@@ -180,29 +180,44 @@ fn engine_script_menu_title(menu: &lc_engine::ObjectMenuState) -> String {
 pub(crate) struct EngineScriptMenuLayout {
     pub bounds: Rect,
     pub title: Rect,
+    /// Visible `ScrollWindow` client area. Item rectangles are translated by
+    /// [`Self::scroll_y`] and clipped to this rectangle.
+    pub client: Rect,
     pub client_x: i32,
     pub client_y: i32,
     pub columns: i32,
     pub lines: i32,
     pub item_width: i32,
     pub item_height: i32,
+    /// Persistent logical-pixel `C4GUI::ScrollWindow::iScrollY`.
+    pub scroll_y: i32,
+    pub max_scroll_y: i32,
     pub first_index: usize,
+    /// Number of item slots which can intersect the client. A partial first
+    /// row exposes one additional row at the bottom.
     pub visible: usize,
 }
 
 impl EngineScriptMenuLayout {
-    pub fn item_rect(self, index: usize) -> Option<Rect> {
-        let slot = index.checked_sub(self.first_index)?;
-        if slot >= self.visible {
-            return None;
-        }
-        let slot = i32::try_from(slot).ok()?;
+    fn item_unclipped_rect(self, index: usize) -> Option<Rect> {
+        let index = i32::try_from(index).ok()?;
+        let column = index % self.columns;
+        let row = index / self.columns;
         Some(Rect::new(
-            self.client_x + (slot % self.columns) * self.item_width,
-            self.client_y + (slot / self.columns) * self.item_height,
+            self.client_x + column * self.item_width,
+            self.client_y + row * self.item_height - self.scroll_y,
             self.item_width as u32,
             self.item_height as u32,
         ))
+    }
+
+    pub fn item_rect(self, index: usize) -> Option<Rect> {
+        let rect = self.item_unclipped_rect(index)?;
+        rect.intersection(self.client).map(|_| rect)
+    }
+
+    pub fn item_visible_rect(self, index: usize) -> Option<Rect> {
+        self.item_unclipped_rect(index)?.intersection(self.client)
     }
 
     pub fn close_button_rect(self) -> Rect {
@@ -233,6 +248,37 @@ struct DialogMenuLayout {
     client: Rect,
     portrait: Option<(usize, Rect)>,
     rows: Vec<DialogMenuRowLayout>,
+}
+
+fn translate_rect(mut rect: Rect, dx: i32, dy: i32) -> Rect {
+    rect.x = rect.x.saturating_add(dx);
+    rect.y = rect.y.saturating_add(dy);
+    rect
+}
+
+fn relocate_dialog_menu_layout(
+    mut layout: DialogMenuLayout,
+    location: Option<(i32, i32)>,
+) -> DialogMenuLayout {
+    let Some((x, y)) = location else {
+        return layout;
+    };
+    let dx = x.saturating_sub(layout.bounds.x);
+    let dy = y.saturating_sub(layout.bounds.y);
+    layout.bounds = translate_rect(layout.bounds, dx, dy);
+    layout.title = layout.title.map(|title| translate_rect(title, dx, dy));
+    layout.client = translate_rect(layout.client, dx, dy);
+    layout.portrait = layout
+        .portrait
+        .map(|(index, rect)| (index, translate_rect(rect, dx, dy)));
+    for row in &mut layout.rows {
+        row.rect = translate_rect(row.rect, dx, dy);
+        row.symbol_rect = row
+            .symbol_rect
+            .map(|rect| translate_rect(rect, dx, dy));
+        row.text_rect = translate_rect(row.text_rect, dx, dy);
+    }
+    layout
 }
 
 #[cfg(test)]
@@ -453,8 +499,18 @@ fn dialog_visible_caption(item: &lc_engine::ObjectMenuItem) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EngineScriptMenuPointerTarget {
     Close,
+    Title,
     Item(usize),
     Background,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EngineScriptMenuPresentationGeometry {
+    pub bounds: Rect,
+    pub title: Option<Rect>,
+    pub client: Option<Rect>,
+    pub scroll_y: i32,
+    pub max_scroll_y: i32,
 }
 
 fn rect_contains_point(rect: Rect, point: GuiPoint) -> bool {
@@ -495,6 +551,9 @@ pub(crate) fn engine_script_menu_pointer_target_with_info(
     font_images: &HashMap<String, ImageData>,
     free_location: Option<(i32, i32)>,
 ) -> Option<EngineScriptMenuPointerTarget> {
+    if !rect_contains_point(area, point) {
+        return None;
+    }
     if menu.style == 3 {
         let item_has_symbols = menu
             .items
@@ -508,36 +567,7 @@ pub(crate) fn engine_script_menu_pointer_target_with_info(
             &item_has_symbols,
             font_images,
         );
-        if show_close_button
-            && layout
-                .title
-                .is_some_and(|_| rect_contains_point(layout.bounds, point))
-        {
-            let close = Rect::new(
-                layout.bounds.x + layout.bounds.width as i32 - 20,
-                layout.title.expect("checked above").y + 4,
-                16,
-                16,
-            );
-            if rect_contains_point(close, point) {
-                return Some(EngineScriptMenuPointerTarget::Close);
-            }
-        }
-        if let Some((index, portrait)) = layout.portrait {
-            if rect_contains_point(portrait, point) {
-                return Some(EngineScriptMenuPointerTarget::Item(index));
-            }
-        }
-        if let Some(index) = layout
-            .rows
-            .iter()
-            .find(|row| rect_contains_point(row.rect, point))
-            .map(|row| row.index)
-        {
-            return Some(EngineScriptMenuPointerTarget::Item(index));
-        }
-        return rect_contains_point(layout.bounds, point)
-            .then_some(EngineScriptMenuPointerTarget::Background);
+        return dialog_script_menu_pointer_target(&layout, show_close_button, point);
     }
     if !matches!(menu.style, 0..=2) {
         return None;
@@ -550,8 +580,57 @@ pub(crate) fn engine_script_menu_pointer_target_with_info(
         font_images,
         free_location,
     );
+    engine_script_menu_pointer_target_for_layout(menu, layout, show_close_button, point)
+}
+
+fn dialog_script_menu_pointer_target(
+    layout: &DialogMenuLayout,
+    show_close_button: bool,
+    point: GuiPoint,
+) -> Option<EngineScriptMenuPointerTarget> {
+    if let Some(title) = layout.title {
+        if show_close_button {
+            let close = Rect::new(
+                layout.bounds.x + layout.bounds.width as i32 - 20,
+                title.y + 4,
+                16,
+                16,
+            );
+            if rect_contains_point(close, point) {
+                return Some(EngineScriptMenuPointerTarget::Close);
+            }
+        }
+        if rect_contains_point(title, point) {
+            return Some(EngineScriptMenuPointerTarget::Title);
+        }
+    }
+    if let Some((index, portrait)) = layout.portrait {
+        if rect_contains_point(portrait, point) {
+            return Some(EngineScriptMenuPointerTarget::Item(index));
+        }
+    }
+    if let Some(index) = layout
+        .rows
+        .iter()
+        .find(|row| rect_contains_point(row.rect, point))
+        .map(|row| row.index)
+    {
+        return Some(EngineScriptMenuPointerTarget::Item(index));
+    }
+    rect_contains_point(layout.bounds, point).then_some(EngineScriptMenuPointerTarget::Background)
+}
+
+fn engine_script_menu_pointer_target_for_layout(
+    menu: &lc_engine::ObjectMenuState,
+    layout: EngineScriptMenuLayout,
+    show_close_button: bool,
+    point: GuiPoint,
+) -> Option<EngineScriptMenuPointerTarget> {
     if show_close_button && rect_contains_point(layout.close_button_rect(), point) {
         return Some(EngineScriptMenuPointerTarget::Close);
+    }
+    if rect_contains_point(layout.title, point) {
+        return Some(EngineScriptMenuPointerTarget::Title);
     }
     let item = menu
         .items
@@ -560,12 +639,153 @@ pub(crate) fn engine_script_menu_pointer_target_with_info(
         .skip(layout.first_index)
         .take(layout.visible)
         .find_map(|(index, _)| {
-            rect_contains_point(layout.item_rect(index)?, point)
+            rect_contains_point(layout.item_visible_rect(index)?, point)
                 .then_some(EngineScriptMenuPointerTarget::Item(index))
         });
     item.or_else(|| {
         rect_contains_point(layout.bounds, point)
             .then_some(EngineScriptMenuPointerTarget::Background)
+    })
+}
+
+/// Pointer hit-test using an initialized title position and a retained
+/// ScrollWindow offset. Unlike the legacy wrapper, this does not adjust the
+/// scroll to the current selection; wheel scrolling may hide the selection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn engine_script_menu_pointer_target_with_presentation(
+    area: Rect,
+    font: &HudFont<'_>,
+    menu: &lc_engine::ObjectMenuState,
+    show_commands: bool,
+    show_close_button: bool,
+    point: GuiPoint,
+    font_images: &HashMap<String, ImageData>,
+    location: Option<(i32, i32)>,
+    scroll_y: i32,
+) -> Option<EngineScriptMenuPointerTarget> {
+    if !rect_contains_point(area, point) {
+        return None;
+    }
+    if menu.style == 3 {
+        let item_has_symbols = menu
+            .items
+            .iter()
+            .map(|item| item.image != lc_engine::ObjectMenuImage::None)
+            .collect::<Vec<_>>();
+        let layout = relocate_dialog_menu_layout(
+            dialog_script_menu_layout_with_symbols(
+                area,
+                font,
+                menu,
+                &item_has_symbols,
+                font_images,
+            ),
+            location,
+        );
+        return dialog_script_menu_pointer_target(&layout, show_close_button, point);
+    }
+    if !matches!(menu.style, 0..=2) {
+        return None;
+    }
+    let layout = engine_script_menu_layout_with_presentation(
+        area,
+        font,
+        menu,
+        show_commands,
+        font_images,
+        location,
+        scroll_y,
+        false,
+    );
+    engine_script_menu_pointer_target_for_layout(menu, layout, show_close_button, point)
+}
+
+/// Hit-test a not-yet-initialized free-alignment anchor with the same
+/// one-time clamping used by `C4Menu::InitLocation`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn engine_script_menu_pointer_target_with_free_anchor(
+    area: Rect,
+    font: &HudFont<'_>,
+    menu: &lc_engine::ObjectMenuState,
+    show_commands: bool,
+    show_close_button: bool,
+    point: GuiPoint,
+    font_images: &HashMap<String, ImageData>,
+    free_location: (i32, i32),
+    scroll_y: i32,
+) -> Option<EngineScriptMenuPointerTarget> {
+    if !rect_contains_point(area, point) || !matches!(menu.style, 0..=2) {
+        return None;
+    }
+    let layout = engine_script_menu_layout_with_free_anchor(
+        area,
+        font,
+        menu,
+        show_commands,
+        font_images,
+        free_location,
+        scroll_y,
+        false,
+    );
+    engine_script_menu_pointer_target_for_layout(menu, layout, show_close_button, point)
+}
+
+/// Style-independent initialized rectangles used by app-level wheel and
+/// title-drag routing. Dialog-style menus have no ScrollWindow offset, while
+/// normal/context/info menus expose the same clamped pixel state as render.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn engine_script_menu_presentation_geometry(
+    area: Rect,
+    font: &HudFont<'_>,
+    menu: &lc_engine::ObjectMenuState,
+    show_commands: bool,
+    font_images: &HashMap<String, ImageData>,
+    location: Option<(i32, i32)>,
+    scroll_y: i32,
+) -> Option<EngineScriptMenuPresentationGeometry> {
+    if menu.style == 3 {
+        let item_has_symbols = menu
+            .items
+            .iter()
+            .map(|item| item.image != lc_engine::ObjectMenuImage::None)
+            .collect::<Vec<_>>();
+        let layout = relocate_dialog_menu_layout(
+            dialog_script_menu_layout_with_symbols(
+                area,
+                font,
+                menu,
+                &item_has_symbols,
+                font_images,
+            ),
+            location,
+        );
+        return Some(EngineScriptMenuPresentationGeometry {
+            bounds: layout.bounds,
+            title: layout.title,
+            client: Some(layout.client),
+            scroll_y: 0,
+            max_scroll_y: 0,
+        });
+    }
+    if !matches!(menu.style, 0..=2) {
+        return None;
+    }
+    let layout = engine_script_menu_layout_with_presentation(
+        area,
+        font,
+        menu,
+        show_commands,
+        font_images,
+        location,
+        scroll_y,
+        false,
+    );
+    Some(EngineScriptMenuPresentationGeometry {
+        bounds: layout.bounds,
+        title: Some(layout.title),
+        client: Some(layout.client),
+        scroll_y: layout.scroll_y,
+        max_scroll_y: layout.max_scroll_y,
     })
 }
 
@@ -1294,6 +1514,16 @@ pub(crate) fn engine_script_menu_layout(
     engine_script_menu_layout_with_images(area, font, menu, show_commands, &HashMap::new(), None)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EngineScriptMenuLocation {
+    Aligned,
+    /// Uninitialized `C4MN_Align_Free` anchor. `InitLocation` clamps it.
+    FreeAnchor(i32, i32),
+    /// Already initialized/dragged dialog origin. Native dragging applies it
+    /// verbatim until a later `ResetLocation`.
+    Exact(i32, i32),
+}
+
 fn engine_script_menu_layout_with_images(
     area: Rect,
     font: &HudFont<'_>,
@@ -1301,6 +1531,90 @@ fn engine_script_menu_layout_with_images(
     show_commands: bool,
     font_images: &HashMap<String, ImageData>,
     free_location: Option<(i32, i32)>,
+) -> EngineScriptMenuLayout {
+    let location = free_location.map_or(EngineScriptMenuLocation::Aligned, |(x, y)| {
+        EngineScriptMenuLocation::FreeAnchor(x, y)
+    });
+    engine_script_menu_layout_impl(
+        area,
+        font,
+        menu,
+        show_commands,
+        font_images,
+        location,
+        0,
+        true,
+    )
+}
+
+/// Computes the initialized presentation geometry for a live script menu.
+///
+/// `location` is an already initialized top-left position (including a raw
+/// title drag), while `scroll_y` is the retained logical-pixel ScrollWindow
+/// offset. Callers set `adjust_selection` only for the native sites which
+/// invoke `C4Menu::AdjustPosition`; wheel scrolling and redraws pass `false`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn engine_script_menu_layout_with_presentation(
+    area: Rect,
+    font: &HudFont<'_>,
+    menu: &lc_engine::ObjectMenuState,
+    show_commands: bool,
+    font_images: &HashMap<String, ImageData>,
+    location: Option<(i32, i32)>,
+    scroll_y: i32,
+    adjust_selection: bool,
+) -> EngineScriptMenuLayout {
+    let location = location.map_or(EngineScriptMenuLocation::Aligned, |(x, y)| {
+        EngineScriptMenuLocation::Exact(x, y)
+    });
+    engine_script_menu_layout_impl(
+        area,
+        font,
+        menu,
+        show_commands,
+        font_images,
+        location,
+        scroll_y,
+        adjust_selection,
+    )
+}
+
+/// Resolve a not-yet-initialized `C4MN_Align_Free` anchor once. The returned
+/// bounds may then be retained and supplied to the ordinary presentation
+/// helper as an exact dragged/initialized location.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn engine_script_menu_layout_with_free_anchor(
+    area: Rect,
+    font: &HudFont<'_>,
+    menu: &lc_engine::ObjectMenuState,
+    show_commands: bool,
+    font_images: &HashMap<String, ImageData>,
+    free_location: (i32, i32),
+    scroll_y: i32,
+    adjust_selection: bool,
+) -> EngineScriptMenuLayout {
+    engine_script_menu_layout_impl(
+        area,
+        font,
+        menu,
+        show_commands,
+        font_images,
+        EngineScriptMenuLocation::FreeAnchor(free_location.0, free_location.1),
+        scroll_y,
+        adjust_selection,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn engine_script_menu_layout_impl(
+    area: Rect,
+    font: &HudFont<'_>,
+    menu: &lc_engine::ObjectMenuState,
+    show_commands: bool,
+    font_images: &HashMap<String, ImageData>,
+    location: EngineScriptMenuLocation,
+    scroll_y: i32,
+    adjust_selection: bool,
 ) -> EngineScriptMenuLayout {
     // Normal menus are a fixed 35px icon grid. Context menus are compact
     // captioned rows: height=max(C4MN_SymbolSize, FontRegular), width is
@@ -1382,45 +1696,94 @@ fn engine_script_menu_layout_with_images(
     let height = lines * item_height + margin_top + title_height + command_height + margin_bottom;
 
     // Default C4Menu alignment is Right|Bottom with one C4SymbolSize (35)
-    // below and two at the right (C4Menu.cpp:298, 727-745).
-    let mut x = area.width as i32 - 2 * CLASSIC_ITEM_SIZE - width;
-    let mut y = area.height as i32 - CLASSIC_ITEM_SIZE - height;
-    if width > area.width as i32 - 2 * CLASSIC_ITEM_SIZE {
-        x = (area.width as i32 - width) / 2;
-    }
-    if height > area.height as i32 - 2 * CLASSIC_ITEM_SIZE {
-        y = (area.height as i32 - height) / 2;
-    }
-    x += area.x;
-    y += area.y;
-    if let Some((free_x, free_y)) = free_location {
-        if width > area.width as i32 - 2 * CLASSIC_ITEM_SIZE {
-            x = area.x + (area.width as i32 - width) / 2;
-        } else {
-            x = free_x.clamp(area.x, area.x + area.width as i32 - width);
-        }
-        if height > area.height as i32 - 2 * CLASSIC_ITEM_SIZE {
-            y = area.y + (area.height as i32 - height) / 2;
-        } else {
-            y = free_y.clamp(area.y, area.y + area.height as i32 - height);
+    // below and two at the right (C4Menu.cpp:298, 727-745). A free anchor is
+    // clamped only during InitLocation. An initialized title drag is raw.
+    let default_x = area.x + area.width as i32 - 2 * CLASSIC_ITEM_SIZE - width;
+    let default_y = area.y + area.height as i32 - CLASSIC_ITEM_SIZE - height;
+    let (x, y) = match location {
+        EngineScriptMenuLocation::Aligned => (
+            if width > area.width as i32 - 2 * CLASSIC_ITEM_SIZE {
+                area.x + (area.width as i32 - width) / 2
+            } else {
+                default_x
+            },
+            if height > area.height as i32 - 2 * CLASSIC_ITEM_SIZE {
+                area.y + (area.height as i32 - height) / 2
+            } else {
+                default_y
+            },
+        ),
+        EngineScriptMenuLocation::FreeAnchor(free_x, free_y) => (
+            if width > area.width as i32 - 2 * CLASSIC_ITEM_SIZE {
+                area.x + (area.width as i32 - width) / 2
+            } else {
+                free_x.clamp(area.x, area.x + area.width as i32 - width)
+            },
+            if height > area.height as i32 - 2 * CLASSIC_ITEM_SIZE {
+                area.y + (area.height as i32 - height) / 2
+            } else {
+                free_y.clamp(area.y, area.y + area.height as i32 - height)
+            },
+        ),
+        EngineScriptMenuLocation::Exact(x, y) => (x, y),
+    };
+
+    let client_x = x + margin_left;
+    let client_y = y + margin_top + title_height;
+    let client_height = lines.saturating_mul(item_height);
+    let content_height = natural_lines.saturating_mul(item_height);
+    let max_scroll_y = content_height.saturating_sub(client_height).max(0);
+    let mut scroll_y = scroll_y.clamp(0, max_scroll_y);
+
+    // C4Menu::AdjustPosition delegates to ScrollRangeInView only for menus
+    // with more than one visible line. It moves the minimum number of pixels
+    // and treats exact top/bottom equality as already visible.
+    if adjust_selection && lines > 1 {
+        if let Some(selection) = usize::try_from(menu.selection)
+            .ok()
+            .filter(|selection| *selection < menu.items.len())
+        {
+            let row = i32::try_from(selection)
+                .unwrap_or(i32::MAX)
+                .checked_div(columns)
+                .unwrap_or_default();
+            let item_y = row.saturating_mul(item_height);
+            let item_bottom = item_y.saturating_add(item_height);
+            scroll_y = if item_bottom > content_height {
+                max_scroll_y
+            } else if scroll_y > item_y {
+                item_y
+            } else if scroll_y.saturating_add(client_height) < item_bottom {
+                item_bottom.saturating_sub(client_height)
+            } else {
+                scroll_y
+            }
+            .clamp(0, max_scroll_y);
         }
     }
 
-    let visible = (columns * lines) as usize;
-    let first_index = usize::try_from(menu.selection)
-        .ok()
-        .filter(|selection| *selection >= visible && lines > 1)
-        .map(|selection| ((selection / columns as usize) + 1 - lines as usize) * columns as usize)
-        .unwrap_or(0);
+    let first_row = scroll_y / item_height;
+    let first_index = usize::try_from(first_row.saturating_mul(columns)).unwrap_or(usize::MAX);
+    let visible_rows = lines.saturating_add(i32::from(scroll_y % item_height != 0));
+    let visible = usize::try_from(visible_rows.saturating_mul(columns)).unwrap_or(usize::MAX);
+    let client = Rect::new(
+        client_x,
+        client_y,
+        columns.saturating_mul(item_width).max(0) as u32,
+        client_height.max(0) as u32,
+    );
     EngineScriptMenuLayout {
         bounds: Rect::new(x, y, width as u32, height as u32),
         title: Rect::new(x, y + margin_top, width as u32, title_height as u32),
-        client_x: x + margin_left,
-        client_y: y + margin_top + title_height,
+        client,
+        client_x,
+        client_y,
         columns,
         lines,
         item_width,
         item_height,
+        scroll_y,
+        max_scroll_y,
         first_index,
         visible,
     }
@@ -1480,6 +1843,14 @@ pub fn render_engine_script_menu_with_gamma(
         return;
     }
 
+    // External dialogs are owned by one viewport. Their raw dragged bounds
+    // may leave it, but C4Viewport's primary clipper prevents painting into a
+    // sibling viewport or outside the output facet.
+    let previous_clip = surface.clip();
+    let viewport_clip = previous_clip
+        .map(|clip| clip.intersection(area).unwrap_or(Rect::new(0, 0, 0, 0)))
+        .unwrap_or(area);
+    surface.set_clip(viewport_clip);
     let selected = usize::try_from(menu.selection)
         .ok()
         .filter(|selection| *selection < menu.items.len());
@@ -1499,9 +1870,7 @@ pub fn render_engine_script_menu_with_gamma(
             time_on_selection,
             gamma,
         );
-        return;
-    }
-    if menu.style == 3 {
+    } else if menu.style == 3 {
         render_engine_dialog_menu(
             surface,
             area,
@@ -1514,12 +1883,16 @@ pub fn render_engine_script_menu_with_gamma(
             show_close_button,
             gamma,
         );
-        return;
+    } else {
+        panic!(
+            "classic script menu style {} is unavailable; refusing generic Rust fallback",
+            menu.style
+        );
     }
-    panic!(
-        "classic script menu style {} is unavailable; refusing generic Rust fallback",
-        menu.style
-    );
+    match previous_clip {
+        Some(clip) => surface.set_clip(clip),
+        None => surface.clear_clip(),
+    }
 }
 
 fn draw_decoration_facet(
@@ -1740,8 +2113,10 @@ fn render_engine_dialog_menu(
     show_close_button: bool,
     gamma: Option<&GammaRamp>,
 ) {
-    let layout =
-        dialog_script_menu_layout_with_images(area, font, menu, item_icons, &gfx.font_images);
+    let layout = relocate_dialog_menu_layout(
+        dialog_script_menu_layout_with_images(area, font, menu, item_icons, &gfx.font_images),
+        gfx.menu_location,
+    );
     if let Some(decoration) = menu.decoration.as_ref() {
         draw_menu_decoration(
             surface,
@@ -1922,13 +2297,15 @@ fn render_engine_normal_menu(
     time_on_selection: u32,
     gamma: Option<&GammaRamp>,
 ) {
-    let layout = engine_script_menu_layout_with_images(
+    let layout = engine_script_menu_layout_with_presentation(
         area,
         font,
         menu,
         gfx.show_commands,
         &gfx.font_images,
         gfx.menu_location,
+        gfx.menu_scroll_y,
+        false,
     );
     let bounds = layout.bounds;
     let x = bounds.x;
@@ -1936,7 +2313,6 @@ fn render_engine_normal_menu(
     let width = bounds.width as i32;
     let height = bounds.height as i32;
     let title_height = layout.title.height as i32;
-    let columns = layout.columns;
 
     if let Some(decoration) = menu.decoration.as_ref() {
         draw_menu_decoration(
@@ -2053,26 +2429,28 @@ fn render_engine_normal_menu(
         }
     }
 
-    let client_x = layout.client_x;
-    let client_y = layout.client_y;
     let visible = layout.visible;
     let first_index = layout.first_index;
-    for (slot, (index, item)) in menu
+    let previous_client_clip = surface.clip();
+    let client_clip = previous_client_clip
+        .map(|clip| {
+            clip.intersection(layout.client)
+                .unwrap_or(Rect::new(0, 0, 0, 0))
+        })
+        .unwrap_or(layout.client);
+    surface.set_clip(client_clip);
+    for (index, item) in menu
         .items
         .iter()
         .enumerate()
         .skip(first_index)
         .take(visible)
-        .enumerate()
     {
-        let cell_x = client_x + (slot as i32 % columns) * layout.item_width;
-        let cell_y = client_y + (slot as i32 / columns) * layout.item_height;
-        let cell = Rect::new(
-            cell_x,
-            cell_y,
-            layout.item_width as u32,
-            layout.item_height as u32,
-        );
+        let Some(cell) = layout.item_rect(index) else {
+            continue;
+        };
+        let cell_x = cell.x;
+        let cell_y = cell.y;
         if menu.style != 2 && selected == Some(index) && item.text_display_progress != 0 {
             fill_rect(surface, cell, CLASSIC_SELECTION_COLOR, gamma);
         }
@@ -2161,6 +2539,10 @@ fn render_engine_normal_menu(
                 gamma,
             );
         }
+    }
+    match previous_client_clip {
+        Some(clip) => surface.set_clip(clip),
+        None => surface.clear_clip(),
     }
 
     if gfx.show_commands || menu.extra != ObjectMenuExtra::None {
@@ -2357,9 +2739,11 @@ fn render_engine_normal_menu(
             .and_then(|selection| menu.items.get(selection).map(|item| (selection, item)))
             .filter(|(_, item)| !item.info_caption.is_empty())
         {
-            let slot = selection.saturating_sub(first_index);
-            let cell_x = client_x + (slot as i32 % columns) * layout.item_width;
-            let cell_y = client_y + (slot as i32 / columns) * layout.item_height;
+            let Some(cell) = layout.item_unclipped_rect(selection) else {
+                return;
+            };
+            let cell_x = cell.x;
+            let cell_y = cell.y;
             let info_caption = engine_script_presentation_text(&item.info_caption);
             draw_text_spec_tooltip(
                 surface,
@@ -3477,6 +3861,45 @@ mod tests {
         )
     }
 
+    fn engine_script_menu_fixture(
+        style: i32,
+        item_count: usize,
+    ) -> lc_engine::ObjectMenuState {
+        let script = format!(
+            r#"
+            func Initialize()
+            {{
+                CreateMenu(MENU, this(), this(), 0, "Scrollable", 0, {style});
+                AddMenuItem("Row 0", "Choose()", MENU, this());
+            }}
+            "#
+        );
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", &script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let mut menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        let template = menu.items[0].clone();
+        menu.items = (0..item_count)
+            .map(|index| {
+                let mut item = template.clone();
+                item.caption = format!("Row {index}");
+                item
+            })
+            .collect();
+        menu.selection = 0;
+        menu.columns = 1;
+        menu
+    }
+
     fn surface_rect_contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
         (rect.y..rect.y + rect.height as i32).any(|y| {
             (rect.x..rect.x + rect.width as i32)
@@ -3914,6 +4337,337 @@ mod tests {
     }
 
     #[test]
+    fn l065_script_menu_scroll_range_is_minimal_pixel_persistent_and_column_aware() {
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let images = HashMap::new();
+        let area = Rect::new(0, 0, 320, 200);
+        let mut menu = engine_script_menu_fixture(1, 20);
+        menu.columns = 2;
+
+        let base = engine_script_menu_layout_with_presentation(
+            area,
+            &font,
+            &menu,
+            false,
+            &images,
+            Some((-25, -9)),
+            0,
+            false,
+        );
+        assert_eq!((base.bounds.x, base.bounds.y), (-25, -9));
+        assert_eq!(base.lines, 6);
+        assert_eq!(base.max_scroll_y, 4 * base.item_height);
+
+        let retained_scroll = base.item_height + 5;
+        menu.selection = 2 * menu.columns;
+        let retained = engine_script_menu_layout_with_presentation(
+            area,
+            &font,
+            &menu,
+            false,
+            &images,
+            Some((-25, -9)),
+            retained_scroll,
+            true,
+        );
+        assert_eq!(retained.scroll_y, retained_scroll);
+        assert_eq!(retained.first_index, 2);
+        assert_eq!(retained.visible, 2 * (retained.lines as usize + 1));
+
+        menu.selection = menu.columns;
+        let above = engine_script_menu_layout_with_presentation(
+            area,
+            &font,
+            &menu,
+            false,
+            &images,
+            None,
+            retained_scroll,
+            true,
+        );
+        assert_eq!(above.scroll_y, base.item_height);
+
+        menu.selection = (base.lines - 1) * menu.columns;
+        let bottom_equality = engine_script_menu_layout_with_presentation(
+            area, &font, &menu, false, &images, None, 0, true,
+        );
+        assert_eq!(bottom_equality.scroll_y, 0);
+
+        menu.selection = (base.lines + 1) * menu.columns + 1;
+        let below = engine_script_menu_layout_with_presentation(
+            area, &font, &menu, false, &images, None, 0, true,
+        );
+        assert_eq!(below.scroll_y, 2 * base.item_height);
+
+        let low = engine_script_menu_layout_with_presentation(
+            area,
+            &font,
+            &menu,
+            false,
+            &images,
+            None,
+            i32::MIN,
+            false,
+        );
+        let high = engine_script_menu_layout_with_presentation(
+            area,
+            &font,
+            &menu,
+            false,
+            &images,
+            None,
+            i32::MAX,
+            false,
+        );
+        assert_eq!(low.scroll_y, 0);
+        assert_eq!(high.scroll_y, high.max_scroll_y);
+
+        let one_line_area = Rect::new(0, 0, 320, 100);
+        menu.selection = i32::try_from(menu.items.len() - 1).expect("small fixture");
+        let one_line = engine_script_menu_layout_with_presentation(
+            one_line_area,
+            &font,
+            &menu,
+            false,
+            &images,
+            None,
+            base.item_height + 3,
+            true,
+        );
+        assert_eq!(one_line.lines, 1);
+        assert_eq!(one_line.scroll_y, base.item_height + 3);
+    }
+
+    #[test]
+    fn l065_partial_scroll_clips_render_and_item_hits_below_title() {
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let images = HashMap::new();
+        let area = Rect::new(0, 0, 320, 200);
+        let menu = engine_script_menu_fixture(1, 20);
+        let location = Some((40, 30));
+        let layout = engine_script_menu_layout_with_presentation(
+            area, &font, &menu, false, &images, location, 5, false,
+        );
+
+        assert_eq!(layout.scroll_y, 5);
+        assert_eq!(layout.first_index, 0);
+        assert_eq!(layout.visible, layout.lines as usize + 1);
+        let first = layout.item_rect(0).expect("partial first row intersects");
+        let first_visible = layout
+            .item_visible_rect(0)
+            .expect("partial first row is clipped");
+        assert_eq!(first.y, layout.client.y - 5);
+        assert_eq!(first_visible.y, layout.client.y);
+        assert_eq!(
+            first_visible.height,
+            u32::try_from(layout.item_height - 5).expect("positive visible height")
+        );
+        let last_partial = usize::try_from(layout.lines).expect("positive line count");
+        assert_eq!(
+            layout
+                .item_visible_rect(last_partial)
+                .expect("partial bottom row")
+                .height,
+            5
+        );
+
+        let hit = |point| {
+            engine_script_menu_pointer_target_with_presentation(
+                area, &font, &menu, false, true, point, &images, location, 5,
+            )
+        };
+        assert_eq!(
+            hit(GuiPoint::new(
+                layout.client.x as f32 + 1.0,
+                layout.client.y as f32 + 0.5,
+            )),
+            Some(EngineScriptMenuPointerTarget::Item(0))
+        );
+        assert_eq!(
+            hit(GuiPoint::new(
+                layout.client.x as f32 + 1.0,
+                layout.client.y as f32 - 0.5,
+            )),
+            Some(EngineScriptMenuPointerTarget::Title),
+            "the clipped-off part of row zero must not steal title hits"
+        );
+        assert_eq!(
+            hit(GuiPoint::new(
+                layout.client.x as f32 + 1.0,
+                (layout.client.y + layout.client.height as i32) as f32 - 0.5,
+            )),
+            Some(EngineScriptMenuPointerTarget::Item(last_partial))
+        );
+        let close = layout.close_button_rect();
+        assert_eq!(
+            hit(GuiPoint::new(
+                close.x as f32 + 1.0,
+                close.y as f32 + 1.0,
+            )),
+            Some(EngineScriptMenuPointerTarget::Close),
+            "close remains topmost over the title drag target"
+        );
+
+        let gfx = IngameMenuGraphics {
+            menu_location: location,
+            menu_scroll_y: 5,
+            ..IngameMenuGraphics::default()
+        };
+        let mut surface = Surface::new(320, 200, lc_graphics::PixelFormat::Rgba8888);
+        let item_icons = vec![None; menu.items.len()];
+        render_engine_script_menu(
+            &mut surface,
+            area,
+            &font,
+            &fallback,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &item_icons,
+            &[],
+            true,
+            0,
+        );
+        assert_eq!(
+            surface.get_pixel(layout.client.x as u32 + 1, layout.client.y as u32),
+            Some(CLASSIC_SELECTION_COLOR)
+        );
+        assert_ne!(
+            surface.get_pixel(
+                layout.client.x as u32 + 1,
+                u32::try_from(layout.client.y - 1).expect("fixture is on-screen"),
+            ),
+            Some(CLASSIC_SELECTION_COLOR),
+            "selection fill is clipped at the client top"
+        );
+        assert_eq!(surface.clip(), None, "render restores the caller clip");
+    }
+
+    #[test]
+    fn l065_dialog_geometry_and_title_hits_follow_exact_presentation_location() {
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let images = HashMap::new();
+        let area = Rect::new(0, 0, 640, 480);
+        let menu = engine_script_menu_fixture(3, 2);
+        let natural = engine_script_menu_presentation_geometry(
+            area, &font, &menu, false, &images, None, 0,
+        )
+        .expect("dialog geometry");
+        let location = Some((-17, -23));
+        let moved = engine_script_menu_presentation_geometry(
+            area, &font, &menu, false, &images, location, i32::MAX,
+        )
+        .expect("moved dialog geometry");
+
+        assert_eq!((moved.bounds.x, moved.bounds.y), (-17, -23));
+        assert_eq!(moved.bounds.width, natural.bounds.width);
+        assert_eq!(moved.bounds.height, natural.bounds.height);
+        assert_eq!(moved.scroll_y, 0);
+        assert_eq!(moved.max_scroll_y, 0);
+        let title = moved.title.expect("caption creates a title");
+        let client = moved.client.expect("dialog has a client");
+        assert_eq!(title.x - moved.bounds.x, 0);
+        assert_eq!(
+            client.x - moved.bounds.x,
+            natural.client.expect("natural client").x - natural.bounds.x
+        );
+
+        assert_eq!(
+            engine_script_menu_pointer_target_with_presentation(
+                area,
+                &font,
+                &menu,
+                false,
+                true,
+                GuiPoint::new(title.x as f32 + 1.0, title.y as f32 + 1.0),
+                &images,
+                location,
+                i32::MAX,
+            ),
+            None,
+            "external-dialog input is clipped to its owning viewport"
+        );
+        let close = Rect::new(
+            moved.bounds.x + moved.bounds.width as i32 - 20,
+            title.y + 4,
+            16,
+            16,
+        );
+        assert_eq!(
+            engine_script_menu_pointer_target_with_presentation(
+                area,
+                &font,
+                &menu,
+                false,
+                true,
+                GuiPoint::new(close.x as f32 + 1.0, close.y as f32 + 1.0),
+                &images,
+                location,
+                i32::MAX,
+            ),
+            None,
+            "an off-viewport close button is not interactive"
+        );
+
+        let visible_location = Some((17, 23));
+        let visible = engine_script_menu_presentation_geometry(
+            area,
+            &font,
+            &menu,
+            false,
+            &images,
+            visible_location,
+            i32::MAX,
+        )
+        .expect("visible moved dialog geometry");
+        let visible_title = visible.title.expect("caption creates a title");
+        assert_eq!(
+            engine_script_menu_pointer_target_with_presentation(
+                area,
+                &font,
+                &menu,
+                false,
+                true,
+                GuiPoint::new(
+                    visible_title.x as f32 + 1.0,
+                    visible_title.y as f32 + 1.0,
+                ),
+                &images,
+                visible_location,
+                i32::MAX,
+            ),
+            Some(EngineScriptMenuPointerTarget::Title)
+        );
+        let visible_close = Rect::new(
+            visible.bounds.x + visible.bounds.width as i32 - 20,
+            visible_title.y + 4,
+            16,
+            16,
+        );
+        assert_eq!(
+            engine_script_menu_pointer_target_with_presentation(
+                area,
+                &font,
+                &menu,
+                false,
+                true,
+                GuiPoint::new(
+                    visible_close.x as f32 + 1.0,
+                    visible_close.y as f32 + 1.0,
+                ),
+                &images,
+                visible_location,
+                i32::MAX,
+            ),
+            Some(EngineScriptMenuPointerTarget::Close)
+        );
+    }
+
+    #[test]
     fn engine_script_context_menu_uses_classic_geometry_and_pointer_targeting() {
         // C4Menu::InitMenu gives context style 1 one column
         // (src/C4Menu.cpp:359-365), then the same classic menu location,
@@ -4089,7 +4843,7 @@ mod tests {
             engine_script_menu_pointer_target_with_info(
                 area, &font, &menu, false, false, probe, &images, None,
             ),
-            Some(EngineScriptMenuPointerTarget::Item(0))
+            Some(EngineScriptMenuPointerTarget::Item(0)),
         );
         assert_eq!(
             engine_script_menu_pointer_target_with_info(
@@ -4341,7 +5095,10 @@ mod tests {
             row.x < unmapped_layout.item_rect(0).expect("unmapped info row").x,
             "right-aligned Info geometry includes title TextSpec width"
         );
-        let probe = GuiPoint::new(row.x as f32 + 1.0, row.y as f32 + 1.0);
+        let probe = GuiPoint::new(
+            row.x.max(area.x) as f32 + 1.0,
+            row.y.max(area.y) as f32 + 1.0,
+        );
         assert_eq!(
             engine_script_menu_pointer_target_with_info(
                 area,
@@ -4353,7 +5110,7 @@ mod tests {
                 &gfx.font_images,
                 None,
             ),
-            Some(EngineScriptMenuPointerTarget::Item(0))
+            Some(EngineScriptMenuPointerTarget::Item(0)),
         );
         assert_eq!(
             engine_script_menu_pointer_target_with_info(
@@ -6251,12 +7008,15 @@ mod tests {
         let expected_layout = EngineScriptMenuLayout {
             bounds: Rect::new(391, 369, 179, 76),
             title: Rect::new(391, 369, 179, 23),
+            client: Rect::new(393, 392, 175, 35),
             client_x: 393,
             client_y: 392,
             columns: 5,
             lines: 1,
             item_width: 35,
             item_height: 35,
+            scroll_y: 0,
+            max_scroll_y: 0,
             first_index: 0,
             visible: 5,
         };

@@ -11,6 +11,7 @@
 //! Bare Escape follows C++ into `C4AbortGameDialog`; until that separate
 //! dialog is ported, lc-app fails at a typed parity boundary.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use lc_engine::{CommandKind, ControlCommand};
@@ -407,12 +408,27 @@ pub struct IngameMenuState {
     close_action: Option<MenuAction>,
     /// `C4Menu::TimeOnSelection` for the tooltip delay (C4Menu.cpp:804-821).
     time_on_selection: u32,
+    /// Presentation-only `C4GUI::ScrollWindow::iScrollY`. Unlike the
+    /// synchronized selection, this survives draws and wheel input locally.
+    scroll_y: Cell<i32>,
+    /// Selection for which `ScrollRangeInView` was last applied. Layout is
+    /// computed from `&self`, so this marker lets it perform the native
+    /// one-shot adjustment without undoing a later wheel scroll every frame.
+    scroll_selection: Cell<Option<usize>>,
+    /// Absolute screen position installed by dragging the wooden title.
+    /// `None` restores C4MainMenu's normal Left|Bottom viewport anchor.
+    location: Cell<Option<(i32, i32)>>,
+    /// Last owning viewport used to initialize the external dialog. Native
+    /// sets `ResetMenuPositions` whenever a viewport output rect changes,
+    /// including split-screen relayouts that do not resize the OS window.
+    last_area: Cell<Option<Rect>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IngameMenuPointerTarget {
     Item(usize),
     Close,
+    Title,
     Background,
 }
 
@@ -435,6 +451,10 @@ impl IngameMenuState {
             permanent,
             close_action,
             time_on_selection: 0,
+            scroll_y: Cell::new(0),
+            scroll_selection: Cell::new(None),
+            location: Cell::new(None),
+            last_area: Cell::new(None),
         }
     }
 
@@ -917,6 +937,66 @@ impl IngameMenuState {
     pub fn set_selection(&mut self, selection: usize) {
         self.selection = selection.min(self.items.len().saturating_sub(1));
         self.time_on_selection = 0;
+        // SetSelection calls AdjustPosition even when the same item is
+        // selected again (C4Menu.cpp:560-592).
+        self.scroll_selection.set(None);
+    }
+
+    /// Current logical-pixel `C4GUI::ScrollWindow` displacement.
+    pub(crate) fn scroll_y(&self) -> i32 {
+        self.scroll_y.get()
+    }
+
+    /// `C4GUI::ScrollWindow::ScrollBy`: clamp a logical-pixel displacement
+    /// without changing the menu selection.
+    pub(crate) fn scroll_by(
+        &self,
+        amount: i32,
+        area: Rect,
+        font: &HudFont<'_>,
+        gfx: &IngameMenuGraphics,
+    ) -> bool {
+        let layout = self.layout(area, font, gfx);
+        let old = self.scroll_y.get();
+        let new = old.saturating_add(amount).clamp(0, layout.max_scroll);
+        if new == old {
+            return false;
+        }
+        self.scroll_y.set(new);
+        true
+    }
+
+    /// Restore C4MainMenu's anchored placement. Reinitializing a location
+    /// also reruns `AdjustPosition` for the current selection.
+    pub(crate) fn reset_location(&mut self) {
+        self.location.set(None);
+        self.last_area.set(None);
+        self.scroll_selection.set(None);
+    }
+
+    /// Install an absolute top-left position from title dragging. Native
+    /// `Element::DoDragging` does not clamp each motion to the viewport.
+    pub(crate) fn set_location(&mut self, location: (i32, i32)) {
+        self.location.set(Some(location));
+    }
+
+    /// Current externally drawn dialog bounds in screen coordinates.
+    pub(crate) fn bounds(&self, area: Rect, font: &HudFont<'_>, gfx: &IngameMenuGraphics) -> Rect {
+        self.layout(area, font, gfx).bounds
+    }
+
+    /// Whether a point lies in the visible `ScrollWindow` client. The title,
+    /// frame and optional command strip deliberately do not receive wheel
+    /// input through this helper.
+    pub(crate) fn client_contains(
+        &self,
+        area: Rect,
+        font: &HudFont<'_>,
+        gfx: &IngameMenuGraphics,
+        point: GuiPoint,
+    ) -> bool {
+        rect_contains_point(area, point)
+            && rect_contains_point(self.layout(area, font, gfx).client_rect(), point)
     }
 
     /// Advances `TimeOnSelection` once per frame while the menu is shown
@@ -976,6 +1056,7 @@ impl IngameMenuState {
         let len = self.items.len() as i32;
         self.selection = (self.selection as i32 + delta).rem_euclid(len) as usize;
         self.time_on_selection = 0;
+        self.scroll_selection.set(None);
     }
 
     /// Draws the menu with the classic C4Menu context-style furniture. The
@@ -1002,7 +1083,16 @@ impl IngameMenuState {
         gamma: Option<&GammaRamp>,
     ) {
         let layout = self.layout(area, font, gfx);
+        let previous_clip = surface.clip();
+        let viewport_clip = previous_clip
+            .map(|clip| clip.intersection(area).unwrap_or(Rect::new(0, 0, 0, 0)))
+            .unwrap_or(area);
+        surface.set_clip(viewport_clip);
         draw_menu(self, &layout, surface, area, font, tiny_font, gfx, gamma);
+        match previous_clip {
+            Some(clip) => surface.set_clip(clip),
+            None => surface.clear_clip(),
+        }
     }
 
     /// Hit-tests the externally drawn dialog inside its associated viewport.
@@ -1023,19 +1113,20 @@ impl IngameMenuState {
         if gfx.show_close_button && rect_contains_point(layout.close_button_rect(), point) {
             return Some(IngameMenuPointerTarget::Close);
         }
-        self.items
-            .iter()
-            .enumerate()
-            .find_map(|(index, _)| {
+        if rect_contains_point(layout.title_rect(), point) {
+            return Some(IngameMenuPointerTarget::Title);
+        }
+        if rect_contains_point(layout.client_rect(), point) {
+            if let Some(index) = self.items.iter().enumerate().find_map(|(index, _)| {
                 layout
                     .item_rect(index)
                     .filter(|rect| rect_contains_point(*rect, point))
-                    .map(|_| IngameMenuPointerTarget::Item(index))
-            })
-            .or_else(|| {
-                rect_contains_point(layout.bounds, point)
-                    .then_some(IngameMenuPointerTarget::Background)
-            })
+                    .map(|_| index)
+            }) {
+                return Some(IngameMenuPointerTarget::Item(index));
+            }
+        }
+        rect_contains_point(layout.bounds, point).then_some(IngameMenuPointerTarget::Background)
     }
 
     pub(crate) fn close_button_rect(
@@ -1050,6 +1141,14 @@ impl IngameMenuState {
     /// Menu geometry per `C4Menu::InitLocation`/`InitSize`
     /// (C4Menu.cpp:642-783) for `C4MN_Style_Context`, one column.
     fn layout(&self, area: Rect, font: &HudFont<'_>, gfx: &IngameMenuGraphics) -> MenuLayout {
+        if self
+            .last_area
+            .replace(Some(area))
+            .is_some_and(|previous| previous != area)
+        {
+            self.location.set(None);
+            self.scroll_selection.set(None);
+        }
         // ItemHeight = max(C4MN_SymbolSize, font line height) (C4Menu.cpp:650).
         let item_height = MN_SYMBOL_SIZE.max(font.line_height());
         // Caption contributes ItemHeight + 16 (C4Menu.cpp:652-655).
@@ -1087,15 +1186,37 @@ impl IngameMenuState {
         }
         x += area.x;
         y += area.y;
+        if let Some((location_x, location_y)) = self.location.get() {
+            x = location_x;
+            y = location_y;
+        }
 
-        // Scroll the selection into view (C4Menu::AdjustPosition,
-        // C4Menu.cpp:601-609).
-        let visible = lines as usize;
-        let scroll = if self.selection >= visible {
-            self.selection + 1 - visible
-        } else {
-            0
-        };
+        let client_height = lines.saturating_mul(item_height);
+        let content_height = i32::try_from(self.items.len())
+            .unwrap_or(i32::MAX)
+            .saturating_mul(item_height);
+        let max_scroll = content_height.saturating_sub(client_height).max(0);
+        let mut scroll_y = self.scroll_y.get().clamp(0, max_scroll);
+
+        // `AdjustPosition` runs after selection changes (and InitLocation),
+        // not on every draw. Preserve wheel displacement while selection is
+        // unchanged, and minimally reveal only the newly selected row.
+        if self.scroll_selection.get() != Some(self.selection) {
+            if lines > 1 && !self.items.is_empty() {
+                let selection_y = i32::try_from(self.selection)
+                    .unwrap_or(i32::MAX)
+                    .saturating_mul(item_height);
+                scroll_y = scroll_range_in_view(
+                    scroll_y,
+                    selection_y,
+                    item_height,
+                    client_height,
+                    max_scroll,
+                );
+            }
+            self.scroll_selection.set(Some(self.selection));
+        }
+        self.scroll_y.set(scroll_y);
 
         MenuLayout {
             bounds: Rect::new(x, y, width as u32, height as u32),
@@ -1103,9 +1224,28 @@ impl IngameMenuState {
             item_height,
             title_height,
             lines,
-            scroll,
+            scroll_y,
+            max_scroll,
         }
     }
+}
+
+fn scroll_range_in_view(
+    scroll_y: i32,
+    range_y: i32,
+    range_height: i32,
+    viewport_height: i32,
+    max_scroll: i32,
+) -> i32 {
+    let mut scroll_y = scroll_y.clamp(0, max_scroll);
+    if scroll_y > range_y {
+        scroll_y = range_y;
+    } else if scroll_y.saturating_add(viewport_height) < range_y.saturating_add(range_height) {
+        scroll_y = range_y
+            .saturating_add(range_height)
+            .saturating_sub(viewport_height);
+    }
+    scroll_y.clamp(0, max_scroll)
 }
 
 /// Computed menu geometry (see [`IngameMenuState::layout`]).
@@ -1115,10 +1255,29 @@ struct MenuLayout {
     item_height: i32,
     title_height: i32,
     lines: i32,
-    scroll: usize,
+    scroll_y: i32,
+    max_scroll: i32,
 }
 
 impl MenuLayout {
+    fn title_rect(&self) -> Rect {
+        Rect::new(
+            self.bounds.x,
+            self.bounds.y,
+            self.bounds.width,
+            self.title_height as u32,
+        )
+    }
+
+    fn client_rect(&self) -> Rect {
+        Rect::new(
+            self.bounds.x + MN_FRAME_WIDTH,
+            self.bounds.y + self.title_height,
+            self.item_width as u32,
+            self.lines.saturating_mul(self.item_height) as u32,
+        )
+    }
+
     fn close_button_rect(&self) -> Rect {
         // Dialog::SetTitle uses GetToprightCornerRect(16,16,4,4,0).
         Rect::new(
@@ -1130,15 +1289,16 @@ impl MenuLayout {
     }
 
     fn item_rect(&self, index: usize) -> Option<Rect> {
-        let row = index.checked_sub(self.scroll)?;
-        (row < self.lines as usize).then(|| {
-            Rect::new(
-                self.bounds.x + MN_FRAME_WIDTH,
-                self.bounds.y + self.title_height + row as i32 * self.item_height,
-                self.item_width as u32,
-                self.item_height as u32,
-            )
-        })
+        let row_y = i32::try_from(index)
+            .unwrap_or(i32::MAX)
+            .saturating_mul(self.item_height)
+            .saturating_sub(self.scroll_y);
+        let client = self.client_rect();
+        let y = client.y.saturating_add(row_y);
+        let bottom = y.saturating_add(self.item_height);
+        let client_bottom = client.y.saturating_add(client.height as i32);
+        (bottom > client.y && y < client_bottom)
+            .then(|| Rect::new(client.x, y, self.item_width as u32, self.item_height as u32))
     }
 }
 
@@ -1179,6 +1339,9 @@ pub struct IngameMenuGraphics {
     pub frame_decoration: Option<ImageData>,
     /// Absolute viewport location for `C4MN_Align_Free` object menus.
     pub menu_location: Option<(i32, i32)>,
+    /// Presentation-only logical-pixel scroll displacement for the active
+    /// script menu's client `ScrollWindow`.
+    pub menu_scroll_y: i32,
     /// `Config.Graphics.ShowCommands` (C4Config.cpp:449) — draws the bottom
     /// command bar (C4Menu.cpp:851-880).
     pub show_commands: bool,
@@ -1268,7 +1431,7 @@ fn draw_menu(
 
     // Wooden caption bar with the menu symbol and title
     // (WoodenLabel::DrawElement, C4GuiLabels.cpp:168-213).
-    let title_rect = Rect::new(x0, y0, bounds.width, layout.title_height as u32);
+    let title_rect = layout.title_rect();
     if let Some(caption) = gfx.caption_bar.as_ref() {
         draw_caption_bar(surface, title_rect, caption, gamma);
     }
@@ -1338,25 +1501,21 @@ fn draw_menu(
         }
     }
 
-    // Client area: items stacked vertically (C4Menu::UpdateElementPositions).
-    let client_x = x0 + MN_FRAME_WIDTH;
-    let client_y = y0 + layout.title_height;
-    let visible = layout.lines as usize;
-    for (row, (index, item)) in menu
-        .items()
-        .iter()
-        .enumerate()
-        .skip(layout.scroll)
-        .take(visible)
-        .enumerate()
-    {
-        let item_y = client_y + row as i32 * layout.item_height;
-        let row_rect = Rect::new(
-            client_x,
-            item_y,
-            layout.item_width as u32,
-            layout.item_height as u32,
-        );
+    // Client area: items are translated by the ScrollWindow's logical-pixel
+    // offset and clipped, including a partially visible first/last row.
+    let client = layout.client_rect();
+    let previous_clip = surface.clip();
+    let client_clip = previous_clip
+        .map(|clip| clip.intersection(client).unwrap_or(Rect::new(0, 0, 0, 0)))
+        .unwrap_or(client);
+    surface.set_clip(client_clip);
+    let first = usize::try_from(layout.scroll_y / layout.item_height).unwrap_or_default();
+    let visible = layout.lines as usize + usize::from(layout.scroll_y % layout.item_height != 0);
+    for (index, item) in menu.items().iter().enumerate().skip(first).take(visible) {
+        let Some(row_rect) = layout.item_rect(index) else {
+            continue;
+        };
+        let item_y = row_rect.y;
         // Selection mark: filled red box (C4MenuItem::DrawElement,
         // C4Menu.cpp:152-154).
         if index == menu.selection() {
@@ -1368,7 +1527,12 @@ fn draw_menu(
                 surface,
                 image,
                 src,
-                Rect::new(client_x, item_y, layout.item_height as u32, row_rect.height),
+                Rect::new(
+                    row_rect.x,
+                    item_y,
+                    layout.item_height as u32,
+                    row_rect.height,
+                ),
                 matches!(item.symbol, MenuSymbol::PlayerColor),
                 gamma,
             );
@@ -1376,13 +1540,17 @@ fn draw_menu(
         // Caption (C4MN_Style_Context: FontRegular, left, C4Menu.cpp:170-172).
         font.draw_with_gamma(
             surface,
-            client_x + layout.item_height,
+            row_rect.x + layout.item_height,
             item_y,
             &item.caption,
             MESSAGE_COLOR,
             TextAlign::Left,
             gamma,
         );
+    }
+    match previous_clip {
+        Some(clip) => surface.set_clip(clip),
+        None => surface.clear_clip(),
     }
 
     // Bottom bar with the menu controls (C4Menu::DrawElement,
@@ -1440,10 +1608,9 @@ fn draw_menu(
             .get(menu.selection())
             .and_then(|item| item.info_caption.as_deref())
         {
-            let row = menu.selection().saturating_sub(layout.scroll);
-            let item_x = client_x;
-            let item_y = client_y + row as i32 * layout.item_height;
-            draw_tooltip(surface, font, area, item_x, item_y, info, gamma);
+            if let Some(item) = layout.item_rect(menu.selection()) {
+                draw_tooltip(surface, font, area, item.x, item.y, info, gamma);
+            }
         }
     }
 }
@@ -2217,6 +2384,183 @@ mod tests {
         assert_eq!(menu.caption(), "No additional player files available.");
     }
 
+    fn l065_long_menu(count: usize) -> IngameMenuState {
+        let players = (0..count)
+            .map(|index| NewPlayerEntry {
+                file: format!("Player{index}.c4p"),
+                name: format!("Player {index}"),
+            })
+            .collect::<Vec<_>>();
+        IngameMenuState::new_player_menu(&players)
+    }
+
+    #[test]
+    fn l065_selection_scroll_is_persistent_and_minimal() {
+        use lc_graphics::BitmapFont;
+
+        let mut menu = l065_long_menu(8);
+        let font_backend = BitmapFont::new();
+        let font = HudFont::Fallback(&font_backend);
+        let gfx = IngameMenuGraphics::default();
+        // Fallback ItemHeight is 16, so this exposes exactly three rows.
+        let area = Rect::new(0, 0, 640, 148);
+        let initial = menu.layout(area, &font, &gfx);
+        assert_eq!(initial.lines, 3);
+        assert_eq!(menu.scroll_y(), 0);
+
+        menu.set_selection(4);
+        menu.layout(area, &font, &gfx);
+        assert_eq!(menu.scroll_y(), 2 * initial.item_height);
+
+        // Row three is already inside rows two through four. Native
+        // ScrollRangeInView keeps the existing displacement.
+        menu.set_selection(3);
+        menu.layout(area, &font, &gfx);
+        assert_eq!(menu.scroll_y(), 2 * initial.item_height);
+
+        menu.set_selection(1);
+        menu.layout(area, &font, &gfx);
+        assert_eq!(menu.scroll_y(), initial.item_height);
+
+        let mut one_line = l065_long_menu(8);
+        one_line.set_selection(4);
+        assert_eq!(one_line.layout(Rect::new(0, 0, 320, 116), &font, &gfx).lines, 1);
+        assert_eq!(
+            one_line.scroll_y(),
+            0,
+            "C4Menu::AdjustPosition is intentionally disabled for one-line menus",
+        );
+    }
+
+    #[test]
+    fn l065_wheel_scroll_survives_layout_and_clips_partial_rows() {
+        use lc_graphics::BitmapFont;
+
+        let menu = l065_long_menu(8);
+        let font_backend = BitmapFont::new();
+        let font = HudFont::Fallback(&font_backend);
+        let gfx = IngameMenuGraphics::default();
+        let area = Rect::new(0, 0, 640, 148);
+        menu.layout(area, &font, &gfx);
+        let selection = menu.selection();
+
+        assert!(menu.scroll_by(7, area, &font, &gfx));
+        assert_eq!(menu.selection(), selection);
+        assert_eq!(menu.scroll_y(), 7);
+        // Rendering/hit-test layout must not reveal the unchanged selection
+        // and thereby erase a wheel displacement.
+        let layout = menu.layout(area, &font, &gfx);
+        assert_eq!(menu.scroll_y(), 7);
+        let client = layout.client_rect();
+        assert!(menu.client_contains(
+            area,
+            &font,
+            &gfx,
+            GuiPoint::new(client.x as f32, client.y as f32),
+        ));
+        assert_eq!(
+            menu.pointer_target(
+                area,
+                &font,
+                &gfx,
+                GuiPoint::new(client.x as f32 + 1.0, client.y as f32),
+            ),
+            Some(IngameMenuPointerTarget::Item(0)),
+        );
+        assert_eq!(
+            menu.pointer_target(
+                area,
+                &font,
+                &gfx,
+                GuiPoint::new(
+                    client.x as f32 + 1.0,
+                    (client.y + client.height as i32) as f32 - 0.5,
+                ),
+            ),
+            Some(IngameMenuPointerTarget::Item(3)),
+        );
+
+        let mut surface = Surface::new(640, 148, lc_graphics::PixelFormat::Rgba8888);
+        menu.render(&mut surface, area, &font, None, &gfx);
+        assert_eq!(
+            surface.get_pixel((client.x + 1) as u32, client.y as u32),
+            Some(SELECTION_COLOR),
+            "the partially visible selected row starts exactly at the client clip",
+        );
+        let red = (0..surface.height())
+            .flat_map(|y| (0..surface.width()).map(move |x| (x, y)))
+            .filter(|&(x, y)| surface.get_pixel(x, y) == Some(SELECTION_COLOR))
+            .collect::<Vec<_>>();
+        assert!(red.iter().all(|&(_, y)| {
+            y >= client.y as u32 && y < (client.y + client.height as i32) as u32
+        }));
+
+        assert!(menu.scroll_by(i32::MAX, area, &font, &gfx));
+        assert_eq!(menu.scroll_y(), layout.max_scroll);
+        assert!(!menu.scroll_by(1, area, &font, &gfx));
+        assert_eq!(menu.selection(), selection);
+    }
+
+    #[test]
+    fn l065_title_location_persists_raw_until_reset() {
+        use lc_graphics::BitmapFont;
+
+        let mut menu = l065_long_menu(8);
+        let font_backend = BitmapFont::new();
+        let font = HudFont::Fallback(&font_backend);
+        let gfx = IngameMenuGraphics {
+            show_close_button: true,
+            ..IngameMenuGraphics::default()
+        };
+        let area = Rect::new(50, 20, 640, 148);
+        let anchored = menu.bounds(area, &font, &gfx);
+        let title = menu.layout(area, &font, &gfx).title_rect();
+        assert_eq!(
+            menu.pointer_target(
+                area,
+                &font,
+                &gfx,
+                GuiPoint::new(title.x as f32 + 2.0, title.y as f32 + 2.0),
+            ),
+            Some(IngameMenuPointerTarget::Title),
+        );
+
+        menu.set_location((-41, 377));
+        assert_eq!(menu.bounds(area, &font, &gfx).x, -41);
+        assert_eq!(menu.bounds(area, &font, &gfx).y, 377);
+        let relaid_area = Rect::new(0, 0, 320, 148);
+        let relaid_expected = l065_long_menu(8).bounds(relaid_area, &font, &gfx);
+        assert_eq!(
+            menu.bounds(relaid_area, &font, &gfx),
+            relaid_expected,
+            "a split-screen output-rect change resets the dragged location without an OS resize",
+        );
+
+        menu.set_location((-41, 377));
+        assert!(menu.scroll_by(i32::MAX, area, &font, &gfx));
+        menu.reset_location();
+        assert_eq!(menu.bounds(area, &font, &gfx), anchored);
+        assert_eq!(
+            menu.scroll_y(),
+            0,
+            "InitLocation reruns AdjustPosition for the selected first row",
+        );
+
+        menu.set_location((0, 30));
+        let mut surface = Surface::new(720, 200, lc_graphics::PixelFormat::Rgba8888);
+        menu.render(&mut surface, area, &font, None, &gfx);
+        assert!(
+            (0..surface.height()).all(|y| (0..surface.width()).all(|x| {
+                let inside = x >= area.x as u32
+                    && y >= area.y as u32
+                    && x < (area.x + area.width as i32) as u32
+                    && y < (area.y + area.height as i32) as u32;
+                inside || surface.get_pixel(x, y) == Some(Color::transparent())
+            })),
+            "a dragged external dialog must remain clipped to its owning viewport",
+        );
+    }
+
     // Layout mirrors C4Menu::InitLocation/InitSize (C4Menu.cpp:642-783).
     #[test]
     fn layout_aligns_left_bottom_with_symbol_margin() {
@@ -2241,7 +2585,7 @@ mod tests {
         let expected_height = 7 * layout.item_height + layout.title_height + 16 + 2;
         assert_eq!(layout.bounds.height as i32, expected_height);
         assert_eq!(layout.lines, 7);
-        assert_eq!(layout.scroll, 0);
+        assert_eq!(layout.scroll_y, 0);
     }
 
     #[test]
@@ -2297,7 +2641,7 @@ mod tests {
         ] {
             assert_eq!(
                 menu.pointer_target(area, &font, &gfx, point),
-                Some(IngameMenuPointerTarget::Background),
+                Some(IngameMenuPointerTarget::Title),
                 "the 16x16 close hitbox is half-open"
             );
         }
@@ -2345,7 +2689,7 @@ mod tests {
                 &hidden_gfx,
                 GuiPoint::new(center.0 as f32, center.1 as f32),
             ),
-            Some(IngameMenuPointerTarget::Background),
+            Some(IngameMenuPointerTarget::Title),
             "HasMouse=false removes the close control instead of leaving an invisible hitbox"
         );
     }

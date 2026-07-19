@@ -167,10 +167,14 @@ use network::{
 use network_host_preparation::NetworkHostPreparation;
 use network_team_assignment::{NetworkTeamAssignmentState, NetworkTeamControlError};
 use object_menu::{
-    EngineScriptMenuPointerTarget, MenuMode as AppObjectMenuMode, ObjectMenuAction,
+    EngineScriptMenuLayout, EngineScriptMenuPointerTarget,
+    EngineScriptMenuPresentationGeometry, MenuMode as AppObjectMenuMode, ObjectMenuAction,
     ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState, apply_definition_owner_color,
     definition_menu_picture, engine_script_menu_inline_image_specs,
-    engine_script_menu_pointer_target_with_info, render_engine_script_menu_with_gamma,
+    engine_script_menu_layout_with_free_anchor, engine_script_menu_layout_with_presentation,
+    engine_script_menu_pointer_target_with_free_anchor,
+    engine_script_menu_pointer_target_with_presentation,
+    engine_script_menu_presentation_geometry, render_engine_script_menu_with_gamma,
     resolve_engine_script_menu_footer, validate_menu_decoration_for_area,
 };
 use offline_startup::{
@@ -8597,9 +8601,48 @@ struct ScriptMenuPresentationKey {
 struct ScriptMenuPresentationState {
     key: ScriptMenuPresentationKey,
     time_on_selection: u32,
-    /// C4MN_Align_Free is resolved once by C4Menu::InitLocation and stays
-    /// fixed while the object/camera subsequently moves.
-    free_location: Option<(i32, i32)>,
+    /// Initialized dialog origin. `None` retains the menu's native anchored
+    /// alignment; free-aligned menus resolve their world anchor once.
+    location: Option<(i32, i32)>,
+    /// The stored location is still a world-derived C4MN_Align_Free anchor
+    /// which must receive InitLocation's one-time viewport clamp.
+    location_needs_initialization: bool,
+    /// Native C4MN_Align_Free keeps its current bounds as the next reset
+    /// candidate; ordinary anchored menus discard a dragged origin on reset.
+    free_aligned: bool,
+    /// Presentation-only C4GUI::ScrollWindow offset in logical pixels.
+    scroll_y: i32,
+    /// Selection for which ScrollRangeInView was most recently applied.
+    scroll_selection: i32,
+    /// C4Menu::AdjustPosition runs after a selection/location update, not on
+    /// every draw (otherwise wheel scrolling would immediately be undone).
+    selection_needs_adjustment: bool,
+}
+
+fn reset_script_menu_presentation_location(state: &mut ScriptMenuPresentationState) {
+    if state.free_aligned {
+        state.location_needs_initialization = state.location.is_some();
+    } else {
+        state.location = None;
+        state.location_needs_initialization = false;
+    }
+    state.selection_needs_adjustment = true;
+}
+
+/// C4GUI's single retained `pDragElement` for a menu's wooden title label.
+#[derive(Clone, Copy, Debug)]
+enum MenuTitleDrag {
+    Script {
+        owner: i32,
+        target: ObjectId,
+        start_pointer: GuiPoint,
+        start_location: (i32, i32),
+    },
+    Ingame {
+        player: i32,
+        start_pointer: GuiPoint,
+        start_location: (i32, i32),
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -10193,9 +10236,14 @@ struct GameApp {
     ingame_menu: PlayerIngameMenus,
     /// Cached Graphics.c4g sheets for the in-game menu renderer.
     ingame_menu_gfx: Option<IngameMenuGraphics>,
-    /// Async C4Menu::TimeOnSelection presentation state. This is deliberately
-    /// outside the deterministic engine menu state (C4Menu.cpp:804-821).
-    script_menu_presentation: Option<ScriptMenuPresentationState>,
+    /// Per-viewport-owner async C4Menu::TimeOnSelection presentation state.
+    /// This is deliberately outside the deterministic engine menu state
+    /// (C4Menu.cpp:804-821).
+    script_menu_presentations: BTreeMap<i32, ScriptMenuPresentationState>,
+    /// Last output rectangle for each owning viewport. C4Viewport raises
+    /// `ResetMenuPositions` on split-screen relayouts as well as window
+    /// resizes, so menu placement cannot key only off the OS resize event.
+    menu_viewport_rects: BTreeMap<i32, Rect>,
     /// `Config.Graphics` display toggles loaded at process startup and driven
     /// by the Display submenu (C4MainMenu.cpp:855-884).
     display_flags: DisplayFlags,
@@ -10390,6 +10438,10 @@ struct GameApp {
     /// Player menu whose title close button retained the current left-down.
     /// C4GUI::Button invokes only when that same button receives left-up.
     ingame_menu_close_pointer_capture: Option<i32>,
+    /// Script menu close button retaining the current left-down.
+    script_menu_close_pointer_capture: Option<(i32, ObjectId)>,
+    /// Wooden menu title currently moving its owning dialog.
+    menu_title_drag: Option<MenuTitleDrag>,
     /// Tooltip-style caption installed by a Help-mode object click or region
     /// hover, including C4MouseControl's move-count lifetime.
     ingame_mouse_help_caption: Option<IngameMouseHelpCaption>,
@@ -20019,7 +20071,8 @@ impl GameApp {
             object_menu: None,
             ingame_menu: PlayerIngameMenus::default(),
             ingame_menu_gfx: None,
-            script_menu_presentation: None,
+            script_menu_presentations: BTreeMap::new(),
+            menu_viewport_rects: BTreeMap::new(),
             display_flags: load_display_flags(paths),
             white_lobby_chat: load_white_lobby_chat(paths),
             show_log_timestamps: load_show_log_timestamps(paths),
@@ -20121,6 +20174,8 @@ impl GameApp {
             running_pointer_position: None,
             primary_pointer_left_down: false,
             ingame_menu_close_pointer_capture: None,
+            script_menu_close_pointer_capture: None,
+            menu_title_drag: None,
             ingame_mouse_help_caption: None,
             mouse_state: None,
             ingame_right_mouse_state: None,
@@ -20827,7 +20882,16 @@ impl GameApp {
         self.game_option_input_last_click = None;
         self.game_option_pointer_capture = false;
         self.running_pointer_position = None;
+        self.ingame_menu_close_pointer_capture = None;
+        self.script_menu_close_pointer_capture = None;
         self.scoreboard_close_pointer_capture = false;
+        self.menu_title_drag = None;
+        for menu in self.ingame_menu.by_player.values_mut() {
+            menu.reset_location();
+        }
+        for state in self.script_menu_presentations.values_mut() {
+            reset_script_menu_presentation_location(state);
+        }
         self.mark_menu_dirty();
         let cursor_atlas = self.current_cursor_atlas();
         let hud_graphics = self.current_hud_graphics();
@@ -22175,6 +22239,20 @@ impl GameApp {
             return Ok(());
         }
         if self.mode == AppMode::Running {
+            let native_delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            if let Some(point) = self.ingame_gui_pointer {
+                if self.handle_ingame_menu_wheel(point, native_delta.saturating_neg()) {
+                    return Ok(());
+                }
+                if self.handle_script_menu_wheel(point, native_delta.saturating_neg())? {
+                    return Ok(());
+                }
+            }
             self.initialize_ingame_mouse_for_wheel();
             self.advance_ingame_mouse_caption_lifetime();
             if !self.mouse_control {
@@ -22184,13 +22262,9 @@ impl GameApp {
             let Some(owner) = self.local_controls.mouse_owner() else {
                 return Ok(());
             };
-            let vertical = match delta {
-                MouseScrollDelta::LineDelta(_, y) => f64::from(y),
-                MouseScrollDelta::PixelDelta(position) => position.y,
-            };
-            let command = if vertical > 0.0 {
+            let command = if native_delta > 0 {
                 Some(lc_engine::COM_WHEEL_UP)
-            } else if vertical < 0.0 {
+            } else if native_delta < 0 {
                 Some(lc_engine::COM_WHEEL_DOWN)
             } else {
                 None
@@ -25690,6 +25764,8 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.primary_pointer_left_down = false;
         self.ingame_menu_close_pointer_capture = None;
+        self.script_menu_close_pointer_capture = None;
+        self.menu_title_drag = None;
         // No key-up events are guaranteed after the window loses focus.
         // Release synchronized controls and forget the physical repeat state
         // so the first press after refocus is not discarded.
@@ -26439,12 +26515,24 @@ impl GameApp {
     fn close_ingame_menu(&mut self) {
         self.ingame_menu.clear();
         self.ingame_menu_close_pointer_capture = None;
+        if matches!(self.menu_title_drag, Some(MenuTitleDrag::Ingame { .. })) {
+            self.menu_title_drag = None;
+        }
     }
 
     fn close_ingame_menu_for_player(&mut self, player: i32) {
         self.ingame_menu.remove(player);
         if self.ingame_menu_close_pointer_capture == Some(player) {
             self.ingame_menu_close_pointer_capture = None;
+        }
+        if matches!(
+            self.menu_title_drag,
+            Some(MenuTitleDrag::Ingame {
+                player: dragged,
+                ..
+            }) if dragged == player
+        ) {
+            self.menu_title_drag = None;
         }
     }
 
@@ -26456,6 +26544,15 @@ impl GameApp {
         if self.ingame_menu.remove(player).is_some() {
             if self.ingame_menu_close_pointer_capture == Some(player) {
                 self.ingame_menu_close_pointer_capture = None;
+            }
+            if matches!(
+                self.menu_title_drag,
+                Some(MenuTitleDrag::Ingame {
+                    player: dragged,
+                    ..
+                }) if dragged == player
+            ) {
+                self.menu_title_drag = None;
             }
             if player != OWNER_NONE {
                 // Player-owned C4MainMenu::OnClosed queues exactly one
@@ -27800,6 +27897,7 @@ impl GameApp {
                 font_images: HashMap::new(),
                 frame_decoration: None,
                 menu_location: None,
+                menu_scroll_y: 0,
                 show_commands: self.display_flags.show_commands,
                 show_close_button: false,
                 show_command_keys: self.display_flags.show_command_keys,
@@ -31925,6 +32023,10 @@ impl GameApp {
         }
         if self.mode == AppMode::Running {
             self.ingame_gui_pointer = Some(point);
+            if self.update_menu_title_drag(point) {
+                self.suspend_ingame_pointer_for_gui();
+                return Ok(());
+            }
             if self.update_construction_menu_drag(point)? {
                 return Ok(());
             }
@@ -32243,7 +32345,8 @@ impl GameApp {
                     self.suspend_ingame_pointer_for_gui();
                     return Ok(());
                 }
-                let script_menu_target = match self.local_controls.mouse_owner() {
+                let script_menu_owner = self.local_controls.mouse_owner();
+                let script_menu_target = match script_menu_owner {
                     Some(owner) => {
                         match self.script_menu_pointer_target_for_owner(owner, point) {
                             Ok(target) => target,
@@ -32266,7 +32369,10 @@ impl GameApp {
                 };
                 if let Some(target) = script_menu_target {
                     if let EngineScriptMenuPointerTarget::Item(index) = target {
-                        if self.select_script_menu_pointer_item(index)? {
+                        if self.select_script_menu_pointer_item(
+                            script_menu_owner.expect("script-menu target has an owner"),
+                            index,
+                        )? {
                             self.refresh_after_script_menu_pointer();
                         }
                     }
@@ -32282,6 +32388,77 @@ impl GameApp {
             }
             AppMode::Loading => Ok(()),
         }
+    }
+
+    /// `Element::DoDragging`: retain the original title-local pointer and
+    /// apply its screen-space delta one-for-one, even outside the dialog.
+    fn update_menu_title_drag(&mut self, point: GuiPoint) -> bool {
+        let Some(drag) = self.menu_title_drag else {
+            return false;
+        };
+        let moved = |start_pointer: GuiPoint, start_location: (i32, i32)| {
+            (
+                start_location
+                    .0
+                    .saturating_add((point.x - start_pointer.x).round() as i32),
+                start_location
+                    .1
+                    .saturating_add((point.y - start_pointer.y).round() as i32),
+            )
+        };
+        match drag {
+            MenuTitleDrag::Ingame {
+                player,
+                start_pointer,
+                start_location,
+            } => {
+                let Some(menu) = self.ingame_menu.get_mut(player) else {
+                    self.menu_title_drag = None;
+                    return false;
+                };
+                menu.set_location(moved(start_pointer, start_location));
+            }
+            MenuTitleDrag::Script {
+                owner,
+                target,
+                start_pointer,
+                start_location,
+            } => {
+                let valid = self
+                    .engine
+                    .cursor_object_menu(owner)
+                    .is_some_and(|(current, menu)| {
+                        current == target
+                            && self
+                                .script_menu_presentations
+                                .get(&owner)
+                                .is_some_and(|state| {
+                                    same_script_menu_presentation(state, target, menu)
+                                })
+                    });
+                if !valid {
+                    self.menu_title_drag = None;
+                    return false;
+                }
+                if let Some(state) = self.script_menu_presentations.get_mut(&owner) {
+                    state.location = Some(moved(start_pointer, start_location));
+                    state.location_needs_initialization = false;
+                }
+            }
+        }
+        true
+    }
+
+    fn finish_menu_title_drag(&mut self, point: Option<GuiPoint>) -> bool {
+        if self.menu_title_drag.is_none() {
+            return false;
+        }
+        if let Some(point) = point {
+            self.update_menu_title_drag(point);
+        }
+        self.menu_title_drag = None;
+        self.cancel_ingame_mouse_gestures();
+        true
     }
 
     fn suspend_ingame_pointer_for_gui(&mut self) {
@@ -33174,6 +33351,78 @@ impl GameApp {
             .map(|target| (player, target))
     }
 
+    fn ingame_menu_area(&self, player: i32) -> Option<Rect> {
+        if player == OWNER_NONE {
+            let surface = self.graphics.surface();
+            Some(Rect::new(0, 0, surface.width(), surface.height()))
+        } else {
+            self.graphics.viewport_rect(player)
+        }
+    }
+
+    /// Route wheel input through the external dialog first. The dialog owns
+    /// every point in its bounds, while only its ScrollWindow client mutates
+    /// the pixel offset.
+    fn handle_ingame_menu_wheel(&mut self, point: GuiPoint, amount: i32) -> bool {
+        let Some((player, _)) = self.ingame_menu_pointer_target(point) else {
+            return false;
+        };
+        let Some(area) = self.ingame_menu_area(player) else {
+            return true;
+        };
+        let fallback = self.assets.font_arc();
+        let font = lc_frontend::hud::HudFont::from_set(
+            self.assets.clonk_fonts.as_deref(),
+            fallback.as_ref(),
+        );
+        let gfx = IngameMenuGraphics {
+            show_commands: self.display_flags.show_commands,
+            show_close_button: true,
+            ..IngameMenuGraphics::default()
+        };
+        let changed = self.ingame_menu.get(player).is_some_and(|menu| {
+            menu.client_contains(area, &font, &gfx, point)
+                && menu.scroll_by(amount, area, &font, &gfx)
+        });
+        if changed {
+            self.mark_menu_dirty();
+        }
+        true
+    }
+
+    fn arm_ingame_menu_title_drag(&mut self, player: i32, point: GuiPoint) -> bool {
+        let Some(area) = self.ingame_menu_area(player) else {
+            return false;
+        };
+        let fallback = self.assets.font_arc();
+        let font = lc_frontend::hud::HudFont::from_set(
+            self.assets.clonk_fonts.as_deref(),
+            fallback.as_ref(),
+        );
+        let gfx = IngameMenuGraphics {
+            show_commands: self.display_flags.show_commands,
+            show_close_button: true,
+            ..IngameMenuGraphics::default()
+        };
+        let Some(bounds) = self
+            .ingame_menu
+            .get(player)
+            .map(|menu| menu.bounds(area, &font, &gfx))
+        else {
+            return false;
+        };
+        let start_location = (bounds.x, bounds.y);
+        if let Some(menu) = self.ingame_menu.get_mut(player) {
+            menu.set_location(start_location);
+        }
+        self.menu_title_drag = Some(MenuTitleDrag::Ingame {
+            player,
+            start_pointer: point,
+            start_location,
+        });
+        true
+    }
+
     fn handle_ingame_menu_pointer_move(&mut self, point: GuiPoint) -> bool {
         let Some((player, target)) = self.ingame_menu_pointer_target(point) else {
             return false;
@@ -33182,7 +33431,9 @@ impl GameApp {
             if let Some(menu) = self.ingame_menu.get_mut(player) {
                 // C4MenuItem::MouseEnter directly selects the hovered item
                 // (C4Menu.cpp:239-244; C4MainMenu.cpp:299-303).
-                menu.set_selection(index);
+                if menu.selection() != index {
+                    menu.set_selection(index);
+                }
             }
         }
         true
@@ -33212,6 +33463,12 @@ impl GameApp {
         {
             self.ingame_menu_close_pointer_capture = Some(player);
         }
+        if !enter_all
+            && button_state == ElementState::Pressed
+            && target == IngameMenuPointerTarget::Title
+        {
+            self.arm_ingame_menu_title_drag(player, point);
+        }
         if button_state == ElementState::Released {
             let outcome = match target {
                 IngameMenuPointerTarget::Item(_) if close_capture.is_some() => None,
@@ -33238,7 +33495,9 @@ impl GameApp {
                     .and_then(|menu| {
                         menu.handle_command(ControlCommand::MenuClose, CommandKind::Press)
                     }),
-                IngameMenuPointerTarget::Close | IngameMenuPointerTarget::Background => None,
+                IngameMenuPointerTarget::Close
+                | IngameMenuPointerTarget::Title
+                | IngameMenuPointerTarget::Background => None,
             };
             if let Some(outcome) = outcome {
                 // C4MenuItem enters on button-up; C4MainMenu executes its
@@ -34008,10 +34267,17 @@ impl GameApp {
             self.restore_ingame_mouse_region_caption();
             return self.on_ingame_mouse_up();
         }
+        if button_state == ElementState::Pressed {
+            self.script_menu_close_pointer_capture = None;
+        }
+        let script_close_capture = (button_state == ElementState::Released)
+            .then(|| self.script_menu_close_pointer_capture.take())
+            .flatten();
+        let script_menu_owner = self.local_controls.mouse_owner();
         let script_menu_target = if moving_drag || self.ingame_mouse_help {
             None
         } else {
-            match (self.local_controls.mouse_owner(), self.ingame_gui_pointer) {
+            match (script_menu_owner, self.ingame_gui_pointer) {
                 (Some(owner), Some(gui_point)) => {
                     self.script_menu_pointer_target_for_owner(owner, gui_point)?
                 }
@@ -34021,11 +34287,13 @@ impl GameApp {
         if let Some(target) = script_menu_target {
             self.cancel_ingame_mouse_gestures();
             match button_state {
-                ElementState::Pressed => {
-                    if let EngineScriptMenuPointerTarget::Item(index) = target {
-                        self.select_script_menu_pointer_item(index)?;
+                ElementState::Pressed => match target {
+                    EngineScriptMenuPointerTarget::Item(index) => {
+                        let owner = script_menu_owner
+                            .expect("script-menu target has an owner");
+                        self.select_script_menu_pointer_item(owner, index)?;
                         if let (Some(owner), Some(gui_point)) =
-                            (self.local_controls.mouse_owner(), self.ingame_gui_pointer)
+                            (script_menu_owner, self.ingame_gui_pointer)
                         {
                             // C4MenuItem::IsDragElement depends only on the
                             // raw item ID's Constructable definition, not on
@@ -34033,29 +34301,62 @@ impl GameApp {
                             self.arm_construction_menu_drag(owner, index, gui_point);
                         }
                     }
-                }
-                ElementState::Released => match target {
-                    EngineScriptMenuPointerTarget::Close => {
-                        self.dispatch_control_event(ControlEvent::RawPlayerControl {
-                            command: lc_engine::COM_MENU_CLOSE,
-                            data: 0,
-                        })?;
+                    EngineScriptMenuPointerTarget::Title => {
+                        if let (Some(owner), Some(gui_point)) =
+                            (script_menu_owner, self.ingame_gui_pointer)
+                        {
+                            self.arm_script_menu_title_drag(owner, gui_point)?;
+                        }
                     }
-                    EngineScriptMenuPointerTarget::Item(index) => {
-                        if self.select_script_menu_pointer_item(index)? {
-                            let data = i32::try_from(index).unwrap_or(i32::MAX);
-                            self.dispatch_control_event(ControlEvent::RawPlayerControl {
-                                command: lc_engine::COM_MENU_ENTER,
-                                data,
-                            })?;
+                    EngineScriptMenuPointerTarget::Close => {
+                        if let Some(owner) = script_menu_owner {
+                            if let Some((target, _)) = self.engine.cursor_object_menu(owner) {
+                                self.script_menu_close_pointer_capture = Some((owner, target));
+                            }
                         }
                     }
                     EngineScriptMenuPointerTarget::Background => {}
                 },
+                ElementState::Released => {
+                    if let Some((owner, captured_target)) = script_close_capture {
+                        if target == EngineScriptMenuPointerTarget::Close
+                            && script_menu_owner == Some(owner)
+                            && self
+                                .engine
+                                .cursor_object_menu(owner)
+                                .is_some_and(|(current, _)| current == captured_target)
+                        {
+                            self.dispatch_control_event_for_local_player(
+                                owner,
+                                ControlEvent::RawPlayerControl {
+                                    command: lc_engine::COM_MENU_CLOSE,
+                                    data: 0,
+                                },
+                            )?;
+                        }
+                    } else if let EngineScriptMenuPointerTarget::Item(index) = target {
+                        let owner = script_menu_owner
+                            .expect("script-menu target has an owner");
+                        if self.select_script_menu_pointer_item(owner, index)? {
+                            let data = i32::try_from(index).unwrap_or(i32::MAX);
+                            self.dispatch_control_event_for_local_player(
+                                owner,
+                                ControlEvent::RawPlayerControl {
+                                    command: lc_engine::COM_MENU_ENTER,
+                                    data,
+                                },
+                            )?;
+                        }
+                    }
+                }
             }
             if button_state == ElementState::Released {
                 self.refresh_after_script_menu_pointer();
             }
+            return Ok(());
+        }
+        if script_close_capture.is_some() {
+            self.cancel_ingame_mouse_gestures();
             return Ok(());
         }
         if candidate_release {
@@ -34437,10 +34738,11 @@ impl GameApp {
                 .is_some_and(|state| {
                     state.motion.region_drag_started || state.motion.world_drag_started
                 });
+        let script_menu_owner = self.local_controls.mouse_owner();
         let script_menu_target = if moving_drag {
             None
         } else {
-            match (self.local_controls.mouse_owner(), self.ingame_gui_pointer) {
+            match (script_menu_owner, self.ingame_gui_pointer) {
                 (Some(owner), Some(gui_point)) => {
                     self.script_menu_pointer_target_for_owner(owner, gui_point)?
                 }
@@ -34452,12 +34754,17 @@ impl GameApp {
                 self.cancel_ingame_mouse_gestures();
                 if button_state == ElementState::Released {
                     if let EngineScriptMenuPointerTarget::Item(index) = target {
-                        if self.select_script_menu_pointer_item(index)? {
+                        let owner = script_menu_owner
+                            .expect("script-menu target has an owner");
+                        if self.select_script_menu_pointer_item(owner, index)? {
                             let data = i32::try_from(index).unwrap_or(i32::MAX);
-                            self.dispatch_control_event(ControlEvent::RawPlayerControl {
-                                command: lc_engine::COM_MENU_ENTER_ALL,
-                                data,
-                            })?;
+                            self.dispatch_control_event_for_local_player(
+                                owner,
+                                ControlEvent::RawPlayerControl {
+                                    command: lc_engine::COM_MENU_ENTER_ALL,
+                                    data,
+                                },
+                            )?;
                         }
                     }
                     self.refresh_after_script_menu_pointer();
@@ -34976,6 +35283,119 @@ impl GameApp {
         self.script_menu_pointer_target_for_owner(self.local_owner, point)
     }
 
+    fn reset_menu_positions_for_viewport_changes(&mut self) {
+        let mut current = BTreeMap::new();
+        for viewport in self.graphics.active_viewport_projections() {
+            current.entry(viewport.owner).or_insert(viewport.rect);
+        }
+        let mut changed = self
+            .menu_viewport_rects
+            .iter()
+            .filter_map(|(&owner, &previous)| {
+                (current.get(&owner).copied() != Some(previous)).then_some(owner)
+            })
+            .collect::<Vec<_>>();
+        changed.extend(current.keys().copied().filter(|owner| {
+            !self.menu_viewport_rects.contains_key(owner)
+                && (self.ingame_menu.contains(*owner)
+                    || self.script_menu_presentations.contains_key(owner))
+        }));
+        if changed.is_empty() {
+            self.menu_viewport_rects = current;
+            return;
+        }
+        for &owner in &changed {
+            if let Some(menu) = self.ingame_menu.get_mut(owner) {
+                menu.reset_location();
+            }
+            if let Some(state) = self.script_menu_presentations.get_mut(&owner) {
+                if state.free_aligned {
+                    if let (Some((x, y)), Some(previous), Some(next)) = (
+                        state.location,
+                        self.menu_viewport_rects.get(&owner),
+                        current.get(&owner),
+                    ) {
+                        state.location = Some((
+                            x.saturating_add(next.x.saturating_sub(previous.x)),
+                            y.saturating_add(next.y.saturating_sub(previous.y)),
+                        ));
+                    }
+                }
+                reset_script_menu_presentation_location(state);
+            }
+        }
+        if self.menu_title_drag.is_some_and(|drag| {
+            let owner = match drag {
+                MenuTitleDrag::Script { owner, .. } => owner,
+                MenuTitleDrag::Ingame { player, .. } => player,
+            };
+            changed.contains(&owner)
+        }) {
+            self.menu_title_drag = None;
+        }
+        if self
+            .ingame_menu_close_pointer_capture
+            .is_some_and(|owner| changed.contains(&owner))
+        {
+            self.ingame_menu_close_pointer_capture = None;
+        }
+        if self
+            .script_menu_close_pointer_capture
+            .is_some_and(|(owner, _)| changed.contains(&owner))
+        {
+            self.script_menu_close_pointer_capture = None;
+        }
+        self.menu_viewport_rects = current;
+        self.mark_menu_dirty();
+    }
+
+    /// Input can arrive between `CreateMenu` and the next frame. Seed the
+    /// presentation state here as well as during render so the first wheel or
+    /// title gesture is retained instead of merely being consumed.
+    fn ensure_script_menu_presentation_for_owner(&mut self, owner: i32) -> bool {
+        let Some((target, menu)) = self
+            .engine
+            .cursor_object_menu(owner)
+            .map(|(target, menu)| (target, menu.clone()))
+        else {
+            return false;
+        };
+        let initial_location = self.script_menu_free_location(owner, &menu);
+        let key = ScriptMenuPresentationKey {
+            target,
+            symbol_id: menu.symbol_id.clone(),
+            caption: menu.caption.clone(),
+            selection: menu.selection,
+        };
+        let next = match self.script_menu_presentations.remove(&owner) {
+            Some(state) if state.key == key => state,
+            Some(mut state) if same_script_menu_presentation(&state, target, &menu) => {
+                state.key = key;
+                state.time_on_selection = 0;
+                if state.location.is_none() {
+                    state.location = initial_location;
+                    state.location_needs_initialization = initial_location.is_some();
+                    state.free_aligned = initial_location.is_some();
+                }
+                state.selection_needs_adjustment |=
+                    state.scroll_selection != menu.selection;
+                state
+            }
+            _ => ScriptMenuPresentationState {
+                key,
+                time_on_selection: 0,
+                location: initial_location,
+                location_needs_initialization: initial_location.is_some(),
+                free_aligned: initial_location.is_some(),
+                scroll_y: 0,
+                scroll_selection: menu.selection,
+                selection_needs_adjustment: true,
+            },
+        };
+        self.script_menu_presentations.insert(owner, next);
+        true
+    }
+
     fn script_menu_pointer_target_for_owner(
         &self,
         owner: i32,
@@ -35011,25 +35431,303 @@ impl GameApp {
                     },
                 ))
             })?;
-        let free_location = self
-            .script_menu_presentation
-            .as_ref()
-            .filter(|state| same_script_menu_presentation(state, target, menu))
-            .and_then(|state| state.free_location)
-            .or_else(|| self.script_menu_free_location(menu));
-        Ok(engine_script_menu_pointer_target_with_info(
+        let presentation = self
+            .script_menu_presentations
+            .get(&owner)
+            .filter(|state| same_script_menu_presentation(state, target, menu));
+        let location = presentation
+            .and_then(|state| state.location)
+            .or_else(|| self.script_menu_free_location(owner, menu));
+        let scroll_y = presentation.map_or(0, |state| state.scroll_y);
+        let use_free_anchor = presentation.map_or(location.is_some(), |state| {
+            state.location_needs_initialization
+        });
+        Ok(if use_free_anchor {
+            location.and_then(|free_location| {
+                engine_script_menu_pointer_target_with_free_anchor(
+                    area,
+                    &font,
+                    menu,
+                    self.display_flags.show_commands,
+                    true,
+                    point,
+                    &font_images,
+                    free_location,
+                    scroll_y,
+                )
+            })
+        } else {
+            engine_script_menu_pointer_target_with_presentation(
+                area,
+                &font,
+                menu,
+                self.display_flags.show_commands,
+                true,
+                point,
+                &font_images,
+                location,
+                scroll_y,
+            )
+        })
+    }
+
+    fn script_menu_layout_for_owner(
+        &self,
+        owner: i32,
+        adjust_selection: bool,
+    ) -> Result<Option<(ObjectId, EngineScriptMenuLayout)>, EngineError> {
+        if !self.mouse_control {
+            return Ok(None);
+        }
+        let Some((target, menu)) = self.engine.cursor_object_menu(owner) else {
+            return Ok(None);
+        };
+        if !matches!(menu.style, 0..=2) {
+            return Ok(None);
+        }
+        self.assets
+            .require_classic_ingame_menu_resources()
+            .map_err(|error| classic_parity_engine_error(report_classic_parity_boundary(error)))?;
+        let fallback = self.assets.font_arc();
+        let font = lc_frontend::hud::HudFont::from_set(
+            self.assets.clonk_fonts.as_deref(),
+            fallback.as_ref(),
+        );
+        let area = self.graphics.viewport_rect(owner).unwrap_or_else(|| {
+            let surface = self.graphics.surface();
+            Rect::new(0, 0, surface.width(), surface.height())
+        });
+        let font_images = resolve_script_menu_font_images(
+            &self.engine,
+            menu,
+            self.script_text_spec_resources(),
+        )
+        .map_err(|error| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::ScriptMenuPointerResources {
+                    detail: error.to_string(),
+                },
+            ))
+        })?;
+        let presentation = self
+            .script_menu_presentations
+            .get(&owner)
+            .filter(|state| same_script_menu_presentation(state, target, menu));
+        let location = presentation
+            .and_then(|state| state.location)
+            .or_else(|| self.script_menu_free_location(owner, menu));
+        let scroll_y = presentation.map_or(0, |state| state.scroll_y);
+        let selection_changed = presentation
+            .is_none_or(|state| state.scroll_selection != menu.selection);
+        let adjust_selection = adjust_selection || selection_changed;
+        let use_free_anchor = presentation.map_or(location.is_some(), |state| {
+            state.location_needs_initialization
+        });
+        let layout = if use_free_anchor {
+            engine_script_menu_layout_with_free_anchor(
+                area,
+                &font,
+                menu,
+                self.display_flags.show_commands,
+                &font_images,
+                location.expect("free anchor has a location"),
+                scroll_y,
+                adjust_selection,
+            )
+        } else {
+            engine_script_menu_layout_with_presentation(
+                area,
+                &font,
+                menu,
+                self.display_flags.show_commands,
+                &font_images,
+                location,
+                scroll_y,
+                adjust_selection,
+            )
+        };
+        Ok(Some((target, layout)))
+    }
+
+    fn script_menu_geometry_for_owner(
+        &self,
+        owner: i32,
+    ) -> Result<Option<(ObjectId, EngineScriptMenuPresentationGeometry)>, EngineError> {
+        if !self.mouse_control {
+            return Ok(None);
+        }
+        let Some((target, menu)) = self.engine.cursor_object_menu(owner) else {
+            return Ok(None);
+        };
+        self.assets
+            .require_classic_ingame_menu_resources()
+            .map_err(|error| classic_parity_engine_error(report_classic_parity_boundary(error)))?;
+        let fallback = self.assets.font_arc();
+        let font = lc_frontend::hud::HudFont::from_set(
+            self.assets.clonk_fonts.as_deref(),
+            fallback.as_ref(),
+        );
+        let area = self.graphics.viewport_rect(owner).unwrap_or_else(|| {
+            let surface = self.graphics.surface();
+            Rect::new(0, 0, surface.width(), surface.height())
+        });
+        let font_images = resolve_script_menu_font_images(
+            &self.engine,
+            menu,
+            self.script_text_spec_resources(),
+        )
+        .map_err(|error| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::ScriptMenuPointerResources {
+                    detail: error.to_string(),
+                },
+            ))
+        })?;
+        let presentation = self
+            .script_menu_presentations
+            .get(&owner)
+            .filter(|state| same_script_menu_presentation(state, target, menu));
+        let location = presentation
+            .and_then(|state| state.location)
+            .or_else(|| self.script_menu_free_location(owner, menu));
+        let scroll_y = presentation.map_or(0, |state| state.scroll_y);
+        if matches!(menu.style, 0..=2)
+            && presentation.map_or(location.is_some(), |state| {
+                state.location_needs_initialization
+            })
+        {
+            let layout = engine_script_menu_layout_with_free_anchor(
+                area,
+                &font,
+                menu,
+                self.display_flags.show_commands,
+                &font_images,
+                location.expect("free anchor has a location"),
+                scroll_y,
+                false,
+            );
+            return Ok(Some((
+                target,
+                EngineScriptMenuPresentationGeometry {
+                    bounds: layout.bounds,
+                    title: Some(layout.title),
+                    client: Some(layout.client),
+                    scroll_y: layout.scroll_y,
+                    max_scroll_y: layout.max_scroll_y,
+                },
+            )));
+        }
+        Ok(engine_script_menu_presentation_geometry(
             area,
             &font,
             menu,
             self.display_flags.show_commands,
-            true,
-            point,
             &font_images,
-            free_location,
-        ))
+            location,
+            scroll_y,
+        )
+        .map(|geometry| (target, geometry)))
     }
 
-    fn script_menu_free_location(&self, menu: &lc_engine::ObjectMenuState) -> Option<(i32, i32)> {
+    fn handle_script_menu_wheel(
+        &mut self,
+        point: GuiPoint,
+        amount: i32,
+    ) -> Result<bool, EngineError> {
+        let Some(owner) = self.local_controls.mouse_owner() else {
+            return Ok(false);
+        };
+        if !self.ensure_script_menu_presentation_for_owner(owner) {
+            return Ok(false);
+        }
+        if self
+            .script_menu_pointer_target_for_owner(owner, point)?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let adjust_selection = self
+            .script_menu_presentations
+            .get(&owner)
+            .is_none_or(|state| state.selection_needs_adjustment);
+        let Some((target, layout)) = self
+            .script_menu_layout_for_owner(owner, adjust_selection)?
+        else {
+            // Dialog-style menus have no normal C4Menu ScrollWindow client,
+            // but their external dialog still consumes the wheel event.
+            return Ok(true);
+        };
+        let menu_selection = self
+            .engine
+            .cursor_object_menu(owner)
+            .filter(|(current, _)| *current == target)
+            .map_or(-1, |(_, menu)| menu.selection);
+        let client_contains = point.x >= layout.client.x as f32
+            && point.y >= layout.client.y as f32
+            && point.x < (layout.client.x + layout.client.width as i32) as f32
+            && point.y < (layout.client.y + layout.client.height as i32) as f32;
+        if let Some(state) = self
+            .script_menu_presentations
+            .get_mut(&owner)
+            .filter(|state| state.key.target == target)
+        {
+            let old = state.scroll_y;
+            if state.location_needs_initialization {
+                state.location = Some((layout.bounds.x, layout.bounds.y));
+                state.location_needs_initialization = false;
+            }
+            state.scroll_y = if client_contains {
+                layout
+                    .scroll_y
+                    .saturating_add(amount)
+                    .clamp(0, layout.max_scroll_y)
+            } else {
+                layout.scroll_y
+            };
+            state.scroll_selection = menu_selection;
+            state.selection_needs_adjustment = false;
+            if state.scroll_y != old {
+                self.mark_menu_dirty();
+            }
+        }
+        Ok(true)
+    }
+
+    fn arm_script_menu_title_drag(
+        &mut self,
+        owner: i32,
+        point: GuiPoint,
+    ) -> Result<bool, EngineError> {
+        if !self.ensure_script_menu_presentation_for_owner(owner) {
+            return Ok(false);
+        }
+        let Some((target, geometry)) = self.script_menu_geometry_for_owner(owner)? else {
+            return Ok(false);
+        };
+        let start_location = (geometry.bounds.x, geometry.bounds.y);
+        let Some(state) = self
+            .script_menu_presentations
+            .get_mut(&owner)
+            .filter(|state| state.key.target == target)
+        else {
+            return Ok(false);
+        };
+        state.location = Some(start_location);
+        state.location_needs_initialization = false;
+        self.menu_title_drag = Some(MenuTitleDrag::Script {
+            owner,
+            target,
+            start_pointer: point,
+            start_location,
+        });
+        Ok(true)
+    }
+
+    fn script_menu_free_location(
+        &self,
+        owner: i32,
+        menu: &lc_engine::ObjectMenuState,
+    ) -> Option<(i32, i32)> {
         if menu.style != 2 || menu.user_menu {
             return None;
         }
@@ -35046,14 +35744,18 @@ impl GameApp {
             target.position.y.saturating_add(shape.y),
         );
         self.graphics
-            .world_to_screen(self.local_owner, anchor)
+            .world_to_screen(owner, anchor)
             .map(|(x, y)| (x.floor() as i32, y.floor() as i32))
     }
 
-    fn select_script_menu_pointer_item(&mut self, index: usize) -> Result<bool, EngineError> {
+    fn select_script_menu_pointer_item(
+        &mut self,
+        owner: i32,
+        index: usize,
+    ) -> Result<bool, EngineError> {
         let Some((selection, selectable)) = self
             .engine
-            .cursor_object_menu(self.local_owner)
+            .cursor_object_menu(owner)
             .and_then(|(_, menu)| {
                 menu.items
                     .get(index)
@@ -35067,10 +35769,13 @@ impl GameApp {
         }
         if selection != index as i32 {
             let data = i32::try_from(index).unwrap_or(i32::MAX) | lc_engine::C4MN_ADJUST_POSITION;
-            self.dispatch_control_event(ControlEvent::RawPlayerControl {
-                command: lc_engine::COM_MENU_SELECT,
-                data,
-            })?;
+            self.dispatch_control_event_for_local_player(
+                owner,
+                ControlEvent::RawPlayerControl {
+                    command: lc_engine::COM_MENU_SELECT,
+                    data,
+                },
+            )?;
         }
         Ok(true)
     }
@@ -35438,6 +36143,15 @@ impl GameApp {
         self.startup_tooltip.note_pointer_button();
         if self.startup_network_transition_active() {
             return Ok(());
+        }
+        if self.mode == AppMode::Running
+            && button_state == ElementState::Released
+            && self.finish_menu_title_drag(self.ingame_gui_pointer)
+        {
+            return Ok(());
+        }
+        if button_state == ElementState::Pressed {
+            self.menu_title_drag = None;
         }
         if button_state == ElementState::Released {
             self.stop_message_dialog_pointer_drag_at_current_position();
@@ -36081,6 +36795,9 @@ impl GameApp {
             TouchPhase::Started => self.primary_pointer_left_down = true,
             TouchPhase::Ended | TouchPhase::Cancelled => {
                 self.primary_pointer_left_down = false;
+                if phase == TouchPhase::Cancelled {
+                    self.menu_title_drag = None;
+                }
             }
             TouchPhase::Moved => {}
         }
@@ -53245,25 +53962,45 @@ impl GameApp {
                 return Err(anyhow::Error::new(boundary));
             }
         }
+        let mut script_menu_owners = Vec::new();
+        if viewport_overlays_visible {
+            let script_menu_viewports = collect_viewport_inputs_from_physical_state(
+                &self.snapshot,
+                &self.physical_viewports,
+            )
+            .map_err(|reason| {
+                report_classic_parity_boundary(ClassicParityBoundary::RunningViewport(reason))
+            })?;
+            for viewport in script_menu_viewports {
+                if !script_menu_owners.contains(&viewport.owner) {
+                    script_menu_owners.push(viewport.owner);
+                }
+            }
+        }
         if viewport_overlays_visible
             && (self.ingame_menu.is_some()
-                || self.engine.cursor_object_menu(self.local_owner).is_some())
+                || script_menu_owners
+                    .iter()
+                    .any(|&owner| self.engine.cursor_object_menu(owner).is_some()))
         {
             self.assets
                 .require_classic_ingame_menu_resources()
                 .map_err(report_classic_parity_boundary)?;
         }
         if viewport_overlays_visible {
-            if let Some((_, menu)) = self.engine.cursor_object_menu(self.local_owner) {
-                if !matches!(menu.style, 0..=3) {
-                    tracing::error!(
-                        style = menu.style,
-                        "refusing to render generic script-menu style fallback"
-                    );
-                    anyhow::bail!(
-                        "classic script menu style {} is unavailable; refusing generic Rust fallback",
-                        menu.style
-                    );
+            for &owner in &script_menu_owners {
+                if let Some((_, menu)) = self.engine.cursor_object_menu(owner) {
+                    if !matches!(menu.style, 0..=3) {
+                        tracing::error!(
+                            owner,
+                            style = menu.style,
+                            "refusing to render generic script-menu style fallback"
+                        );
+                        anyhow::bail!(
+                            "classic script menu style {} is unavailable for owner {owner}; refusing generic Rust fallback",
+                            menu.style
+                        );
+                    }
                 }
             }
         }
@@ -53289,20 +54026,23 @@ impl GameApp {
         let frame_gamma = self
             .graphics
             .active_gamma_ramp(&self.snapshot.environment.gamma);
-        let value_footer_player = viewport_overlays_visible
-            .then(|| {
-                self.engine
-                    .cursor_object_menu(self.local_owner)
-                    .and_then(|(_, menu)| {
-                        (menu.extra == lc_engine::ObjectMenuExtra::Value)
-                            .then_some(menu.command_object)
-                            .flatten()
-                    })
-                    .and_then(|command_object| self.engine.object_controller(command_object))
-                    .filter(|controller| self.engine.player(*controller).is_some())
-            })
-            .flatten();
-        if let Some(owner) = value_footer_player {
+        let mut value_footer_players = Vec::new();
+        for &menu_owner in &script_menu_owners {
+            let player = self
+                .engine
+                .cursor_object_menu(menu_owner)
+                .and_then(|(_, menu)| {
+                    (menu.extra == lc_engine::ObjectMenuExtra::Value)
+                        .then_some(menu.command_object)
+                        .flatten()
+                })
+                .and_then(|command_object| self.engine.object_controller(command_object))
+                .filter(|controller| self.engine.player(*controller).is_some());
+            if let Some(player) = player.filter(|player| !value_footer_players.contains(player)) {
+                value_footer_players.push(player);
+            }
+        }
+        for owner in value_footer_players {
             self.engine
                 .arm_player_view_wealth(owner)
                 .map_err(anyhow::Error::new)?;
@@ -53425,26 +54165,30 @@ impl GameApp {
                 viewport.preserved_offset = Vector2::ZERO;
             }
         }
+        self.reset_menu_positions_for_viewport_changes();
         // Rendering latches the current C4Viewport ViewX/ViewY. Reproject a
         // stationary construction cursor before drawing its phase so camera
         // following and viewport-layout changes cannot leave one stale frame.
         self.refresh_construction_menu_drag();
 
-        let mut script_menu = viewport_overlays_visible
-            .then(|| {
-                self.engine
-                    .cursor_object_menu(self.local_owner)
-                    .map(|(target, menu)| (target, menu.clone()))
-            })
-            .flatten();
-        if let Some((_, menu)) = script_menu.as_mut() {
-            resolve_engine_script_menu_footer(&self.engine, &self.snapshot, menu);
-        }
-        let initial_script_menu_location = script_menu
-            .as_ref()
-            .and_then(|(_, menu)| self.script_menu_free_location(menu));
-        let script_menu_time = if viewport_overlays_visible {
-            script_menu
+        let engine = &self.engine;
+        self.script_menu_presentations
+            .retain(|owner, _| engine.cursor_object_menu(*owner).is_some());
+        let has_visible_script_menu = script_menu_owners
+            .iter()
+            .any(|&owner| self.engine.cursor_object_menu(owner).is_some());
+        for script_menu_owner in script_menu_owners {
+            let mut script_menu = self
+                .engine
+                .cursor_object_menu(script_menu_owner)
+                .map(|(target, menu)| (target, menu.clone()));
+            if let Some((_, menu)) = script_menu.as_mut() {
+                resolve_engine_script_menu_footer(&self.engine, &self.snapshot, menu);
+            }
+            let initial_script_menu_location = script_menu
+                .as_ref()
+                .and_then(|(_, menu)| self.script_menu_free_location(script_menu_owner, menu));
+            let script_menu_time = script_menu
                 .as_ref()
                 .map(|(target, menu)| {
                     let key = ScriptMenuPresentationKey {
@@ -53454,284 +54198,395 @@ impl GameApp {
                         selection: menu.selection,
                     };
                     let progressing = menu.text_progressing;
-                    let free_location = self
-                        .script_menu_presentation
-                        .as_ref()
-                        .filter(|state| same_script_menu_presentation(state, *target, menu))
-                        .map(|state| state.free_location)
-                        .unwrap_or(initial_script_menu_location);
-                    match self.script_menu_presentation.as_mut() {
-                        Some(state) if state.key == key => {
+                    match self.script_menu_presentations.remove(&script_menu_owner) {
+                        Some(mut state) if state.key == key => {
+                            if state.location.is_none() {
+                                state.location = initial_script_menu_location;
+                                state.location_needs_initialization =
+                                    initial_script_menu_location.is_some();
+                                state.free_aligned |= initial_script_menu_location.is_some();
+                            }
                             if !progressing {
                                 state.time_on_selection = state.time_on_selection.saturating_add(1);
                             }
-                            state.time_on_selection
+                            let time = state.time_on_selection;
+                            self.script_menu_presentations
+                                .insert(script_menu_owner, state);
+                            time
+                        }
+                        Some(mut state)
+                            if same_script_menu_presentation(&state, *target, menu) =>
+                        {
+                            state.key = key;
+                            if state.location.is_none() {
+                                state.location = initial_script_menu_location;
+                                state.location_needs_initialization =
+                                    initial_script_menu_location.is_some();
+                                state.free_aligned |= initial_script_menu_location.is_some();
+                            }
+                            state.time_on_selection = u32::from(!progressing);
+                            state.selection_needs_adjustment |=
+                                state.scroll_selection != menu.selection;
+                            let time = state.time_on_selection;
+                            self.script_menu_presentations
+                                .insert(script_menu_owner, state);
+                            time
                         }
                         _ => {
                             let time_on_selection = u32::from(!progressing);
-                            self.script_menu_presentation = Some(ScriptMenuPresentationState {
-                                key,
-                                time_on_selection,
-                                free_location,
-                            });
+                            self.script_menu_presentations.insert(
+                                script_menu_owner,
+                                ScriptMenuPresentationState {
+                                    key,
+                                    time_on_selection,
+                                    location: initial_script_menu_location,
+                                    location_needs_initialization: initial_script_menu_location
+                                        .is_some(),
+                                    free_aligned: initial_script_menu_location.is_some(),
+                                    scroll_y: 0,
+                                    scroll_selection: menu.selection,
+                                    selection_needs_adjustment: true,
+                                },
+                            );
                             time_on_selection
                         }
                     }
                 })
                 .unwrap_or_else(|| {
-                    self.script_menu_presentation = None;
-                    0
-                })
-        } else {
-            0
-        };
-        if let Some((target, menu)) = script_menu.as_ref() {
-            let fonts = self.assets.clonk_fonts.clone();
-            let fallback = self.assets.font_arc();
-            let legacy_title_id = menu.identification.to_string();
-            let legacy_title_id = legacy_title_id
-                .strip_prefix('"')
-                .and_then(|id| id.strip_suffix('"'))
-                .unwrap_or(&legacy_title_id);
-            let title_id = if menu.symbol_id.is_empty() {
-                legacy_title_id
-            } else {
-                &menu.symbol_id
-            };
-            let title_icon = self
-                .engine
-                .definition_picture_image(title_id)
-                .map(definition_menu_picture);
-            let item_definition_color = if !menu.user_menu
-                && matches!(menu.title_symbol, lc_engine::ObjectMenuSymbol::Buy { .. })
-            {
-                object_menu_buying_player_color(&self.snapshot, menu.command_object)
-            } else {
-                0
-            };
-            let text_spec_resources = self.script_text_spec_resources();
-            let font_images = resolve_script_menu_font_images(
-                &self.engine,
-                menu,
-                text_spec_resources,
-            )
-            .map_err(|error| {
-                tracing::error!(%error, "classic menu text-image resource preflight failed");
-                error
-            })?;
-            let hud_graphics = self.current_hud_graphics();
-            let item_icons = menu
-                .items
-                .iter()
-                .map(|item| {
-                    object_menu_item_picture_with_text_spec_resources(
-                        &self.engine,
-                        &self.snapshot,
-                        item,
-                        item_definition_color,
-                        &hud_graphics,
-                        menu.style,
-                        text_spec_resources,
-                    )
-                })
-                .collect::<Vec<_>>();
-            for (index, (item, image)) in menu.items.iter().zip(&item_icons).enumerate() {
-                let requested_text_spec =
-                    matches!(item.image, lc_engine::ObjectMenuImage::TextSpec { .. });
-                if (menu.style == 3 || requested_text_spec)
-                    && item.image != lc_engine::ObjectMenuImage::None
-                    && image.is_none()
-                {
-                    tracing::error!(
-                        index,
-                        style = menu.style,
-                        recipe = ?item.image,
-                        "classic menu image preflight failed"
-                    );
-                    anyhow::bail!(
-                        "unresolved classic menu image at item {index}: {:?}",
-                        item.image
-                    );
-                }
-            }
-            let selected_component_icons = usize::try_from(menu.selection)
-                .ok()
-                .and_then(|selection| menu.items.get(selection))
-                .map(|item| {
-                    item.components
-                        .iter()
-                        .map(|component| {
-                            self.engine
-                                .definition_picture_image(&component.definition_id)
-                                .map(definition_menu_picture)
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let menu_location = self
-                .script_menu_presentation
-                .as_ref()
-                .filter(|state| same_script_menu_presentation(state, *target, menu))
-                .and_then(|state| state.free_location);
-            let area = self
-                .graphics
-                .viewport_rect(self.local_owner)
-                .unwrap_or_else(|| {
-                    let surface = self.graphics.surface();
-                    Rect::new(0, 0, surface.width(), surface.height())
-                });
-            let frame_decoration = menu.decoration.as_ref().and_then(|decoration| {
-                self.engine
-                    .definition_sprite_image(&decoration.source_definition, None)
-                    .map(default_owner_definition_sprite)
-            });
-            if let Some(decoration) = menu.decoration.as_ref() {
-                if let Err(error) =
-                    validate_menu_decoration_for_area(area, decoration, frame_decoration.as_ref())
-                {
-                    tracing::error!(
-                        decoration = ?menu.decoration,
-                        %error,
-                        "classic menu decoration preflight failed"
-                    );
-                    anyhow::bail!("invalid classic menu frame decoration: {error}");
-                }
-            }
-            {
-                let show_commands = self.display_flags.show_commands;
-                let show_command_keys = self.display_flags.show_command_keys;
-                let owner_colors = self
-                    .snapshot
-                    .players
-                    .iter()
-                    .map(|player| {
-                        let color = player
-                            .color
-                            .map(|RgbColor { r, g, b }| Color::opaque(r, g, b))
-                            .unwrap_or_else(|| default_owner_color(player.id));
-                        (player.id, color)
-                    })
-                    .collect();
-                let gfx = self.ensure_ingame_menu_gfx();
-                gfx.show_commands = show_commands;
-                gfx.show_command_keys = show_command_keys;
-                gfx.owner_colors = owner_colors;
-                gfx.font_images = font_images;
-                gfx.frame_decoration = frame_decoration;
-                gfx.menu_location = menu_location;
-            }
-            if let Some(gfx) = self.ingame_menu_gfx.as_ref() {
-                let font = lc_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
-                let tiny = fonts
-                    .as_deref()
-                    .map(|set| lc_frontend::hud::HudFont::Clonk(&set.mini));
-                let dim_for_construction_drag = self
-                    .construction_menu_drag
-                    .as_ref()
-                    .is_some_and(|drag| {
-                        matches!(
-                            drag,
-                            ConstructionMenuDrag::Active { owner, .. }
-                                if *owner == self.local_owner
-                        )
-                    });
-                if dim_for_construction_drag {
-                    let surface = self.graphics.surface_mut();
-                    let mut menu_layer =
-                        Surface::new(surface.width(), surface.height(), surface.format());
-                    let capture_text = surface.is_clonk_text_capture_active();
-                    if capture_text {
-                        menu_layer.begin_clonk_text_capture();
+                    self.script_menu_presentations.remove(&script_menu_owner);
+                    if self
+                        .script_menu_close_pointer_capture
+                        .is_some_and(|(owner, _)| owner == script_menu_owner)
+                    {
+                        self.script_menu_close_pointer_capture = None;
                     }
-                    render_engine_script_menu_with_gamma(
-                        &mut menu_layer,
-                        area,
-                        &font,
-                        fallback.as_ref(),
-                        tiny.as_ref(),
-                        menu,
-                        gfx,
-                        title_icon.as_ref(),
-                        &item_icons,
-                        &selected_component_icons,
-                        self.mouse_control,
-                        script_menu_time,
-                        Some(&frame_gamma),
-                    );
-                    let modulation = Color::new(255, 255, 255, 0xaf);
-                    surface.blit_region_modulated(
-                        &menu_layer,
-                        menu_layer.bounds(),
-                        SurfacePoint::new(0, 0),
-                        modulation,
-                    )?;
-                    if capture_text {
-                        surface.extend_clonk_text_capture_from_modulated(
-                            &mut menu_layer,
-                            SurfacePoint::new(0, 0),
-                            modulation,
+                    if matches!(
+                        self.menu_title_drag,
+                        Some(MenuTitleDrag::Script { owner, .. }) if owner == script_menu_owner
+                    ) {
+                        self.menu_title_drag = None;
+                    }
+                    0
+                });
+            if let Some((target, menu)) = script_menu.as_ref() {
+                let fonts = self.assets.clonk_fonts.clone();
+                let fallback = self.assets.font_arc();
+                let legacy_title_id = menu.identification.to_string();
+                let legacy_title_id = legacy_title_id
+                    .strip_prefix('"')
+                    .and_then(|id| id.strip_suffix('"'))
+                    .unwrap_or(&legacy_title_id);
+                let title_id = if menu.symbol_id.is_empty() {
+                    legacy_title_id
+                } else {
+                    &menu.symbol_id
+                };
+                let title_icon = self
+                    .engine
+                    .definition_picture_image(title_id)
+                    .map(definition_menu_picture);
+                let item_definition_color = if !menu.user_menu
+                    && matches!(menu.title_symbol, lc_engine::ObjectMenuSymbol::Buy { .. })
+                {
+                    object_menu_buying_player_color(&self.snapshot, menu.command_object)
+                } else {
+                    0
+                };
+                let text_spec_resources = self.script_text_spec_resources();
+                let font_images = resolve_script_menu_font_images(
+                    &self.engine,
+                    menu,
+                    text_spec_resources,
+                )
+                .map_err(|error| {
+                    tracing::error!(%error, "classic menu text-image resource preflight failed");
+                    error
+                })?;
+                let hud_graphics = self.current_hud_graphics();
+                let item_icons = menu
+                    .items
+                    .iter()
+                    .map(|item| {
+                        object_menu_item_picture_with_text_spec_resources(
+                            &self.engine,
+                            &self.snapshot,
+                            item,
+                            item_definition_color,
+                            &hud_graphics,
+                            menu.style,
+                            text_spec_resources,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                for (index, (item, image)) in menu.items.iter().zip(&item_icons).enumerate() {
+                    let requested_text_spec =
+                        matches!(item.image, lc_engine::ObjectMenuImage::TextSpec { .. });
+                    if (menu.style == 3 || requested_text_spec)
+                        && item.image != lc_engine::ObjectMenuImage::None
+                        && image.is_none()
+                    {
+                        tracing::error!(
+                            index,
+                            style = menu.style,
+                            recipe = ?item.image,
+                            "classic menu image preflight failed"
+                        );
+                        anyhow::bail!(
+                            "unresolved classic menu image at item {index}: {:?}",
+                            item.image
                         );
                     }
+                }
+                let selected_component_icons = usize::try_from(menu.selection)
+                    .ok()
+                    .and_then(|selection| menu.items.get(selection))
+                    .map(|item| {
+                        item.components
+                            .iter()
+                            .map(|component| {
+                                self.engine
+                                    .definition_picture_image(&component.definition_id)
+                                    .map(definition_menu_picture)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let (
+                    menu_location,
+                    retained_scroll_y,
+                    adjust_selection,
+                    initialize_location,
+                ) = self
+                    .script_menu_presentations
+                    .get(&script_menu_owner)
+                    .filter(|state| same_script_menu_presentation(state, *target, menu))
+                    .map(|state| {
+                        (
+                            state.location,
+                            state.scroll_y,
+                            state.selection_needs_adjustment,
+                            state.location_needs_initialization,
+                        )
+                    })
+                    .unwrap_or((None, 0, true, false));
+                let area = self
+                    .graphics
+                    .viewport_rect(script_menu_owner)
+                    .unwrap_or_else(|| {
+                        let surface = self.graphics.surface();
+                        Rect::new(0, 0, surface.width(), surface.height())
+                    });
+                let layout_font = lc_frontend::hud::HudFont::from_set(
+                    fonts.as_deref(),
+                    fallback.as_ref(),
+                );
+                let (menu_location, menu_scroll_y) = if matches!(menu.style, 0..=2) {
+                    let layout = if initialize_location {
+                        engine_script_menu_layout_with_free_anchor(
+                            area,
+                            &layout_font,
+                            menu,
+                            self.display_flags.show_commands,
+                            &font_images,
+                            menu_location.expect("free anchor has a location"),
+                            retained_scroll_y,
+                            adjust_selection,
+                        )
+                    } else {
+                        engine_script_menu_layout_with_presentation(
+                            area,
+                            &layout_font,
+                            menu,
+                            self.display_flags.show_commands,
+                            &font_images,
+                            menu_location,
+                            retained_scroll_y,
+                            adjust_selection,
+                        )
+                    };
+                    (
+                        initialize_location
+                            .then_some((layout.bounds.x, layout.bounds.y))
+                            .or(menu_location),
+                        layout.scroll_y,
+                    )
                 } else {
-                    let surface = self.graphics.surface_mut();
-                    render_engine_script_menu_with_gamma(
-                        surface,
-                        area,
-                        &font,
-                        fallback.as_ref(),
-                        tiny.as_ref(),
-                        menu,
-                        gfx,
-                        title_icon.as_ref(),
-                        &item_icons,
-                        &selected_component_icons,
-                        self.mouse_control,
-                        script_menu_time,
-                        Some(&frame_gamma),
-                    );
+                    (menu_location, retained_scroll_y)
+                };
+                if let Some(state) = self
+                    .script_menu_presentations
+                    .get_mut(&script_menu_owner)
+                    .filter(|state| same_script_menu_presentation(state, *target, menu))
+                {
+                    state.location = menu_location;
+                    state.location_needs_initialization = false;
+                    state.scroll_y = menu_scroll_y;
+                    state.scroll_selection = menu.selection;
+                    state.selection_needs_adjustment = false;
+                }
+                let frame_decoration = menu.decoration.as_ref().and_then(|decoration| {
+                    self.engine
+                        .definition_sprite_image(&decoration.source_definition, None)
+                        .map(default_owner_definition_sprite)
+                });
+                if let Some(decoration) = menu.decoration.as_ref() {
+                    if let Err(error) =
+                        validate_menu_decoration_for_area(area, decoration, frame_decoration.as_ref())
+                    {
+                        tracing::error!(
+                            decoration = ?menu.decoration,
+                            %error,
+                            "classic menu decoration preflight failed"
+                        );
+                        anyhow::bail!("invalid classic menu frame decoration: {error}");
+                    }
+                }
+                {
+                    let show_commands = self.display_flags.show_commands;
+                    let show_command_keys = self.display_flags.show_command_keys;
+                    let owner_colors = self
+                        .snapshot
+                        .players
+                        .iter()
+                        .map(|player| {
+                            let color = player
+                                .color
+                                .map(|RgbColor { r, g, b }| Color::opaque(r, g, b))
+                                .unwrap_or_else(|| default_owner_color(player.id));
+                            (player.id, color)
+                        })
+                        .collect();
+                    let gfx = self.ensure_ingame_menu_gfx();
+                    gfx.show_commands = show_commands;
+                    gfx.show_command_keys = show_command_keys;
+                    gfx.owner_colors = owner_colors;
+                    gfx.font_images = font_images;
+                    gfx.frame_decoration = frame_decoration;
+                    gfx.menu_location = menu_location;
+                    gfx.menu_scroll_y = menu_scroll_y;
+                }
+                let script_menu_accepts_mouse = self.mouse_control
+                    && self.local_controls.mouse_owner() == Some(script_menu_owner);
+                if let Some(gfx) = self.ingame_menu_gfx.as_ref() {
+                    let font = lc_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
+                    let tiny = fonts
+                        .as_deref()
+                        .map(|set| lc_frontend::hud::HudFont::Clonk(&set.mini));
+                    let dim_for_construction_drag = self
+                        .construction_menu_drag
+                        .as_ref()
+                        .is_some_and(|drag| {
+                            matches!(
+                                drag,
+                                ConstructionMenuDrag::Active { owner, .. }
+                                    if *owner == script_menu_owner
+                            )
+                        });
+                    if dim_for_construction_drag {
+                        let surface = self.graphics.surface_mut();
+                        let mut menu_layer =
+                            Surface::new(surface.width(), surface.height(), surface.format());
+                        let capture_text = surface.is_clonk_text_capture_active();
+                        if capture_text {
+                            menu_layer.begin_clonk_text_capture();
+                        }
+                        render_engine_script_menu_with_gamma(
+                            &mut menu_layer,
+                            area,
+                            &font,
+                            fallback.as_ref(),
+                            tiny.as_ref(),
+                            menu,
+                            gfx,
+                            title_icon.as_ref(),
+                            &item_icons,
+                            &selected_component_icons,
+                            script_menu_accepts_mouse,
+                            script_menu_time,
+                            Some(&frame_gamma),
+                        );
+                        let modulation = Color::new(255, 255, 255, 0xaf);
+                        surface.blit_region_modulated(
+                            &menu_layer,
+                            menu_layer.bounds(),
+                            SurfacePoint::new(0, 0),
+                            modulation,
+                        )?;
+                        if capture_text {
+                            surface.extend_clonk_text_capture_from_modulated(
+                                &mut menu_layer,
+                                SurfacePoint::new(0, 0),
+                                modulation,
+                            );
+                        }
+                    } else {
+                        let surface = self.graphics.surface_mut();
+                        render_engine_script_menu_with_gamma(
+                            surface,
+                            area,
+                            &font,
+                            fallback.as_ref(),
+                            tiny.as_ref(),
+                            menu,
+                            gfx,
+                            title_icon.as_ref(),
+                            &item_icons,
+                            &selected_component_icons,
+                            script_menu_accepts_mouse,
+                            script_menu_time,
+                            Some(&frame_gamma),
+                        );
+                    }
                 }
             }
         }
-        if ordered_native && script_menu.is_some() {
+        if ordered_native && has_visible_script_menu {
             self.next_pending_native_overlay();
         }
 
         if viewport_overlays_visible && self.ingame_menu.is_some() {
             let fonts = self.assets.clonk_fonts.clone();
             let fallback = self.assets.font_arc();
-            let show_close_button = self.local_controls.mouse_owner().is_some_and(|owner| {
-                self.ingame_menu
-                    .as_ref()
-                    .and_then(IngameMenuState::player)
-                    == Some(owner)
-            });
+            let players = self
+                .ingame_menu
+                .iter()
+                .map(|(player, _)| player)
+                .collect::<Vec<_>>();
             {
                 let show_commands = self.display_flags.show_commands;
                 let show_command_keys = self.display_flags.show_command_keys;
                 let gfx = self.ensure_ingame_menu_gfx();
                 gfx.show_commands = show_commands;
-                gfx.show_close_button = show_close_button;
                 gfx.show_command_keys = show_command_keys;
             }
-            if let (Some(menu), Some(gfx)) =
-                (self.ingame_menu.as_ref(), self.ingame_menu_gfx.as_ref())
-            {
-                // FontRegular for items, FontTiny for command-key labels
-                // (C4Menu.cpp:170; C4ObjectCom.cpp:940).
-                let font = lc_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
-                let tiny = fonts
-                    .as_deref()
-                    .map(|set| lc_frontend::hud::HudFont::Clonk(&set.mini));
-                let surface = self.graphics.surface_mut();
-                let area = Rect::new(0, 0, surface.width(), surface.height());
-                menu.render_with_gamma(
-                    surface,
-                    area,
-                    &font,
-                    tiny.as_ref(),
-                    gfx,
-                    Some(&frame_gamma),
-                );
+            for player in players {
+                let area = self.graphics.viewport_rect(player).unwrap_or_else(|| {
+                    let surface = self.graphics.surface();
+                    Rect::new(0, 0, surface.width(), surface.height())
+                });
+                if let Some(gfx) = self.ingame_menu_gfx.as_mut() {
+                    gfx.show_close_button = self.local_controls.mouse_owner() == Some(player);
+                }
+                if let (Some(menu), Some(gfx)) =
+                    (self.ingame_menu.get(player), self.ingame_menu_gfx.as_ref())
+                {
+                    // FontRegular for items, FontTiny for command-key labels
+                    // (C4Menu.cpp:170; C4ObjectCom.cpp:940).
+                    let font =
+                        lc_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
+                    let tiny = fonts
+                        .as_deref()
+                        .map(|set| lc_frontend::hud::HudFont::Clonk(&set.mini));
+                    let surface = self.graphics.surface_mut();
+                    menu.render_with_gamma(
+                        surface,
+                        area,
+                        &font,
+                        tiny.as_ref(),
+                        gfx,
+                        Some(&frame_gamma),
+                    );
+                }
             }
         }
         if ordered_native && viewport_overlays_visible && self.ingame_menu.is_some() {
@@ -55401,7 +56256,7 @@ impl GameApp {
         self.definition_selector_pointer_capture = false;
         self.close_ingame_menu();
         self.object_menu = None;
-        self.script_menu_presentation = None;
+        self.script_menu_presentations.clear();
         self.save_browser = None;
         self.save_browser_return_to_menu = false;
         self.game_over_dialog = None;
@@ -58034,7 +58889,7 @@ impl GameApp {
         self.menu_state.set_pointer_position(None);
         self.object_menu = None;
         self.ingame_menu.clear();
-        self.script_menu_presentation = None;
+        self.script_menu_presentations.clear();
         self.game_over_handled = false;
         self.runtime_help_visible = false;
         self.runtime_flash_message = None;
@@ -108201,17 +109056,6 @@ ScenInfoArea=70,5,25,90
             .expect("open primary player menu");
         app.open_ingame_menu_for_player(secondary)
             .expect("open secondary player menu");
-        for owner in [primary, secondary] {
-            let menu = app.ingame_menu.get_mut(owner).expect("player menu");
-            let options = menu
-                .items()
-                .iter()
-                .position(|item| item.caption == "Options")
-                .expect("Options item");
-            // C4Menu's viewport scroll is selection-driven. Select Options so
-            // the tiny split-screen menu genuinely exposes the tested row.
-            menu.set_selection(options);
-        }
         let mut frame = vec![0_u8; 320 * 200 * 4];
         app.render(&mut frame)
             .expect("establish both local viewports and menus");
@@ -108264,11 +109108,14 @@ ScenInfoArea=70,5,25,90
                 f64::from(area.y + y + title_height + row as i32 * item_height + item_height / 2),
             )
         };
-        let primary_options = item_point(&app, primary, "Options");
-        let secondary_options = item_point(&app, secondary, "Options");
+        // Each half-height viewport exposes one line. Native intentionally
+        // disables AdjustPosition for one-line menus, so exercise the first
+        // visible row instead of relying on the removed selection-pinning.
+        let primary_item = item_point(&app, primary, "Goals");
+        let secondary_item = item_point(&app, secondary, "Goals");
         assert_eq!(app.local_controls.mouse_owner(), Some(primary));
 
-        app.handle_cursor_moved(secondary_options)
+        app.handle_cursor_moved(secondary_item)
             .expect("move over unassigned secondary menu");
         app.handle_mouse_button(ElementState::Pressed)
             .expect("press over unassigned secondary menu");
@@ -108285,15 +109132,15 @@ ScenInfoArea=70,5,25,90
             "the unassigned viewport must not receive the click"
         );
 
-        app.handle_cursor_moved(primary_options)
+        app.handle_cursor_moved(primary_item)
             .expect("move over assigned primary menu");
         app.handle_mouse_button(ElementState::Pressed)
-            .expect("press primary Options");
+            .expect("press primary item");
         app.handle_mouse_button(ElementState::Released)
-            .expect("release primary Options");
+            .expect("release primary item");
         assert_eq!(
             app.ingame_menu.get(primary).map(IngameMenuState::page),
-            Some(ingame_menu::MenuPage::Options)
+            Some(ingame_menu::MenuPage::Goals)
         );
         assert_eq!(
             app.ingame_menu.get(secondary).map(IngameMenuState::page),
@@ -108347,25 +109194,25 @@ ScenInfoArea=70,5,25,90
             "the assigned secondary mouse owner's close button must hit-test"
         );
         let secondary_target =
-            app.ingame_menu_pointer_target(gui_point_from_position(secondary_options));
+            app.ingame_menu_pointer_target(gui_point_from_position(secondary_item));
         assert!(
             matches!(secondary_target, Some((owner, IngameMenuPointerTarget::Item(_))) if owner == secondary),
-            "assigned secondary menu item must hit-test: target={secondary_target:?}, viewport={:?}, point={secondary_options:?}",
+            "assigned secondary menu item must hit-test: target={secondary_target:?}, viewport={:?}, point={secondary_item:?}",
             app.graphics.viewport_rect(secondary),
         );
-        app.handle_cursor_moved(secondary_options)
+        app.handle_cursor_moved(secondary_item)
             .expect("move over assigned secondary menu");
         app.handle_mouse_button(ElementState::Pressed)
-            .expect("press secondary Options");
+            .expect("press secondary item");
         app.handle_mouse_button(ElementState::Released)
-            .expect("release secondary Options");
+            .expect("release secondary item");
         assert_eq!(
             app.ingame_menu.get(secondary).map(IngameMenuState::page),
-            Some(ingame_menu::MenuPage::Options)
+            Some(ingame_menu::MenuPage::Goals)
         );
         assert_eq!(
             app.ingame_menu.get(primary).map(IngameMenuState::page),
-            Some(ingame_menu::MenuPage::Options),
+            Some(ingame_menu::MenuPage::Goals),
             "the secondary action must not cross-route to the primary menu"
         );
     }
@@ -120849,6 +121696,8 @@ protected func InputCallback(string answer, int player)
         );
         assert!(commands.take_submitted_local().is_empty());
 
+        app.handle_cursor_moved(close_point(&app))
+            .expect("re-hover the close button after title dragging moved the dialog");
         app.handle_mouse_button(ElementState::Pressed)
             .expect("Options close mouse down");
         assert_eq!(
@@ -130799,6 +131648,20 @@ protected func InputCallback(string answer, int player)
         }
     }
 
+    fn long_script_menu(cursor: ObjectId, item_count: usize) -> lc_engine::ObjectMenuState {
+        let mut menu = two_item_script_menu(cursor);
+        menu.columns = 1;
+        let template = menu.items[0].clone();
+        menu.items = (0..item_count)
+            .map(|index| lc_engine::ObjectMenuItem {
+                caption: format!("Item {index}"),
+                info_caption: format!("Details {index}"),
+                ..template.clone()
+            })
+            .collect();
+        menu
+    }
+
     fn install_test_cursor_menu(
         app: &mut GameApp,
         cursor: ObjectId,
@@ -131886,6 +132749,7 @@ func ControlDig() { dig_count = 1; return(1); }
     fn engine_info_menu_renders_the_classic_style_instead_of_a_fallback() {
         lc_core::logging::init();
         let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
         let cursor = app
             .engine
             .crew_cursor(app.local_owner)
@@ -131920,9 +132784,9 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("classic style-2 Info menu renders");
         assert_ne!(with_menu, baseline);
         let initial_location = app
-            .script_menu_presentation
-            .as_ref()
-            .and_then(|state| state.free_location)
+            .script_menu_presentations
+            .get(&owner)
+            .and_then(|state| state.location)
             .expect("internal Info latches its target-relative location");
 
         app.engine
@@ -131936,9 +132800,9 @@ func ControlDig() { dig_count = 1; return(1); }
         app.render(&mut with_menu)
             .expect("render after target move");
         assert_eq!(
-            app.script_menu_presentation
-                .as_ref()
-                .and_then(|state| state.free_location),
+            app.script_menu_presentations
+                .get(&owner)
+                .and_then(|state| state.location),
             Some(initial_location),
             "C4Menu::SetLocation is one-shot; the menu must not follow a moving target"
         );
@@ -132057,6 +132921,412 @@ func ControlDig() { dig_count = 1; return(1); }
         app.handle_mouse_button(ElementState::Released)
             .expect("close mouse up");
         assert_eq!(app.engine.debug_object_menu(cursor.as_u64()), Some(None));
+    }
+
+    #[test]
+    fn l065_running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let menu = long_script_menu(cursor, 12);
+        install_test_cursor_menu(&mut app, cursor, menu);
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("seed script presentation");
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
+
+        let (_, layout) = app
+            .script_menu_layout_for_owner(owner, false)
+            .expect("script layout resources")
+            .expect("open normal script menu");
+        assert!(layout.max_scroll_y >= 60);
+        let client_point = GuiPoint::new(
+            (layout.client.x + 4) as f32,
+            (layout.client.y + 4) as f32,
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(client_point.x),
+            f64::from(client_point.y),
+        ))
+        .expect("hover script ScrollWindow");
+        let selection = app
+            .engine
+            .cursor_object_menu(owner)
+            .expect("script menu open")
+            .1
+            .selection;
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("script menu consumes wheel down");
+        assert_eq!(
+            app.script_menu_presentations
+                .get(&owner)
+                .expect("script presentation")
+                .scroll_y,
+            60
+        );
+        assert_eq!(
+            app.engine
+                .cursor_object_menu(owner)
+                .expect("wheel leaves menu open")
+                .1
+                .selection,
+            selection,
+            "wheel must not move the synchronized menu selection"
+        );
+        assert!(commands.take_submitted_local().is_empty());
+        app.render(&mut frame)
+            .expect("render preserves wheel displacement");
+        assert_eq!(
+            app.script_menu_presentations
+                .get(&owner)
+                .expect("script presentation")
+                .scroll_y,
+            60,
+            "redraw must not pin an unchanged selection back into view"
+        );
+
+        let (_, geometry) = app
+            .script_menu_geometry_for_owner(owner)
+            .expect("script geometry resources")
+            .expect("script geometry");
+        let title = geometry.title.expect("normal menu title");
+        let title_point = GuiPoint::new((title.x + 24) as f32, (title.y + 5) as f32);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(title_point.x),
+            f64::from(title_point.y),
+        ))
+        .expect("hover script title");
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("external dialog consumes title wheel");
+        assert_eq!(
+            app.script_menu_presentations
+                .get(&owner)
+                .expect("script presentation")
+                .scroll_y,
+            60,
+            "only the ScrollWindow client scrolls"
+        );
+        assert!(commands.take_submitted_local().is_empty());
+
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(None),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("close script menu");
+        app.script_menu_presentations.remove(&owner);
+        let players = (0..12)
+            .map(|index| NewPlayerEntry {
+                file: format!("Player{index}.c4p"),
+                name: format!("Player {index}"),
+            })
+            .collect::<Vec<_>>();
+        app.ingame_menu.replace(
+            owner,
+            Some(IngameMenuState::new_player_menu(&players)),
+        );
+        app.render(&mut frame).expect("render long player menu");
+        let area = app.ingame_menu_area(owner).expect("player viewport");
+        let fallback = app.assets.font_arc();
+        let font = lc_frontend::hud::HudFont::from_set(
+            app.assets.clonk_fonts.as_deref(),
+            fallback.as_ref(),
+        );
+        let gfx = IngameMenuGraphics {
+            show_commands: app.display_flags.show_commands,
+            show_close_button: true,
+            ..IngameMenuGraphics::default()
+        };
+        let bounds = app
+            .ingame_menu
+            .get(owner)
+            .expect("player menu")
+            .bounds(area, &font, &gfx);
+        let player_client = GuiPoint::new((bounds.x + 6) as f32, (bounds.y + 30) as f32);
+        assert!(app
+            .ingame_menu
+            .get(owner)
+            .expect("player menu")
+            .client_contains(area, &font, &gfx, player_client));
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(player_client.x),
+            f64::from(player_client.y),
+        ))
+        .expect("hover player-menu ScrollWindow");
+        let selection = app.ingame_menu.get(owner).expect("player menu").selection();
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("player menu consumes wheel down");
+        let player_menu = app.ingame_menu.get(owner).expect("player menu");
+        assert_eq!(player_menu.scroll_y(), 60);
+        assert_eq!(player_menu.selection(), selection);
+        assert!(commands.take_submitted_local().is_empty());
+        app.render(&mut frame)
+            .expect("player-menu redraw preserves wheel displacement");
+        assert_eq!(app.ingame_menu.get(owner).unwrap().scroll_y(), 60);
+    }
+
+    #[test]
+    fn l065_title_drag_is_captured_exactly_and_resize_resets_location() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        install_test_cursor_menu(&mut app, cursor, long_script_menu(cursor, 8));
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("seed script presentation");
+        let (_, geometry) = app
+            .script_menu_geometry_for_owner(owner)
+            .expect("script geometry resources")
+            .expect("script geometry");
+        let title = geometry.title.expect("script title");
+        let start = GuiPoint::new((title.x + 2) as f32, (title.y + 5) as f32);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(start.x),
+            f64::from(start.y),
+        ))
+        .expect("hover wooden title");
+        assert_eq!(
+            app.script_menu_pointer_target(start)
+                .expect("title hit-test resources"),
+            Some(EngineScriptMenuPointerTarget::Title)
+        );
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("capture wooden title");
+        assert!(matches!(
+            app.menu_title_drag,
+            Some(MenuTitleDrag::Script { .. })
+        ));
+        let destination = GuiPoint::new(start.x - 400.0, start.y + 17.0);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(destination.x),
+            f64::from(destination.y),
+        ))
+        .expect("drag stays captured outside dialog and viewport");
+        let expected = (
+            geometry.bounds.x.saturating_sub(400),
+            geometry.bounds.y.saturating_add(17),
+        );
+        assert_eq!(
+            app.script_menu_presentations
+                .get(&owner)
+                .and_then(|state| state.location),
+            Some(expected),
+            "native title drag applies the exact pointer delta without a threshold or clamp"
+        );
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release retained title capture outside");
+        assert!(app.menu_title_drag.is_none());
+        let retained = app
+            .script_menu_presentations
+            .get(&owner)
+            .and_then(|state| state.location);
+        app.handle_cursor_moved(PhysicalPosition::new(10.0, 10.0))
+            .expect("ordinary move after release");
+        assert_eq!(
+            app.script_menu_presentations
+                .get(&owner)
+                .and_then(|state| state.location),
+            retained
+        );
+        app.resize(360, 220).expect("viewport resize");
+        assert!(app.menu_title_drag.is_none());
+        assert_eq!(
+            app.script_menu_presentations
+                .get(&owner)
+                .and_then(|state| state.location),
+            None,
+            "viewport ResetLocation restores anchored placement"
+        );
+
+        let mut player_app = new_running_sandbox_app();
+        let player = player_app.local_owner;
+        let players = (0..8)
+            .map(|index| NewPlayerEntry {
+                file: format!("Player{index}.c4p"),
+                name: format!("Player {index}"),
+            })
+            .collect::<Vec<_>>();
+        player_app.ingame_menu.replace(
+            player,
+            Some(IngameMenuState::new_player_menu(&players)),
+        );
+        player_app
+            .render(&mut frame)
+            .expect("seed player-menu presentation");
+        let area = player_app.ingame_menu_area(player).expect("player viewport");
+        let bounds = {
+            let fallback = player_app.assets.font_arc();
+            let font = lc_frontend::hud::HudFont::from_set(
+                player_app.assets.clonk_fonts.as_deref(),
+                fallback.as_ref(),
+            );
+            let gfx = IngameMenuGraphics {
+                show_commands: player_app.display_flags.show_commands,
+                show_close_button: true,
+                ..IngameMenuGraphics::default()
+            };
+            player_app
+                .ingame_menu
+                .get(player)
+                .expect("player menu")
+                .bounds(area, &font, &gfx)
+        };
+        let start = GuiPoint::new((bounds.x + 2) as f32, (bounds.y + 5) as f32);
+        player_app
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(start.x),
+                f64::from(start.y),
+            ))
+            .expect("hover player-menu title");
+        player_app
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("capture player-menu title");
+        let destination = GuiPoint::new(start.x + 11.0, start.y - 9.0);
+        player_app
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(destination.x),
+                f64::from(destination.y),
+            ))
+            .expect("drag player menu");
+        let moved_x = {
+            let fallback = player_app.assets.font_arc();
+            let font = lc_frontend::hud::HudFont::from_set(
+                player_app.assets.clonk_fonts.as_deref(),
+                fallback.as_ref(),
+            );
+            let gfx = IngameMenuGraphics {
+                show_commands: player_app.display_flags.show_commands,
+                show_close_button: true,
+                ..IngameMenuGraphics::default()
+            };
+            player_app
+                .ingame_menu
+                .get(player)
+                .expect("player menu")
+                .bounds(area, &font, &gfx)
+                .x
+        };
+        assert_eq!(
+            moved_x,
+            bounds.x + 11
+        );
+        player_app
+            .handle_mouse_button(ElementState::Released)
+            .expect("release player-menu title");
+        player_app.resize(360, 220).expect("reset player menu location");
+        assert!(player_app.menu_title_drag.is_none());
+    }
+
+    #[test]
+    fn l065_script_menu_scroll_and_drag_state_is_per_viewport_owner() {
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = primary + 1;
+        let primary_cursor = app.engine.crew_cursor(primary).expect("primary cursor");
+        let primary_state = app
+            .engine
+            .object_snapshot(primary_cursor)
+            .expect("primary cursor state");
+
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary"))
+            .expect("register secondary player");
+        let secondary_position = Vector2::new(
+            primary_state.position.x.saturating_add(24),
+            primary_state.position.y,
+        );
+        let secondary_cursor = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new(primary_state.definition_id)
+                    .with_position(secondary_position)
+                    .with_owner(secondary)
+                    .with_crew_member(true),
+            )
+            .expect("spawn secondary cursor");
+        app.engine
+            .select_crew(secondary, [secondary_cursor])
+            .expect("select secondary cursor");
+        app.engine
+            .set_crew_cursor(secondary, Some(secondary_cursor))
+            .expect("set secondary cursor");
+        app.engine
+            .replace_player_viewports(
+                secondary,
+                vec![lc_engine::PlayerViewport::new(secondary_position)
+                    .with_focus(Some(secondary_cursor))],
+            )
+            .expect("set secondary viewport");
+        app.engine.set_local_players([primary, secondary]);
+        app.local_controls = LocalControlRegistry::default();
+        for (owner, preferred_set, prefers_mouse) in
+            [(primary, 0, false), (secondary, 1, true)]
+        {
+            app.local_controls.initialize(LocalControlInit {
+                owner,
+                preferred_set,
+                prefers_mouse,
+                gamepads_enabled: true,
+                replay: false,
+                disable_mouse: false,
+            });
+        }
+        app.mouse_control = true;
+        install_test_cursor_menu(&mut app, primary_cursor, long_script_menu(primary_cursor, 12));
+        install_test_cursor_menu(
+            &mut app,
+            secondary_cursor,
+            long_script_menu(secondary_cursor, 12),
+        );
+        app.snapshot = app.engine.snapshot();
+
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("render both viewport-owned script menus");
+        assert!(app.script_menu_presentations.contains_key(&primary));
+        assert!(app.script_menu_presentations.contains_key(&secondary));
+
+        let (_, secondary_layout) = app
+            .script_menu_layout_for_owner(secondary, false)
+            .expect("secondary layout resources")
+            .expect("secondary script menu");
+        assert!(secondary_layout.max_scroll_y >= 60);
+        let client = PhysicalPosition::new(
+            f64::from(secondary_layout.client.x + 4),
+            f64::from(secondary_layout.client.y + 4),
+        );
+        app.handle_cursor_moved(client)
+            .expect("hover secondary ScrollWindow");
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("scroll secondary script menu");
+        assert_eq!(app.script_menu_presentations[&primary].scroll_y, 0);
+        assert_eq!(app.script_menu_presentations[&secondary].scroll_y, 60);
+        app.render(&mut frame)
+            .expect("retain independent viewport scroll state");
+        assert_eq!(app.script_menu_presentations[&primary].scroll_y, 0);
+        assert_eq!(app.script_menu_presentations[&secondary].scroll_y, 60);
+
+        let (_, geometry) = app
+            .script_menu_geometry_for_owner(secondary)
+            .expect("secondary geometry resources")
+            .expect("secondary geometry");
+        let title = geometry.title.expect("secondary wooden title");
+        let start = PhysicalPosition::new(f64::from(title.x + 3), f64::from(title.y + 5));
+        app.handle_cursor_moved(start)
+            .expect("hover secondary title");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("capture secondary title");
+        let destination = PhysicalPosition::new(start.x + 11.0, start.y + 7.0);
+        app.handle_cursor_moved(destination)
+            .expect("drag secondary title");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release secondary title");
+        assert_eq!(app.script_menu_presentations[&primary].location, None);
+        assert_eq!(
+            app.script_menu_presentations[&secondary].location,
+            Some((geometry.bounds.x + 11, geometry.bounds.y + 7)),
+        );
     }
 
     #[test]
