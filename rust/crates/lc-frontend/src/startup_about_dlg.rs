@@ -548,8 +548,7 @@ impl AboutDlgState {
 
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<AboutDlgAction> {
         if let Some(target) = self.scrollbar_dragging {
-            self.pointer_position = Some(position);
-            self.hovered = None;
+            self.set_pointer_position(Some(position));
             self.set_scroll_from_pointer(target, position);
             return Vec::new();
         }
@@ -578,6 +577,18 @@ impl AboutDlgState {
         self.cancel_scrollbar_interaction();
         self.set_pointer_position(Some(position));
 
+        // The ListBox takes focus across its full bounds, including its
+        // border and scrollbar. Its later-added TextWindow sibling still
+        // wins any overlap on extremely small layouts.
+        if self.page == AboutPage::Licenses
+            && self.layout.is_some_and(|layout| {
+                about_rect_contains(&layout.licenses.tabs, position)
+                    && !about_rect_contains(&layout.licenses.text, position)
+            })
+        {
+            self.focused = Some(AboutFocus::LicenseTabs);
+        }
+
         // Page children are inserted after the bottom buttons and therefore
         // win the rare overlap on extremely short screens.
         if let Some(target) = self.scrollbar_at(position) {
@@ -593,7 +604,9 @@ impl AboutDlgState {
         // (C4GuiListBox.cpp:142-169; C4GuiListBox.h:54-56).
         if self.page == AboutPage::Licenses {
             if let Some(layout) = self.layout {
-                if about_rect_contains(&license_tabs_viewport(&layout), position) {
+                if about_rect_contains(&license_tabs_viewport(&layout), position)
+                    && !about_rect_contains(&layout.licenses.text, position)
+                {
                     self.focused = Some(AboutFocus::LicenseTabs);
                     let next = license_tab_at(
                         &layout,
@@ -761,40 +774,50 @@ impl AboutDlgState {
 
         match self.page {
             AboutPage::Credits => {
-                for (index, section) in layout.sections.iter().enumerate() {
+                for (index, section) in layout.sections.iter().enumerate().rev() {
                     let viewport = credit_viewport(section);
                     let metrics = credit_scroll_metrics(
                         section,
                         fonts,
                         CREDITS_SECTIONS[index].1.len(),
                     );
-                    if metrics.max_scroll > 0 && about_rect_contains(&viewport, position) {
-                        self.credit_max_scroll[index] = metrics.max_scroll;
-                        self.credit_scroll_y[index] = metrics
-                            .clamp_offset(self.credit_scroll_y[index].saturating_sub(delta));
-                        self.sync_scrollbar_pin(AboutScrollbar::Credit(index));
+                    if about_rect_contains(&viewport, position) {
+                        if metrics.max_scroll > 0 {
+                            self.credit_max_scroll[index] = metrics.max_scroll;
+                            let previous = self.credit_scroll_y[index];
+                            self.credit_scroll_y[index] = metrics
+                                .clamp_offset(previous.saturating_sub(delta));
+                            if self.credit_scroll_y[index] != previous {
+                                self.sync_scrollbar_pin(AboutScrollbar::Credit(index));
+                            }
+                        }
                         break;
                     }
                 }
             }
             AboutPage::Licenses => {
-                let tabs_viewport = license_tabs_viewport(&layout);
-                if about_rect_contains(&tabs_viewport, position) {
-                    let metrics = license_tabs_scroll_metrics(&layout);
-                    self.license_tabs_max_scroll = metrics.max_scroll;
-                    self.license_tabs_scroll_y = metrics
-                        .clamp_offset(self.license_tabs_scroll_y.saturating_sub(delta));
-                    self.sync_scrollbar_pin(AboutScrollbar::LicenseTabs);
-                } else if about_rect_contains(&license_text_viewport(&layout), position) {
+                if about_rect_contains(&license_text_viewport(&layout), position) {
                     let metrics = license_scroll_metrics(
                         &layout,
                         fonts,
                         &ABOUT_LICENSES[self.displayed_license],
                     );
                     self.license_max_scroll[self.displayed_license] = metrics.max_scroll;
-                    self.license_scroll_y = metrics
-                        .clamp_offset(self.license_scroll_y.saturating_sub(delta));
-                    self.sync_scrollbar_pin(AboutScrollbar::LicenseText);
+                    let previous = self.license_scroll_y;
+                    self.license_scroll_y =
+                        metrics.clamp_offset(previous.saturating_sub(delta));
+                    if self.license_scroll_y != previous {
+                        self.sync_scrollbar_pin(AboutScrollbar::LicenseText);
+                    }
+                } else if about_rect_contains(&license_tabs_viewport(&layout), position) {
+                    let metrics = license_tabs_scroll_metrics(&layout);
+                    self.license_tabs_max_scroll = metrics.max_scroll;
+                    let previous = self.license_tabs_scroll_y;
+                    self.license_tabs_scroll_y =
+                        metrics.clamp_offset(previous.saturating_sub(delta));
+                    if self.license_tabs_scroll_y != previous {
+                        self.sync_scrollbar_pin(AboutScrollbar::LicenseTabs);
+                    }
                 }
             }
         }
@@ -871,6 +894,7 @@ impl AboutDlgState {
     fn scrollbar_at(&self, point: GuiPoint) -> Option<AboutScrollbar> {
         match self.page {
             AboutPage::Credits => (0..CREDITS_SECTIONS.len())
+                .rev()
                 .map(AboutScrollbar::Credit)
                 .find(|target| {
                     self.scrollbar_geometry(*target).is_some_and(|(rect, max_scroll)| {
@@ -878,8 +902,8 @@ impl AboutDlgState {
                     })
                 }),
             AboutPage::Licenses => [
-                AboutScrollbar::LicenseTabs,
                 AboutScrollbar::LicenseText,
+                AboutScrollbar::LicenseTabs,
             ]
             .into_iter()
             .find(|target| {
@@ -1098,6 +1122,7 @@ impl AboutDlgState {
         }
         AboutButton::ALL
             .iter()
+            .rev()
             .copied()
             .filter(|button| self.is_visible(*button))
             .find(|button| about_rect_contains(&layout.buttons[button.index()], point))
@@ -1123,6 +1148,7 @@ impl AboutDlgState {
     }
 
     fn scroll_license_tab_into_view(&mut self, index: usize, layout: &AboutLayout) {
+        let previous_scroll = self.license_tabs_scroll_y;
         let metrics = license_tabs_scroll_metrics(layout);
         let item_y = index as i32 * LICENSE_TAB_PITCH;
         let item_bottom = item_y + TEXT_LINE_HEIGHT;
@@ -1132,7 +1158,9 @@ impl AboutDlgState {
             self.license_tabs_scroll_y = item_bottom - metrics.viewport_height;
         }
         self.license_tabs_scroll_y = metrics.clamp_offset(self.license_tabs_scroll_y);
-        self.sync_scrollbar_pin(AboutScrollbar::LicenseTabs);
+        if self.license_tabs_scroll_y != previous_scroll {
+            self.sync_scrollbar_pin(AboutScrollbar::LicenseTabs);
+        }
     }
 
     fn set_displayed_license(&mut self, index: usize) {
@@ -2183,6 +2211,181 @@ mod tests {
         assert!(state.tick_scrollbar());
         assert_eq!(state.license_tabs_scroll_pin, 1);
         assert_eq!(scrollbar_range(bar), 100);
+    }
+
+    #[test]
+    fn l059_noop_scroll_updates_preserve_thumb_pin_residuals() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let layout = about_layout(1280, 720);
+        let mut state = AboutDlgState::new();
+        state.resize(1280, 720, &fonts);
+
+        let bar = credit_scrollbar(&layout.sections[2]);
+        let bottom = GuiPoint::new((bar.x + 8) as f32, (bar.y + bar.h - 1) as f32);
+        assert_eq!(
+            state.handle_pointer_down(bottom),
+            vec![AboutDlgAction::GuiSound(AboutDlgSound::ArrowHit)]
+        );
+        assert!(state.tick_scrollbar());
+        assert_eq!((state.credit_scroll_pin[2], state.credit_scroll_y[2]), (1, 0));
+        state.handle_pointer_up(bottom);
+
+        let viewport = credit_viewport(&layout.sections[2]);
+        let top = GuiPoint::new((viewport.x + 1) as f32, (viewport.y + 1) as f32);
+        state.handle_wheel(top, 60, &fonts);
+        assert_eq!(
+            state.credit_scroll_pin[2], 1,
+            "a clamped wheel no-op must not erase the retained thumb residual"
+        );
+
+        let tiny_layout = about_layout(320, 134);
+        let mut tiny = AboutDlgState::new();
+        tiny.resize(320, 134, &fonts);
+        tiny.activate(AboutButton::Licenses);
+        let tiny_bar = license_tabs_scrollbar(&tiny_layout);
+        assert_eq!((tiny_bar.h, tiny.license_tabs_scroll_pin), (44, -4));
+        let tiny_bottom = GuiPoint::new(
+            (tiny_bar.x + 8) as f32,
+            (tiny_bar.y + tiny_bar.h - 1) as f32,
+        );
+        tiny.handle_pointer_down(tiny_bottom);
+        assert!(tiny.tick_scrollbar());
+        tiny.handle_pointer_up(tiny_bottom);
+        assert_eq!((tiny.license_tabs_scroll_pin, tiny.license_tabs_scroll_y), (-3, 0));
+        tiny.scroll_license_tab_into_view(0, &tiny_layout);
+        assert_eq!(
+            tiny.license_tabs_scroll_pin, -3,
+            "keeping an already-visible row visible must not call ScrollBar::Update"
+        );
+    }
+
+    #[test]
+    fn l059_listbox_focus_and_captured_drag_follow_native_child_routing() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let layout = about_layout(1280, 720);
+        let mut state = AboutDlgState::new();
+        state.resize(1280, 720, &fonts);
+        state.activate(AboutButton::Licenses);
+        state.focused = None;
+
+        let border = GuiPoint::new(
+            (layout.licenses.tabs.x + 1) as f32,
+            (layout.licenses.tabs.y + 1) as f32,
+        );
+        assert!(!about_rect_contains(&license_tabs_viewport(&layout), border));
+        assert!(state.handle_pointer_down(border).is_empty());
+        assert_eq!(state.focused, Some(AboutFocus::LicenseTabs));
+        state.handle_pointer_up(border);
+
+        let narrow_layout = about_layout(320, 240);
+        let mut narrow = AboutDlgState::new();
+        narrow.resize(320, 240, &fonts);
+        narrow.activate(AboutButton::Licenses);
+        let text_bar = license_text_scrollbar(&narrow_layout);
+        let track = GuiPoint::new(
+            (text_bar.x + 8) as f32,
+            (text_bar.y + SCROLL_BAR_WDT + SCROLL_BAR_WDT / 2 + 1) as f32,
+        );
+        assert_eq!(
+            narrow.handle_pointer_down(track),
+            vec![AboutDlgAction::GuiSound(AboutDlgSound::Command)]
+        );
+
+        let back = narrow_layout.buttons[AboutButton::Back.index()];
+        let back_center = GuiPoint::new(
+            (back.x + back.w / 2) as f32,
+            (back.y + back.h / 2) as f32,
+        );
+        assert!(!about_rect_contains(&narrow_layout.licenses.window, back_center));
+        assert!(narrow.handle_pointer_move(back_center).is_empty());
+        assert_eq!(narrow.scrollbar_dragging, Some(AboutScrollbar::LicenseText));
+        assert_eq!(narrow.hovered, Some(AboutButton::Back));
+        assert!(narrow.handle_pointer_up(back_center).is_empty());
+        assert_eq!(narrow.current_page(), AboutPage::Licenses);
+    }
+
+    #[test]
+    fn l059_overlaps_route_to_later_added_children() {
+        let fonts = crate::test_support::endeavour_font_set();
+        let mut state = AboutDlgState::new();
+        state.resize(1280, 720, &fonts);
+        let mut layout = about_layout(1280, 720);
+
+        let button_overlap = IntRect {
+            x: 10,
+            y: 10,
+            w: 40,
+            h: 40,
+        };
+        layout.buttons = [button_overlap; 3];
+        layout.licenses.window = IntRect {
+            x: 1_000,
+            y: 1_000,
+            w: 10,
+            h: 10,
+        };
+        state.layout = Some(layout);
+        let button_point = GuiPoint::new(20.0, 20.0);
+        assert_eq!(state.hit_test_button(button_point), Some(AboutButton::Licenses));
+
+        let shared_textbox = IntRect {
+            x: 100,
+            y: 1_000,
+            w: 80,
+            h: 40,
+        };
+        layout.sections[0].textbox = shared_textbox;
+        layout.sections[1].textbox = shared_textbox;
+        state.layout = Some(layout);
+        state.credit_max_scroll[0] = 1;
+        state.credit_max_scroll[1] = 1;
+        let credit_bar = credit_scrollbar(&layout.sections[0]);
+        let credit_point = GuiPoint::new((credit_bar.x + 1) as f32, (credit_bar.y + 1) as f32);
+        assert_eq!(state.scrollbar_at(credit_point), Some(AboutScrollbar::Credit(1)));
+
+        layout.licenses.window = IntRect {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 100,
+        };
+        layout.licenses.tabs = IntRect {
+            x: 7,
+            y: 7,
+            w: 62,
+            h: 26,
+        };
+        layout.licenses.text = IntRect {
+            x: 0,
+            y: 2,
+            w: 71,
+            h: 36,
+        };
+        state.layout = Some(layout);
+        state.page = AboutPage::Licenses;
+        state.license_tabs_max_scroll = 25;
+        state.license_max_scroll[state.displayed_license] = 100;
+        let shared_bar = license_text_scrollbar(&layout);
+        assert_eq!(shared_bar, license_tabs_scrollbar(&layout));
+        let bar_point = GuiPoint::new((shared_bar.x + 1) as f32, (shared_bar.y + 1) as f32);
+        assert_eq!(state.scrollbar_at(bar_point), Some(AboutScrollbar::LicenseText));
+
+        let shared_viewport = license_text_viewport(&layout);
+        assert_eq!(shared_viewport, license_tabs_viewport(&layout));
+        let wheel_point = GuiPoint::new(
+            (shared_viewport.x + 1) as f32,
+            (shared_viewport.y + 1) as f32,
+        );
+        state.license_scroll_y = 0;
+        state.license_tabs_scroll_y = 0;
+        state.handle_wheel(wheel_point, -1, &fonts);
+        assert_eq!(state.license_scroll_y, 1);
+        assert_eq!(state.license_tabs_scroll_y, 0);
+
+        state.focused = None;
+        assert!(state.handle_pointer_down(wheel_point).is_empty());
+        assert_eq!(state.focused, None, "the later TextWindow blocks ListBox focus");
+        state.handle_pointer_up(wheel_point);
     }
 
     // Buttons invoke callbacks only after a matching down/up
