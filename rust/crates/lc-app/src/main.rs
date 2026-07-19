@@ -4405,6 +4405,7 @@ impl FrontendAssets {
                 Some(button_highlight),
             ),
             fonts: self.clonk_fonts.as_deref()?,
+            tooltip_font: self.global_tooltip_font.as_deref()?,
             icons: self.startup_dialog_images.get("GUIIcons.png")?,
             icons_extended: self.startup_dialog_images.get("GUIIcons2.png")?,
             button_highlight,
@@ -31717,6 +31718,16 @@ impl GameApp {
             return Ok(());
         }
         self.running_pointer_position = Some(point);
+        if let Some(index) = self.captured_message_dialog_index().filter(|index| {
+            self.message_dialogs
+                .get(*index)
+                .is_some_and(|dialog| dialog.state.has_positional_pointer_drag())
+        }) {
+            // `CMouse` runs pDragElement::DoDragging before ordinary screen
+            // and context-menu hit-testing, even on a shared dialog below a
+            // higher interactive layer.
+            self.handle_message_dialog_pointer_move_at(index, point);
+        }
         if self.mode == AppMode::Running {
             self.ingame_gui_pointer = Some(point);
             if self.update_construction_menu_drag(point)? {
@@ -34735,6 +34746,9 @@ impl GameApp {
         if self.startup_network_transition_active() {
             return Ok(());
         }
+        if button_state == ElementState::Released {
+            self.stop_message_dialog_pointer_drag_at_current_position();
+        }
         if self.mode == AppMode::Running
             && (self.ingame_moving_drag_active() || self.construction_menu_drag_captured())
         {
@@ -35377,7 +35391,7 @@ impl GameApp {
             }
             TouchPhase::Moved => {}
         }
-        if self.mode == AppMode::Running {
+        if phase != TouchPhase::Cancelled {
             self.running_pointer_position = Some(position);
         }
         self.context_menu_pointer_dismissed_lobby_team_player = None;
@@ -35437,6 +35451,19 @@ impl GameApp {
         }
         if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
             self.mark_menu_dirty();
+            let retained_title_drag = self.captured_message_dialog_index().filter(|index| {
+                self.message_dialogs
+                    .get(*index)
+                    .is_some_and(|dialog| dialog.state.has_positional_pointer_drag())
+            });
+            if matches!(phase, TouchPhase::Moved | TouchPhase::Ended) {
+                if let Some(index) = retained_title_drag {
+                    self.handle_message_dialog_pointer_move_at(index, position);
+                    if phase == TouchPhase::Ended {
+                        self.stop_message_dialog_pointer_drag_at(index, position);
+                    }
+                }
+            }
             if !matches!(phase, TouchPhase::Cancelled) {
                 self.handle_message_dialog_pointer_move(position);
             }
@@ -49440,6 +49467,7 @@ impl GameApp {
         ] {
             state.set_button_label(button, self.runtime_resource_text(key, fallback));
         }
+        state.set_close_tooltip(self.runtime_resource_text("IDS_MNU_CLOSE", "Close"));
         self.guard_classic_global_gui_bootstrap()?;
         Self::guard_gui_overlay_result(
             "C4GUI::MessageDialog",
@@ -50176,6 +50204,29 @@ impl GameApp {
         self.play_message_dialog_sound_events(sounds);
     }
 
+    fn stop_message_dialog_pointer_drag_at_current_position(&mut self) {
+        let Some(index) = self.captured_message_dialog_index().filter(|index| {
+            self.message_dialogs
+                .get(*index)
+                .is_some_and(|dialog| dialog.state.has_positional_pointer_drag())
+        }) else {
+            return;
+        };
+        if let Some(point) = self.running_pointer_position {
+            self.stop_message_dialog_pointer_drag_at(index, point);
+        } else if let Some(dialog) = self.message_dialogs.get_mut(index) {
+            dialog.state.cancel_pointer_capture();
+            self.message_dialog_pointer_capture_index = None;
+        }
+    }
+
+    fn stop_message_dialog_pointer_drag_at(&mut self, index: usize, point: GuiPoint) {
+        if let Some(dialog) = self.message_dialogs.get_mut(index) {
+            dialog.state.stop_pointer_drag_at(point);
+        }
+        self.message_dialog_pointer_capture_index = None;
+    }
+
     fn handle_message_dialog_pointer_move_at(&mut self, index: usize, point: GuiPoint) -> bool {
         let Some(layout) = self.message_dialog_layout_at(index) else {
             return false;
@@ -50299,6 +50350,9 @@ impl GameApp {
         &mut self,
         state: ElementState,
     ) -> Result<bool, EngineError> {
+        if state == ElementState::Released {
+            self.stop_message_dialog_pointer_drag_at_current_position();
+        }
         let Some(top_index) = self.message_dialogs.len().checked_sub(1) else {
             return Ok(false);
         };
@@ -50360,21 +50414,62 @@ impl GameApp {
             .then(|| self.active_message_dialog_index())
             .flatten();
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        let now = Instant::now();
         for index in 0..=last {
             let keyboard_active = Some(index) == active_index && self.context_menu.is_none();
             let mouse_active = self.mode == AppMode::Running || Some(index) == active_index;
-            self.message_dialogs[index].state.render(
+            self.message_dialogs[index].state.render_at(
                 self.graphics.surface_mut(),
                 resources,
                 keyboard_active,
                 mouse_active,
                 gamma,
+                now,
             )?;
             if ordered_native && index != last {
                 self.next_pending_native_overlay();
             }
         }
         Ok(())
+    }
+
+    fn render_message_dialog_tooltip(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Result<()> {
+        let Some(tooltip_pointer) = self.startup_tooltip.eligible_pointer() else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        let Some(resources) = assets.message_dialog_resources() else {
+            return Ok(());
+        };
+        let (surface_width, surface_height) = {
+            let surface = self.graphics.surface();
+            (surface.width() as i32, surface.height() as i32)
+        };
+        let Some(index) = (0..self.message_dialogs.len()).rev().find(|index| {
+            let dialog = &self.message_dialogs[*index].state;
+            let layout = dialog.layout(
+                surface_width,
+                surface_height,
+                &resources.fonts.text,
+            );
+            dialog
+                .tooltip_state(Some(tooltip_pointer), &layout)
+                .is_some()
+        }) else {
+            return Ok(());
+        };
+        if self.graphics.surface().is_clonk_text_capture_active() {
+            self.next_pending_native_overlay();
+        }
+        self.message_dialogs[index].state.render_tooltip(
+            self.graphics.surface_mut(),
+            resources,
+            Some(tooltip_pointer),
+            gamma,
+        )
     }
 
     fn render_definition_selector(&mut self, gamma: Option<&lc_graphics::GammaRamp>) -> Result<()> {
@@ -51002,6 +51097,7 @@ impl GameApp {
                             context_menu.render(self.graphics.surface_mut(), gamma.as_ref())?;
                         }
                     }
+                    self.render_message_dialog_tooltip(gamma.as_ref())?;
                     if !ordered_native {
                         let surface = self.graphics.surface();
                         if surface.pixels().len() == frame.len() {
@@ -51248,6 +51344,7 @@ impl GameApp {
                             .render(self.graphics.surface_mut(), Some(startup_gamma()))?;
                     }
                 }
+                self.render_message_dialog_tooltip(Some(startup_gamma()))?;
                 if !ordered_native
                     && (fade_was_active
                         || self.startup_player_properties_dialog.is_some()
@@ -52706,6 +52803,7 @@ impl GameApp {
                 context_menu.render(self.graphics.surface_mut(), Some(&frame_gamma))?;
             }
         }
+        self.render_message_dialog_tooltip(Some(&frame_gamma))?;
 
         if !ordered_native {
             let surface = self.graphics.surface();
@@ -76878,6 +76976,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         )
         .expect("open localized dialog");
 
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
         let dialog = &mut app.message_dialogs[0].state;
         assert_eq!(
             dialog.button_label(lc_frontend::message_dialog::MessageDialogButton::Ok),
@@ -76892,6 +76991,17 @@ public func Grant(password) { return GainMissionAccess(password); }
             Some(lc_frontend::message_dialog::MessageDialogResult::Cancel)
         );
         assert_eq!(dialog.handle_hotkey('C'), None);
+        let layout = dialog.layout(640, 480, &fonts.text);
+        let close = layout.close_button.expect("close button");
+        let close_point = GuiPoint::new((close.x + 1) as f32, (close.y + 1) as f32);
+        dialog.handle_pointer_move(close_point, &layout);
+        assert_eq!(
+            dialog
+                .tooltip_state(Some(close_point), &layout)
+                .expect("localized close tooltip")
+                .text,
+            "Schließen"
+        );
         reset_cached_app_paths();
     }
 
@@ -102699,6 +102809,38 @@ ScenInfoArea=70,5,25,90
             assert_eq!(app.running_chat_text(), Some(expected));
             assert!(app.context_menu.is_some());
         }
+    }
+
+    #[test]
+    fn menu_touch_title_drag_uses_touch_coordinates_through_release() {
+        let mut app = new_menu_app(640, 480);
+        let dialog = lc_frontend::message_dialog::MessageDialogState::new(
+            "Move this confirmation",
+            "Caption",
+            lc_frontend::message_dialog::MessageDialogButtons::OK,
+            lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            lc_frontend::message_dialog::MessageDialogSize::Small,
+            false,
+        );
+        app.push_message_dialog(dialog, MessageDialogContinuation::None)
+            .expect("open message dialog");
+        let layout = app.top_message_dialog_layout().expect("message layout");
+        let caption = layout.caption.expect("caption");
+        let start = GuiPoint::new((caption.x + 10) as f32, (caption.y + 10) as f32);
+        let end = GuiPoint::new(start.x + 41.0, start.y + 27.0);
+        app.running_pointer_position = Some(GuiPoint::new(1.0, 1.0));
+
+        app.handle_touch(TouchPhase::Started, start)
+            .expect("start title touch drag despite stale mouse point");
+        assert!(app.message_dialogs[0]
+            .state
+            .has_positional_pointer_drag());
+        app.handle_touch(TouchPhase::Ended, end)
+            .expect("finish title touch drag without an intermediate move");
+
+        assert_eq!(app.message_dialogs[0].state.dialog_offset(), (41, 27));
+        assert!(!app.message_dialogs[0].state.has_pointer_capture());
+        assert_eq!(app.message_dialogs.len(), 1);
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 use crate::classic_gui::{draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect};
 use crate::clonk_fonts::NativeClonkFont;
+use crate::context_menu::draw_classic_tooltip;
 use crate::hud::HudFont;
 use crate::{expand_hotkey_markup, ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use anyhow::Result;
@@ -15,7 +16,9 @@ use lc_graphics::clonk_font::{
 };
 use lc_graphics::{GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
+use std::cell::Cell;
 use std::ops::{BitOr, BitOrAssign};
+use std::time::{Duration, Instant};
 
 const REGULAR_WIDTH: i32 = 500;
 const MEDIUM_WIDTH: i32 = 360;
@@ -28,6 +31,9 @@ const BUTTON_HEIGHT: i32 = 32;
 const BUTTON_GAP: i32 = 10;
 const CLIENT_VERTICAL_ROOM: i32 = 80;
 const CLOSE_ICON_PHASE: u16 = 34;
+const TITLE_LEFT_INDENT: i32 = 5;
+const TITLE_RIGHT_INDENT: i32 = 20;
+const TITLE_SCROLL_DELAY: Duration = Duration::from_millis(3000);
 
 /// C++ `MessageDialog::Buttons` bitmask.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -213,12 +219,19 @@ pub struct MessageDialogLayout {
     pub buttons: Vec<MessageDialogButtonLayout>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MessageDialogTooltip {
+    pub pointer: GuiPoint,
+    pub text: String,
+}
+
 /// Borrowed classic resources. Callers should decline to render rather than
 /// construct this value with substitute assets.
 #[derive(Clone, Copy)]
 pub struct MessageDialogResources<'a> {
     pub skin: ClassicGuiSkin<'a>,
     pub fonts: &'a ClonkFontSet,
+    pub tooltip_font: &'a ClonkFont,
     pub icons: &'a ImageData,
     pub icons_extended: &'a ImageData,
     pub button_highlight: &'a ImageData,
@@ -231,7 +244,12 @@ impl MessageDialogResources<'_> {
         validate_icon_sheet("GUIIcons.png", self.icons, 40)?;
         validate_icon_sheet("GUIIcons2.png", self.icons_extended, 64)?;
         validate_nonempty_image("GUIButtonHighlight.png", self.button_highlight)?;
-        validate_checkbox_sheet("GUICheckbox.png", self.checkbox)
+        validate_checkbox_sheet("GUICheckbox.png", self.checkbox)?;
+        anyhow::ensure!(
+            self.tooltip_font.line_height > 0,
+            "classic TooltipFont must have a positive line height"
+        );
+        Ok(())
     }
 }
 
@@ -250,10 +268,25 @@ struct MessageDialogCheckbox {
     checked: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct CaptionScrollState {
+    last_change: Option<Instant>,
+    position: i32,
+    direction: i8,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TitleDrag {
+    pointer: GuiPoint,
+    offset: (i32, i32),
+}
+
 /// Pure frontend state for one message dialog.
 #[derive(Clone, Debug)]
 pub struct MessageDialogState {
     caption: String,
+    close_tooltip: String,
+    caption_scroll: Cell<CaptionScrollState>,
     message: String,
     buttons: MessageDialogButtons,
     button_labels: Vec<(MessageDialogButton, String)>,
@@ -264,10 +297,12 @@ pub struct MessageDialogState {
     checkbox: Option<MessageDialogCheckbox>,
     checkbox_changes: Vec<bool>,
     placement: MessageDialogPlacement,
+    dialog_offset: (i32, i32),
     focus: Option<DialogTarget>,
     hovered: Option<DialogTarget>,
     pointer: Option<GuiPoint>,
     pointer_pressed: Option<DialogTarget>,
+    title_drag: Option<TitleDrag>,
     key_pressed: Option<DialogTarget>,
     sound_events: Vec<MessageDialogSound>,
 }
@@ -286,6 +321,8 @@ impl MessageDialogState {
         let focus_button = initial_focus_button(&ordered, default_no).map(DialogTarget::Button);
         Self {
             caption,
+            close_tooltip: "Close".into(),
+            caption_scroll: Cell::new(CaptionScrollState::default()),
             message: message.into(),
             buttons,
             button_labels: Vec::new(),
@@ -296,10 +333,12 @@ impl MessageDialogState {
             checkbox: None,
             checkbox_changes: Vec::new(),
             placement: MessageDialogPlacement::Centered,
+            dialog_offset: (0, 0),
             focus: focus_button,
             hovered: None,
             pointer: None,
             pointer_pressed: None,
+            title_drag: None,
             key_pressed: None,
             sound_events: Vec::new(),
         }
@@ -365,6 +404,10 @@ impl MessageDialogState {
         }
     }
 
+    pub fn set_close_tooltip(&mut self, tooltip: impl Into<String>) {
+        self.close_tooltip = tooltip.into();
+    }
+
     pub fn button_label(&self, button: MessageDialogButton) -> &str {
         self.button_labels
             .iter()
@@ -402,6 +445,10 @@ impl MessageDialogState {
 
     pub const fn default_no(&self) -> bool {
         self.default_no
+    }
+
+    pub const fn dialog_offset(&self) -> (i32, i32) {
+        self.dialog_offset
     }
 
     pub fn checkbox_checked(&self) -> Option<bool> {
@@ -485,12 +532,14 @@ impl MessageDialogState {
         let client_height =
             message_height + checkbox_size.map_or(CLIENT_VERTICAL_ROOM, |(_, height)| height + 100);
         let height = title_height + client_height;
-        let (x, y) = match self.placement {
+        let (base_x, base_y) = match self.placement {
             MessageDialogPlacement::Centered => {
                 ((screen_width - width) / 2, (screen_height - height) / 2)
             }
             MessageDialogPlacement::Preferred { x, y } => (x + 30, y + 30),
         };
+        let x = base_x + self.dialog_offset.0;
+        let y = base_y + self.dialog_offset.1;
         let client_y = y + title_height;
         let caption = (title_height > 0).then_some(IntRect {
             x,
@@ -636,7 +685,14 @@ impl MessageDialogState {
 
     pub fn handle_pointer_move(&mut self, point: GuiPoint, layout: &MessageDialogLayout) {
         let was_down = self.pointer_target_is_down();
-        self.pointer = Some(point);
+        self.note_pointer_input(point);
+        if let Some(drag) = self.title_drag {
+            self.dialog_offset = (
+                drag.offset.0 + (point.x - drag.pointer.x) as i32,
+                drag.offset.1 + (point.y - drag.pointer.y) as i32,
+            );
+            return;
+        }
         self.hovered = hit_target(layout, point);
         if was_down != self.pointer_target_is_down() {
             self.sound_events.push(MessageDialogSound::ArrowHit);
@@ -645,9 +701,24 @@ impl MessageDialogState {
 
     pub fn handle_pointer_down(&mut self, layout: &MessageDialogLayout) {
         let was_down = self.pointer_target_is_down();
+        if let Some(point) = self.pointer {
+            self.note_pointer_input(point);
+        }
         let target = self.pointer.and_then(|point| hit_target(layout, point));
         if target == Some(DialogTarget::Checkbox) {
             self.pointer_pressed = None;
+            return;
+        }
+        if target.is_none()
+            && self
+                .pointer
+                .is_some_and(|point| caption_contains(layout, point))
+        {
+            self.pointer_pressed = None;
+            self.title_drag = self.pointer.map(|pointer| TitleDrag {
+                pointer,
+                offset: self.dialog_offset,
+            });
             return;
         }
         self.pointer_pressed = target;
@@ -670,6 +741,10 @@ impl MessageDialogState {
         layout: &MessageDialogLayout,
     ) -> Option<MessageDialogResult> {
         let was_down = self.pointer_target_is_down();
+        if let Some(point) = self.pointer {
+            self.note_pointer_input(point);
+            self.finish_title_drag_at(point);
+        }
         let released = self.pointer.and_then(|point| hit_target(layout, point));
         self.finish_pointer_up(released, was_down)
     }
@@ -684,10 +759,18 @@ impl MessageDialogState {
         layout: &MessageDialogLayout,
     ) -> Option<MessageDialogResult> {
         let was_down = self.pointer_target_is_down();
+        self.note_pointer_input(point);
+        self.finish_title_drag_at(point);
         let released = hit_target(layout, point);
-        self.pointer = Some(point);
         self.hovered = released;
         self.finish_pointer_up(released, was_down)
+    }
+
+    /// Apply the retained title's final pointer delta before ordinary
+    /// top-down release hit-testing, matching `Screen::MouseInput`.
+    pub fn stop_pointer_drag_at(&mut self, point: GuiPoint) {
+        self.note_pointer_input(point);
+        self.finish_title_drag_at(point);
     }
 
     fn finish_pointer_up(
@@ -715,7 +798,11 @@ impl MessageDialogState {
     /// element before hit-testing the matching release. Checkboxes deliberately
     /// do not retain the pointer at all.
     pub const fn has_pointer_capture(&self) -> bool {
-        self.pointer_pressed.is_some()
+        self.pointer_pressed.is_some() || self.title_drag.is_some()
+    }
+
+    pub const fn has_positional_pointer_drag(&self) -> bool {
+        self.title_drag.is_some()
     }
 
     pub const fn has_pointer_hover(&self) -> bool {
@@ -729,6 +816,7 @@ impl MessageDialogState {
         self.pointer = None;
         self.hovered = None;
         self.pointer_pressed = None;
+        self.title_drag = None;
         if was_down {
             self.sound_events.push(MessageDialogSound::ArrowHit);
         }
@@ -747,8 +835,72 @@ impl MessageDialogState {
         self.pointer = None;
         self.hovered = None;
         self.pointer_pressed = None;
+        self.title_drag = None;
         self.key_pressed = None;
         self.sound_events.clear();
+    }
+
+    /// Global tooltip state for the title label installed by
+    /// `Dialog::SetTitle`. The host supplies the pointer only after the
+    /// process-level [`crate::context_menu::ClassicTooltipTracker`] reaches
+    /// its shared 500ms threshold.
+    pub fn tooltip_state(
+        &self,
+        eligible_pointer: Option<GuiPoint>,
+        layout: &MessageDialogLayout,
+    ) -> Option<MessageDialogTooltip> {
+        let pointer = eligible_pointer?;
+        let routed_pointer = self.pointer?;
+        if routed_pointer.x as i32 != pointer.x as i32
+            || routed_pointer.y as i32 != pointer.y as i32
+        {
+            return None;
+        }
+        let text = match hit_target(layout, pointer) {
+            Some(DialogTarget::Close) => &self.close_tooltip,
+            None if caption_contains(layout, pointer) => &self.caption,
+            Some(DialogTarget::Checkbox | DialogTarget::Button(_)) | None => return None,
+        };
+        (!text.is_empty()).then(|| MessageDialogTooltip {
+            pointer,
+            text: text.clone(),
+        })
+    }
+
+    /// Draw the title tooltip in the host's screen-global final overlay pass.
+    pub fn render_tooltip_at(
+        &self,
+        surface: &mut Surface,
+        resources: MessageDialogResources<'_>,
+        eligible_pointer: Option<GuiPoint>,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
+        resources.validate()?;
+        let layout = self.layout(
+            surface.width() as i32,
+            surface.height() as i32,
+            &resources.fonts.text,
+        );
+        if let Some(tooltip) = self.tooltip_state(eligible_pointer, &layout) {
+            draw_classic_tooltip(
+                surface,
+                resources.tooltip_font,
+                tooltip.pointer,
+                &tooltip.text,
+                gamma,
+            );
+        }
+        Ok(())
+    }
+
+    pub fn render_tooltip(
+        &self,
+        surface: &mut Surface,
+        resources: MessageDialogResources<'_>,
+        eligible_pointer: Option<GuiPoint>,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
+        self.render_tooltip_at(surface, resources, eligible_pointer, gamma)
     }
 
     pub fn render(
@@ -759,6 +911,25 @@ impl MessageDialogState {
         mouse_active: bool,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
+        self.render_at(
+            surface,
+            resources,
+            keyboard_active,
+            mouse_active,
+            gamma,
+            Instant::now(),
+        )
+    }
+
+    pub fn render_at(
+        &self,
+        surface: &mut Surface,
+        resources: MessageDialogResources<'_>,
+        keyboard_active: bool,
+        mouse_active: bool,
+        gamma: Option<&GammaRamp>,
+        now: Instant,
+    ) -> Result<()> {
         resources.validate()?;
         let layout = self.layout(
             surface.width() as i32,
@@ -767,14 +938,16 @@ impl MessageDialogState {
         );
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
         if let Some(caption) = layout.caption {
-            resources.skin.draw_caption_with_right_indent(
+            let scroll = self.caption_scroll_offset_at(now, &resources.fonts.text);
+            resources.skin.draw_caption_scrolled(
                 surface,
                 caption,
                 &self.caption,
                 &resources.fonts.text,
                 [255, 255, 255, 255],
                 TextAlign::Left,
-                20,
+                TITLE_RIGHT_INDENT,
+                scroll,
                 gamma,
             );
         }
@@ -973,6 +1146,50 @@ impl MessageDialogState {
     fn pointer_target_is_down(&self) -> bool {
         self.pointer_pressed.is_some() && self.pointer_pressed == self.hovered
     }
+
+    fn note_pointer_input(&mut self, point: GuiPoint) {
+        self.pointer = Some(point);
+    }
+
+    fn finish_title_drag_at(&mut self, point: GuiPoint) {
+        if let Some(drag) = self.title_drag.take() {
+            self.dialog_offset = (
+                drag.offset.0 + (point.x - drag.pointer.x) as i32,
+                drag.offset.1 + (point.y - drag.pointer.y) as i32,
+            );
+        }
+    }
+
+    fn caption_scroll_offset_at(&self, now: Instant, font: &ClonkFont) -> i32 {
+        if self.caption.is_empty() {
+            return 0;
+        }
+        let max_scroll =
+            (font.measure(&self.caption, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT
+                - self.size.width())
+            .max(0);
+        let mut state = self.caption_scroll.get();
+        let Some(last_change) = state.last_change else {
+            state.last_change = Some(now);
+            self.caption_scroll.set(state);
+            return 0;
+        };
+        if now.checked_duration_since(last_change).unwrap_or_default() >= TITLE_SCROLL_DELAY {
+            if state.direction == 0 {
+                state.direction = 1;
+            }
+            if max_scroll > 0 {
+                state.position += i32::from(state.direction);
+                if state.position >= max_scroll || state.position < 0 {
+                    state.direction = -state.direction;
+                    state.position += i32::from(state.direction);
+                    state.last_change = Some(now);
+                }
+            }
+        }
+        self.caption_scroll.set(state);
+        state.position
+    }
 }
 
 fn initial_focus_button(buttons: &[MessageDialogButton], default_no: bool) -> Option<usize> {
@@ -1015,6 +1232,12 @@ fn hit_target(layout: &MessageDialogLayout, point: GuiPoint) -> Option<DialogTar
         .iter()
         .position(|button| rect_contains(button.rect, point))
         .map(DialogTarget::Button)
+}
+
+fn caption_contains(layout: &MessageDialogLayout, point: GuiPoint) -> bool {
+    layout
+        .caption
+        .is_some_and(|caption| rect_contains(caption, point))
 }
 
 fn rect_contains(rect: IntRect, point: GuiPoint) -> bool {
@@ -1889,6 +2112,176 @@ mod tests {
     }
 
     #[test]
+    fn title_drag_applies_live_and_final_delta_outside_dialog() {
+        let fonts = endeavour_font_set();
+        let mut dialog = ok_dialog("message");
+        let layout = dialog.layout(1280, 720, &fonts.text);
+        let caption = layout.caption.expect("caption");
+        let start = GuiPoint::new((caption.x + 10) as f32, (caption.y + 10) as f32);
+
+        dialog.handle_pointer_down_at(start, &layout);
+        assert!(dialog.has_pointer_capture());
+        assert!(dialog.has_positional_pointer_drag());
+
+        let moved = GuiPoint::new(start.x - 500.0, start.y + 37.0);
+        dialog.handle_pointer_move(moved, &layout);
+        assert_eq!(dialog.dialog_offset(), (-500, 37));
+        let moved_layout = dialog.layout(1280, 720, &fonts.text);
+        assert_eq!(moved_layout.bounds.x, layout.bounds.x - 500);
+        assert_eq!(moved_layout.bounds.y, layout.bounds.y + 37);
+
+        let released = GuiPoint::new(moved.x - 9.0, moved.y + 4.0);
+        assert_eq!(dialog.handle_pointer_up_at(released, &moved_layout), None);
+        assert_eq!(dialog.dialog_offset(), (-509, 41));
+        assert!(!dialog.has_pointer_capture());
+
+        let retained = dialog.dialog_offset();
+        let released_layout = dialog.layout(1280, 720, &fonts.text);
+        dialog.handle_pointer_move(GuiPoint::new(1000.0, 700.0), &released_layout);
+        assert_eq!(dialog.dialog_offset(), retained);
+
+        let mut close = ok_dialog("message");
+        let close_layout = close.layout(1280, 720, &fonts.text);
+        let close_point = GuiPoint::new(
+            (close_layout.close_button.expect("close").x + 1) as f32,
+            (close_layout.close_button.expect("close").y + 1) as f32,
+        );
+        close.handle_pointer_down_at(close_point, &close_layout);
+        assert!(close.has_pointer_capture());
+        assert!(!close.has_positional_pointer_drag());
+    }
+
+    #[test]
+    fn title_autoscroll_advances_per_draw_and_dwells_at_both_ends() {
+        let font = unit_width_font("W");
+        let caption = "W".repeat(278);
+        let dialog = MessageDialogState::new(
+            "message",
+            caption,
+            MessageDialogButtons::OK,
+            MessageDialogIcon::None,
+            MessageDialogSize::Small,
+            false,
+        );
+        assert_eq!(font.measure(dialog.caption(), true).0 + 25 - SMALL_WIDTH, 3);
+        let base = Instant::now();
+        assert_eq!(dialog.caption_scroll_offset_at(base, &font), 0);
+        assert_eq!(
+            dialog.caption_scroll_offset_at(
+                base + TITLE_SCROLL_DELAY - Duration::from_millis(1),
+                &font,
+            ),
+            0
+        );
+        let outbound = base + TITLE_SCROLL_DELAY;
+        assert_eq!(dialog.caption_scroll_offset_at(outbound, &font), 1);
+        assert_eq!(dialog.caption_scroll_offset_at(outbound, &font), 2);
+        assert_eq!(
+            dialog.caption_scroll_offset_at(outbound, &font),
+            2,
+            "the attempted max-scroll frame reverses and immediately backs off"
+        );
+        assert_eq!(
+            dialog.caption_scroll_offset_at(
+                outbound + TITLE_SCROLL_DELAY - Duration::from_millis(1),
+                &font,
+            ),
+            2
+        );
+        let returning = outbound + TITLE_SCROLL_DELAY;
+        assert_eq!(dialog.caption_scroll_offset_at(returning, &font), 1);
+        assert_eq!(dialog.caption_scroll_offset_at(returning, &font), 0);
+        assert_eq!(
+            dialog.caption_scroll_offset_at(returning, &font),
+            0,
+            "the attempted negative frame reverses and pauses at the start"
+        );
+        assert_eq!(
+            dialog.caption_scroll_offset_at(returning + TITLE_SCROLL_DELAY, &font),
+            1
+        );
+
+        for (width, expected) in [(276, 0), (275, 0)] {
+            let short = MessageDialogState::new(
+                "message",
+                "W".repeat(width),
+                MessageDialogButtons::OK,
+                MessageDialogIcon::None,
+                MessageDialogSize::Small,
+                false,
+            );
+            assert_eq!(short.caption_scroll_offset_at(base, &font), 0);
+            assert_eq!(
+                short.caption_scroll_offset_at(base + TITLE_SCROLL_DELAY, &font),
+                expected,
+                "max scroll of one or zero has no visible offset"
+            );
+        }
+    }
+
+    #[test]
+    fn title_tooltip_uses_shared_mouse_delay_and_close_wins_overlap() {
+        use crate::context_menu::{ClassicTooltipTracker, CLASSIC_TOOLTIP_DELAY};
+
+        let fonts = endeavour_font_set();
+        let mut dialog = ok_dialog("message");
+        dialog.set_close_tooltip("Schließen");
+        let layout = dialog.layout(1280, 720, &fonts.text);
+        let caption = layout.caption.expect("caption");
+        let title_point = GuiPoint::new((caption.x + 10) as f32, (caption.y + 10) as f32);
+        let base = Instant::now();
+        let mut tracker = ClassicTooltipTracker::new_at(base);
+        tracker.note_pointer_move_at(title_point, base);
+        dialog.handle_pointer_move(title_point, &layout);
+
+        assert!(dialog
+            .tooltip_state(
+                tracker
+                    .eligible_pointer_at(base + CLASSIC_TOOLTIP_DELAY - Duration::from_millis(1)),
+                &layout,
+            )
+            .is_none());
+        assert_eq!(
+            dialog
+                .tooltip_state(
+                    tracker.eligible_pointer_at(base + CLASSIC_TOOLTIP_DELAY),
+                    &layout,
+                )
+                .expect("title tooltip")
+                .text,
+            dialog.caption()
+        );
+
+        tracker.note_non_pointer_input();
+        assert!(!tracker.note_pointer_move_at(
+            GuiPoint::new(title_point.x + 0.25, title_point.y + 0.25),
+            base + Duration::from_secs(1),
+        ));
+        assert!(dialog
+            .tooltip_state(
+                tracker.eligible_pointer_at(base + Duration::from_secs(2)),
+                &layout,
+            )
+            .is_none());
+
+        let close = layout.close_button.expect("close");
+        let close_point = GuiPoint::new((close.x + 1) as f32, (close.y + 1) as f32);
+        let close_at = base + Duration::from_secs(3);
+        tracker.note_pointer_move_at(close_point, close_at);
+        dialog.handle_pointer_move(close_point, &layout);
+        assert_eq!(
+            dialog
+                .tooltip_state(
+                    tracker.eligible_pointer_at(close_at + CLASSIC_TOOLTIP_DELAY),
+                    &layout,
+                )
+                .expect("localized close tooltip wins the title overlap")
+                .text,
+            "Schließen"
+        );
+    }
+
+    #[test]
     fn rendering_overlays_without_dimming_the_screen() {
         let fonts = endeavour_font_set();
         let caption = load_graphics_png("GUICaption.png");
@@ -1904,6 +2297,7 @@ mod tests {
         let resources = MessageDialogResources {
             skin: ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight)),
             fonts: &fonts,
+            tooltip_font: &fonts.text,
             icons: &icons,
             icons_extended: &icons_extended,
             button_highlight: &highlight,
@@ -2188,6 +2582,7 @@ mod tests {
         let resources = MessageDialogResources {
             skin: ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight)),
             fonts: &fonts,
+            tooltip_font: &fonts.text,
             icons: &malformed_icons,
             icons_extended: &icons_extended,
             button_highlight: &highlight,
@@ -2204,6 +2599,7 @@ mod tests {
         let resources = MessageDialogResources {
             skin: ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight)),
             fonts: &fonts,
+            tooltip_font: &fonts.text,
             icons: &icons,
             icons_extended: &icons_extended,
             button_highlight: &highlight,
@@ -2217,6 +2613,7 @@ mod tests {
         let resources = MessageDialogResources {
             skin: ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight)),
             fonts: &fonts,
+            tooltip_font: &fonts.text,
             icons: &icons,
             icons_extended: &icons_extended,
             button_highlight: &highlight,
