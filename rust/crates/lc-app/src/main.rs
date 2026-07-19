@@ -10112,6 +10112,9 @@ struct GameApp {
     /// Physical primary-button state (`CMouse::LDown`), independent of any
     /// control that installed itself as `pDragElement`.
     primary_pointer_left_down: bool,
+    /// Player menu whose title close button retained the current left-down.
+    /// C4GUI::Button invokes only when that same button receives left-up.
+    ingame_menu_close_pointer_capture: Option<i32>,
     mouse_state: Option<IngameButtonMouseState>,
     ingame_right_mouse_state: Option<IngameButtonMouseState>,
     /// C4Menu's retained drag element begins in GUI coordinates and becomes
@@ -19621,6 +19624,7 @@ impl GameApp {
             ingame_edge_scroll: None,
             running_pointer_position: None,
             primary_pointer_left_down: false,
+            ingame_menu_close_pointer_capture: None,
             mouse_state: None,
             ingame_right_mouse_state: None,
             construction_menu_drag: None,
@@ -24991,6 +24995,7 @@ impl GameApp {
     fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.primary_pointer_left_down = false;
+        self.ingame_menu_close_pointer_capture = None;
         // No key-up events are guaranteed after the window loses focus.
         // Release synchronized controls and forget the physical repeat state
         // so the first press after refocus is not discarded.
@@ -25706,10 +25711,14 @@ impl GameApp {
 
     fn close_ingame_menu(&mut self) {
         self.ingame_menu.clear();
+        self.ingame_menu_close_pointer_capture = None;
     }
 
     fn close_ingame_menu_for_player(&mut self, player: i32) {
         self.ingame_menu.remove(player);
+        if self.ingame_menu_close_pointer_capture == Some(player) {
+            self.ingame_menu_close_pointer_capture = None;
+        }
     }
 
     fn close_ingame_menu_by_user(&mut self) -> Result<(), EngineError> {
@@ -25718,6 +25727,9 @@ impl GameApp {
 
     fn close_ingame_menu_by_user_for_player(&mut self, player: i32) -> Result<(), EngineError> {
         if self.ingame_menu.remove(player).is_some() {
+            if self.ingame_menu_close_pointer_capture == Some(player) {
+                self.ingame_menu_close_pointer_capture = None;
+            }
             // C4MainMenu::OnClosed queues exactly one synchronized clear;
             // teardown/reset calls use close_ingame_menu and stay silent
             // (src/C4MainMenu.cpp:319-329; src/C4Player.cpp:1392-1395).
@@ -26953,6 +26965,7 @@ impl GameApp {
                 frame_decoration: None,
                 menu_location: None,
                 show_commands: self.display_flags.show_commands,
+                show_close_button: false,
                 show_command_keys: self.display_flags.show_command_keys,
                 throw_key,
                 special2_key,
@@ -32116,6 +32129,7 @@ impl GameApp {
         );
         let gfx = IngameMenuGraphics {
             show_commands: self.display_flags.show_commands,
+            show_close_button: true,
             ..IngameMenuGraphics::default()
         };
         menu.pointer_target(area, &font, &gfx, point)
@@ -32141,6 +32155,12 @@ impl GameApp {
         button_state: ElementState,
         enter_all: bool,
     ) -> Result<bool, EngineError> {
+        if !enter_all && button_state == ElementState::Pressed {
+            self.ingame_menu_close_pointer_capture = None;
+        }
+        let close_capture = (!enter_all && button_state == ElementState::Released)
+            .then(|| self.ingame_menu_close_pointer_capture.take())
+            .flatten();
         let Some(point) = self.ingame_gui_pointer else {
             return Ok(false);
         };
@@ -32148,25 +32168,45 @@ impl GameApp {
             return Ok(false);
         };
         self.cancel_ingame_mouse_gestures();
+        if !enter_all
+            && button_state == ElementState::Pressed
+            && target == IngameMenuPointerTarget::Close
+        {
+            self.ingame_menu_close_pointer_capture = Some(player);
+        }
         if button_state == ElementState::Released {
-            if let IngameMenuPointerTarget::Item(index) = target {
-                let outcome = self.ingame_menu.get_mut(player).and_then(|menu| {
-                    menu.set_selection(index);
-                    menu.handle_command(
-                        if enter_all {
-                            ControlCommand::MenuEnterAll
-                        } else {
-                            ControlCommand::MenuEnter
-                        },
-                        CommandKind::Press,
-                    )
-                });
-                if let Some(outcome) = outcome {
-                    // C4MenuItem enters on button-up; C4MainMenu executes its
-                    // own Player-owned command directly (C4Menu.cpp:213-233;
-                    // C4MainMenu.cpp:305-310).
-                    self.execute_ingame_menu_outcome_for_player(player, outcome)?;
+            let outcome = match target {
+                IngameMenuPointerTarget::Item(_) if close_capture.is_some() => None,
+                IngameMenuPointerTarget::Item(index) => {
+                    self.ingame_menu.get_mut(player).and_then(|menu| {
+                        menu.set_selection(index);
+                        menu.handle_command(
+                            if enter_all {
+                                ControlCommand::MenuEnterAll
+                            } else {
+                                ControlCommand::MenuEnter
+                            },
+                            CommandKind::Press,
+                        )
+                    })
                 }
+                // C4GUI::IconButton invokes Dialog::OnUserClose on left
+                // button-up; right-button input is consumed without closing
+                // (C4GuiDialogs.cpp:386-425; C4Gui.cpp:2029-2037).
+                IngameMenuPointerTarget::Close
+                    if !enter_all && close_capture == Some(player) => self
+                    .ingame_menu
+                    .get_mut(player)
+                    .and_then(|menu| {
+                        menu.handle_command(ControlCommand::MenuClose, CommandKind::Press)
+                    }),
+                IngameMenuPointerTarget::Close | IngameMenuPointerTarget::Background => None,
+            };
+            if let Some(outcome) = outcome {
+                // C4MenuItem enters on button-up; C4MainMenu executes its
+                // own Player-owned command directly (C4Menu.cpp:213-233;
+                // C4MainMenu.cpp:305-310).
+                self.execute_ingame_menu_outcome_for_player(player, outcome)?;
             }
         }
         Ok(true)
@@ -50989,11 +51029,18 @@ impl GameApp {
         if self.ingame_menu.is_some() {
             let fonts = self.assets.clonk_fonts.clone();
             let fallback = self.assets.font_arc();
+            let show_close_button = self.local_controls.mouse_owner().is_some_and(|owner| {
+                self.ingame_menu
+                    .as_ref()
+                    .and_then(IngameMenuState::player)
+                    == Some(owner)
+            });
             {
                 let show_commands = self.display_flags.show_commands;
                 let show_command_keys = self.display_flags.show_command_keys;
                 let gfx = self.ensure_ingame_menu_gfx();
                 gfx.show_commands = show_commands;
+                gfx.show_close_button = show_close_button;
                 gfx.show_command_keys = show_command_keys;
             }
             if let (Some(menu), Some(gfx)) =
@@ -102075,6 +102122,39 @@ ScenInfoArea=70,5,25,90
             });
         }
         assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
+        let secondary_close = {
+            let area = app
+                .graphics
+                .viewport_rect(secondary)
+                .expect("secondary viewport");
+            let fallback = app.assets.font_arc();
+            let font = lc_frontend::hud::HudFont::from_set(
+                app.assets.clonk_fonts.as_deref(),
+                fallback.as_ref(),
+            );
+            let close = app
+                .ingame_menu
+                .get(secondary)
+                .expect("secondary player menu")
+                .close_button_rect(
+                    area,
+                    &font,
+                    &IngameMenuGraphics {
+                        show_commands: app.display_flags.show_commands,
+                        show_close_button: true,
+                        ..IngameMenuGraphics::default()
+                    },
+                );
+            GuiPoint::new(
+                (close.x + close.width as i32 / 2) as f32,
+                (close.y + close.height as i32 / 2) as f32,
+            )
+        };
+        assert_eq!(
+            app.ingame_menu_pointer_target(secondary_close),
+            Some((secondary, IngameMenuPointerTarget::Close)),
+            "the assigned secondary mouse owner's close button must hit-test"
+        );
         let secondary_target =
             app.ingame_menu_pointer_target(gui_point_from_position(secondary_options));
         assert!(
@@ -113378,6 +113458,226 @@ protected func InputCallback(string answer, int player)
             commands.take_submitted_local(),
             vec![(app.local_owner, ControlEvent::ClearPressed, tick)],
             "one user-driven close queues one clear for the still-open tick"
+        );
+    }
+
+    #[test]
+    fn player_menu_title_close_routes_submenu_back_and_main_closed() {
+        // Dialog's Ico_Close calls C4Menu::TryClose on left-up. Submenus run
+        // their ActivateMenu:Main close command; the Main page stays closed.
+        // Every C4MainMenu::OnClosed queues one synchronized ClearPressed
+        // (C4GuiDialogs.cpp:386-425; C4MainMenu.cpp:313-329).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+        app.open_ingame_menu().expect("open player menu");
+        app.apply_ingame_menu_action(MenuAction::ActivateOptions)
+            .expect("open Options submenu");
+
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish local viewport");
+        assert!(
+            app.ingame_menu_gfx
+                .as_ref()
+                .is_some_and(|gfx| gfx.show_close_button),
+            "the controlling mouse player's title renders its close button"
+        );
+
+        let close_rect = |app: &GameApp| {
+            let player = app.local_owner;
+            let area = app.graphics.viewport_rect(player).expect("local viewport");
+            let fallback = app.assets.font_arc();
+            let font = lc_frontend::hud::HudFont::from_set(
+                app.assets.clonk_fonts.as_deref(),
+                fallback.as_ref(),
+            );
+            let gfx = IngameMenuGraphics {
+                show_commands: app.display_flags.show_commands,
+                show_close_button: true,
+                ..IngameMenuGraphics::default()
+            };
+            app
+                .ingame_menu
+                .get(player)
+                .expect("player menu")
+                .close_button_rect(area, &font, &gfx)
+        };
+        let close_point = |app: &GameApp| {
+            let close = close_rect(app);
+            PhysicalPosition::new(
+                f64::from(close.x) + f64::from(close.width) / 2.0,
+                f64::from(close.y) + f64::from(close.height) / 2.0,
+            )
+        };
+
+        app.handle_cursor_moved(close_point(&app))
+            .expect("hover Options close");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("right-down is consumed by close control");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("right-up is consumed by close control");
+        assert_eq!(
+            app.ingame_menu.get(app.local_owner).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options),
+            "right-click must not invoke Dialog::OnUserClose"
+        );
+        assert!(commands.take_submitted_local().is_empty());
+
+        let close = close_rect(&app);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(close.x - 1),
+            f64::from(close.y) + f64::from(close.height) / 2.0,
+        ))
+        .expect("hover title background beside close");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("title background mouse down");
+        app.handle_cursor_moved(close_point(&app))
+            .expect("move onto close after background down");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release over close without close capture");
+        assert_eq!(
+            app.ingame_menu.get(app.local_owner).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options),
+            "release-over must not close unless the close button retained left-down"
+        );
+        assert!(commands.take_submitted_local().is_empty());
+
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("Options close mouse down");
+        assert_eq!(
+            app.ingame_menu.get(app.local_owner).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options),
+            "IconButton closes on button-up, not button-down"
+        );
+        assert!(commands.take_submitted_local().is_empty());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("Options close mouse up");
+        assert_eq!(
+            app.ingame_menu.get(app.local_owner).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Main),
+            "Options close command reactivates Main"
+        );
+        assert_eq!(
+            commands.take_submitted_local(),
+            vec![(app.local_owner, ControlEvent::ClearPressed, tick)]
+        );
+
+        app.handle_cursor_moved(close_point(&app))
+            .expect("hover Main close");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("Main close mouse down");
+        assert!(app.ingame_menu.contains(app.local_owner));
+        assert!(commands.take_submitted_local().is_empty());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("Main close mouse up");
+        assert!(
+            !app.ingame_menu.contains(app.local_owner),
+            "Main has no close action and remains closed"
+        );
+        assert_eq!(
+            commands.take_submitted_local(),
+            vec![(app.local_owner, ControlEvent::ClearPressed, tick)]
+        );
+    }
+
+    #[test]
+    fn player_menu_title_close_visibility_follows_mouse_owner_and_disable_mouse() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        app.open_ingame_menu().expect("open mouse owner's menu");
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("render mouse owner's menu");
+        assert!(
+            app.ingame_menu_gfx
+                .as_ref()
+                .is_some_and(|gfx| gfx.show_close_button)
+        );
+
+        app.ingame_menu.clear();
+        app.ingame_menu.replace(
+            owner + 1,
+            IngameMenuState::main_menu(&MainMenuConditions::default()),
+        );
+        app.render(&mut frame)
+            .expect("render menu not owned by the mouse player");
+        assert!(
+            !app.ingame_menu_gfx
+                .as_ref()
+                .is_some_and(|gfx| gfx.show_close_button),
+            "a non-controlling player's C4Menu::HasMouse is false"
+        );
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: owner + 1,
+            preferred_set: 1,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.mouse_control = true;
+        app.render(&mut frame)
+            .expect("render reassigned mouse owner's menu");
+        assert!(
+            app.ingame_menu_gfx
+                .as_ref()
+                .is_some_and(|gfx| gfx.show_close_button),
+            "close visibility follows the assigned mouse owner, not local_owner"
+        );
+
+        app.ingame_menu.clear();
+        app.ingame_menu.replace(
+            owner,
+            IngameMenuState::main_menu(&MainMenuConditions::default()),
+        );
+        app.local_controls = LocalControlRegistry::default();
+        let assignment = app.local_controls.initialize(LocalControlInit {
+            owner,
+            preferred_set: 0,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: true,
+        });
+        assert!(!assignment.mouse);
+        app.mouse_control_allowed = false;
+        app.mouse_control = false;
+        app.render(&mut frame).expect("render DisableMouse menu");
+        assert!(
+            !app.ingame_menu_gfx
+                .as_ref()
+                .is_some_and(|gfx| gfx.show_close_button),
+            "DisableMouse=1 suppresses the title close button"
+        );
+
+        let area = app.graphics.viewport_rect(owner).expect("local viewport");
+        let fallback = app.assets.font_arc();
+        let font = lc_frontend::hud::HudFont::from_set(
+            app.assets.clonk_fonts.as_deref(),
+            fallback.as_ref(),
+        );
+        let close = app
+            .ingame_menu
+            .get(owner)
+            .expect("disabled-mouse player menu")
+            .close_button_rect(
+                area,
+                &font,
+                &IngameMenuGraphics {
+                    show_commands: app.display_flags.show_commands,
+                    show_close_button: true,
+                    ..IngameMenuGraphics::default()
+                },
+            );
+        let point = GuiPoint::new(
+            (close.x + close.width as i32 / 2) as f32,
+            (close.y + close.height as i32 / 2) as f32,
+        );
+        assert_eq!(
+            app.ingame_menu_pointer_target(point),
+            None,
+            "DisableMouse leaves no invisible close hit target"
         );
     }
 

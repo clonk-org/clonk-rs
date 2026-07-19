@@ -61,6 +61,7 @@ const MAX_TOOLTIP_WDT: i32 = 500;
 pub const ICO_TEAM: u8 = 19;
 pub const ICO_GAME_RUNNING: u8 = 30;
 pub const ICO_EXIT: u8 = 33;
+pub const ICO_CLOSE: u8 = 34;
 pub const ICO_SURRENDER: u8 = 45;
 pub const ICO_DISCONNECT: u8 = 49;
 pub const ICO_VIEW: u8 = 50;
@@ -411,6 +412,7 @@ pub struct IngameMenuState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IngameMenuPointerTarget {
     Item(usize),
+    Close,
     Background,
 }
 
@@ -1018,6 +1020,9 @@ impl IngameMenuState {
             return None;
         }
         let layout = self.layout(area, font, gfx);
+        if gfx.show_close_button && rect_contains_point(layout.close_button_rect(), point) {
+            return Some(IngameMenuPointerTarget::Close);
+        }
         self.items
             .iter()
             .enumerate()
@@ -1031,6 +1036,15 @@ impl IngameMenuState {
                 rect_contains_point(layout.bounds, point)
                     .then_some(IngameMenuPointerTarget::Background)
             })
+    }
+
+    pub(crate) fn close_button_rect(
+        &self,
+        area: Rect,
+        font: &HudFont<'_>,
+        gfx: &IngameMenuGraphics,
+    ) -> Rect {
+        self.layout(area, font, gfx).close_button_rect()
     }
 
     /// Menu geometry per `C4Menu::InitLocation`/`InitSize`
@@ -1105,6 +1119,16 @@ struct MenuLayout {
 }
 
 impl MenuLayout {
+    fn close_button_rect(&self) -> Rect {
+        // Dialog::SetTitle uses GetToprightCornerRect(16,16,4,4,0).
+        Rect::new(
+            self.bounds.x + self.bounds.width as i32 - 20,
+            self.bounds.y + 4,
+            16,
+            16,
+        )
+    }
+
     fn item_rect(&self, index: usize) -> Option<Rect> {
         let row = index.checked_sub(self.scroll)?;
         (row < self.lines as usize).then(|| {
@@ -1158,6 +1182,9 @@ pub struct IngameMenuGraphics {
     /// `Config.Graphics.ShowCommands` (C4Config.cpp:449) — draws the bottom
     /// command bar (C4Menu.cpp:851-880).
     pub show_commands: bool,
+    /// `C4Menu::HasMouse()` passed to `Dialog::SetTitle`: reserves and draws
+    /// the title-bar close button only for the controlling mouse player.
+    pub show_close_button: bool,
     /// `Config.Graphics.ShowCommandKeys` (C4Config.cpp:450) — key names on
     /// the command keys (C4ObjectCom.cpp:942-944).
     pub show_command_keys: bool,
@@ -1259,6 +1286,29 @@ fn draw_menu(
         // GetLeftIndent = bar height when an icon is set (C4Gui.h:560).
         icon_indent = layout.title_height;
     }
+    // WoodenLabel reserves 20px for the close button and clips its caption
+    // before Dialog draws Ico_Close (C4GuiDialogs.cpp:386-421).
+    let close_rect = layout.close_button_rect();
+    let text_right = if gfx.show_close_button {
+        close_rect.x
+    } else {
+        title_rect.x + title_rect.width as i32
+    };
+    let previous_clip = surface.clip();
+    let text_left = title_rect.x + icon_indent;
+    let title_clip = Rect::new(
+        text_left,
+        title_rect.y,
+        text_right.saturating_sub(text_left).max(0) as u32,
+        title_rect.height,
+    );
+    let nested_clip = previous_clip
+        .map(|clip| {
+            clip.intersection(title_clip)
+                .unwrap_or(Rect::new(0, 0, 0, 0))
+        })
+        .unwrap_or(title_clip);
+    surface.set_clip(nested_clip);
     // ALeft x offset +5, vertically centered -1 (C4GuiLabels.cpp:183-212).
     font.draw_with_gamma(
         surface,
@@ -1269,6 +1319,24 @@ fn draw_menu(
         TextAlign::Left,
         gamma,
     );
+    match previous_clip {
+        Some(clip) => surface.set_clip(clip),
+        None => surface.clear_clip(),
+    }
+    if gfx.show_close_button {
+        if let Some(gui_icons) = gfx.gui_icons.as_ref() {
+            let source_x = i32::from(ICO_CLOSE % 6) * 40;
+            let source_y = i32::from(ICO_CLOSE / 6) * 40;
+            draw_image_region_aspect(
+                surface,
+                gui_icons,
+                Rect::new(source_x, source_y, 40, 40),
+                close_rect,
+                false,
+                gamma,
+            );
+        }
+    }
 
     // Client area: items stacked vertically (C4Menu::UpdateElementPositions).
     let client_x = x0 + MN_FRAME_WIDTH;
@@ -2152,6 +2220,112 @@ mod tests {
         assert_eq!(layout.bounds.height as i32, expected_height);
         assert_eq!(layout.lines, 7);
         assert_eq!(layout.scroll, 0);
+    }
+
+    #[test]
+    fn mouse_close_button_uses_classic_title_geometry_and_icon_phase() {
+        // Dialog::SetTitle reserves GetToprightCornerRect(16,16,4,4) and
+        // assigns GUIIcons Ico_Close (phase 34) only when C4Menu::HasMouse
+        // (C4GuiDialogs.cpp:386-425; C4Menu.cpp:1270-1276).
+        use lc_graphics::BitmapFont;
+
+        let menu = IngameMenuState::main_menu(&MainMenuConditions::default()).expect("menu");
+        let font_backend = BitmapFont::new();
+        let font = HudFont::Fallback(&font_backend);
+        let area = Rect::new(0, 0, 640, 480);
+        let mut gui_icons = vec![0_u8; 240 * 240 * 4];
+        for y in 200..240 {
+            for x in 160..200 {
+                let offset = (y * 240 + x) * 4;
+                gui_icons[offset..offset + 4].copy_from_slice(&[17, 238, 51, 255]);
+            }
+        }
+        let gui_icons = ImageData::new(240, 240, gui_icons);
+        let gfx = IngameMenuGraphics {
+            gui_icons: Some(gui_icons.clone()),
+            show_close_button: true,
+            ..IngameMenuGraphics::default()
+        };
+        let layout = menu.layout(area, &font, &gfx);
+        let close = menu.close_button_rect(area, &font, &gfx);
+        assert_eq!(
+            close,
+            Rect::new(
+                layout.bounds.x + layout.bounds.width as i32 - 20,
+                layout.bounds.y + 4,
+                16,
+                16,
+            )
+        );
+        for point in [
+            GuiPoint::new(close.x as f32, close.y as f32),
+            GuiPoint::new(
+                (close.x + close.width as i32) as f32 - 0.5,
+                (close.y + close.height as i32) as f32 - 0.5,
+            ),
+        ] {
+            assert_eq!(
+                menu.pointer_target(area, &font, &gfx, point),
+                Some(IngameMenuPointerTarget::Close)
+            );
+        }
+        for point in [
+            GuiPoint::new((close.x + close.width as i32) as f32, close.y as f32),
+            GuiPoint::new(close.x as f32, (close.y + close.height as i32) as f32),
+        ] {
+            assert_eq!(
+                menu.pointer_target(area, &font, &gfx, point),
+                Some(IngameMenuPointerTarget::Background),
+                "the 16x16 close hitbox is half-open"
+            );
+        }
+
+        let center = (
+            (close.x + close.width as i32 / 2) as u32,
+            (close.y + close.height as i32 / 2) as u32,
+        );
+        let mut visible = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
+        menu.render(&mut visible, area, &font, None, &gfx);
+        let close_pixels = (0..visible.height())
+            .flat_map(|y| (0..visible.width()).map(move |x| (x, y)))
+            .filter(|&(x, y)| visible.get_pixel(x, y) == Some(Color::opaque(17, 238, 51)))
+            .collect::<Vec<_>>();
+        assert_eq!(close_pixels.len(), 16 * 16);
+        assert!(close_pixels.iter().all(|&(x, y)| {
+            x >= close.x as u32
+                && x < (close.x + close.width as i32) as u32
+                && y >= close.y as u32
+                && y < (close.y + close.height as i32) as u32
+        }));
+        assert_eq!(
+            visible.get_pixel(center.0, center.1),
+            Some(Color::opaque(17, 238, 51)),
+            "Ico_Close is phase 34 in the six-column 40px GUIIcons atlas"
+        );
+
+        let hidden_gfx = IngameMenuGraphics {
+            gui_icons: Some(gui_icons),
+            show_close_button: false,
+            ..IngameMenuGraphics::default()
+        };
+        let mut hidden = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
+        menu.render(&mut hidden, area, &font, None, &hidden_gfx);
+        assert!(
+            (0..hidden.height())
+                .flat_map(|y| (0..hidden.width()).map(move |x| (x, y)))
+                .all(|(x, y)| hidden.get_pixel(x, y) != Some(Color::opaque(17, 238, 51))),
+            "the same GUIIcons atlas must remain hidden when HasMouse=false"
+        );
+        assert_eq!(
+            menu.pointer_target(
+                area,
+                &font,
+                &hidden_gfx,
+                GuiPoint::new(center.0 as f32, center.1 as f32),
+            ),
+            Some(IngameMenuPointerTarget::Background),
+            "HasMouse=false removes the close control instead of leaving an invisible hitbox"
+        );
     }
 
     #[test]
