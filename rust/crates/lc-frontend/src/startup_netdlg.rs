@@ -15,6 +15,7 @@ use crate::classic_gui::{
     draw_facet_stretch, ClassicButtonState, ClassicGuiSkin,
 };
 use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
+use crate::message_dialog::break_message;
 use crate::startup_main_menu::{IntRect, StartupTooltip};
 use crate::{GuiPoint, ImageData, KeyCode};
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
@@ -28,14 +29,22 @@ use lc_gui::Rect as GuiRect;
 const CLR_YELLOW: [u8; 4] = [0xff, 0xff, 0x00, 0xff];
 /// C4GUI_CaptionFontClr / C4GUI_MessageFontClr.
 const CLR_WHITE: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
-const CLR_DISABLED: [u8; 4] = [0x7f, 0x7f, 0x7f, 0xff];
+const CLR_DISABLED: [u8; 4] = [0xaf, 0xaf, 0xaf, 0xff];
+const CLR_HYPERLINK: [u8; 4] = [0x80, 0x80, 0xff, 0xff];
 /// ListBox background / C4GUI_EditBGColor.
 const CLR_DARK_BG: u32 = 0x7f00_0000;
 const CLR_EDIT_SELECTION: u32 = 0x7f7f_7f00;
+const CLR_IMPORTANT_BG: u32 = 0xcf00_007f;
+const CLR_SELECTION: u32 = 0xafaf_0000;
 const SCROLLBAR_WIDTH: i32 = 16;
 const SCROLLBAR_PART: i32 = 16;
 const JOIN_EDIT_MAX_PAYLOAD: usize = 254;
 const EDIT_SCROLL_OFFSET: i32 = 2;
+const MAX_INFO_ICONS: usize = 10;
+const SCENARIO_ICON_COUNT: i32 = 52;
+const DEFAULT_SCENARIO_ICON_PHASE: i32 = 14;
+const EXPANDED_ROW_TOP_SPACING: i32 = 10;
+const COLLAPSED_ROW_TOP_SPACING: i32 = 5;
 
 /// The `Graphics.c4g` images `C4StartupNetDlg` draws (C4Startup.cpp:48,82-83;
 /// C4Gui.cpp:1087-1097).
@@ -44,6 +53,8 @@ pub struct NetDlgAssets {
     pub background: ImageData,
     /// `StartupNetGetRef.png` (2000x32): 50-phase animated query icon.
     pub net_get_ref: ImageData,
+    /// `StartupScenSelIcons.png` (1248x24): 52 scenario-icon phases.
+    pub scen_icons: ImageData,
     /// `GUICaption.png` (192x23): wooden caption bar, 3-slice border 32.
     pub gui_caption: ImageData,
     /// `GUIButton.png` (128x32): bottom button planks, 3-slice border 32.
@@ -54,6 +65,8 @@ pub struct NetDlgAssets {
     pub gui_button_highlight: ImageData,
     /// `GUIScroll.png` (32x48): classic vertical scrollbar facets.
     pub gui_scroll: ImageData,
+    /// `GUIIcons.png` (240x360): standard 40x40 icon grid, 6 columns.
+    pub gui_icons: ImageData,
     /// `GUIIcons2.png` (256x320): extended 64x64 icon grid, 4 columns.
     pub gui_icons_ex: ImageData,
 }
@@ -458,10 +471,99 @@ impl Default for NetDlgConfig {
     }
 }
 
+/// Top-right reference-state icons in native insertion order
+/// (`C4StartupNetListEntry::SetReference`, C4StartupNetDlg.cpp:467-490).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetDlgStatusIcon {
+    PasswordNeeded,
+    League,
+    LobbyActive,
+    Running,
+    RuntimeJoin,
+    FairCrew,
+    OfficialServer,
+}
+
+impl NetDlgStatusIcon {
+    /// `(extended_sheet, phase)` from `C4GUI::Icons`.
+    const fn source(self) -> (bool, u32) {
+        match self {
+            Self::PasswordNeeded => (true, 13),
+            Self::League => (true, 8),
+            Self::LobbyActive => (false, 31),
+            Self::Running => (false, 30),
+            Self::RuntimeJoin => (false, 32),
+            Self::FairCrew => (true, 2),
+            Self::OfficialServer => (false, 44),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NetDlgRowIcon {
+    #[default]
+    None,
+    /// Animated `StartupNetGetRef` reference query.
+    Query,
+    /// Static base frame of `StartupNetGetRef` for a completed query.
+    QueryStatic,
+    /// Standard `Ico_Close` (GUIIcons phase 34).
+    Error,
+    /// Raw `C4Network2Reference::Icon` phase from `StartupScenSelIcons`.
+    Scenario(i32),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetDlgTextLine {
+    Plain(String),
+    Hyperlink { label: String, url: String },
+}
+
+impl NetDlgTextLine {
+    fn text(&self) -> &str {
+        match self {
+            Self::Plain(text) | Self::Hyperlink { label: text, .. } => text,
+        }
+    }
+
+    fn hyperlink(&self) -> Option<&str> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Hyperlink { url, .. } => Some(url),
+        }
+    }
+}
+
+/// Stateful masterserver query row. Response metadata extends the two compact
+/// query lines without being flattened into the discovered-game list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetDlgMasterserverEntry {
+    pub title: String,
+    pub details: String,
+    pub extra_lines: Vec<NetDlgTextLine>,
+    pub row_icon: NetDlgRowIcon,
+}
+
+impl Default for NetDlgMasterserverEntry {
+    fn default() -> Self {
+        Self {
+            title: "Internet server on league.clonkspot.org".to_string(),
+            details: "Querying game infos...".to_string(),
+            extra_lines: Vec::new(),
+            row_icon: NetDlgRowIcon::Query,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NetDlgGameEntry {
     pub title: String,
     pub details: String,
+    /// Version, comment and player-name labels for resolved references.
+    pub extra_lines: Vec<String>,
+    /// At most the first ten icons are displayed, matching the native slots.
+    pub status_icons: Vec<NetDlgStatusIcon>,
+    pub row_icon: NetDlgRowIcon,
     pub address: Option<String>,
     pub joinable: bool,
 }
@@ -570,6 +672,7 @@ pub enum NetDlgAction {
         text: String,
         cut: bool,
     },
+    OpenUrl(String),
     GuiSound(NetDlgSound),
 }
 
@@ -902,6 +1005,7 @@ impl NetDlgEditState {
 /// (C4GuiButton.cpp:112-155), including keyboard activation.
 pub struct NetDlgController {
     metrics: NetDlgFontMetrics,
+    text_font: Option<ClonkFont>,
     width: i32,
     height: i32,
     config: NetDlgConfig,
@@ -912,6 +1016,7 @@ pub struct NetDlgController {
     hovered: Option<NetDlgControl>,
     pointer_pressed: Option<NetDlgControl>,
     key_pressed: Option<(NetDlgControl, KeyCode)>,
+    masterserver: NetDlgMasterserverEntry,
     games: Vec<NetDlgGameEntry>,
     selection: Option<NetDlgSelection>,
     list_scroll_y: i32,
@@ -927,10 +1032,28 @@ enum NetDlgSelection {
     Game(usize),
 }
 
+#[derive(Clone, Debug)]
+struct NetDlgLineLayout {
+    rect: IntRect,
+    text: String,
+    hyperlink: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct NetDlgRowLayout {
+    selection: NetDlgSelection,
+    rect: IntRect,
+    lines: Vec<NetDlgLineLayout>,
+    status_icons: Vec<NetDlgStatusIcon>,
+    row_icon: NetDlgRowIcon,
+    joinable: bool,
+}
+
 impl NetDlgController {
     pub fn new(config: NetDlgConfig, metrics: NetDlgFontMetrics) -> Self {
         Self {
             metrics,
+            text_font: None,
             width: 1,
             height: 1,
             config,
@@ -942,6 +1065,7 @@ impl NetDlgController {
             hovered: None,
             pointer_pressed: None,
             key_pressed: None,
+            masterserver: NetDlgMasterserverEntry::default(),
             games: Vec::new(),
             selection: None,
             list_scroll_y: 0,
@@ -958,6 +1082,14 @@ impl NetDlgController {
         self.hovered = self
             .pointer_position
             .and_then(|point| self.hit_button(point));
+        self.clamp_list_scroll();
+    }
+
+    /// Supplies the live text font used by `CStdFont::BreakMessage` row
+    /// wrapping. The constructor retains its metrics-only fallback so tests
+    /// and headless callers that cannot load GUI fonts remain usable.
+    pub fn set_text_font(&mut self, font: &ClonkFont) {
+        self.text_font = Some(font.clone());
         self.clamp_list_scroll();
     }
 
@@ -1113,6 +1245,15 @@ impl NetDlgController {
         self.clamp_list_scroll();
     }
 
+    pub fn set_masterserver_entry(&mut self, entry: NetDlgMasterserverEntry) {
+        self.masterserver = entry;
+        self.clamp_list_scroll();
+    }
+
+    pub fn masterserver_entry(&self) -> &NetDlgMasterserverEntry {
+        &self.masterserver
+    }
+
     pub fn games(&self) -> &[NetDlgGameEntry] {
         &self.games
     }
@@ -1154,6 +1295,10 @@ impl NetDlgController {
     /// Maximum displacement for the current rows and viewport.
     pub fn list_max_scroll(&self) -> i32 {
         self.max_list_scroll(&self.layout())
+    }
+
+    pub fn list_is_collapsed(&self) -> bool {
+        self.list_is_collapsed_with_font(&self.layout(), self.text_font.as_ref())
     }
 
     /// Adds text received from the windowing layer while the IP edit owns
@@ -1410,8 +1555,13 @@ impl NetDlgController {
                 actions
             }
             Some(NetDlgControl::GameList) => {
+                let hyperlink = self.hyperlink_at(position, &layout);
                 self.select_list_row(position);
-                self.change_focus(NetDlgControl::GameList)
+                let mut actions = self.change_focus(NetDlgControl::GameList);
+                if let Some(url) = hyperlink {
+                    actions.push(NetDlgAction::OpenUrl(url));
+                }
+                actions
             }
             _ => Vec::new(),
         }
@@ -1872,17 +2022,27 @@ impl NetDlgController {
         if !contains(layout.list_viewport, position) {
             return None;
         }
-        let row = ((position.y as i32 - layout.list_viewport.y + self.list_scroll_y)
-            / layout.list_entry.h) as usize;
-        if self.config.masterserver_signup {
-            if row == 0 {
-                Some(NetDlgSelection::Masterserver)
-            } else {
-                (row - 1 < self.games.len()).then_some(NetDlgSelection::Game(row - 1))
-            }
-        } else {
-            (row < self.games.len()).then_some(NetDlgSelection::Game(row))
+        let content_y = position.y as i32 - layout.list_viewport.y + self.list_scroll_y;
+        self.row_layouts(&layout)
+            .into_iter()
+            .find(|row| {
+                let top = row.rect.y - layout.list_viewport.y;
+                content_y >= top && content_y < top.saturating_add(row.rect.h)
+            })
+            .map(|row| row.selection)
+    }
+
+    fn hyperlink_at(&self, position: GuiPoint, layout: &NetDlgLayout) -> Option<String> {
+        if !contains(layout.list_viewport, position) {
+            return None;
         }
+        self.row_layouts(layout)
+            .into_iter()
+            .flat_map(|row| row.lines)
+            .find_map(|line| {
+                let hyperlink = line.hyperlink?;
+                contains(offset(line.rect, 0, -self.list_scroll_y), position).then_some(hyperlink)
+            })
     }
 
     fn move_game_selection(&mut self, forward: bool) {
@@ -1918,14 +2078,208 @@ impl NetDlgController {
         }
     }
 
-    fn list_row_count(&self) -> usize {
-        self.games.len() + usize::from(self.config.masterserver_signup)
+    fn list_content_height(&self, layout: &NetDlgLayout) -> i32 {
+        self.row_layouts(layout)
+            .last()
+            .map_or(0, |row| row.rect.y + row.rect.h - layout.list_viewport.y)
     }
 
-    fn list_content_height(&self, layout: &NetDlgLayout) -> i32 {
-        i32::try_from(self.list_row_count())
-            .unwrap_or(i32::MAX)
-            .saturating_mul(layout.list_entry.h)
+    fn row_layouts(&self, layout: &NetDlgLayout) -> Vec<NetDlgRowLayout> {
+        self.row_layouts_with_font(layout, self.text_font.as_ref())
+    }
+
+    fn list_is_collapsed_with_font(&self, layout: &NetDlgLayout, font: Option<&ClonkFont>) -> bool {
+        let mut expanded_height = 0_i32;
+        let mut has_previous = false;
+        if self.config.masterserver_signup {
+            expanded_height = expanded_height.saturating_add(
+                self.layout_row(
+                    layout,
+                    font,
+                    NetDlgSelection::Masterserver,
+                    layout.list_viewport.y,
+                    self.masterserver_lines(),
+                    &[],
+                    self.masterserver.row_icon,
+                    true,
+                    false,
+                )
+                .rect
+                .h,
+            );
+            has_previous = true;
+        }
+        for (index, game) in self.games.iter().enumerate() {
+            if has_previous {
+                expanded_height = expanded_height.saturating_add(EXPANDED_ROW_TOP_SPACING);
+            }
+            expanded_height = expanded_height.saturating_add(
+                self.layout_row(
+                    layout,
+                    font,
+                    NetDlgSelection::Game(index),
+                    layout.list_viewport.y,
+                    Self::game_lines(game),
+                    &game.status_icons,
+                    game.row_icon,
+                    game.joinable,
+                    false,
+                )
+                .rect
+                .h,
+            );
+            has_previous = true;
+        }
+        expanded_height > layout.list_viewport.h
+    }
+
+    fn row_layouts_with_font(
+        &self,
+        layout: &NetDlgLayout,
+        font: Option<&ClonkFont>,
+    ) -> Vec<NetDlgRowLayout> {
+        let collapsed = self.list_is_collapsed_with_font(layout, font);
+        let mut rows =
+            Vec::with_capacity(self.games.len() + usize::from(self.config.masterserver_signup));
+        let mut y = layout.list_viewport.y;
+        let mut has_previous = false;
+        if self.config.masterserver_signup {
+            let master_selection = NetDlgSelection::Masterserver;
+            let master_collapsed =
+                collapsed && self.selection.is_some() && self.selection != Some(master_selection);
+            let row = self.layout_row(
+                layout,
+                font,
+                master_selection,
+                y,
+                self.masterserver_lines(),
+                &[],
+                self.masterserver.row_icon,
+                true,
+                master_collapsed,
+            );
+            y = y.saturating_add(row.rect.h);
+            rows.push(row);
+            has_previous = true;
+        }
+        for (index, game) in self.games.iter().enumerate() {
+            let selection = NetDlgSelection::Game(index);
+            let row_collapsed = collapsed && self.selection != Some(selection);
+            if has_previous {
+                y = y.saturating_add(if row_collapsed {
+                    COLLAPSED_ROW_TOP_SPACING
+                } else {
+                    EXPANDED_ROW_TOP_SPACING
+                });
+            }
+            let row = self.layout_row(
+                layout,
+                font,
+                selection,
+                y,
+                Self::game_lines(game),
+                &game.status_icons,
+                game.row_icon,
+                game.joinable,
+                row_collapsed,
+            );
+            y = y.saturating_add(row.rect.h);
+            rows.push(row);
+            has_previous = true;
+        }
+        rows
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layout_row(
+        &self,
+        layout: &NetDlgLayout,
+        font: Option<&ClonkFont>,
+        selection: NetDlgSelection,
+        y: i32,
+        mut lines: Vec<NetDlgTextLine>,
+        status_icons: &[NetDlgStatusIcon],
+        row_icon: NetDlgRowIcon,
+        joinable: bool,
+        collapsed: bool,
+    ) -> NetDlgRowLayout {
+        lines.truncate(if collapsed { 2 } else { 5 });
+        let status_icons = status_icons
+            .iter()
+            .copied()
+            .take(MAX_INFO_ICONS)
+            .collect::<Vec<_>>();
+        let label_x = layout.entry_labels[0].x;
+        let label_width = layout.entry_labels[0].w;
+        let mut line_y = y.saturating_add(1);
+        let mut line_layouts = Vec::with_capacity(lines.len());
+        for (index, line) in lines.into_iter().enumerate() {
+            let width = if index == 0 {
+                label_width
+                    .saturating_sub(
+                        self.metrics
+                            .text_line_height
+                            .saturating_mul(i32::try_from(status_icons.len()).unwrap_or(i32::MAX)),
+                    )
+                    .max(1)
+            } else {
+                label_width.max(1)
+            };
+            let text = font.map_or_else(
+                || line.text().to_string(),
+                |font| break_message(font, line.text(), width),
+            );
+            let text_height = font
+                .map(|font| font.measure(&text, true).1)
+                .unwrap_or(self.metrics.text_line_height)
+                .max(self.metrics.text_line_height);
+            line_layouts.push(NetDlgLineLayout {
+                rect: IntRect {
+                    x: label_x,
+                    y: line_y,
+                    w: width,
+                    h: text_height,
+                },
+                text,
+                hyperlink: line.hyperlink().map(ToOwned::to_owned),
+            });
+            line_y = line_y.saturating_add(text_height).saturating_add(2);
+        }
+        let row_height = line_y
+            .saturating_sub(y)
+            .saturating_sub(1)
+            .max(layout.list_entry.h);
+        NetDlgRowLayout {
+            selection,
+            rect: IntRect {
+                x: layout.list_entry.x,
+                y,
+                w: layout.list_entry.w,
+                h: row_height,
+            },
+            lines: line_layouts,
+            status_icons,
+            row_icon,
+            joinable,
+        }
+    }
+
+    fn masterserver_lines(&self) -> Vec<NetDlgTextLine> {
+        let mut lines = vec![
+            NetDlgTextLine::Plain(self.masterserver.title.clone()),
+            NetDlgTextLine::Plain(self.masterserver.details.clone()),
+        ];
+        lines.extend(self.masterserver.extra_lines.iter().cloned());
+        lines
+    }
+
+    fn game_lines(game: &NetDlgGameEntry) -> Vec<NetDlgTextLine> {
+        let mut lines = vec![
+            NetDlgTextLine::Plain(game.title.clone()),
+            NetDlgTextLine::Plain(game.details.clone()),
+        ];
+        lines.extend(game.extra_lines.iter().cloned().map(NetDlgTextLine::Plain));
+        lines
     }
 
     fn max_list_scroll(&self, layout: &NetDlgLayout) -> i32 {
@@ -2018,24 +2372,19 @@ impl NetDlgController {
         }
     }
 
-    fn selected_row(&self) -> Option<usize> {
-        match self.selection {
-            Some(NetDlgSelection::Masterserver) => Some(0),
-            Some(NetDlgSelection::Game(index)) => {
-                Some(index + usize::from(self.config.masterserver_signup))
-            }
-            None => None,
-        }
-    }
-
     fn ensure_selection_visible(&mut self, layout: &NetDlgLayout) {
-        let Some(row) = self.selected_row() else {
+        let Some(selection) = self.selection else {
             return;
         };
-        let top = i32::try_from(row)
-            .unwrap_or(i32::MAX)
-            .saturating_mul(layout.list_entry.h);
-        let bottom = top.saturating_add(layout.list_entry.h);
+        let Some(row) = self
+            .row_layouts(layout)
+            .into_iter()
+            .find(|row| row.selection == selection)
+        else {
+            return;
+        };
+        let top = row.rect.y - layout.list_viewport.y;
+        let bottom = top.saturating_add(row.rect.h);
         if self.list_scroll_y > top {
             self.list_scroll_y = top;
         } else if self.list_scroll_y + layout.list_viewport.h < bottom {
@@ -2378,100 +2727,97 @@ impl NetDlgScreen {
             let scroll_y = controller.map_or(0, |state| state.list_scroll_y);
             let row_visible =
                 |rect: IntRect| rect.y < viewport.y + viewport.h && rect.y + rect.h > viewport.y;
-            let mut row = 0_i32;
-            if config.masterserver_signup {
-                let dy = -scroll_y;
-                let row_rect = offset(layout.list_entry, 0, dy);
-                if row_visible(row_rect) {
-                    if controller
-                        .is_some_and(|state| state.selection == Some(NetDlgSelection::Masterserver))
-                    {
-                        draw_engine_box(
-                            surface,
-                            row_rect.x,
-                            row_rect.y,
-                            row_rect.x + row_rect.w - 1,
-                            row_rect.y + row_rect.h - 1,
-                            0xafaf_0000,
-                            gamma,
-                        );
-                    }
-                    // The masterserver query entry: animated NetGetRef icon,
-                    // aspect-fit 40x32 -> 48x38 (C4StartupNetDlg.cpp:144-160).
-                    let phase = net_get_ref_phase(&assets.net_get_ref, get_ref_phase);
-                    crate::draw_image_bilinear(
+            let fallback_controller;
+            let row_state = match controller {
+                Some(controller) => controller,
+                None => {
+                    fallback_controller = NetDlgController::new(config, metrics);
+                    &fallback_controller
+                }
+            };
+            for row in row_state.row_layouts_with_font(&layout, Some(&fonts.text)) {
+                let row_rect = offset(row.rect, 0, -scroll_y);
+                if !row_visible(row_rect) {
+                    continue;
+                }
+                let selected = controller
+                    .is_some_and(|controller| controller.selection == Some(row.selection));
+                let official = row.status_icons.contains(&NetDlgStatusIcon::OfficialServer);
+                if selected {
+                    draw_engine_box(
                         surface,
-                        &gui_rect(offset(layout.entry_icon, 0, dy)),
-                        &phase,
+                        row_rect.x,
+                        row_rect.y,
+                        row_rect.x + row_rect.w - 1,
+                        row_rect.y + row_rect.h - 1,
+                        CLR_SELECTION,
                         gamma,
                     );
-                    let entry_texts = [
-                        "Internet server on league.clonkspot.org",
-                        "Querying game infos...",
-                    ];
-                    for (rect, text) in layout
-                        .entry_labels
-                        .iter()
-                        .map(|rect| offset(*rect, 0, dy))
-                        .zip(entry_texts)
-                    {
-                        fonts.text.draw_with_gamma(
-                            surface,
-                            rect.x,
-                            rect.y,
-                            text,
-                            CLR_WHITE,
-                            TextAlign::Left,
-                            true,
-                            gamma,
-                        );
-                    }
+                } else if official {
+                    // C4StartupNetListEntry::DrawElement uses the native
+                    // inclusive endpoint quirk (`x + Wdt`, `y + Hgt`).
+                    draw_engine_box(
+                        surface,
+                        row_rect.x,
+                        row_rect.y,
+                        row_rect.x + row_rect.w,
+                        row_rect.y + row_rect.h,
+                        CLR_IMPORTANT_BG,
+                        gamma,
+                    );
                 }
-                row += 1;
-            }
 
-            if let Some(controller) = controller {
-                for (index, game) in controller.games().iter().enumerate() {
-                    let dy = row * layout.list_entry.h - scroll_y;
-                    let row_rect = offset(layout.list_entry, 0, dy);
-                    if !row_visible(row_rect) {
-                        row += 1;
-                        continue;
-                    }
-                    if controller.selection == Some(NetDlgSelection::Game(index)) {
-                        draw_engine_box(
-                            surface,
-                            row_rect.x,
-                            row_rect.y,
-                            row_rect.x + row_rect.w - 1,
-                            row_rect.y + row_rect.h - 1,
-                            0xafaf_0000,
-                            gamma,
-                        );
-                    }
-                    let color = if game.joinable {
-                        CLR_WHITE
-                    } else {
-                        CLR_DISABLED
+                Self::draw_row_icon(
+                    surface,
+                    assets,
+                    row_rect,
+                    row.row_icon,
+                    get_ref_phase,
+                    gamma,
+                );
+                for (index, icon) in row.status_icons.iter().copied().enumerate() {
+                    let size = metrics.text_line_height;
+                    let icon_rect = IntRect {
+                        x: row_rect.x + row_rect.w
+                            - size * (i32::try_from(index).unwrap_or(i32::MAX) + 1),
+                        y: row_rect.y,
+                        w: size,
+                        h: size,
                     };
-                    for (rect, text) in layout
-                        .entry_labels
-                        .iter()
-                        .map(|rect| offset(*rect, 0, dy))
-                        .zip([game.title.as_str(), game.details.as_str()])
-                    {
-                        fonts.text.draw_with_gamma(
+                    Self::draw_status_icon(surface, assets, icon_rect, icon, gamma);
+                }
+
+                let ordinary_color = if row.joinable {
+                    CLR_WHITE
+                } else {
+                    CLR_DISABLED
+                };
+                for line in row.lines {
+                    let rect = offset(line.rect, 0, -scroll_y);
+                    let color = if line.hyperlink.is_some() {
+                        CLR_HYPERLINK
+                    } else {
+                        ordinary_color
+                    };
+                    fonts.text.draw_with_gamma(
+                        surface,
+                        rect.x,
+                        rect.y,
+                        &line.text,
+                        color,
+                        TextAlign::Left,
+                        true,
+                        gamma,
+                    );
+                    if line.hyperlink.is_some() {
+                        Self::draw_hyperlink_underline(
                             surface,
-                            rect.x,
-                            rect.y,
-                            text,
-                            color,
-                            TextAlign::Left,
-                            true,
+                            &fonts.text,
+                            rect,
+                            &line.text,
                             gamma,
                         );
                     }
-                    row += 1;
                 }
             }
 
@@ -2642,6 +2988,138 @@ impl NetDlgScreen {
                 gamma,
             );
         }
+    }
+
+    fn draw_row_icon(
+        surface: &mut Surface,
+        assets: &NetDlgAssets,
+        row: IntRect,
+        icon: NetDlgRowIcon,
+        get_ref_phase: u32,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let large_size = row.h.min(48).max(0);
+        match icon {
+            NetDlgRowIcon::None => {}
+            NetDlgRowIcon::Query => {
+                let phase = net_get_ref_phase(&assets.net_get_ref, get_ref_phase);
+                let fitted_height = 32 * large_size / 40;
+                crate::draw_image_bilinear(
+                    surface,
+                    &gui_rect(IntRect {
+                        x: row.x,
+                        y: row.y + (large_size - fitted_height) / 2,
+                        w: large_size,
+                        h: fitted_height,
+                    }),
+                    &phase,
+                    gamma,
+                );
+            }
+            NetDlgRowIcon::QueryStatic => {
+                let phase = net_get_ref_phase(&assets.net_get_ref, 0);
+                let fitted_height = 32 * large_size / 40;
+                crate::draw_image_bilinear(
+                    surface,
+                    &gui_rect(IntRect {
+                        x: row.x,
+                        y: row.y + (large_size - fitted_height) / 2,
+                        w: large_size,
+                        h: fitted_height,
+                    }),
+                    &phase,
+                    gamma,
+                );
+            }
+            NetDlgRowIcon::Error => {
+                let small_size = large_size * 2 / 3;
+                Self::draw_icon_phase(
+                    surface,
+                    &assets.gui_icons,
+                    40,
+                    34,
+                    IntRect {
+                        x: row.x + (large_size - small_size) / 2,
+                        y: row.y + (large_size - small_size) / 2,
+                        w: small_size,
+                        h: small_size,
+                    },
+                    gamma,
+                );
+            }
+            NetDlgRowIcon::Scenario(raw_phase) => {
+                let phase = if (0..SCENARIO_ICON_COUNT).contains(&raw_phase) {
+                    raw_phase
+                } else {
+                    DEFAULT_SCENARIO_ICON_PHASE
+                };
+                let small_size = large_size * 2 / 3;
+                Self::draw_icon_phase(
+                    surface,
+                    &assets.scen_icons,
+                    24,
+                    phase as u32,
+                    IntRect {
+                        x: row.x + (large_size - small_size) / 2,
+                        y: row.y + (large_size - small_size) / 2,
+                        w: small_size,
+                        h: small_size,
+                    },
+                    gamma,
+                );
+            }
+        }
+    }
+
+    fn draw_status_icon(
+        surface: &mut Surface,
+        assets: &NetDlgAssets,
+        rect: IntRect,
+        icon: NetDlgStatusIcon,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let (extended, phase) = icon.source();
+        let (image, cell) = if extended {
+            (&assets.gui_icons_ex, 64)
+        } else {
+            (&assets.gui_icons, 40)
+        };
+        Self::draw_icon_phase(surface, image, cell, phase, rect, gamma);
+    }
+
+    fn draw_icon_phase(
+        surface: &mut Surface,
+        image: &ImageData,
+        cell: u32,
+        phase: u32,
+        rect: IntRect,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let columns = (image.width() / cell).max(1);
+        let source_x = phase % columns * cell;
+        let source_y = phase / columns * cell;
+        draw_facet_stretch(
+            surface,
+            image,
+            (source_x as f32, source_y as f32, cell as f32, cell as f32),
+            (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
+            gamma,
+        );
+    }
+
+    fn draw_hyperlink_underline(
+        surface: &mut Surface,
+        font: &ClonkFont,
+        rect: IntRect,
+        text: &str,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let (width, height) = font.measure(text, true);
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let y = rect.y + height - 2;
+        draw_engine_box(surface, rect.x, y, rect.x + width, y, 0x0080_80ff, gamma);
     }
 
     fn draw_scrollbar(
@@ -2884,6 +3362,7 @@ mod tests {
                 details: format!("Lobby {index:02} — Host"),
                 address: Some(format!("203.0.113.{index}:11112")),
                 joinable: true,
+                ..NetDlgGameEntry::default()
             })
             .collect()
     }
@@ -2903,6 +3382,446 @@ mod tests {
             .handle_pointer_down(point, text_font())
             .is_empty());
         controller.handle_pointer_up(point, text_font())
+    }
+
+    fn net_assets() -> NetDlgAssets {
+        let load = crate::test_support::load_graphics_png;
+        NetDlgAssets {
+            background: load("StartupNetworkBG.png"),
+            net_get_ref: load("StartupNetGetRef.png"),
+            scen_icons: load("StartupScenSelIcons.png"),
+            gui_caption: load("GUICaption.png"),
+            gui_button: load("GUIButton.png"),
+            gui_button_down: load("GUIButtonDown.png"),
+            gui_button_highlight: load("GUIButtonHighlight.png"),
+            gui_scroll: load("GUIScroll.png"),
+            gui_icons: load("GUIIcons.png"),
+            gui_icons_ex: load("GUIIcons2.png"),
+        }
+    }
+
+    fn rich_game(index: usize) -> NetDlgGameEntry {
+        NetDlgGameEntry {
+            title: format!("Round {index} on Host"),
+            details: "2/4 players - Capture the flag - Running - 01:02:03".into(),
+            extra_lines: vec![
+                "Engine version: 4.9.11.0 [362]".into(),
+                "Comment: Exact reference presentation".into(),
+                "Player: Alice, Bob".into(),
+            ],
+            address: Some(format!("203.0.113.{index}:11112")),
+            joinable: true,
+            ..NetDlgGameEntry::default()
+        }
+    }
+
+    #[test]
+    fn resolved_row_wraps_five_info_lines_and_maps_every_status_icon() {
+        let fonts = endeavour_font_set();
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        controller.set_text_font(&fonts.text);
+        controller.resize(1280, 720);
+        let statuses = vec![
+            NetDlgStatusIcon::PasswordNeeded,
+            NetDlgStatusIcon::League,
+            NetDlgStatusIcon::LobbyActive,
+            NetDlgStatusIcon::Running,
+            NetDlgStatusIcon::RuntimeJoin,
+            NetDlgStatusIcon::FairCrew,
+            NetDlgStatusIcon::OfficialServer,
+        ];
+        let mut game = rich_game(0);
+        game.extra_lines[2] = format!("Player: {}", "Long player name ".repeat(80));
+        game.status_icons = statuses.clone();
+        controller.set_games(vec![game]);
+
+        let layout = controller.layout();
+        let rows = controller.row_layouts(&layout);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].lines.len(), 5);
+        assert!(rows[0].lines[4].rect.h > metrics().text_line_height);
+        assert_eq!(rows[0].status_icons, statuses);
+        assert_eq!(
+            rows[0].lines[0].rect.w,
+            layout.entry_labels[0].w - 7 * metrics().text_line_height
+        );
+        assert_eq!(
+            rows[0]
+                .status_icons
+                .iter()
+                .copied()
+                .map(NetDlgStatusIcon::source)
+                .collect::<Vec<_>>(),
+            vec![
+                (true, 13),
+                (true, 8),
+                (false, 31),
+                (false, 30),
+                (false, 32),
+                (true, 2),
+                (false, 44),
+            ]
+        );
+
+        let assets = net_assets();
+        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
+        let row_text = surface
+            .take_clonk_text_capture()
+            .into_iter()
+            .map(|command| command.text)
+            .filter(|text| {
+                text.starts_with("Round ")
+                    || text.starts_with("2/4 players")
+                    || text.starts_with("Engine version")
+                    || text.starts_with("Comment:")
+                    || text.starts_with("Player:")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(row_text.len(), 5);
+        assert!(row_text[4].contains('\n'));
+    }
+
+    #[test]
+    fn overflowing_expanded_rows_collapse_except_selection_and_remain_hittable() {
+        let fonts = endeavour_font_set();
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        controller.set_text_font(&fonts.text);
+        controller.resize(1280, 720);
+        controller.set_games((0..6).map(rich_game).collect());
+        let layout = controller.layout();
+
+        assert!(controller.list_is_collapsed());
+        assert_eq!(
+            controller
+                .row_layouts(&layout)
+                .iter()
+                .map(|row| row.rect.h)
+                .collect::<Vec<_>>(),
+            vec![48; 6]
+        );
+        assert_eq!(controller.list_max_scroll(), 0);
+
+        assert!(controller.focus_game(2).is_empty());
+        let rows = controller.row_layouts(&layout);
+        assert_eq!(
+            rows.iter().map(|row| row.rect.h).collect::<Vec<_>>(),
+            vec![48, 48, 120, 48, 48, 48]
+        );
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(
+                controller.game_index_at(GuiPoint::new(
+                    (row.rect.x + 2) as f32,
+                    (row.rect.y + row.rect.h - 2) as f32,
+                )),
+                Some(index)
+            );
+        }
+
+        controller.set_games((0..10).map(rich_game).collect());
+        assert!(controller.list_max_scroll() > 0);
+        assert!(controller.focus_game(9).is_empty());
+        assert_eq!(controller.selected_game(), Some(9));
+        assert_eq!(
+            controller.list_scroll_offset(),
+            controller.list_max_scroll()
+        );
+
+        let mut with_master = NetDlgController::new(NetDlgConfig::default(), metrics());
+        with_master.set_text_font(&fonts.text);
+        with_master.resize(1280, 720);
+        with_master.set_masterserver_entry(NetDlgMasterserverEntry {
+            title: "Masterserver".into(),
+            details: "Six games".into(),
+            extra_lines: vec![
+                NetDlgTextLine::Plain("MOTD".into()),
+                NetDlgTextLine::Plain("News".into()),
+                NetDlgTextLine::Plain("Status".into()),
+            ],
+            row_icon: NetDlgRowIcon::None,
+        });
+        with_master.set_games((0..6).map(rich_game).collect());
+        let master_layout = with_master.layout();
+        assert_eq!(with_master.row_layouts(&master_layout)[0].rect.h, 120);
+        assert!(with_master.focus_game(2).is_empty());
+        let selected_rows = with_master.row_layouts(&master_layout);
+        assert_eq!(
+            selected_rows[0].rect.h, 48,
+            "selected game collapses master"
+        );
+        assert_eq!(selected_rows[3].rect.h, 120, "selected game stays expanded");
+    }
+
+    #[test]
+    fn native_row_top_spacing_drives_collapse_scroll_and_gap_hit_testing() {
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        controller.resize(1280, 720);
+        controller.set_games(games(10));
+        let layout = controller.layout();
+
+        // Fully expanded this is 10*48 + 9*10 = 570, so a 490px viewport
+        // enters collapsed mode. Collapsed it is 10*48 + 9*5 = 525.
+        assert_eq!(layout.list_viewport.h, 490);
+        assert!(controller.list_is_collapsed());
+        assert_eq!(controller.list_max_scroll(), 35);
+        let rows = controller.row_layouts(&layout);
+        assert_eq!(rows[1].rect.y - (rows[0].rect.y + rows[0].rect.h), 5);
+
+        let gap = GuiPoint::new(
+            (layout.list_viewport.x + 4) as f32,
+            (rows[0].rect.y + rows[0].rect.h + 2) as f32,
+        );
+        assert_eq!(controller.game_index_at(gap), None);
+        assert!(controller
+            .handle_pointer_down(gap, text_font())
+            .is_empty());
+        assert_eq!(controller.selected_game(), None);
+
+        assert!(controller.focus_game(1).is_empty());
+        let selected_rows = controller.row_layouts(&layout);
+        assert_eq!(
+            selected_rows[1].rect.y - (selected_rows[0].rect.y + selected_rows[0].rect.h),
+            10,
+            "an expanded selected row uses the native 10px top spacing"
+        );
+        assert_eq!(
+            selected_rows[2].rect.y - (selected_rows[1].rect.y + selected_rows[1].rect.h),
+            5,
+            "the following collapsed row uses the native 5px top spacing"
+        );
+    }
+
+    #[test]
+    fn masterserver_reply_renders_count_motd_and_link_and_link_activates() {
+        let fonts = endeavour_font_set();
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.set_text_font(&fonts.text);
+        controller.resize(1280, 720);
+        controller.set_masterserver_entry(NetDlgMasterserverEntry {
+            title: "Internet server on league.example".into(),
+            details: "3 game(s) found, 7 players online.".into(),
+            extra_lines: vec![
+                NetDlgTextLine::Plain("Message of the day: Welcome".into()),
+                NetDlgTextLine::Hyperlink {
+                    label: "https://league.example/news".into(),
+                    url: "https://league.example/news".into(),
+                },
+            ],
+            row_icon: NetDlgRowIcon::None,
+        });
+
+        let layout = controller.layout();
+        let rows = controller.row_layouts(&layout);
+        assert_eq!(rows[0].rect.h, 96);
+        assert_eq!(rows[0].lines.len(), 4);
+        let link = rows[0].lines[3].rect;
+        assert_eq!(
+            controller.handle_pointer_down(
+                GuiPoint::new((link.x + 2) as f32, (link.y + 2) as f32),
+                text_font(),
+            ),
+            vec![NetDlgAction::OpenUrl("https://league.example/news".into())]
+        );
+
+        let assets = net_assets();
+        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
+        let captured = surface
+            .take_clonk_text_capture()
+            .into_iter()
+            .map(|command| command.text)
+            .collect::<Vec<_>>();
+        for expected in [
+            "Internet server on league.example",
+            "3 game(s) found, 7 players online.",
+            "Message of the day: Welcome",
+            "https://league.example/news",
+        ] {
+            assert!(captured.iter().any(|text| text == expected), "{expected}");
+        }
+    }
+
+    #[test]
+    fn official_unselected_row_uses_important_background_but_selection_wins() {
+        let fonts = endeavour_font_set();
+        let assets = net_assets();
+        let config = NetDlgConfig {
+            masterserver_signup: false,
+            ..NetDlgConfig::default()
+        };
+        let render = |official: bool, selected: bool| {
+            let mut controller = NetDlgController::new(config, metrics());
+            controller.set_text_font(&fonts.text);
+            controller.resize(1280, 720);
+            let mut game = rich_game(0);
+            if official {
+                game.status_icons.push(NetDlgStatusIcon::OfficialServer);
+            }
+            controller.set_games(vec![game]);
+            if selected {
+                let _ = controller.focus_game(0);
+            }
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
+            surface
+        };
+        let layout = net_dlg_layout(1280, 720, &metrics());
+        let sample = (layout.list_entry.x + 2, layout.list_entry.y + 2);
+        let ordinary = render(false, false);
+        let official = render(true, false);
+        assert_ne!(
+            ordinary.get_pixel(sample.0 as u32, sample.1 as u32),
+            official.get_pixel(sample.0 as u32, sample.1 as u32)
+        );
+        let ordinary_selected = render(false, true);
+        let official_selected = render(true, true);
+        assert_eq!(
+            ordinary_selected.get_pixel(sample.0 as u32, sample.1 as u32),
+            official_selected.get_pixel(sample.0 as u32, sample.1 as u32)
+        );
+    }
+
+    #[test]
+    fn row_icons_use_native_query_error_and_scenario_sources() {
+        let fonts = endeavour_font_set();
+        let assets = net_assets();
+        let config = NetDlgConfig {
+            masterserver_signup: false,
+            ..NetDlgConfig::default()
+        };
+        let render = |icon, phase| {
+            let mut controller = NetDlgController::new(config, metrics());
+            controller.set_text_font(&fonts.text);
+            controller.resize(1280, 720);
+            controller.set_games(vec![NetDlgGameEntry {
+                title: "Direct join on example.test".into(),
+                details: "Query status".into(),
+                row_icon: icon,
+                ..NetDlgGameEntry::default()
+            }]);
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            NetDlgScreen::render_controller(
+                &mut surface,
+                &assets,
+                &fonts,
+                None,
+                &controller,
+                phase,
+            );
+            surface
+        };
+        let query_0 = render(NetDlgRowIcon::Query, 0);
+        let query_1 = render(NetDlgRowIcon::Query, 1);
+        let query_static_0 = render(NetDlgRowIcon::QueryStatic, 0);
+        let query_static_1 = render(NetDlgRowIcon::QueryStatic, 1);
+        let error_0 = render(NetDlgRowIcon::Error, 0);
+        let error_1 = render(NetDlgRowIcon::Error, 1);
+        let scenario_0 = render(NetDlgRowIcon::Scenario(0), 0);
+        let scenario_0_later = render(NetDlgRowIcon::Scenario(0), 1);
+        let scenario_1 = render(NetDlgRowIcon::Scenario(1), 0);
+        let scenario_default = render(NetDlgRowIcon::Scenario(14), 0);
+        let scenario_negative = render(NetDlgRowIcon::Scenario(-1), 0);
+        let scenario_too_large = render(NetDlgRowIcon::Scenario(52), 0);
+        let no_icon = render(NetDlgRowIcon::None, 0);
+        let icon = net_dlg_layout(1280, 720, &metrics()).list_entry;
+        let icon_pixels = |surface: &Surface| {
+            (icon.y..icon.y + icon.h)
+                .flat_map(|y| (icon.x..icon.x + icon.h).map(move |x| (x, y)))
+                .map(|(x, y)| surface.get_pixel(x as u32, y as u32))
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(icon_pixels(&query_0), icon_pixels(&query_1));
+        assert_eq!(icon_pixels(&query_static_0), icon_pixels(&query_0));
+        assert_eq!(icon_pixels(&query_static_0), icon_pixels(&query_static_1));
+        assert_ne!(icon_pixels(&query_0), icon_pixels(&error_0));
+        assert_eq!(icon_pixels(&error_0), icon_pixels(&error_1));
+        assert_ne!(icon_pixels(&scenario_0), icon_pixels(&scenario_1));
+        assert_eq!(icon_pixels(&scenario_0), icon_pixels(&scenario_0_later));
+        assert_eq!(
+            icon_pixels(&scenario_default),
+            icon_pixels(&scenario_negative)
+        );
+        assert_eq!(
+            icon_pixels(&scenario_default),
+            icon_pixels(&scenario_too_large)
+        );
+
+        let small_icon = IntRect {
+            x: icon.x + 8,
+            y: icon.y + 8,
+            w: 32,
+            h: 32,
+        };
+        let changed = no_icon
+            .pixels()
+            .chunks_exact(4)
+            .zip(scenario_0.pixels().chunks_exact(4))
+            .enumerate()
+            .filter_map(|(index, (none, scenario))| (none != scenario).then_some(index))
+            .collect::<Vec<_>>();
+        assert!(!changed.is_empty());
+        assert!(changed.into_iter().all(|index| {
+            let x = i32::try_from(index % 1280).unwrap();
+            let y = i32::try_from(index / 1280).unwrap();
+            x >= small_icon.x
+                && x < small_icon.x + small_icon.w
+                && y >= small_icon.y
+                && y < small_icon.y + small_icon.h
+        }));
+    }
+
+    #[test]
+    fn disabled_reference_rows_use_native_inactive_message_color() {
+        let fonts = endeavour_font_set();
+        let assets = net_assets();
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        controller.set_text_font(&fonts.text);
+        controller.resize(1280, 720);
+        controller.set_games(vec![NetDlgGameEntry {
+            title: "Wrong version".into(),
+            details: "Engine version: 4.9.11.0 [363]".into(),
+            joinable: false,
+            ..NetDlgGameEntry::default()
+        }]);
+        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
+        let rows = surface
+            .take_clonk_text_capture()
+            .into_iter()
+            .filter(|command| {
+                command.text == "Wrong version" || command.text == "Engine version: 4.9.11.0 [363]"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|command| command.color == CLR_DISABLED));
+        assert_eq!(CLR_DISABLED, [0xaf, 0xaf, 0xaf, 0xff]);
     }
 
     // Callback buttons invoke their C4StartupNetDlg handlers only after a
@@ -3144,6 +4063,7 @@ mod tests {
             details: "Querying".into(),
             address: Some("example.test".into()),
             joinable: false,
+            ..NetDlgGameEntry::default()
         }]);
         assert!(controller.focus_game(0).is_empty());
         assert_eq!(
@@ -3445,12 +4365,14 @@ mod tests {
                 details: "Lobby — Host One".into(),
                 address: Some("203.0.113.10:11112".into()),
                 joinable: true,
+                ..NetDlgGameEntry::default()
             },
             NetDlgGameEntry {
                 title: "Wrong version".into(),
                 details: "LegacyClonk 4.9.11.0 [363]".into(),
                 address: Some("203.0.113.11:11112".into()),
                 joinable: false,
+                ..NetDlgGameEntry::default()
             },
         ]);
 
@@ -3483,12 +4405,14 @@ mod tests {
                 details: "Lobby".into(),
                 address: Some("203.0.113.10:11112".into()),
                 joinable: true,
+                ..NetDlgGameEntry::default()
             },
             NetDlgGameEntry {
                 title: "Runtime confirmation required".into(),
                 details: "Running".into(),
                 address: Some("203.0.113.11:11112".into()),
                 joinable: false,
+                ..NetDlgGameEntry::default()
             },
         ]);
         let layout = net_dlg_layout(1280, 720, &metrics());
@@ -3499,9 +4423,14 @@ mod tests {
 
         // Row zero is the masterserver query; the second discovered game is
         // therefore visual row two.
+        let second_game = controller
+            .row_layouts(&layout)
+            .into_iter()
+            .find(|row| row.selection == NetDlgSelection::Game(1))
+            .expect("second discovered game row");
         let point = GuiPoint::new(
-            (layout.list_viewport.x + 4) as f32,
-            (layout.list_viewport.y + layout.list_entry.h * 2 + 4) as f32,
+            (second_game.rect.x + 4) as f32,
+            (second_game.rect.y + 4) as f32,
         );
         assert_eq!(controller.game_index_at(point), Some(1));
         assert_eq!(
@@ -3540,7 +4469,7 @@ mod tests {
             (layout.list_viewport.y + 4) as f32,
         );
 
-        assert_eq!(controller.list_max_scroll(), 470);
+        assert_eq!(controller.list_max_scroll(), 565);
         assert!(controller.handle_wheel(point, -60).is_empty());
         assert_eq!(controller.list_scroll_offset(), 60);
         controller.handle_wheel(point, -10_000);
@@ -3558,7 +4487,8 @@ mod tests {
         controller.handle_wheel(scrollbar_point, -60);
         assert_eq!(controller.list_scroll_offset(), 0);
 
-        controller.handle_wheel(point, -96);
+        let third_row_top = controller.row_layouts(&layout)[2].rect.y - layout.list_viewport.y;
+        controller.handle_wheel(point, -third_row_top);
         assert!(controller
             .handle_pointer_down(point, text_font())
             .is_empty());
@@ -3581,8 +4511,13 @@ mod tests {
         for index in 0..20 {
             assert!(controller.handle_key_down(KeyCode::Down).is_empty());
             assert_eq!(controller.selected_game(), Some(index));
-            let top = index as i32 * layout.list_entry.h;
-            let bottom = top + layout.list_entry.h;
+            let row = controller
+                .row_layouts(&layout)
+                .into_iter()
+                .find(|row| row.selection == NetDlgSelection::Game(index))
+                .expect("selected row layout");
+            let top = row.rect.y - layout.list_viewport.y;
+            let bottom = top + row.rect.h;
             assert!(controller.list_scroll_offset() <= top);
             assert!(controller.list_scroll_offset() + layout.list_viewport.h >= bottom);
         }
@@ -3701,7 +4636,7 @@ mod tests {
         );
         controller.resize(1280, height);
         controller.set_games(games(4));
-        assert_eq!(controller.list_max_scroll(), 144);
+        assert_eq!(controller.list_max_scroll(), 159);
         let bottom_arrow = GuiPoint::new(
             (layout.list_scrollbar.x + 8) as f32,
             (layout.list_scrollbar.y + layout.list_scrollbar.h - 8) as f32,
@@ -3795,11 +4730,13 @@ mod tests {
         let assets = NetDlgAssets {
             background: load_graphics_png("StartupNetworkBG.png"),
             net_get_ref: load_graphics_png("StartupNetGetRef.png"),
+            scen_icons: load_graphics_png("StartupScenSelIcons.png"),
             gui_caption: load_graphics_png("GUICaption.png"),
             gui_button: load_graphics_png("GUIButton.png"),
             gui_button_down: load_graphics_png("GUIButtonDown.png"),
             gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
             gui_scroll: load_graphics_png("GUIScroll.png"),
+            gui_icons: load_graphics_png("GUIIcons.png"),
             gui_icons_ex: load_graphics_png("GUIIcons2.png"),
         };
         let fonts = endeavour_font_set();
@@ -3952,11 +4889,13 @@ mod tests {
         let assets = NetDlgAssets {
             background: load_graphics_png("StartupNetworkBG.png"),
             net_get_ref: load_graphics_png("StartupNetGetRef.png"),
+            scen_icons: load_graphics_png("StartupScenSelIcons.png"),
             gui_caption: load_graphics_png("GUICaption.png"),
             gui_button: load_graphics_png("GUIButton.png"),
             gui_button_down: load_graphics_png("GUIButtonDown.png"),
             gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
             gui_scroll: load_graphics_png("GUIScroll.png"),
+            gui_icons: load_graphics_png("GUIIcons.png"),
             gui_icons_ex: load_graphics_png("GUIIcons2.png"),
         };
         let fonts = endeavour_font_set();
@@ -4004,11 +4943,13 @@ mod tests {
         let assets = NetDlgAssets {
             background: load_graphics_png("StartupNetworkBG.png"),
             net_get_ref: load_graphics_png("StartupNetGetRef.png"),
+            scen_icons: load_graphics_png("StartupScenSelIcons.png"),
             gui_caption: load_graphics_png("GUICaption.png"),
             gui_button: load_graphics_png("GUIButton.png"),
             gui_button_down: load_graphics_png("GUIButtonDown.png"),
             gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
             gui_scroll: load_graphics_png("GUIScroll.png"),
+            gui_icons: load_graphics_png("GUIIcons.png"),
             gui_icons_ex: load_graphics_png("GUIIcons2.png"),
         };
         let fonts = endeavour_font_set();
@@ -4071,11 +5012,13 @@ mod tests {
         let assets = NetDlgAssets {
             background: load_graphics_png("StartupNetworkBG.png"),
             net_get_ref: load_graphics_png("StartupNetGetRef.png"),
+            scen_icons: load_graphics_png("StartupScenSelIcons.png"),
             gui_caption: load_graphics_png("GUICaption.png"),
             gui_button: load_graphics_png("GUIButton.png"),
             gui_button_down: load_graphics_png("GUIButtonDown.png"),
             gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
             gui_scroll: load_graphics_png("GUIScroll.png"),
+            gui_icons: load_graphics_png("GUIIcons.png"),
             gui_icons_ex: load_graphics_png("GUIIcons2.png"),
         };
         let fonts = endeavour_font_set();
@@ -4136,11 +5079,13 @@ mod tests {
         let assets = NetDlgAssets {
             background: load_graphics_png("StartupNetworkBG.png"),
             net_get_ref: load_graphics_png("StartupNetGetRef.png"),
+            scen_icons: load_graphics_png("StartupScenSelIcons.png"),
             gui_caption: load_graphics_png("GUICaption.png"),
             gui_button: load_graphics_png("GUIButton.png"),
             gui_button_down: load_graphics_png("GUIButtonDown.png"),
             gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
             gui_scroll: load_graphics_png("GUIScroll.png"),
+            gui_icons: load_graphics_png("GUIIcons.png"),
             gui_icons_ex: load_graphics_png("GUIIcons2.png"),
         };
         let fonts = endeavour_font_set();
@@ -4204,11 +5149,13 @@ mod tests {
         let assets = NetDlgAssets {
             background: load_graphics_png("StartupNetworkBG.png"),
             net_get_ref: load_graphics_png("StartupNetGetRef.png"),
+            scen_icons: load_graphics_png("StartupScenSelIcons.png"),
             gui_caption: load_graphics_png("GUICaption.png"),
             gui_button: load_graphics_png("GUIButton.png"),
             gui_button_down: load_graphics_png("GUIButtonDown.png"),
             gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
             gui_scroll: load_graphics_png("GUIScroll.png"),
+            gui_icons: load_graphics_png("GUIIcons.png"),
             gui_icons_ex: load_graphics_png("GUIIcons2.png"),
         };
         let fonts = endeavour_font_set();

@@ -6511,19 +6511,30 @@ mod tests {
             .parameters
             .clone();
         let summary = lc_network::NetworkGameReference {
+            icon: 0,
             title: lc_resources::decode_legacy_script_text(parameters.title.as_bytes()),
             host_name: lc_resources::decode_legacy_script_text(config.local_core.name.as_bytes()),
             host_nick: lc_resources::decode_legacy_script_text(config.local_core.nick.as_bytes()),
             state: "Lobby".to_string(),
             control_mode: config.initial_status.control_mode,
+            time: 0,
             start_time: 1,
+            comment: String::new(),
             join_allowed: false,
             password_needed: false,
             official_server: false,
+            use_fair_crew: parameters.use_fair_crew,
+            goals: parameters
+                .goals
+                .iter()
+                .map(|goal| goal.id.as_bytes().iter().copied().map(char::from).collect())
+                .collect(),
+            league: lc_resources::decode_legacy_script_text(parameters.league.as_bytes()),
             league_address: lc_resources::decode_legacy_script_text(
                 parameters.league_address.as_bytes(),
             ),
             max_players: parameters.max_players,
+            player_names: Vec::new(),
             game: "LegacyClonk".to_string(),
             version: lc_network::CURRENT_GAME_VERSION,
             build: lc_network::CURRENT_GAME_BUILD,

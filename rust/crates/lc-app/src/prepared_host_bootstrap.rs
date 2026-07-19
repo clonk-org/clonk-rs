@@ -22,7 +22,8 @@ use lc_engine::{
     InitialNetworkGameData, InitialNetworkTeam, InitialNetworkTeamMetadata, LegacyCString,
     NetworkResourceCore, PlayerInfoControlData, PlayerInfoUpdateRequest, Scenario, ScenarioError,
     TeamColorUpdateError, CLIENT_PLAYER_INFO_FLAG_INITIAL, CLIENT_PLAYER_INFO_FLAG_UPDATED,
-    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_JOINED,
+    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED,
+    PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
 use lc_network::{
     compose_initial_network_dynamic, fill_scenario_derived_join_parameters,
@@ -431,7 +432,29 @@ impl PreparedHostBootstrap {
             NETWORK_STATE_GO => "Running",
             state => return Err(PreparedHostReferenceError::UnsupportedStatus(state)),
         };
+        let player_names = parameters
+            .player_infos
+            .clients
+            .iter()
+            .flat_map(|client| &client.players)
+            .filter(|player| {
+                player.flags & PLAYER_INFO_FLAG_REMOVED == 0
+                    && !(player.player_type == PLAYER_INFO_TYPE_SCRIPT
+                        && player.flags & PLAYER_INFO_FLAG_INVISIBLE != 0)
+            })
+            .map(|player| {
+                let name = if !player.league_account.as_bytes().is_empty() {
+                    &player.league_account
+                } else if !player.forced_name.as_bytes().is_empty() {
+                    &player.forced_name
+                } else {
+                    &player.name
+                };
+                lc_resources::decode_legacy_script_text(name.as_bytes())
+            })
+            .collect();
         let summary = NetworkGameReference {
+            icon: self.reference_icon,
             title: lc_resources::decode_legacy_script_text(parameters.title.as_bytes()),
             host_name: lc_resources::decode_legacy_script_text(
                 self.host_config.local_core.name.as_bytes(),
@@ -441,14 +464,24 @@ impl PreparedHostBootstrap {
             ),
             state: state.to_string(),
             control_mode: self.host_config.initial_status.control_mode,
+            time: self.initial_game.time,
             start_time: i64::from(self.start_time),
+            comment: lc_resources::decode_legacy_script_text(self.reference_comment.as_bytes()),
             join_allowed,
             password_needed: !self.host_config.password.is_empty(),
             official_server: false,
+            use_fair_crew: parameters.use_fair_crew,
+            goals: parameters
+                .goals
+                .iter()
+                .map(|goal| goal.id.as_bytes().iter().copied().map(char::from).collect())
+                .collect(),
+            league: lc_resources::decode_legacy_script_text(parameters.league.as_bytes()),
             league_address: lc_resources::decode_legacy_script_text(
                 parameters.league_address.as_bytes(),
             ),
             max_players: parameters.max_players,
+            player_names,
             game: "LegacyClonk".to_string(),
             version: CURRENT_GAME_VERSION,
             build: CURRENT_GAME_BUILD,

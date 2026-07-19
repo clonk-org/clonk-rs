@@ -3,6 +3,7 @@
 
 #[cfg(unix)]
 use std::collections::BTreeSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::mpsc;
@@ -22,6 +23,7 @@ pub const MAX_LAN_DISCOVERS: usize = 64;
 pub const REFERENCE_QUERY_TIMEOUT: Duration = Duration::from_secs(12);
 pub const GAME_SEARCH_INTERVAL: Duration = Duration::from_secs(30);
 const REFERENCE_LIFETIME: Duration = Duration::from_secs(42);
+const EMPTY_REFERENCE_LIFETIME: Duration = Duration::from_secs(10);
 
 const DISCOVERY_PROBE: u8 = 0x03;
 const DISCOVERY_REPLY: u8 = 0x04;
@@ -44,6 +46,11 @@ pub struct MasterserverReplyInfo {
     pub motd: String,
     pub motd_url: String,
     pub league_server_redirect: String,
+    /// Number of references returned by this masterserver request before
+    /// they are merged with LAN and direct-query results.
+    pub game_count: usize,
+    /// Active, visible players in those references.
+    pub player_count: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -54,17 +61,26 @@ pub struct ReferenceQueryResponse {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkGameReference {
+    pub icon: i32,
     pub title: String,
     pub host_name: String,
     pub host_nick: String,
     pub state: String,
     pub control_mode: i32,
+    /// Elapsed game time serialized by `C4Network2Reference::Time`.
+    pub time: i32,
     pub start_time: i64,
+    pub comment: String,
     pub join_allowed: bool,
     pub password_needed: bool,
     pub official_server: bool,
+    pub use_fair_crew: bool,
+    pub goals: Vec<String>,
+    pub league: String,
     pub league_address: String,
     pub max_players: i32,
+    /// Active, non-invisible `PlayerInfos` names in wire order.
+    pub player_names: Vec<String>,
     pub game: String,
     pub version: [i32; 4],
     pub build: i32,
@@ -84,17 +100,24 @@ pub struct NetworkGameReference {
 impl Default for NetworkGameReference {
     fn default() -> Self {
         Self {
+            icon: 0,
             title: String::new(),
             host_name: String::new(),
             host_nick: String::new(),
             state: "None".to_string(),
             control_mode: -1,
+            time: 0,
             start_time: 0,
+            comment: String::new(),
             join_allowed: true,
             password_needed: false,
             official_server: false,
+            use_fair_crew: false,
+            goals: Vec::new(),
+            league: String::new(),
             league_address: String::new(),
             max_players: 0,
+            player_names: Vec::new(),
             game: "None".to_string(),
             version: [0; 4],
             build: -1,
@@ -118,6 +141,15 @@ impl NetworkGameReference {
         self.join_allowed
             && self.version == CURRENT_GAME_VERSION
             && self.build == CURRENT_GAME_BUILD
+    }
+
+    pub fn is_lobby_active(&self) -> bool {
+        self.state.eq_ignore_ascii_case("lobby")
+    }
+
+    pub fn is_past_lobby(&self) -> bool {
+        self.state.eq_ignore_ascii_case("paused")
+            || self.state.eq_ignore_ascii_case("running")
     }
 
     /// Copies and prepares the reference addresses in C++ client join order.
@@ -660,6 +692,18 @@ fn direct_url_has_explicit_port(url: &str) -> bool {
 pub enum StartupGameSearchEvent {
     Cleared,
     ReferencesUpdated(Vec<NetworkGameReference>),
+    GameDiscoveryQueryStarted {
+        address: SocketAddr,
+    },
+    GameDiscoveryQueryResolved {
+        address: SocketAddr,
+        references: Vec<NetworkGameReference>,
+        selected_index: Option<usize>,
+    },
+    GameDiscoveryQueryFailed {
+        address: SocketAddr,
+        message: String,
+    },
     DirectQueryResolved {
         request_id: u64,
         references: Vec<NetworkGameReference>,
@@ -797,6 +841,7 @@ struct QueryResult {
     generation: u64,
     masterserver_generation: u64,
     source: ReferenceQuerySource,
+    endpoint: ReferenceEndpoint,
     direct_request_id: Option<u64>,
     result: Result<ReferenceQueryResponse, ReferenceFetchError>,
 }
@@ -840,6 +885,8 @@ async fn run_game_search(
     let mut generation = 0_u64;
     let mut masterserver_generation = 0_u64;
     let mut masterserver_query: Option<tokio::task::JoinHandle<()>> = None;
+    let mut active_discovery_queries = HashSet::new();
+    let mut empty_discovery_query_expirations = HashMap::new();
     let mut stopped = false;
     let mut datagram = [0_u8; 512];
     let mut next_periodic_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
@@ -853,6 +900,8 @@ async fn run_game_search(
                         query.abort();
                     }
                     generation = generation.wrapping_add(1);
+                    active_discovery_queries.clear();
+                    empty_discovery_query_expirations.clear();
                     next_periodic_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
                     let _ = events.send(StartupGameSearchEvent::Cleared);
                     let commands = match command {
@@ -942,32 +991,64 @@ async fn run_game_search(
             {
                 continue;
             }
+            let discovery_address = if query.source == ReferenceQuerySource::GameDiscovery {
+                match query.endpoint {
+                    ReferenceEndpoint::Address(address) => Some(address),
+                    ReferenceEndpoint::Url(_) => None,
+                }
+            } else {
+                None
+            };
+            if let Some(address) = discovery_address {
+                active_discovery_queries.remove(&address);
+            }
             match query.result {
                 Ok(response) => {
+                    if let Some(address) = discovery_address {
+                        if response.references.is_empty() {
+                            let now = Instant::now();
+                            empty_discovery_query_expirations.insert(
+                                address,
+                                now.checked_add(EMPTY_REFERENCE_LIFETIME).unwrap_or(now),
+                            );
+                        } else {
+                            empty_discovery_query_expirations.remove(&address);
+                        }
+                    }
                     let ReferenceQueryResponse {
                         references,
                         masterserver,
                     } = response;
                     let now = Instant::now();
-                    let selected_reference = query
-                        .direct_request_id
-                        .and_then(|_| references.first().cloned());
+                    let selected_reference = (query.direct_request_id.is_some()
+                        || discovery_address.is_some())
+                    .then(|| references.first().cloned())
+                    .flatten();
                     search.merge_references_at(now, references);
                     search.expire_references_at(now);
-                    if let Some(request_id) = query.direct_request_id {
-                        let selected_index = selected_reference.as_ref().and_then(|selected| {
-                            search
-                                .references()
-                                .iter()
-                                .position(|reference| reference == selected)
-                                .or_else(|| {
-                                    search.references().iter().position(|reference| {
+                    let selected_index = selected_reference.as_ref().and_then(|selected| {
+                        search
+                            .references()
+                            .iter()
+                            .position(|reference| reference == selected)
+                            .or_else(|| {
+                                search
+                                    .references()
+                                    .iter()
+                                    .position(|reference| {
                                         reference.is_same_host_and_address(selected)
                                     })
-                                })
-                        });
+                            })
+                    });
+                    if let Some(request_id) = query.direct_request_id {
                         let _ = events.send(StartupGameSearchEvent::DirectQueryResolved {
                             request_id,
+                            references: search.references().to_vec(),
+                            selected_index,
+                        });
+                    } else if let Some(address) = discovery_address {
+                        let _ = events.send(StartupGameSearchEvent::GameDiscoveryQueryResolved {
+                            address,
                             references: search.references().to_vec(),
                             selected_index,
                         });
@@ -984,10 +1065,18 @@ async fn run_game_search(
                     }
                 }
                 Err(error) => {
+                    if let Some(address) = discovery_address {
+                        empty_discovery_query_expirations.remove(&address);
+                    }
                     let message = error.to_string();
                     if let Some(request_id) = query.direct_request_id {
                         let _ = events.send(StartupGameSearchEvent::DirectQueryFailed {
                             request_id,
+                            message,
+                        });
+                    } else if let Some(address) = discovery_address {
+                        let _ = events.send(StartupGameSearchEvent::GameDiscoveryQueryFailed {
+                            address,
                             message,
                         });
                     } else {
@@ -1032,22 +1121,54 @@ async fn run_game_search(
                     .await
             {
                 if let Some(command) = search.handle_lan_datagram(source, &datagram[..size]) {
-                    execute_search_command(
-                        command,
-                        (generation, masterserver_generation),
-                        None,
-                        &mut masterserver_query,
-                        discovery.as_ref(),
-                        &query_tx,
-                        &events,
-                        &reference_config,
-                    )
-                    .await;
+                    if register_game_discovery_query(
+                        &mut active_discovery_queries,
+                        &mut empty_discovery_query_expirations,
+                        Instant::now(),
+                        &command,
+                    ) {
+                        execute_search_command(
+                            command,
+                            (generation, masterserver_generation),
+                            None,
+                            &mut masterserver_query,
+                            discovery.as_ref(),
+                            &query_tx,
+                            &events,
+                            &reference_config,
+                        )
+                        .await;
+                    }
                 }
             }
         } else {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+}
+
+fn register_game_discovery_query(
+    active: &mut HashSet<SocketAddr>,
+    empty_expirations: &mut HashMap<SocketAddr, Instant>,
+    now: Instant,
+    command: &SearchCommand,
+) -> bool {
+    match command {
+        SearchCommand::QueryReferences {
+            endpoint: ReferenceEndpoint::Address(address),
+            source: ReferenceQuerySource::GameDiscovery,
+            ..
+        } => {
+            if empty_expirations
+                .get(address)
+                .is_some_and(|expires_at| now < *expires_at)
+            {
+                return false;
+            }
+            empty_expirations.remove(address);
+            active.insert(*address)
+        }
+        _ => true,
     }
 }
 
@@ -1083,8 +1204,16 @@ async fn execute_search_command(
             source,
             timeout,
         } => {
+            if source == ReferenceQuerySource::GameDiscovery {
+                if let ReferenceEndpoint::Address(address) = &endpoint {
+                    let _ = events.send(StartupGameSearchEvent::GameDiscoveryQueryStarted {
+                        address: *address,
+                    });
+                }
+            }
             let query_tx = query_tx.clone();
             let reference_config = reference_config.clone();
+            let result_endpoint = endpoint.clone();
             let query = tokio::spawn(async move {
                 let result = fetch_reference_query_endpoint_with_config(
                     endpoint,
@@ -1096,6 +1225,7 @@ async fn execute_search_command(
                     generation,
                     masterserver_generation,
                     source,
+                    endpoint: result_endpoint,
                     direct_request_id,
                     result,
                 });
@@ -1191,13 +1321,19 @@ pub fn parse_reference_query_response_with_config(
     if let Some(chunk) = current {
         chunks.push(chunk);
     }
-    let references = chunks
+    let references: Vec<NetworkGameReference> = chunks
         .into_iter()
         .map(|lines| parse_reference_chunk(lines, config))
         .collect::<Result<_, _>>()?;
+    let mut masterserver = parse_masterserver_reply_info(bytes, config)?;
+    masterserver.game_count = references.len();
+    masterserver.player_count = references
+        .iter()
+        .map(|reference| reference.player_names.len())
+        .sum();
     Ok(ReferenceQueryResponse {
         references,
-        masterserver: parse_masterserver_reply_info(bytes, config)?,
+        masterserver,
     })
 }
 
@@ -1487,6 +1623,9 @@ fn parse_reference_chunk(
     let mut reference = NetworkGameReference::default();
     let mut direct_client = false;
     let mut netpuncher_id = false;
+    let mut in_player_infos = false;
+    let mut in_player = false;
+    let mut player = ParsedReferencePlayer::default();
     let mut direct_client_id = None;
     let mut direct_client_name = None;
     let mut direct_client_nick = None;
@@ -1496,6 +1635,11 @@ fn parse_reference_chunk(
         let indent = line.len() - trimmed_start.len();
         let trimmed = trim_reference_ascii_end(trimmed_start);
         if trimmed.starts_with(b"[") && trimmed.ends_with(b"]") {
+            if in_player {
+                player.finish(&mut reference.player_names);
+                player = ParsedReferencePlayer::default();
+                in_player = false;
+            }
             if direct_client {
                 flush_direct_client(
                     &mut reference,
@@ -1506,6 +1650,11 @@ fn parse_reference_chunk(
             }
             direct_client = indent == 2 && trimmed == b"[Client]";
             netpuncher_id = indent == 2 && trimmed == b"[NetpuncherID]";
+            if indent == 2 {
+                in_player_infos = trimmed == b"[PlayerInfos]";
+            } else if in_player_infos && indent == 6 && trimmed == b"[Player]" {
+                in_player = true;
+            }
             continue;
         }
         let Some(equal) = trimmed.iter().position(|byte| *byte == b'=') else {
@@ -1516,6 +1665,17 @@ fn parse_reference_chunk(
         };
         let raw_value = trim_reference_ascii(&trimmed[equal + 1..]);
         let value = decode_reference_value(raw_value, config)?;
+        if in_player && indent == 6 {
+            match key {
+                "Name" => player.name = value,
+                "ForcedName" => player.forced_name = value,
+                "LeagueAccount" => player.league_account = value,
+                "Flags" => player.set_flags(&value),
+                "Type" => player.is_script = value.eq_ignore_ascii_case("script"),
+                _ => {}
+            }
+            continue;
+        }
         if direct_client && indent == 2 {
             match key {
                 "ID" => direct_client_id = Some(parse_i32(key, &value)?),
@@ -1537,12 +1697,18 @@ fn parse_reference_chunk(
             continue;
         }
         match key {
+            "Icon" => reference.icon = parse_i32(key, &value)?,
             "State" => reference.state = value,
             "CtrlMode" => reference.control_mode = parse_i32(key, &value)?,
+            "Time" => reference.time = parse_i32(key, &value)?,
             "StartTime" => reference.start_time = parse_i64(key, &value)?,
+            "Comment" => reference.comment = value,
             "JoinAllowed" => reference.join_allowed = parse_bool(&value),
             "PasswordNeeded" => reference.password_needed = parse_bool(&value),
             "OfficialServer" => reference.official_server = parse_bool(&value),
+            "UseFairCrew" => reference.use_fair_crew = parse_bool(&value),
+            "Goals" => reference.goals = parse_reference_goal_ids(&value),
+            "League" => reference.league = value,
             "LeagueAddress" => reference.league_address = value,
             "MaxPlayers" => reference.max_players = parse_i32(key, &value)?,
             "Address" => {
@@ -1574,7 +1740,57 @@ fn parse_reference_chunk(
             &mut direct_client_nick,
         );
     }
+    if in_player {
+        player.finish(&mut reference.player_names);
+    }
     Ok(reference)
+}
+
+#[derive(Default)]
+struct ParsedReferencePlayer {
+    name: String,
+    forced_name: String,
+    league_account: String,
+    removed: bool,
+    invisible: bool,
+    is_script: bool,
+}
+
+impl ParsedReferencePlayer {
+    fn set_flags(&mut self, flags: &str) {
+        for flag in flags.split(['|', ',', ' ']).filter(|flag| !flag.is_empty()) {
+            self.removed |= flag.eq_ignore_ascii_case("removed");
+            self.invisible |= flag.eq_ignore_ascii_case("invisible");
+        }
+    }
+
+    fn finish(self, names: &mut Vec<String>) {
+        // C4PlayerInfo::CompileFunc clears Invisible for ordinary users.
+        if self.removed || (self.is_script && self.invisible) {
+            return;
+        }
+        let name = if !self.league_account.is_empty() {
+            self.league_account
+        } else if !self.forced_name.is_empty() {
+            self.forced_name
+        } else {
+            self.name
+        };
+        names.push(name);
+    }
+}
+
+fn parse_reference_goal_ids(value: &str) -> Vec<String> {
+    value
+        .split(';')
+        .filter_map(|entry| {
+            let id = entry
+                .trim()
+                .split_once('=')
+                .map_or(entry.trim(), |(id, _)| id.trim());
+            (!id.is_empty()).then(|| id.to_string())
+        })
+        .collect()
 }
 
 fn trim_reference_ascii_start(mut bytes: &[u8]) -> &[u8] {
@@ -1997,6 +2213,69 @@ mod tests {
     }
 
     #[test]
+    fn reference_rows_retain_classic_display_fields_and_master_counts() {
+        let response = parse_reference_query_response(
+            b"[LegacyClonk]\n\
+MOTD=Welcome\n\
+MOTDURL=https://example.test/news\n\
+LeagueServerRedirect=https://example.test/league\n\
+[Reference]\n\
+Icon=7\n\
+State=Running\n\
+Time=3723\n\
+Comment=Host comment\n\
+PasswordNeeded=true\n\
+OfficialServer=true\n\
+UseFairCrew=true\n\
+Goals=GOAL=2;ZERO=0;MELE=1\n\
+League=Cup\n\
+LeagueAddress=https://example.test/cup\n\
+MaxPlayers=8\n\
+Game=LegacyClonk\n\
+Version=4,9,11,0\n\
+Build=362\n\
+Title=Fixture\n\
+\x20\x20[PlayerInfos]\n\
+\x20\x20\x20\x20[Client]\n\
+\x20\x20\x20\x20\x20\x20[Player]\n\
+\x20\x20\x20\x20\x20\x20Name=Alice\n\
+\x20\x20\x20\x20\x20\x20Flags=Joined\n\
+\x20\x20\x20\x20\x20\x20[Player]\n\
+\x20\x20\x20\x20\x20\x20Name=Removed\n\
+\x20\x20\x20\x20\x20\x20Flags=Joined|Removed\n\
+\x20\x20\x20\x20\x20\x20[Player]\n\
+\x20\x20\x20\x20\x20\x20Name=Hidden bot\n\
+\x20\x20\x20\x20\x20\x20Flags=Invisible\n\
+\x20\x20\x20\x20\x20\x20Type=Script\n\
+\x20\x20\x20\x20\x20\x20[Player]\n\
+\x20\x20\x20\x20\x20\x20Name=Original\n\
+\x20\x20\x20\x20\x20\x20ForcedName=Forced\n\
+\x20\x20\x20\x20\x20\x20LeagueAccount=League Alice\n\
+\x20\x20\x20\x20\x20\x20Flags=Invisible\n\
+\x20\x20\x20\x20\x20\x20Type=User\n\
+[Reference]\n\
+Title=Empty\n",
+        )
+        .expect("parse display-complete reference response");
+
+        assert_eq!(response.references.len(), 2);
+        let reference = &response.references[0];
+        assert_eq!((reference.icon, reference.time), (7, 3723));
+        assert_eq!(reference.comment, "Host comment");
+        assert_eq!(reference.goals, ["GOAL", "ZERO", "MELE"]);
+        assert!(reference.use_fair_crew);
+        assert_eq!(reference.league, "Cup");
+        assert_eq!(reference.player_names, ["Alice", "League Alice"]);
+        assert_eq!(response.masterserver.game_count, 2);
+        assert_eq!(response.masterserver.player_count, 2);
+        assert_eq!(response.masterserver.motd, "Welcome");
+        assert_eq!(
+            response.masterserver.league_server_redirect,
+            "https://example.test/league"
+        );
+    }
+
+    #[test]
     fn references_expire_at_cpp_deadline_and_updates_refresh_it() {
         // C++ gives every received reference a 42-second timeout, removes it
         // when `now >= timeout`, and resets that timeout when a matching newer
@@ -2109,6 +2388,47 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_live_lan_reference_queries_are_suppressed_by_address() {
+        let address: SocketAddr = "127.0.0.1:31112".parse().unwrap();
+        let command = SearchCommand::QueryReferences {
+            endpoint: ReferenceEndpoint::Address(address),
+            source: ReferenceQuerySource::GameDiscovery,
+            timeout: REFERENCE_QUERY_TIMEOUT,
+        };
+        let mut active = HashSet::new();
+        let mut empty_expirations = HashMap::new();
+        let now = Instant::now();
+
+        assert!(register_game_discovery_query(
+            &mut active,
+            &mut empty_expirations,
+            now,
+            &command,
+        ));
+        assert!(!register_game_discovery_query(
+            &mut active,
+            &mut empty_expirations,
+            now,
+            &command,
+        ));
+        assert!(active.remove(&address));
+        let empty_until = now + EMPTY_REFERENCE_LIFETIME;
+        empty_expirations.insert(address, empty_until);
+        assert!(!register_game_discovery_query(
+            &mut active,
+            &mut empty_expirations,
+            empty_until - Duration::from_millis(1),
+            &command,
+        ));
+        assert!(register_game_discovery_query(
+            &mut active,
+            &mut empty_expirations,
+            empty_until,
+            &command,
+        ));
+    }
+
+    #[test]
     fn lan_probe_send_failure_reporting_matches_cpp_call_sites() {
         // C4StartupNetDlg ignores the initial and timer StartDiscovery results,
         // but checks the explicit refresh result before continuing with the
@@ -2206,6 +2526,63 @@ Build=362\n"
         }
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn startup_lan_reference_query_reports_address_lifecycle() {
+        let discovery_port = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let unavailable_reference_port = std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let search = StartupGameSearch::start(NetworkGameSearchConfig {
+            internet_enabled: false,
+            discovery_port,
+            ..NetworkGameSearchConfig::default()
+        })
+        .unwrap();
+        search.initial_refresh().unwrap();
+        loop {
+            if matches!(
+                search.events().recv_timeout(Duration::from_secs(5)).unwrap(),
+                StartupGameSearchEvent::Cleared
+            ) {
+                break;
+            }
+        }
+
+        let sender = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+        let port = unavailable_reference_port.to_ne_bytes();
+        sender
+            .send_to(
+                &[DISCOVERY_REPLY, 0, port[0], port[1]],
+                (Ipv6Addr::LOCALHOST, discovery_port),
+            )
+            .unwrap();
+        let expected = SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::LOCALHOST,
+            unavailable_reference_port,
+            0,
+            0,
+        ));
+
+        assert!(matches!(
+            search.events().recv_timeout(Duration::from_secs(5)).unwrap(),
+            StartupGameSearchEvent::GameDiscoveryQueryStarted { address }
+                if address == expected
+        ));
+        match search.events().recv_timeout(Duration::from_secs(5)).unwrap() {
+            StartupGameSearchEvent::GameDiscoveryQueryFailed { address, message } => {
+                assert_eq!(address, expected);
+                assert!(!message.is_empty());
+            }
+            event => panic!("expected LAN reference failure, got {event:?}"),
+        }
     }
 
     #[test]

@@ -41,15 +41,20 @@ pub fn encode_reference_response(reference: &NetworkGameReference) -> Vec<u8> {
     let _ = write!(
         output,
         "[Reference]\r\n\
-Icon=0\r\n\
+Icon={}\r\n\
 State={}\r\n\
 CtrlMode={}\r\n\
+Time={}\r\n\
 StartTime={}\r\n\
+Comment={}\r\n\
 JoinAllowed={}\r\n\
 PasswordNeeded={}\r\n",
+        reference.icon,
         reference.state,
         reference.control_mode,
+        reference.time,
         reference.start_time,
+        quote_ini(&reference.comment),
         reference.join_allowed,
         reference.password_needed,
     );
@@ -83,6 +88,10 @@ Version={},{},{},{}\r\n\
 Build={}\r\n\
 OfficialServer={}\r\n\
 MaxPlayers={}\r\n\
+UseFairCrew={}\r\n\
+Goals={}\r\n\
+League={}\r\n\
+LeagueAddress={}\r\n\
 IsNetworkGame=true\r\n\
 Title={}\r\n",
         quote_ini(&reference.game),
@@ -93,8 +102,33 @@ Title={}\r\n",
         reference.build,
         reference.official_server,
         reference.max_players,
+        reference.use_fair_crew,
+        quote_ini(
+            &reference
+                .goals
+                .iter()
+                .map(|goal| format!("{goal}=1"))
+                .collect::<Vec<_>>()
+                .join(";")
+        ),
+        quote_ini(&reference.league),
+        quote_ini(&reference.league_address),
         quote_ini(&reference.title),
     );
+    if !reference.player_names.is_empty() {
+        output.push_str("\r\n  [PlayerInfos]\r\n");
+        let _ = write!(output, "  LastPlayerID={}\r\n", reference.player_names.len());
+        output.push_str("\r\n    [Client]\r\n    ID=0\r\n    Flags=Initial\r\n");
+        for (index, name) in reference.player_names.iter().enumerate() {
+            output.push_str("\r\n      [Player]\r\n");
+            let _ = write!(
+                output,
+                "      Name={}\r\n      Flags=Joined\r\n      ID={}\r\n",
+                quote_ini(name),
+                index + 1
+            );
+        }
+    }
     output.push_str("\r\n  [Client]\r\n  ID=0\r\n  Activated=true\r\n");
     let _ = write!(
         output,

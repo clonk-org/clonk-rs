@@ -214,6 +214,7 @@ const NETWORK_CONTROL_OVERFLOW_LIMIT: u32 = 3;
 const NETWORK_RENDER_SKIP_BEHIND: u32 = 25;
 const GAME_SECOND_INTERVAL: Duration = Duration::from_secs(1);
 const STARTUP_NETWORK_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const STARTUP_NETWORK_QUERY_ERROR_LIFETIME: Duration = Duration::from_secs(10);
 /// `C4NetDeactivationDelay` is measured in simulation frames, despite the
 /// native header's historical "ticks" comment (`src/C4Network2.h:57-60`).
 const NETWORK_CLIENT_DEACTIVATION_DELAY: i32 = 500;
@@ -2801,7 +2802,14 @@ fn startup_resource_string(paths: Option<&AppPaths>, key: &str, fallback: &str) 
 
 fn format_resource_string(mut template: String, arguments: &[&str]) -> String {
     for argument in arguments {
-        template = template.replacen("%s", argument, 1);
+        let placeholder = [template.find("%s"), template.find("%d")]
+            .into_iter()
+            .flatten()
+            .min();
+        let Some(placeholder) = placeholder else {
+            break;
+        };
+        template.replace_range(placeholder..placeholder + 2, argument);
     }
     template
 }
@@ -2815,6 +2823,37 @@ fn network_game_version_string(
         "{game} {}.{}.{}.{} [{build}]",
         version[0], version[1], version[2], version[3]
     )
+}
+
+fn open_external_http_url(url: &str) -> io::Result<()> {
+    let scheme = url
+        .split_once(':')
+        .map(|(scheme, _)| scheme)
+        .unwrap_or_default();
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "only HTTP and HTTPS hyperlinks can be opened",
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("rundll32");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = std::process::Command::new("xdg-open");
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "opening external hyperlinks is unsupported on this platform",
+    ));
+
+    command.arg(url).spawn().map(drop)
 }
 
 fn load_runtime_help_language_table(paths: Option<&AppPaths>) -> Result<HashMap<String, String>> {
@@ -4383,11 +4422,13 @@ impl FrontendAssets {
         Some(lc_frontend::startup_netdlg::NetDlgAssets {
             background: self.dialog_image("StartupNetworkBG.png")?,
             net_get_ref: self.dialog_image("StartupNetGetRef.png")?,
+            scen_icons: self.dialog_image("StartupScenSelIcons.png")?,
             gui_caption: self.dialog_image("GUICaption.png")?,
             gui_button: self.dialog_image("GUIButton.png")?,
             gui_button_down: self.dialog_image("GUIButtonDown.png")?,
             gui_button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
             gui_scroll: self.dialog_image("GUIScroll.png")?,
+            gui_icons: self.dialog_image("GUIIcons.png")?,
             gui_icons_ex: self.dialog_image("GUIIcons2.png")?,
         })
     }
@@ -8294,6 +8335,9 @@ enum MessageDialogContinuation {
     NetworkRuntimeJoin {
         reference: lc_network::NetworkGameReference,
     },
+    NetworkServerRedirect {
+        address: String,
+    },
     ClassicLobbyStart { countdown_seconds: i32 },
     DeleteStartupPlayer { path: PathBuf },
     DeleteStartupCrew {
@@ -8495,6 +8539,19 @@ struct StartupDirectReferenceQuery {
     id: u64,
     address: String,
     state: StartupDirectReferenceQueryState,
+    /// `TT_RefReqWait` removes completed empty/error direct-query rows after
+    /// `C4NetErrorRefTimeout`; an in-flight request retains no removal timer.
+    expires_at: Option<Instant>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StartupDiscoveryReferenceQuery {
+    id: u64,
+    address: SocketAddr,
+    state: StartupDirectReferenceQueryState,
+    /// Game-discovery queries use the same completed-row timeout as manually
+    /// entered direct queries.
+    expires_at: Option<Instant>,
 }
 
 enum StartupNetworkJoinTarget {
@@ -9809,9 +9866,14 @@ struct GameApp {
     /// Reject pre-refresh events until the worker acknowledges the new
     /// generation with Cleared, so deleted rows cannot flash back into view.
     startup_network_refresh_waiting_for_clear: bool,
+    /// `C4StartupNetDlg::fIgnoreUpdate`: declining one league-server redirect
+    /// suppresses further prompts for the lifetime of this dialog instance.
+    startup_network_ignore_redirect: bool,
     /// Complete references retained in the same order as the visible game
     /// list. The frontend row projects only a display address.
     startup_game_references: Vec<lc_network::NetworkGameReference>,
+    /// Per-host reference requests created from LAN discovery datagrams.
+    startup_discovery_reference_queries: Vec<StartupDiscoveryReferenceQuery>,
     /// User-entered reference requests remain visible until they resolve,
     /// fail, or are replaced by their returned reference rows.
     startup_direct_reference_queries: Vec<StartupDirectReferenceQuery>,
@@ -19349,7 +19411,9 @@ impl GameApp {
             startup_game_search: None,
             startup_network_last_refresh: None,
             startup_network_refresh_waiting_for_clear: false,
+            startup_network_ignore_redirect: false,
             startup_game_references: Vec::new(),
+            startup_discovery_reference_queries: Vec::new(),
             startup_direct_reference_queries: Vec::new(),
             next_startup_direct_reference_query_id: 0,
             network_game_advertiser: None,
@@ -34607,25 +34671,151 @@ impl GameApp {
     fn startup_network_reference_row(
         reference: &lc_network::NetworkGameReference,
     ) -> lc_frontend::startup_netdlg::NetDlgGameEntry {
+        Self::startup_network_reference_row_with_config(None, false, reference)
+    }
+
+    fn startup_network_reference_identity_eq(
+        left: &lc_network::NetworkGameReference,
+        right: &lc_network::NetworkGameReference,
+    ) -> bool {
+        left.host_name == right.host_name
+            && if left.addresses.is_empty() || right.addresses.is_empty() {
+                left.tcp_addresses
+                    .iter()
+                    .any(|address| right.tcp_addresses.contains(address))
+            } else {
+                left.addresses
+                    .iter()
+                    .any(|address| right.addresses.contains(address))
+            }
+    }
+
+    fn startup_network_reference_row_with_config(
+        paths: Option<&AppPaths>,
+        use_alternate_server: bool,
+        reference: &lc_network::NetworkGameReference,
+    ) -> lc_frontend::startup_netdlg::NetDlgGameEntry {
+        use lc_frontend::startup_netdlg::{
+            NetDlgGameEntry, NetDlgRowIcon, NetDlgStatusIcon,
+        };
+
         let host = if reference.host_name.is_empty() {
             "unknown"
         } else {
             reference.host_name.as_str()
         };
-        lc_frontend::startup_netdlg::NetDlgGameEntry {
-            title: format!("{} on {host}", reference.title),
-            details: format!(
-                "{} — {} {}.{}.{}.{} [{}]",
-                reference.state,
-                reference.game,
-                reference.version[0],
-                reference.version[1],
-                reference.version[2],
-                reference.version[3],
-                reference.build,
+        let title = format_resource_string(
+            startup_resource_string(paths, "IDS_NET_REFONCLIENT", "%s on %s"),
+            &[&reference.title, host],
+        );
+        let goals = if reference.goals.is_empty() {
+            startup_resource_string(paths, "IDS_CTL_NOGOAL", "No game goal")
+        } else {
+            format!(
+                "{}: {}",
+                startup_resource_string(paths, "IDS_MENU_CPGOALS", "Goals"),
+                reference.goals.join(", ")
+            )
+        };
+        let state = match reference.state.to_ascii_lowercase().as_str() {
+            "none" => startup_resource_string(paths, "IDS_DESC_NOTINITED", "Not initialised"),
+            "init" => startup_resource_string(
+                paths,
+                "IDS_DESC_WAITFORHOST",
+                "Waiting for host connection",
             ),
+            "lobby" => startup_resource_string(
+                paths,
+                "IDS_DESC_EXPECTING",
+                "Awaiting participants.",
+            ),
+            "paused" => {
+                startup_resource_string(paths, "IDS_DESC_GAMEPAUSED", "Game is paused")
+            }
+            "running" => {
+                startup_resource_string(paths, "IDS_DESC_GAMERUNNING", "Game is running")
+            }
+            _ => startup_resource_string(
+                paths,
+                "IDS_DESC_UNKNOWNGAMESTATE",
+                "Game is in an unknown state",
+            ),
+        };
+        let player_count = reference.player_names.len().to_string();
+        let max_players = reference.max_players.to_string();
+        let mut details = format_resource_string(
+            startup_resource_string(
+                paths,
+                "IDS_NET_INFOPLRSGOALDESC",
+                "%d/%d players - %s - %s",
+            ),
+            &[&player_count, &max_players, &goals, &state],
+        );
+        if reference.time > 0 {
+            let duration = format!(
+                "{:02}:{:02}:{:02}",
+                reference.time / 3_600,
+                (reference.time % 3_600) / 60,
+                reference.time % 60
+            );
+            details.push_str(" - ");
+            details.push_str(&duration);
+        }
+        let version = network_game_version_string(
+            &reference.game,
+            reference.version,
+            reference.build,
+        );
+        let version_line = format_resource_string(
+            startup_resource_string(paths, "IDS_DESC_VERSION", "Engine version: %s"),
+            &[&version],
+        );
+        let comment_line = format!(
+            "{}: {}",
+            startup_resource_string(paths, "IDS_CTL_COMMENT", "Comment"),
+            reference.comment
+        );
+        let players = if reference.player_names.is_empty() {
+            startup_resource_string(paths, "IDS_CTL_NONE", "none")
+        } else {
+            reference.player_names.join(", ")
+        };
+        let players_line = format!(
+            "{}: {players}",
+            startup_resource_string(paths, "IDS_CTL_PLAYER", "Player")
+        );
+
+        let mut status_icons = Vec::new();
+        if reference.password_needed {
+            status_icons.push(NetDlgStatusIcon::PasswordNeeded);
+        }
+        if !reference.league_address.is_empty() {
+            status_icons.push(NetDlgStatusIcon::League);
+        }
+        if reference.is_lobby_active() {
+            status_icons.push(NetDlgStatusIcon::LobbyActive);
+        }
+        if reference.is_past_lobby() {
+            status_icons.push(NetDlgStatusIcon::Running);
+            if reference.join_allowed {
+                status_icons.push(NetDlgStatusIcon::RuntimeJoin);
+            }
+        }
+        if reference.use_fair_crew {
+            status_icons.push(NetDlgStatusIcon::FairCrew);
+        }
+        if reference.official_server && !use_alternate_server {
+            status_icons.push(NetDlgStatusIcon::OfficialServer);
+        }
+
+        NetDlgGameEntry {
+            title,
+            details,
             address: reference.tcp_addresses.first().map(ToString::to_string),
             joinable: reference.is_joinable(),
+            extra_lines: vec![version_line, comment_line, players_line],
+            status_icons,
+            row_icon: NetDlgRowIcon::Scenario(reference.icon),
         }
     }
 
@@ -34633,18 +34823,45 @@ impl GameApp {
         &self,
         query: &StartupDirectReferenceQuery,
     ) -> lc_frontend::startup_netdlg::NetDlgGameEntry {
-        let query_name = startup_resource_string(
-            self.app_paths.as_ref(),
+        self.startup_reference_query_row(
+            &query.address,
+            &query.state,
             "IDS_NET_QUERY_DIRECTJOIN",
             "Direct join",
+        )
+    }
+
+    fn startup_discovery_reference_query_row(
+        &self,
+        query: &StartupDiscoveryReferenceQuery,
+    ) -> lc_frontend::startup_netdlg::NetDlgGameEntry {
+        self.startup_reference_query_row(
+            &query.address.to_string(),
+            &query.state,
+            "IDS_NET_QUERY_LOCALNET",
+            "Local network",
+        )
+    }
+
+    fn startup_reference_query_row(
+        &self,
+        address: &str,
+        state: &StartupDirectReferenceQueryState,
+        query_resource: &str,
+        query_fallback: &str,
+    ) -> lc_frontend::startup_netdlg::NetDlgGameEntry {
+        let query_name = startup_resource_string(
+            self.app_paths.as_ref(),
+            query_resource,
+            query_fallback,
         );
         let title_template = startup_resource_string(
             self.app_paths.as_ref(),
             "IDS_NET_CLIENTONNET",
             "%s on %s",
         );
-        let title = format_resource_string(title_template, &[&query_name, query.address.trim()]);
-        let details = match &query.state {
+        let title = format_resource_string(title_template, &[&query_name, address.trim()]);
+        let details = match state {
             StartupDirectReferenceQueryState::Pending => startup_resource_string(
                 self.app_paths.as_ref(),
                 "IDS_NET_INFOQUERY",
@@ -34660,17 +34877,235 @@ impl GameApp {
         lc_frontend::startup_netdlg::NetDlgGameEntry {
             title,
             details,
-            address: Some(query.address.clone()),
+            address: Some(address.to_string()),
             joinable: true,
+            extra_lines: Vec::new(),
+            status_icons: Vec::new(),
+            row_icon: match state {
+                StartupDirectReferenceQueryState::Pending => {
+                    lc_frontend::startup_netdlg::NetDlgRowIcon::Query
+                }
+                StartupDirectReferenceQueryState::Empty => {
+                    lc_frontend::startup_netdlg::NetDlgRowIcon::QueryStatic
+                }
+                StartupDirectReferenceQueryState::Failed(_) => {
+                    lc_frontend::startup_netdlg::NetDlgRowIcon::Error
+                }
+            },
         }
     }
 
+    fn startup_masterserver_display_name(address: &str) -> String {
+        let authority = address
+            .trim()
+            .split_once("://")
+            .map_or(address.trim(), |(_, remainder)| remainder)
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default()
+            .rsplit('@')
+            .next()
+            .unwrap_or_default();
+        if let Some(ipv6) = authority.strip_prefix('[') {
+            return ipv6
+                .split_once(']')
+                .map_or(ipv6, |(host, _)| host)
+                .to_string();
+        }
+        authority
+            .rsplit_once(':')
+            .filter(|(_, port)| {
+                !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())
+            })
+            .map_or(authority, |(host, _)| host)
+            .to_string()
+    }
+
+    fn startup_masterserver_query_entry(
+        paths: Option<&AppPaths>,
+        address: &str,
+    ) -> lc_frontend::startup_netdlg::NetDlgMasterserverEntry {
+        let query_name = startup_resource_string(
+            paths,
+            "IDS_NET_QUERY_MASTERSRV",
+            "Internet server",
+        );
+        let server_name = Self::startup_masterserver_display_name(address);
+        lc_frontend::startup_netdlg::NetDlgMasterserverEntry {
+            title: format_resource_string(
+                startup_resource_string(paths, "IDS_NET_CLIENTONNET", "%s on %s"),
+                &[&query_name, &server_name],
+            ),
+            details: startup_resource_string(
+                paths,
+                "IDS_NET_INFOQUERY",
+                "Querying game infos...",
+            ),
+            extra_lines: Vec::new(),
+            row_icon: lc_frontend::startup_netdlg::NetDlgRowIcon::Query,
+        }
+    }
+
+    fn startup_masterserver_reply_entry(
+        paths: Option<&AppPaths>,
+        address: &str,
+        reply: &lc_network::MasterserverReplyInfo,
+    ) -> lc_frontend::startup_netdlg::NetDlgMasterserverEntry {
+        use lc_frontend::startup_netdlg::{NetDlgRowIcon, NetDlgTextLine};
+
+        let mut entry = Self::startup_masterserver_query_entry(paths, address);
+        let game_count = reply.game_count.to_string();
+        let player_count = reply.player_count.to_string();
+        entry.details = if reply.game_count == 0 {
+            startup_resource_string(paths, "IDS_NET_INFONOGAME", "No games found.")
+        } else {
+            format_resource_string(
+                startup_resource_string(paths, "IDS_NET_INFOGAMES", "%d game(s) found."),
+                &[&game_count, &player_count],
+            )
+        };
+        entry.extra_lines.clear();
+        if !reply.motd.is_empty() {
+            entry.extra_lines.push(NetDlgTextLine::Plain(
+                format_resource_string(
+                    startup_resource_string(
+                        paths,
+                        "IDS_NET_MOTD",
+                        "Message of the day: %s",
+                    ),
+                    &[&reply.motd],
+                ),
+            ));
+        }
+        if !reply.motd_url.is_empty() {
+            entry.extra_lines.push(NetDlgTextLine::Hyperlink {
+                label: reply.motd_url.clone(),
+                url: reply.motd_url.clone(),
+            });
+        }
+        entry.row_icon = NetDlgRowIcon::QueryStatic;
+        entry
+    }
+
+    fn reset_startup_masterserver_entry(&mut self) {
+        let settings = load_network_search_settings(self.app_paths.as_ref());
+        let entry = Self::startup_masterserver_query_entry(
+            self.app_paths.as_ref(),
+            &settings.master_server_url,
+        );
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            dialog.set_masterserver_entry(entry);
+        }
+    }
+
+    fn set_startup_masterserver_error(&mut self, message: String) {
+        let settings = load_network_search_settings(self.app_paths.as_ref());
+        let mut entry = Self::startup_masterserver_query_entry(
+            self.app_paths.as_ref(),
+            &settings.master_server_url,
+        );
+        entry.details = message;
+        entry.row_icon = lc_frontend::startup_netdlg::NetDlgRowIcon::Error;
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            dialog.set_masterserver_entry(entry);
+        }
+    }
+
+    fn apply_startup_masterserver_reply(
+        &mut self,
+        reply: lc_network::MasterserverReplyInfo,
+    ) -> Result<(), EngineError> {
+        let settings = load_network_search_settings(self.app_paths.as_ref());
+        let entry = Self::startup_masterserver_reply_entry(
+            self.app_paths.as_ref(),
+            &settings.master_server_url,
+            &reply,
+        );
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            dialog.set_masterserver_entry(entry);
+        }
+
+        if self.startup_network_dialog.is_none()
+            || self.startup_network_ignore_redirect
+            || reply.league_server_redirect.trim().is_empty()
+            || self.message_dialogs.iter().any(|dialog| {
+                matches!(
+                    &dialog.continuation,
+                    MessageDialogContinuation::NetworkServerRedirect { .. }
+                )
+            })
+        {
+            return Ok(());
+        }
+        let Some(paths) = self.app_paths.as_ref() else {
+            return Ok(());
+        };
+        let config = load_native_config_bytes(Some(paths));
+        let use_alternate_server = native_config_text(&config, "Network", "UseAlternateServer")
+            .as_deref()
+            .map(parse_config_bool)
+            .unwrap_or(false);
+        let server_address = native_config_text(&config, "Network", "ServerAddress")
+            .map(|address| address.trim().to_string())
+            .filter(|address| !address.is_empty())
+            .unwrap_or_else(|| OFFICIAL_LEAGUE_SERVER.to_string());
+        let alternate_server_address =
+            native_config_text(&config, "Network", "AlternateServerAddress")
+                .map(|address| address.trim().to_string())
+                .filter(|address| !address.is_empty())
+                .unwrap_or_else(|| OFFICIAL_LEAGUE_SERVER.to_string());
+        let redirect = reply.league_server_redirect.trim().to_string();
+        if redirect == server_address
+            || (use_alternate_server && server_address != alternate_server_address)
+        {
+            return Ok(());
+        }
+
+        let message = format_resource_string(
+            startup_resource_string(
+                self.app_paths.as_ref(),
+                "IDS_NET_SERVERREDIRECTMSG",
+                "The configured server is no longer active and offers the following server redirection:||%s||Do you want to switch to the new server?",
+            ),
+            &[&redirect],
+        );
+        let caption = startup_resource_string(
+            self.app_paths.as_ref(),
+            "IDS_NET_SERVERREDIRECT",
+            "Server Redirection",
+        );
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                message,
+                caption,
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::Standard(44),
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            MessageDialogContinuation::NetworkServerRedirect { address: redirect },
+        )
+    }
+
     fn sync_startup_network_game_rows(&mut self) {
+        let use_alternate_server =
+            load_network_search_settings(self.app_paths.as_ref()).use_alternate_server;
         let mut games = self
             .startup_game_references
             .iter()
-            .map(Self::startup_network_reference_row)
+            .map(|reference| {
+                Self::startup_network_reference_row_with_config(
+                    self.app_paths.as_ref(),
+                    use_alternate_server,
+                    reference,
+                )
+            })
             .collect::<Vec<_>>();
+        games.extend(
+            self.startup_discovery_reference_queries
+                .iter()
+                .map(|query| self.startup_discovery_reference_query_row(query)),
+        );
         games.extend(
             self.startup_direct_reference_queries
                 .iter()
@@ -34683,24 +35118,77 @@ impl GameApp {
 
     fn selected_startup_direct_reference_query_id(&self) -> Option<u64> {
         let selected = self.startup_network_dialog.as_ref()?.selected_game()?;
-        let query_index = selected.checked_sub(self.startup_game_references.len())?;
+        let query_index = selected
+            .checked_sub(self.startup_game_references.len())?
+            .checked_sub(self.startup_discovery_reference_queries.len())?;
         self.startup_direct_reference_queries
             .get(query_index)
             .map(|query| query.id)
     }
 
-    fn focus_startup_direct_reference_query(&mut self, id: u64) {
+    fn selected_startup_game_reference(&self) -> Option<lc_network::NetworkGameReference> {
+        let selected = self.startup_network_dialog.as_ref()?.selected_game()?;
+        self.startup_game_references.get(selected).cloned()
+    }
+
+    fn focus_startup_game_reference(
+        &mut self,
+        reference: &lc_network::NetworkGameReference,
+    ) {
+        let index = self
+            .startup_game_references
+            .iter()
+            .position(|candidate| candidate == reference)
+            .or_else(|| {
+                self.startup_game_references.iter().position(|candidate| {
+                    Self::startup_network_reference_identity_eq(candidate, reference)
+                })
+            });
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            if let Some(index) = index {
+                let _ = dialog.focus_game(index);
+            }
+        }
+    }
+
+    fn selected_startup_discovery_reference_query_id(&self) -> Option<u64> {
+        let selected = self.startup_network_dialog.as_ref()?.selected_game()?;
+        let query_index = selected.checked_sub(self.startup_game_references.len())?;
+        self.startup_discovery_reference_queries
+            .get(query_index)
+            .map(|query| query.id)
+    }
+
+    fn focus_startup_discovery_reference_query(&mut self, id: u64) -> bool {
         let Some(query_index) = self
-            .startup_direct_reference_queries
+            .startup_discovery_reference_queries
             .iter()
             .position(|query| query.id == id)
         else {
-            return;
+            return false;
         };
         let row = self.startup_game_references.len() + query_index;
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
             let _ = dialog.focus_game(row);
         }
+        true
+    }
+
+    fn focus_startup_direct_reference_query(&mut self, id: u64) -> bool {
+        let Some(query_index) = self
+            .startup_direct_reference_queries
+            .iter()
+            .position(|query| query.id == id)
+        else {
+            return false;
+        };
+        let row = self.startup_game_references.len()
+            + self.startup_discovery_reference_queries.len()
+            + query_index;
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            let _ = dialog.focus_game(row);
+        }
+        true
     }
 
     fn begin_startup_direct_reference_query(&mut self, address: String) {
@@ -34726,6 +35214,7 @@ impl GameApp {
                 id,
                 address: address.clone(),
                 state: StartupDirectReferenceQueryState::Pending,
+                expires_at: None,
             });
         let default_port = load_network_reference_port(self.app_paths.as_ref());
         let submitted = self.startup_game_search.as_ref().is_some_and(|search| {
@@ -34740,6 +35229,8 @@ impl GameApp {
                 query.state = StartupDirectReferenceQueryState::Failed(
                     "Unable to start direct reference query".to_string(),
                 );
+                query.expires_at = Instant::now()
+                    .checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
             }
         }
         self.sync_startup_network_game_rows();
@@ -34751,9 +35242,21 @@ impl GameApp {
         if let Some(reference) = self.startup_game_references.get(index) {
             return Some(StartupNetworkJoinTarget::Reference(reference.clone()));
         }
+        let query_index = index.checked_sub(self.startup_game_references.len())?;
+        if let Some(query) = self.startup_discovery_reference_queries.get(query_index) {
+            return Some(match &query.state {
+                StartupDirectReferenceQueryState::Failed(error) => {
+                    StartupNetworkJoinTarget::QueryError(error.clone())
+                }
+                StartupDirectReferenceQueryState::Pending
+                | StartupDirectReferenceQueryState::Empty => {
+                    StartupNetworkJoinTarget::DirectAddress(query.address.to_string())
+                }
+            });
+        }
         let query = self
             .startup_direct_reference_queries
-            .get(index.checked_sub(self.startup_game_references.len())?)?;
+            .get(query_index.checked_sub(self.startup_discovery_reference_queries.len())?)?;
         Some(match &query.state {
             StartupDirectReferenceQueryState::Failed(error) => {
                 StartupNetworkJoinTarget::QueryError(error.clone())
@@ -34765,13 +35268,112 @@ impl GameApp {
         })
     }
 
+    fn begin_startup_discovery_reference_query(&mut self, address: SocketAddr) {
+        if self
+            .startup_discovery_reference_queries
+            .iter()
+            .any(|query| {
+                query.address == address
+                    && !matches!(query.state, StartupDirectReferenceQueryState::Failed(_))
+            })
+        {
+            return;
+        }
+        let selected_direct_query = self.selected_startup_direct_reference_query_id();
+        self.next_startup_direct_reference_query_id =
+            self.next_startup_direct_reference_query_id.wrapping_add(1);
+        let id = self.next_startup_direct_reference_query_id;
+        self.startup_discovery_reference_queries
+            .push(StartupDiscoveryReferenceQuery {
+                id,
+                address,
+                state: StartupDirectReferenceQueryState::Pending,
+                expires_at: None,
+            });
+        self.sync_startup_network_game_rows();
+        if let Some(id) = selected_direct_query {
+            self.focus_startup_direct_reference_query(id);
+        }
+    }
+
+    fn finish_startup_discovery_reference_query(
+        &mut self,
+        address: SocketAddr,
+        references: Vec<lc_network::NetworkGameReference>,
+        resolved_reference: bool,
+    ) {
+        let selected_reference = self.selected_startup_game_reference();
+        let selected_direct_query = self.selected_startup_direct_reference_query_id();
+        let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
+        let Some(query_index) = self
+            .startup_discovery_reference_queries
+            .iter()
+            .rposition(|query| {
+                query.address == address
+                    && !matches!(query.state, StartupDirectReferenceQueryState::Failed(_))
+            })
+        else {
+            return;
+        };
+        let query_id = self.startup_discovery_reference_queries[query_index].id;
+        self.startup_game_references = references;
+        if resolved_reference {
+            self.startup_discovery_reference_queries.remove(query_index);
+        } else {
+            self.startup_discovery_reference_queries[query_index].state =
+                StartupDirectReferenceQueryState::Empty;
+            self.startup_discovery_reference_queries[query_index].expires_at = Instant::now()
+                .checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
+        }
+        // Unlike NRQT_DirectJoin, NRQT_GameDiscovery never explicitly selects
+        // a returned reference; preserve the controller's existing selection.
+        self.sync_startup_network_game_rows();
+        if let Some(reference) = selected_reference.as_ref() {
+            self.focus_startup_game_reference(reference);
+        } else if let Some(id) = selected_direct_query {
+            self.focus_startup_direct_reference_query(id);
+        } else if let Some(selected_id) = selected_discovery_query {
+            if selected_id != query_id {
+                self.focus_startup_discovery_reference_query(selected_id);
+            }
+        }
+    }
+
+    fn fail_startup_discovery_reference_query(
+        &mut self,
+        address: SocketAddr,
+        message: String,
+    ) {
+        let expires_at = Instant::now().checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
+        if let Some(query) = self
+            .startup_discovery_reference_queries
+            .iter_mut()
+            .rev()
+            .find(|query| {
+                query.address == address
+                    && !matches!(query.state, StartupDirectReferenceQueryState::Failed(_))
+            })
+        {
+            query.state = StartupDirectReferenceQueryState::Failed(message);
+            query.expires_at = expires_at;
+        } else {
+            // Started is queued before every result. Missing means this is a
+            // stale duplicate completion whose same-address row was already
+            // resolved or cleared; native suppresses duplicate live queries.
+            return;
+        }
+        self.sync_startup_network_game_rows();
+    }
+
     fn finish_startup_direct_reference_query(
         &mut self,
         request_id: u64,
         references: Vec<lc_network::NetworkGameReference>,
         selected_index: Option<usize>,
     ) {
+        let selected_reference = self.selected_startup_game_reference();
         let selected_query = self.selected_startup_direct_reference_query_id();
+        let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
         let Some(query_index) = self
             .startup_direct_reference_queries
             .iter()
@@ -34789,15 +35391,26 @@ impl GameApp {
                         let _ = dialog.focus_game(selected_index);
                     }
                 }
-                Some(id) => self.focus_startup_direct_reference_query(id),
+                Some(id) => {
+                    self.focus_startup_direct_reference_query(id);
+                }
                 None => {}
             }
         } else {
             self.startup_direct_reference_queries[query_index].state =
                 StartupDirectReferenceQueryState::Empty;
+            self.startup_direct_reference_queries[query_index].expires_at = Instant::now()
+                .checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
             self.sync_startup_network_game_rows();
             if let Some(id) = selected_query {
                 self.focus_startup_direct_reference_query(id);
+            }
+        }
+        if selected_query.is_none() {
+            if let Some(reference) = selected_reference.as_ref() {
+                self.focus_startup_game_reference(reference);
+            } else if let Some(id) = selected_discovery_query {
+                self.focus_startup_discovery_reference_query(id);
             }
         }
     }
@@ -34812,9 +35425,55 @@ impl GameApp {
             return;
         };
         query.state = StartupDirectReferenceQueryState::Failed(message);
+        query.expires_at =
+            Instant::now().checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
         self.sync_startup_network_game_rows();
         if let Some(id) = selected_query {
             self.focus_startup_direct_reference_query(id);
+        }
+    }
+
+    fn tick_startup_network_query_rows_at(&mut self, now: Instant) {
+        let selected_query = self.selected_startup_direct_reference_query_id();
+        let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
+        let query_count = self.startup_discovery_reference_queries.len()
+            + self.startup_direct_reference_queries.len();
+        self.startup_discovery_reference_queries.retain(|query| {
+            query
+                .expires_at
+                .map_or(true, |expires_at| now < expires_at)
+        });
+        self.startup_direct_reference_queries.retain(|query| {
+            query
+                .expires_at
+                .map_or(true, |expires_at| now < expires_at)
+        });
+        if self.startup_discovery_reference_queries.len()
+            + self.startup_direct_reference_queries.len()
+            != query_count
+        {
+            self.sync_startup_network_game_rows();
+            if let Some(id) = selected_query {
+                self.focus_startup_direct_reference_query(id);
+            } else if let Some(id) = selected_discovery_query {
+                self.focus_startup_discovery_reference_query(id);
+            }
+            self.mark_menu_dirty();
+        }
+
+        let masterserver_enabled = self
+            .startup_network_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.config().masterserver_signup);
+        if masterserver_enabled
+            && self.startup_network_last_refresh.is_some_and(|last_refresh| {
+                now.saturating_duration_since(last_refresh)
+                    >= lc_network::GAME_SEARCH_INTERVAL
+            })
+        {
+            self.startup_network_last_refresh = Some(now);
+            self.reset_startup_masterserver_entry();
+            self.mark_menu_dirty();
         }
     }
 
@@ -34929,11 +35588,13 @@ impl GameApp {
 
         self.startup_network_last_refresh = Some(now);
         self.startup_game_references.clear();
+        self.startup_discovery_reference_queries.clear();
         self.startup_direct_reference_queries.clear();
         self.netdlg_last_click = None;
         self.netdlg_join_edit_last_click = None;
         self.netdlg_edit_consumed_keys.clear();
         self.sync_startup_network_game_rows();
+        self.reset_startup_masterserver_entry();
         self.status_text = "Querying game infos…".to_string();
         self.mark_menu_dirty();
 
@@ -35061,6 +35722,12 @@ impl GameApp {
                 NetDlgAction::QueryAddress { address } => {
                     self.begin_startup_direct_reference_query(address);
                 }
+                NetDlgAction::OpenUrl(url) => {
+                    if let Err(error) = open_external_http_url(&url) {
+                        tracing::warn!(%url, %error, "failed to open network-dialog hyperlink");
+                        self.status_text = format!("Unable to open link: {error}");
+                    }
+                }
                 NetDlgAction::JoinGame { .. } => {
                     let selected_index = self
                         .startup_network_dialog
@@ -35130,6 +35797,10 @@ impl GameApp {
                 NetDlgAction::MasterserverSignupChanged(enabled) => {
                     if let Some(search) = self.startup_game_search.as_ref() {
                         let _ = search.set_internet_enabled(enabled);
+                    }
+                    if enabled {
+                        self.startup_network_last_refresh = Some(Instant::now());
+                        self.reset_startup_masterserver_entry();
                     }
                     if let Some(paths) = self.app_paths.as_ref() {
                         if let Err(error) = persist_config_value(
@@ -37910,22 +38581,54 @@ impl GameApp {
         match event {
             lc_network::StartupGameSearchEvent::Cleared => {
                 let selected_query = self.selected_startup_direct_reference_query_id();
+                let selected_discovery_query =
+                    self.selected_startup_discovery_reference_query_id();
                 self.startup_game_references.clear();
                 self.sync_startup_network_game_rows();
+                self.reset_startup_masterserver_entry();
                 if let Some(id) = selected_query {
                     self.focus_startup_direct_reference_query(id);
+                } else if let Some(id) = selected_discovery_query {
+                    self.focus_startup_discovery_reference_query(id);
                 }
                 self.status_text = "Querying game infos…".to_string();
             }
             lc_network::StartupGameSearchEvent::ReferencesUpdated(references) => {
+                let selected_reference = self.selected_startup_game_reference();
                 let selected_query = self.selected_startup_direct_reference_query_id();
+                let selected_discovery_query =
+                    self.selected_startup_discovery_reference_query_id();
                 self.startup_game_references = references;
                 let count = self.startup_game_references.len();
                 self.sync_startup_network_game_rows();
-                if let Some(id) = selected_query {
+                if let Some(reference) = selected_reference.as_ref() {
+                    self.focus_startup_game_reference(reference);
+                } else if let Some(id) = selected_query {
                     self.focus_startup_direct_reference_query(id);
+                } else if let Some(id) = selected_discovery_query {
+                    self.focus_startup_discovery_reference_query(id);
                 }
                 self.status_text = format!("Found {count} network game(s)");
+            }
+            lc_network::StartupGameSearchEvent::GameDiscoveryQueryStarted { address } => {
+                self.begin_startup_discovery_reference_query(address);
+            }
+            lc_network::StartupGameSearchEvent::GameDiscoveryQueryResolved {
+                address,
+                references,
+                selected_index,
+            } => {
+                self.finish_startup_discovery_reference_query(
+                    address,
+                    references,
+                    selected_index.is_some(),
+                );
+            }
+            lc_network::StartupGameSearchEvent::GameDiscoveryQueryFailed {
+                address,
+                message,
+            } => {
+                self.fail_startup_discovery_reference_query(address, message);
             }
             lc_network::StartupGameSearchEvent::DirectQueryResolved {
                 request_id,
@@ -37944,11 +38647,16 @@ impl GameApp {
             } => {
                 self.fail_startup_direct_reference_query(request_id, message);
             }
-            lc_network::StartupGameSearchEvent::MasterserverReply(_) => {}
+            lc_network::StartupGameSearchEvent::MasterserverReply(reply) => {
+                self.apply_startup_masterserver_reply(reply)?;
+            }
             lc_network::StartupGameSearchEvent::SearchError { source, message } => {
                 tracing::warn!(?source, %message, "network game search failed");
                 if source == Some(lc_network::ReferenceQuerySource::GameDiscovery) {
                     self.show_startup_discovery_error(&message)?;
+                } else if source == Some(lc_network::ReferenceQuerySource::Masterserver) {
+                    self.set_startup_masterserver_error(message.clone());
+                    self.status_text = message;
                 } else {
                     self.status_text = message;
                 }
@@ -37959,6 +38667,10 @@ impl GameApp {
     }
 
     fn poll_startup_game_search(&mut self) -> Result<(), EngineError> {
+        // Advance presentation timers before applying completions from the
+        // query that began at this interval, so an immediate failure/success
+        // remains visible instead of being overwritten by Query state.
+        self.tick_startup_network_query_rows_at(Instant::now());
         let events = self
             .startup_game_search
             .as_ref()
@@ -42526,7 +43238,9 @@ impl GameApp {
     fn open_network_game_dialog(&mut self) {
         self.close_context_menu_silently();
         self.startup_network_refresh_waiting_for_clear = false;
+        self.startup_network_ignore_redirect = false;
         self.startup_game_references.clear();
+        self.startup_discovery_reference_queries.clear();
         self.startup_direct_reference_queries.clear();
         self.netdlg_last_click = None;
         self.netdlg_join_edit_last_click = None;
@@ -42552,11 +43266,18 @@ impl GameApp {
             },
             metrics,
         );
+        let search_config = load_network_search_settings(self.app_paths.as_ref());
+        dialog.set_masterserver_entry(Self::startup_masterserver_query_entry(
+            self.app_paths.as_ref(),
+            &search_config.master_server_url,
+        ));
+        if let Some(fonts) = self.assets.clonk_fonts.as_deref() {
+            dialog.set_text_font(&fonts.text);
+        }
         dialog.resize(
             self.graphics.surface().width() as i32,
             self.graphics.surface().height() as i32,
         );
-        let search_config = load_network_search_settings(self.app_paths.as_ref());
         let reference_config = load_reference_query_settings(self.app_paths.as_ref());
         self.startup_game_search = match lc_network::StartupGameSearch::start_with_reference_config(
             search_config,
@@ -42586,13 +43307,18 @@ impl GameApp {
     /// controller's older value.
     fn refresh_retained_network_dialog_internet(&mut self) {
         let (masterserver_signup, _) = load_network_startup_settings(self.app_paths.as_ref());
-        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+        let recreate_masterserver = self.startup_network_dialog.as_mut().is_some_and(|dialog| {
+            let recreate = !dialog.config().masterserver_signup && masterserver_signup;
             dialog.sync_masterserver_signup_from_config(masterserver_signup);
-        }
+            recreate
+        });
         if let Some(search) = self.startup_game_search.as_ref() {
             let _ = search.set_internet_enabled(masterserver_signup);
         }
-        self.startup_network_last_refresh = Some(Instant::now());
+        if recreate_masterserver {
+            self.startup_network_last_refresh = Some(Instant::now());
+            self.reset_startup_masterserver_entry();
+        }
     }
 
     fn open_player_selection_dialog(&mut self) {
@@ -42756,6 +43482,7 @@ impl GameApp {
         self.startup_network_last_refresh = None;
         self.startup_network_refresh_waiting_for_clear = false;
         self.startup_game_references.clear();
+        self.startup_discovery_reference_queries.clear();
         self.startup_direct_reference_queries.clear();
         self.netdlg_last_click = None;
         self.netdlg_join_edit_last_click = None;
@@ -46373,6 +47100,49 @@ impl GameApp {
                 self.activate_network_reference_join(reference)?;
             }
             MessageDialogContinuation::NetworkRuntimeJoin { .. } => {}
+            MessageDialogContinuation::NetworkServerRedirect { address }
+                if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
+            {
+                let persisted = self.app_paths.as_ref().map_or_else(
+                    || {
+                        Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "application paths are unavailable",
+                        ))
+                    },
+                    |paths| persist_config_value(paths, "Network", "ServerAddress", address),
+                );
+                match persisted {
+                    Ok(()) => {
+                        let message = startup_resource_string(
+                            self.app_paths.as_ref(),
+                            "IDS_NET_SERVERREDIRECTDONE",
+                            "Server redirection has been applied.",
+                        );
+                        let caption = startup_resource_string(
+                            self.app_paths.as_ref(),
+                            "IDS_NET_SERVERREDIRECT",
+                            "Server Redirection",
+                        );
+                        self.push_message_dialog(
+                            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                                message,
+                                caption,
+                                lc_frontend::message_dialog::MessageDialogIcon::Standard(44),
+                            ),
+                            MessageDialogContinuation::None,
+                        )?;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to persist masterserver redirect");
+                        self.status_text =
+                            format!("Unable to save server redirection: {error}");
+                    }
+                }
+            }
+            MessageDialogContinuation::NetworkServerRedirect { .. } => {
+                self.startup_network_ignore_redirect = true;
+            }
             MessageDialogContinuation::ClassicLobbyStart { countdown_seconds }
                 if result == lc_frontend::message_dialog::MessageDialogResult::Yes
                     && self.classic_host_lobby_active() =>
@@ -90833,6 +91603,7 @@ ScenInfoArea=70,5,25,90
                 id: 27,
                 address: "stale.invalid".to_string(),
                 state: StartupDirectReferenceQueryState::Pending,
+                expires_at: None,
             }];
             app.sync_startup_network_game_rows();
             app.netdlg_last_click = Some((0, Instant::now()));
@@ -90971,6 +91742,7 @@ ScenInfoArea=70,5,25,90
             id: 28,
             address: "retained.invalid".to_string(),
             state: StartupDirectReferenceQueryState::Pending,
+            expires_at: None,
         }];
         app.sync_startup_network_game_rows();
         app.status_text = "Retained status".to_string();
@@ -91093,6 +91865,720 @@ ScenInfoArea=70,5,25,90
         assert!(!app.take_exit_request());
     }
 
+    fn attach_l040_network_dialog(app: &mut GameApp) {
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(
+            app.assets
+                .clonk_fonts
+                .as_deref()
+                .expect("classic startup fonts"),
+        );
+        let mut dialog = lc_frontend::startup_netdlg::NetDlgController::new(
+            lc_frontend::startup_netdlg::NetDlgConfig {
+                masterserver_signup: true,
+                record: false,
+            },
+            metrics,
+        );
+        dialog.set_text_font(
+            &app.assets
+                .clonk_fonts
+                .as_deref()
+                .expect("classic startup fonts")
+                .text,
+        );
+        dialog.resize(800, 600);
+        app.startup_view = StartupView::NetworkGame;
+        app.startup_network_dialog = Some(dialog);
+        app.startup_game_search = None;
+    }
+
+    #[test]
+    fn l040_network_reference_projects_five_lines_and_native_status_order() {
+        use lc_frontend::startup_netdlg::{NetDlgRowIcon, NetDlgStatusIcon};
+
+        let reference = lc_network::NetworkGameReference {
+            icon: 7,
+            title: "Rage".to_string(),
+            host_name: "Ada".to_string(),
+            state: "Running".to_string(),
+            time: 3_723,
+            comment: "Bring a friend".to_string(),
+            join_allowed: true,
+            password_needed: true,
+            official_server: true,
+            use_fair_crew: true,
+            goals: vec!["Gold".to_string(), "Elimination".to_string()],
+            league: "League game".to_string(),
+            league_address: "https://league.example/".to_string(),
+            max_players: 4,
+            player_names: vec!["Ada".to_string(), "Bob".to_string()],
+            game: "LegacyClonk".to_string(),
+            version: lc_network::CURRENT_GAME_VERSION,
+            build: lc_network::CURRENT_GAME_BUILD,
+            tcp_addresses: vec!["127.0.0.1:11112".parse().unwrap()],
+            ..Default::default()
+        };
+
+        let row = GameApp::startup_network_reference_row(&reference);
+        assert_eq!(row.title, "Rage on Ada");
+        assert_eq!(
+            row.details,
+            "2/4 players - Goals: Gold, Elimination - Game is running - 01:02:03"
+        );
+        assert_eq!(
+            row.extra_lines,
+            [
+                "Engine version: LegacyClonk 4.9.11.0 [362]",
+                "Comment: Bring a friend",
+                "Player: Ada, Bob",
+            ]
+        );
+        assert_eq!(
+            row.status_icons,
+            [
+                NetDlgStatusIcon::PasswordNeeded,
+                NetDlgStatusIcon::League,
+                NetDlgStatusIcon::Running,
+                NetDlgStatusIcon::RuntimeJoin,
+                NetDlgStatusIcon::FairCrew,
+                NetDlgStatusIcon::OfficialServer,
+            ]
+        );
+        assert_eq!(row.row_icon, NetDlgRowIcon::Scenario(7));
+        assert_eq!(row.address.as_deref(), Some("127.0.0.1:11112"));
+        assert!(row.joinable);
+
+        let alternate =
+            GameApp::startup_network_reference_row_with_config(None, true, &reference);
+        assert!(!alternate
+            .status_icons
+            .contains(&NetDlgStatusIcon::OfficialServer));
+    }
+
+    #[test]
+    fn l040_masterserver_row_projects_counts_motd_and_query_error_states() {
+        use lc_frontend::startup_netdlg::{NetDlgRowIcon, NetDlgTextLine};
+
+        let reply = lc_network::MasterserverReplyInfo {
+            motd: "Welcome back".to_string(),
+            motd_url: "https://news.example/motd".to_string(),
+            game_count: 3,
+            player_count: 17,
+            ..Default::default()
+        };
+        let entry = GameApp::startup_masterserver_reply_entry(
+            None,
+            "https://master.example:8443/refs",
+            &reply,
+        );
+        assert_eq!(entry.title, "Internet server on master.example");
+        assert_eq!(entry.details, "3 game(s) found.");
+        assert_eq!(
+            entry.extra_lines,
+            [
+                NetDlgTextLine::Plain("Message of the day: Welcome back".to_string()),
+                NetDlgTextLine::Hyperlink {
+                    label: "https://news.example/motd".to_string(),
+                    url: "https://news.example/motd".to_string(),
+                },
+            ]
+        );
+        assert_eq!(entry.row_icon, NetDlgRowIcon::QueryStatic);
+
+        let zero = GameApp::startup_masterserver_reply_entry(
+            None,
+            "https://master.example/",
+            &lc_network::MasterserverReplyInfo::default(),
+        );
+        assert_eq!(zero.details, "No games found.");
+
+        let mut app = new_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut app);
+        app.apply_startup_game_search_event(lc_network::StartupGameSearchEvent::MasterserverReply(
+            reply,
+        ))
+        .expect("project masterserver success");
+        app.apply_startup_game_search_event(lc_network::StartupGameSearchEvent::Cleared)
+            .expect("reset masterserver query generation");
+        let master = app
+            .startup_network_dialog
+            .as_ref()
+            .unwrap()
+            .masterserver_entry();
+        assert_eq!(master.details, "Querying game infos...");
+        assert_eq!(master.row_icon, NetDlgRowIcon::Query);
+        assert!(master.extra_lines.is_empty());
+
+        app.apply_startup_game_search_event(lc_network::StartupGameSearchEvent::SearchError {
+            source: Some(lc_network::ReferenceQuerySource::Masterserver),
+            message: "masterserver timed out".to_string(),
+        })
+        .expect("project permanent masterserver error row");
+        let master = app
+            .startup_network_dialog
+            .as_ref()
+            .unwrap()
+            .masterserver_entry();
+        assert_eq!(master.details, "masterserver timed out");
+        assert_eq!(master.row_icon, NetDlgRowIcon::Error);
+        assert!(master.extra_lines.is_empty());
+
+        let last_refresh = Instant::now();
+        app.startup_network_last_refresh = Some(last_refresh);
+        app.tick_startup_network_query_rows_at(
+            last_refresh + lc_network::GAME_SEARCH_INTERVAL - Duration::from_millis(1),
+        );
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .masterserver_entry()
+                .row_icon,
+            NetDlgRowIcon::Error
+        );
+        app.tick_startup_network_query_rows_at(
+            last_refresh + lc_network::GAME_SEARCH_INTERVAL,
+        );
+        let master = app
+            .startup_network_dialog
+            .as_ref()
+            .unwrap()
+            .masterserver_entry();
+        assert_eq!(master.details, "Querying game infos...");
+        assert_eq!(master.row_icon, NetDlgRowIcon::Query);
+
+        app.set_startup_masterserver_error("stale disabled error".to_string());
+        if let Some(dialog) = app.startup_network_dialog.as_mut() {
+            dialog.sync_masterserver_signup_from_config(false);
+            // The controller performs this toggle before emitting the action.
+            dialog.sync_masterserver_signup_from_config(true);
+        }
+        app.process_network_dialog_actions(vec![
+            lc_frontend::startup_netdlg::NetDlgAction::MasterserverSignupChanged(true),
+        ])
+        .expect("reenable Internet query row");
+        let master = app
+            .startup_network_dialog
+            .as_ref()
+            .unwrap()
+            .masterserver_entry();
+        assert_eq!(master.details, "Querying game infos...");
+        assert_eq!(master.row_icon, NetDlgRowIcon::Query);
+
+        let unchanged_refresh = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .unwrap();
+        app.startup_network_last_refresh = Some(unchanged_refresh);
+        app.refresh_retained_network_dialog_internet();
+        assert_eq!(
+            app.startup_network_last_refresh,
+            Some(unchanged_refresh),
+            "showing an already-enabled retained dialog starts no new query"
+        );
+        app.set_startup_masterserver_error("stale disabled error".to_string());
+        app.startup_network_dialog
+            .as_mut()
+            .unwrap()
+            .sync_masterserver_signup_from_config(false);
+        app.refresh_retained_network_dialog_internet();
+        assert!(app
+            .startup_network_last_refresh
+            .is_some_and(|refresh| refresh > unchanged_refresh));
+        let master = app
+            .startup_network_dialog
+            .as_ref()
+            .unwrap()
+            .masterserver_entry();
+        assert_eq!(master.details, "Querying game infos...");
+        assert_eq!(master.row_icon, NetDlgRowIcon::Query);
+    }
+
+    #[test]
+    fn l040_direct_empty_and_error_rows_expire_after_ten_seconds() {
+        let mut app = new_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut app);
+        let now = Instant::now();
+        let expires_at = now + STARTUP_NETWORK_QUERY_ERROR_LIFETIME;
+        app.startup_direct_reference_queries = vec![
+            StartupDirectReferenceQuery {
+                id: 1,
+                address: "empty.example".to_string(),
+                state: StartupDirectReferenceQueryState::Empty,
+                expires_at: Some(expires_at),
+            },
+            StartupDirectReferenceQuery {
+                id: 2,
+                address: "failed.example".to_string(),
+                state: StartupDirectReferenceQueryState::Failed("query failed".to_string()),
+                expires_at: Some(expires_at),
+            },
+            StartupDirectReferenceQuery {
+                id: 3,
+                address: "pending.example".to_string(),
+                state: StartupDirectReferenceQueryState::Pending,
+                expires_at: None,
+            },
+        ];
+        app.sync_startup_network_game_rows();
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().games()[0].row_icon,
+            lc_frontend::startup_netdlg::NetDlgRowIcon::QueryStatic
+        );
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().games()[1].row_icon,
+            lc_frontend::startup_netdlg::NetDlgRowIcon::Error
+        );
+        app.startup_network_dialog.as_mut().unwrap().focus_game(0);
+
+        app.tick_startup_network_query_rows_at(expires_at - Duration::from_millis(1));
+        assert_eq!(app.startup_direct_reference_queries.len(), 3);
+        app.tick_startup_network_query_rows_at(expires_at);
+        assert_eq!(
+            app.startup_direct_reference_queries,
+            [StartupDirectReferenceQuery {
+                id: 3,
+                address: "pending.example".to_string(),
+                state: StartupDirectReferenceQueryState::Pending,
+                expires_at: None,
+            }]
+        );
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .games()
+                .len(),
+            1
+        );
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().selected_game(),
+            Some(0),
+            "expiring a selected query row selects its next native sibling"
+        );
+    }
+
+    #[test]
+    fn l040_lan_query_rows_resolve_fail_and_expire_without_modal() {
+        use lc_frontend::startup_netdlg::NetDlgRowIcon;
+
+        let mut app = new_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut app);
+        let address: SocketAddr = "127.0.0.1:30111".parse().unwrap();
+        app.apply_startup_game_search_event(
+            lc_network::StartupGameSearchEvent::GameDiscoveryQueryStarted { address },
+        )
+        .expect("show LAN reference query row");
+        assert_eq!(app.startup_discovery_reference_queries.len(), 1);
+        let row = &app.startup_network_dialog.as_ref().unwrap().games()[0];
+        assert_eq!(row.title, "Local network on 127.0.0.1:30111");
+        assert_eq!(row.row_icon, NetDlgRowIcon::Query);
+
+        app.startup_direct_reference_queries
+            .push(StartupDirectReferenceQuery {
+                id: 40,
+                address: "direct.example".to_string(),
+                state: StartupDirectReferenceQueryState::Pending,
+                expires_at: None,
+            });
+        app.sync_startup_network_game_rows();
+        assert!(matches!(
+            app.startup_network_join_target(0),
+            Some(StartupNetworkJoinTarget::DirectAddress(target)) if target == address.to_string()
+        ));
+        assert!(matches!(
+            app.startup_network_join_target(1),
+            Some(StartupNetworkJoinTarget::DirectAddress(target)) if target == "direct.example"
+        ));
+        app.startup_direct_reference_queries.clear();
+
+        app.apply_startup_game_search_event(
+            lc_network::StartupGameSearchEvent::GameDiscoveryQueryFailed {
+                address,
+                message: "reference connection refused".to_string(),
+            },
+        )
+        .expect("show LAN reference error row");
+        assert!(app.message_dialogs.is_empty());
+        let row = &app.startup_network_dialog.as_ref().unwrap().games()[0];
+        assert_eq!(row.details, "reference connection refused");
+        assert_eq!(row.row_icon, NetDlgRowIcon::Error);
+        let expires_at = app.startup_discovery_reference_queries[0]
+            .expires_at
+            .expect("failed LAN query expiry");
+        app.tick_startup_network_query_rows_at(expires_at);
+        assert!(app.startup_discovery_reference_queries.is_empty());
+        assert!(app.startup_network_dialog.as_ref().unwrap().games().is_empty());
+
+        app.apply_startup_game_search_event(
+            lc_network::StartupGameSearchEvent::GameDiscoveryQueryStarted { address },
+        )
+        .expect("show next LAN reference query row");
+        // Repeated multicast replies do not duplicate a live native query.
+        app.apply_startup_game_search_event(
+            lc_network::StartupGameSearchEvent::GameDiscoveryQueryStarted { address },
+        )
+        .expect("deduplicate repeated LAN query start");
+        assert_eq!(app.startup_discovery_reference_queries.len(), 1);
+        let reference = lc_network::NetworkGameReference {
+            icon: 12,
+            title: "LAN game".to_string(),
+            version: lc_network::CURRENT_GAME_VERSION,
+            build: lc_network::CURRENT_GAME_BUILD,
+            ..Default::default()
+        };
+        app.apply_startup_game_search_event(
+            lc_network::StartupGameSearchEvent::GameDiscoveryQueryResolved {
+                address,
+                references: vec![reference.clone()],
+                selected_index: Some(0),
+            },
+        )
+        .expect("replace LAN query with resolved reference");
+        assert!(app.startup_discovery_reference_queries.is_empty());
+        assert_eq!(app.startup_game_references, [reference]);
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().selected_game(),
+            None,
+            "game discovery must not explicitly select its returned reference"
+        );
+
+        app.apply_startup_game_search_event(
+            lc_network::StartupGameSearchEvent::GameDiscoveryQueryFailed {
+                address,
+                message: "late duplicate failure".to_string(),
+            },
+        )
+        .expect("ignore late duplicate LAN completion");
+        assert!(app.startup_discovery_reference_queries.is_empty());
+        assert_eq!(app.startup_network_dialog.as_ref().unwrap().games().len(), 1);
+
+        let mut selection_app = new_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut selection_app);
+        selection_app.begin_startup_discovery_reference_query(address);
+        selection_app
+            .startup_direct_reference_queries
+            .push(StartupDirectReferenceQuery {
+                id: 41,
+                address: "selected-direct.example".to_string(),
+                state: StartupDirectReferenceQueryState::Pending,
+                expires_at: None,
+            });
+        selection_app.sync_startup_network_game_rows();
+        selection_app.focus_startup_direct_reference_query(41);
+        assert_eq!(
+            selection_app
+                .startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .selected_game(),
+            Some(1)
+        );
+        let second_address: SocketAddr = "127.0.0.1:30112".parse().unwrap();
+        selection_app.begin_startup_discovery_reference_query(second_address);
+        assert_eq!(
+            selection_app
+                .startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .selected_game(),
+            Some(2),
+            "inserting a LAN row before direct rows retains direct-query identity"
+        );
+        selection_app.finish_startup_discovery_reference_query(
+            second_address,
+            vec![lc_network::NetworkGameReference {
+                title: "Second LAN game".to_string(),
+                version: lc_network::CURRENT_GAME_VERSION,
+                build: lc_network::CURRENT_GAME_BUILD,
+                ..Default::default()
+            }],
+            true,
+        );
+        assert_eq!(
+            selection_app
+                .startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .selected_game(),
+            Some(2),
+            "resolving a LAN row retains selected direct-query identity"
+        );
+        assert!(matches!(
+            selection_app.startup_network_join_target(2),
+            Some(StartupNetworkJoinTarget::DirectAddress(target))
+                if target == "selected-direct.example"
+        ));
+
+        let mut retry_app = new_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut retry_app);
+        retry_app.begin_startup_discovery_reference_query(address);
+        let failed_id = retry_app.startup_discovery_reference_queries[0].id;
+        retry_app.fail_startup_discovery_reference_query(
+            address,
+            "first request failed".to_string(),
+        );
+        retry_app.begin_startup_discovery_reference_query(address);
+        let retry_id = retry_app.startup_discovery_reference_queries[1].id;
+        assert_ne!(failed_id, retry_id);
+        retry_app.focus_startup_discovery_reference_query(retry_id);
+        retry_app
+            .apply_startup_game_search_event(
+                lc_network::StartupGameSearchEvent::ReferencesUpdated(vec![
+                    lc_network::NetworkGameReference {
+                        title: "Other LAN game".to_string(),
+                        version: lc_network::CURRENT_GAME_VERSION,
+                        build: lc_network::CURRENT_GAME_BUILD,
+                        ..Default::default()
+                    },
+                ]),
+            )
+            .expect("preserve selected LAN retry row");
+        assert_eq!(
+            retry_app
+                .startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .selected_game(),
+            Some(2),
+            "a selected pending retry must not retarget to an older failed row for the same address"
+        );
+        assert_eq!(
+            retry_app.selected_startup_discovery_reference_query_id(),
+            Some(retry_id)
+        );
+    }
+
+    #[test]
+    fn l040_resolved_game_selection_tracks_host_and_address_identity() {
+        let reference = |title: &str, host: &str, address: &str| {
+            lc_network::NetworkGameReference {
+                title: title.to_string(),
+                host_name: host.to_string(),
+                tcp_addresses: vec![address.parse().unwrap()],
+                version: lc_network::CURRENT_GAME_VERSION,
+                build: lc_network::CURRENT_GAME_BUILD,
+                ..Default::default()
+            }
+        };
+        let a = reference("A", "Host A", "127.0.0.1:31001");
+        let b = reference("B", "Host B", "127.0.0.1:31002");
+        let c = reference("C", "Host C", "127.0.0.1:31003");
+        let mut b_later = b.clone();
+        b_later.title = "B later".to_string();
+        b_later.start_time = 2;
+        let mut identity_app = new_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut identity_app);
+        identity_app.startup_game_references = vec![b_later, b.clone()];
+        identity_app.sync_startup_network_game_rows();
+        identity_app.focus_startup_game_reference(&b);
+        assert_eq!(
+            identity_app
+                .startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .selected_game(),
+            Some(1),
+            "exact reference identity precedes the host/address fallback"
+        );
+
+        let mut app = new_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut app);
+        app.startup_game_references = vec![a.clone(), b.clone()];
+        app.sync_startup_network_game_rows();
+        app.startup_network_dialog.as_mut().unwrap().focus_game(1);
+
+        app.apply_startup_game_search_event(
+            lc_network::StartupGameSearchEvent::ReferencesUpdated(vec![
+                b.clone(),
+                a.clone(),
+            ]),
+        )
+        .expect("preserve selected reference through sorted update");
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().selected_game(),
+            Some(0)
+        );
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().games()[0].title,
+            "B on Host B"
+        );
+
+        let discovery_address: SocketAddr = "127.0.0.1:30113".parse().unwrap();
+        app.begin_startup_discovery_reference_query(discovery_address);
+        app.finish_startup_discovery_reference_query(
+            discovery_address,
+            vec![a.clone(), b.clone(), c.clone()],
+            true,
+        );
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().selected_game(),
+            Some(1),
+            "LAN resolution keeps the selected resolved game"
+        );
+
+        app.startup_direct_reference_queries
+            .push(StartupDirectReferenceQuery {
+                id: 42,
+                address: "direct-selection.example".to_string(),
+                state: StartupDirectReferenceQueryState::Pending,
+                expires_at: None,
+            });
+        app.sync_startup_network_game_rows();
+        app.finish_startup_direct_reference_query(
+            42,
+            vec![c, b, a],
+            Some(0),
+        );
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().selected_game(),
+            Some(1),
+            "an unselected direct query cannot hijack resolved-game selection"
+        );
+
+        app.apply_startup_game_search_event(
+            lc_network::StartupGameSearchEvent::ReferencesUpdated(vec![
+                reference("A newer", "Host A", "127.0.0.1:31001"),
+                reference("C newer", "Host C", "127.0.0.1:31003"),
+            ]),
+        )
+        .expect("remove selected resolved reference");
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().selected_game(),
+            Some(1),
+            "removing a selected resolved reference selects its next native sibling"
+        );
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().games()[1].title,
+            "C newer on Host C"
+        );
+    }
+
+    #[test]
+    fn l040_masterserver_redirect_decline_latches_and_accept_persists() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("L040 user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover L040 paths");
+        paths.ensure_user_dirs().expect("create L040 user dirs");
+        persist_config_value(&paths, "General", "LanguageEx", "US")
+            .expect("configure L040 language");
+        persist_config_value(&paths, "Network", "MasterServerSignUp", "0")
+            .expect("disable live masterserver query");
+        persist_config_value(
+            &paths,
+            "Network",
+            "ServerAddress",
+            "https://old.example",
+        )
+        .expect("configure old server");
+        persist_config_value(
+            &paths,
+            "Network",
+            "AlternateServerAddress",
+            "https://old.example",
+        )
+        .expect("configure matching alternate server");
+        persist_config_value(&paths, "Network", "UseAlternateServer", "0")
+            .expect("configure official server mode");
+
+        let mut app = new_classic_menu_app(800, 600);
+        app.app_paths = Some(paths.clone());
+        attach_l040_network_dialog(&mut app);
+        let redirect = lc_network::MasterserverReplyInfo {
+            league_server_redirect: "https://new.example".to_string(),
+            game_count: 1,
+            ..Default::default()
+        };
+
+        app.apply_startup_game_search_event(lc_network::StartupGameSearchEvent::MasterserverReply(
+            redirect.clone(),
+        ))
+        .expect("open redirect confirmation");
+        assert_eq!(app.message_dialogs.len(), 1);
+        let modal = &app.message_dialogs[0].state;
+        assert_eq!(modal.caption(), "Server Redirection");
+        assert!(modal.message().contains("https://new.example"));
+        assert_eq!(
+            modal.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::YES_NO
+        );
+        assert_eq!(
+            modal.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::Standard(44)
+        );
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline redirect");
+        assert!(app.startup_network_ignore_redirect);
+        app.apply_startup_game_search_event(lc_network::StartupGameSearchEvent::MasterserverReply(
+            redirect.clone(),
+        ))
+        .expect("ignore repeated redirect");
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(
+            Config::load(paths.config_file())
+                .unwrap()
+                .get_in(Some("Network"), "ServerAddress"),
+            Some("https://old.example")
+        );
+
+        app.startup_network_ignore_redirect = true;
+        app.open_network_game_dialog();
+        app.startup_game_search = None;
+        assert!(!app.startup_network_ignore_redirect);
+        app.apply_startup_game_search_event(lc_network::StartupGameSearchEvent::MasterserverReply(
+            redirect,
+        ))
+        .expect("reopened dialog offers redirect again");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("accept and persist redirect");
+        assert_eq!(
+            Config::load(paths.config_file())
+                .unwrap()
+                .get_in(Some("Network"), "ServerAddress"),
+            Some("https://new.example")
+        );
+        assert_eq!(app.message_dialogs.len(), 1);
+        let applied = &app.message_dialogs[0].state;
+        assert_eq!(applied.caption(), "Server Redirection");
+        assert_eq!(applied.message(), "Server redirection has been applied.");
+        assert_eq!(
+            applied.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::OK
+        );
+        assert_eq!(
+            applied.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::Standard(44)
+        );
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss applied confirmation");
+
+        persist_config_value(&paths, "Network", "UseAlternateServer", "1")
+            .expect("enable alternate server");
+        persist_config_value(
+            &paths,
+            "Network",
+            "AlternateServerAddress",
+            "https://alternate.example",
+        )
+        .expect("configure independent alternate server");
+        app.apply_startup_game_search_event(lc_network::StartupGameSearchEvent::MasterserverReply(
+            lc_network::MasterserverReplyInfo {
+                league_server_redirect: "https://ignored.example".to_string(),
+                game_count: 1,
+                ..Default::default()
+            },
+        ))
+        .expect("independent alternate server cannot redirect");
+        assert!(app.message_dialogs.is_empty());
+    }
+
     #[test]
     fn network_game_list_wheel_and_held_arrow_route_through_app() {
         use lc_frontend::startup_netdlg::{
@@ -91120,6 +92606,9 @@ ScenInfoArea=70,5,25,90
                 .map(|index| NetDlgGameEntry {
                     title: format!("Game {index}"),
                     details: String::new(),
+                    extra_lines: Vec::new(),
+                    status_icons: Vec::new(),
+                    row_icon: lc_frontend::startup_netdlg::NetDlgRowIcon::None,
                     address: None,
                     joinable: true,
                 })
@@ -91728,11 +93217,13 @@ ScenInfoArea=70,5,25,90
                 id: 10,
                 address: "first.invalid".to_string(),
                 state: StartupDirectReferenceQueryState::Pending,
+                expires_at: None,
             },
             StartupDirectReferenceQuery {
                 id: 20,
                 address: "second.invalid".to_string(),
                 state: StartupDirectReferenceQueryState::Pending,
+                expires_at: None,
             },
         ];
         app.sync_startup_network_game_rows();
@@ -92034,6 +93525,9 @@ ScenInfoArea=70,5,25,90
         network_dialog.set_games(vec![lc_frontend::startup_netdlg::NetDlgGameEntry {
             title: reference.title.clone(),
             details: String::new(),
+            extra_lines: Vec::new(),
+            status_icons: Vec::new(),
+            row_icon: lc_frontend::startup_netdlg::NetDlgRowIcon::None,
             address: None,
             joinable: true,
         }]);

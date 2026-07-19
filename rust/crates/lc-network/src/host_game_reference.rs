@@ -10,8 +10,8 @@ use std::net::{SocketAddr, SocketAddrV6};
 
 use lc_engine::{
     ClientCoreControlData, ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
-    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
-    PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
+    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED,
+    PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
 };
 use thiserror::Error;
 
@@ -91,6 +91,7 @@ impl HostGameReference {
     ) -> Result<Self, HostGameReferenceError> {
         let mut summary = self.summary.clone();
         summary.password_needed = password_needed;
+        summary.comment = lc_resources::decode_legacy_script_text(comment.as_bytes());
         let mut metadata = self.metadata.clone();
         metadata.comment = comment;
         Self::new(summary, metadata, self.parameters.clone())
@@ -104,8 +105,7 @@ impl HostGameReference {
         parameters: JoinGameParametersEnvelope,
     ) -> Result<Self, HostGameReferenceError> {
         let mut summary = self.summary.clone();
-        summary.title = lc_resources::decode_legacy_script_text(parameters.title.as_bytes());
-        summary.max_players = parameters.max_players;
+        refresh_parameter_summary(&mut summary, &parameters);
         Self::new(summary, self.metadata.clone(), parameters)
     }
 
@@ -166,8 +166,8 @@ impl HostGameReference {
         let mut summary = self.summary.clone();
         summary.state = state.into();
         summary.join_allowed = join_allowed;
-        summary.title = lc_resources::decode_legacy_script_text(parameters.title.as_bytes());
-        summary.max_players = parameters.max_players;
+        summary.time = time;
+        refresh_parameter_summary(&mut summary, &parameters);
         let mut metadata = self.metadata.clone();
         metadata.time = time;
         metadata.frame = frame;
@@ -230,6 +230,22 @@ pub enum HostGameReferenceError {
     MaxPlayersMismatch { reference: i32, parameters: i32 },
     #[error("reference title differs from the byte-preserving parameters title")]
     TitleMismatch,
+    #[error("reference icon differs from the top-level reference metadata")]
+    IconMetadataMismatch,
+    #[error("reference time differs from the top-level reference metadata")]
+    TimeMetadataMismatch,
+    #[error("reference comment differs from the byte-preserving top-level metadata")]
+    CommentMetadataMismatch,
+    #[error("reference UseFairCrew differs from the parameters value")]
+    UseFairCrewMismatch,
+    #[error("reference goals differ from the parameters goal list")]
+    GoalsMismatch,
+    #[error("reference league differs from the byte-preserving parameters league")]
+    LeagueMismatch,
+    #[error("reference league address differs from the byte-preserving parameters value")]
+    LeagueAddressMismatch,
+    #[error("reference player names differ from the active parameters player projection")]
+    PlayerNamesMismatch,
     #[error("parameters contain no unique host client with ID 0")]
     HostClientMissingOrDuplicate,
     #[error("reference host Name differs from the parameters host client")]
@@ -357,6 +373,15 @@ fn validate_summary(
     i32::try_from(summary.start_time)
         .map(|_| ())
         .map_err(|_| HostGameReferenceError::StartTimeOutOfRange(summary.start_time))?;
+    if summary.icon != metadata.icon {
+        return Err(HostGameReferenceError::IconMetadataMismatch);
+    }
+    if summary.time != metadata.time {
+        return Err(HostGameReferenceError::TimeMetadataMismatch);
+    }
+    if summary.comment != lc_resources::decode_legacy_script_text(metadata.comment.as_bytes()) {
+        return Err(HostGameReferenceError::CommentMetadataMismatch);
+    }
     if summary.max_players != parameters.max_players {
         return Err(HostGameReferenceError::MaxPlayersMismatch {
             reference: summary.max_players,
@@ -365,6 +390,23 @@ fn validate_summary(
     }
     if summary.title != lc_resources::decode_legacy_script_text(parameters.title.as_bytes()) {
         return Err(HostGameReferenceError::TitleMismatch);
+    }
+    if summary.use_fair_crew != parameters.use_fair_crew {
+        return Err(HostGameReferenceError::UseFairCrewMismatch);
+    }
+    if summary.goals != project_goal_ids(parameters) {
+        return Err(HostGameReferenceError::GoalsMismatch);
+    }
+    if summary.league != lc_resources::decode_legacy_script_text(parameters.league.as_bytes()) {
+        return Err(HostGameReferenceError::LeagueMismatch);
+    }
+    if summary.league_address
+        != lc_resources::decode_legacy_script_text(parameters.league_address.as_bytes())
+    {
+        return Err(HostGameReferenceError::LeagueAddressMismatch);
+    }
+    if summary.player_names != project_active_player_names(parameters) {
+        return Err(HostGameReferenceError::PlayerNamesMismatch);
     }
     let mut hosts = parameters
         .clients
@@ -414,6 +456,52 @@ fn validate_summary(
         return Err(HostGameReferenceError::TcpAddressProjectionMismatch);
     }
     Ok(())
+}
+
+fn refresh_parameter_summary(
+    summary: &mut NetworkGameReference,
+    parameters: &JoinGameParametersEnvelope,
+) {
+    summary.title = lc_resources::decode_legacy_script_text(parameters.title.as_bytes());
+    summary.max_players = parameters.max_players;
+    summary.use_fair_crew = parameters.use_fair_crew;
+    summary.goals = project_goal_ids(parameters);
+    summary.league = lc_resources::decode_legacy_script_text(parameters.league.as_bytes());
+    summary.league_address =
+        lc_resources::decode_legacy_script_text(parameters.league_address.as_bytes());
+    summary.player_names = project_active_player_names(parameters);
+}
+
+fn project_goal_ids(parameters: &JoinGameParametersEnvelope) -> Vec<String> {
+    parameters
+        .goals
+        .iter()
+        .map(|goal| goal.id.as_bytes().iter().copied().map(char::from).collect())
+        .collect()
+}
+
+fn project_active_player_names(parameters: &JoinGameParametersEnvelope) -> Vec<String> {
+    parameters
+        .player_infos
+        .clients
+        .iter()
+        .flat_map(|client| &client.players)
+        .filter(|player| {
+            player.flags & PLAYER_INFO_FLAG_REMOVED == 0
+                && !(player.player_type == PLAYER_INFO_TYPE_SCRIPT
+                    && player.flags & PLAYER_INFO_FLAG_INVISIBLE != 0)
+        })
+        .map(|player| {
+            let name = if !player.league_account.is_empty() {
+                &player.league_account
+            } else if !player.forced_name.is_empty() {
+                &player.forced_name
+            } else {
+                &player.name
+            };
+            lc_resources::decode_legacy_script_text(name.as_bytes())
+        })
+        .collect()
 }
 
 fn reference_projection_endpoint(endpoint: SocketAddr) -> SocketAddr {
@@ -1031,11 +1119,14 @@ mod tests {
             .expect("default host client");
         HostGameReference::new(
             NetworkGameReference {
+                icon: 7,
                 title: lc_resources::decode_legacy_script_text(parameters.title.as_bytes()),
                 host_name: lc_resources::decode_legacy_script_text(host.name.as_bytes()),
                 host_nick: lc_resources::decode_legacy_script_text(host.nick.as_bytes()),
                 state: "Lobby".to_string(),
                 control_mode: host_config.initial_status.control_mode,
+                time: 23,
+                comment: "old comment".to_string(),
                 password_needed: false,
                 official_server: true,
                 max_players: parameters.max_players,
@@ -1071,11 +1162,136 @@ mod tests {
 
         let mut expected_summary = original_summary;
         expected_summary.password_needed = true;
+        expected_summary.comment = lc_resources::decode_legacy_script_text(comment.as_bytes());
         let mut expected_metadata = original_metadata;
         expected_metadata.comment = comment;
         assert_eq!(updated.summary, expected_summary);
         assert_eq!(updated.metadata, expected_metadata);
         assert_eq!(updated.parameters, original_parameters);
+    }
+
+    #[test]
+    fn constructor_rejects_stale_display_projections() {
+        let reference = exact_reference();
+
+        let mut summary = reference.summary.clone();
+        summary.icon += 1;
+        assert_eq!(
+            HostGameReference::new(
+                summary,
+                reference.metadata.clone(),
+                reference.parameters.clone(),
+            )
+            .unwrap_err(),
+            HostGameReferenceError::IconMetadataMismatch
+        );
+
+        let mut summary = reference.summary.clone();
+        summary.comment.push('!');
+        assert_eq!(
+            HostGameReference::new(
+                summary,
+                reference.metadata.clone(),
+                reference.parameters.clone(),
+            )
+            .unwrap_err(),
+            HostGameReferenceError::CommentMetadataMismatch
+        );
+
+        let mut summary = reference.summary.clone();
+        summary.player_names.push("stale".to_string());
+        assert_eq!(
+            HostGameReference::new(
+                summary,
+                reference.metadata.clone(),
+                reference.parameters.clone(),
+            )
+            .unwrap_err(),
+            HostGameReferenceError::PlayerNamesMismatch
+        );
+    }
+
+    #[test]
+    fn parameter_rebuild_refreshes_every_display_projection() {
+        let reference = exact_reference();
+        let mut parameters = reference.parameters.clone();
+        parameters.title = LegacyCString::from_bytes(b"New title".to_vec()).unwrap();
+        parameters.max_players = 12;
+        parameters.use_fair_crew = true;
+        parameters.goals = vec![crate::JoinDataIdListEntry {
+            id: crate::JoinDataC4Id::from_bytes(*b"MELE").unwrap(),
+            count: 0,
+        }];
+        parameters.league = LegacyCString::from_bytes(b"New league".to_vec()).unwrap();
+        parameters.league_address =
+            LegacyCString::from_bytes(b"https://league.invalid/new".to_vec()).unwrap();
+        parameters.player_infos = PlayerInfoListSnapshot {
+            last_player_id: 5,
+            clients: vec![ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![
+                    ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Original".to_vec()).unwrap(),
+                        forced_name: LegacyCString::from_bytes(b"Forced".to_vec()).unwrap(),
+                        league_account: LegacyCString::from_bytes(b"League name".to_vec()).unwrap(),
+                        id: 1,
+                        ..ControlPlayerInfoEntry::default()
+                    },
+                    ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Original two".to_vec()).unwrap(),
+                        forced_name: LegacyCString::from_bytes(b"Forced two".to_vec()).unwrap(),
+                        id: 2,
+                        ..ControlPlayerInfoEntry::default()
+                    },
+                    ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Plain".to_vec()).unwrap(),
+                        id: 3,
+                        ..ControlPlayerInfoEntry::default()
+                    },
+                    ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Removed".to_vec()).unwrap(),
+                        flags: PLAYER_INFO_FLAG_REMOVED,
+                        id: 4,
+                        ..ControlPlayerInfoEntry::default()
+                    },
+                    ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Invisible".to_vec()).unwrap(),
+                        flags: PLAYER_INFO_FLAG_INVISIBLE,
+                        id: 5,
+                        ..ControlPlayerInfoEntry::default()
+                    },
+                    ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Invisible script".to_vec()).unwrap(),
+                        flags: PLAYER_INFO_FLAG_INVISIBLE,
+                        id: 6,
+                        player_type: PLAYER_INFO_TYPE_SCRIPT,
+                        ..ControlPlayerInfoEntry::default()
+                    },
+                ],
+            }],
+        };
+
+        let updated = reference.replacing_parameters(parameters.clone()).unwrap();
+
+        assert_eq!(updated.summary.title, "New title");
+        assert_eq!(updated.summary.max_players, 12);
+        assert!(updated.summary.use_fair_crew);
+        assert_eq!(updated.summary.goals, ["MELE"]);
+        assert_eq!(updated.summary.league, "New league");
+        assert_eq!(updated.summary.league_address, "https://league.invalid/new");
+        assert_eq!(
+            updated.summary.player_names,
+            ["League name", "Forced two", "Plain", "Invisible"]
+        );
+
+        parameters.league = LegacyCString::from_bytes(b"Runtime league".to_vec()).unwrap();
+        let runtime = updated
+            .replacing_runtime(parameters, "Running", 99, 100, false, 0)
+            .unwrap();
+        assert_eq!(runtime.summary.time, 99);
+        assert_eq!(runtime.metadata.time, 99);
+        assert_eq!(runtime.summary.league, "Runtime league");
     }
 
     #[test]
