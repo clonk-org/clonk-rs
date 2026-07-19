@@ -25543,9 +25543,12 @@ impl GameApp {
                             CommandKind::Press,
                         )?;
                     } else {
-                        return Err(classic_parity_engine_error(report_classic_parity_boundary(
-                            ClassicParityBoundary::AbortDialog,
-                        )));
+                        let dialog_owner = if self.primary_physical_viewport_is_no_owner() {
+                            OWNER_NONE
+                        } else {
+                            self.local_owner
+                        };
+                        self.show_abort_dialog(dialog_owner);
                     }
                     return Ok(());
                 }
@@ -26412,6 +26415,27 @@ impl GameApp {
         }
     }
 
+    /// `C4FullScreen::ShowAbortDlg`: keep the confirmation unique, suppress
+    /// it while evaluation is visible, and expose Restart only to the control
+    /// host (or a cinematic film), as `C4AbortGameDialog` does.
+    fn show_abort_dialog(&mut self, player: i32) -> bool {
+        if !matches!(self.mode, AppMode::Running)
+            || self.game_over_dialog.is_some()
+            || self
+                .ingame_menu
+                .iter()
+                .any(|(_, menu)| menu.page() == ingame_menu::MenuPage::AbortConfirm)
+        {
+            return false;
+        }
+        let show_restart = self.engine.is_control_host() || self.engine.cinematic_film();
+        self.ingame_menu.replace(
+            player,
+            Some(IngameMenuState::abort_confirm_menu(show_restart)),
+        );
+        true
+    }
+
     fn close_ingame_menu(&mut self) {
         self.ingame_menu.clear();
         self.ingame_menu_close_pointer_capture = None;
@@ -26976,9 +27000,7 @@ impl GameApp {
                 ));
             }
             MenuAction::Abort => {
-                return Err(classic_parity_engine_error(report_classic_parity_boundary(
-                    ClassicParityBoundary::AbortDialog,
-                )));
+                self.show_abort_dialog(player);
             }
             MenuAction::AbortConfirmed => {
                 // `Game.Abort()` back to the startup menu
@@ -93781,19 +93803,33 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn abort_action_fails_instead_of_opening_menu_approximation() {
+    fn l002_abort_action_opens_confirmation_with_control_host_restart() {
         let mut app = new_menu_app(320, 200);
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start explicit test sandbox");
-        let error = app
-            .apply_ingame_menu_action(MenuAction::Abort)
-            .expect_err("C4AbortGameDialog approximation must not open");
-        assert!(error.to_string().contains("C4AbortGameDialog"));
-        assert!(app.ingame_menu.is_none());
+        app.apply_ingame_menu_action(MenuAction::Abort)
+            .expect("open C4AbortGameDialog confirmation");
+        let menu = app
+            .ingame_menu
+            .get(app.local_owner)
+            .expect("abort confirmation is visible");
+        assert_eq!(menu.page(), ingame_menu::MenuPage::AbortConfirm);
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| item.action.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                MenuAction::AbortConfirmed,
+                MenuAction::RestartRound,
+                MenuAction::NoOp,
+            ]
+        );
+        assert!(matches!(app.mode, AppMode::Running));
     }
 
     #[test]
-    fn production_menu_input_never_downgrades_a_classic_boundary_to_status() {
+    fn l002_ingame_menu_abort_routes_to_the_same_confirmation() {
         let mut app = new_menu_app(320, 200);
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start explicit test sandbox");
@@ -93808,19 +93844,19 @@ ScenInfoArea=70,5,25,90
         app.ingame_menu.replace(app.local_owner, Some(menu));
         app.status_text.clear();
 
-        let error = app
-            .handle_menu_command_failsafe(
-                app.local_owner,
-                ControlCommand::MenuEnter,
-                CommandKind::Press,
-            )
-            .expect_err("production input must propagate the parity boundary");
-        assert!(matches!(
-            &error,
-            EngineError::ClassicMenuParityBoundary { .. }
-        ));
-        assert!(error.to_string().contains("C4AbortGameDialog"));
-        assert!(app.ingame_menu.is_none(), "C++ closes before the callback");
+        app.handle_menu_command_failsafe(
+            app.local_owner,
+            ControlCommand::MenuEnter,
+            CommandKind::Press,
+        )
+            .expect("production Abort opens the confirmation");
+        assert_eq!(
+            app.ingame_menu
+                .get(app.local_owner)
+                .map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::AbortConfirm)
+        );
+        assert!(matches!(app.mode, AppMode::Running));
         assert!(app.status_text.is_empty());
     }
 
@@ -138705,22 +138741,181 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn bare_escape_reaches_abort_dialog_boundary_before_player_menu() {
+    fn l002_bare_escape_opens_abort_confirmation_without_exiting() {
         lc_core::logging::init();
         let mut app = new_running_sandbox_app();
         app.status_text.clear();
-        let error = app
-            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .expect_err("bare Escape opens C4AbortGameDialog, not C4MainMenu");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("bare Escape opens C4AbortGameDialog");
 
-        assert!(matches!(
-            &error,
-            EngineError::ClassicMenuParityBoundary { .. }
-        ));
-        assert!(error.to_string().contains("C4AbortGameDialog"));
-        assert!(app.ingame_menu.is_none());
+        assert_eq!(
+            app.ingame_menu
+                .get(app.local_owner)
+                .map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::AbortConfirm)
+        );
         assert!(app.object_menu.is_none());
+        assert!(matches!(app.mode, AppMode::Running));
+        assert!(!app.take_exit_request());
         assert!(app.status_text.is_empty());
+        assert!(!app.show_abort_dialog(app.local_owner));
+        assert_eq!(app.ingame_menu.iter().count(), 1);
+    }
+
+    #[test]
+    fn l002_ownerless_escape_opens_fullscreen_abort_confirmation() {
+        let mut app = new_running_sandbox_app();
+        let removed_owner = app.local_owner;
+        app.engine
+            .remove_player(removed_owner)
+            .expect("remove local player for passive observer");
+        app.engine.set_local_players([]);
+        app.local_controls = LocalControlRegistry::default();
+        app.snapshot = app.engine.snapshot();
+        app.refresh_non_authoritative_physical_viewports();
+        assert!(app.primary_physical_viewport_is_no_owner());
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("ownerless Escape opens fullscreen abort confirmation");
+        assert_eq!(
+            app.ingame_menu.get(OWNER_NONE).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::AbortConfirm)
+        );
+        assert!(!app.ingame_menu_belongs_to(app.local_owner));
+        assert!(matches!(app.mode, AppMode::Running));
+        assert!(!app.take_exit_request());
+    }
+
+    #[test]
+    fn l002_abort_confirmation_declines_confirms_and_restarts() {
+        let mut declined = new_running_sandbox_app();
+        declined.update().expect("advance round before declining");
+        let declined_frame = declined.engine.frame();
+        assert!(declined_frame > 0);
+        let declined_scenario = declined
+            .active_scenario
+            .as_ref()
+            .expect("active sandbox scenario")
+            .identifier
+            .clone();
+        declined
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("open abort confirmation for decline");
+        let no = declined
+            .ingame_menu
+            .get(declined.local_owner)
+            .expect("abort confirmation")
+            .items()
+            .iter()
+            .position(|item| item.action == MenuAction::NoOp)
+            .expect("No button");
+        declined
+            .ingame_menu
+            .get_mut(declined.local_owner)
+            .expect("abort confirmation")
+            .set_selection(no);
+        declined
+            .handle_menu_command_failsafe(
+                declined.local_owner,
+                ControlCommand::MenuEnter,
+                CommandKind::Press,
+            )
+            .expect("decline abort");
+        assert!(declined.ingame_menu.is_none());
+        assert!(matches!(declined.mode, AppMode::Running));
+        assert_eq!(
+            declined
+                .active_scenario
+                .as_ref()
+                .map(|active| active.identifier.as_str()),
+            Some(declined_scenario.as_str())
+        );
+        assert_eq!(declined.engine.frame(), declined_frame);
+
+        let mut confirmed = new_running_sandbox_app();
+        confirmed
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("open abort confirmation for Yes");
+        confirmed
+            .handle_menu_command_failsafe(
+                confirmed.local_owner,
+                ControlCommand::MenuEnter,
+                CommandKind::Press,
+            )
+            .expect("confirm abort");
+        assert!(matches!(confirmed.mode, AppMode::Menu));
+        assert!(confirmed.active_scenario.is_none());
+        assert!(confirmed.ingame_menu.is_none());
+
+        let mut restarted = new_running_sandbox_app();
+        restarted.update().expect("advance round before restarting");
+        assert!(restarted.engine.frame() > 0);
+        let scenario = restarted
+            .active_scenario
+            .as_ref()
+            .expect("active sandbox scenario")
+            .identifier
+            .clone();
+        restarted
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("open abort confirmation for restart");
+        let restart = restarted
+            .ingame_menu
+            .get(restarted.local_owner)
+            .expect("abort confirmation")
+            .items()
+            .iter()
+            .position(|item| item.action == MenuAction::RestartRound)
+            .expect("control host Restart button");
+        restarted
+            .ingame_menu
+            .get_mut(restarted.local_owner)
+            .expect("abort confirmation")
+            .set_selection(restart);
+        restarted
+            .handle_menu_command_failsafe(
+                restarted.local_owner,
+                ControlCommand::MenuEnter,
+                CommandKind::Press,
+            )
+            .expect("restart current scenario");
+        wait_for_running(&mut restarted);
+        assert_eq!(
+            restarted
+                .active_scenario
+                .as_ref()
+                .map(|active| active.identifier.as_str()),
+            Some(scenario.as_str())
+        );
+        assert_eq!(restarted.engine.frame(), 0);
+        assert!(restarted.ingame_menu.is_none());
+    }
+
+    #[test]
+    fn l002_restart_is_control_host_only_and_game_over_suppresses_abort() {
+        let mut client = new_running_sandbox_app();
+        client.engine.set_control_host(false);
+        client
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("open client abort confirmation");
+        let client_dialog = client
+            .ingame_menu
+            .get(client.local_owner)
+            .expect("client abort confirmation");
+        assert!(client_dialog
+            .items()
+            .iter()
+            .all(|item| item.action != MenuAction::RestartRound));
+
+        let mut game_over = new_game_over_keyboard_app();
+        game_over
+            .apply_ingame_menu_action(MenuAction::Abort)
+            .expect("suppressed abort request is non-fatal");
+        assert!(game_over.game_over_dialog.is_some());
+        assert!(game_over.ingame_menu.iter().all(|(_, menu)| {
+            menu.page() != ingame_menu::MenuPage::AbortConfirm
+        }));
+        assert!(matches!(game_over.mode, AppMode::Running));
     }
 
     #[test]
@@ -138745,10 +138940,14 @@ func ControlDig() { dig_count = 1; return(1); }
         }
         app.handle_modifiers_changed(ModifiersState::LOGO)
             .expect("set keyboard modifiers");
-        let logo_error = app
-            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .expect_err("Logo is outside C++'s Alt/Ctrl/Shift modifier mask");
-        assert!(logo_error.to_string().contains("C4AbortGameDialog"));
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Logo is outside C++'s Alt/Ctrl/Shift modifier mask");
+        assert_eq!(
+            app.ingame_menu
+                .get(app.local_owner)
+                .map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::AbortConfirm)
+        );
         app.handle_modifiers_changed(ModifiersState::empty())
             .expect("set keyboard modifiers");
     }
