@@ -129,7 +129,9 @@ use lc_frontend::rename_edit::{
     RenameEdit, RenameEditAction, RenameEditCursorOperation, RenameEditResolution,
     RenameEditResult,
 };
-use lc_frontend::startup_plrsel::{PlrSelCrewContextCommand, PlrSelPlayerContextCommand};
+use lc_frontend::startup_plrsel::{
+    PlrSelControl, PlrSelCrewContextCommand, PlrSelPlayerContextCommand,
+};
 use lc_frontend::{
     ActiveViewportProjection, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
     GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher,
@@ -199,7 +201,7 @@ use settings::{AudioOptions, DisplayMode, DisplayOptions};
 use startup_player_files::{
     PlayerActivationRefusal, PlayerImageWrite, SavedStartupPlayer, StartupCrewFile,
     StartupCrewMutationError, StartupPlayerFile, delete_crew_file, delete_player_file,
-    discover_crew_files, discover_player_files, discover_player_files_in,
+    crew_file_name_for_title, discover_crew_files, discover_player_files, discover_player_files_in,
     load_network_player_big_icon, persist_activations, rename_crew, save_player_properties,
     set_crew_death_message, set_crew_participation,
 };
@@ -8758,7 +8760,6 @@ struct PendingOptionsAdvancedDialog {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingCrewInputAction {
-    Rename { index: usize },
     SetDeathMessage { index: usize },
 }
 
@@ -8935,6 +8936,7 @@ enum AppContextMenuCommand {
     NetworkJoinEdit(lc_frontend::startup_netdlg::NetDlgEditContextCommand),
     LobbyChat(LobbyChatContextCommand),
     ScenarioSearch(ScenselSearchContextCommand),
+    StartupCrewRename(lc_frontend::startup_netdlg::NetDlgEditContextCommand),
     InputDialog(InputDialogContextCommand),
 }
 
@@ -10228,6 +10230,8 @@ struct GameApp {
     startup_crew_files: Vec<StartupCrewFile>,
     startup_crew_models: Vec<lc_frontend::startup_plrsel::PlrSelCrew>,
     startup_crew_player_index: Option<usize>,
+    /// Inline `CallbackRenameEdit` projected over the active crew row.
+    startup_crew_rename: Option<StartupCrewRenameState>,
     startup_options_dialog: Option<lc_frontend::startup_options_dlg::OptionsDlgState>,
     startup_options_advanced_dialog: Option<PendingOptionsAdvancedDialog>,
     startup_about_dialog: Option<lc_frontend::startup_about_dlg::AboutDlgState>,
@@ -12412,6 +12416,16 @@ struct ScenarioRenameState {
     identifier: String,
     edit: RenameEdit<ScenselFocusSnapshot>,
     last_click: Option<Instant>,
+}
+
+#[derive(Clone, Debug)]
+struct StartupCrewRenameState {
+    index: usize,
+    player_path: PathBuf,
+    file_name: String,
+    edit: RenameEdit<PlrSelControl>,
+    last_click: Option<Instant>,
+    ignore_pointer_up: bool,
 }
 
 /// `C4GUI::Dialog::AdvanceFocus` order for C4StartupScenSelDlg. The option
@@ -20138,6 +20152,7 @@ impl GameApp {
             startup_crew_files: Vec::new(),
             startup_crew_models: Vec::new(),
             startup_crew_player_index: None,
+            startup_crew_rename: None,
             startup_options_dialog: None,
             startup_options_advanced_dialog: None,
             startup_about_dialog: None,
@@ -21596,6 +21611,16 @@ impl GameApp {
             self.handle_menu_input(|menu| menu.select_list_character(character))?;
             return Ok(());
         }
+        if self.startup_view == StartupView::PlayerSelection
+            && self.startup_crew_rename.is_some()
+        {
+            let mut encoded = [0_u8; 4];
+            if let Some(rename) = self.startup_crew_rename.as_mut() {
+                rename.edit.insert_text(character.encode_utf8(&mut encoded));
+            }
+            self.mark_menu_dirty();
+            return Ok(());
+        }
         if self.startup_view == StartupView::PlayerSelection {
             let actions = match self.startup_player_dialog.as_mut() {
                 Some(dialog) if dialog.is_crew_mode() => dialog.handle_character(
@@ -21886,6 +21911,137 @@ impl GameApp {
                 rename.last_click = None;
             } else {
                 rename.last_click = inside.then_some(now);
+            }
+        }
+        true
+    }
+
+    fn startup_crew_rename_rect(&self) -> Option<lc_frontend::classic_gui::IntRect> {
+        let rename = self.startup_crew_rename.as_ref()?;
+        let current = self.startup_crew_files.get(rename.index)?;
+        if current.file_name != rename.file_name || current.player_path != rename.player_path {
+            return None;
+        }
+        let dialog = self
+            .startup_player_dialog
+            .as_ref()
+            .filter(|dialog| dialog.is_crew_mode())?;
+        let layout = dialog.layout();
+        let row = i32::try_from(rename.index).unwrap_or(i32::MAX);
+        Some(lc_frontend::classic_gui::IntRect {
+            x: layout.list_viewport.x + (layout.item_height + 2) * 2,
+            y: layout.list_viewport.y + layout.item_pitch.saturating_mul(row)
+                - dialog.list_scroll_offset()
+                + 2,
+            w: (layout.item_width - (layout.item_height + 2) * 2 - 2).max(1),
+            h: (layout.item_height - 4).max(1),
+        })
+    }
+
+    fn startup_crew_rename_char_pos(
+        &self,
+        point: GuiPoint,
+        require_inside: bool,
+    ) -> Option<usize> {
+        let rename = self.startup_crew_rename.as_ref()?;
+        let dialog = self.startup_player_dialog.as_ref()?;
+        let layout = dialog.layout();
+        let rect = self.startup_crew_rename_rect()?;
+        let inside_rect = point.x >= rect.x as f32
+            && point.x < (rect.x + rect.w) as f32
+            && point.y >= rect.y as f32
+            && point.y < (rect.y + rect.h) as f32;
+        let inside_viewport = point.x >= layout.list_viewport.x as f32
+            && point.x < (layout.list_viewport.x + layout.list_viewport.w) as f32
+            && point.y >= layout.list_viewport.y as f32
+            && point.y < (layout.list_viewport.y + layout.list_viewport.h) as f32;
+        if require_inside && !(inside_rect && inside_viewport) {
+            return None;
+        }
+        let font = &self.assets.clonk_fonts.as_deref()?.text;
+        Some(rename.edit.character_at_x(point.x, rect, font))
+    }
+
+    fn handle_startup_crew_rename_pointer_down(&mut self, point: GuiPoint) -> bool {
+        let Some(position) = self.startup_crew_rename_char_pos(point, true) else {
+            return false;
+        };
+        let now = Instant::now();
+        if let Some(rename) = self.startup_crew_rename.as_mut() {
+            let double_click = rename
+                .last_click
+                .is_some_and(|last| now.duration_since(last) < CPP_DOUBLE_CLICK_INTERVAL);
+            if double_click {
+                rename.edit.select_word_at(position);
+                rename.last_click = None;
+                rename.ignore_pointer_up = true;
+            } else {
+                rename.edit.begin_pointer_selection(position);
+                rename.last_click = Some(now);
+                rename.ignore_pointer_up = false;
+            }
+        }
+        true
+    }
+
+    fn handle_startup_crew_rename_pointer_move(&mut self, point: GuiPoint) -> bool {
+        if !self
+            .startup_crew_rename
+            .as_ref()
+            .is_some_and(|rename| rename.edit.is_dragging())
+        {
+            return false;
+        }
+        if let Some(position) = self.startup_crew_rename_char_pos(point, false) {
+            if let Some(rename) = self.startup_crew_rename.as_mut() {
+                rename.edit.drag_pointer_selection(position);
+            }
+        }
+        true
+    }
+
+    fn handle_startup_crew_rename_pointer_up(&mut self, point: GuiPoint) -> bool {
+        if self
+            .startup_crew_rename
+            .as_mut()
+            .is_some_and(|rename| std::mem::take(&mut rename.ignore_pointer_up))
+        {
+            return true;
+        }
+        if !self
+            .startup_crew_rename
+            .as_ref()
+            .is_some_and(|rename| rename.edit.is_dragging())
+        {
+            return false;
+        }
+        let position = self
+            .startup_crew_rename_char_pos(point, false)
+            .or_else(|| {
+                self.startup_crew_rename
+                    .as_ref()
+                    .map(|rename| rename.edit.caret())
+            })
+            .unwrap_or(0);
+        if let Some(rename) = self.startup_crew_rename.as_mut() {
+            rename.edit.end_pointer_selection(position);
+        }
+        true
+    }
+
+    fn handle_startup_crew_rename_middle_down(
+        &mut self,
+        point: GuiPoint,
+        primary: Option<&str>,
+    ) -> bool {
+        let Some(position) = self.startup_crew_rename_char_pos(point, true) else {
+            return false;
+        };
+        if let Some(rename) = self.startup_crew_rename.as_mut() {
+            rename.edit.begin_pointer_selection(position);
+            rename.edit.end_pointer_selection(position);
+            if let Some(primary) = primary {
+                rename.edit.insert_text(primary);
             }
         }
         true
@@ -22764,6 +22920,13 @@ impl GameApp {
         {
             return Ok(false);
         }
+        if self.startup_view == StartupView::PlayerSelection
+            && self.startup_crew_rename.is_some()
+        {
+            // RenameEdit owns Tab as a focus-loss commit. Its FinishRename
+            // restores the saved control and cancels this traversal.
+            return Ok(false);
+        }
         let modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         let backwards = if modifiers.is_empty() {
@@ -23631,6 +23794,143 @@ impl GameApp {
                         }
                     }
                     Err(error) => tracing::warn!(%error, "failed to paste scenario rename text"),
+                }
+            }
+            _ => {}
+        }
+        self.mark_menu_dirty();
+        Ok(true)
+    }
+
+    fn handle_startup_crew_rename_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.startup_view != StartupView::PlayerSelection
+            || self.startup_crew_rename.is_none()
+        {
+            return Ok(false);
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if state == ElementState::Pressed
+            && key == VirtualKeyCode::Apps
+            && modifiers.is_empty()
+        {
+            if let Some(rect) = self.startup_crew_rename_rect() {
+                let anchor = GuiPoint::new(
+                    (rect.x + rect.w / 2) as f32,
+                    (rect.y + rect.h / 2) as f32,
+                );
+                self.open_startup_crew_rename_context_menu(anchor)?;
+            }
+            return Ok(true);
+        }
+        if state == ElementState::Pressed
+            && key == VirtualKeyCode::Tab
+            && (modifiers.is_empty() || modifiers == ModifiersState::SHIFT)
+        {
+            self.commit_startup_crew_rename(true)?;
+            return Ok(true);
+        }
+        if state == ElementState::Released {
+            return Ok(true);
+        }
+        let ctrl = modifiers.ctrl();
+        let shift = modifiers.shift();
+        let cursor_modifiers = !modifiers.alt();
+        match key {
+            VirtualKeyCode::F2 if modifiers.is_empty() => {
+                let index = self
+                    .startup_crew_rename
+                    .as_ref()
+                    .map(|rename| rename.index)
+                    .expect("active crew rename remains installed");
+                self.abort_startup_crew_rename();
+                self.start_startup_crew_rename(index)?;
+            }
+            VirtualKeyCode::Escape if modifiers.is_empty() => {
+                self.abort_startup_crew_rename();
+            }
+            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter if modifiers.is_empty() => {
+                self.commit_startup_crew_rename(false)?;
+            }
+            VirtualKeyCode::Back if cursor_modifiers => {
+                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                    rename.edit.backspace(ctrl, shift);
+                }
+            }
+            VirtualKeyCode::Delete if cursor_modifiers => {
+                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                    rename.edit.delete(ctrl, shift);
+                }
+            }
+            VirtualKeyCode::Left if cursor_modifiers => {
+                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                    rename
+                        .edit
+                        .move_cursor(RenameEditCursorOperation::Left, ctrl, shift);
+                }
+            }
+            VirtualKeyCode::Right if cursor_modifiers => {
+                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                    rename
+                        .edit
+                        .move_cursor(RenameEditCursorOperation::Right, ctrl, shift);
+                }
+            }
+            VirtualKeyCode::Home if cursor_modifiers => {
+                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                    rename
+                        .edit
+                        .move_cursor(RenameEditCursorOperation::Home, ctrl, shift);
+                }
+            }
+            VirtualKeyCode::End if cursor_modifiers => {
+                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                    rename
+                        .edit
+                        .move_cursor(RenameEditCursorOperation::End, ctrl, shift);
+                }
+            }
+            VirtualKeyCode::A if modifiers == ModifiersState::CTRL => {
+                if let Some(rename) = self.startup_crew_rename.as_mut() {
+                    rename.edit.select_all();
+                }
+            }
+            VirtualKeyCode::C if modifiers == ModifiersState::CTRL => {
+                let result = self.startup_crew_rename.as_mut().map(|rename| {
+                    transfer_edit_selection(&mut rename.edit, false, |selected| {
+                        arboard::Clipboard::new()
+                            .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
+                    })
+                });
+                if let Some(Err(error)) = result {
+                    tracing::warn!(%error, "failed to copy startup crew rename text");
+                }
+            }
+            VirtualKeyCode::X if modifiers == ModifiersState::CTRL => {
+                let result = self.startup_crew_rename.as_mut().map(|rename| {
+                    transfer_edit_selection(&mut rename.edit, true, |selected| {
+                        arboard::Clipboard::new()
+                            .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
+                    })
+                });
+                if let Some(Err(error)) = result {
+                    tracing::warn!(%error, "failed to cut startup crew rename text");
+                }
+            }
+            VirtualKeyCode::V if modifiers == ModifiersState::CTRL => {
+                match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+                    Ok(text) => {
+                        if let Some(rename) = self.startup_crew_rename.as_mut() {
+                            rename.edit.insert_text(&text);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to paste startup crew rename text")
+                    }
                 }
             }
             _ => {}
@@ -25337,6 +25637,11 @@ impl GameApp {
                 if self.handle_network_join_edit_key(key, state)? {
                     return Ok(());
                 }
+                if self.startup_view == StartupView::PlayerSelection
+                    && self.handle_startup_crew_rename_key(key, state)?
+                {
+                    return Ok(());
+                }
                 if self.startup_view == StartupView::ScenarioBrowser {
                     if self.handle_scenario_rename_key(key, state)? {
                         return Ok(());
@@ -25885,6 +26190,11 @@ impl GameApp {
         self.scoreboard_tab_raw_pressed = false;
         self.keyboard_modifiers = ModifiersState::empty();
         self.running_pointer_position = None;
+        if let Some(rename) = self.startup_crew_rename.as_mut() {
+            rename.edit.cancel_pointer_selection();
+            rename.last_click = None;
+            rename.ignore_pointer_up = false;
+        }
         self.pointer_left_unchecked();
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -31103,10 +31413,16 @@ impl GameApp {
                             {
                                 continue;
                             }
-                            let rename_active = self.mode == AppMode::Menu
+                            let scenario_rename_active = self.mode == AppMode::Menu
                                 && self.startup_view == StartupView::ScenarioBrowser
                                 && self.menu_state.rename_edit.is_some();
+                            let crew_rename_active = self.mode == AppMode::Menu
+                                && self.startup_view == StartupView::PlayerSelection
+                                && self.startup_crew_rename.is_some();
+                            let rename_active = scenario_rename_active || crew_rename_active;
                             let rename_owns_raw_gui_button = eligible_gamepad_gui && rename_active;
+                            let scenario_rename_owns_raw_gui_button =
+                                eligible_gamepad_gui && scenario_rename_active;
                             let options_owns_raw_gui_button = eligible_gamepad_gui
                                 && self.mode == AppMode::Menu
                                 && self.startup_view == StartupView::Options
@@ -31124,7 +31440,11 @@ impl GameApp {
                                     ..
                                 } if rename_owns_raw_gui_button => {
                                     if state == ElementState::Pressed {
-                                        self.abort_scenario_rename();
+                                        if scenario_rename_active {
+                                            self.abort_scenario_rename();
+                                        } else {
+                                            self.abort_startup_crew_rename();
+                                        }
                                         self.mark_menu_dirty();
                                     }
                                     // RenameEdit's AnyHighButton binding owns
@@ -31136,7 +31456,7 @@ impl GameApp {
                                     class: GuiButtonClass::Low,
                                     state,
                                     ..
-                                } if rename_owns_raw_gui_button => {
+                                } if scenario_rename_owns_raw_gui_button => {
                                     if state == ElementState::Pressed {
                                         self.activate_scensel_after_gamepad_low_rename_abort()?;
                                         self.mark_menu_dirty();
@@ -31699,6 +32019,17 @@ impl GameApp {
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_gamepad_direction(button, state);
         }
+        if self.mode == AppMode::Menu
+            && self.startup_view == StartupView::PlayerSelection
+            && self.startup_crew_rename.is_some()
+        {
+            if state == ElementState::Pressed
+                && matches!(button, ControlButton::Left | ControlButton::Right)
+            {
+                self.commit_startup_crew_rename(true)?;
+            }
+            return Ok(());
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
             if self.menu_state.rename_edit.is_some() {
                 if state == ElementState::Pressed
@@ -31862,6 +32193,16 @@ impl GameApp {
         if self.game_over_dialog.is_some() {
             if state == ElementState::Pressed {
                 self.handle_game_over_action(GameOverAction::End)?;
+            }
+            return Ok(());
+        }
+        if self.mode == AppMode::Menu
+            && self.startup_view == StartupView::PlayerSelection
+            && self.startup_crew_rename.is_some()
+        {
+            if state == ElementState::Pressed {
+                self.abort_startup_crew_rename();
+                self.mark_menu_dirty();
             }
             return Ok(());
         }
@@ -32364,6 +32705,19 @@ impl GameApp {
                         self.process_network_dialog_actions(actions)
                     }
                     StartupView::PlayerSelection => {
+                        if self
+                            .startup_crew_rename
+                            .as_ref()
+                            .is_some_and(|rename| rename.edit.is_dragging())
+                        {
+                            if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                                dialog.set_pointer_position(Some(point));
+                            }
+                        }
+                        if self.handle_startup_crew_rename_pointer_move(point) {
+                            self.mark_menu_dirty();
+                            return Ok(());
+                        }
                         let actions = self
                             .startup_player_dialog
                             .as_mut()
@@ -34625,6 +34979,18 @@ impl GameApp {
                             self.open_scenario_search_context_menu(false)?;
                         }
                         StartupView::PlayerSelection => {
+                            if self.startup_crew_rename.is_some() {
+                                let point = self
+                                    .startup_player_dialog
+                                    .as_ref()
+                                    .and_then(|dialog| dialog.pointer_position());
+                                if let Some(point) = point.filter(|point| {
+                                    self.startup_crew_rename_char_pos(*point, true).is_some()
+                                }) {
+                                    self.open_startup_crew_rename_context_menu(point)?;
+                                    return Ok(());
+                                }
+                            }
                             self.open_startup_player_context_menu(false)?;
                         }
                         StartupView::NetworkGame => {
@@ -34776,6 +35142,25 @@ impl GameApp {
                     })
                     .unwrap_or_default();
                 self.process_network_dialog_actions(outcome.actions)?;
+            }
+            return Ok(());
+        }
+        if self.mode == AppMode::Menu
+            && self.startup_view == StartupView::PlayerSelection
+            && self.startup_crew_rename.is_some()
+        {
+            if button_state == ElementState::Pressed {
+                let point = self
+                    .startup_player_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.pointer_position());
+                if let Some(point) = point {
+                    let primary = primary_clipboard_text();
+                    self.handle_startup_crew_rename_middle_down(
+                        point,
+                        primary.as_deref(),
+                    );
+                }
             }
             return Ok(());
         }
@@ -36613,6 +36998,30 @@ impl GameApp {
                             .startup_player_dialog
                             .as_ref()
                             .and_then(|dialog| dialog.pointer_position());
+                        let mut restore_rename_focus = None;
+                        if self.startup_crew_rename.is_some() {
+                            match (button_state, point) {
+                                (ElementState::Pressed, Some(point)) => {
+                                    if self.handle_startup_crew_rename_pointer_down(point) {
+                                        return Ok(());
+                                    }
+                                    if let Some(rename) = self.startup_crew_rename.as_mut() {
+                                        rename.last_click = None;
+                                        rename.ignore_pointer_up = false;
+                                    }
+                                    restore_rename_focus = self
+                                        .startup_player_dialog
+                                        .as_ref()
+                                        .map(|dialog| dialog.focused_control());
+                                }
+                                (ElementState::Released, Some(point))
+                                    if self.handle_startup_crew_rename_pointer_up(point) =>
+                                {
+                                    return Ok(());
+                                }
+                                _ => {}
+                            }
+                        }
                         let scrollbar_captured = self
                             .startup_player_dialog
                             .as_ref()
@@ -36665,7 +37074,9 @@ impl GameApp {
                             );
                             self.plrsel_last_click = None;
                         }
-                        self.process_player_dialog_actions(actions)
+                        self.process_player_dialog_actions(actions)?;
+                        self.restore_startup_crew_focus(restore_rename_focus);
+                        Ok(())
                     }
                     StartupView::ScenarioBrowser => {
                         if button_state == ElementState::Pressed {
@@ -37295,6 +37706,44 @@ impl GameApp {
                 Ok(())
             }
             StartupView::PlayerSelection => {
+                let mut restore_rename_focus = None;
+                if self.startup_crew_rename.is_some() {
+                    match phase {
+                        TouchPhase::Started => {
+                            if self.handle_startup_crew_rename_pointer_down(position) {
+                                return Ok(());
+                            }
+                            if let Some(rename) = self.startup_crew_rename.as_mut() {
+                                rename.last_click = None;
+                                rename.ignore_pointer_up = false;
+                            }
+                            restore_rename_focus = self
+                                .startup_player_dialog
+                                .as_ref()
+                                .map(|dialog| dialog.focused_control());
+                        }
+                        TouchPhase::Moved
+                            if self.handle_startup_crew_rename_pointer_move(position) =>
+                        {
+                            return Ok(());
+                        }
+                        TouchPhase::Ended
+                            if self.handle_startup_crew_rename_pointer_up(position) =>
+                        {
+                            self.pointer_left_unchecked();
+                            return Ok(());
+                        }
+                        TouchPhase::Cancelled => {
+                            if let Some(rename) = self.startup_crew_rename.as_mut() {
+                                rename.edit.cancel_pointer_selection();
+                                rename.ignore_pointer_up = false;
+                            }
+                            self.pointer_left_unchecked();
+                            return Ok(());
+                        }
+                        TouchPhase::Moved | TouchPhase::Ended => {}
+                    }
+                }
                 let actions = self
                     .startup_player_dialog
                     .as_mut()
@@ -37306,6 +37755,7 @@ impl GameApp {
                     })
                     .unwrap_or_default();
                 self.process_player_dialog_actions(actions)?;
+                self.restore_startup_crew_focus(restore_rename_focus);
                 if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                     self.pointer_left_unchecked();
                 }
@@ -41834,6 +42284,18 @@ impl GameApp {
         else {
             return Ok(false);
         };
+        if let Some(rename_index) = self
+            .startup_crew_rename
+            .as_ref()
+            .map(|rename| rename.index)
+        {
+            if keyboard_trigger {
+                return Ok(false);
+            }
+            if !crew_mode || index != rename_index {
+                self.abort_startup_crew_rename();
+            }
+        }
         self.guard_classic_global_gui_bootstrap()?;
         Self::guard_gui_overlay_result(
             "C4GUI context menu",
@@ -42025,11 +42487,13 @@ impl GameApp {
                     AppContextMenuCommand::StartupCrew(
                         PlrSelCrewContextCommand::RenameCrew(index),
                     ) => {
-                        self.open_startup_crew_rename_dialog(index)?;
+                        self.abort_startup_crew_rename();
+                        self.start_startup_crew_rename(index)?;
                     }
                     AppContextMenuCommand::StartupCrew(
                         PlrSelCrewContextCommand::DeleteCrew(index),
                     ) => {
+                        self.abort_startup_crew_rename();
                         self.open_startup_crew_delete_dialog(index)?;
                     }
                     AppContextMenuCommand::StartupCrew(
@@ -42142,6 +42606,9 @@ impl GameApp {
                     }
                     AppContextMenuCommand::ScenarioSearch(command) => {
                         self.execute_scenario_search_context_command(command)?;
+                    }
+                    AppContextMenuCommand::StartupCrewRename(command) => {
+                        self.execute_startup_crew_rename_context_command(command);
                     }
                     AppContextMenuCommand::InputDialog(command) => {
                         self.apply_input_dialog_context_command(command)?;
@@ -42937,7 +43404,10 @@ impl GameApp {
 
         for action in actions {
             match action {
-                PlrSelAction::SelectionChanged(_) | PlrSelAction::FocusChanged(_) => {}
+                PlrSelAction::SelectionChanged(_) => {
+                    self.abort_startup_crew_rename();
+                }
+                PlrSelAction::FocusChanged(_) => {}
                 PlrSelAction::Back => {
                     self.begin_startup_dialog_fade(StartupDialog::MainMenu);
                     self.show_main_menu();
@@ -43031,12 +43501,15 @@ impl GameApp {
                     participating,
                 } => {
                     self.set_startup_crew_participation(index, participating)?;
+                    self.abort_startup_crew_rename();
                 }
                 PlrSelAction::DeleteCrew(index) => {
+                    self.abort_startup_crew_rename();
                     self.open_startup_crew_delete_dialog(index)?;
                 }
                 PlrSelAction::RenameCrew(index) => {
-                    self.open_startup_crew_rename_dialog(index)?;
+                    self.abort_startup_crew_rename();
+                    self.start_startup_crew_rename(index)?;
                 }
                 PlrSelAction::SetCrewDeathMessage(index) => {
                     self.open_startup_crew_death_message_dialog(index)?;
@@ -43075,6 +43548,7 @@ impl GameApp {
     }
 
     fn enter_startup_crew_mode(&mut self, player_index: usize) -> Result<(), EngineError> {
+        self.abort_startup_crew_rename();
         let Some(player) = self.startup_player_files.get(player_index) else {
             tracing::error!(player_index, "crew action references a stale player row");
             return Ok(());
@@ -43131,6 +43605,7 @@ impl GameApp {
     }
 
     fn leave_startup_crew_mode(&mut self) {
+        self.abort_startup_crew_rename();
         self.close_context_menu_silently();
         if self
             .startup_player_dialog
@@ -43270,40 +43745,399 @@ impl GameApp {
         )
     }
 
-    fn open_startup_crew_rename_dialog(&mut self, index: usize) -> Result<(), EngineError> {
-        let Some(initial_text) = self
+    fn startup_crew_rename_context_entries(
+        &self,
+        clipboard_available: bool,
+    ) -> Vec<ContextMenuEntry<AppContextMenuCommand>> {
+        use lc_frontend::startup_netdlg::NetDlgEditContextCommand as Command;
+
+        let Some(edit) = self
+            .startup_crew_rename
+            .as_ref()
+            .map(|rename| &rename.edit)
+        else {
+            return Vec::new();
+        };
+        let item = |command, label_key, label, tooltip_key, tooltip| {
+            ContextMenuEntry::new(self.runtime_resource_text(label_key, label))
+                .with_tooltip(self.runtime_resource_text(tooltip_key, tooltip))
+                .with_icon(ContextMenuIcon::None)
+                .with_action(AppContextMenuCommand::StartupCrewRename(command))
+        };
+        let has_selection = edit.selection_range().is_some();
+        let mut entries = Vec::new();
+        if has_selection {
+            entries.push(item(
+                Command::Cut,
+                "IDS_DLG_CUT",
+                "Cut",
+                "IDS_DLGTIP_CUT",
+                "Moves the selection to the clipboard.",
+            ));
+            entries.push(item(
+                Command::Copy,
+                "IDS_DLG_COPY",
+                "Copy",
+                "IDS_DLGTIP_COPY",
+                "Copies the selection to the clipboard.",
+            ));
+        }
+        if clipboard_available {
+            entries.push(item(
+                Command::Paste,
+                "IDS_DLG_PASTE",
+                "Paste",
+                "IDS_DLGTIP_PASTE",
+                "Inserts the contents of the clipboard.",
+            ));
+        }
+        if has_selection {
+            entries.push(item(
+                Command::Clear,
+                "IDS_DLG_CLEAR",
+                "Clear",
+                "IDS_DLGTIP_CLEAR",
+                "Clears the selection.",
+            ));
+        }
+        let whole_text_selected = edit
+            .selection_range()
+            .is_some_and(|range| range.start == 0 && range.end == edit.text().len());
+        if !edit.text().is_empty() && !whole_text_selected {
+            entries.push(item(
+                Command::SelectAll,
+                "IDS_DLG_SELALL",
+                "Select all",
+                "IDS_DLGTIP_SELALL",
+                "Selects the complete text",
+            ));
+        }
+        entries
+    }
+
+    fn open_startup_crew_rename_context_menu(
+        &mut self,
+        anchor: GuiPoint,
+    ) -> Result<bool, EngineError> {
+        if self.startup_crew_rename.is_none() {
+            return Ok(false);
+        }
+        let entries =
+            self.startup_crew_rename_context_entries(clipboard_text_available());
+        self.open_context_menu_at(entries, anchor)
+    }
+
+    fn execute_startup_crew_rename_context_command(
+        &mut self,
+        command: lc_frontend::startup_netdlg::NetDlgEditContextCommand,
+    ) {
+        use lc_frontend::startup_netdlg::NetDlgEditContextCommand as Command;
+
+        let Some(rename) = self.startup_crew_rename.as_mut() else {
+            tracing::error!(?command, "stale startup crew rename context command");
+            return;
+        };
+        match command {
+            Command::Cut | Command::Copy => {
+                let cut = command == Command::Cut;
+                if let Err(error) =
+                    transfer_edit_selection(&mut rename.edit, cut, |selected| {
+                        arboard::Clipboard::new()
+                            .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
+                    })
+                {
+                    tracing::warn!(%error, "failed to copy startup crew rename text");
+                }
+            }
+            Command::Paste => {
+                match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+                    Ok(text) => {
+                        rename.edit.insert_text(&text);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to paste startup crew rename text");
+                    }
+                }
+            }
+            Command::Clear => {
+                rename.edit.delete_selection();
+            }
+            Command::SelectAll => rename.edit.select_all(),
+        }
+        self.mark_menu_dirty();
+    }
+
+    fn start_startup_crew_rename(&mut self, index: usize) -> Result<(), EngineError> {
+        if self.startup_crew_rename.is_some() {
+            return Ok(());
+        }
+        let Some((initial_text, player_path, file_name)) = self
             .startup_crew_models
             .get(index)
-            .map(|entry| entry.name.clone())
+            .zip(self.startup_crew_files.get(index))
+            .map(|(model, file)| {
+                (
+                    model.name.clone(),
+                    file.player_path.clone(),
+                    file.file_name.clone(),
+                )
+            })
         else {
             tracing::error!(index, "crew-rename action references a stale row");
             return Ok(());
         };
-        self.guard_classic_global_gui_bootstrap()?;
-        Self::guard_gui_overlay_result(
-            "Crew rename input",
-            self.assets.input_dialog_resources().map(|_| ()),
-        )?;
+        let Some(previous_focus) = self
+            .startup_player_dialog
+            .as_ref()
+            .filter(|dialog| dialog.is_crew_mode())
+            .map(|dialog| dialog.focused_control())
+        else {
+            tracing::error!(index, "crew-rename action received outside crew mode");
+            return Ok(());
+        };
         self.close_context_menu_silently();
-        let controller = InputDialogController::new(
-            "Rename crew member:",
-            "Rename",
-            InputDialogIcon::None,
-        )
-        .with_input_text(&initial_text);
         self.startup_tooltip.pointer_left();
-        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
-            purpose: PendingInputDialogPurpose::StartupCrew(PendingCrewInputAction::Rename {
-                index,
-            }),
-            controller,
+        self.startup_crew_rename = Some(StartupCrewRenameState {
+            index,
+            player_path,
+            file_name,
+            edit: RenameEdit::new(initial_text, Some(previous_focus)),
+            last_click: None,
+            ignore_pointer_up: false,
         });
-        self.game_option_input_consumed_keys.clear();
-        self.game_option_input_pointer_capture = None;
-        self.game_option_input_pointer_position = None;
-        self.game_option_input_last_click = None;
         self.mark_menu_dirty();
         Ok(())
+    }
+
+    fn restore_startup_crew_focus(&mut self, focus: Option<PlrSelControl>) {
+        if let (Some(dialog), Some(focus)) = (self.startup_player_dialog.as_mut(), focus) {
+            if dialog.is_crew_mode() {
+                dialog.restore_focus(focus);
+            }
+        }
+    }
+
+    fn abort_startup_crew_rename(&mut self) -> bool {
+        let Some(mut rename) = self.startup_crew_rename.take() else {
+            return false;
+        };
+        rename.edit.abort();
+        let previous_focus = rename.edit.take_previous_focus();
+        self.restore_startup_crew_focus(previous_focus);
+        self.mark_menu_dirty();
+        true
+    }
+
+    fn resolve_startup_crew_rename(&mut self, result: RenameEditResult) -> bool {
+        let Some(rename) = self.startup_crew_rename.as_mut() else {
+            return false;
+        };
+        if rename.edit.resolve(result) == RenameEditResolution::KeepEditing {
+            return false;
+        }
+        let mut rename = self
+            .startup_crew_rename
+            .take()
+            .expect("finished crew rename state remains installed");
+        let previous_focus = rename.edit.take_previous_focus();
+        self.restore_startup_crew_focus(previous_focus);
+        true
+    }
+
+    fn commit_startup_crew_rename(&mut self, focus_lost: bool) -> Result<bool, EngineError> {
+        let Some((index, player_path, old_file_name, original_name, action)) = self
+            .startup_crew_rename
+            .as_mut()
+            .map(|rename| {
+                (
+                    rename.index,
+                    rename.player_path.clone(),
+                    rename.file_name.clone(),
+                    rename.edit.label_text().to_string(),
+                    if focus_lost {
+                        rename.edit.focus_lost()
+                    } else {
+                        rename.edit.finish_input()
+                    },
+                )
+            })
+        else {
+            return Ok(false);
+        };
+        let RenameEditAction::Submit(new_name) = action else {
+            self.abort_startup_crew_rename();
+            return Ok(true);
+        };
+        if new_name == original_name {
+            self.resolve_startup_crew_rename(RenameEditResult::Accepted);
+            self.mark_menu_dirty();
+            return Ok(true);
+        }
+
+        let new_file_name = crew_file_name_for_title(&new_name);
+        match rename_crew(&player_path, &old_file_name, &new_name) {
+            Ok(persisted_file_name) => {
+                self.resolve_startup_crew_rename(RenameEditResult::Accepted);
+                let reload_error = self
+                    .reload_startup_crew_list(Some(persisted_file_name.as_str()))
+                    .err();
+                self.reconcile_startup_crew_rename_model(
+                    index,
+                    &player_path,
+                    &old_file_name,
+                    &persisted_file_name,
+                    &new_name,
+                    reload_error.is_some(),
+                );
+                if let Some(error) = reload_error {
+                    tracing::error!(%error, "failed to reload renamed startup crew");
+                    let message = self.runtime_resource_text(
+                        "IDS_FAIL_MODIFY",
+                        "File modification failure.",
+                    );
+                    self.show_startup_crew_error(message, "")?;
+                }
+                self.mark_menu_dirty();
+                Ok(true)
+            }
+            Err(StartupCrewMutationError::NameCollision { file_name }) => {
+                self.resolve_startup_crew_rename(RenameEditResult::Invalid);
+                let template = self.runtime_resource_text(
+                    "IDS_ERR_CLONKCOLLISION",
+                    "A Clonk with the file name \"%s\" exists already.",
+                );
+                let caption =
+                    self.runtime_resource_text("IDS_FAIL_RENAME", "Rename failure.");
+                self.show_startup_crew_error(
+                    format_resource_string(template, &[&file_name]),
+                    caption,
+                )?;
+                self.mark_menu_dirty();
+                Ok(false)
+            }
+            Err(StartupCrewMutationError::RenameAcceptedCoreRewriteFailed {
+                file_name,
+                source,
+            }) => {
+                tracing::error!(
+                    error = %source,
+                    path = %player_path.display(),
+                    %old_file_name,
+                    persisted_file_name = %file_name,
+                    "startup crew filename changed but its core rewrite failed"
+                );
+                self.accept_startup_crew_rename_after_rewrite_failure(
+                    index,
+                    &player_path,
+                    &old_file_name,
+                    &file_name,
+                    &new_name,
+                )?;
+                Ok(true)
+            }
+            Err(error) => {
+                tracing::error!(%error, path = %player_path.display(), %old_file_name, %new_file_name, "failed to rename startup crew");
+                self.resolve_startup_crew_rename(RenameEditResult::Invalid);
+                let template = self.runtime_resource_text(
+                    "IDS_ERR_RENAMEFILE",
+                    "Error renaming file \"%s\" to \"%s\".",
+                );
+                let caption =
+                    self.runtime_resource_text("IDS_FAIL_RENAME", "Rename failure.");
+                self.show_startup_crew_error(
+                    format_resource_string(template, &[&old_file_name, &new_file_name]),
+                    caption,
+                )?;
+                self.mark_menu_dirty();
+                Ok(false)
+            }
+        }
+    }
+
+    fn accept_startup_crew_rename_after_rewrite_failure(
+        &mut self,
+        original_index: usize,
+        player_path: &Path,
+        old_file_name: &str,
+        persisted_file_name: &str,
+        new_name: &str,
+    ) -> Result<(), EngineError> {
+        self.resolve_startup_crew_rename(RenameEditResult::Accepted);
+        let reload_error = self
+            .reload_startup_crew_list(Some(persisted_file_name))
+            .err();
+        if let Some(error) = reload_error.as_ref() {
+            tracing::error!(%error, "failed to reload startup crew after partial rename");
+        }
+        self.reconcile_startup_crew_rename_model(
+            original_index,
+            player_path,
+            old_file_name,
+            persisted_file_name,
+            new_name,
+            reload_error.is_some(),
+        );
+
+        let message = self.runtime_resource_text("IDS_FAIL_MODIFY", "File modification failure.");
+        self.show_startup_crew_error(message, "")?;
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn reconcile_startup_crew_rename_model(
+        &mut self,
+        original_index: usize,
+        player_path: &Path,
+        old_file_name: &str,
+        persisted_file_name: &str,
+        new_name: &str,
+        allow_index_fallback: bool,
+    ) {
+        let row = self
+            .startup_crew_files
+            .iter()
+            .position(|entry| {
+                entry.player_path == player_path
+                    && entry
+                        .file_name
+                        .eq_ignore_ascii_case(persisted_file_name)
+            })
+            .or_else(|| {
+                self.startup_crew_files.iter().position(|entry| {
+                    entry.player_path == player_path
+                        && entry.file_name.eq_ignore_ascii_case(old_file_name)
+                })
+            })
+            .or_else(|| {
+                (allow_index_fallback && original_index < self.startup_crew_files.len())
+                    .then_some(original_index)
+            });
+
+        if let Some(index) = row {
+            let mut core_name = lc_script::c4_string_bytes(new_name);
+            if let Some(nul) = core_name.iter().position(|byte| *byte == 0) {
+                core_name.truncate(nul);
+            }
+            core_name.truncate(30);
+            if let Some(entry) = self.startup_crew_files.get_mut(index) {
+                entry.file_name = persisted_file_name.to_string();
+                entry.crew_info.name = lc_script::c4_string_from_bytes(&core_name);
+                entry.render_model.name = new_name.to_string();
+            }
+            if let Some(model) = self.startup_crew_models.get_mut(index) {
+                model.name = new_name.to_string();
+            }
+            if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                dialog.set_selected_index(Some(index));
+            }
+        } else {
+            tracing::error!(
+                path = %player_path.display(),
+                %old_file_name,
+                %persisted_file_name,
+                "renamed startup crew row could not be reconciled"
+            );
+        }
     }
 
     fn open_startup_crew_death_message_dialog(
@@ -43352,45 +44186,6 @@ impl GameApp {
         text: String,
     ) -> Result<(), EngineError> {
         match action {
-            PendingCrewInputAction::Rename { index } => {
-                let Some((player_path, old_file_name)) = self
-                    .startup_crew_files
-                    .get(index)
-                    .map(|entry| (entry.player_path.clone(), entry.file_name.clone()))
-                else {
-                    tracing::error!(index, "accepted crew rename references a stale row");
-                    return Ok(());
-                };
-                match rename_crew(&player_path, &old_file_name, &text) {
-                    Ok(new_file_name) => {
-                        if let Err(error) =
-                            self.reload_startup_crew_list(Some(new_file_name.as_str()))
-                        {
-                            tracing::error!(%error, "failed to reload renamed startup crew");
-                            self.show_startup_crew_error(
-                                "File modification failure.",
-                                "Rename failure.",
-                            )?;
-                        }
-                    }
-                    Err(StartupCrewMutationError::NameCollision { file_name }) => {
-                        self.show_startup_crew_error(
-                            format!(
-                                "A Clonk with the file name \"{file_name}\" exists already."
-                            ),
-                            "Rename failure.",
-                        )?;
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, path = %player_path.display(), %old_file_name, "failed to rename startup crew");
-                        let _ = self.reload_startup_crew_list(None);
-                        self.show_startup_crew_error(
-                            format!("Crew rename failed: {error}"),
-                            "Rename failure.",
-                        )?;
-                    }
-                }
-            }
             PendingCrewInputAction::SetDeathMessage { index } => {
                 let Some((player_path, file_name)) = self
                     .startup_crew_files
@@ -47106,6 +47901,7 @@ impl GameApp {
             self.startup_player_dialog.as_ref(),
             &self.startup_player_models,
             &self.startup_crew_models,
+            self.startup_crew_rename.as_mut(),
             None,
             true,
             true,
@@ -47431,6 +48227,7 @@ impl GameApp {
     }
 
     fn open_player_selection_dialog(&mut self) {
+        self.abort_startup_crew_rename();
         self.close_context_menu_silently();
         self.startup_player_properties_dialog = None;
         self.startup_crew_files.clear();
@@ -47621,6 +48418,7 @@ impl GameApp {
         self.running_chat = None;
         self.message_input_history.clear();
         self.close_context_menu_silently();
+        self.abort_startup_crew_rename();
         self.startup_player_properties_dialog = None;
         self.game_option_input_dialog = None;
         self.game_option_input_consumed_keys.clear();
@@ -50111,6 +50909,10 @@ impl GameApp {
                     .rename_edit
                     .as_mut()
                     .is_some_and(|rename| rename.edit.tick_blink());
+                let crew_rename_blink_changed = self
+                    .startup_crew_rename
+                    .as_mut()
+                    .is_some_and(|rename| rename.edit.tick_blink());
                 let advanced_blink_changed = self
                     .startup_options_advanced_dialog
                     .as_mut()
@@ -50123,6 +50925,7 @@ impl GameApp {
                     || scrollbar_changed
                     || search_blink_changed
                     || rename_blink_changed
+                    || crew_rename_blink_changed
                     || advanced_blink_changed
                     || netdlg_blink_changed
                 {
@@ -53501,6 +54304,7 @@ impl GameApp {
                     self.startup_player_dialog.as_ref(),
                     &self.startup_player_models,
                     &self.startup_crew_models,
+                    self.startup_crew_rename.as_mut(),
                     base_context_menu,
                     context_menu_open,
                     definition_selector_open,
@@ -60119,6 +60923,7 @@ fn render_startup_frame(
     player_dialog: Option<&lc_frontend::startup_plrsel::PlrSelController>,
     player_models: &[lc_frontend::startup_plrsel::PlrSelPlayer],
     crew_models: &[lc_frontend::startup_plrsel::PlrSelCrew],
+    crew_rename: Option<&mut StartupCrewRenameState>,
     context_menu: Option<&ClassicContextMenu<AppContextMenuCommand>>,
     context_menu_open: bool,
     definition_selector_open: bool,
@@ -60335,7 +61140,7 @@ fn render_startup_frame(
                 player_dialog,
             ) {
                 (Some(dlg_assets), Some(fonts), Some(book), Some(dialog)) => {
-                    lc_frontend::startup_plrsel::PlrSelScreen::render_controller_with_crew_and_draw_focus(
+                    lc_frontend::startup_plrsel::PlrSelScreen::render_controller_with_crew_rename_and_draw_focus(
                         surface,
                         &dlg_assets,
                         fonts,
@@ -60343,7 +61148,11 @@ fn render_startup_frame(
                         player_models,
                         crew_models,
                         dialog,
-                        !context_menu_open,
+                        crew_rename.map(|rename| (rename.index, &mut rename.edit)),
+                        !context_menu_open
+                            && !definition_selector_open
+                            && !game_option_input_open
+                            && !message_dialog_open,
                         Some(startup_gamma()),
                     );
                     true
@@ -92186,6 +92995,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .focused_control(),
             PlrSelControl::PlayerList
         );
+
     }
 
     #[test]
@@ -92272,18 +93082,15 @@ public func Grant(password) { return GainMissionAccess(password); }
             .collect();
         app.open_player_selection_dialog();
 
-        app.game_option_input_dialog = Some(PendingGameOptionInputDialog {
-            purpose: PendingInputDialogPurpose::StartupCrew(PendingCrewInputAction::Rename {
-                index: 0,
-            }),
-            controller: InputDialogController::new(
-                "Rename crew member:",
-                "Rename",
-                InputDialogIcon::None,
-            )
-            .with_input_text("Crew"),
+        app.startup_crew_rename = Some(StartupCrewRenameState {
+            index: 0,
+            player_path: PathBuf::from("Player.c4p"),
+            file_name: "Crew.c4i".to_string(),
+            edit: RenameEdit::new("Crew", Some(PlrSelControl::PlayerList)),
+            last_click: None,
+            ignore_pointer_up: false,
         });
-        app.handle_text_input('T').expect("type into rename dialog");
+        app.handle_text_input('T').expect("type into inline rename");
         assert_eq!(
             app.startup_player_dialog
                 .as_ref()
@@ -92293,14 +93100,14 @@ public func Grant(password) { return GainMissionAccess(password); }
             "the covered list must not type-ahead"
         );
         assert_ne!(
-            app.game_option_input_dialog
+            app.startup_crew_rename
                 .as_ref()
-                .expect("rename dialog")
-                .controller
+                .expect("inline rename")
+                .edit
                 .text(),
             "Crew"
         );
-        app.game_option_input_dialog = None;
+        app.startup_crew_rename = None;
 
         app.push_message_dialog(
             lc_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -92322,6 +93129,392 @@ public func Grant(password) { return GainMissionAccess(password); }
             Some(0)
         );
         assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn l071_crew_rename_is_inline_reselects_invalid_and_commits_on_focus_loss() {
+        let directory = tempdir().expect("crew rename fixture root");
+        let player_path = directory.path().join("Ada.c4p");
+        fs::create_dir(&player_path).expect("create player group");
+        fs::write(
+            player_path.join("Player.txt"),
+            "[Player]\nName=Ada\n\n[Preferences]\nColorDw=255\n",
+        )
+        .expect("write player core");
+        for (file_name, name) in [("Alpha.c4i", "Alpha"), ("Taken.c4i", "Taken")] {
+            let crew = player_path.join(file_name);
+            fs::create_dir(&crew).expect("create crew child");
+            fs::write(
+                crew.join("ObjectInfo.txt"),
+                format!("[ObjectInfo]\nid=CLNK\nName={name}\nParticipation=1\n"),
+            )
+            .expect("write crew core");
+        }
+        let player_file = PlayerFile::load_from_path(&player_path).expect("load player fixture");
+        let player_model = lc_frontend::startup_plrsel::PlrSelPlayer {
+            name: "Ada".to_string(),
+            activated: false,
+            big_icon: None,
+            portrait: None,
+            color_dw: 255,
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            comment: String::new(),
+        };
+        let mut app = new_classic_menu_app(640, 480);
+        app.startup_player_files.push(StartupPlayerFile {
+            path: player_path.clone(),
+            file_name: "Ada.c4p".to_string(),
+            player_file,
+            render_model: player_model.clone(),
+        });
+        app.startup_player_models.push(player_model);
+        app.open_player_selection_dialog();
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::ShowCrew(0),
+        ])
+        .expect("enter crew mode");
+
+        let alpha_index = app
+            .startup_crew_models
+            .iter()
+            .position(|crew| crew.name == "Alpha")
+            .expect("Alpha row");
+        app.startup_player_dialog
+            .as_mut()
+            .expect("player dialog")
+            .set_selected_index(Some(alpha_index));
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start inline crew rename");
+        let rename = app.startup_crew_rename.as_ref().expect("inline rename");
+        assert!(!rename.edit.label_visible());
+        assert!(rename.edit.is_focused());
+        assert_eq!(rename.edit.selected_text(), Some("Alpha"));
+        assert!(app.startup_crew_rename_rect().is_some());
+        assert!(app.game_option_input_dialog.is_none());
+        for character in "Draft".chars() {
+            app.handle_text_input(character)
+                .expect("type draft before restarting rename");
+        }
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("F2 restarts the active rename");
+        assert_eq!(
+            app.startup_crew_rename
+                .as_ref()
+                .expect("restarted inline rename")
+                .edit
+                .selected_text(),
+            Some("Alpha")
+        );
+
+        let edit_rect = app.startup_crew_rename_rect().expect("rename bounds");
+        let edit_point = GuiPoint::new(
+            (edit_rect.x + edit_rect.w / 2) as f32,
+            (edit_rect.y + edit_rect.h / 2) as f32,
+        );
+        assert!(app.handle_startup_crew_rename_middle_down(edit_point, None));
+        assert!(app
+            .startup_crew_rename
+            .as_ref()
+            .expect("middle-clicked inline rename")
+            .edit
+            .selection_range()
+            .is_none());
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("restart after middle click");
+        app.startup_crew_rename
+            .as_mut()
+            .expect("rename before double click")
+            .last_click = Some(Instant::now());
+        assert!(app.handle_startup_crew_rename_pointer_down(edit_point));
+        assert!(!app
+            .startup_crew_rename
+            .as_ref()
+            .expect("double-clicked inline rename")
+            .edit
+            .is_dragging());
+        assert!(app.handle_startup_crew_rename_pointer_up(edit_point));
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("restart after double click");
+        app.startup_player_dialog
+            .as_mut()
+            .expect("player dialog")
+            .set_pointer_position(Some(edit_point));
+        let expected_edit_entries = app.startup_crew_rename_context_entries(false);
+        assert!(expected_edit_entries.iter().any(|entry| {
+            entry.action
+                == Some(AppContextMenuCommand::StartupCrewRename(
+                    lc_frontend::startup_netdlg::NetDlgEditContextCommand::Cut,
+                ))
+        }));
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("open inline edit context");
+        assert!(app.startup_crew_rename.is_some());
+        assert!(matches!(
+            app.context_menu
+                .as_ref()
+                .expect("inline edit context")
+                .layout()
+                .panels[0]
+                .rows
+                .len(),
+            3 | 4
+        ));
+        app.close_context_menu_silently();
+
+        let layout = app
+            .startup_player_dialog
+            .as_ref()
+            .expect("player dialog")
+            .layout();
+        let same_row_point = GuiPoint::new(
+            (layout.list_viewport.x + layout.item_height / 2) as f32,
+            (layout.list_viewport.y + layout.item_pitch * alpha_index as i32
+                - app
+                    .startup_player_dialog
+                    .as_ref()
+                    .expect("player dialog")
+                    .list_scroll_offset()
+                + layout.item_height / 2) as f32,
+        );
+        let inert_row_point = GuiPoint::new(
+            (layout.list_viewport.x + layout.item_height + layout.item_height / 2) as f32,
+            same_row_point.y,
+        );
+        app.startup_player_dialog
+            .as_mut()
+            .expect("player dialog")
+            .set_pointer_position(Some(inert_row_point));
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press current row outside the edit");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release current row outside the edit");
+        assert!(app.startup_crew_rename.is_some());
+
+        app.startup_player_dialog
+            .as_mut()
+            .expect("player dialog")
+            .set_pointer_position(Some(same_row_point));
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("open current crew row context");
+        assert!(app.startup_crew_rename.is_some());
+        assert_eq!(
+            app.context_menu
+                .as_ref()
+                .expect("crew row context")
+                .layout()
+                .panels[0]
+                .rows
+                .len(),
+            3
+        );
+        app.close_context_menu_silently();
+
+        app.startup_player_dialog
+            .as_mut()
+            .expect("player dialog")
+            .set_pointer_position(Some(same_row_point));
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press crew participation checkbox");
+        assert!(app.startup_crew_rename.is_some());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("toggle crew participation checkbox");
+        assert!(app.startup_crew_rename.is_none());
+        assert!(player_path.join("Alpha.c4i").exists());
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("restart after checkbox abort");
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("abort inline crew rename");
+        assert!(app.startup_crew_rename.is_none());
+        assert!(player_path.join("Alpha.c4i").exists());
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("restart rename before row switch");
+        for character in "Discarded".chars() {
+            app.handle_text_input(character)
+                .expect("type name that must be discarded");
+        }
+        let taken_index = app
+            .startup_crew_models
+            .iter()
+            .position(|crew| crew.name == "Taken")
+            .expect("Taken row");
+        let other_row_point = GuiPoint::new(
+            (layout.list_viewport.x + layout.item_height / 2) as f32,
+            (layout.list_viewport.y + layout.item_pitch * taken_index as i32
+                - app
+                    .startup_player_dialog
+                    .as_ref()
+                    .expect("player dialog")
+                    .list_scroll_offset()
+                + layout.item_height / 2) as f32,
+        );
+        app.startup_player_dialog
+            .as_mut()
+            .expect("player dialog")
+            .set_pointer_position(Some(other_row_point));
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("switch row through crew context");
+        assert!(app.startup_crew_rename.is_none());
+        assert!(player_path.join("Alpha.c4i").exists());
+        assert!(!player_path.join("Discarded.c4i").exists());
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .selected_index(),
+            Some(taken_index)
+        );
+        assert!(app.context_menu.is_some());
+        app.close_context_menu_silently();
+        app.startup_player_dialog
+            .as_mut()
+            .expect("player dialog")
+            .set_selected_index(Some(alpha_index));
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("restart inline crew rename");
+        for character in "Taken".chars() {
+            app.handle_text_input(character).expect("type colliding name");
+        }
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("submit colliding name");
+        let rename = app
+            .startup_crew_rename
+            .as_ref()
+            .expect("invalid rename stays active");
+        assert!(rename.edit.is_focused());
+        assert_eq!(rename.edit.selected_text(), Some("Taken"));
+        let collision = app.message_dialogs.last().expect("collision dialog");
+        assert_eq!(collision.state.caption(), "Rename failure.");
+        assert_eq!(
+            collision.state.message(),
+            "A Clonk with the file name \"Taken.c4i\" exists already."
+        );
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss collision dialog");
+
+        for character in "Renamed".chars() {
+            app.handle_text_input(character).expect("type unique name");
+        }
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("commit inline crew rename");
+        assert!(app.startup_crew_rename.is_none());
+        assert!(!player_path.join("Alpha.c4i").exists());
+        assert!(player_path.join("Renamed.c4i").exists());
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .focused_control(),
+            PlrSelControl::PlayerList
+        );
+
+        let renamed_index = app
+            .startup_crew_models
+            .iter()
+            .position(|crew| crew.name == "Renamed")
+            .expect("renamed row");
+        app.startup_player_dialog
+            .as_mut()
+            .expect("player dialog")
+            .set_selected_index(Some(renamed_index));
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start focus-loss rename");
+        let focus_loss_name = "Blurred crew name exceeds thirty";
+        let focus_loss_file = crew_file_name_for_title(focus_loss_name);
+        for character in focus_loss_name.chars() {
+            app.handle_text_input(character)
+                .expect("type focus-loss name");
+        }
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("commit rename on focus loss");
+        assert!(app.startup_crew_rename.is_none());
+        assert!(!player_path.join("Renamed.c4i").exists());
+        assert!(player_path.join(&focus_loss_file).exists());
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .focused_control(),
+            PlrSelControl::PlayerList
+        );
+
+        let focus_loss_index = app
+            .startup_crew_models
+            .iter()
+            .position(|crew| crew.name == focus_loss_name)
+            .expect("full untruncated focus-loss renamed row");
+        assert!(
+            fs::read_to_string(player_path.join(&focus_loss_file).join("ObjectInfo.txt"))
+                .expect("read truncated persisted crew core")
+                .contains("Name=Blurred crew name exceeds thir")
+        );
+        app.startup_player_dialog
+            .as_mut()
+            .expect("player dialog")
+            .set_selected_index(Some(focus_loss_index));
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start partial-persistence rename");
+        for character in "Partial".chars() {
+            app.handle_text_input(character)
+                .expect("type partially persisted name");
+        }
+        fs::rename(
+            player_path.join(&focus_loss_file),
+            player_path.join("Partial.c4i"),
+        )
+        .expect("simulate the accepted filename change before RewriteCore fails");
+        app.accept_startup_crew_rename_after_rewrite_failure(
+            focus_loss_index,
+            &player_path,
+            &focus_loss_file,
+            "Partial.c4i",
+            "Partial",
+        )
+        .expect("accept the partially persisted rename");
+        assert!(app.startup_crew_rename.is_none());
+        let partial_index = app
+            .startup_crew_files
+            .iter()
+            .position(|entry| entry.file_name == "Partial.c4i")
+            .expect("partially persisted crew row");
+        assert_eq!(app.startup_crew_models[partial_index].name, "Partial");
+        assert_eq!(
+            app.startup_crew_files[partial_index].file_name,
+            "Partial.c4i"
+        );
+        assert_eq!(
+            app.startup_crew_files[partial_index].crew_info.name,
+            "Partial"
+        );
+        assert!(
+            fs::read_to_string(player_path.join("Partial.c4i/ObjectInfo.txt"))
+                .expect("read stale core after simulated rewrite failure")
+                .contains("Name=Blurred crew name exceeds thir")
+        );
+        let rewrite_failure = app.message_dialogs.last().expect("rewrite failure dialog");
+        assert_eq!(rewrite_failure.state.caption(), "");
+        assert_eq!(
+            rewrite_failure.state.message(),
+            "File modification failure."
+        );
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss rewrite failure dialog");
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start rename before leaving player selection");
+        assert!(app.startup_crew_rename.is_some());
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::Back,
+        ])
+        .expect("leave player selection while rename is active");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert!(app.startup_crew_rename.is_none());
     }
 
     #[test]

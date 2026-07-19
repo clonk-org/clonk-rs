@@ -254,6 +254,12 @@ pub enum StartupCrewMutationError {
     FilenameTooLong { file_name: String },
     #[error("crew filename already exists: {file_name}")]
     NameCollision { file_name: String },
+    #[error("crew rename to {file_name} was accepted but its core rewrite failed: {source}")]
+    RenameAcceptedCoreRewriteFailed {
+        file_name: String,
+        #[source]
+        source: Box<StartupCrewMutationError>,
+    },
 }
 
 /// Immediately rewrites `C4ObjectInfoCore::Participation` for one direct
@@ -345,10 +351,20 @@ pub fn rename_crew(
         } else {
             actual_name
         };
-        let reopened = Group::open(player_path)?;
-        let renamed_entry = find_crew_entry(&reopened, &persisted_name)?;
-        let renamed_child = open_direct_child(&reopened, &renamed_entry)?;
-        persist_object_info_to_standalone_child(&renamed_child, &rewritten)?;
+        let rewrite_result = (|| {
+            let reopened = Group::open(player_path)?;
+            let renamed_entry = find_crew_entry(&reopened, &persisted_name)?;
+            let renamed_child = open_direct_child(&reopened, &renamed_entry)?;
+            persist_object_info_to_standalone_child(&renamed_child, &rewritten)
+        })();
+        if let Err(source) = rewrite_result {
+            return Err(
+                StartupCrewMutationError::RenameAcceptedCoreRewriteFailed {
+                    file_name: persisted_name,
+                    source: Box::new(source),
+                },
+            );
+        }
     } else {
         let actual_utf8 = std::str::from_utf8(&entry.name_bytes).map_err(|_| {
             StartupCrewMutationError::InvalidCrewCore {
@@ -532,6 +548,11 @@ fn crew_filename_from_title(title: &[u8]) -> Vec<u8> {
     filename.extend_from_slice(&b".c4i"[..remaining.min(4)]);
     title.clear();
     filename
+}
+
+pub(crate) fn crew_file_name_for_title(title: &str) -> String {
+    let title = c4_input_bytes(title);
+    lc_script::c4_string_from_bytes(&crew_filename_from_title(&title))
 }
 
 fn item_identical(old: &[u8], new: &[u8]) -> bool {

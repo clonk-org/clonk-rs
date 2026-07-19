@@ -8,6 +8,7 @@
 //! through the CStdDDraw-faithful helpers in this crate.
 
 use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
+use crate::rename_edit::RenameEdit;
 use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
 use crate::{GuiPoint, ImageData, KeyCode};
 use anyhow::{Context, Result};
@@ -1418,6 +1419,11 @@ impl PlrSelController {
         self.focus
     }
 
+    pub fn restore_focus(&mut self, focus: PlrSelControl) {
+        self.focus = focus;
+        self.key_pressed = None;
+    }
+
     pub fn pointer_position(&self) -> Option<GuiPoint> {
         self.pointer_position
     }
@@ -2323,6 +2329,7 @@ impl PlrSelScreen {
             &[],
             selected,
             None,
+            None,
             true,
             gamma,
         );
@@ -2348,6 +2355,7 @@ impl PlrSelScreen {
             &[],
             controller.selected,
             Some(controller),
+            None,
             true,
             gamma,
         );
@@ -2376,6 +2384,7 @@ impl PlrSelScreen {
             &[],
             controller.selected,
             Some(controller),
+            None,
             draw_focus,
             gamma,
         );
@@ -2404,6 +2413,7 @@ impl PlrSelScreen {
             crew,
             controller.selected,
             Some(controller),
+            None,
             true,
             gamma,
         );
@@ -2432,6 +2442,37 @@ impl PlrSelScreen {
             crew,
             controller.selected,
             Some(controller),
+            None,
+            draw_focus,
+            gamma,
+        );
+    }
+
+    /// Mode-aware renderer variant with an inline replacement for one crew
+    /// name label, matching `C4GUI::RenameEdit` ownership and draw order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_controller_with_crew_rename_and_draw_focus(
+        surface: &mut Surface,
+        assets: &PlrSelAssets,
+        fonts: &ClonkFontSet,
+        book: &BookFontSet,
+        players: &[PlrSelPlayer],
+        crew: &[PlrSelCrew],
+        controller: &PlrSelController,
+        crew_rename: Option<(usize, &mut RenameEdit<PlrSelControl>)>,
+        draw_focus: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        Self::render_impl(
+            surface,
+            assets,
+            fonts,
+            book,
+            players,
+            crew,
+            controller.selected,
+            Some(controller),
+            crew_rename,
             draw_focus,
             gamma,
         );
@@ -2447,6 +2488,7 @@ impl PlrSelScreen {
         crew: &[PlrSelCrew],
         selected: Option<usize>,
         controller: Option<&PlrSelController>,
+        mut crew_rename: Option<(usize, &mut RenameEdit<PlrSelControl>)>,
         draw_focus: bool,
         gamma: Option<&GammaRamp>,
     ) {
@@ -2501,8 +2543,9 @@ impl PlrSelScreen {
 
         if let Some(sel) = selected.filter(|&sel| sel < row_count) {
             let y = layout.list_viewport.y + layout.item_pitch * sel as i32 - scroll_y;
-            let color = if controller
-                .is_none_or(|state| draw_focus && state.focus == PlrSelControl::PlayerList)
+            let color = if crew_rename.is_none()
+                && controller
+                    .is_none_or(|state| draw_focus && state.focus == PlrSelControl::PlayerList)
             {
                 CLR_LIST_BOX_SEL
             } else {
@@ -2523,6 +2566,9 @@ impl PlrSelScreen {
                 let participating = controller
                     .and_then(|state| state.crew_participations.get(i).copied())
                     .unwrap_or(member.participating);
+                let is_renaming = crew_rename
+                    .as_ref()
+                    .is_some_and(|(rename_index, _)| *rename_index == i);
                 Self::render_crew_list_item(
                     surface,
                     assets,
@@ -2532,8 +2578,32 @@ impl PlrSelScreen {
                     participating,
                     i as i32,
                     scroll_y,
+                    !is_renaming,
                     gamma,
                 );
+                if is_renaming {
+                    let item = IntRect {
+                        x: layout.list_viewport.x,
+                        y: layout.list_viewport.y + layout.item_pitch * i as i32 - scroll_y,
+                        w: layout.item_width,
+                        h: layout.item_height,
+                    };
+                    let edit_x = item.x + (item.h + 2) * 2;
+                    if let Some((_, edit)) = crew_rename.as_mut() {
+                        edit.render_with_draw_focus(
+                            surface,
+                            &fonts.text,
+                            IntRect {
+                                x: edit_x,
+                                y: item.y + 2,
+                                w: (item.x + item.w - edit_x - 2).max(1),
+                                h: (item.h - 4).max(1),
+                            },
+                            draw_focus,
+                            gamma,
+                        );
+                    }
+                }
             }
         } else {
             for (i, player) in players.iter().enumerate() {
@@ -2866,6 +2936,7 @@ impl PlrSelScreen {
         participating: bool,
         index: i32,
         scroll_y: i32,
+        draw_name: bool,
         gamma: Option<&GammaRamp>,
     ) {
         let item = IntRect {
@@ -2899,16 +2970,18 @@ impl PlrSelScreen {
             let dest = aspect_fit(icon.width() as i32, icon.height() as i32, icon_box);
             crate::draw_image_bilinear(surface, &gui_rect(dest), &icon, gamma);
         }
-        book.text.draw_with_gamma(
-            surface,
-            item.x + (item.h + 2) * 2,
-            item.y + 2,
-            &crew.name,
-            CLR_PLAYER_ITEM,
-            TextAlign::Left,
-            false,
-            gamma,
-        );
+        if draw_name {
+            book.text.draw_with_gamma(
+                surface,
+                item.x + (item.h + 2) * 2,
+                item.y + 2,
+                &crew.name,
+                CLR_PLAYER_ITEM,
+                TextAlign::Left,
+                false,
+                gamma,
+            );
+        }
     }
 
     /// Crew detail text from `CrewListItem::SetSelectionInfo`
@@ -4055,6 +4128,88 @@ mod tests {
             viewport_differences > 0,
             "rows did not move inside viewport"
         );
+    }
+
+    #[test]
+    fn inline_crew_rename_intersects_outer_clip_and_hides_caret_without_draw_focus() {
+        use lc_graphics::PixelFormat;
+
+        let assets = PlrSelAssets {
+            background: crate::test_support::load_graphics_png("StartupPlrSelBG.png"),
+            checkbox: crate::test_support::load_graphics_png("GUICheckbox.png"),
+            button: crate::test_support::load_graphics_png("GUIButton.png"),
+            button_down: crate::test_support::load_graphics_png("GUIButtonDown.png"),
+            button_highlight: crate::test_support::load_graphics_png("GUIButtonHighlight.png"),
+            book_scroll: crate::test_support::load_graphics_png("StartupBookScroll.png"),
+            player: crate::test_support::load_graphics_png("Player.png"),
+        };
+        let fonts = crate::test_support::endeavour_font_set();
+        let book = book_fonts();
+        let gamma = crate::test_support::standard_gamma();
+        let crew = [PlrSelCrew {
+            name: "Alpha".to_string(),
+            participating: true,
+            rank_icon: None,
+            portrait: None,
+            color_dw: 0xff,
+            rank: 0,
+            rank_name: "Clonk".to_string(),
+            type_name: "Clonk".to_string(),
+            experience: 0,
+            rounds: 0,
+            death_count: 0,
+            total_playing_time: 0,
+            birthday: String::new(),
+            next_rank: None,
+            physical: PhysicalInfo::default(),
+        }];
+        let mut controller = PlrSelController::new(1);
+        controller.resize(1280, 720);
+        assert!(controller.enter_crew_mode(0, "Ada", vec![true]));
+
+        let render = |draw_focus| {
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            let mut edit = RenameEdit::new("Alpha", Some(PlrSelControl::PlayerList));
+            PlrSelScreen::render_controller_with_crew_rename_and_draw_focus(
+                &mut surface,
+                &assets,
+                &fonts,
+                &book,
+                &[],
+                &crew,
+                &controller,
+                Some((0, &mut edit)),
+                draw_focus,
+                Some(gamma),
+            );
+            surface
+        };
+        assert_ne!(render(true).pixels(), render(false).pixels());
+
+        let untouched = Color::new(17, 31, 47, 255);
+        let mut clipped = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        clipped.fill(untouched);
+        clipped.set_clip(lc_graphics::Rect::new(0, 0, 1, 1));
+        let mut edit = RenameEdit::new("Alpha", Some(PlrSelControl::PlayerList));
+        PlrSelScreen::render_controller_with_crew_rename_and_draw_focus(
+            &mut clipped,
+            &assets,
+            &fonts,
+            &book,
+            &[],
+            &crew,
+            &controller,
+            Some((0, &mut edit)),
+            true,
+            Some(gamma),
+        );
+        for y in 0..clipped.height() {
+            for x in 0..clipped.width() {
+                if x != 0 || y != 0 {
+                    assert_eq!(clipped.get_pixel(x, y), Some(untouched));
+                }
+            }
+        }
     }
 
     #[test]

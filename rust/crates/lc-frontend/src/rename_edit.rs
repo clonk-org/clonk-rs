@@ -540,6 +540,19 @@ impl<Focus> RenameEdit<Focus> {
         rect: IntRect,
         gamma: Option<&GammaRamp>,
     ) {
+        self.render_with_draw_focus(surface, font, rect, true, gamma);
+    }
+
+    /// Renders the active edit while allowing the owning screen to suppress
+    /// only the caret when a context menu or modal dialog owns draw focus.
+    pub fn render_with_draw_focus(
+        &mut self,
+        surface: &mut Surface,
+        font: &ClonkFont,
+        rect: IntRect,
+        draw_focus: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
         if rect.w <= 0 || rect.h <= 0 {
             return;
         }
@@ -576,12 +589,22 @@ impl<Focus> RenameEdit<Focus> {
             }
         }
         let previous_clip = surface.clip();
-        surface.set_clip(Rect::new(
+        let edit_clip = Rect::new(
             rect.x,
             rect.y,
             rect.w.max(1) as u32,
             rect.h.max(1) as u32,
-        ));
+        );
+        let active_clip = previous_clip
+            .and_then(|clip| clip.intersection(edit_clip))
+            .unwrap_or_else(|| {
+                if previous_clip.is_some() {
+                    Rect::new(rect.x, rect.y, 0, 0)
+                } else {
+                    edit_clip
+                }
+            });
+        surface.set_clip(active_clip);
         font.draw_with_gamma(
             surface,
             client_left - self.horizontal_scroll,
@@ -592,7 +615,7 @@ impl<Focus> RenameEdit<Focus> {
             false,
             gamma,
         );
-        if self.cursor_visible() {
+        if draw_focus && self.cursor_visible() {
             let x = client_left + cursor_x - self.horizontal_scroll;
             if (client_left..=client_right).contains(&x) {
                 draw_engine_box(
