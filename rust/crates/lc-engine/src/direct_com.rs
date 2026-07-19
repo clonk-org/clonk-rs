@@ -21,7 +21,8 @@ use crate::control::{
     COM_MENU_LAST, COM_MENU_LEFT, COM_MENU_NAVIGATION1, COM_MENU_NAVIGATION2, COM_MENU_RIGHT,
     COM_MENU_SELECT, COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_NONE, COM_RELEASE_FIRST,
     COM_RELEASE_LAST, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2,
-    COM_THROW, COM_UP, COM_WHEEL_DOWN, COM_WHEEL_UP, PlayerSelectControlData,
+    COM_THROW, COM_UP, COM_WHEEL_DOWN, COM_WHEEL_UP, PlayerCommandControlData,
+    PlayerSelectControlData,
 };
 use crate::math::{self, itofix};
 use crate::player::CountedControlType;
@@ -42,6 +43,21 @@ enum PlayerObjectCommandMode {
     Set,
     Add,
     Append,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MouseWorldCursor {
+    Crosshair,
+    Dig { material: bool },
+    Enter(ObjectId),
+    Grab(ObjectId),
+    Ungrab(ObjectId),
+    Carryable(ObjectId),
+    Chop(ObjectId),
+    Build(ObjectId),
+    Select(ObjectId),
+    Attack(ObjectId),
+    Jump,
 }
 
 const C4P_COMMAND_SET: i32 = 1;
@@ -3308,6 +3324,175 @@ impl Engine {
             .then_some(CommandId::Throw)
     }
 
+    fn mouse_world_point_is_solid(&self, point: Vector2) -> bool {
+        let Some(landscape) = self.landscape.as_ref() else {
+            return false;
+        };
+        landscape.is_solid_at(point.x, point.y)
+            || self
+                .ocf_solid_mask_overlay()
+                .iter()
+                .any(|mask| mask.contains(point.x, point.y))
+    }
+
+    /// Reproduce `C4MouseControl::UpdateCursorTarget`'s world-cursor
+    /// priority. A picked object first replaces the landscape cursor with a
+    /// crosshair; each later matching object cursor then overrides the
+    /// previous one, and the nearby jump cursor is evaluated last
+    /// (C4MouseControl.cpp:451-538).
+    fn mouse_world_cursor(
+        &self,
+        owner: i32,
+        target: Option<ObjectId>,
+        point: Vector2,
+        control_down: bool,
+    ) -> MouseWorldCursor {
+        let mut cursor = if self.mouse_world_point_is_solid(point) {
+            MouseWorldCursor::Dig {
+                material: control_down,
+            }
+        } else {
+            MouseWorldCursor::Crosshair
+        };
+
+        if let Some(target) = target {
+            let Some(index) = self.find_object_index(target) else {
+                return cursor;
+            };
+            let object = &self.objects[index];
+            if !object.state.status.is_active() || object.state.container.is_some() {
+                return cursor;
+            }
+
+            // Any object admitted by the primary OCF pick suppresses the
+            // landscape dig cursor, even if it was admitted by OCF_Exclusive
+            // and has no actionable cursor of its own.
+            cursor = MouseWorldCursor::Crosshair;
+            let target_ocf = self.object_ocf_for_pos(index, point);
+
+            // The first entrance check intentionally uses cached Entrance:
+            // containers remain enterable across their whole shape. The
+            // ordinary position-filtered Entrance check below runs later.
+            if target_ocf & ocf::CONTAINER != 0 && object.state.ocf & ocf::ENTRANCE != 0 {
+                cursor = MouseWorldCursor::Enter(target);
+            }
+            if target_ocf & ocf::GRAB != 0 {
+                let pushing_target = self
+                    .crew_cursor(owner)
+                    .and_then(|cursor| self.find_object_index(cursor))
+                    .is_some_and(|cursor_index| {
+                        self.object_procedure(cursor_index) == ActionProcedure::Push
+                            && self.objects[cursor_index].state.action.target == Some(target)
+                    });
+                cursor = if pushing_target {
+                    MouseWorldCursor::Ungrab(target)
+                } else {
+                    MouseWorldCursor::Grab(target)
+                };
+            }
+            if target_ocf & ocf::CARRYABLE != 0 {
+                cursor = MouseWorldCursor::Carryable(target);
+            }
+            if target_ocf & ocf::CHOP != 0 {
+                let width = object
+                    .current_shape_rect()
+                    .map(|shape| shape.width)
+                    .unwrap_or(0);
+                let dx = point.x - object.state.position.x;
+                let dy = point.y - object.state.position.y;
+                if (-width / 3..=width / 3).contains(&dx)
+                    && (-width / 2..=width / 3).contains(&dy)
+                {
+                    cursor = MouseWorldCursor::Chop(target);
+                }
+            }
+            if target_ocf & ocf::ENTRANCE != 0 {
+                cursor = MouseWorldCursor::Enter(target);
+            }
+            if target_ocf & ocf::CONSTRUCT != 0 {
+                cursor = MouseWorldCursor::Build(target);
+            }
+            if target_ocf & ocf::ALIVE != 0 && self.player_crew_roster(owner).contains(&target) {
+                cursor = MouseWorldCursor::Select(target);
+            }
+            if object.state.category & CATEGORY_MOUSE_SELECT != 0 {
+                cursor = MouseWorldCursor::Select(target);
+            }
+            if object.state.ocf & ocf::ALIVE != 0
+                && object.state.alive
+                && self.players_hostile(owner, object.state.owner)
+            {
+                cursor = MouseWorldCursor::Attack(target);
+            }
+        }
+
+        if self.mouse_jump_zone(owner, point) {
+            MouseWorldCursor::Jump
+        } else {
+            cursor
+        }
+    }
+
+    /// Build the exact `C4ControlPlayerCommand` produced by a world
+    /// LeftDouble event. Selection and Jump cursors deliberately do not emit
+    /// a double-click command (C4MouseControl.cpp:1060-1102).
+    pub fn mouse_left_double_command(
+        &self,
+        owner: i32,
+        target: Option<ObjectId>,
+        point: Vector2,
+        control_down: bool,
+        shift_down: bool,
+    ) -> Option<PlayerCommandControlData> {
+        if !self.players.contains_key(&owner) || self.is_owner_eliminated(owner) {
+            return None;
+        }
+
+        let (command, x, y, target, data) =
+            match self.mouse_world_cursor(owner, target, point, control_down) {
+                MouseWorldCursor::Attack(target) => {
+                    (CommandId::Attack, point.x, point.y, target.as_u64() as i32, 0)
+                }
+                MouseWorldCursor::Grab(target) => {
+                    (CommandId::Grab, 0, 0, target.as_u64() as i32, 0)
+                }
+                MouseWorldCursor::Ungrab(target) => {
+                    (CommandId::UnGrab, point.x, point.y, target.as_u64() as i32, 0)
+                }
+                MouseWorldCursor::Build(target) => {
+                    (CommandId::Build, point.x, point.y, target.as_u64() as i32, 0)
+                }
+                MouseWorldCursor::Chop(target) => {
+                    (CommandId::Chop, point.x, point.y, target.as_u64() as i32, 0)
+                }
+                MouseWorldCursor::Enter(target) => {
+                    (CommandId::Enter, point.x, point.y, target.as_u64() as i32, 0)
+                }
+                MouseWorldCursor::Carryable(target) => {
+                    (CommandId::Get, 0, 0, target.as_u64() as i32, 0)
+                }
+                MouseWorldCursor::Dig { material } => {
+                    (CommandId::Dig, point.x, point.y, 0, i32::from(material))
+                }
+                MouseWorldCursor::Crosshair
+                | MouseWorldCursor::Select(_)
+                | MouseWorldCursor::Jump => return None,
+            };
+
+        Some(PlayerCommandControlData {
+            player: owner,
+            command: command as i32,
+            x,
+            y,
+            target,
+            target2: 0,
+            data,
+            add_mode: C4P_COMMAND_SET
+                | if shift_down { C4P_COMMAND_APPEND } else { 0 },
+            by_client: -1,
+        })
+    }
+
     /// Whether `point` selects the nearby jump cursor for the player's cursor
     /// object. UpdateCursorTarget evaluates this after every object cursor, so
     /// it also overrides Select (C4MouseControl.cpp:522-534).
@@ -3348,54 +3533,14 @@ impl Engine {
         if !object.state.status.is_active() || object.state.container.is_some() {
             return None;
         }
-        let target_ocf = self.object_ocf_for_pos(index, point);
-        let definition = self.definitions.get(&object.definition_id)?;
-
-        // UpdateCursorTarget installs Grab first and then lets Carryable
-        // replace it (C4MouseControl.cpp:486-501).
-        let mut source = (target_ocf & ocf::GRAB != 0 && definition.grab() == 1)
-            .then_some(MouseDragSource::Vehicle);
-        if target_ocf & ocf::CARRYABLE != 0 {
-            source = Some(MouseDragSource::Carryable);
-        }
-
-        // These cursor decisions occur after Carryable and therefore make
-        // DragNone ignore the object as a moving-drag source.
-        if target_ocf & ocf::CHOP != 0 {
-            let width = object
-                .current_shape_rect()
-                .map(|shape| shape.width)
-                .unwrap_or(0);
-            let dx = point.x - object.state.position.x;
-            let dy = point.y - object.state.position.y;
-            if (-width / 3..=width / 3).contains(&dx) && (-width / 2..=width / 3).contains(&dy) {
-                source = None;
+        let grab = self.definitions.get(&object.definition_id)?.grab();
+        match self.mouse_world_cursor(owner, Some(target), point, false) {
+            MouseWorldCursor::Carryable(_) => Some(MouseDragSource::Carryable),
+            MouseWorldCursor::Grab(_) | MouseWorldCursor::Ungrab(_) if grab == 1 => {
+                Some(MouseDragSource::Vehicle)
             }
+            _ => None,
         }
-        let hostile_alive = target_ocf & ocf::ALIVE != 0
-            && self
-                .players
-                .get(&owner)
-                .zip(self.players.get(&object.state.owner))
-                .is_some_and(|(player, target_owner)| {
-                    player.id() != target_owner.id()
-                        && (player.is_hostile_towards(target_owner.id())
-                            || target_owner.is_hostile_towards(player.id()))
-                });
-        if target_ocf & (ocf::ENTRANCE | ocf::CONSTRUCT) != 0
-            || object.state.category & CATEGORY_MOUSE_SELECT != 0
-            || target_ocf & ocf::ALIVE != 0 && self.player_crew_roster(owner).contains(&target)
-            || hostile_alive
-        {
-            source = None;
-        }
-
-        // The nearby jump cursor is evaluated last and overrides every
-        // object cursor (C4MouseControl.cpp:522-534).
-        if self.mouse_jump_zone(owner, point) {
-            return None;
-        }
-        source
     }
 
     /// The moving-drag class for a copied viewport region target. Regions
@@ -17355,6 +17500,333 @@ protected func ControlContents(idTarget) { return(1); }
             engine.mouse_world_drag_source(1, site, Vector2::new(40, 10)),
             None,
             "the later Build cursor overrides Carryable and Grab"
+        );
+    }
+
+    #[test]
+    fn mouse_left_double_dispatches_every_classic_world_cursor() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(PlayerConfig::new(1, "Local"))
+            .expect("local player");
+        engine
+            .register_player(PlayerConfig::new(2, "Enemy"))
+            .expect("enemy player");
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_position(Vector2::new(400, 100))
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("spawn cursor crew");
+        engine.select_crew(1, [crew]).expect("select cursor crew");
+        engine.set_crew_cursor(1, Some(crew)).expect("set cursor crew");
+        engine.set_landscape(Landscape::flat(512, 300));
+
+        let mut entrance =
+            Definition::from_script("ENTR", "Entrance", "#strict\n").expect("entrance");
+        entrance.set_entrance_rect(Some(crate::DefinitionRect::new(-2, -2, 4, 4)));
+        engine.register_definition(entrance).expect("register entrance");
+
+        let mut vehicle =
+            Definition::from_script("VEH1", "Vehicle", "#strict\n").expect("vehicle");
+        vehicle.set_grab(1);
+        engine.register_definition(vehicle).expect("register vehicle");
+        let mut grab_two =
+            Definition::from_script("VEH2", "Grab two", "#strict\n").expect("grab two");
+        grab_two.set_grab(2);
+        engine.register_definition(grab_two).expect("register grab two");
+
+        let mut tree = Definition::from_script("TREE", "Tree", "#strict\n").expect("tree");
+        tree.set_shape_rect(Some(crate::DefinitionRect::new(-15, -45, 30, 90)));
+        engine.register_definition(tree).expect("register tree");
+
+        for (id, name) in [
+            ("SITE", "Construction site"),
+            ("ITEM", "Carryable"),
+            ("ENMY", "Enemy"),
+            ("EXCL", "Exclusive"),
+        ] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, name, "#strict\n").expect("definition"),
+                )
+                .expect("register definition");
+        }
+
+        let entrance = engine
+            .spawn_object(
+                SpawnConfig::new("ENTR").with_position(Vector2::new(40, 40)),
+            )
+            .expect("spawn entrance");
+        let vehicle = engine
+            .spawn_object(
+                SpawnConfig::new("VEH1").with_position(Vector2::new(70, 40)),
+            )
+            .expect("spawn vehicle");
+        let grab_two = engine
+            .spawn_object(
+                SpawnConfig::new("VEH2").with_position(Vector2::new(100, 40)),
+            )
+            .expect("spawn grab-two target");
+        let tree = engine
+            .spawn_object(
+                SpawnConfig::new("TREE").with_position(Vector2::new(140, 80)),
+            )
+            .expect("spawn tree");
+        let site = engine
+            .spawn_object(
+                SpawnConfig::new("SITE").with_position(Vector2::new(190, 40)),
+            )
+            .expect("spawn construction site");
+        let item = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM").with_position(Vector2::new(230, 40)),
+            )
+            .expect("spawn carryable");
+        let enemy = engine
+            .spawn_object(
+                SpawnConfig::new("ENMY")
+                    .with_owner(2)
+                    .with_position(Vector2::new(270, 40)),
+            )
+            .expect("spawn enemy");
+        let exclusive = engine
+            .spawn_object(
+                SpawnConfig::new("EXCL").with_position(Vector2::new(310, 320)),
+            )
+            .expect("spawn exclusive blocker");
+
+        let set_ocf = |engine: &mut Engine, object, value| {
+            let index = engine.find_object_index(object).expect("object exists");
+            engine.objects[index].state.ocf = value;
+        };
+        set_ocf(&mut engine, entrance, ocf::CONTAINER | ocf::ENTRANCE);
+        set_ocf(&mut engine, vehicle, ocf::GRAB);
+        set_ocf(&mut engine, grab_two, ocf::GRAB);
+        set_ocf(&mut engine, tree, ocf::CHOP);
+        set_ocf(
+            &mut engine,
+            site,
+            ocf::GRAB | ocf::CARRYABLE | ocf::CONSTRUCT,
+        );
+        set_ocf(&mut engine, item, ocf::CARRYABLE);
+        set_ocf(&mut engine, enemy, ocf::ALIVE);
+        set_ocf(&mut engine, exclusive, ocf::EXCLUSIVE);
+        let enemy_index = engine.find_object_index(enemy).expect("enemy exists");
+        engine.objects[enemy_index].state.alive = true;
+        engine.objects[enemy_index].state.category = CATEGORY_MOUSE_SELECT;
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.ocf |= ocf::ALIVE;
+
+        let packet = |command: CommandId,
+                      x: i32,
+                      y: i32,
+                      target: Option<ObjectId>,
+                      data: i32,
+                      shift: bool| PlayerCommandControlData {
+            player: 1,
+            command: command as i32,
+            x,
+            y,
+            target: target.map_or(0, |target| target.as_u64() as i32),
+            target2: 0,
+            data,
+            add_mode: if shift { 5 } else { 1 },
+            by_client: -1,
+        };
+
+        let entrance_point = Vector2::new(45, 45);
+        assert_eq!(
+            engine.mouse_left_double_command(
+                1,
+                Some(entrance),
+                entrance_point,
+                false,
+                false,
+            ),
+            Some(packet(
+                CommandId::Enter,
+                entrance_point.x,
+                entrance_point.y,
+                Some(entrance),
+                0,
+                false,
+            )),
+            "cached Entrance keeps a Container enterable outside its small entrance rect",
+        );
+
+        let vehicle_point = Vector2::new(70, 40);
+        assert_eq!(
+            engine.mouse_left_double_command(
+                1,
+                Some(vehicle),
+                vehicle_point,
+                false,
+                false,
+            ),
+            Some(packet(CommandId::Grab, 0, 0, Some(vehicle), 0, false)),
+        );
+        engine.objects[crew_index].state.action = ActionState::new("Push");
+        engine.objects[crew_index].state.action.target = Some(vehicle);
+        assert_eq!(
+            engine.mouse_left_double_command(
+                1,
+                Some(vehicle),
+                vehicle_point,
+                false,
+                false,
+            ),
+            Some(packet(
+                CommandId::UnGrab,
+                vehicle_point.x,
+                vehicle_point.y,
+                Some(vehicle),
+                0,
+                false,
+            )),
+        );
+        engine.objects[crew_index].state.action = ActionState::new("Walk");
+
+        assert_eq!(
+            engine.mouse_left_double_command(
+                1,
+                Some(grab_two),
+                Vector2::new(100, 40),
+                false,
+                true,
+            ),
+            Some(packet(CommandId::Grab, 0, 0, Some(grab_two), 0, true)),
+            "Grab=2 is still a double-click Grab and Shift appends it",
+        );
+
+        let tree_snapshot = engine.object_snapshot(tree).expect("tree snapshot");
+        let tree_shape = engine
+            .object_current_shape_rect(tree)
+            .expect("tree has its live shape");
+        let chop_point = Vector2::new(
+            tree_snapshot.position.x + tree_shape.width / 3,
+            tree_snapshot.position.y + tree_shape.width / 3,
+        );
+        assert_eq!(
+            engine.mouse_left_double_command(1, Some(tree), chop_point, false, false),
+            Some(packet(
+                CommandId::Chop,
+                chop_point.x,
+                chop_point.y,
+                Some(tree),
+                0,
+                false,
+            )),
+            "the reduced Chop cursor zone includes its boundary",
+        );
+        let outside_chop = Vector2::new(chop_point.x + 1, chop_point.y);
+        assert_eq!(
+            engine.mouse_left_double_command(1, Some(tree), outside_chop, false, false),
+            None,
+            "a picked tree outside the reduced Chop zone remains a crosshair",
+        );
+
+        let site_point = Vector2::new(190, 40);
+        assert_eq!(
+            engine.mouse_left_double_command(1, Some(site), site_point, false, false),
+            Some(packet(
+                CommandId::Build,
+                site_point.x,
+                site_point.y,
+                Some(site),
+                0,
+                false,
+            )),
+            "Build overrides both Carryable and Grab",
+        );
+        assert_eq!(
+            engine.mouse_left_double_command(
+                1,
+                Some(item),
+                Vector2::new(230, 40),
+                false,
+                false,
+            ),
+            Some(packet(CommandId::Get, 0, 0, Some(item), 0, false)),
+        );
+
+        engine.set_hostility(1, 2, true).expect("set hostility");
+        let enemy_point = Vector2::new(270, 40);
+        assert_eq!(
+            engine.mouse_left_double_command(1, Some(enemy), enemy_point, false, false),
+            Some(packet(
+                CommandId::Attack,
+                enemy_point.x,
+                enemy_point.y,
+                Some(enemy),
+                0,
+                false,
+            )),
+            "Attack overrides MouseSelect",
+        );
+        engine.set_hostility(1, 2, false).expect("clear hostility");
+        assert_eq!(
+            engine.mouse_left_double_command(1, Some(enemy), enemy_point, false, false),
+            None,
+            "MouseSelect has no LeftDouble command",
+        );
+        assert_eq!(
+            engine.mouse_left_double_command(
+                1,
+                Some(crew),
+                Vector2::new(400, 100),
+                false,
+                false,
+            ),
+            None,
+            "own-crew Select has no LeftDouble command",
+        );
+
+        let solid = Vector2::new(20, 320);
+        assert_eq!(
+            engine.mouse_left_double_command(1, None, solid, false, false),
+            Some(packet(CommandId::Dig, solid.x, solid.y, None, 0, false)),
+        );
+        assert_eq!(
+            engine.mouse_left_double_command(1, None, solid, true, false),
+            Some(packet(CommandId::Dig, solid.x, solid.y, None, 1, false)),
+            "Control selects DigMaterial data",
+        );
+        assert_eq!(
+            engine.mouse_left_double_command(
+                1,
+                Some(exclusive),
+                Vector2::new(310, 320),
+                false,
+                false,
+            ),
+            None,
+            "an OCF_Exclusive-only pick suppresses landscape Dig",
+        );
+        assert_eq!(
+            engine.mouse_left_double_command(
+                1,
+                Some(item),
+                Vector2::new(408, 85),
+                false,
+                false,
+            ),
+            None,
+            "the last-evaluated Jump cursor suppresses Get",
+        );
+        assert_eq!(
+            engine.mouse_left_double_command(1, None, Vector2::new(20, 20), false, false),
+            None,
+            "a free-air crosshair has no double-click command",
+        );
+        assert_eq!(
+            engine.mouse_left_double_command(99, None, solid, false, false),
+            None,
+            "a missing player cannot issue a mouse command",
         );
     }
 

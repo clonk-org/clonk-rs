@@ -31507,41 +31507,27 @@ impl GameApp {
         let Some(pointer) = self.ingame_pointer else {
             return Ok(());
         };
-        if pointer.owner != self.local_owner {
-            return Ok(());
-        }
-        if self
-            .ingame_viewport_region(pointer.owner, pointer.screen)
-            .is_some()
+        if self.local_controls.mouse_owner() != Some(pointer.owner)
+            || self
+                .ingame_viewport_region(pointer.owner, pointer.screen)
+                .is_some()
         {
             return Ok(());
         }
-        let Some(target) =
-            self.graphics
-                .object_at_point(&self.snapshot, self.local_owner, pointer.screen)
-        else {
+        let point = ingame_pointer_world_pixel(pointer);
+        let target = self.ingame_primary_mouse_target(pointer.owner, pointer.screen);
+        let Some(command) = self.engine.mouse_left_double_command(
+            pointer.owner,
+            target,
+            point,
+            self.keyboard_modifiers.ctrl(),
+            self.keyboard_modifiers.shift(),
+        ) else {
             return Ok(());
         };
-        if self
-            .snapshot
-            .object(target)
-            .is_none_or(|object| object.ocf & lc_engine::ocf::CARRYABLE == 0)
-        {
-            return Ok(());
-        }
 
         self.show_startup_hint = false;
-        self.submit_or_execute_player_command(PlayerCommandControlData {
-            player: self.local_owner,
-            command: CommandId::Get as i32,
-            x: 0,
-            y: 0,
-            target: target.as_u64() as i32,
-            target2: 0,
-            data: 0,
-            add_mode: 1,
-            by_client: -1,
-        })?;
+        self.submit_or_execute_player_command(command)?;
         Ok(())
     }
 
@@ -60319,6 +60305,26 @@ mod tests {
             "the regression target uses the shipped carryable definition"
         );
 
+        // FindVisObject's OCF filter is part of the pick itself. A newer
+        // foreground object with no primary mouse OCF must therefore be
+        // skipped rather than blocking the carryable object behind it.
+        let mut blocker =
+            Definition::from_script("MBLK", "Mouse blocker", "#strict\n")
+                .expect("blocker compiles");
+        blocker.set_category(lc_engine::CATEGORY_OBJECT);
+        blocker.set_shape_rect(Some(lc_engine::DefinitionRect::new(-3, -3, 6, 6)));
+        app.engine
+            .register_definition(blocker)
+            .expect("register foreground blocker");
+        let mut blocker_spawn = SpawnConfig::new("MBLK").with_position(bag_position);
+        if let Some(layer) = bag_snapshot.layer {
+            blocker_spawn = blocker_spawn.with_layer(layer);
+        }
+        let blocker = app
+            .engine
+            .spawn_object(blocker_spawn)
+            .expect("spawn foreground non-primary blocker");
+
         app.snapshot = app.engine.snapshot();
         app.render(&mut frame).expect("establish Alchemy viewport");
         let viewport = app
@@ -60330,8 +60336,11 @@ mod tests {
                 (viewport.x..viewport.x + viewport.width as i32)
                     .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
             })
-            .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(bag))
-            .expect("the shipped bag has a visible C++ pick point");
+            .find(|point| {
+                app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(blocker)
+                    && app.ingame_primary_mouse_target(owner, *point) == Some(bag)
+            })
+            .expect("the primary OCF pick sees the bag behind a foreground blocker");
         app.handle_cursor_moved(PhysicalPosition::new(
             f64::from(bag_point.x),
             f64::from(bag_point.y),
@@ -60344,8 +60353,13 @@ mod tests {
         assert_eq!(
             app.graphics
                 .object_at_point(&app.snapshot, owner, bag_point),
+            Some(blocker),
+            "the unfiltered foreground pick sees the newer blocker",
+        );
+        assert_eq!(
+            app.ingame_primary_mouse_target(owner, bag_point),
             Some(bag),
-            "C++-ordered world picking resolves the carryable target",
+            "the primary mouse OCF pick skips that blocker and resolves the carryable",
         );
 
         app.handle_mouse_button(ElementState::Pressed)
@@ -100491,6 +100505,92 @@ protected func InputCallback(string answer, int player)
             world: FloatVector2::new(world.x as f32, world.y as f32),
             screen,
         }
+    }
+
+    #[test]
+    fn mouse_left_double_on_solid_queues_dig_and_control_material_data() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let mut landscape = lc_engine::Landscape::flat(640, 50);
+        landscape.set_world_height(200);
+        app.engine.set_landscape(landscape);
+        app.snapshot = app.engine.snapshot();
+        app.refresh_focus();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish sandbox viewport");
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("sandbox viewport");
+        let pointer = (viewport.y..viewport.y + viewport.height as i32)
+            .flat_map(|y| {
+                (viewport.x..viewport.x + viewport.width as i32)
+                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+            })
+            .find_map(|screen| {
+                let pointer = app.graphics.viewport_point_at(screen)?;
+                let point = ingame_pointer_world_pixel(pointer);
+                (pointer.owner == owner
+                    && point.x != 0
+                    && point.y != 0
+                    && app
+                        .engine
+                        .landscape()
+                        .is_some_and(|landscape| landscape.is_solid_at(point.x, point.y))
+                    && app.ingame_primary_mouse_target(owner, screen).is_none()
+                    && app.ingame_viewport_region(owner, screen).is_none()
+                    && !app.engine.mouse_jump_zone(owner, point))
+                .then_some(pointer)
+            })
+            .expect("visible solid landscape point without an object or HUD region");
+        let point = ingame_pointer_world_pixel(pointer);
+        app.ingame_pointer = Some(pointer);
+
+        let (manager, _event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+        app.on_ingame_mouse_double()
+            .expect("plain landscape double-click queues Dig");
+        assert_eq!(
+            commands.take_submitted_player_commands(),
+            vec![(
+                tick,
+                PlayerCommandControlData {
+                    player: owner,
+                    command: CommandId::Dig as i32,
+                    x: point.x,
+                    y: point.y,
+                    target: 0,
+                    target2: 0,
+                    data: 0,
+                    add_mode: 1,
+                    by_client: 7,
+                },
+            )],
+        );
+
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set Control modifier");
+        app.on_ingame_mouse_double()
+            .expect("Control landscape double-click queues DigMaterial");
+        assert_eq!(
+            commands.take_submitted_player_commands(),
+            vec![(
+                tick,
+                PlayerCommandControlData {
+                    player: owner,
+                    command: CommandId::Dig as i32,
+                    x: point.x,
+                    y: point.y,
+                    target: 0,
+                    target2: 0,
+                    data: 1,
+                    add_mode: 1,
+                    by_client: 7,
+                },
+            )],
+        );
     }
 
     #[test]
