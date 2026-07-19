@@ -18,6 +18,9 @@ use lc_graphics::{Color, GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
 use lc_resources::{PhysicalInfo, C4_MAX_PHYSICAL};
 
+const SCROLLBAR_WIDTH: i32 = 16;
+const SCROLLBAR_PART: i32 = 16;
+
 /// Pixel-exact C4StartupPlrSelDlg geometry, all in C++ integer math and
 /// screen coordinates (dialog-client coordinates shifted by the client
 /// origin).
@@ -31,6 +34,11 @@ pub struct PlrSelLayout {
     pub plr_list: IntRect,
     /// List box client area: 3px margins all sides (C4GuiListBox.h:120-123).
     pub list_client: IntRect,
+    /// ScrollWindow viewport. The 16px scrollbar remains reserved even while
+    /// auto-hide makes the scrollbar itself invisible.
+    pub list_viewport: IntRect,
+    /// Fixed-width book scrollbar beside [`Self::list_viewport`].
+    pub list_scrollbar: IntRect,
     /// Width of the list scroll window client = item width
     /// (list client minus the 16px scrollbar, C4Gui.h:111).
     pub item_width: i32,
@@ -133,6 +141,18 @@ pub fn plrsel_layout(w: i32, h: i32) -> PlrSelLayout {
         w: plr_list.w - 6,
         h: plr_list.h - 6,
     };
+    let list_viewport = IntRect {
+        x: list_client.x,
+        y: list_client.y,
+        w: list_client.w - SCROLLBAR_WIDTH,
+        h: list_client.h,
+    };
+    let list_scrollbar = IntRect {
+        x: list_viewport.x + list_viewport.w,
+        y: list_viewport.y,
+        w: SCROLLBAR_WIDTH,
+        h: list_viewport.h,
+    };
     let info_window = at_screen(info_rel);
     // TextWindow margins T8 L10 R5 B8 (C4Gui.h:1334-1337); the scroll window
     // reserves the 16px scrollbar (C4GuiContainers.cpp:477-491).
@@ -172,7 +192,9 @@ pub fn plrsel_layout(w: i32, h: i32) -> PlrSelLayout {
         client,
         plr_list,
         list_client,
-        item_width: list_client.w - 16,
+        list_viewport,
+        list_scrollbar,
+        item_width: list_viewport.w,
         item_height: BOOK_FONT_LINE_HEIGHT + 4,
         item_pitch: BOOK_FONT_LINE_HEIGHT + 4 + 1,
         info_window,
@@ -350,6 +372,9 @@ pub struct PlrSelAssets {
     pub button_down: ImageData,
     /// `GUIButtonHighlight.png` — additive focus/hover overlay.
     pub button_highlight: ImageData,
+    /// `StartupBookScroll.png` — 16px up/track/down/pin facets used by the
+    /// auto-hiding player-list scrollbar.
+    pub book_scroll: ImageData,
     /// `Player.png` — 48x48 ColorByOwner source used for the default player
     /// icon and portrait (C4GraphicsResource.cpp:265-268,
     /// C4StartupPlrSelDlg.cpp:168-170,230-233).
@@ -1045,6 +1070,11 @@ pub struct PlrSelController {
     hovered: Option<PlrSelControl>,
     pointer_pressed: Option<PlrSelControl>,
     key_pressed: Option<(PlrSelControl, KeyCode)>,
+    list_scroll_y: i32,
+    list_scroll_pin: i32,
+    scrollbar_dragging: bool,
+    scrollbar_arrow_captured: bool,
+    scrollbar_arrow: i8,
 }
 
 impl PlrSelController {
@@ -1064,6 +1094,11 @@ impl PlrSelController {
             hovered: None,
             pointer_pressed: None,
             key_pressed: None,
+            list_scroll_y: 0,
+            list_scroll_pin: 0,
+            scrollbar_dragging: false,
+            scrollbar_arrow_captured: false,
+            scrollbar_arrow: 0,
         }
     }
 
@@ -1101,6 +1136,7 @@ impl PlrSelController {
         };
         self.crew_participations = participations;
         self.selected = (!self.crew_participations.is_empty()).then_some(0);
+        self.reset_list_scroll();
         self.focus = PlrSelControl::PlayerList;
         self.pointer_pressed = None;
         self.key_pressed = None;
@@ -1123,6 +1159,9 @@ impl PlrSelController {
         self.mode = PlrSelMode::Player;
         self.crew_participations.clear();
         self.selected = restored.or_else(|| (!self.player_activations.is_empty()).then_some(0));
+        self.reset_list_scroll();
+        let layout = self.layout();
+        self.ensure_selection_visible(&layout);
         self.focus = PlrSelControl::PlayerList;
         self.pointer_pressed = None;
         self.key_pressed = None;
@@ -1138,6 +1177,9 @@ impl PlrSelController {
         self.hovered = self
             .pointer_position
             .and_then(|point| self.hit_button(point));
+        self.clamp_list_scroll();
+        let layout = self.layout();
+        self.ensure_selection_visible(&layout);
     }
 
     pub fn set_player_count(&mut self, player_count: usize) {
@@ -1148,6 +1190,7 @@ impl PlrSelController {
         if !self.is_crew_mode() {
             self.normalize_selection();
         }
+        self.clamp_list_scroll();
     }
 
     /// Replaces the activation flags after player-file discovery. Like C++,
@@ -1164,6 +1207,9 @@ impl PlrSelController {
                 .iter()
                 .position(|activated| *activated)
                 .or_else(|| (!self.player_activations.is_empty()).then_some(0));
+            self.reset_list_scroll();
+            let layout = self.layout();
+            self.ensure_selection_visible(&layout);
         }
     }
 
@@ -1181,6 +1227,9 @@ impl PlrSelController {
         }
         self.crew_participations = participations;
         self.normalize_selection();
+        self.reset_list_scroll();
+        let layout = self.layout();
+        self.ensure_selection_visible(&layout);
         true
     }
 
@@ -1197,7 +1246,12 @@ impl PlrSelController {
     }
 
     pub fn set_selected_index(&mut self, selected: Option<usize>) {
-        self.selected = selected.filter(|index| *index < self.row_count());
+        let selected = selected.filter(|index| *index < self.row_count());
+        if self.selected != selected {
+            self.selected = selected;
+            let layout = self.layout();
+            self.ensure_selection_visible(&layout);
+        }
     }
 
     /// Returns the player row under a context-menu press. The whole item
@@ -1269,11 +1323,30 @@ impl PlrSelController {
         self.pointer_position
     }
 
+    /// Current vertical ScrollWindow displacement in logical pixels.
+    pub const fn list_scroll_offset(&self) -> i32 {
+        self.list_scroll_y
+    }
+
+    /// Maximum displacement for the current rows and viewport.
+    pub fn list_max_scroll(&self) -> i32 {
+        self.max_list_scroll(&self.layout())
+    }
+
+    /// Whether the next pointer release belongs to the book scrollbar rather
+    /// than to a row under that release position.
+    pub const fn scrollbar_pointer_captured(&self) -> bool {
+        self.scrollbar_dragging || self.scrollbar_arrow_captured
+    }
+
     pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
         self.pointer_position = position;
         self.hovered = position.and_then(|point| self.hit_button(point));
         if position.is_none() {
             self.pointer_pressed = None;
+            self.scrollbar_dragging = false;
+            self.scrollbar_arrow_captured = false;
+            self.scrollbar_arrow = 0;
         }
     }
 
@@ -1289,6 +1362,12 @@ impl PlrSelController {
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
+        let layout = self.layout();
+        if self.scrollbar_dragging {
+            self.set_scroll_from_pointer(position, &layout);
+        } else if self.scrollbar_arrow_captured {
+            self.scrollbar_arrow = self.scrollbar_arrow_at(position, &layout);
+        }
         Vec::new()
     }
 
@@ -1297,14 +1376,21 @@ impl PlrSelController {
         self.hovered = self.hit_button(position);
         self.pointer_pressed = self.hovered;
 
+        let layout = self.layout();
+        if self.max_list_scroll(&layout) > 0 && contains_plrsel(layout.list_scrollbar, position) {
+            self.pointer_pressed = None;
+            let actions = self.change_focus(PlrSelControl::PlayerList);
+            self.begin_scrollbar_pointer(position, &layout);
+            return actions;
+        }
+
         if self.hovered.is_some() {
             // C4GUI::Button::IsFocusOnClick is false. Bottom-button clicks
             // retain the list (or previously tabbed) keyboard focus.
             return Vec::new();
         }
 
-        let layout = self.layout();
-        if contains_plrsel(layout.list_client, position) {
+        if contains_plrsel(layout.list_viewport, position) {
             let mut actions = self.change_focus(PlrSelControl::PlayerList);
             let selected = self.list_item_at(position);
             actions.extend(self.change_selection(selected));
@@ -1316,6 +1402,17 @@ impl PlrSelController {
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
+        if self.scrollbar_dragging {
+            let layout = self.layout();
+            self.set_scroll_from_pointer(position, &layout);
+            self.scrollbar_dragging = false;
+            return Vec::new();
+        }
+        if self.scrollbar_arrow_captured {
+            self.scrollbar_arrow_captured = false;
+            self.scrollbar_arrow = 0;
+            return Vec::new();
+        }
         if let Some(index) = self.checkbox_at(position) {
             self.pointer_pressed = None;
             return self.toggle_activation(index);
@@ -1334,7 +1431,7 @@ impl PlrSelController {
         self.hovered = self.hit_button(position);
         self.pointer_pressed = None;
         let layout = self.layout();
-        if !contains_plrsel(layout.list_client, position) {
+        if !contains_plrsel(layout.list_viewport, position) {
             return Vec::new();
         }
         let selected = self.list_item_at(position);
@@ -1342,6 +1439,37 @@ impl PlrSelController {
         actions.extend(self.change_selection(selected));
         actions.extend(self.selected_edit_action());
         actions
+    }
+
+    /// Routes the native signed wheel delta over the ScrollWindow viewport.
+    /// C4FullScreen supplies +60 for one notch up; ScrollWindow negates it.
+    pub fn handle_wheel(&mut self, position: GuiPoint, delta: i32) -> Vec<PlrSelAction> {
+        self.pointer_position = Some(position);
+        self.hovered = self.hit_button(position);
+        let layout = self.layout();
+        if contains_plrsel(layout.list_viewport, position) {
+            self.scroll_list_by(delta.saturating_neg(), &layout);
+        }
+        Vec::new()
+    }
+
+    /// Advances a held arrow by one fixed thumb pixel, matching
+    /// `C4GUI::ScrollBar::DrawElement`.
+    pub fn tick_scrollbar(&mut self) -> bool {
+        if self.scrollbar_arrow == 0 {
+            return false;
+        }
+        let layout = self.layout();
+        let max_scroll = self.max_list_scroll(&layout);
+        let max_pin = Self::scrollbar_range(&layout);
+        if max_scroll == 0 {
+            return false;
+        }
+        let previous_pin = self.list_scroll_pin;
+        self.list_scroll_pin =
+            (self.list_scroll_pin + i32::from(self.scrollbar_arrow)).clamp(0, max_pin);
+        self.list_scroll_y = max_scroll * self.list_scroll_pin / max_pin;
+        self.list_scroll_pin != previous_pin
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<PlrSelAction> {
@@ -1438,11 +1566,11 @@ impl PlrSelController {
 
     fn list_item_at(&self, point: GuiPoint) -> Option<usize> {
         let layout = self.layout();
-        if point.x >= (layout.list_client.x + layout.item_width) as f32 {
+        if !contains_plrsel(layout.list_viewport, point) {
             return None;
         }
-        let offset = point.y as i32 - layout.list_client.y;
-        if offset < 0 || offset % layout.item_pitch >= layout.item_height {
+        let offset = point.y as i32 - layout.list_viewport.y + self.list_scroll_y;
+        if offset % layout.item_pitch >= layout.item_height {
             return None;
         }
         let index = (offset / layout.item_pitch) as usize;
@@ -1511,6 +1639,8 @@ impl PlrSelController {
             return Vec::new();
         }
         self.selected = selected;
+        let layout = self.layout();
+        self.ensure_selection_visible(&layout);
         vec![PlrSelAction::SelectionChanged(selected)]
     }
 
@@ -1615,6 +1745,132 @@ impl PlrSelController {
             .selected
             .filter(|index| *index < row_count)
             .or_else(|| (row_count > 0).then_some(0));
+        self.clamp_list_scroll();
+        let layout = self.layout();
+        self.ensure_selection_visible(&layout);
+    }
+
+    fn list_content_height(&self, layout: &PlrSelLayout) -> i32 {
+        if self.row_count() == 0 {
+            return 0;
+        }
+        i32::try_from(self.row_count())
+            .unwrap_or(i32::MAX)
+            .saturating_mul(layout.item_pitch)
+            .saturating_sub(1)
+    }
+
+    fn max_list_scroll(&self, layout: &PlrSelLayout) -> i32 {
+        self.list_content_height(layout)
+            .saturating_sub(layout.list_viewport.h)
+            .max(0)
+    }
+
+    fn scrollbar_has_pin(layout: &PlrSelLayout) -> bool {
+        layout.list_scrollbar.h > 3 * SCROLLBAR_PART
+    }
+
+    fn scrollbar_range(layout: &PlrSelLayout) -> i32 {
+        if Self::scrollbar_has_pin(layout) {
+            layout.list_scrollbar.h - 3 * SCROLLBAR_PART
+        } else {
+            // C4GUI::ScrollBar uses a synthetic range when the viewport is
+            // too short for its fixed pin. The arrows remain usable.
+            100
+        }
+    }
+
+    fn reset_list_scroll(&mut self) {
+        self.list_scroll_y = 0;
+        self.list_scroll_pin = 0;
+        self.scrollbar_dragging = false;
+        self.scrollbar_arrow_captured = false;
+        self.scrollbar_arrow = 0;
+    }
+
+    fn clamp_list_scroll(&mut self) {
+        let layout = self.layout();
+        let max_scroll = self.max_list_scroll(&layout);
+        self.list_scroll_y = self.list_scroll_y.clamp(0, max_scroll);
+        self.sync_pin_from_scroll(&layout);
+        if max_scroll == 0 {
+            self.scrollbar_dragging = false;
+            self.scrollbar_arrow_captured = false;
+            self.scrollbar_arrow = 0;
+        }
+    }
+
+    fn sync_pin_from_scroll(&mut self, layout: &PlrSelLayout) {
+        let max_scroll = self.max_list_scroll(layout);
+        self.list_scroll_pin = if max_scroll == 0 || !Self::scrollbar_has_pin(layout) {
+            0
+        } else {
+            Self::scrollbar_range(layout) * self.list_scroll_y / max_scroll
+        };
+    }
+
+    fn scroll_list_by(&mut self, amount: i32, layout: &PlrSelLayout) {
+        self.list_scroll_y = self
+            .list_scroll_y
+            .saturating_add(amount)
+            .clamp(0, self.max_list_scroll(layout));
+        self.sync_pin_from_scroll(layout);
+    }
+
+    fn set_scroll_from_pointer(&mut self, point: GuiPoint, layout: &PlrSelLayout) {
+        let max_pin = Self::scrollbar_range(layout);
+        self.list_scroll_pin =
+            (point.y as i32 - layout.list_scrollbar.y - SCROLLBAR_PART - SCROLLBAR_PART / 2)
+                .clamp(0, max_pin);
+        self.list_scroll_y = self.max_list_scroll(layout) * self.list_scroll_pin / max_pin.max(1);
+    }
+
+    fn scrollbar_arrow_at(&self, point: GuiPoint, layout: &PlrSelLayout) -> i8 {
+        if !contains_plrsel(layout.list_scrollbar, point) {
+            return 0;
+        }
+        let local_y = point.y as i32 - layout.list_scrollbar.y;
+        if local_y < SCROLLBAR_PART {
+            -1
+        } else if local_y >= layout.list_scrollbar.h - SCROLLBAR_PART {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn begin_scrollbar_pointer(&mut self, point: GuiPoint, layout: &PlrSelLayout) {
+        let arrow = self.scrollbar_arrow_at(point, layout);
+        if arrow != 0 {
+            self.scrollbar_arrow_captured = true;
+            self.scrollbar_arrow = arrow;
+        } else if Self::scrollbar_has_pin(layout) {
+            self.scrollbar_arrow_captured = false;
+            self.set_scroll_from_pointer(point, layout);
+            self.scrollbar_dragging = true;
+        }
+    }
+
+    fn ensure_selection_visible(&mut self, layout: &PlrSelLayout) {
+        if layout.list_viewport.h <= 0 {
+            self.list_scroll_y = 0;
+            self.list_scroll_pin = 0;
+            return;
+        }
+        let Some(index) = self.selected else {
+            return;
+        };
+        let top = i32::try_from(index)
+            .unwrap_or(i32::MAX)
+            .saturating_mul(layout.item_pitch);
+        let bottom = top.saturating_add(layout.item_height);
+        if self.list_scroll_y > top {
+            self.list_scroll_y = top;
+        } else if self.list_scroll_y + layout.list_viewport.h < bottom {
+            self.list_scroll_y = bottom - layout.list_viewport.h;
+        }
+        self.list_scroll_y = self.list_scroll_y.clamp(0, self.max_list_scroll(layout));
+        self.sync_pin_from_scroll(layout);
     }
 
     fn is_highlighted(&self, control: PlrSelControl, draw_focus: bool) -> bool {
@@ -1805,6 +2061,7 @@ impl PlrSelScreen {
             button: engine_png_texture(&assets.button),
             button_down: engine_png_texture(&assets.button_down),
             button_highlight: engine_png_texture(&assets.button_highlight),
+            book_scroll: engine_png_texture(&assets.book_scroll),
             player: engine_png_texture(&assets.player),
         };
 
@@ -1819,11 +2076,32 @@ impl PlrSelScreen {
 
         let crew_mode = controller.is_some_and(PlrSelController::is_crew_mode);
         let row_count = if crew_mode { crew.len() } else { players.len() };
+        let scroll_y = controller.map_or(0, PlrSelController::list_scroll_offset);
 
         // 2. List box: selection bar behind the items (ListBox::DrawElement,
-        //    C4GuiListBox.cpp:100-124), then the items in add-order.
+        //    C4GuiListBox.cpp:100-124), then the items in add-order. Its
+        //    ScrollWindow shifts children and clips them to the viewport.
+        let viewport = layout.list_viewport;
+        let saved_clip = surface.clip();
+        let viewport_clip = lc_graphics::Rect::new(
+            viewport.x,
+            viewport.y,
+            viewport.w.max(0) as u32,
+            viewport.h.max(0) as u32,
+        );
+        let active_clip = saved_clip
+            .and_then(|clip| clip.intersection(viewport_clip))
+            .unwrap_or_else(|| {
+                if saved_clip.is_some() {
+                    lc_graphics::Rect::new(viewport.x, viewport.y, 0, 0)
+                } else {
+                    viewport_clip
+                }
+            });
+        surface.set_clip(active_clip);
+
         if let Some(sel) = selected.filter(|&sel| sel < row_count) {
-            let y = layout.list_client.y + layout.item_pitch * sel as i32;
+            let y = layout.list_viewport.y + layout.item_pitch * sel as i32 - scroll_y;
             let color = if controller
                 .is_none_or(|state| draw_focus && state.focus == PlrSelControl::PlayerList)
             {
@@ -1833,9 +2111,9 @@ impl PlrSelScreen {
             };
             draw_box_dw(
                 surface,
-                layout.list_client.x,
+                layout.list_viewport.x,
                 y,
-                layout.list_client.x + layout.item_width - 1,
+                layout.list_viewport.x + layout.item_width - 1,
                 y + layout.item_height - 1,
                 color,
                 gamma,
@@ -1854,12 +2132,9 @@ impl PlrSelScreen {
                     member,
                     participating,
                     i as i32,
+                    scroll_y,
                     gamma,
                 );
-            }
-            if let Some(member) = selected.and_then(|sel| crew.get(sel)) {
-                Self::render_crew_selection_info(surface, book, &layout, member, gamma);
-                Self::render_crew_portrait(surface, &layout, member, gamma);
             }
         } else {
             for (i, player) in players.iter().enumerate() {
@@ -1867,10 +2142,29 @@ impl PlrSelScreen {
                     .and_then(|state| state.player_activations.get(i).copied())
                     .unwrap_or(player.activated);
                 Self::render_list_item(
-                    surface, assets, book, &layout, player, activated, i as i32, gamma,
+                    surface, assets, book, &layout, player, activated, i as i32, scroll_y, gamma,
                 );
             }
+        }
 
+        if let Some(saved) = saved_clip {
+            surface.set_clip(saved);
+        } else {
+            surface.clear_clip();
+        }
+
+        if let Some(controller) = controller {
+            if controller.max_list_scroll(&layout) > 0 {
+                Self::draw_scrollbar(surface, assets, controller, &layout, gamma);
+            }
+        }
+
+        if crew_mode {
+            if let Some(member) = selected.and_then(|sel| crew.get(sel)) {
+                Self::render_crew_selection_info(surface, book, &layout, member, gamma);
+                Self::render_crew_portrait(surface, &layout, member, gamma);
+            }
+        } else {
             // 3. Info panel text for the selected player
             //    (PlayerListItem::SetSelectionInfo, cpp:293-302).
             if let Some(player) = selected.and_then(|sel| players.get(sel)) {
@@ -2011,6 +2305,80 @@ impl PlrSelScreen {
         );
     }
 
+    fn draw_scrollbar(
+        surface: &mut Surface,
+        assets: &PlrSelAssets,
+        controller: &PlrSelController,
+        layout: &PlrSelLayout,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let bar = layout.list_scrollbar;
+        let top_x = if controller.scrollbar_arrow < 0 {
+            16
+        } else {
+            0
+        };
+        let bottom_x = if controller.scrollbar_arrow > 0 {
+            16
+        } else {
+            0
+        };
+        crate::draw_image_strip(
+            surface,
+            bar.x,
+            bar.y,
+            &assets.book_scroll,
+            top_x,
+            0,
+            16,
+            16,
+            gamma,
+        );
+        let mut y = SCROLLBAR_PART;
+        while y < bar.h - 5 {
+            let tile_height = SCROLLBAR_PART.min(bar.h - 5 - y).max(0) as u32;
+            if tile_height == 0 {
+                break;
+            }
+            crate::draw_image_strip(
+                surface,
+                bar.x,
+                bar.y + y,
+                &assets.book_scroll,
+                0,
+                16,
+                16,
+                tile_height,
+                gamma,
+            );
+            y += SCROLLBAR_PART;
+        }
+        crate::draw_image_strip(
+            surface,
+            bar.x,
+            bar.y + bar.h - SCROLLBAR_PART,
+            &assets.book_scroll,
+            bottom_x,
+            32,
+            16,
+            16,
+            gamma,
+        );
+        if PlrSelController::scrollbar_has_pin(layout) {
+            crate::draw_image_strip(
+                surface,
+                bar.x,
+                bar.y + SCROLLBAR_PART + controller.list_scroll_pin,
+                &assets.book_scroll,
+                16,
+                16,
+                16,
+                16,
+                gamma,
+            );
+        }
+    }
+
     /// One PlayerListItem: checkbox, icon, name label (cpp:76-103).
     fn render_list_item(
         surface: &mut Surface,
@@ -2020,11 +2388,12 @@ impl PlrSelScreen {
         player: &PlrSelPlayer,
         activated: bool,
         index: i32,
+        scroll_y: i32,
         gamma: Option<&GammaRamp>,
     ) {
         let item = IntRect {
-            x: layout.list_client.x,
-            y: layout.list_client.y + layout.item_pitch * index,
+            x: layout.list_viewport.x,
+            y: layout.list_viewport.y + layout.item_pitch * index - scroll_y,
             w: layout.item_width,
             h: layout.item_height,
         };
@@ -2097,11 +2466,12 @@ impl PlrSelScreen {
         crew: &PlrSelCrew,
         participating: bool,
         index: i32,
+        scroll_y: i32,
         gamma: Option<&GammaRamp>,
     ) {
         let item = IntRect {
-            x: layout.list_client.x,
-            y: layout.list_client.y + layout.item_pitch * index,
+            x: layout.list_viewport.x,
+            y: layout.list_viewport.y + layout.item_pitch * index - scroll_y,
             w: layout.item_width,
             h: layout.item_height,
         };
@@ -2379,6 +2749,24 @@ mod tests {
                 l.list_client.h
             ),
             (151, 260, 373, 367)
+        );
+        assert_eq!(
+            l.list_viewport,
+            IntRect {
+                x: 151,
+                y: 260,
+                w: 357,
+                h: 367
+            }
+        );
+        assert_eq!(
+            l.list_scrollbar,
+            IntRect {
+                x: 508,
+                y: 260,
+                w: 16,
+                h: 367
+            }
         );
         // Items: 357 wide (373-16 scrollbar), 26 high, 27px pitch.
         assert_eq!((l.item_width, l.item_height, l.item_pitch), (357, 26, 27));
@@ -2764,6 +3152,207 @@ mod tests {
     }
 
     #[test]
+    fn l021_overflow_wheel_scrollbar_and_scrolled_hits_reach_every_row() {
+        let layout = plrsel_layout(1280, 720);
+        let mut controller = PlrSelController::new(20);
+        controller.resize(1280, 720);
+
+        assert_eq!(controller.list_max_scroll(), 172);
+        let viewport_point = crate::GuiPoint::new(
+            (layout.list_viewport.x + 4) as f32,
+            (layout.list_viewport.y + 4) as f32,
+        );
+        controller.handle_wheel(viewport_point, -60);
+        assert_eq!(controller.list_scroll_offset(), 60);
+        assert_eq!(controller.context_index_at(viewport_point), Some(2));
+
+        controller.handle_wheel(viewport_point, -10_000);
+        assert_eq!(controller.list_scroll_offset(), 172);
+        let last_checkbox = crate::GuiPoint::new(
+            (layout.list_viewport.x + layout.item_height / 2) as f32,
+            (layout.list_viewport.y + 19 * layout.item_pitch - 172 + layout.item_height / 2) as f32,
+        );
+        assert_eq!(
+            controller.handle_pointer_down(last_checkbox),
+            vec![PlrSelAction::SelectionChanged(Some(19))]
+        );
+        assert_eq!(
+            controller.handle_pointer_up(last_checkbox),
+            vec![PlrSelAction::ActivationChanged {
+                index: 19,
+                activated: true,
+            }]
+        );
+        assert!(controller.player_activations()[..19]
+            .iter()
+            .all(|activated| !activated));
+        assert_eq!(controller.player_activations()[19], true);
+
+        let last_name = crate::GuiPoint::new(
+            (layout.list_viewport.x + layout.item_height * 3) as f32,
+            last_checkbox.y,
+        );
+        assert_eq!(controller.context_index_at(last_name), Some(19));
+        assert_eq!(
+            controller.handle_pointer_double_click(last_name),
+            vec![PlrSelAction::PlayerProperties(19)]
+        );
+        assert_eq!(
+            click(&mut controller, layout.buttons[3]),
+            vec![PlrSelAction::DeletePlayer(19)]
+        );
+
+        let over_bar = crate::GuiPoint::new(
+            (layout.list_scrollbar.x + 8) as f32,
+            (layout.list_scrollbar.y + 8) as f32,
+        );
+        controller.handle_wheel(over_bar, 10_000);
+        assert_eq!(controller.list_scroll_offset(), 172);
+
+        controller.handle_wheel(viewport_point, 10_000);
+        assert_eq!(controller.list_scroll_offset(), 0);
+        let middle_track = crate::GuiPoint::new(
+            (layout.list_scrollbar.x + 8) as f32,
+            (layout.list_scrollbar.y + layout.list_scrollbar.h / 2) as f32,
+        );
+        assert!(controller.handle_pointer_down(middle_track).is_empty());
+        assert_eq!(controller.list_scroll_offset(), 85);
+        let bottom_track = crate::GuiPoint::new(
+            middle_track.x,
+            (layout.list_scrollbar.y + layout.list_scrollbar.h - 17) as f32,
+        );
+        controller.handle_pointer_move(bottom_track);
+        assert_eq!(controller.list_scroll_offset(), 172);
+        controller.handle_pointer_up(bottom_track);
+        assert_eq!(controller.list_scroll_offset(), 172);
+    }
+
+    #[test]
+    fn l021_keyboard_selection_scrolls_each_row_into_view() {
+        let layout = plrsel_layout(1280, 720);
+        let mut controller = PlrSelController::new(20);
+        controller.resize(1280, 720);
+
+        for index in 1..20 {
+            assert_eq!(
+                controller.handle_key_down(crate::KeyCode::Down),
+                vec![PlrSelAction::SelectionChanged(Some(index))]
+            );
+            let expected = (index as i32 * layout.item_pitch + layout.item_height
+                - layout.list_viewport.h)
+                .max(0);
+            assert_eq!(controller.list_scroll_offset(), expected);
+            let top = index as i32 * layout.item_pitch;
+            assert!(controller.list_scroll_offset() <= top);
+            assert!(
+                controller.list_scroll_offset() + layout.list_viewport.h
+                    >= top + layout.item_height
+            );
+        }
+        assert_eq!(controller.list_scroll_offset(), 172);
+
+        for index in (0..19).rev() {
+            assert_eq!(
+                controller.handle_key_down(crate::KeyCode::Up),
+                vec![PlrSelAction::SelectionChanged(Some(index))]
+            );
+            assert_eq!(
+                controller.list_scroll_offset(),
+                (index as i32 * layout.item_pitch).min(172)
+            );
+        }
+        assert_eq!(controller.list_scroll_offset(), 0);
+
+        let mut initial = PlrSelController::new(20);
+        let mut activations = vec![false; 20];
+        activations[19] = true;
+        initial.set_player_activations(activations);
+        initial.resize(1280, 720);
+        assert_eq!(initial.selected_index(), Some(19));
+        assert_eq!(initial.list_scroll_offset(), 172);
+    }
+
+    #[test]
+    fn l021_scrolled_rows_and_selection_are_clipped_to_list_viewport() {
+        use lc_graphics::PixelFormat;
+
+        let assets = PlrSelAssets {
+            background: crate::test_support::load_graphics_png("StartupPlrSelBG.png"),
+            checkbox: crate::test_support::load_graphics_png("GUICheckbox.png"),
+            button: crate::test_support::load_graphics_png("GUIButton.png"),
+            button_down: crate::test_support::load_graphics_png("GUIButtonDown.png"),
+            button_highlight: crate::test_support::load_graphics_png("GUIButtonHighlight.png"),
+            book_scroll: crate::test_support::load_graphics_png("StartupBookScroll.png"),
+            player: crate::test_support::load_graphics_png("Player.png"),
+        };
+        let fonts = crate::test_support::endeavour_font_set();
+        let book = book_fonts();
+        let gamma = crate::test_support::standard_gamma();
+        let players = (0..20)
+            .map(|index| {
+                let mut player = tyler();
+                player.name = format!("Player {index:02}");
+                player
+            })
+            .collect::<Vec<_>>();
+        let mut controller = PlrSelController::new(players.len());
+        controller.resize(1280, 720);
+
+        let render = |controller: &PlrSelController| {
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            PlrSelScreen::render_controller(
+                &mut surface,
+                &assets,
+                &fonts,
+                &book,
+                &players,
+                controller,
+                Some(gamma),
+            );
+            surface
+        };
+        let top = render(&controller);
+        let layout = plrsel_layout(1280, 720);
+        controller.handle_wheel(
+            crate::GuiPoint::new(
+                (layout.list_viewport.x + 4) as f32,
+                (layout.list_viewport.y + 4) as f32,
+            ),
+            -10_000,
+        );
+        let bottom = render(&controller);
+
+        let mut inside_differences = 0;
+        let mut viewport_differences = 0;
+        for y in 0..720_u32 {
+            for x in 0..1280_u32 {
+                let differs = top.get_pixel(x, y) != bottom.get_pixel(x, y);
+                let inside_client = x >= layout.list_client.x as u32
+                    && x < (layout.list_client.x + layout.list_client.w) as u32
+                    && y >= layout.list_client.y as u32
+                    && y < (layout.list_client.y + layout.list_client.h) as u32;
+                if inside_client {
+                    inside_differences += usize::from(differs);
+                    let inside_viewport = x >= layout.list_viewport.x as u32
+                        && x < (layout.list_viewport.x + layout.list_viewport.w) as u32
+                        && y >= layout.list_viewport.y as u32
+                        && y < (layout.list_viewport.y + layout.list_viewport.h) as u32;
+                    if inside_viewport {
+                        viewport_differences += usize::from(differs);
+                    }
+                } else {
+                    assert!(!differs, "scrolled list leaked to pixel ({x},{y})");
+                }
+            }
+        }
+        assert!(inside_differences > 0);
+        assert!(
+            viewport_differences > 0,
+            "rows did not move inside viewport"
+        );
+    }
+
+    #[test]
     fn keyboard_right_is_crew_but_gamepad_horizontal_only_moves_focus() {
         let mut controller = PlrSelController::new(2);
         controller.resize(1280, 720);
@@ -2860,6 +3449,7 @@ mod tests {
             button: crate::test_support::load_graphics_png("GUIButton.png"),
             button_down: crate::test_support::load_graphics_png("GUIButtonDown.png"),
             button_highlight: crate::test_support::load_graphics_png("GUIButtonHighlight.png"),
+            book_scroll: crate::test_support::load_graphics_png("StartupBookScroll.png"),
             player: crate::test_support::load_graphics_png("Player.png"),
         };
         let fonts = crate::test_support::endeavour_font_set();
@@ -3143,6 +3733,7 @@ mod tests {
             button: crate::test_support::load_graphics_png("GUIButton.png"),
             button_down: crate::test_support::load_graphics_png("GUIButtonDown.png"),
             button_highlight: crate::test_support::load_graphics_png("GUIButtonHighlight.png"),
+            book_scroll: crate::test_support::load_graphics_png("StartupBookScroll.png"),
             player: crate::test_support::load_graphics_png("Player.png"),
         };
         let fonts = crate::test_support::endeavour_font_set();

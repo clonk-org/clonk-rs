@@ -3973,6 +3973,7 @@ impl FrontendAssets {
             button: self.dialog_image("GUIButton.png")?,
             button_down: self.dialog_image("GUIButtonDown.png")?,
             button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
+            book_scroll: self.dialog_image("StartupBookScroll.png")?,
             player: self.dialog_image("Player.png")?,
         })
     }
@@ -20890,6 +20891,32 @@ impl GameApp {
             }
             return Ok(());
         }
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::PlayerSelection {
+            let native_delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            if native_delta == 0 {
+                return Ok(());
+            }
+            let mut actions = Vec::new();
+            let mut scrolled = false;
+            if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                if let Some(point) = dialog.pointer_position() {
+                    let before = dialog.list_scroll_offset();
+                    actions = dialog.handle_wheel(point, native_delta);
+                    scrolled = dialog.list_scroll_offset() != before;
+                }
+            }
+            self.process_player_dialog_actions(actions)?;
+            if scrolled {
+                self.plrsel_last_click = None;
+                self.mark_menu_dirty();
+            }
+            return Ok(());
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::NetworkGame {
             let native_delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
@@ -31826,25 +31853,30 @@ impl GameApp {
                             .startup_player_dialog
                             .as_ref()
                             .and_then(|dialog| dialog.pointer_position());
-                        let clicked_row = point.and_then(|point| {
-                            let layout = lc_frontend::startup_plrsel::plrsel_layout(
-                                self.graphics.surface().width() as i32,
-                                self.graphics.surface().height() as i32,
-                            );
-                            let offset = point.y as i32 - layout.list_client.y;
-                            let in_name_column = point.x
-                                >= (layout.list_client.x + layout.item_height) as f32
-                                && point.x < (layout.list_client.x + layout.item_width) as f32;
-                            (in_name_column
-                                && offset >= 0
-                                && offset % layout.item_pitch < layout.item_height)
-                                .then_some((offset / layout.item_pitch) as usize)
-                                .filter(|index| {
-                                    self.startup_player_dialog
-                                        .as_ref()
-                                        .is_some_and(|dialog| *index < dialog.row_count())
-                                })
-                        });
+                        let scrollbar_captured = self
+                            .startup_player_dialog
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.scrollbar_pointer_captured());
+                        let clicked_row = if scrollbar_captured {
+                            None
+                        } else {
+                            point.and_then(|point| {
+                                let layout = lc_frontend::startup_plrsel::plrsel_layout(
+                                    self.graphics.surface().width() as i32,
+                                    self.graphics.surface().height() as i32,
+                                );
+                                let in_name_column = point.x
+                                    >= (layout.list_client.x + layout.item_height) as f32
+                                    && point.x < (layout.list_client.x + layout.item_width) as f32;
+                                in_name_column
+                                    .then(|| {
+                                        self.startup_player_dialog
+                                            .as_ref()
+                                            .and_then(|dialog| dialog.context_index_at(point))
+                                    })
+                                    .flatten()
+                            })
+                        };
                         let is_double = if button_state == ElementState::Released {
                             let now = Instant::now();
                             let is_double = clicked_row.is_some_and(|index| {
@@ -44758,6 +44790,16 @@ impl GameApp {
                 {
                     // C4GUI::ScrollBar repeats held arrows from DrawElement,
                     // so advance once per presentation rather than per update.
+                    self.mark_menu_dirty();
+                }
+                if self.startup_view == StartupView::PlayerSelection
+                    && self
+                        .startup_player_dialog
+                        .as_mut()
+                        .is_some_and(|dialog| dialog.tick_scrollbar())
+                {
+                    // Book-scrollbar arrows repeat once per presentation.
+                    self.plrsel_last_click = None;
                     self.mark_menu_dirty();
                 }
                 if self.startup_view == StartupView::Options {
@@ -84549,6 +84591,122 @@ ScenInfoArea=70,5,25,90
                 .list_scroll_offset(),
             before_transition
         );
+    }
+
+    #[test]
+    fn l021_player_selection_wheel_and_held_arrow_route_through_app() {
+        use lc_frontend::startup_plrsel::{plrsel_layout, PlrSelController, PlrSelPlayer};
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.startup_player_models = (0..20)
+            .map(|index| PlrSelPlayer {
+                name: format!("Player {index:02}"),
+                activated: false,
+                big_icon: None,
+                portrait: None,
+                color_dw: 0xff,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                comment: String::new(),
+            })
+            .collect();
+        let mut controller = PlrSelController::new(app.startup_player_models.len());
+        controller.resize(640, 480);
+        assert_eq!(controller.list_max_scroll(), 300);
+        app.startup_view = StartupView::PlayerSelection;
+        app.startup_player_dialog = Some(controller);
+
+        let layout = plrsel_layout(640, 480);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(layout.list_viewport.x + 4),
+            f64::from(layout.list_viewport.y + 4),
+        ))
+        .expect("point inside player list");
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("wheel down through app shell");
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .list_scroll_offset(),
+            60
+        );
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
+            .expect("wheel up through app shell");
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .list_scroll_offset(),
+            0
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(layout.list_scrollbar.x + 8),
+            f64::from(layout.list_scrollbar.y + layout.list_scrollbar.h - 8),
+        ))
+        .expect("point at bottom book-scrollbar arrow");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hold bottom book-scrollbar arrow");
+        let mut frame = vec![0_u8; 640 * 480 * 4];
+        app.render(&mut frame).expect("first held-arrow frame");
+        let first = app
+            .startup_player_dialog
+            .as_ref()
+            .expect("player dialog")
+            .list_scroll_offset();
+        app.render(&mut frame).expect("second held-arrow frame");
+        let second = app
+            .startup_player_dialog
+            .as_ref()
+            .expect("player dialog")
+            .list_scroll_offset();
+        assert_eq!((first, second), (1, 3));
+
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release bottom book-scrollbar arrow");
+        app.render(&mut frame).expect("post-release frame");
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .list_scroll_offset(),
+            second
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(layout.list_scrollbar.x + 8),
+            f64::from(layout.list_scrollbar.y + layout.list_scrollbar.h / 2),
+        ))
+        .expect("point at book-scrollbar track");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("capture book-scrollbar drag");
+        let first_row_name = PhysicalPosition::new(
+            f64::from(layout.list_viewport.x + layout.item_height * 3),
+            f64::from(layout.list_viewport.y + layout.item_height / 2),
+        );
+        app.handle_cursor_moved(first_row_name)
+            .expect("drag thumb outside bar over a player row");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release captured drag over player row");
+        assert!(
+            app.plrsel_last_click.is_none(),
+            "scrollbar release must not seed row double-click bookkeeping"
+        );
+
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press row after scrollbar release");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release first genuine row click");
+        assert_eq!(
+            app.plrsel_last_click.map(|(index, _)| index),
+            Some(0),
+            "the first genuine row click must remain a single click"
+        );
+        assert!(app.startup_player_properties_dialog.is_none());
     }
 
     #[test]
