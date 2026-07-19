@@ -7642,6 +7642,8 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         style,
         equal_item_height: raw_style & 128 != 0,
         permanent,
+        location: None,
+        runtime_id: crate::direct_com::next_object_menu_runtime_id(),
         extra: crate::ObjectMenuExtra::from_legacy(extra),
         extra_data,
         internal_refill_token: 0,

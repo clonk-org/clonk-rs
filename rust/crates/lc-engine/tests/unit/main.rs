@@ -26725,7 +26725,7 @@ protected func ControlCommandFinished() { finished_dir = GetComDir(); }
     }
 
     #[test]
-    fn tutorial_special2_executes_context_before_control_returns_like_cpp() {
+    fn l068_tutorial_special2_keeps_context_location_before_control_returns() {
         // FnExecuteCommand dispatches synchronously to C4Object::ExecuteCommand
         // (C4Script.cpp:835-838). ExecuteCommand calls
         // ~ControlCommandFinished while the finished command is still the
@@ -26735,7 +26735,7 @@ local callback_name, callback_front, callback_comdir;
 
 protected func ControlSpecial2()
 {
-  SetCommand(this(), "Context", 0, 0, 0, this());
+  SetCommand(this(), "Context", 0, 17, 23, this());
   return ExecuteCommand();
 }
 
@@ -26805,6 +26805,7 @@ protected func ControlCommandFinished(command)
         assert_eq!(menu.identification, Value::Int(14));
         assert_eq!(menu.style, 1);
         assert!(!menu.permanent);
+        assert_eq!(menu.location, Some(Vector2::new(17, 23)));
         assert_eq!(menu.command_object, Some(clonk));
     }
 
@@ -71311,6 +71312,8 @@ protected func Entrance(pTarget)
                     style: 1,
                     equal_item_height: false,
                     permanent: true,
+                    location: None,
+                    runtime_id: 0,
                     extra: ObjectMenuExtra::default(),
                     extra_data: 0,
                     internal_refill_token: 0,

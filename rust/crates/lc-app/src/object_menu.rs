@@ -39,6 +39,7 @@ const MODE_HINT: &str = "Press ←/→ to switch menus";
 const CLASSIC_ITEM_SIZE: i32 = 35;
 const CLASSIC_FRAME_WIDTH: i32 = 2;
 const CLASSIC_COMMAND_HEIGHT: i32 = 16;
+const CLASSIC_SCROLLBAR_WIDTH: i32 = 16;
 const CLASSIC_TITLE_HEIGHT: i32 = 23;
 const CLASSIC_INFO_DEFAULT_WIDTH: i32 = 270;
 const CLASSIC_PICTURE_SIZE: i32 = 64;
@@ -279,6 +280,30 @@ fn relocate_dialog_menu_layout(
         row.text_rect = translate_rect(row.text_rect, dx, dy);
     }
     layout
+}
+
+fn clamp_dialog_menu_layout_to_free_anchor(
+    area: Rect,
+    layout: DialogMenuLayout,
+    free_location: (i32, i32),
+) -> DialogMenuLayout {
+    let width = layout.bounds.width as i32;
+    let height = layout.bounds.height as i32;
+    let x = if width > area.width as i32 - 2 * CLASSIC_ITEM_SIZE {
+        area.x + (area.width as i32 - width) / 2
+    } else {
+        free_location
+            .0
+            .clamp(area.x, area.x + area.width as i32 - width)
+    };
+    let y = if height > area.height as i32 - 2 * CLASSIC_ITEM_SIZE {
+        area.y + (area.height as i32 - height) / 2
+    } else {
+        free_location
+            .1
+            .clamp(area.y, area.y + area.height as i32 - height)
+    };
+    relocate_dialog_menu_layout(layout, Some((x, y)))
 }
 
 #[cfg(test)]
@@ -560,13 +585,16 @@ pub(crate) fn engine_script_menu_pointer_target_with_info(
             .iter()
             .map(|item| item.image != lc_engine::ObjectMenuImage::None)
             .collect::<Vec<_>>();
-        let layout = dialog_script_menu_layout_with_symbols(
+        let mut layout = dialog_script_menu_layout_with_symbols(
             area,
             font,
             menu,
             &item_has_symbols,
             font_images,
         );
+        if let Some(free_location) = free_location {
+            layout = clamp_dialog_menu_layout_to_free_anchor(area, layout, free_location);
+        }
         return dialog_script_menu_pointer_target(&layout, show_close_button, point);
     }
     if !matches!(menu.style, 0..=2) {
@@ -714,7 +742,29 @@ pub(crate) fn engine_script_menu_pointer_target_with_free_anchor(
     free_location: (i32, i32),
     scroll_y: i32,
 ) -> Option<EngineScriptMenuPointerTarget> {
-    if !rect_contains_point(area, point) || !matches!(menu.style, 0..=2) {
+    if !rect_contains_point(area, point) {
+        return None;
+    }
+    if menu.style == 3 {
+        let item_has_symbols = menu
+            .items
+            .iter()
+            .map(|item| item.image != lc_engine::ObjectMenuImage::None)
+            .collect::<Vec<_>>();
+        let layout = clamp_dialog_menu_layout_to_free_anchor(
+            area,
+            dialog_script_menu_layout_with_symbols(
+                area,
+                font,
+                menu,
+                &item_has_symbols,
+                font_images,
+            ),
+            free_location,
+        );
+        return dialog_script_menu_pointer_target(&layout, show_close_button, point);
+    }
+    if !matches!(menu.style, 0..=2) {
         return None;
     }
     let layout = engine_script_menu_layout_with_free_anchor(
@@ -728,6 +778,67 @@ pub(crate) fn engine_script_menu_pointer_target_with_free_anchor(
         false,
     );
     engine_script_menu_pointer_target_for_layout(menu, layout, show_close_button, point)
+}
+
+/// Resolve a not-yet-initialized free-alignment anchor for either native
+/// menu presentation style. The returned origin can be retained as an exact
+/// location for redraws, refills, and title dragging.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn engine_script_menu_presentation_geometry_with_free_anchor(
+    area: Rect,
+    font: &HudFont<'_>,
+    menu: &lc_engine::ObjectMenuState,
+    show_commands: bool,
+    font_images: &HashMap<String, ImageData>,
+    free_location: (i32, i32),
+    scroll_y: i32,
+    adjust_selection: bool,
+) -> Option<EngineScriptMenuPresentationGeometry> {
+    if menu.style == 3 {
+        let item_has_symbols = menu
+            .items
+            .iter()
+            .map(|item| item.image != lc_engine::ObjectMenuImage::None)
+            .collect::<Vec<_>>();
+        let layout = clamp_dialog_menu_layout_to_free_anchor(
+            area,
+            dialog_script_menu_layout_with_symbols(
+                area,
+                font,
+                menu,
+                &item_has_symbols,
+                font_images,
+            ),
+            free_location,
+        );
+        return Some(EngineScriptMenuPresentationGeometry {
+            bounds: layout.bounds,
+            title: layout.title,
+            client: Some(layout.client),
+            scroll_y: 0,
+            max_scroll_y: 0,
+        });
+    }
+    if !matches!(menu.style, 0..=2) {
+        return None;
+    }
+    let layout = engine_script_menu_layout_with_free_anchor(
+        area,
+        font,
+        menu,
+        show_commands,
+        font_images,
+        free_location,
+        scroll_y,
+        adjust_selection,
+    );
+    Some(EngineScriptMenuPresentationGeometry {
+        bounds: layout.bounds,
+        title: Some(layout.title),
+        client: Some(layout.client),
+        scroll_y: layout.scroll_y,
+        max_scroll_y: layout.max_scroll_y,
+    })
 }
 
 /// Style-independent initialized rectangles used by app-level wheel and
@@ -1692,7 +1803,8 @@ fn engine_script_menu_layout_impl(
             CLASSIC_FRAME_WIDTH,
             CLASSIC_FRAME_WIDTH,
         ));
-    let width = columns * item_width + margin_left + margin_right;
+    let scrollbar_width = i32::from(item_count > columns * lines) * CLASSIC_SCROLLBAR_WIDTH;
+    let width = columns * item_width + margin_left + margin_right + scrollbar_width;
     let height = lines * item_height + margin_top + title_height + command_height + margin_bottom;
 
     // Default C4Menu alignment is Right|Bottom with one C4SymbolSize (35)
@@ -4668,7 +4780,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_script_context_menu_uses_classic_geometry_and_pointer_targeting() {
+    fn l068_engine_script_context_menu_uses_free_location_and_cpp_clamping() {
         // C4Menu::InitMenu gives context style 1 one column
         // (src/C4Menu.cpp:359-365), then the same classic menu location,
         // size, drawing, and GUI element path handles its items
@@ -4714,6 +4826,116 @@ mod tests {
             layout.bounds.width,
             (item_width + 2 * CLASSIC_FRAME_WIDTH) as u32
         );
+
+        let free_area = Rect::new(41, 27, 240, 160);
+        let at_click = engine_script_menu_layout_with_free_anchor(
+            free_area,
+            &hud_font,
+            &menu,
+            false,
+            &HashMap::new(),
+            (free_area.x + 12, free_area.y + 18),
+            0,
+            false,
+        );
+        assert_eq!(
+            (at_click.bounds.x, at_click.bounds.y),
+            (free_area.x + 12, free_area.y + 18),
+            "a fitting free menu keeps the viewport-local click as its outer top-left"
+        );
+        let above_left = engine_script_menu_layout_with_free_anchor(
+            free_area,
+            &hud_font,
+            &menu,
+            false,
+            &HashMap::new(),
+            (free_area.x - 100, free_area.y - 100),
+            0,
+            false,
+        );
+        assert_eq!(
+            (above_left.bounds.x, above_left.bounds.y),
+            (free_area.x, free_area.y),
+            "negative free coordinates clamp to the viewport origin"
+        );
+        let below_right = engine_script_menu_layout_with_free_anchor(
+            free_area,
+            &hud_font,
+            &menu,
+            false,
+            &HashMap::new(),
+            (i32::MAX / 2, i32::MAX / 2),
+            0,
+            false,
+        );
+        assert_eq!(
+            (below_right.bounds.x, below_right.bounds.y),
+            (
+                free_area.x + free_area.width as i32 - below_right.bounds.width as i32,
+                free_area.y + free_area.height as i32 - below_right.bounds.height as i32,
+            ),
+            "right/bottom free coordinates clamp by the fully sized outer dialog"
+        );
+
+        let mut overflowing_menu = menu.clone();
+        while overflowing_menu.items.len() < 5 {
+            overflowing_menu.items.push(menu.items[0].clone());
+        }
+        let overflowing = engine_script_menu_layout_with_free_anchor(
+            free_area,
+            &hud_font,
+            &overflowing_menu,
+            false,
+            &HashMap::new(),
+            (i32::MAX / 2, free_area.y),
+            0,
+            false,
+        );
+        assert_eq!(
+            overflowing.bounds.width,
+            layout.bounds.width + CLASSIC_SCROLLBAR_WIDTH as u32,
+            "InitSize reserves C4GUI_ScrollBarWdt before free-position clamping"
+        );
+        assert_eq!(
+            overflowing.bounds.x,
+            free_area.x + free_area.width as i32 - overflowing.bounds.width as i32,
+        );
+
+        let mut replacement_dialog = menu.clone();
+        replacement_dialog.style = 3;
+        let dialog_area = Rect::new(41, 27, 640, 480);
+        let dialog_click = (dialog_area.x + 48, dialog_area.y + 36);
+        let replacement_geometry = engine_script_menu_presentation_geometry_with_free_anchor(
+            dialog_area,
+            &hud_font,
+            &replacement_dialog,
+            false,
+            &HashMap::new(),
+            dialog_click,
+            0,
+            false,
+        )
+        .expect("dialog style has presentation geometry");
+        assert_eq!(
+            (replacement_geometry.bounds.x, replacement_geometry.bounds.y),
+            dialog_click,
+            "SetLocation applies to a dialog that replaces Context during ActivateMenu"
+        );
+        assert_eq!(
+            engine_script_menu_pointer_target_with_free_anchor(
+                dialog_area,
+                &hud_font,
+                &replacement_dialog,
+                false,
+                true,
+                GuiPoint::new(dialog_click.0 as f32 + 1.0, dialog_click.1 as f32 + 1.0),
+                &HashMap::new(),
+                dialog_click,
+                0,
+            ),
+            Some(EngineScriptMenuPointerTarget::Title)
+        );
+
         let point = GuiPoint::new(item.x as f32 + 1.0, item.y as f32 + 1.0);
         assert_eq!(
             engine_script_menu_pointer_target(area, &hud_font, &menu, false, true, point,),

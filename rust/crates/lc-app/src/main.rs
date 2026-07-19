@@ -174,7 +174,9 @@ use object_menu::{
     engine_script_menu_layout_with_free_anchor, engine_script_menu_layout_with_presentation,
     engine_script_menu_pointer_target_with_free_anchor,
     engine_script_menu_pointer_target_with_presentation,
-    engine_script_menu_presentation_geometry, render_engine_script_menu_with_gamma,
+    engine_script_menu_presentation_geometry,
+    engine_script_menu_presentation_geometry_with_free_anchor,
+    render_engine_script_menu_with_gamma,
     resolve_engine_script_menu_footer, validate_menu_decoration_for_area,
 };
 use offline_startup::{
@@ -8597,9 +8599,11 @@ fn wrap_word_units(
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ScriptMenuPresentationKey {
     target: ObjectId,
+    runtime_id: u64,
     symbol_id: String,
     caption: String,
     selection: i32,
+    location: Option<Vector2>,
 }
 
 #[derive(Clone, Debug)]
@@ -8938,8 +8942,10 @@ fn same_script_menu_presentation(
     menu: &lc_engine::ObjectMenuState,
 ) -> bool {
     state.key.target == target
+        && state.key.runtime_id == menu.runtime_id
         && state.key.symbol_id == menu.symbol_id
         && state.key.caption == menu.caption
+        && state.key.location == menu.location
 }
 
 fn initial_control_clients(
@@ -35435,9 +35441,11 @@ impl GameApp {
         let initial_location = self.script_menu_free_location(owner, &menu);
         let key = ScriptMenuPresentationKey {
             target,
+            runtime_id: menu.runtime_id,
             symbol_id: menu.symbol_id.clone(),
             caption: menu.caption.clone(),
             selection: menu.selection,
+            location: menu.location,
         };
         let next = match self.script_menu_presentations.remove(&owner) {
             Some(state) if state.key == key => state,
@@ -35663,12 +35671,10 @@ impl GameApp {
             .and_then(|state| state.location)
             .or_else(|| self.script_menu_free_location(owner, menu));
         let scroll_y = presentation.map_or(0, |state| state.scroll_y);
-        if matches!(menu.style, 0..=2)
-            && presentation.map_or(location.is_some(), |state| {
-                state.location_needs_initialization
-            })
-        {
-            let layout = engine_script_menu_layout_with_free_anchor(
+        if presentation.map_or(location.is_some(), |state| {
+            state.location_needs_initialization
+        }) {
+            let geometry = engine_script_menu_presentation_geometry_with_free_anchor(
                 area,
                 &font,
                 menu,
@@ -35678,16 +35684,7 @@ impl GameApp {
                 scroll_y,
                 false,
             );
-            return Ok(Some((
-                target,
-                EngineScriptMenuPresentationGeometry {
-                    bounds: layout.bounds,
-                    title: Some(layout.title),
-                    client: Some(layout.client),
-                    scroll_y: layout.scroll_y,
-                    max_scroll_y: layout.max_scroll_y,
-                },
-            )));
+            return Ok(geometry.map(|geometry| (target, geometry)));
         }
         Ok(engine_script_menu_presentation_geometry(
             area,
@@ -35800,6 +35797,16 @@ impl GameApp {
         owner: i32,
         menu: &lc_engine::ObjectMenuState,
     ) -> Option<(i32, i32)> {
+        if let Some(location) = menu.location {
+            let area = self.graphics.viewport_rect(owner).unwrap_or_else(|| {
+                let surface = self.graphics.surface();
+                Rect::new(0, 0, surface.width(), surface.height())
+            });
+            return Some((
+                area.x.saturating_add(location.x),
+                area.y.saturating_add(location.y),
+            ));
+        }
         if menu.style != 2 || menu.user_menu {
             return None;
         }
@@ -54292,9 +54299,11 @@ impl GameApp {
                 .map(|(target, menu)| {
                     let key = ScriptMenuPresentationKey {
                         target: *target,
+                        runtime_id: menu.runtime_id,
                         symbol_id: menu.symbol_id.clone(),
                         caption: menu.caption.clone(),
                         selection: menu.selection,
+                        location: menu.location,
                     };
                     let progressing = menu.text_progressing;
                     match self.script_menu_presentations.remove(&script_menu_owner) {
@@ -54508,6 +54517,22 @@ impl GameApp {
                             .then_some((layout.bounds.x, layout.bounds.y))
                             .or(menu_location),
                         layout.scroll_y,
+                    )
+                } else if menu.style == 3 && initialize_location {
+                    let geometry = engine_script_menu_presentation_geometry_with_free_anchor(
+                        area,
+                        &layout_font,
+                        menu,
+                        self.display_flags.show_commands,
+                        &font_images,
+                        menu_location.expect("free anchor has a location"),
+                        retained_scroll_y,
+                        adjust_selection,
+                    )
+                    .expect("supported dialog menu has presentation geometry");
+                    (
+                        Some((geometry.bounds.x, geometry.bounds.y)),
+                        geometry.scroll_y,
                     )
                 } else {
                     (menu_location, retained_scroll_y)
@@ -62868,8 +62893,8 @@ fn ingame_pointer_viewport_pixel(
     viewport: ActiveViewportProjection,
 ) -> (i32, i32) {
     (
-        (pointer.world.x - viewport.content_origin_x) as i32,
-        (pointer.world.y - viewport.content_origin_y) as i32,
+        (pointer.screen.x as i32).saturating_sub(viewport.rect.x),
+        (pointer.screen.y as i32).saturating_sub(viewport.rect.y),
     )
 }
 
@@ -66946,7 +66971,7 @@ mod tests {
     }
 
     #[test]
-    fn context_command_coordinates_are_unscaled_viewport_pixels() {
+    fn l068_context_command_coordinates_include_letterbox_and_ignore_camera_zoom() {
         let viewport = ActiveViewportProjection {
             index: 0,
             owner: 1,
@@ -66969,8 +66994,8 @@ mod tests {
 
         assert_eq!(
             ingame_pointer_viewport_pixel(pointer, viewport),
-            (20, 12),
-            "C++ sends VpX/VpY after scale removal, not raw screen-minus-layout coordinates"
+            (61, 45),
+            "C++ sends VpX/VpY relative to the full viewport output, including letterbox bars"
         );
     }
 
@@ -71715,7 +71740,7 @@ mod tests {
     }
 
     #[test]
-    fn real_alchemy_right_click_mage_opens_classic_context_magic_menu() {
+    fn l068_real_alchemy_right_click_positions_classic_context_magic_menu() {
         // C4MouseControl issues C4CMD_Context on right-up with the clicked
         // MCLK as Target2. The command installs classic style-1 context on
         // the selected mage; entering ContextMagic opens the shipped spell
@@ -71801,6 +71826,17 @@ mod tests {
             Some(mage),
             "C++ front-to-back object picking selects the topmost MCLK",
         );
+        let pointer = app.ingame_pointer.expect("right-click retains viewport pointer");
+        let projection = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.owner == owner)
+            .expect("Alchemy owner viewport projection");
+        let (click_x, click_y) = ingame_pointer_viewport_pixel(pointer, projection);
+        assert_ne!(click_x, 0, "fixture must enter C++'s free-alignment branch");
+        assert_ne!(click_y, 0, "fixture must enter C++'s free-alignment branch");
+        let click_location = Vector2::new(click_x, click_y);
 
         app.handle_right_mouse_button(ElementState::Pressed)
             .expect("right-down stores no command");
@@ -71817,9 +71853,15 @@ mod tests {
             .engine
             .cursor_object_menu(owner)
             .expect("right-up opens the mage context menu")
-            .1;
+            .1
+            .clone();
         assert_eq!(context.style, 1);
         assert!(!context.permanent);
+        assert_eq!(
+            context.location,
+            Some(click_location),
+            "the synchronized Context command keeps logical viewport-local Tx/Ty"
+        );
         let magic_index = context
             .items
             .iter()
@@ -71834,6 +71876,110 @@ mod tests {
                     context.items
                 )
             });
+
+        let viewport = app.graphics.viewport_rect(owner).expect("Alchemy viewport");
+        app.render(&mut frame)
+            .expect("render the freely aligned context menu");
+        let latched_screen = app
+            .script_menu_presentations
+            .get(&owner)
+            .and_then(|state| state.location)
+            .expect("free context location is latched after layout");
+        let latched_local = Vector2::new(
+            latched_screen.0.saturating_sub(viewport.x),
+            latched_screen.1.saturating_sub(viewport.y),
+        );
+        assert!(
+            latched_local.x <= click_location.x && latched_local.y <= click_location.y,
+            "right/bottom edges may clamp the menu back into the viewport"
+        );
+        assert_eq!(
+            app.ingame_menu_gfx
+                .as_ref()
+                .and_then(|gfx| gfx.menu_location),
+            Some(latched_screen),
+            "viewport-local coordinates are translated exactly once for drawing"
+        );
+
+        let mut moved_context = context.clone();
+        let moved_x = latched_local.x.saturating_sub(4);
+        assert_ne!(
+            moved_x, latched_local.x,
+            "fixture must leave room for relocation"
+        );
+        moved_context.location = Some(Vector2::new(moved_x, latched_local.y));
+        app.engine
+            .apply_object_update(
+                mage,
+                ObjectUpdate {
+                    menu: Some(Some(moved_context.clone())),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("reopen the same context identity at another click");
+        app.render(&mut frame)
+            .expect("render the relocated context menu");
+        assert_eq!(
+            app.script_menu_presentations
+                .get(&owner)
+                .and_then(|state| state.location),
+            Some((
+                viewport.x.saturating_add(moved_x),
+                viewport.y.saturating_add(latched_local.y),
+            )),
+            "a new click location invalidates the prior presentation latch"
+        );
+
+        let mut tall_context = moved_context;
+        tall_context.location = Some(Vector2::new(
+            viewport.width as i32 - 1,
+            viewport.height as i32 - 1,
+        ));
+        tall_context.items.push(context.items[magic_index].clone());
+        app.engine
+            .apply_object_update(
+                mage,
+                ObjectUpdate {
+                    menu: Some(Some(tall_context.clone())),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install a taller edge-clamped context refill");
+        app.render(&mut frame).expect("render the taller context");
+        let edge_latched = app
+            .script_menu_presentations
+            .get(&owner)
+            .and_then(|state| state.location)
+            .expect("edge location clamps and latches");
+        tall_context.items.pop();
+        app.engine
+            .apply_object_update(
+                mage,
+                ObjectUpdate {
+                    menu: Some(Some(tall_context)),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("apply a shrinking context refill");
+        app.render(&mut frame).expect("render the smaller context");
+        assert_eq!(
+            app.script_menu_presentations
+                .get(&owner)
+                .and_then(|state| state.location),
+            Some(edge_latched),
+            "C++ refills retain the first post-clamp rcBounds position"
+        );
+
+        app.engine
+            .apply_object_update(
+                mage,
+                ObjectUpdate {
+                    menu: Some(Some(context.clone())),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("restore the live context before selecting ContextMagic");
+
         app.dispatch_control_event(ControlEvent::RawPlayerControl {
             command: lc_engine::COM_MENU_SELECT,
             data: i32::try_from(magic_index).expect("context index fits i32"),
@@ -131975,6 +132121,8 @@ protected func InputCallback(string answer, int player)
             style: 0,
             equal_item_height: false,
             permanent: false,
+            location: None,
+            runtime_id: 0,
             extra: lc_engine::ObjectMenuExtra::default(),
             extra_data: 0,
             internal_refill_token: 0,

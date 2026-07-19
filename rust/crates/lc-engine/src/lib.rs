@@ -4122,7 +4122,7 @@ mod object_menu_byte_tests {
 /// `selection`, MenuQueryCancel/OnMenuSelection dispatch on the callback
 /// type captured at initialization (CB_Object or CB_Scenario).
 /// C++ never persists menus in Objects.txt, so this state is runtime-only.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectMenuState {
     /// C4Menu::Caption from CreateMenu's szEmpty argument; the app uses
     /// it as the menu title until Normal-style selection captions replace
@@ -4149,6 +4149,16 @@ pub struct ObjectMenuState {
     pub equal_item_height: bool,
     /// C4Menu::Permanent (SetPermanent, C4Menu.cpp:942-945).
     pub permanent: bool,
+    /// Requested top-left in logical viewport-local pixels. `Some` models
+    /// `C4MN_Align_Free` plus `C4Menu::SetLocation`; `None` retains the
+    /// style's default alignment. The app clamps it after menu sizing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Vector2>,
+    /// Process-local allocation identity used only to distinguish a fresh
+    /// menu from an in-place refill in presentation caches.
+    #[doc(hidden)]
+    #[serde(skip, default = "crate::direct_com::next_object_menu_runtime_id")]
+    pub runtime_id: u64,
     /// Optional lower-strip payload selected by `C4Menu::SetExtra`.
     #[serde(default, skip_serializing_if = "ObjectMenuExtra::is_none")]
     pub extra: ObjectMenuExtra,
@@ -4200,6 +4210,34 @@ pub struct ObjectMenuState {
     /// SetMenuDecoration's immediate FrameDecoration::SetByDef snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoration: Option<ObjectMenuFrameDecoration>,
+}
+
+impl PartialEq for ObjectMenuState {
+    fn eq(&self, other: &Self) -> bool {
+        // Allocation/refill tokens are process-local mechanics, not part of
+        // the script-visible or serialized menu state.
+        self.caption == other.caption
+            && self.symbol_id == other.symbol_id
+            && self.title_symbol == other.title_symbol
+            && self.identification == other.identification
+            && self.style == other.style
+            && self.equal_item_height == other.equal_item_height
+            && self.permanent == other.permanent
+            && self.location == other.location
+            && self.extra == other.extra
+            && self.extra_data == other.extra_data
+            && self.selection == other.selection
+            && self.user_menu == other.user_menu
+            && self.command_object == other.command_object
+            && self.scenario_callbacks == other.scenario_callbacks
+            && self.refill_object == other.refill_object
+            && self.refill_object_contents_count == other.refill_object_contents_count
+            && self.items == other.items
+            && self.columns == other.columns
+            && self.lines == other.lines
+            && self.text_progressing == other.text_progressing
+            && self.decoration == other.decoration
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30652,6 +30690,12 @@ impl Engine {
             menu: update_menu,
             ..
         } = update;
+        let mut update_menu = update_menu;
+        if let Some(Some(menu)) = update_menu.as_mut() {
+            if menu.runtime_id == 0 {
+                menu.runtime_id = crate::direct_com::next_object_menu_runtime_id();
+            }
+        }
         if let Some(sequence) = solid_mask_instance_sequence {
             self.next_solid_mask_instance_sequence = self.next_solid_mask_instance_sequence.max(
                 sequence
@@ -31586,13 +31630,10 @@ impl Engine {
                 }
                 MenuRequestKind::Context {
                     target,
-                    position: _,
+                    position,
                 } => {
                     if let Some(target_index) = self.find_object_index(target) {
-                        // Free click-location alignment is still unmodeled;
-                        // install the same non-permanent classic context menu
-                        // at its default alignment for now.
-                        self.open_context_menu(crew_index, target_index, false)?;
+                        self.open_context_menu(crew_index, target_index, false, position)?;
                     }
                 }
                 kind => self.pending_menu_requests.push(MenuRequest {
@@ -50311,10 +50352,10 @@ impl Engine {
                     }
                     MenuRequestKind::Context {
                         target,
-                        position: _,
+                        position,
                     } => {
                         if let Some(target_index) = self.find_object_index(target) {
-                            self.open_context_menu(crew_index, target_index, false)?;
+                            self.open_context_menu(crew_index, target_index, false, position)?;
                         }
                     }
                     kind => self.pending_menu_requests.push(MenuRequest {

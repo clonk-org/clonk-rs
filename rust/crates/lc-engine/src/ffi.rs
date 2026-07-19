@@ -5609,6 +5609,8 @@ global func Step(state, frame, random)
                         style: 0,
                         equal_item_height: false,
                         permanent: false,
+                        location: None,
+                        runtime_id: 0,
                         extra: crate::ObjectMenuExtra::default(),
                         extra_data: 0,
                         internal_refill_token: 0,

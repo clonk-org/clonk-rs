@@ -283,6 +283,8 @@ fn activate_menu_state(
         style: 0,
         equal_item_height: false,
         permanent: true,
+        location: None,
+        runtime_id: next_internal_object_menu_refill_token(),
         extra: crate::ObjectMenuExtra::default(),
         extra_data: 0,
         internal_refill_token: 0,
@@ -309,6 +311,10 @@ fn next_internal_object_menu_refill_token() -> u64 {
             return token;
         }
     }
+}
+
+pub(crate) fn next_object_menu_runtime_id() -> u64 {
+    next_internal_object_menu_refill_token()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -908,6 +914,8 @@ pub(crate) fn build_container_contents_menu_state<S: InternalObjectMenuSource>(
             style: 0,
             equal_item_height: false,
             permanent: true,
+            location: None,
+            runtime_id: next_internal_object_menu_refill_token(),
             extra: crate::ObjectMenuExtra::default(),
             extra_data: 0,
             internal_refill_token: 0,
@@ -1856,7 +1864,7 @@ impl Engine {
             .get(&self.objects[base_index].definition_id)
             .is_some_and(|definition| definition.auto_context_menu());
         if auto_context {
-            self.open_context_menu(crew_index, base_index, true)?;
+            self.open_context_menu(crew_index, base_index, true, None)?;
         }
         Ok(())
     }
@@ -2439,8 +2447,21 @@ impl Engine {
         crew_index: usize,
         base_index: usize,
         permanent: bool,
+        location: Option<Vector2>,
     ) -> Result<(), EngineError> {
-        self.build_context_menu(crew_index, base_index, permanent, false, 0)
+        self.build_context_menu(crew_index, base_index, permanent, false, 0)?;
+        // C4Command::Context applies Free alignment and SetLocation only
+        // after ActivateMenu returns, and only if a menu survived.
+        if let Some(location) = location {
+            if let Some(menu) = self
+                .objects
+                .get_mut(crew_index)
+                .and_then(|object| object.state.menu.as_mut())
+            {
+                menu.location = Some(location);
+            }
+        }
+        Ok(())
     }
 
     fn refill_context_menu(
@@ -2551,6 +2572,8 @@ impl Engine {
                 style: 1,
                 equal_item_height: false,
                 permanent,
+                location: None,
+                runtime_id: next_internal_object_menu_refill_token(),
                 extra: crate::ObjectMenuExtra::default(),
                 extra_data: 0,
                 internal_refill_token: refill_token,
@@ -2800,6 +2823,8 @@ impl Engine {
             style: 2,
             equal_item_height: false,
             permanent: true,
+            location: None,
+            runtime_id: next_internal_object_menu_refill_token(),
             extra: crate::ObjectMenuExtra::default(),
             extra_data: 0,
             internal_refill_token: 0,
@@ -4818,6 +4843,8 @@ impl Engine {
             style: 0,
             equal_item_height: false,
             permanent: false,
+            location: None,
+            runtime_id: next_internal_object_menu_refill_token(),
             extra: crate::ObjectMenuExtra::Components,
             extra_data: 0,
             internal_refill_token: 0,
@@ -5021,6 +5048,8 @@ impl Engine {
             style: 0,
             equal_item_height: false,
             permanent: true,
+            location: None,
+            runtime_id: next_internal_object_menu_refill_token(),
             extra: crate::ObjectMenuExtra::Value,
             extra_data: 0,
             internal_refill_token: 0,
@@ -5332,6 +5361,8 @@ impl Engine {
             style: 0,
             equal_item_height: false,
             permanent: true,
+            location: None,
+            runtime_id: next_internal_object_menu_refill_token(),
             extra: crate::ObjectMenuExtra::Value,
             extra_data: 0,
             internal_refill_token: 0,
@@ -7580,7 +7611,7 @@ public func Activate(object clonk)
         let crew_index = engine.find_object_index(crew).expect("crew exists");
         let target_index = engine.find_object_index(target).expect("target exists");
         engine
-            .open_context_menu(crew_index, target_index, false)
+            .open_context_menu(crew_index, target_index, false, None)
             .expect("context menu opens");
         engine
             .debug_object_menu(crew.as_u64())
@@ -11858,7 +11889,7 @@ protected func CalcValue(object pInBase)
             .expect("spawn container");
         let crew_index = engine.find_object_index(crew).expect("crew exists");
         engine
-            .open_context_menu(crew_index, crew_index, false)
+            .open_context_menu(crew_index, crew_index, false, None)
             .expect("open prior menu");
         assert!(
             engine
@@ -14042,7 +14073,7 @@ func Enable() {
     }
 
     #[test]
-    fn periodic_context_refill_preserves_live_shell_and_callback_selection() {
+    fn l068_periodic_context_refill_preserves_location_and_live_shell() {
         // DoRefillInternal clears only the rows. The old selection and every
         // other menu property stay live while conditions run; a condition's
         // own SelectMenuItem then feeds the final AdjustSelection pass
@@ -14121,6 +14152,9 @@ func Enable() {
         menu.columns = 3;
         menu.lines = 2;
         menu.text_progressing = true;
+        menu.location = Some(Vector2::new(17, 23));
+        let runtime_id = menu.runtime_id;
+        assert_ne!(runtime_id, 0);
         let target_index = engine.find_object_index(target).expect("target exists");
         assert_eq!(
             engine
@@ -14166,6 +14200,8 @@ func Enable() {
         assert_eq!((menu.columns, menu.lines), (3, 2));
         assert!(menu.text_progressing);
         assert!(!menu.permanent);
+        assert_eq!(menu.location, Some(Vector2::new(17, 23)));
+        assert_eq!(menu.runtime_id, runtime_id);
     }
 
     #[test]
@@ -15481,10 +15517,11 @@ public func GetCustomComponents(object builder)
     }
 
     #[test]
-    fn mouse_context_command_targets_self_and_opens_classic_nonpermanent_menu() {
+    fn l068_mouse_context_command_keeps_viewport_location_and_zero_axis_sentinel() {
         // C4MouseControl passes the clicked object as Target2 with Add mode;
         // self-targeting must not exclude the cursor as ordinary Target does.
-        // C4Command::Context then installs non-permanent C4MN_Context
+        // C4Command::Context then installs non-permanent C4MN_Context and
+        // applies Free/SetLocation only when both coordinates are nonzero
         // (C4MouseControl.cpp:1253-1260; C4Command.cpp:1076-1090).
         let mut engine = Engine::new();
         register_clonk(
@@ -15504,11 +15541,18 @@ public func ContextMagic(object caller)
             .expect("player");
         let mage = spawn_crew(&mut engine, "MCLK", 1);
 
-        assert!(
-            engine
-                .player_context_command(1, mage)
-                .expect("queue mouse context command")
-        );
+        engine
+            .execute_player_command(
+                1,
+                CommandId::Context as i32,
+                17,
+                23,
+                0,
+                mage.as_u64() as i32,
+                0,
+                C4P_COMMAND_ADD,
+            )
+            .expect("queue mouse context command");
         assert_eq!(
             engine
                 .object_snapshot(mage)
@@ -15533,12 +15577,57 @@ public func ContextMagic(object caller)
         assert_eq!(menu.identification, Value::Int(14));
         assert_eq!(menu.style, 1);
         assert!(!menu.permanent);
+        assert_eq!(menu.location, Some(Vector2::new(17, 23)));
+        let mut prior_runtime_id = menu.runtime_id;
+        assert_ne!(prior_runtime_id, 0);
+        let restored: crate::ObjectMenuState = serde_json::from_value(
+            serde_json::to_value(&menu).expect("serialize synchronized menu state"),
+        )
+        .expect("deserialize synchronized menu state");
+        assert_eq!(restored.location, menu.location);
+        assert_ne!(restored.runtime_id, menu.runtime_id);
+        assert_eq!(restored, menu, "runtime identities are not semantic state");
         assert_eq!(menu.command_object, Some(mage));
         assert!(menu.items.iter().any(|item| {
             item.caption == "Magic"
                 && item.command.contains("ContextMagic")
                 && item.command.contains(&mage.as_u64().to_string())
         }));
+
+        for (x, y) in [(0, 23), (17, 0)] {
+            engine
+                .close_object_menu(mage, true)
+                .expect("close prior context menu");
+            engine
+                .execute_player_command(
+                    1,
+                    CommandId::Context as i32,
+                    x,
+                    y,
+                    0,
+                    mage.as_u64() as i32,
+                    0,
+                    C4P_COMMAND_ADD,
+                )
+                .expect("queue sentinel context command");
+            engine
+                .execute_object_command_now(mage)
+                .expect("execute sentinel context command");
+            let menu = engine
+                .debug_object_menu(mage.as_u64())
+                .expect("mage exists")
+                .expect("context menu opens");
+            assert_eq!(
+                menu.location,
+                None,
+                "x={x}, y={y} keeps default Right|Bottom alignment"
+            );
+            assert_ne!(
+                menu.runtime_id, prior_runtime_id,
+                "each ActivateMenu allocation gets a distinct presentation identity"
+            );
+            prior_runtime_id = menu.runtime_id;
+        }
     }
 
     #[test]
