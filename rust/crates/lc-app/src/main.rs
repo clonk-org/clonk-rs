@@ -832,6 +832,12 @@ fn seek_loader_candidates(
 
 fn classic_wildcard_match(wildcard: &[u8], value: &[u8]) -> bool {
     let wildcard = if wildcard == b"*.*" { b"*" } else { wildcard };
+    classic_raw_wildcard_match(wildcard, value)
+}
+
+/// `WildcardMatch` as used by lobby player-name commands. Unlike the loader
+/// wrapper above, native command matching does not treat `*.*` as `*`.
+fn classic_raw_wildcard_match(wildcard: &[u8], value: &[u8]) -> bool {
     let (mut wildcard_index, mut value_index) = (0usize, 0usize);
     let (mut backtrack_wildcard, mut backtrack_value) = (None, None);
     while wildcard_index < wildcard.len() || backtrack_wildcard.is_some() {
@@ -18005,6 +18011,40 @@ fn legacy_sscanf_decimal_prefix(value: &[u8]) -> Option<i32> {
         .ok()
 }
 
+fn legacy_sscanf_hex_prefix(value: &[u8]) -> Option<u32> {
+    let value = value
+        .iter()
+        .position(|byte| !legacy_message_whitespace(*byte))
+        .map(|start| &value[start..])?;
+    let negative = value.first() == Some(&b'-');
+    let sign = usize::from(matches!(value.first(), Some(b'+' | b'-')));
+    let digits_start = if value
+        .get(sign..sign.saturating_add(2))
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"0x"))
+    {
+        sign + 2
+    } else {
+        sign
+    };
+    let digits = value[digits_start..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_hexdigit())
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    let magnitude = u32::from_str_radix(
+        std::str::from_utf8(&value[digits_start..digits_start + digits]).ok()?,
+        16,
+    )
+    .ok()?;
+    Some(if negative {
+        magnitude.wrapping_neg()
+    } else {
+        magnitude
+    })
+}
+
 fn legacy_prefix_no_case(value: &[u8], prefix: &[u8]) -> bool {
     value
         .get(..prefix.len())
@@ -18016,6 +18056,16 @@ fn is_team_message_syntax(text: &str) -> bool {
     raw.first() == Some(&b'^')
         || legacy_prefix_no_case(&raw, b"team:")
         || legacy_prefix_no_case(&raw, b"/team ")
+}
+
+fn control_player_effective_name(player: &lc_engine::ControlPlayerInfoEntry) -> &[u8] {
+    if !player.league_account.is_empty() {
+        player.league_account.as_bytes()
+    } else if !player.forced_name.is_empty() {
+        player.forced_name.as_bytes()
+    } else {
+        player.name.as_bytes()
+    }
 }
 
 fn parse_lobby_message_control(text: &str) -> Result<Option<MessageControlData>> {
@@ -25945,13 +25995,30 @@ impl GameApp {
     }
 
     fn submit_runtime_network_player(&mut self, file: &str) -> Result<(), String> {
-        self.submit_runtime_network_player_path(Path::new(file), file)
+        self.submit_network_player_path(Path::new(file), file, true)
     }
 
     fn submit_runtime_network_player_path(
         &mut self,
         source_path: &Path,
         wire_filename: &str,
+    ) -> Result<(), String> {
+        self.submit_network_player_path(source_path, wire_filename, true)
+    }
+
+    fn submit_lobby_network_player(
+        &mut self,
+        source_path: PathBuf,
+        wire_name: &str,
+    ) -> Result<(), String> {
+        self.submit_network_player_path(&source_path, wire_name, false)
+    }
+
+    fn submit_network_player_path(
+        &mut self,
+        source_path: &Path,
+        wire_filename: &str,
+        require_activated_client: bool,
     ) -> Result<(), String> {
         let league_auth = self.league_player_auth_settings();
         let fallback_group_maker = || {
@@ -25980,7 +26047,7 @@ impl GameApp {
             .ok_or_else(|| "network session is unavailable".to_string())?;
         let client_id = i32::try_from(network.local_client_id())
             .map_err(|_| "local client ID exceeds the PlayerInfo wire field".to_string())?;
-        if !self.control_clients.is_activated(client_id) {
+        if require_activated_client && !self.control_clients.is_activated(client_id) {
             return Err("network client is not active".to_string());
         }
 
@@ -36515,6 +36582,9 @@ impl GameApp {
             LobbyAction::StartGame => self.start_network_lobby_countdown()?,
             LobbyAction::SubmitMessage(text) => {
                 self.store_message_input_history(&text);
+                if self.process_classic_lobby_command(&text)? {
+                    return Ok(());
+                }
                 if self.process_control_message_local_command(&text) {
                     return Ok(());
                 }
@@ -36530,11 +36600,7 @@ impl GameApp {
                     Ok(control) => control,
                     Err(error) => {
                         tracing::warn!(%error, "classic lobby chat command is not implemented");
-                        self.append_control_message_log(
-                            "Unknown command.".to_string(),
-                            0x00ff_1f1f,
-                            None,
-                        );
+                        self.append_unknown_lobby_command(&text);
                         return Ok(());
                     }
                 };
@@ -37273,15 +37339,66 @@ impl GameApp {
         })
     }
 
-    fn append_classic_lobby_error(&mut self, message: String) {
+    fn append_lobby_command_error(&mut self, message: String) {
         self.play_ui_sound("Error");
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
             lobby.controller.push_log(LobbyLogLine {
-                text: message,
+                text: message.clone(),
                 color: [255, 31, 31, 255],
             });
+        } else if self.startup_view == StartupView::NetworkLobby {
+            if let Some(lobby) = self.network_lobby.as_mut() {
+                lobby.push_log(LobbyLogLine {
+                    text: message,
+                    color: [255, 31, 31, 255],
+                });
+            }
         }
         self.mark_menu_dirty();
+    }
+
+    fn append_unknown_lobby_command(&mut self, text: &str) {
+        let raw = lc_script::c4_string_bytes(text);
+        let name = raw
+            .get(1..)
+            .unwrap_or_default()
+            .split(|byte| *byte == b' ')
+            .next()
+            .unwrap_or_default();
+        let name = legacy_presentation_text(&name[..name.len().min(30)]);
+        let template = self.classic_lobby_resource_text(
+            "IDS_ERR_UNKNOWNCMD",
+            "Unknown command: \"%s\" - type /help to get a list of valid commands",
+        );
+        self.append_lobby_command_error(format_resource_string(template, &[&name]));
+    }
+
+    fn clear_lobby_log(&mut self) {
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.set_logs(Vec::new());
+        } else if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.logs.clear();
+        }
+        self.mark_menu_dirty();
+    }
+
+    fn append_lobby_command_help(&mut self) {
+        let header = self.classic_lobby_resource_text(
+            "IDS_TEXT_COMMANDSAVAILABLEDURINGLO",
+            "Commands available during lobby:",
+        );
+        self.append_control_message_log(header, CONTROL_LOG_COLOR, None);
+        for line in [
+            "/start [time]", "/abort", "/alert", "/joinplr [filename]",
+            "/kick [client]", "/observer [client]", "/me [action]",
+            "/sound [sound]", "/mute [client]", "/unmute [client]",
+            "/team [message]", "/plrclr [player] [RGB]", "/plrclr [RGB]",
+            "/set comment [comment]", "/set password [password]",
+            "/set faircrew [on/off]", "/set maxplayer [number]", "/clear",
+            "/readycheck",
+        ] {
+            self.append_control_message_log(line.to_string(), CONTROL_LOG_COLOR, None);
+        }
     }
 
     fn classic_lobby_resource_text(&self, key: &str, fallback: &str) -> String {
@@ -37291,7 +37408,7 @@ impl GameApp {
             .unwrap_or_else(|| fallback.to_string())
     }
 
-    fn process_classic_lobby_host_command(&mut self, text: &str) -> Result<bool, EngineError> {
+    fn process_classic_lobby_command(&mut self, text: &str) -> Result<bool, EngineError> {
         let raw = lc_script::c4_string_bytes(text);
         if raw.first() != Some(&b'/') {
             return Ok(false);
@@ -37303,11 +37420,130 @@ impl GameApp {
                 (&raw[..space], &raw[space + 1..])
             });
         let host = matches!(self.network_mode, Some(NetworkMode::Host(_)));
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or(0);
+        if command.eq_ignore_ascii_case(b"/joinplr") {
+            let filename = lc_script::c4_string_from_bytes(parameter);
+            let config = self
+                .app_paths
+                .as_ref()
+                .and_then(|paths| Config::load(paths.config_file()).ok())
+                .unwrap_or_else(Config::new);
+            let player_path = startup_player_path(&config);
+            let wire_path = player_path.join(&filename);
+            let source_path = self
+                .app_paths
+                .as_ref()
+                .map(|paths| startup_player_search_paths(paths, &config))
+                .unwrap_or_else(|| vec![player_path])
+                .into_iter()
+                .map(|root| root.join(&filename))
+                .find(|path| path.exists());
+            let Some(source_path) = source_path else {
+                let displayed_path = wire_path.to_string_lossy();
+                let template = self.classic_lobby_resource_text(
+                    "IDS_MSG_CMD_JOINPLR_NOFILE",
+                    "Cannot join player %s: File not found!",
+                );
+                self.append_lobby_command_error(format_resource_string(
+                    template,
+                    &[&displayed_path],
+                ));
+                return Ok(true);
+            };
+            let wire_path = wire_path.to_string_lossy().into_owned();
+            if let Err(error) = self.submit_lobby_network_player(source_path, &wire_path) {
+                self.append_lobby_command_error(error);
+            }
+            return Ok(true);
+        }
+        if command.eq_ignore_ascii_case(b"/plrclr") {
+            let named_player = parameter
+                .iter()
+                .position(|byte| *byte == b' ')
+                .filter(|position| *position > 0);
+            let target = if let Some(separator) = named_player {
+                let pattern = &parameter[..separator];
+                self.control_player_infos
+                    .retained_rows_snapshot()
+                    .1
+                    .into_iter()
+                    .flat_map(|(client_id, _, players)| {
+                        players.into_iter().map(move |player| (client_id, player))
+                    })
+                    .filter(|(_, player)| player.id > 0)
+                    .filter(|(_, player)| {
+                        classic_raw_wildcard_match(
+                            pattern,
+                            control_player_effective_name(player),
+                        )
+                    })
+                    .min_by_key(|(_, player)| player.id)
+                    .map(|(client_id, player)| (client_id, player.id))
+            } else {
+                self.control_player_infos
+                    .retained_rows_snapshot()
+                    .1
+                    .into_iter()
+                    .find(|(client_id, _, _)| *client_id == local_client_id)
+                    .and_then(|(client_id, _, players)| {
+                        players.first().map(|player| (client_id, player.id))
+                    })
+            };
+            let Some((client_id, player_id)) = target else {
+                let message = self.classic_lobby_resource_text(
+                    "IDS_MSG_CMD_PLRCLR_NOPLAYER",
+                    "Player not found!",
+                );
+                self.append_lobby_command_error(message);
+                return Ok(true);
+            };
+            if client_id != local_client_id && !host {
+                let message = self.classic_lobby_resource_text(
+                    "IDS_MSG_CMD_PLRCLR_NOACCESS",
+                    "Access denied",
+                );
+                self.append_lobby_command_error(message);
+                return Ok(true);
+            }
+            let color_parameter = named_player
+                .map(|separator| &parameter[separator + 1..])
+                .unwrap_or(parameter);
+            let Some(mut color) = legacy_sscanf_hex_prefix(color_parameter) else {
+                let message = self.classic_lobby_resource_text(
+                    "IDS_MSG_CMD_PLRCLR_USAGE",
+                    "Usage: /plrclr [Johnny] ff0000",
+                );
+                self.append_lobby_command_error(message);
+                return Ok(true);
+            };
+            color &= 0x00ff_ffff;
+            if color == 0 {
+                color = 1;
+            }
+            if let Some(mut update) = self.control_player_infos.client_update_request(client_id) {
+                if let Some(player) = update.players.iter_mut().find(|player| player.id == player_id)
+                {
+                    player.original_color = color;
+                    if let Some(Err(error)) = self
+                        .network
+                        .as_ref()
+                        .map(|network| network.submit_player_info_update(update))
+                    {
+                        tracing::error!(%error, "failed to submit lobby player-color update");
+                    }
+                }
+            }
+            return Ok(true);
+        }
         if command.eq_ignore_ascii_case(b"/start") {
             if !host {
                 let message =
                     self.classic_lobby_resource_text("IDS_MSG_CMD_HOSTONLY", "Host only!");
-                self.append_classic_lobby_error(message);
+                self.append_lobby_command_error(message);
                 return Ok(true);
             }
             let configured = self
@@ -37326,7 +37562,7 @@ impl GameApp {
                     "IDS_MSG_CMD_START_USAGE",
                     "Usage: /start [timer]",
                 );
-                self.append_classic_lobby_error(message);
+                self.append_lobby_command_error(message);
                 return Ok(true);
             };
             let countdown_seconds = if requested < 0 {
@@ -37348,13 +37584,13 @@ impl GameApp {
             if !host {
                 let message =
                     self.classic_lobby_resource_text("IDS_MSG_CMD_HOSTONLY", "Host only!");
-                self.append_classic_lobby_error(message);
+                self.append_lobby_command_error(message);
             } else if !self.abort_network_lobby_countdown() {
                 let message = self.classic_lobby_resource_text(
                     "IDS_MSG_CMD_ABORT_NOCOUNTDOWN",
                     "Not in countdown!",
                 );
-                self.append_classic_lobby_error(message);
+                self.append_lobby_command_error(message);
             }
             return Ok(true);
         }
@@ -37362,10 +37598,132 @@ impl GameApp {
             if !host {
                 let message =
                     self.classic_lobby_resource_text("IDS_MSG_CMD_HOSTONLY", "Host only!");
-                self.append_classic_lobby_error(message);
+                self.append_lobby_command_error(message);
             } else if !self.request_lobby_ready_check_at(Instant::now())? {
                 let message = std::mem::take(&mut self.status_text);
-                self.append_classic_lobby_error(message);
+                self.append_lobby_command_error(message);
+            }
+            return Ok(true);
+        }
+        if command.eq_ignore_ascii_case(b"/help") {
+            self.append_lobby_command_help();
+            return Ok(true);
+        }
+        if command == b"/clear" {
+            self.clear_lobby_log();
+            return Ok(true);
+        }
+        if command == b"/kick" {
+            if host {
+                let target = self
+                    .control_clients
+                    .snapshot()
+                    .into_iter()
+                    .find(|client| client.name.as_bytes() == parameter);
+                let Some(target) = target else {
+                    let name = legacy_presentation_text(parameter);
+                    let template = self.classic_lobby_resource_text(
+                        "IDS_MSG_CMD_NOCLIENT",
+                        "Client %s not found!",
+                    );
+                    self.append_control_message_log(
+                        format_resource_string(template, &[&name]),
+                        CONTROL_LOG_COLOR,
+                        None,
+                    );
+                    return Ok(true);
+                };
+                let league_vote = self.network_is_league
+                    && self
+                        .engine
+                        .players()
+                        .any(|player| player.at_client().get() == target.client_id);
+                if let Some(network) = self.network.as_ref() {
+                    let result = if league_vote {
+                        network.submit_vote(lc_engine::VOTE_TYPE_KICK, true, target.client_id)
+                    } else {
+                        let reason = self.classic_lobby_resource_text(
+                            "IDS_MSG_KICKFROMMSGBOARD",
+                            "kicked from messageboard",
+                        );
+                        network.submit_client_remove(lc_engine::ClientRemoveControlData {
+                            client_id: target.client_id,
+                            reason: lc_engine::LegacyCString::from_bytes(
+                                lc_script::c4_string_bytes(&reason),
+                            )
+                            .unwrap_or_default(),
+                            by_client: 0,
+                        })
+                    };
+                    if let Err(error) = result {
+                        tracing::error!(%error, "failed to submit lobby kick command");
+                    }
+                }
+            }
+            return Ok(true);
+        }
+        if command == b"/observer" {
+            if !host {
+                let message =
+                    self.classic_lobby_resource_text("IDS_MSG_CMD_HOSTONLY", "Host only!");
+                self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
+                return Ok(true);
+            }
+            let target = self
+                .control_clients
+                .snapshot()
+                .into_iter()
+                .find(|client| client.name.as_bytes() == parameter);
+            let Some(target) = target else {
+                let name = legacy_presentation_text(parameter);
+                let template = self.classic_lobby_resource_text(
+                    "IDS_MSG_CMD_NOCLIENT",
+                    "Client %s not found!",
+                );
+                self.append_control_message_log(
+                    format_resource_string(template, &[&name]),
+                    CONTROL_LOG_COLOR,
+                    None,
+                );
+                return Ok(true);
+            };
+            if self.network_is_league {
+                let message = self.classic_lobby_resource_text(
+                    "IDS_LOG_COMMANDNOTALLOWEDINLEAGUE",
+                    "Command not allowed in league games!",
+                );
+                self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
+            } else if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                network.submit_client_update(lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_SET_OBSERVER,
+                    client_id: target.client_id,
+                    data: 0,
+                    by_client: 0,
+                })
+            }) {
+                tracing::error!(%error, "failed to submit lobby observer command");
+            }
+            return Ok(true);
+        }
+        if command == b"/set" {
+            if host && parameter.starts_with(b"maxplayer ") {
+                let value = &parameter[b"maxplayer ".len()..];
+                let maximum = legacy_sscanf_decimal_prefix(value).unwrap_or(0);
+                if maximum == 0 && value != b"0" {
+                    self.append_control_message_log(
+                        "Syntax: /set maxplayer count".to_string(),
+                        CONTROL_LOG_COLOR,
+                        None,
+                    );
+                } else if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                    network.submit_control_set(lc_network::LegacyControlSet {
+                        value_type: 2,
+                        data: maximum,
+                        by_client: local_client_id,
+                    })
+                }) {
+                    tracing::error!(%error, "failed to submit lobby maximum-player update");
+                }
             }
             return Ok(true);
         }
@@ -37466,7 +37824,7 @@ impl GameApp {
                     lobby.chat_history_index = -1;
                     lobby.controller.set_chat_draft("");
                 }
-                if self.process_classic_lobby_host_command(&text)? {
+                if self.process_classic_lobby_command(&text)? {
                     return Ok(());
                 }
                 if self.process_control_message_local_command(&text) {
@@ -37480,10 +37838,14 @@ impl GameApp {
                     );
                     return Ok(());
                 }
-                let control = parse_lobby_message_control(&text).map_err(|error| {
-                    tracing::warn!(%error, "classic lobby chat command is not implemented");
-                    classic_game_lobby_child_error(ClassicGameLobbyChild::Chat)
-                })?;
+                let control = match parse_lobby_message_control(&text) {
+                    Ok(control) => control,
+                    Err(error) => {
+                        tracing::warn!(%error, "classic lobby chat command is not implemented");
+                        self.append_unknown_lobby_command(&text);
+                        return Ok(());
+                    }
+                };
                 if let Some(control) = control {
                     if let Some(Err(error)) = self
                         .network
@@ -37532,9 +37894,8 @@ impl GameApp {
                 // request is safe until the recursive context menu is wired.
             }
             LobbyChatRequest::OpenExternalDialog => {
-                return Err(classic_game_lobby_child_error(
-                    ClassicGameLobbyChild::ExternalIrcChat,
-                ));
+                // The retained external-chat sheet is not implemented yet,
+                // but opening it must not tear down the live network lobby.
             }
         }
         Ok(())
@@ -38926,6 +39287,15 @@ impl GameApp {
         if set.by_client != 0 && set.value_type != 1 {
             return;
         }
+        if set.value_type == 2 && self.network_is_league {
+            self.append_control_message_log(
+                "/set maxplayer disabled in league!".to_string(),
+                CONTROL_LOG_COLOR,
+                None,
+            );
+            self.play_ui_sound("Error");
+            return;
+        }
 
         let mut host_snapshot_changed = false;
         let runtime_network_role = self.runtime_network_role();
@@ -38974,9 +39344,6 @@ impl GameApp {
             }
             // C4CVT_MaxPlayer
             2 => {
-                if self.network_is_league {
-                    return;
-                }
                 self.network_max_players = usize::try_from(set.data).unwrap_or(0);
                 self.engine.set_max_players(set.data);
                 if let Some(join_data) = self.pending_network_join_data.as_mut() {
@@ -39202,6 +39569,14 @@ impl GameApp {
         if host_snapshot_changed {
             self.publish_updated_host_join_snapshot();
         }
+        if set.value_type == 2 {
+            self.append_control_message_log(
+                format!("MaxPlayer = {}", set.data),
+                CONTROL_LOG_COLOR,
+                None,
+            );
+            self.sync_classic_lobby_roster();
+        }
     }
 
     fn apply_ready_controls(
@@ -39315,6 +39690,7 @@ impl GameApp {
                         }
                     }
                     self.publish_current_host_player_infos();
+                    self.sync_classic_lobby_roster();
                     Ok(())
                 }
                 NetworkControl::JoinPlayer(join) => {
@@ -39464,6 +39840,7 @@ impl GameApp {
                     if host_authored {
                         self.publish_updated_host_join_snapshot();
                     }
+                    self.sync_classic_lobby_roster();
                     Ok(())
                 }
                 NetworkControl::ClientJoin(join) => {
@@ -39472,6 +39849,7 @@ impl GameApp {
                             .reset_client(join.core.client_id);
                         self.publish_updated_host_join_snapshot();
                     }
+                    self.sync_classic_lobby_roster();
                     Ok(())
                 }
                 NetworkControl::ClientRemove(remove) => {
@@ -39575,6 +39953,7 @@ impl GameApp {
                             );
                             self.publish_current_host_player_infos();
                         }
+                        self.sync_classic_lobby_roster();
                         Ok(())
                     }
                 }
@@ -66658,6 +67037,240 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn l016_unknown_lobby_command_is_a_local_nonfatal_cpp_error() {
+        let mut app = new_menu_app(640, 480);
+        install_classic_host_network_stub(&mut app);
+        app.show_log_timestamps = true;
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/xyz".to_string()))
+            .expect("unknown lobby commands stay inside the lobby");
+
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .logs()
+                .last(),
+            Some(&LobbyLogLine {
+                text: "Unknown command: \"xyz\" - type /help to get a list of valid commands"
+                    .to_string(),
+                color: [255, 31, 31, 255],
+            }),
+            "C4GameLobby::OnError is red and deliberately bypasses log timestamps"
+        );
+    }
+
+    #[test]
+    fn l016_client_start_and_abort_report_the_cpp_host_only_error() {
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+
+        app.process_lobby_action(LobbyAction::SubmitMessage("/start 10".to_string()))
+            .expect("client start command is consumed");
+        app.process_lobby_action(LobbyAction::SubmitMessage("/abort".to_string()))
+            .expect("client abort command is consumed");
+
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .unwrap()
+                .logs
+                .iter()
+                .map(|line| (&*line.text, line.color))
+                .collect::<Vec<_>>(),
+            [
+                ("Host only!", [255, 31, 31, 255]),
+                ("Host only!", [255, 31, 31, 255]),
+            ]
+        );
+    }
+
+    #[test]
+    fn l016_plrclr_submits_full_owner_packet_and_authoritative_rows_recolor() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        let fred = lc_engine::ControlPlayerInfoEntry {
+            id: 4,
+            name: lc_engine::LegacyCString::from_bytes(b"Fred".to_vec()).unwrap(),
+            color: 0x0000_ff00,
+            original_color: 0x0000_ff00,
+            ..Default::default()
+        };
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Exact Host")]);
+        app.control_player_infos.replace_snapshot(
+            4,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![fred.clone()],
+                by_client: 0,
+            }],
+        );
+        app.sync_classic_lobby_roster();
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/plrclr Fred FF0000".to_string(),
+        ))
+        .expect("submit lobby player-color request");
+
+        let updates = commands.take_player_info_updates();
+        assert_eq!(updates.len(), 1);
+        let mut expected = fred.clone();
+        expected.original_color = 0x00ff_0000;
+        assert_eq!(
+            updates[0],
+            lc_network::PlayerInfoUpdateRequest {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![expected.clone()],
+            },
+            "the complete owner packet is cloned and only OriginalColor changes"
+        );
+
+        expected.color = expected.original_color;
+        let authoritative = lc_engine::PlayerInfoControlData {
+            client_id: 0,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![expected],
+            by_client: 0,
+        };
+        app.control_player_infos
+            .replace_snapshot(4, [authoritative.clone()]);
+        app.sync_classic_lobby_roster();
+        let expected_color = lobby_rgba(0x00ff_0000);
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .rows()
+            .iter()
+            .any(|row| matches!(row, LobbyRosterRow::Player(player) if player.id == 4 && player.color == expected_color)));
+
+        let mut client = new_menu_app(640, 480);
+        client.startup_view = StartupView::NetworkLobby;
+        client.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        client.control_clients.replace_snapshot([
+            message_client(0, b"Exact Host"),
+            message_client(7, b"Client"),
+        ]);
+        client.control_player_infos.replace_snapshot(4, [authoritative]);
+        client.sync_classic_lobby_roster();
+        assert!(client
+            .network_lobby
+            .as_ref()
+            .unwrap()
+            .roster_rows
+            .iter()
+            .any(|row| matches!(row, LobbyRosterRow::Player(player) if player.id == 4 && player.color == expected_color)));
+    }
+
+    #[test]
+    fn l016_set_maxplayer_submits_sync_control_and_refreshes_lobby_count() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/set maxplayer 4".to_string(),
+        ))
+        .expect("submit maximum-player setting");
+        let sets = commands.take_submitted_control_sets();
+        assert_eq!(
+            sets,
+            [lc_network::LegacyControlSet {
+                value_type: 2,
+                data: 4,
+                by_client: 0,
+            }]
+        );
+
+        app.execute_control_set(sets[0]);
+        assert_eq!(app.engine.max_players(), Some(4));
+        assert_eq!(app.network_max_players, 4);
+        let lobby = &app.classic_host_lobby.as_ref().unwrap().controller;
+        assert!(lobby.players_title().contains("/4"));
+        assert_eq!(
+            lobby.logs().last().map(|line| line.text.as_str()),
+            Some("MaxPlayer = 4")
+        );
+    }
+
+    #[test]
+    fn l016_forwarded_help_clear_kick_and_observer_commands_stay_in_lobby() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        app.control_clients.replace_snapshot([
+            message_client(0, b"Exact Host"),
+            message_client(7, b"Remote"),
+        ]);
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/observer Remote".to_string(),
+        ))
+        .expect("submit observer command");
+        assert_eq!(
+            commands.take_submitted_client_updates(),
+            [lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_SET_OBSERVER,
+                client_id: 7,
+                data: 0,
+                by_client: 0,
+            }]
+        );
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/kick Remote".to_string(),
+        ))
+        .expect("submit kick command");
+        let removals = commands.take_submitted_client_removes();
+        assert_eq!(removals.len(), 1);
+        assert_eq!(removals[0].client_id, 7);
+        assert_eq!(removals[0].by_client, 0);
+        assert_eq!(removals[0].reason.as_bytes(), b"kicked from messageboard");
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/joinplr definitely-missing-l016.c4p".to_string(),
+        ))
+        .expect("missing join-player command stays in the lobby");
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .logs()
+                .last()
+                .map(|line| line.text.as_str()),
+            Some("Cannot join player definitely-missing-l016.c4p: File not found!")
+        );
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/help".to_string()))
+            .expect("render lobby help locally");
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .logs()
+            .iter()
+            .any(|line| line.text.contains("/set maxplayer")));
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/clear".to_string()))
+            .expect("clear lobby log locally");
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .logs()
+            .is_empty());
+        app.process_classic_lobby_chat_request(LobbyChatRequest::OpenExternalDialog)
+            .expect("external-chat button is nonfatal while its sheet is unavailable");
+        assert!(app.classic_host_lobby.is_some());
+    }
+
+    #[test]
     fn network_start_wait_tracks_only_matching_accepted_status_acknowledgements() {
         let mut app = new_menu_app(640, 480);
         app.control_clients.replace_snapshot([
@@ -71854,20 +72467,12 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let mut lobby_app = new_menu_app(640, 480);
         install_test_classic_host_lobby(&mut lobby_app);
-        let lobby_boundary = ClassicParityBoundary::GameLobby(
-            ClassicGameLobbyBoundary::Child(ClassicGameLobbyChild::ExternalIrcChat),
-        );
-        let lobby_expected = lobby_boundary.to_string();
-        assert_eq!(
-            lobby_expected,
-            "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the game-lobby IRC button"
-        );
-        let lobby_error = lobby_app
+        lobby_app
             .process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
                 LobbyChatRequest::OpenExternalDialog,
             )])
-            .expect_err("retained lobby IRC button must fail at the drop boundary");
-        assert_engine_parity_boundary(lobby_error, lobby_boundary);
+            .expect("the unavailable external-chat sheet is a nonfatal lobby no-op");
+        assert!(lobby_app.classic_host_lobby.is_some());
 
         for modifiers in [
             ModifiersState::ALT,

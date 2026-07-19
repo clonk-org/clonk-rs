@@ -1413,6 +1413,16 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_control_sets(&mut self) -> Vec<LegacyControlSet> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitControlSet(set) = command {
+                submitted.push(set);
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn take_submitted_client_removes(
         &mut self,
     ) -> Vec<lc_engine::ClientRemoveControlData> {
@@ -1861,6 +1871,7 @@ enum NetworkCommand {
     },
     SubmitClientUpdate(lc_engine::ClientUpdateControlData),
     SubmitClientRemove(lc_engine::ClientRemoveControlData),
+    SubmitControlSet(LegacyControlSet),
     SubmitInitScenarioPlayer {
         tick: Tick,
         selection: lc_engine::InitScenarioPlayerControlData,
@@ -2222,6 +2233,18 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitClientRemove(remove))
             .map_err(|_| anyhow!("network worker is not accepting client removals"))
+    }
+
+    /// Submit one `CID_Set` with the synchronized delivery selected by
+    /// `CDT_Decide` while the lobby is frozen. The host remains responsible
+    /// for enforcing each setting's `HostControl` rule when it executes the
+    /// echoed control.
+    pub fn submit_control_set(&self, mut set: LegacyControlSet) -> Result<()> {
+        set.by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the control-set wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitControlSet(set))
+            .map_err(|_| anyhow!("network worker is not accepting control-set updates"))
     }
 
     pub fn submit_init_scenario_player(&self, tick: Tick, player: i32, team: i32) -> Result<()> {
@@ -4045,6 +4068,12 @@ async fn run_host_worker(
                             .await
                             .map_err(|error| anyhow!("host client-remove submission failed: {error}"))?;
                     }
+                    NetworkCommand::SubmitControlSet(set) => {
+                        let data = encode_control_entry_payload(&set.into_control_packet())?;
+                        host.submit_packet(ControlDelivery::Sync, data)
+                            .await
+                            .map_err(|error| anyhow!("host control-set submission failed: {error}"))?;
+                    }
                     NetworkCommand::SubmitInitScenarioPlayer { tick, selection } => {
                         frame_builder.record_control(
                             tick,
@@ -4709,6 +4738,12 @@ async fn run_client_worker(
                             "client attempted to submit an authoritative client removal"
                                 .to_string(),
                         ));
+                    }
+                    NetworkCommand::SubmitControlSet(set) => {
+                        let data = encode_control_entry_payload(&set.into_control_packet())?;
+                        client.submit_packet(ControlDelivery::Sync, data)
+                            .await
+                            .map_err(|error| anyhow!("client control-set submission failed: {error}"))?;
                     }
                     NetworkCommand::SubmitInitScenarioPlayer { tick, selection } => {
                         record_client_control(
@@ -6839,6 +6874,42 @@ mod tests {
             .expect("queue PlayerInfo update request");
 
         assert_eq!(commands.take_player_info_updates(), vec![request]);
+    }
+
+    #[test]
+    fn managers_queue_control_set_with_authenticated_local_author() {
+        // C4MessageInput submits `/set` through CDT_Decide. During the frozen
+        // lobby C4GameControlNetwork resolves that delivery to CDT_Sync, while
+        // retaining the submitting client for the setting's HostControl check.
+        let set = LegacyControlSet {
+            value_type: 2,
+            data: 4,
+            by_client: -1,
+        };
+
+        let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
+        host.submit_control_set(set)
+            .expect("host queues synchronized CID_Set");
+        assert_eq!(
+            host_commands.take_submitted_control_sets(),
+            vec![LegacyControlSet {
+                by_client: 0,
+                ..set
+            }]
+        );
+
+        let (client, _events, mut client_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        client
+            .submit_control_set(set)
+            .expect("client queues synchronized CID_Set");
+        assert_eq!(
+            client_commands.take_submitted_control_sets(),
+            vec![LegacyControlSet {
+                by_client: 7,
+                ..set
+            }]
+        );
     }
 
     #[test]
