@@ -10188,6 +10188,8 @@ struct GameApp {
     startup_tooltip: ClassicTooltipTracker,
     startup_network_dialog: Option<lc_frontend::startup_netdlg::NetDlgController>,
     startup_game_search: Option<lc_network::StartupGameSearch>,
+    #[cfg(test)]
+    startup_game_search_test_events: VecDeque<lc_network::StartupGameSearchEvent>,
     /// C4StartupNetDlg::tLastRefresh. OnShown seeds the one-second guard,
     /// and accepted Reload/F5 requests advance it before restarting search.
     startup_network_last_refresh: Option<Instant>,
@@ -20107,6 +20109,8 @@ impl GameApp {
             startup_tooltip: ClassicTooltipTracker::new(),
             startup_network_dialog: None,
             startup_game_search: None,
+            #[cfg(test)]
+            startup_game_search_test_events: VecDeque::new(),
             startup_network_last_refresh: None,
             startup_network_refresh_waiting_for_clear: false,
             startup_network_ignore_redirect: false,
@@ -42070,17 +42074,44 @@ impl GameApp {
         Ok(())
     }
 
+    fn startup_network_dialog_is_covered_by_message(&self) -> bool {
+        self.startup_view == StartupView::NetworkGame
+            && self.startup_network_dialog.is_some()
+            && !self.message_dialogs.is_empty()
+    }
+
+    fn next_startup_game_search_event(&mut self) -> Option<lc_network::StartupGameSearchEvent> {
+        #[cfg(test)]
+        if let Some(event) = self.startup_game_search_test_events.pop_front() {
+            return Some(event);
+        }
+        self.startup_game_search
+            .as_ref()
+            .and_then(|search| search.events().try_recv().ok())
+    }
+
     fn poll_startup_game_search(&mut self) -> Result<(), EngineError> {
+        // C4StartupNetDlg::OnSec1Timer stops before both DiscoverClient.Execute
+        // and UpdateList while a message dialog owns the active-dialog slot.
+        // Leave worker events queued as well as presentation timers untouched
+        // until the network dialog becomes active again.
+        if self.startup_network_dialog_is_covered_by_message() {
+            return Ok(());
+        }
         // Advance presentation timers before applying completions from the
         // query that began at this interval, so an immediate failure/success
         // remains visible instead of being overwritten by Query state.
         self.tick_startup_network_query_rows_at(Instant::now());
-        let events = self
-            .startup_game_search
-            .as_ref()
-            .map(|search| search.events().try_iter().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for event in events {
+        loop {
+            // Applying one event may itself open a message (for example a
+            // masterserver redirect). Do not pre-drain later events: native
+            // leaves the remainder pending as soon as NetDlg loses activity.
+            if self.startup_network_dialog_is_covered_by_message() {
+                break;
+            }
+            let Some(event) = self.next_startup_game_search_event() else {
+                break;
+            };
             self.apply_startup_game_search_event(event)?;
         }
         Ok(())
@@ -100990,6 +101021,17 @@ ScenInfoArea=70,5,25,90
             {
                 app.poll_startup_game_search()
                     .expect("apply restarted search event");
+                // Hosts without a usable multicast route report the explicit
+                // LAN probe failure in a modal. L070 freezes the queued
+                // masterserver result until that native prompt is dismissed.
+                if app.message_dialogs.last().is_some_and(|dialog| {
+                    dialog.state.caption() == "Search Error"
+                }) {
+                    app.finish_message_dialog(
+                        lc_frontend::message_dialog::MessageDialogResult::Cancel,
+                    )
+                    .expect("dismiss incidental LAN discovery failure");
+                }
                 thread::sleep(Duration::from_millis(10));
             }
             assert!(server.join().expect("L027 masterserver fixture thread"));
@@ -101876,6 +101918,130 @@ ScenInfoArea=70,5,25,90
         ))
         .expect("independent alternate server cannot redirect");
         assert!(app.message_dialogs.is_empty());
+    }
+
+    #[test]
+    fn l070_network_message_modal_freezes_search_events_and_expiry_until_close() {
+        use lc_frontend::startup_netdlg::NetDlgRowIcon;
+
+        let mut app = new_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut app);
+        let nearly_expired_reference = lc_network::NetworkGameReference {
+            title: "Nearly expired game".to_string(),
+            version: lc_network::CURRENT_GAME_VERSION,
+            build: lc_network::CURRENT_GAME_BUILD,
+            ..Default::default()
+        };
+        app.startup_game_references = vec![nearly_expired_reference.clone()];
+        let expired_query_id = 70;
+        app.startup_direct_reference_queries
+            .push(StartupDirectReferenceQuery {
+                id: expired_query_id,
+                address: "expired.example".to_string(),
+                state: StartupDirectReferenceQueryState::Empty,
+                expires_at: Instant::now().checked_sub(Duration::from_secs(1)),
+            });
+        app.sync_startup_network_game_rows();
+        // lc-network's fake-time coverage proves that the worker emits this
+        // removal at the native 42-second reference deadline. Inject the
+        // resulting event here so modal/backlog behavior is deterministic.
+        app.startup_game_search_test_events
+            .push_back(lc_network::StartupGameSearchEvent::ReferencesUpdated(
+                Vec::new(),
+            ));
+
+        app.set_startup_masterserver_error("stale query error".to_string());
+        let overdue_refresh = Instant::now()
+            .checked_sub(lc_network::GAME_SEARCH_INTERVAL + Duration::from_secs(1))
+            .expect("represent an overdue refresh");
+        app.startup_network_last_refresh = Some(overdue_refresh);
+        app.request_network_reference_join(lc_network::NetworkGameReference {
+            game: "LegacyClonk".to_string(),
+            version: lc_network::CURRENT_GAME_VERSION,
+            build: lc_network::CURRENT_GAME_BUILD,
+            join_allowed: false,
+            ..Default::default()
+        })
+        .expect("open no-runtime-join modal");
+        assert_eq!(app.message_dialogs.len(), 1);
+
+        app.poll_startup_game_search()
+            .expect("covered network dialog remains frozen");
+        assert_eq!(app.startup_game_search_test_events.len(), 1);
+        assert_eq!(app.startup_game_references, [nearly_expired_reference.clone()]);
+        assert!(app
+            .startup_direct_reference_queries
+            .iter()
+            .any(|query| query.id == expired_query_id));
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .games()
+                .len(),
+            2
+        );
+        assert_eq!(app.startup_network_last_refresh, Some(overdue_refresh));
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .masterserver_entry()
+                .row_icon,
+            NetDlgRowIcon::Error
+        );
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("dismiss no-runtime-join modal");
+        app.poll_startup_game_search()
+            .expect("resume network dialog polling");
+        assert!(app.startup_game_search_test_events.is_empty());
+        assert!(app.startup_game_references.is_empty());
+        assert!(app
+            .startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .games()
+            .is_empty());
+        assert!(!app
+            .startup_direct_reference_queries
+            .iter()
+            .any(|query| query.id == expired_query_id));
+        assert!(app
+            .startup_network_last_refresh
+            .is_some_and(|refresh| refresh > overdue_refresh));
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .masterserver_entry()
+                .row_icon,
+            NetDlgRowIcon::Query
+        );
+
+        // A search event can create the covering modal itself. Later events
+        // must remain in the receiver rather than being pre-drained or lost.
+        app.startup_game_references = vec![nearly_expired_reference.clone()];
+        app.sync_startup_network_game_rows();
+        app.startup_game_search_test_events.extend([
+            lc_network::StartupGameSearchEvent::SearchError {
+                source: Some(lc_network::ReferenceQuerySource::GameDiscovery),
+                message: "discovery failed".to_string(),
+            },
+            lc_network::StartupGameSearchEvent::ReferencesUpdated(Vec::new()),
+        ]);
+        app.poll_startup_game_search()
+            .expect("first event opens discovery error modal");
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.startup_game_search_test_events.len(), 1);
+        assert_eq!(app.startup_game_references, [nearly_expired_reference]);
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("dismiss discovery error modal");
+        app.poll_startup_game_search()
+            .expect("apply event left behind the discovery modal");
+        assert!(app.startup_game_search_test_events.is_empty());
+        assert!(app.startup_game_references.is_empty());
     }
 
     #[test]
