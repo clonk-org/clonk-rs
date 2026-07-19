@@ -3936,9 +3936,18 @@ impl FrontendAssets {
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-        let workers = std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(4)
+        // nextest already parallelizes individual cases as processes. Letting
+        // every test process fan out to every host core turns `-j 8` into more
+        // than a hundred simultaneous PNG/font workers and makes the suite
+        // slower and timing-sensitive. Production startup keeps the full-core
+        // prewarm; tests retain parallel decode with a bounded inner pool.
+        let workers = if cfg!(test) {
+            2
+        } else {
+            std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(4)
+        }
             .min(names.len())
             .max(1);
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -6172,8 +6181,12 @@ impl AudioContext {
         let music_control = Arc::new(std::sync::Mutex::new(MusicControlState::new(
             options.music_volume,
         )));
+        #[cfg(test)]
+        let system = AudioSystem::new_null(options.max_channels);
+        #[cfg(not(test))]
+        let system = AudioSystem::new(options.max_channels)?;
         Ok(Self {
-            system: AudioSystem::new(options.max_channels)?,
+            system,
             options,
             music_control,
             pending_music: Arc::new(std::sync::Mutex::new(None)),
@@ -9902,6 +9915,11 @@ struct GameApp {
     loader_render_error: Option<String>,
     loader_gamma: Option<lc_graphics::GammaRamp>,
     app_paths: Option<AppPaths>,
+    /// Optional targeted crew-definition source for pathless sandbox
+    /// fixtures. This is deliberately separate from `app_paths`: it must not
+    /// make unrelated app subsystems appear install-initialized, but it does
+    /// need to survive sandbox restart and saved-game restoration.
+    sandbox_crew_definition_paths: Option<AppPaths>,
     configured_client_player_selection: Option<ConfiguredClientPlayerSelection>,
     material_library: Option<Arc<MaterialSet>>,
     network: Option<NetworkManager>,
@@ -19388,6 +19406,7 @@ impl GameApp {
             loader_render_error: None,
             loader_gamma: load_classic_loader_gamma(paths),
             app_paths: paths.cloned(),
+            sandbox_crew_definition_paths: None,
             configured_client_player_selection: None,
             material_library: None,
             network,
@@ -51827,6 +51846,25 @@ impl GameApp {
     }
 
     fn start_sandbox_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
+        let catalog_paths = self.app_paths.clone();
+        let crew_paths = self.sandbox_crew_definition_paths.clone();
+        let definition_load = match (catalog_paths.as_ref(), crew_paths.as_ref()) {
+            (Some(paths), _) => SandboxDefinitionLoad::InstallCatalog(paths),
+            (None, Some(paths)) => SandboxDefinitionLoad::InstallCrew(paths),
+            (None, None) => SandboxDefinitionLoad::None,
+        };
+        self.start_sandbox_scenario_with_definitions(scenario, definition_load)
+    }
+
+    fn start_sandbox_scenario_with_definitions(
+        &mut self,
+        scenario: FrontendScenario,
+        definition_load: SandboxDefinitionLoad<'_>,
+    ) -> Result<(), EngineError> {
+        self.sandbox_crew_definition_paths = match definition_load {
+            SandboxDefinitionLoad::InstallCrew(paths) => Some(paths.clone()),
+            SandboxDefinitionLoad::None | SandboxDefinitionLoad::InstallCatalog(_) => None,
+        };
         tracing::info!(
             scenario = %scenario.title,
             "starting sandbox fallback scenario"
@@ -51874,10 +51912,11 @@ impl GameApp {
         self.active_definition_load = None;
         self.sky = None;
 
-        let spawn_definition = match self.audio.as_mut() {
-            Some(audio) => configure_sandbox_engine(&mut self.engine, Some(audio))?,
-            None => configure_sandbox_engine(&mut self.engine, None)?,
-        };
+        let spawn_definition = configure_sandbox_engine(
+            &mut self.engine,
+            definition_load,
+            self.audio.as_mut(),
+        )?;
 
         self.ensure_local_player_registered()?;
 
@@ -52287,12 +52326,19 @@ impl GameApp {
         let mut recording_scenario_data = None;
 
         if scenario_info.sandbox {
-            match self.audio.as_mut() {
-                Some(audio) => configure_sandbox_engine(&mut self.engine, Some(audio))
-                    .context("failed to prepare sandbox engine for saved game")?,
-                None => configure_sandbox_engine(&mut self.engine, None)
-                    .context("failed to prepare sandbox engine for saved game")?,
+            let catalog_paths = self.app_paths.clone();
+            let crew_paths = self.sandbox_crew_definition_paths.clone();
+            let definition_load = match (catalog_paths.as_ref(), crew_paths.as_ref()) {
+                (Some(paths), _) => SandboxDefinitionLoad::InstallCatalog(paths),
+                (None, Some(paths)) => SandboxDefinitionLoad::InstallCrew(paths),
+                (None, None) => SandboxDefinitionLoad::None,
             };
+            configure_sandbox_engine(
+                &mut self.engine,
+                definition_load,
+                self.audio.as_mut(),
+            )
+            .context("failed to prepare sandbox engine for saved game")?;
         } else {
             let path = frontend.path.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -54018,6 +54064,18 @@ fn scaled_viewport_extent(logical_extent: u32, scale: f32) -> Option<u32> {
     (scaled.is_finite() && scaled > 0.0 && scaled <= u32::MAX as f32).then(|| scaled.ceil() as u32)
 }
 
+/// C++ `LayoutOrder` used by `SortViewportsByPlayerControl` immediately
+/// before fullscreen viewport layout (C4GraphicsSystem.cpp:422-441).
+const fn classic_viewport_layout_order(control_set: i32) -> i32 {
+    match control_set {
+        0 => 0, // Keyboard1
+        1 => 3, // Keyboard2
+        2 => 1, // Keyboard3
+        3 => 2, // Keyboard4
+        _ => control_set,
+    }
+}
+
 fn collect_viewport_inputs<'a>(
     snapshot: &'a SimulationSnapshot,
 ) -> std::result::Result<Vec<ViewportInput<'a>>, ClassicViewportBoundary> {
@@ -54025,15 +54083,29 @@ fn collect_viewport_inputs<'a>(
 
     // C++ creates viewports from C4Player::LocalControl, not from the global
     // player list (C4Game.cpp:2736-2746). The snapshot's local_players list is
-    // the authoritative projection of that flag. Keep its order and keep
-    // eliminated players until they are actually removed.
-    for owner in &snapshot.hud.local_players {
-        let Some(state) = snapshot.players.iter().find(|state| state.id == *owner) else {
-            return Err(ClassicViewportBoundary::LocalViewportUnavailable { owner: *owner });
-        };
-        if state.viewports.is_empty() {
-            return Err(ClassicViewportBoundary::LocalViewportUnavailable { owner: *owner });
-        }
+    // the authoritative projection of that flag. RecalculateViewports sorts
+    // the resulting C++ viewport list by the player's keyboard layout before
+    // assigning cells; a stable sort also keeps duplicate slots for one owner
+    // in their existing order. Eliminated players retain their viewports until
+    // they are actually removed.
+    let mut local_players = snapshot
+        .hud
+        .local_players
+        .iter()
+        .map(|owner| {
+            let state = snapshot
+                .players
+                .iter()
+                .find(|state| state.id == *owner)
+                .ok_or(ClassicViewportBoundary::LocalViewportUnavailable { owner: *owner })?;
+            if state.viewports.is_empty() {
+                return Err(ClassicViewportBoundary::LocalViewportUnavailable { owner: state.id });
+            }
+            Ok(state)
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    local_players.sort_by_key(|state| classic_viewport_layout_order(state.control_set));
+    for state in local_players {
         for (slot, viewport) in state.viewports.iter().enumerate() {
             let object = viewport
                 .focus
@@ -56451,8 +56523,16 @@ fn load_definitions_from_group(
     Ok(audio)
 }
 
+#[derive(Clone, Copy)]
+enum SandboxDefinitionLoad<'a> {
+    None,
+    InstallCatalog(&'a AppPaths),
+    InstallCrew(&'a AppPaths),
+}
+
 fn configure_sandbox_engine(
     engine: &mut Engine,
+    definition_load: SandboxDefinitionLoad<'_>,
     mut audio: Option<&mut AudioContext>,
 ) -> Result<String, EngineError> {
     if let Some(audio) = audio.as_deref_mut() {
@@ -56460,42 +56540,48 @@ fn configure_sandbox_engine(
         audio.configure_scenario(None);
         audio.reset_sfx();
     }
-    if let Ok(paths) = cached_app_paths() {
-        match load_install_definitions(engine, &paths, audio.as_deref_mut()) {
-            Ok(Some(spawn_definition)) => {
-                sync_engine_audio_catalogs(engine, audio.as_deref());
-                engine.set_environment(EnvironmentSettings::default());
-                engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
-                return Ok(spawn_definition);
+    let install_paths = match definition_load {
+        SandboxDefinitionLoad::InstallCatalog(paths) => {
+            match load_install_definitions(engine, paths, audio.as_deref_mut()) {
+                Ok(Some(spawn_definition)) => {
+                    sync_engine_audio_catalogs(engine, audio.as_deref());
+                    engine.set_environment(EnvironmentSettings::default());
+                    engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
+                    return Ok(spawn_definition);
+                }
+                Ok(None) => {
+                    // No install definitions found; fall back to targeted loader.
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = ?error,
+                        "encountered error while loading install definitions; trying the sandbox crew definition"
+                    );
+                }
             }
-            Ok(None) => {
-                // No install definitions found; fall back to targeted loader.
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = ?error,
-                    "encountered error while loading install definitions; falling back to sandbox walker"
-                );
-            }
+            Some(paths)
         }
-    }
-
-    let install_definition_id = "CLNK";
-    if let Some(resource_def) = try_load_install_definition(install_definition_id) {
-        match Definition::from_resource(&resource_def) {
-            Ok(definition) => {
-                engine.register_definition(definition)?;
-                sync_engine_audio_catalogs(engine, audio.as_deref());
-                engine.set_environment(EnvironmentSettings::default());
-                engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
-                return Ok(resource_def.core.id);
-            }
-            Err(err) => {
-                tracing::warn!(
-                    definition = install_definition_id,
-                    error = %err,
-                    "failed to compile install definition; falling back to sandbox walker"
-                );
+        SandboxDefinitionLoad::InstallCrew(paths) => Some(paths),
+        SandboxDefinitionLoad::None => None,
+    };
+    if let Some(paths) = install_paths {
+        let install_definition_id = "CLNK";
+        if let Some(resource_def) = try_load_install_definition(paths, install_definition_id) {
+            match Definition::from_resource(&resource_def) {
+                Ok(definition) => {
+                    engine.register_definition(definition)?;
+                    sync_engine_audio_catalogs(engine, audio.as_deref());
+                    engine.set_environment(EnvironmentSettings::default());
+                    engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
+                    return Ok(resource_def.core.id);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        definition = install_definition_id,
+                        error = %err,
+                        "failed to compile install definition; falling back to sandbox walker"
+                    );
+                }
             }
         }
     }
@@ -56532,27 +56618,16 @@ fn sync_engine_audio_catalogs(engine: &mut Engine, audio: Option<&AudioContext>)
     );
 }
 
-fn try_load_install_definition(definition_id: &str) -> Option<ResourceDefinitionData> {
-    let paths = match cached_app_paths() {
-        Ok(paths) => paths,
-        Err(err) => {
+fn try_load_install_definition(
+    paths: &AppPaths,
+    definition_id: &str,
+) -> Option<ResourceDefinitionData> {
+    let objects_group = match open_install_objects_group(paths) {
+        Some(group) => group,
+        None => {
             tracing::debug!(
                 definition = definition_id,
-                error = %err,
-                "install root unavailable; cannot load real definition"
-            );
-            return None;
-        }
-    };
-
-    let objects_path = paths.planet_dir().join("Objects.ocd");
-    let objects_group = match Group::open(objects_path) {
-        Ok(group) => group,
-        Err(err) => {
-            tracing::debug!(
-                definition = definition_id,
-                error = %err,
-                "failed to open Objects.ocd; cannot load real definition"
+                "install object group unavailable; cannot load real definition"
             );
             return None;
         }
@@ -90514,44 +90589,6 @@ ScenInfoArea=70,5,25,90
                 .set_nonblocking(true)
                 .expect("make L027 fixture bounded");
             let master_address = listener.local_addr().expect("fixture address");
-            let server_title = title.to_string();
-            let server = thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(5);
-                let (mut stream, _) = loop {
-                    match listener.accept() {
-                        Ok(connection) => break connection,
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if Instant::now() >= deadline {
-                                return false;
-                            }
-                            thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(error) => panic!("accept L027 masterserver request: {error}"),
-                    }
-                };
-                stream
-                    .set_nonblocking(false)
-                    .expect("make fixture connection blocking");
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .expect("bound fixture request read");
-                let mut request = [0_u8; 4096];
-                let size = stream.read(&mut request).expect("read masterserver request");
-                assert!(String::from_utf8_lossy(&request[..size]).starts_with("GET / HTTP/1.1"));
-                let body = format!(
-                    "[Reference]\nTitle=\"{server_title}\"\nState=Lobby\nJoinAllowed=1\nAddress=TCP:\"127.0.0.1:31112\"\nGame=LegacyClonk\nVersion=4,9,11,0\nBuild=362\n"
-                );
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                )
-                .expect("write fixture response headers");
-                stream
-                    .write_all(body.as_bytes())
-                    .expect("write fixture response body");
-                true
-            });
 
             let discovery_port = std::net::UdpSocket::bind((std::net::Ipv6Addr::LOCALHOST, 0))
                 .expect("reserve discovery port")
@@ -90599,6 +90636,49 @@ ScenInfoArea=70,5,25,90
             app.startup_network_last_refresh = Some(Instant::now() - Duration::from_secs(2));
             assert_eq!(app.startup_network_dialog.as_ref().unwrap().games().len(), 2);
 
+            // Start the bounded server clock only after the expensive classic
+            // app fixture is ready. Under a parallel full-suite run, starting
+            // it before app construction can consume the whole accept timeout
+            // before Reload/F5 is even able to issue the request.
+            let server_title = title.to_string();
+            let start_server = move || thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(12);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                return false;
+                            }
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept L027 masterserver request: {error}"),
+                    }
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("make fixture connection blocking");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("bound fixture request read");
+                let mut request = [0_u8; 4096];
+                let size = stream.read(&mut request).expect("read masterserver request");
+                assert!(String::from_utf8_lossy(&request[..size]).starts_with("GET / HTTP/1.1"));
+                let body = format!(
+                    "[Reference]\nTitle=\"{server_title}\"\nState=Lobby\nJoinAllowed=1\nAddress=TCP:\"127.0.0.1:31112\"\nGame=LegacyClonk\nVersion=4,9,11,0\nBuild=362\n"
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write fixture response headers");
+                stream
+                    .write_all(body.as_bytes())
+                    .expect("write fixture response body");
+                true
+            });
+
             if use_f5 {
                 app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
                     .expect("F5 restarts network search");
@@ -90616,6 +90696,10 @@ ScenInfoArea=70,5,25,90
                 app.handle_mouse_button(ElementState::Released)
                     .expect("release Reload");
             }
+            // The listener is already bound, so a promptly scheduled client
+            // can wait in the kernel backlog. Arm the fixture deadline only
+            // after the refresh command has been delivered to the worker.
+            let server = start_server();
 
             assert!(app.startup_game_references.is_empty());
             assert!(app.startup_direct_reference_queries.is_empty());
@@ -90624,7 +90708,7 @@ ScenInfoArea=70,5,25,90
             assert_eq!(app.status_text, "Querying game infos…");
             assert!(!app.take_exit_request());
 
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(14);
             while !app
                 .startup_game_references
                 .iter()
@@ -93094,6 +93178,19 @@ ScenInfoArea=70,5,25,90
     }
 
     fn new_running_sandbox_app() -> GameApp {
+        let paths = cached_app_paths().expect("discover sandbox crew definition");
+        new_running_sandbox_app_with_definitions(SandboxDefinitionLoad::InstallCrew(
+            paths.as_ref(),
+        ))
+    }
+
+    fn new_lightweight_running_sandbox_app() -> GameApp {
+        new_running_sandbox_app_with_definitions(SandboxDefinitionLoad::None)
+    }
+
+    fn new_running_sandbox_app_with_definitions(
+        definition_load: SandboxDefinitionLoad<'_>,
+    ) -> GameApp {
         // Silent audio: keeps these apps from initialising the global
         // sandbox-music OnceLock while env-guarded tests run in parallel.
         let audio_options = AudioOptions {
@@ -93117,8 +93214,15 @@ ScenInfoArea=70,5,25,90
         )
         .expect("initialise app");
         install_classic_test_assets(&mut app);
-        app.start_sandbox_scenario(FrontendScenario::fallback())
-            .expect("start sandbox scenario");
+        // Keep the app itself pathless while choosing exactly how much
+        // definition data this fixture needs. The default uses the shipped
+        // CLNK for native shape/action/portrait coverage; the explicit
+        // lightweight variant is reserved for definition-independent tests.
+        app.start_sandbox_scenario_with_definitions(
+            FrontendScenario::fallback(),
+            definition_load,
+        )
+        .expect("start sandbox scenario");
         wait_for_running(&mut app);
         // Most running-input tests begin after native's one-time centered
         // C4MouseControl move. Tests for that initialization explicitly clear
@@ -96553,6 +96657,88 @@ ScenInfoArea=70,5,25,90
         let mut frame = vec![0x91; app.graphics.surface().pixels().len()];
         app.render_running(&mut frame, false)
             .expect("eliminated local viewport remains renderable");
+    }
+
+    #[test]
+    fn viewport_selection_uses_cpp_keyboard_layout_order_across_joins() {
+        assert_eq!(
+            [-1, 0, 1, 2, 3, 4, 7].map(classic_viewport_layout_order),
+            [-1, 0, 3, 1, 2, 4, 7],
+            "non-keyboard controls pass through and Keyboard1/3/4/2 map to row-major order",
+        );
+
+        let app = new_running_sandbox_app();
+        let mut snapshot = app.snapshot.clone();
+        let template = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == app.local_owner)
+            .cloned()
+            .expect("sandbox local player");
+        let make_player = |id, control_set, center| {
+            let mut player = template.clone();
+            player.id = id;
+            player.name = format!("Keyboard {}", control_set + 1);
+            player.control_set = control_set;
+            player.viewports.truncate(1);
+            player.viewports[0].center = center;
+            player
+        };
+
+        // IDs deliberately oppose C++ layout order. Engine snapshots expose
+        // local IDs in numeric order, while C4GraphicsSystem assigns cells by
+        // Keyboard1, Keyboard3, Keyboard4, Keyboard2.
+        let keyboard2 = make_player(10, 1, Vector2::new(100, 10));
+        let keyboard4 = make_player(20, 3, Vector2::new(200, 20));
+        let keyboard3 = make_player(30, 2, Vector2::new(300, 30));
+        let keyboard1 = make_player(40, 0, Vector2::new(400, 40));
+        let viewport_owners = |snapshot: &SimulationSnapshot| {
+            collect_viewport_inputs(snapshot)
+                .expect("local viewports resolve")
+                .into_iter()
+                .map(|viewport| viewport.owner)
+                .collect::<Vec<_>>()
+        };
+
+        snapshot.players = vec![keyboard2.clone(), keyboard1.clone()];
+        snapshot.hud.local_players = vec![keyboard2.id, keyboard1.id];
+        let initial = viewport_owners(&snapshot);
+        assert_eq!(initial, vec![keyboard1.id, keyboard2.id]);
+
+        // Joining Keyboard3 inserts its new cell between Keyboard1 and
+        // Keyboard2 without reversing the existing players' relative order.
+        snapshot.players.insert(1, keyboard3.clone());
+        snapshot
+            .hud
+            .local_players
+            .insert(1, keyboard3.id);
+        let joined = viewport_owners(&snapshot);
+        assert_eq!(joined, vec![keyboard1.id, keyboard3.id, keyboard2.id]);
+        assert_eq!(
+            joined
+                .iter()
+                .copied()
+                .filter(|owner| initial.contains(owner))
+                .collect::<Vec<_>>(),
+            initial,
+        );
+
+        snapshot.players.insert(1, keyboard4.clone());
+        snapshot
+            .hud
+            .local_players
+            .insert(1, keyboard4.id);
+        let all_keyboards = vec![keyboard1.id, keyboard3.id, keyboard4.id, keyboard2.id];
+        for _ in 0..8 {
+            assert_eq!(viewport_owners(&snapshot), all_keyboards);
+        }
+        snapshot.players.reverse();
+        snapshot.hud.local_players.reverse();
+        assert_eq!(
+            viewport_owners(&snapshot),
+            all_keyboards,
+            "unique control layouts make slot assignment independent of source order",
+        );
     }
 
     #[test]
@@ -122464,7 +122650,7 @@ func ControlDig() { dig_count = 1; return(1); }
             assert_eq!(rebound_menu.page(), page);
             assert_eq!(sound_menu.page(), page);
 
-            let mut default_app = new_running_sandbox_app();
+            let mut default_app = new_lightweight_running_sandbox_app();
             default_app
                 .ingame_menu
                 .replace(default_app.local_owner, Some(default_menu));
@@ -122494,7 +122680,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 Some(page)
             );
 
-            let mut rebound_app = new_running_sandbox_app();
+            let mut rebound_app = new_lightweight_running_sandbox_app();
             rebound_app
                 .ingame_menu
                 .replace(rebound_app.local_owner, Some(rebound_menu));
@@ -122513,7 +122699,7 @@ func ControlDig() { dig_count = 1; return(1); }
             assert!(rebound_app.runtime_flash_message.is_none(), "page {page:?}");
             assert!(rebound_app.ingame_menu.is_some(), "page {page:?}");
 
-            let mut sound_app = new_running_sandbox_app();
+            let mut sound_app = new_lightweight_running_sandbox_app();
             sound_app
                 .ingame_menu
                 .replace(sound_app.local_owner, Some(sound_menu));
@@ -122566,7 +122752,7 @@ func ControlDig() { dig_count = 1; return(1); }
                     app.snapshot = app.engine.snapshot();
                 };
 
-                let mut default_app = new_running_sandbox_app();
+                let mut default_app = new_lightweight_running_sandbox_app();
                 install_menu(&mut default_app);
                 default_app
                     .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
@@ -122593,7 +122779,7 @@ func ControlDig() { dig_count = 1; return(1); }
                     .cursor_object_menu(default_app.local_owner)
                     .is_some());
 
-                let mut rebound = new_running_sandbox_app();
+                let mut rebound = new_lightweight_running_sandbox_app();
                 install_menu(&mut rebound);
                 rebound
                     .bindings
@@ -122613,7 +122799,7 @@ func ControlDig() { dig_count = 1; return(1); }
                     .cursor_object_menu(rebound.local_owner)
                     .is_some());
 
-                let mut sound = new_running_sandbox_app();
+                let mut sound = new_lightweight_running_sandbox_app();
                 install_menu(&mut sound);
                 let before = sound
                     .audio

@@ -123,12 +123,19 @@ impl AudioSystem {
             });
         }
 
+        Ok(Self::new_null(max_channels))
+    }
+
+    /// Construct the same live mixer state without opening a platform audio
+    /// device. The null backend advances playback in real time, making it
+    /// suitable for deterministic tests and headless embedding.
+    pub fn new_null(max_channels: usize) -> Self {
         let mixer = Arc::new(AudioMixer::new(44_100, max_channels));
         let backend = NullBackend::new(mixer.clone());
-        Ok(Self {
+        Self {
             mixer,
             _backend: Backend::Null(backend),
-        })
+        }
     }
 
     pub fn load_sound(&self, data: &[u8]) -> Result<SoundHandle, AudioError> {
