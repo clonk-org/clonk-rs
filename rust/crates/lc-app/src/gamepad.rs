@@ -68,6 +68,14 @@ impl GamepadManager {
         }
     }
 
+    pub(crate) fn disabled() -> Self {
+        Self {
+            gilrs: None,
+            states: HashMap::new(),
+            next_cluster: 0,
+        }
+    }
+
     pub(crate) fn poll(&mut self) -> Vec<SourcedGamepadEvent> {
         let mut output = Vec::new();
         while let Some(event) = self.gilrs.as_mut().and_then(|gilrs| gilrs.next_event()) {

@@ -19171,6 +19171,17 @@ impl GameApp {
         paths: Option<&AppPaths>,
         runtime: RuntimeConfig,
     ) -> Result<Self> {
+        Self::new_with_frontend_scenarios(width, height, audio_options, paths, runtime, None)
+    }
+
+    fn new_with_frontend_scenarios(
+        width: u32,
+        height: u32,
+        audio_options: AudioOptions,
+        paths: Option<&AppPaths>,
+        runtime: RuntimeConfig,
+        frontend_scenarios: Option<Vec<FrontendScenario>>,
+    ) -> Result<Self> {
         // A real installation must establish C4GUI's process-global bundle
         // before any controller, discovery worker, renderer, or app-owned UI
         // state is constructed. Asset-less test apps install their explicit
@@ -19235,7 +19246,9 @@ impl GameApp {
         let control_player_infos = ControlPlayerInfoRegistry::default();
         // Scenario discovery only walks directories and reads scenario
         // groups; start it only after the process-global resource gate.
-        let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
+        let scenario_discovery = frontend_scenarios
+            .is_none()
+            .then(|| std::thread::spawn(load_frontend_scenarios));
         let (loader_screen, loader_error) = match paths {
             Some(paths) => match build_startup_loader(paths, assets.as_ref()) {
                 Ok(setup) => (Some(setup.screen), None),
@@ -19322,9 +19335,13 @@ impl GameApp {
         }
         let snapshot = engine.snapshot();
 
-        let scenarios = scenario_discovery
-            .join()
-            .map_err(|_| anyhow!("scenario discovery thread panicked"))?;
+        let scenarios = match frontend_scenarios {
+            Some(scenarios) => scenarios,
+            None => scenario_discovery
+                .expect("scenario discovery starts without preloaded scenarios")
+                .join()
+                .map_err(|_| anyhow!("scenario discovery thread panicked"))?,
+        };
         let button_textures = assets.button_textures();
         let menu_entries = build_menu_entries(&scenarios, false);
         let mut menu = StartupMenu::new(menu_entries, assets.font_arc(), button_textures.clone())
@@ -19449,7 +19466,15 @@ impl GameApp {
             keyboard_modifiers: ModifiersState::empty(),
             pending_screenshots: VecDeque::new(),
             pending_options_display_requests: VecDeque::new(),
-            gamepads: GamepadManager::new(),
+            gamepads: if cfg!(test) {
+                // Synthetic app tests inject normalized events directly. Starting the
+                // macOS gilrs backend for every nextest process creates two unused
+                // threads per fixture and can leave hundreds contending during the
+                // workspace gate.
+                GamepadManager::disabled()
+            } else {
+                GamepadManager::new()
+            },
             gamepad_gui_control: load_gamepad_gui_control(paths),
             snapshot,
             focus_id: None,
@@ -96970,7 +96995,7 @@ ScenInfoArea=70,5,25,90
             menu_sound_enabled: false,
             ..AudioOptions::default()
         };
-        let mut app = GameApp::new(
+        let mut app = GameApp::new_with_frontend_scenarios(
             320,
             200,
             audio_options,
@@ -96981,6 +97006,7 @@ ScenInfoArea=70,5,25,90
                 network: None,
                 record_enabled: false,
             },
+            Some(Vec::new()),
         )
         .expect("initialise app");
         install_classic_test_assets(&mut app);
@@ -128134,6 +128160,38 @@ func ControlDig() { dig_count = 1; return(1); }
             ingame_menu::MenuPage::AbortConfirm => 9,
             ingame_menu::MenuPage::TeamSelection => 10,
         };
+        let test_music_bytes = silent_pcm_wav(10);
+        let load_test_music = |app: &GameApp| {
+            app.audio
+                .as_ref()
+                .expect("test audio")
+                .system
+                .load_music(&test_music_bytes)
+                .expect("load lightweight runtime music fixture")
+        };
+        let prime_music_toggle_off = |app: &mut GameApp, music: &MusicHandle| {
+            app.audio
+                .as_ref()
+                .expect("test audio")
+                .system
+                .play_music(music, true)
+                .expect("start lightweight runtime music fixture");
+            app.runtime_music_enabled = true;
+        };
+
+        let mut default_app = new_lightweight_running_sandbox_app();
+        let default_music = load_test_music(&default_app);
+        let mut rebound_app = new_lightweight_running_sandbox_app();
+        rebound_app
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
+        rebound_app
+            .engine
+            .player_mut(rebound_app.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        let mut sound_app = new_lightweight_running_sandbox_app();
         let mut covered = [false; 11];
         for ((default_menu, rebound_menu), sound_menu) in default_pages
             .into_iter()
@@ -128145,10 +128203,10 @@ func ControlDig() { dig_count = 1; return(1); }
             assert_eq!(rebound_menu.page(), page);
             assert_eq!(sound_menu.page(), page);
 
-            let mut default_app = new_lightweight_running_sandbox_app();
             default_app
                 .ingame_menu
                 .replace(default_app.local_owner, Some(default_menu));
+            prime_music_toggle_off(&mut default_app, &default_music);
             default_app
                 .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
                 .expect("music producer reaches every player-menu page");
@@ -128174,27 +128232,35 @@ func ControlDig() { dig_count = 1; return(1); }
                 default_app.ingame_menu.as_ref().map(IngameMenuState::page),
                 Some(page)
             );
+            default_app
+                .handle_key(VirtualKeyCode::F3, ElementState::Released)
+                .expect("release music producer");
 
-            let mut rebound_app = new_lightweight_running_sandbox_app();
             rebound_app
                 .ingame_menu
                 .replace(rebound_app.local_owner, Some(rebound_menu));
-            rebound_app
-                .bindings
-                .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
-            rebound_app
-                .engine
-                .player_mut(rebound_app.local_owner)
-                .expect("local player")
-                .control
-                .control_style = true;
             rebound_app
                 .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
                 .expect("player priority owns F3 on every page");
             assert!(rebound_app.runtime_flash_message.is_none(), "page {page:?}");
             assert!(rebound_app.ingame_menu.is_some(), "page {page:?}");
+            rebound_app
+                .handle_key(VirtualKeyCode::F3, ElementState::Released)
+                .expect("release rebound player control");
+            assert!(!rebound_app
+                .pressed_engine_keys
+                .contains(&VirtualKeyCode::F3));
+            assert_eq!(
+                rebound_app
+                    .engine
+                    .player(rebound_app.local_owner)
+                    .expect("local player")
+                    .control
+                    .pressed_coms
+                    & (1 << lc_engine::COM_LEFT),
+                0
+            );
 
-            let mut sound_app = new_lightweight_running_sandbox_app();
             sound_app
                 .ingame_menu
                 .replace(sound_app.local_owner, Some(sound_menu));
@@ -128222,9 +128288,28 @@ func ControlDig() { dig_count = 1; return(1); }
             );
             assert!(sound_app.runtime_flash_message.is_none(), "page {page:?}");
             assert!(sound_app.ingame_menu.is_some(), "page {page:?}");
+            sound_app
+                .handle_key(VirtualKeyCode::F3, ElementState::Released)
+                .expect("release sound producer");
+            sound_app
+                .handle_modifiers_changed(ModifiersState::empty())
+                .expect("release Ctrl");
         }
         assert!(covered.into_iter().all(|covered| covered));
 
+        let mut default_app = new_lightweight_running_sandbox_app();
+        let default_music = load_test_music(&default_app);
+        let mut rebound = new_lightweight_running_sandbox_app();
+        rebound
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
+        rebound
+            .engine
+            .player_mut(rebound.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        let mut sound = new_lightweight_running_sandbox_app();
         for style in 0..=3 {
             for text_progressing in [false, true] {
                 let install_menu = |app: &mut GameApp| {
@@ -128247,8 +128332,8 @@ func ControlDig() { dig_count = 1; return(1); }
                     app.snapshot = app.engine.snapshot();
                 };
 
-                let mut default_app = new_lightweight_running_sandbox_app();
                 install_menu(&mut default_app);
+                prime_music_toggle_off(&mut default_app, &default_music);
                 default_app
                     .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
                     .expect("music producer reaches every engine menu style");
@@ -128273,18 +128358,11 @@ func ControlDig() { dig_count = 1; return(1); }
                     .engine
                     .cursor_object_menu(default_app.local_owner)
                     .is_some());
+                default_app
+                    .handle_key(VirtualKeyCode::F3, ElementState::Released)
+                    .expect("release music producer");
 
-                let mut rebound = new_lightweight_running_sandbox_app();
                 install_menu(&mut rebound);
-                rebound
-                    .bindings
-                    .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
-                rebound
-                    .engine
-                    .player_mut(rebound.local_owner)
-                    .expect("local player")
-                    .control
-                    .control_style = true;
                 rebound
                     .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
                     .expect("player F3 owns every engine menu style");
@@ -128293,8 +128371,21 @@ func ControlDig() { dig_count = 1; return(1); }
                     .engine
                     .cursor_object_menu(rebound.local_owner)
                     .is_some());
+                rebound
+                    .handle_key(VirtualKeyCode::F3, ElementState::Released)
+                    .expect("release rebound player control");
+                assert!(!rebound.pressed_engine_keys.contains(&VirtualKeyCode::F3));
+                assert_eq!(
+                    rebound
+                        .engine
+                        .player(rebound.local_owner)
+                        .expect("local player")
+                        .control
+                        .pressed_coms
+                        & (1 << lc_engine::COM_LEFT),
+                    0
+                );
 
-                let mut sound = new_lightweight_running_sandbox_app();
                 install_menu(&mut sound);
                 let before = sound
                     .audio
@@ -128319,6 +128410,12 @@ func ControlDig() { dig_count = 1; return(1); }
                 );
                 assert!(sound.runtime_flash_message.is_none());
                 assert!(sound.engine.cursor_object_menu(sound.local_owner).is_some());
+                sound
+                    .handle_key(VirtualKeyCode::F3, ElementState::Released)
+                    .expect("release sound producer");
+                sound
+                    .handle_modifiers_changed(ModifiersState::empty())
+                    .expect("release Ctrl");
             }
         }
     }
