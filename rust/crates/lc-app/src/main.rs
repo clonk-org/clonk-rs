@@ -5242,6 +5242,23 @@ fn client_settings_for_paths(
     settings
 }
 
+fn startup_network_connect_targets(settings: &ClientSettings) -> String {
+    settings
+        .server_addresses
+        .iter()
+        .filter(|address| !address.is_ip_null())
+        .map(|address| {
+            let protocol = match address.protocol {
+                lc_network::NetworkProtocol::Tcp => "TCP".to_string(),
+                lc_network::NetworkProtocol::Udp => "UDP".to_string(),
+                _ => "INVALID".to_string(),
+            };
+            format!("{protocol}:{}", address.endpoint)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn resolve_network_mode(cli: &Cli, paths: Option<&AppPaths>) -> Result<Option<NetworkMode>> {
     if let Some(ref host_addr) = cli.host {
         let bind_addr = parse_socket_addr(host_addr, "host")?;
@@ -8659,6 +8676,7 @@ enum MenuTitleDrag {
 #[derive(Clone, Debug)]
 enum MessageDialogContinuation {
     None,
+    StartupNetworkConnectProgress,
     NetworkRuntimeJoin {
         reference: lc_network::NetworkGameReference,
     },
@@ -20689,6 +20707,22 @@ impl GameApp {
         self.mode != AppMode::Running && self.startup_network_connection.is_some()
     }
 
+    fn startup_network_join_progress_active(&self) -> bool {
+        self.startup_network_connection
+            .as_ref()
+            .is_some_and(|connection| connection.purpose == StartupNetworkPurpose::Join)
+            && self.message_dialogs.iter().any(|dialog| {
+                matches!(
+                    dialog.continuation,
+                    MessageDialogContinuation::StartupNetworkConnectProgress
+                )
+            })
+    }
+
+    fn startup_network_transition_blocks_input(&self) -> bool {
+        self.startup_network_transition_active() && !self.startup_network_join_progress_active()
+    }
+
     fn startup_dialog_fade_active(&self) -> bool {
         self.mode == AppMode::Menu && self.startup_dialog_fade.is_some()
     }
@@ -21528,7 +21562,7 @@ impl GameApp {
         if self.mode == AppMode::Menu {
             self.menu_frame_cache = None;
         }
-        if self.startup_network_transition_active() {
+        if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
         if !self.message_dialogs.is_empty() && !self.running_chat_active() {
@@ -22347,7 +22381,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.startup_tooltip.note_pointer_wheel();
-        if self.startup_network_transition_active() {
+        if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
         if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
@@ -25290,7 +25324,7 @@ impl GameApp {
             return Ok(());
         }
         self.mark_menu_dirty();
-        if self.startup_network_transition_active() {
+        if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
         if state == ElementState::Released
@@ -31232,7 +31266,7 @@ impl GameApp {
                 self.menu_frame_cache = None;
             }
             self.mark_menu_dirty();
-            if self.startup_network_transition_active() {
+            if self.startup_network_transition_blocks_input() {
                 return Ok(());
             }
         }
@@ -32454,7 +32488,7 @@ impl GameApp {
         let raw_point = gui_point_from_position(position);
         let point = GuiPoint::new(raw_point.x.ceil(), raw_point.y.ceil());
         self.startup_tooltip.note_pointer_move(point);
-        if self.startup_network_transition_active() {
+        if self.startup_network_transition_blocks_input() {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
@@ -34907,7 +34941,7 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
         self.startup_tooltip.note_pointer_button();
-        if self.startup_network_transition_active() {
+        if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
         if self.mode == AppMode::Running && self.ingame_captured_drag_active() {
@@ -35064,7 +35098,7 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
         self.startup_tooltip.note_pointer_button();
-        if self.startup_network_transition_active() {
+        if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
         if self.mode == AppMode::Running && self.ingame_captured_drag_active() {
@@ -36634,7 +36668,7 @@ impl GameApp {
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.mark_menu_dirty();
         self.startup_tooltip.note_pointer_button();
-        if self.startup_network_transition_active() {
+        if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
         if self.mode == AppMode::Running
@@ -37324,7 +37358,7 @@ impl GameApp {
             self.running_pointer_position = Some(position);
         }
         self.context_menu_pointer_dismissed_lobby_team_player = None;
-        if self.startup_network_transition_active() {
+        if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
         if self.running_chat_controller().is_some() {
@@ -39630,7 +39664,7 @@ impl GameApp {
                             self.request_network_reference_join(reference)?;
                         }
                         StartupNetworkJoinTarget::DirectAddress(address) => {
-                            self.activate_network_join(address);
+                            self.activate_network_join(address)?;
                         }
                         StartupNetworkJoinTarget::QueryError(error) => {
                             let message = format_resource_string(
@@ -39742,11 +39776,41 @@ impl GameApp {
         >,
         purpose: StartupNetworkPurpose,
         selected_scenario: Option<(String, String)>,
-    ) {
+        connect_targets: Option<String>,
+    ) -> Result<(), EngineError> {
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
             // Transition guards suppress subsequent input, so release every
             // net-dialog press/capture before installing that guard.
             dialog.cancel_interaction();
+        }
+        if purpose == StartupNetworkPurpose::Join {
+            let connect_targets = connect_targets
+                .filter(|targets| !targets.trim().is_empty())
+                .unwrap_or_else(|| "network game".to_string());
+            let message = format_resource_string(
+                startup_resource_string(
+                    self.app_paths.as_ref(),
+                    "IDS_NET_CONNECTHOST",
+                    "Connecting to host on %s...",
+                ),
+                &[&connect_targets],
+            );
+            let caption = startup_resource_string(
+                self.app_paths.as_ref(),
+                "IDS_NET_JOINGAME",
+                "Joining network game",
+            );
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::new(
+                    message,
+                    caption,
+                    lc_frontend::message_dialog::MessageDialogButtons::CANCEL,
+                    lc_frontend::message_dialog::MessageDialogIcon::Standard(3),
+                    lc_frontend::message_dialog::MessageDialogSize::Regular,
+                    false,
+                ),
+                MessageDialogContinuation::StartupNetworkConnectProgress,
+            )?;
         }
         self.startup_network_connection = Some(StartupNetworkConnection {
             receiver,
@@ -39786,9 +39850,10 @@ impl GameApp {
             self.status_text.clear();
             self.mode = AppMode::Loading;
         } else {
-            self.status_text = "Connecting to network game…".to_string();
+            self.status_text.clear();
         }
         self.mark_menu_dirty();
+        Ok(())
     }
 
     fn activate_prepared_network_host(
@@ -39834,12 +39899,20 @@ impl GameApp {
             });
         match spawn {
             Ok(_) => {
-                self.begin_startup_network_connection(
+                match self.begin_startup_network_connection(
                     receiver,
                     StartupNetworkPurpose::StagedHost,
                     selected_scenario,
-                );
-                self.status_text = "Preparing network game…".to_string();
+                    None,
+                ) {
+                    Ok(()) => {
+                        self.status_text = "Preparing network game…".to_string();
+                    }
+                    Err(error) => {
+                        self.status_text =
+                            format!("Unable to start network preparation: {error}");
+                    }
+                }
             }
             Err(error) => {
                 self.status_text = format!("Unable to start network preparation: {error}");
@@ -39847,14 +39920,14 @@ impl GameApp {
         }
     }
 
-    fn activate_network_join(&mut self, address: String) {
+    fn activate_network_join(&mut self, address: String) -> Result<(), EngineError> {
         if self.startup_network_connection.is_some() {
             self.status_text = "A network connection is already in progress".to_string();
-            return;
+            return Ok(());
         }
         if let Err(error) = self.freeze_configured_client_players_for_game() {
             self.status_text = format!("Unable to load configured players: {error}");
-            return;
+            return Ok(());
         }
         self.prepare_network_join_game_state();
         self.startup_game_search = None;
@@ -39867,6 +39940,7 @@ impl GameApp {
             .as_ref()
             .map(|selection| selection.group_maker().clone());
         let (_, default_port) = load_network_startup_settings(self.app_paths.as_ref());
+        let connect_target = address.clone();
         let spawn = thread::Builder::new()
             .name("lc-startup-network".to_string())
             .spawn(move || {
@@ -39893,12 +39967,18 @@ impl GameApp {
             });
         match spawn {
             Ok(_) => {
-                self.begin_startup_network_connection(receiver, StartupNetworkPurpose::Join, None);
+                self.begin_startup_network_connection(
+                    receiver,
+                    StartupNetworkPurpose::Join,
+                    None,
+                    Some(connect_target),
+                )?;
             }
             Err(error) => {
                 self.status_text = format!("Unable to start network worker: {error}");
             }
         }
+        Ok(())
     }
 
     fn activate_network_reference_join(
@@ -39936,7 +40016,7 @@ impl GameApp {
         if reference.password_needed {
             self.open_network_join_password_dialog()?;
         } else {
-            self.launch_pending_network_join();
+            self.launch_pending_network_join()?;
         }
         Ok(())
     }
@@ -39949,11 +40029,12 @@ impl GameApp {
         self.active_definition_load = Some(self.scenario_seed_definition_load());
     }
 
-    fn launch_pending_network_join(&mut self) {
+    fn launch_pending_network_join(&mut self) -> Result<(), EngineError> {
         let Some(settings) = self.pending_network_join.clone() else {
             self.status_text = "Network join settings are unavailable".to_string();
-            return;
+            return Ok(());
         };
+        let connect_targets = startup_network_connect_targets(&settings);
         let (sender, receiver) = mpsc::channel();
         let local_owner = self.local_owner;
         let spawn = thread::Builder::new()
@@ -39966,13 +40047,22 @@ impl GameApp {
             });
         match spawn {
             Ok(_) => {
-                self.begin_startup_network_connection(receiver, StartupNetworkPurpose::Join, None);
+                if let Err(error) = self.begin_startup_network_connection(
+                    receiver,
+                    StartupNetworkPurpose::Join,
+                    None,
+                    Some(connect_targets),
+                ) {
+                    self.pending_network_join = None;
+                    return Err(error);
+                }
             }
             Err(error) => {
                 self.pending_network_join = None;
                 self.status_text = format!("Unable to start network worker: {error}");
             }
         }
+        Ok(())
     }
 
     fn open_network_join_password_dialog(&mut self) -> Result<(), EngineError> {
@@ -40436,6 +40526,19 @@ impl GameApp {
         ))
     }
 
+    fn dismiss_startup_network_connect_progress(&mut self) {
+        let Some(index) = self.message_dialogs.iter().rposition(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::StartupNetworkConnectProgress
+            )
+        }) else {
+            return;
+        };
+        self.remove_message_dialog_at(index);
+        self.mark_menu_dirty();
+    }
+
     fn poll_startup_network_connection(&mut self) {
         let selected_scenario = self
             .startup_network_connection
@@ -40457,6 +40560,11 @@ impl GameApp {
             )),
         };
         self.startup_network_connection = None;
+        if purpose == Some(StartupNetworkPurpose::Join) {
+            // Resolution owns silent dismissal. Finishing the dialog would
+            // run its continuation and incorrectly turn success into abort.
+            self.dismiss_startup_network_connect_progress();
+        }
         self.mark_menu_dirty();
         match result {
             Ok((mut mode, mut manager)) => {
@@ -52643,7 +52751,7 @@ impl GameApp {
                                 break;
                             };
                             settings.password = password;
-                            self.launch_pending_network_join();
+                            self.launch_pending_network_join()?;
                         }
                         PendingInputDialogPurpose::GameOption(kind) => {
                             let actions = self.scenario_game_options.resolve_input_dialog(
@@ -53070,6 +53178,20 @@ impl GameApp {
         self.mark_menu_dirty();
         match pending.continuation {
             MessageDialogContinuation::None => {}
+            MessageDialogContinuation::StartupNetworkConnectProgress => {
+                if self
+                    .startup_network_connection
+                    .as_ref()
+                    .is_some_and(|connection| connection.purpose == StartupNetworkPurpose::Join)
+                {
+                    // Dropping this attempt's receiver makes any eventual
+                    // worker result unreachable; its manager is dropped when
+                    // the detached worker's send fails.
+                    self.startup_network_connection = None;
+                    self.pending_network_join = None;
+                    self.status_text.clear();
+                }
+            }
             MessageDialogContinuation::NetworkRuntimeJoin { reference }
                 if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
             {
@@ -82324,7 +82446,9 @@ public func Grant(password) { return GainMissionAccess(password); }
             receiver,
             StartupNetworkPurpose::StagedHost,
             Some((scenario.identifier.clone(), scenario.title.clone())),
-        );
+            None,
+        )
+        .expect("begin exact-host transition");
         app.poll_startup_network_connection();
 
         assert_eq!(app.mode, AppMode::Menu);
@@ -83725,7 +83849,13 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.staged_network_host_scenario = Some(staged);
 
         let (sender, receiver) = mpsc::channel();
-        app.begin_startup_network_connection(receiver, StartupNetworkPurpose::StagedHost, None);
+        app.begin_startup_network_connection(
+            receiver,
+            StartupNetworkPurpose::StagedHost,
+            None,
+            None,
+        )
+        .expect("begin controlled host transition");
         assert_eq!(app.startup_view, StartupView::NetworkGame);
         assert!(app.startup_network_transition_active());
         let join_before = app
@@ -84456,7 +84586,13 @@ public func Grant(password) { return GainMissionAccess(password); }
                 manager,
             )))
             .expect("queue exact host connection");
-        app.begin_startup_network_connection(receiver, StartupNetworkPurpose::StagedHost, None);
+        app.begin_startup_network_connection(
+            receiver,
+            StartupNetworkPurpose::StagedHost,
+            None,
+            None,
+        )
+        .expect("begin prepared host transition");
         assert_eq!(app.mode, AppMode::Loading);
         assert!(app.status_text.is_empty());
         assert_eq!(
@@ -84651,7 +84787,13 @@ public func Grant(password) { return GainMissionAccess(password); }
                 manager,
             )))
             .expect("queue prepared participant host connection");
-        app.begin_startup_network_connection(receiver, StartupNetworkPurpose::StagedHost, None);
+        app.begin_startup_network_connection(
+            receiver,
+            StartupNetworkPurpose::StagedHost,
+            None,
+            None,
+        )
+        .expect("begin prepared participant host transition");
         app.poll_startup_network_connection();
         admission
             .join()
@@ -103605,6 +103747,131 @@ ScenInfoArea=70,5,25,90
         assert!(!app.take_exit_request());
     }
 
+    #[test]
+    fn l084_join_progress_names_target_and_dismisses_on_resolution() {
+        use lc_frontend::message_dialog::{
+            MessageDialogButton, MessageDialogButtons, MessageDialogIcon, MessageDialogSize,
+        };
+
+        let mut app = new_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut app);
+        let (sender, receiver) = mpsc::channel();
+        let target = "UDP:192.0.2.10:11112, TCP:192.0.2.10:11112";
+
+        app.begin_startup_network_connection(
+            receiver,
+            StartupNetworkPurpose::Join,
+            None,
+            Some(target.to_string()),
+        )
+        .expect("show raw-connect progress");
+
+        assert!(app.startup_network_transition_active());
+        assert_eq!(app.message_dialogs.len(), 1);
+        let progress = &app.message_dialogs[0].state;
+        assert_eq!(
+            progress.message(),
+            format!("Connecting to host on {target}...")
+        );
+        assert_eq!(progress.caption(), "Joining network game");
+        assert_eq!(progress.buttons(), MessageDialogButtons::CANCEL);
+        assert_eq!(progress.focused_button(), Some(MessageDialogButton::Cancel));
+        assert_eq!(progress.icon(), MessageDialogIcon::Standard(3));
+        assert_eq!(progress.size(), MessageDialogSize::Regular);
+        assert!(app.status_text.is_empty());
+
+        sender
+            .send(Err(NetworkStartError::Other(
+                "controlled connection failure".to_string(),
+            )))
+            .expect("resolve controlled raw connect");
+        app.poll_startup_network_connection();
+
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.startup_network_dialog.is_some());
+        assert!(app.status_text.contains("controlled connection failure"));
+    }
+
+    #[test]
+    fn l084_escape_aborts_inflight_join_and_keeps_network_dialog() {
+        let mut app = new_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut app);
+        let address: SocketAddr = "192.0.2.20:11112".parse().unwrap();
+        app.pending_network_join = Some(ClientSettings::new(address, "Player"));
+        let (sender, receiver) = mpsc::channel();
+
+        app.begin_startup_network_connection(
+            receiver,
+            StartupNetworkPurpose::Join,
+            None,
+            Some(address.to_string()),
+        )
+        .expect("show abortable raw-connect progress");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Escape aborts raw connect");
+
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.pending_network_join.is_none());
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.status_text.is_empty());
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.startup_network_dialog.is_some());
+        assert!(app
+            .message_dialog_consumed_keys
+            .contains(&VirtualKeyCode::Escape));
+        assert!(sender
+            .send(Err(NetworkStartError::Other("stale result".to_string())))
+            .is_err());
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("Escape release remains owned by dismissed progress");
+        app.poll_startup_network_connection();
+        assert!(app.message_dialog_consumed_keys.is_empty());
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.status_text.is_empty());
+    }
+
+    #[test]
+    fn l084_cancel_button_aborts_inflight_join() {
+        let mut app = new_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut app);
+        let (sender, receiver) = mpsc::channel();
+        app.begin_startup_network_connection(
+            receiver,
+            StartupNetworkPurpose::Join,
+            None,
+            Some("198.51.100.40:11112".to_string()),
+        )
+        .expect("show clickable raw-connect progress");
+        let cancel = app
+            .top_message_dialog_layout()
+            .expect("progress layout")
+            .buttons
+            .first()
+            .expect("Cancel button")
+            .rect;
+        let point = PhysicalPosition::new(
+            f64::from(cancel.x + cancel.w / 2),
+            f64::from(cancel.y + cancel.h / 2),
+        );
+
+        app.handle_cursor_moved(point).expect("hover Cancel");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press Cancel");
+        assert!(app.startup_network_connection.is_some());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release Cancel");
+
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(sender
+            .send(Err(NetworkStartError::Other("stale result".to_string())))
+            .is_err());
+    }
+
     fn attach_l040_network_dialog(app: &mut GameApp) {
         let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(
             app.assets
@@ -104547,7 +104814,13 @@ ScenInfoArea=70,5,25,90
             .expect("network dialog")
             .list_scroll_offset();
         let (_sender, receiver) = mpsc::channel();
-        app.begin_startup_network_connection(receiver, StartupNetworkPurpose::Join, None);
+        app.begin_startup_network_connection(
+            receiver,
+            StartupNetworkPurpose::Join,
+            None,
+            Some("127.0.0.1:11112".to_string()),
+        )
+        .expect("begin join transition");
         assert!(
             !app.startup_network_dialog
                 .as_mut()
@@ -104566,6 +104839,7 @@ ScenInfoArea=70,5,25,90
             before_transition
         );
         app.startup_network_connection = None;
+        app.dismiss_startup_network_connect_progress();
         app.render(&mut frame)
             .expect("post-transition frame does not resume stale arrow");
         assert_eq!(
