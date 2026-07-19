@@ -833,6 +833,10 @@ Title="Visible ~ Game"
             StartupGameSearchEvent::Cleared
             | StartupGameSearchEvent::MasterserverReply(_)
             | StartupGameSearchEvent::SearchError { .. } => {}
+            StartupGameSearchEvent::DirectQueryResolved { .. }
+            | StartupGameSearchEvent::DirectQueryFailed { .. } => {
+                panic!("masterserver search emitted a direct-query event")
+            }
         }
     }
     server.join().unwrap();
@@ -892,6 +896,10 @@ Title="Visible game"
             StartupGameSearchEvent::MasterserverReply(info) => reply = Some(info),
             StartupGameSearchEvent::ReferencesUpdated(visible) => references = Some(visible),
             StartupGameSearchEvent::Cleared | StartupGameSearchEvent::SearchError { .. } => {}
+            StartupGameSearchEvent::DirectQueryResolved { .. }
+            | StartupGameSearchEvent::DirectQueryFailed { .. } => {
+                panic!("masterserver search emitted a direct-query event")
+            }
         }
         if reply.is_some() && references.is_some() {
             break;

@@ -502,6 +502,7 @@ pub enum NetDlgAction {
     ModeChanged(NetDlgMode),
     Back,
     Refresh,
+    QueryAddress { address: String },
     JoinGame { address: Option<String> },
     CreateGame,
     MasterserverSignupChanged(bool),
@@ -659,6 +660,28 @@ impl NetDlgController {
         }
     }
 
+    /// Selects one discovered game and transfers keyboard focus to the list.
+    /// The application uses this after a direct reference query materializes
+    /// its row, mirroring `AddReferenceQuery` followed by `SetFocus`.
+    pub fn focus_game(&mut self, index: usize) -> Vec<NetDlgAction> {
+        if index >= self.games.len() {
+            return Vec::new();
+        }
+        self.selection = Some(NetDlgSelection::Game(index));
+        let layout = self.layout();
+        self.ensure_selection_visible(&layout);
+        self.change_focus(NetDlgControl::GameList)
+    }
+
+    /// Returns the discovered-game index under a visible list point. The
+    /// masterserver query row and blank space are deliberately not games.
+    pub fn game_index_at(&self, position: GuiPoint) -> Option<usize> {
+        match self.list_selection_at(position)? {
+            NetDlgSelection::Game(index) => Some(index),
+            NetDlgSelection::Masterserver => None,
+        }
+    }
+
     /// Current vertical ScrollWindow displacement in logical pixels.
     pub const fn list_scroll_offset(&self) -> i32 {
         self.list_scroll_y
@@ -760,6 +783,21 @@ impl NetDlgController {
             return Vec::new();
         }
         self.activate(pressed)
+    }
+
+    /// A native list double-click selects and focuses the row before invoking
+    /// the same callback as Return/Join. Only concrete game rows carry a join
+    /// target; double-clicking the masterserver status row has no activation.
+    pub fn handle_pointer_double_click(&mut self, position: GuiPoint) -> Vec<NetDlgAction> {
+        self.pointer_position = Some(position);
+        self.hovered = self.hit_button(position);
+        self.pointer_pressed = None;
+        let Some(index) = self.game_index_at(position) else {
+            return Vec::new();
+        };
+        let mut actions = self.focus_game(index);
+        actions.extend(self.join_action());
+        actions
     }
 
     /// Routes the native signed wheel delta over the ScrollWindow viewport.
@@ -1008,38 +1046,47 @@ impl NetDlgController {
         actions
     }
 
-    fn join_action(&self) -> Vec<NetDlgAction> {
+    fn join_action(&mut self) -> Vec<NetDlgAction> {
+        if self.focus == NetDlgControl::JoinAddress && !self.join_address.is_empty() {
+            let mut actions = vec![NetDlgAction::QueryAddress {
+                address: self.join_address.clone(),
+            }];
+            actions.extend(self.change_focus(NetDlgControl::GameList));
+            return actions;
+        }
         let selected_address = self
             .selected_game()
             .and_then(|index| self.games.get(index))
-            .filter(|game| game.joinable)
             .and_then(|game| game.address.clone());
         vec![NetDlgAction::JoinGame {
-            address: (self.focus == NetDlgControl::JoinAddress && !self.join_address.is_empty())
-                .then(|| self.join_address.clone())
-                .or(selected_address),
+            address: selected_address,
         }]
     }
 
     fn select_list_row(&mut self, position: GuiPoint) {
+        let previous = self.selection;
+        self.selection = self.list_selection_at(position);
+        if self.selection != previous {
+            let layout = self.layout();
+            self.ensure_selection_visible(&layout);
+        }
+    }
+
+    fn list_selection_at(&self, position: GuiPoint) -> Option<NetDlgSelection> {
         let layout = self.layout();
         if !contains(layout.list_viewport, position) {
-            return;
+            return None;
         }
-        let previous = self.selection;
         let row = ((position.y as i32 - layout.list_viewport.y + self.list_scroll_y)
             / layout.list_entry.h) as usize;
         if self.config.masterserver_signup {
-            self.selection = if row == 0 {
+            if row == 0 {
                 Some(NetDlgSelection::Masterserver)
             } else {
                 (row - 1 < self.games.len()).then_some(NetDlgSelection::Game(row - 1))
-            };
+            }
         } else {
-            self.selection = (row < self.games.len()).then_some(NetDlgSelection::Game(row));
-        }
-        if self.selection != previous {
-            self.ensure_selection_visible(&layout);
+            (row < self.games.len()).then_some(NetDlgSelection::Game(row))
         }
     }
 
@@ -1913,9 +1960,12 @@ mod tests {
         );
         assert_eq!(
             click(&mut controller, layout.buttons[2]),
-            vec![NetDlgAction::JoinGame {
-                address: Some(" 127.0.0.1:11111 ".into())
-            }]
+            vec![
+                NetDlgAction::QueryAddress {
+                    address: " 127.0.0.1:11111 ".into()
+                },
+                NetDlgAction::FocusChanged(NetDlgControl::GameList),
+            ]
         );
         assert_eq!(
             click(&mut controller, layout.buttons[3]),
@@ -2048,7 +2098,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_join_requires_edit_focus_and_preserves_raw_text() {
+    fn direct_join_edit_is_a_two_step_query_then_selected_row_join() {
         let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
         controller.resize(1280, 720);
         let layout = net_dlg_layout(1280, 720, &metrics());
@@ -2068,14 +2118,28 @@ mod tests {
         );
         assert_eq!(
             controller.handle_key_down(crate::KeyCode::Enter),
-            vec![NetDlgAction::JoinGame {
-                address: Some("   ".into())
-            }]
+            vec![
+                NetDlgAction::QueryAddress {
+                    address: "   ".into()
+                },
+                NetDlgAction::FocusChanged(NetDlgControl::GameList),
+            ]
         );
+        assert_eq!(controller.focused_control(), NetDlgControl::GameList);
+        assert_eq!(controller.join_address(), "   ");
+
+        // The application materializes and selects the direct-query row.
+        controller.set_games(vec![NetDlgGameEntry {
+            title: "Direct query".into(),
+            details: "Querying".into(),
+            address: Some("example.test".into()),
+            joinable: false,
+        }]);
+        assert!(controller.focus_game(0).is_empty());
         assert_eq!(
-            click(&mut controller, layout.buttons[2]),
+            controller.handle_key_down(crate::KeyCode::Enter),
             vec![NetDlgAction::JoinGame {
-                address: Some("   ".into())
+                address: Some("example.test".into())
             }]
         );
     }
@@ -2116,7 +2180,7 @@ mod tests {
     }
 
     #[test]
-    fn discovered_rows_are_selectable_and_supply_the_reference_address() {
+    fn discovered_rows_are_selectable_and_disabled_rows_remain_actionable() {
         let mut controller = NetDlgController::new(
             NetDlgConfig {
                 masterserver_signup: false,
@@ -2153,7 +2217,59 @@ mod tests {
         assert_eq!(controller.selected_game(), Some(1));
         assert_eq!(
             controller.handle_key_down(crate::KeyCode::Enter),
-            vec![NetDlgAction::JoinGame { address: None }]
+            vec![NetDlgAction::JoinGame {
+                address: Some("203.0.113.11:11112".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn list_double_click_selects_focuses_and_joins_the_row_under_pointer() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.set_games(vec![
+            NetDlgGameEntry {
+                title: "Joinable".into(),
+                details: "Lobby".into(),
+                address: Some("203.0.113.10:11112".into()),
+                joinable: true,
+            },
+            NetDlgGameEntry {
+                title: "Runtime confirmation required".into(),
+                details: "Running".into(),
+                address: Some("203.0.113.11:11112".into()),
+                joinable: false,
+            },
+        ]);
+        let layout = net_dlg_layout(1280, 720, &metrics());
+        assert_eq!(
+            controller.handle_pointer_down(center(layout.join_edit)),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
+        );
+
+        // Row zero is the masterserver query; the second discovered game is
+        // therefore visual row two.
+        let point = GuiPoint::new(
+            (layout.list_viewport.x + 4) as f32,
+            (layout.list_viewport.y + layout.list_entry.h * 2 + 4) as f32,
+        );
+        assert_eq!(controller.game_index_at(point), Some(1));
+        assert_eq!(
+            controller.handle_pointer_double_click(point),
+            vec![
+                NetDlgAction::FocusChanged(NetDlgControl::GameList),
+                NetDlgAction::JoinGame {
+                    address: Some("203.0.113.11:11112".into())
+                },
+            ]
+        );
+        assert_eq!(controller.selected_game(), Some(1));
+        assert_eq!(controller.focused_control(), NetDlgControl::GameList);
+
+        assert_eq!(
+            controller.game_index_at(center(layout.list_entry)),
+            None,
+            "the masterserver query row is not a discovered game"
         );
     }
 

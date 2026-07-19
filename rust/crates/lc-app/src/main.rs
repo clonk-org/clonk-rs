@@ -2663,6 +2663,31 @@ fn load_runtime_language_table(paths: Option<&AppPaths>) -> Result<RuntimeLangua
     )
 }
 
+fn startup_resource_string(paths: Option<&AppPaths>, key: &str, fallback: &str) -> String {
+    load_runtime_language_table(paths)
+        .ok()
+        .and_then(|table| table.entries.get(key).cloned())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn format_resource_string(mut template: String, arguments: &[&str]) -> String {
+    for argument in arguments {
+        template = template.replacen("%s", argument, 1);
+    }
+    template
+}
+
+fn network_game_version_string(
+    game: &str,
+    version: [i32; 4],
+    build: i32,
+) -> String {
+    format!(
+        "{game} {}.{}.{}.{} [{build}]",
+        version[0], version[1], version[2], version[3]
+    )
+}
+
 fn load_runtime_help_language_table(paths: Option<&AppPaths>) -> Result<HashMap<String, String>> {
     Ok(load_runtime_language_table(paths)?.entries)
 }
@@ -7920,6 +7945,9 @@ struct ScriptMenuPresentationState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum MessageDialogContinuation {
     None,
+    NetworkRuntimeJoin {
+        reference: lc_network::NetworkGameReference,
+    },
     DeleteStartupPlayer { path: PathBuf },
     DeleteStartupCrew {
         player_path: PathBuf,
@@ -8056,6 +8084,26 @@ struct ClassicHostLobbyState {
 enum StartupNetworkPurpose {
     Join,
     StagedHost,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StartupDirectReferenceQueryState {
+    Pending,
+    Empty,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StartupDirectReferenceQuery {
+    id: u64,
+    address: String,
+    state: StartupDirectReferenceQueryState,
+}
+
+enum StartupNetworkJoinTarget {
+    Reference(lc_network::NetworkGameReference),
+    DirectAddress(String),
+    QueryError(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -8863,6 +8911,10 @@ struct GameApp {
     /// Complete references retained in the same order as the visible game
     /// list. The frontend row projects only a display address.
     startup_game_references: Vec<lc_network::NetworkGameReference>,
+    /// User-entered reference requests remain visible until they resolve,
+    /// fail, or are replaced by their returned reference rows.
+    startup_direct_reference_queries: Vec<StartupDirectReferenceQuery>,
+    next_startup_direct_reference_query_id: u64,
     network_game_advertiser: Option<lc_network::NetworkGameAdvertiser>,
     /// Last validated exact host reference. This state advances independently
     /// of optional listener I/O and is retained as the next InitLocal rebuild
@@ -9137,6 +9189,9 @@ struct GameApp {
     /// Last player-list row click (index, time) for forwarding the list box's
     /// double-click event (C4StartupPlrSelDlg.cpp:574-575).
     plrsel_last_click: Option<(usize, Instant)>,
+    /// Last network-game row click for C4StartupNetDlg's list-box
+    /// `OnSelDblClick -> DoOK` callback.
+    netdlg_last_click: Option<(usize, Instant)>,
     /// The message board's current log line and the frame it expires
     /// (fade-in + strlen delay + fade-out at Speed 1,
     /// src/C4MessageBoard.cpp:163-212).
@@ -10006,7 +10061,6 @@ enum ClassicStartupAction {
     AboutCheckForUpdates,
     OptionsProgramFocus(lc_frontend::startup_options_dlg::OptionsProgramFocusTarget),
     NetworkRefresh,
-    NetworkDirectJoin { address: String },
     PlayerCrew { index: usize },
 }
 
@@ -15857,6 +15911,18 @@ fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, u16) {
     (masterserver_signup, port)
 }
 
+fn load_network_reference_port(paths: Option<&AppPaths>) -> u16 {
+    paths
+        .and_then(|paths| Config::load(paths.config_file()).ok())
+        .and_then(|config| {
+            config
+                .get_in(Some("Network"), "PortRefServer")
+                .and_then(|value| value.trim().parse::<u16>().ok())
+        })
+        .filter(|port| *port != 0)
+        .unwrap_or(lc_network::DEFAULT_REFERENCE_PORT)
+}
+
 fn lobby_ready_check_cooldown_from_config(config: Option<&Config>) -> LobbyReadyCheckCooldown {
     let seconds = config
         .and_then(|config| config.get_in(Some("Cooldowns"), "ReadyCheck"))
@@ -17620,6 +17686,8 @@ impl GameApp {
             startup_network_dialog: None,
             startup_game_search: None,
             startup_game_references: Vec::new(),
+            startup_direct_reference_queries: Vec::new(),
+            next_startup_direct_reference_query_id: 0,
             network_game_advertiser: None,
             advertised_game_reference: None,
             startup_player_dialog: None,
@@ -17771,6 +17839,7 @@ impl GameApp {
             scensel_search_last_click: None,
             definition_selector_last_click: None,
             plrsel_last_click: None,
+            netdlg_last_click: None,
             board_line: None,
             board_log_history: VecDeque::new(),
             board_back_scroll: -1,
@@ -28676,16 +28745,52 @@ impl GameApp {
                 }
                 match self.startup_view {
                     StartupView::NetworkGame => {
-                        let actions = self
+                        let point = self
+                            .startup_network_dialog
+                            .as_ref()
+                            .and_then(|dialog| dialog.pointer_position());
+                        let clicked_row = point.and_then(|point| {
+                            self.startup_network_dialog
+                                .as_ref()
+                                .and_then(|dialog| dialog.game_index_at(point))
+                        });
+                        let is_double = if button_state == ElementState::Released {
+                            let now = Instant::now();
+                            let is_double = clicked_row.is_some_and(|index| {
+                                self.netdlg_last_click.is_some_and(|(last_index, at)| {
+                                    last_index == index
+                                        && now.duration_since(at) < Duration::from_millis(500)
+                                })
+                            });
+                            self.netdlg_last_click =
+                                clicked_row.map(|index| (index, now));
+                            is_double
+                        } else {
+                            false
+                        };
+                        let mut actions = self
                             .startup_network_dialog
                             .as_mut()
                             .and_then(|dialog| {
-                                dialog.pointer_position().map(|point| match button_state {
+                                point.map(|point| match button_state {
                                     ElementState::Pressed => dialog.handle_pointer_down(point),
                                     ElementState::Released => dialog.handle_pointer_up(point),
                                 })
                             })
                             .unwrap_or_default();
+                        if is_double {
+                            actions.extend(
+                                self.startup_network_dialog
+                                    .as_mut()
+                                    .and_then(|dialog| {
+                                        point.map(|point| {
+                                            dialog.handle_pointer_double_click(point)
+                                        })
+                                    })
+                                    .unwrap_or_default(),
+                            );
+                            self.netdlg_last_click = None;
+                        }
                         self.process_network_dialog_actions(actions)
                     }
                     StartupView::PlayerSelection => {
@@ -29479,6 +29584,7 @@ impl GameApp {
                     if let Some(dialog) = self.startup_network_dialog.as_mut() {
                         dialog.pointer_left();
                     }
+                    self.netdlg_last_click = None;
                 }
                 StartupView::PlayerSelection => {
                     if let Some(dialog) = self.startup_player_dialog.as_mut() {
@@ -29868,6 +29974,287 @@ impl GameApp {
         Ok(())
     }
 
+    fn startup_network_reference_row(
+        reference: &lc_network::NetworkGameReference,
+    ) -> lc_frontend::startup_netdlg::NetDlgGameEntry {
+        let host = if reference.host_name.is_empty() {
+            "unknown"
+        } else {
+            reference.host_name.as_str()
+        };
+        lc_frontend::startup_netdlg::NetDlgGameEntry {
+            title: format!("{} on {host}", reference.title),
+            details: format!(
+                "{} — {} {}.{}.{}.{} [{}]",
+                reference.state,
+                reference.game,
+                reference.version[0],
+                reference.version[1],
+                reference.version[2],
+                reference.version[3],
+                reference.build,
+            ),
+            address: reference.tcp_addresses.first().map(ToString::to_string),
+            joinable: reference.is_joinable(),
+        }
+    }
+
+    fn startup_direct_reference_query_row(
+        &self,
+        query: &StartupDirectReferenceQuery,
+    ) -> lc_frontend::startup_netdlg::NetDlgGameEntry {
+        let query_name = startup_resource_string(
+            self.app_paths.as_ref(),
+            "IDS_NET_QUERY_DIRECTJOIN",
+            "Direct join",
+        );
+        let title_template = startup_resource_string(
+            self.app_paths.as_ref(),
+            "IDS_NET_CLIENTONNET",
+            "%s on %s",
+        );
+        let title = format_resource_string(title_template, &[&query_name, query.address.trim()]);
+        let details = match &query.state {
+            StartupDirectReferenceQueryState::Pending => startup_resource_string(
+                self.app_paths.as_ref(),
+                "IDS_NET_INFOQUERY",
+                "Querying game infos...",
+            ),
+            StartupDirectReferenceQueryState::Empty => startup_resource_string(
+                self.app_paths.as_ref(),
+                "IDS_NET_INFONOGAME",
+                "No games found.",
+            ),
+            StartupDirectReferenceQueryState::Failed(error) => error.clone(),
+        };
+        lc_frontend::startup_netdlg::NetDlgGameEntry {
+            title,
+            details,
+            address: Some(query.address.clone()),
+            joinable: true,
+        }
+    }
+
+    fn sync_startup_network_game_rows(&mut self) {
+        let mut games = self
+            .startup_game_references
+            .iter()
+            .map(Self::startup_network_reference_row)
+            .collect::<Vec<_>>();
+        games.extend(
+            self.startup_direct_reference_queries
+                .iter()
+                .map(|query| self.startup_direct_reference_query_row(query)),
+        );
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            dialog.set_games(games);
+        }
+    }
+
+    fn selected_startup_direct_reference_query_id(&self) -> Option<u64> {
+        let selected = self.startup_network_dialog.as_ref()?.selected_game()?;
+        let query_index = selected.checked_sub(self.startup_game_references.len())?;
+        self.startup_direct_reference_queries
+            .get(query_index)
+            .map(|query| query.id)
+    }
+
+    fn focus_startup_direct_reference_query(&mut self, id: u64) {
+        let Some(query_index) = self
+            .startup_direct_reference_queries
+            .iter()
+            .position(|query| query.id == id)
+        else {
+            return;
+        };
+        let row = self.startup_game_references.len() + query_index;
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            let _ = dialog.focus_game(row);
+        }
+    }
+
+    fn begin_startup_direct_reference_query(&mut self, address: String) {
+        if let Some(existing) = self
+            .startup_direct_reference_queries
+            .iter()
+            .find(|query| {
+                !matches!(query.state, StartupDirectReferenceQueryState::Failed(_))
+                    && query.address.eq_ignore_ascii_case(&address)
+            })
+            .map(|query| query.id)
+        {
+            self.focus_startup_direct_reference_query(existing);
+            self.mark_menu_dirty();
+            return;
+        }
+
+        self.next_startup_direct_reference_query_id =
+            self.next_startup_direct_reference_query_id.wrapping_add(1);
+        let id = self.next_startup_direct_reference_query_id;
+        self.startup_direct_reference_queries
+            .push(StartupDirectReferenceQuery {
+                id,
+                address: address.clone(),
+                state: StartupDirectReferenceQueryState::Pending,
+            });
+        let default_port = load_network_reference_port(self.app_paths.as_ref());
+        let submitted = self.startup_game_search.as_ref().is_some_and(|search| {
+            search.query_direct(id, address, default_port).is_ok()
+        });
+        if !submitted {
+            if let Some(query) = self
+                .startup_direct_reference_queries
+                .iter_mut()
+                .find(|query| query.id == id)
+            {
+                query.state = StartupDirectReferenceQueryState::Failed(
+                    "Unable to start direct reference query".to_string(),
+                );
+            }
+        }
+        self.sync_startup_network_game_rows();
+        self.focus_startup_direct_reference_query(id);
+        self.mark_menu_dirty();
+    }
+
+    fn startup_network_join_target(&self, index: usize) -> Option<StartupNetworkJoinTarget> {
+        if let Some(reference) = self.startup_game_references.get(index) {
+            return Some(StartupNetworkJoinTarget::Reference(reference.clone()));
+        }
+        let query = self
+            .startup_direct_reference_queries
+            .get(index.checked_sub(self.startup_game_references.len())?)?;
+        Some(match &query.state {
+            StartupDirectReferenceQueryState::Failed(error) => {
+                StartupNetworkJoinTarget::QueryError(error.clone())
+            }
+            StartupDirectReferenceQueryState::Pending
+            | StartupDirectReferenceQueryState::Empty => {
+                StartupNetworkJoinTarget::DirectAddress(query.address.clone())
+            }
+        })
+    }
+
+    fn finish_startup_direct_reference_query(
+        &mut self,
+        request_id: u64,
+        references: Vec<lc_network::NetworkGameReference>,
+        selected_index: Option<usize>,
+    ) {
+        let selected_query = self.selected_startup_direct_reference_query_id();
+        let Some(query_index) = self
+            .startup_direct_reference_queries
+            .iter()
+            .position(|query| query.id == request_id)
+        else {
+            return;
+        };
+        self.startup_game_references = references;
+        if let Some(selected_index) = selected_index {
+            self.startup_direct_reference_queries.remove(query_index);
+            self.sync_startup_network_game_rows();
+            match selected_query {
+                Some(id) if id == request_id => {
+                    if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                        let _ = dialog.focus_game(selected_index);
+                    }
+                }
+                Some(id) => self.focus_startup_direct_reference_query(id),
+                None => {}
+            }
+        } else {
+            self.startup_direct_reference_queries[query_index].state =
+                StartupDirectReferenceQueryState::Empty;
+            self.sync_startup_network_game_rows();
+            if let Some(id) = selected_query {
+                self.focus_startup_direct_reference_query(id);
+            }
+        }
+    }
+
+    fn fail_startup_direct_reference_query(&mut self, request_id: u64, message: String) {
+        let selected_query = self.selected_startup_direct_reference_query_id();
+        let Some(query) = self
+            .startup_direct_reference_queries
+            .iter_mut()
+            .find(|query| query.id == request_id)
+        else {
+            return;
+        };
+        query.state = StartupDirectReferenceQueryState::Failed(message);
+        self.sync_startup_network_game_rows();
+        if let Some(id) = selected_query {
+            self.focus_startup_direct_reference_query(id);
+        }
+    }
+
+    fn request_network_reference_join(
+        &mut self,
+        reference: lc_network::NetworkGameReference,
+    ) -> Result<(), EngineError> {
+        let version_matches = reference.version == lc_network::CURRENT_GAME_VERSION
+            && reference.build == lc_network::CURRENT_GAME_BUILD;
+        if !version_matches {
+            let remote = network_game_version_string(
+                &reference.game,
+                reference.version,
+                reference.build,
+            );
+            let local = network_game_version_string(
+                "LegacyClonk",
+                lc_network::CURRENT_GAME_VERSION,
+                lc_network::CURRENT_GAME_BUILD,
+            );
+            let message = format_resource_string(
+                startup_resource_string(
+                    self.app_paths.as_ref(),
+                    "IDS_NET_NOJOIN_BADVER",
+                    "Engine version mismatch: the game runs with %s - you have %s.",
+                ),
+                &[&remote, &local],
+            );
+            let caption = startup_resource_string(
+                self.app_paths.as_ref(),
+                "IDS_NET_NOJOIN",
+                "Cannot join game",
+            );
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    message,
+                    caption,
+                    lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                ),
+                MessageDialogContinuation::None,
+            )?;
+            return Ok(());
+        }
+        if !reference.join_allowed {
+            let message = startup_resource_string(
+                self.app_paths.as_ref(),
+                "IDS_NET_NOJOIN_NORUNTIME",
+                "The game has started already and runtime join is not allowed! Try joining anyway?",
+            );
+            let caption = startup_resource_string(
+                self.app_paths.as_ref(),
+                "IDS_NET_NOJOIN",
+                "Cannot join game",
+            );
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::new(
+                    message,
+                    caption,
+                    lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                    lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                    lc_frontend::message_dialog::MessageDialogSize::Regular,
+                    false,
+                ),
+                MessageDialogContinuation::NetworkRuntimeJoin { reference },
+            )?;
+            return Ok(());
+        }
+        self.activate_network_reference_join(reference)
+    }
+
     fn process_network_dialog_actions(
         &mut self,
         actions: Vec<lc_frontend::startup_netdlg::NetDlgAction>,
@@ -29898,38 +30285,69 @@ impl GameApp {
                         ClassicStartupAction::NetworkRefresh,
                     ));
                 }
-                NetDlgAction::JoinGame { address } => {
-                    let selected_reference = self
+                NetDlgAction::QueryAddress { address } => {
+                    self.begin_startup_direct_reference_query(address);
+                }
+                NetDlgAction::JoinGame { .. } => {
+                    let selected_index = self
                         .startup_network_dialog
                         .as_ref()
-                        .filter(|dialog| {
-                            dialog.focused_control()
-                                != lc_frontend::startup_netdlg::NetDlgControl::JoinAddress
-                                || dialog.join_address().is_empty()
-                        })
-                        .and_then(|dialog| dialog.selected_game())
-                        .and_then(|index| self.startup_game_references.get(index))
-                        .filter(|reference| reference.is_joinable())
-                        .cloned();
-                    if let Some(reference) = selected_reference {
-                        self.activate_network_reference_join(reference)?;
-                        continue;
-                    }
-                    let Some(address) = address else {
+                        .and_then(|dialog| dialog.selected_game());
+                    let target = selected_index
+                        .and_then(|index| self.startup_network_join_target(index));
+                    let Some(target) = target else {
                         self.status_text.clear();
+                        let message = startup_resource_string(
+                            self.app_paths.as_ref(),
+                            "IDS_NET_NOJOIN_NOREF",
+                            "No reference selected. Select a game from the list or enter a direct join address below!",
+                        );
+                        let caption = startup_resource_string(
+                            self.app_paths.as_ref(),
+                            "IDS_NET_NOJOIN",
+                            "Cannot join game",
+                        );
                         self.push_message_dialog(
                             lc_frontend::message_dialog::MessageDialogState::regular_ok(
-                                "No reference selected. Select a game from the list or enter a direct join address below!",
-                                "Cannot join game",
+                                message,
+                                caption,
                                 lc_frontend::message_dialog::MessageDialogIcon::ERROR,
                             ),
                             MessageDialogContinuation::None,
                         )?;
                         continue;
                     };
-                    return Err(classic_startup_action_error(
-                        ClassicStartupAction::NetworkDirectJoin { address },
-                    ));
+                    match target {
+                        StartupNetworkJoinTarget::Reference(reference) => {
+                            self.request_network_reference_join(reference)?;
+                        }
+                        StartupNetworkJoinTarget::DirectAddress(address) => {
+                            self.activate_network_join(address);
+                        }
+                        StartupNetworkJoinTarget::QueryError(error) => {
+                            let message = format_resource_string(
+                                startup_resource_string(
+                                    self.app_paths.as_ref(),
+                                    "IDS_NET_NOJOIN_BADREF",
+                                    "Cannot join selected game: %s",
+                                ),
+                                &[&error],
+                            );
+                            let caption = startup_resource_string(
+                                self.app_paths.as_ref(),
+                                "IDS_NET_NOJOIN",
+                                "Cannot join game",
+                            );
+                            self.push_message_dialog(
+                                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                                    message,
+                                    caption,
+                                    lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                                ),
+                                MessageDialogContinuation::None,
+                            )?;
+                        }
+                    }
                 }
                 NetDlgAction::CreateGame => {
                     // C4StartupNetDlg opens C4StartupScenSelDlg(true) before
@@ -30094,6 +30512,7 @@ impl GameApp {
             self.status_text = format!("Unable to load configured players: {error}");
             return;
         }
+        self.prepare_network_join_game_state();
         self.startup_game_search = None;
         let (sender, receiver) = mpsc::channel();
         let local_owner = self.local_owner;
@@ -30150,6 +30569,7 @@ impl GameApp {
             self.status_text = format!("Unable to load configured players: {error}");
             return Ok(());
         }
+        self.prepare_network_join_game_state();
         let attempts = reference.join_attempts_for_local_host();
         let netpuncher_address = reference.netpuncher_address.clone();
         let netpuncher_game_ids = lc_network::NetpuncherGameIds {
@@ -30175,6 +30595,14 @@ impl GameApp {
             self.launch_pending_network_join();
         }
         Ok(())
+    }
+
+    /// Mirrors the game-state reset immediately before C++ starts either a
+    /// reference-backed or unresolved direct join. The synchronized client
+    /// load replaces this seed with the host's exact fixed resources later.
+    fn prepare_network_join_game_state(&mut self) {
+        self.active_scenario = None;
+        self.active_definition_load = Some(self.scenario_seed_definition_load());
     }
 
     fn launch_pending_network_join(&mut self) {
@@ -31529,46 +31957,40 @@ impl GameApp {
         for event in events {
             match event {
                 lc_network::StartupGameSearchEvent::Cleared => {
+                    let selected_query = self.selected_startup_direct_reference_query_id();
                     self.startup_game_references.clear();
-                    if let Some(dialog) = self.startup_network_dialog.as_mut() {
-                        dialog.set_games(Vec::new());
+                    self.sync_startup_network_game_rows();
+                    if let Some(id) = selected_query {
+                        self.focus_startup_direct_reference_query(id);
                     }
                     self.status_text = "Querying game infos…".to_string();
                 }
                 lc_network::StartupGameSearchEvent::ReferencesUpdated(references) => {
-                    let games = references
-                        .iter()
-                        .map(|reference| {
-                            let host = if reference.host_name.is_empty() {
-                                "unknown"
-                            } else {
-                                reference.host_name.as_str()
-                            };
-                            let title = format!("{} on {host}", reference.title);
-                            let details = format!(
-                                "{} — {} {}.{}.{}.{} [{}]",
-                                reference.state,
-                                reference.game,
-                                reference.version[0],
-                                reference.version[1],
-                                reference.version[2],
-                                reference.version[3],
-                                reference.build,
-                            );
-                            lc_frontend::startup_netdlg::NetDlgGameEntry {
-                                title,
-                                details,
-                                address: reference.tcp_addresses.first().map(ToString::to_string),
-                                joinable: reference.is_joinable(),
-                            }
-                        })
-                        .collect::<Vec<_>>();
+                    let selected_query = self.selected_startup_direct_reference_query_id();
                     self.startup_game_references = references;
-                    let count = games.len();
-                    if let Some(dialog) = self.startup_network_dialog.as_mut() {
-                        dialog.set_games(games);
+                    let count = self.startup_game_references.len();
+                    self.sync_startup_network_game_rows();
+                    if let Some(id) = selected_query {
+                        self.focus_startup_direct_reference_query(id);
                     }
                     self.status_text = format!("Found {count} network game(s)");
+                }
+                lc_network::StartupGameSearchEvent::DirectQueryResolved {
+                    request_id,
+                    references,
+                    selected_index,
+                } => {
+                    self.finish_startup_direct_reference_query(
+                        request_id,
+                        references,
+                        selected_index,
+                    );
+                }
+                lc_network::StartupGameSearchEvent::DirectQueryFailed {
+                    request_id,
+                    message,
+                } => {
+                    self.fail_startup_direct_reference_query(request_id, message);
                 }
                 lc_network::StartupGameSearchEvent::MasterserverReply(_) => {}
                 lc_network::StartupGameSearchEvent::SearchError { source, message } => {
@@ -34358,6 +34780,8 @@ impl GameApp {
     fn open_network_game_dialog(&mut self) {
         self.close_context_menu_silently();
         self.startup_game_references.clear();
+        self.startup_direct_reference_queries.clear();
+        self.netdlg_last_click = None;
         self.pending_network_join = None;
         let (masterserver_signup, _) = load_network_startup_settings(self.app_paths.as_ref());
         let metrics = self
@@ -34554,6 +34978,8 @@ impl GameApp {
         self.startup_network_connection = None;
         self.startup_game_search = None;
         self.startup_game_references.clear();
+        self.startup_direct_reference_queries.clear();
+        self.netdlg_last_click = None;
         self.pending_network_join = None;
         self.network_game_advertiser = None;
         self.advertised_game_reference = None;
@@ -37640,6 +38066,12 @@ impl GameApp {
         }
         match pending.continuation {
             MessageDialogContinuation::None => {}
+            MessageDialogContinuation::NetworkRuntimeJoin { reference }
+                if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
+            {
+                self.activate_network_reference_join(reference)?;
+            }
+            MessageDialogContinuation::NetworkRuntimeJoin { .. } => {}
             MessageDialogContinuation::LobbyReadyCheck { .. } => {
                 self.complete_lobby_ready_check_response(
                     result == lc_frontend::message_dialog::MessageDialogResult::Yes,
@@ -66494,24 +66926,6 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(app.startup_network_connection.is_none());
         assert!(app.network.is_none());
 
-        let address = " 127.0.0.1:11111 ".to_string();
-        let error = app
-            .process_network_dialog_actions(vec![
-                lc_frontend::startup_netdlg::NetDlgAction::JoinGame {
-                    address: Some(address.clone()),
-                },
-            ])
-            .expect_err("direct reference query is not ported");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupAction(ClassicStartupAction::NetworkDirectJoin {
-                address,
-            }),
-        );
-        assert_eq!(app.status_text, network_status);
-        assert!(app.startup_network_connection.is_none());
-        assert!(app.network.is_none());
-
         app.open_player_selection_dialog();
         app.process_player_dialog_actions(vec![
             lc_frontend::startup_plrsel::PlrSelAction::NewPlayer,
@@ -73835,6 +74249,377 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn network_direct_address_enter_adds_query_row_and_focuses_list_without_joining() {
+        let mut app = new_classic_menu_app(800, 600);
+        app.open_network_game_dialog();
+        let address = "127.0.0.1:9".to_string();
+        let actions = {
+            let dialog = app
+                .startup_network_dialog
+                .as_mut()
+                .expect("network dialog");
+            dialog.set_join_address(address.clone());
+            assert_eq!(
+                dialog.handle_key_down(KeyCode::Tab),
+                [lc_frontend::startup_netdlg::NetDlgAction::FocusChanged(
+                    lc_frontend::startup_netdlg::NetDlgControl::JoinAddress,
+                )]
+            );
+            dialog.handle_key_down(KeyCode::Enter)
+        };
+        assert_eq!(
+            actions,
+            [
+                lc_frontend::startup_netdlg::NetDlgAction::QueryAddress {
+                    address: address.clone(),
+                },
+                lc_frontend::startup_netdlg::NetDlgAction::FocusChanged(
+                    lc_frontend::startup_netdlg::NetDlgControl::GameList,
+                ),
+            ]
+        );
+
+        app.process_network_dialog_actions(actions)
+            .expect("first Enter starts only a reference query");
+
+        let dialog = app.startup_network_dialog.as_ref().unwrap();
+        assert_eq!(
+            dialog.focused_control(),
+            lc_frontend::startup_netdlg::NetDlgControl::GameList
+        );
+        assert_eq!(dialog.selected_game(), Some(0));
+        assert_eq!(dialog.games().len(), 1);
+        assert_eq!(dialog.games()[0].address.as_deref(), Some(address.as_str()));
+        assert_eq!(app.startup_direct_reference_queries.len(), 1);
+        assert_eq!(
+            app.startup_direct_reference_queries[0].state,
+            StartupDirectReferenceQueryState::Pending
+        );
+        assert!(app.pending_network_join.is_none());
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.network.is_none());
+
+        // Cancel the deliberately unreachable reference query, then exercise
+        // the unresolved row's second-Enter raw-join fallback.
+        app.startup_game_search = None;
+        app.active_scenario = Some(FrontendScenario::fallback());
+        app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
+            modules: vec!["Stale.c4d".to_string()],
+            definition_root: None,
+        });
+        let actions = app
+            .startup_network_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key_down(KeyCode::Enter);
+        assert_eq!(
+            actions,
+            [lc_frontend::startup_netdlg::NetDlgAction::JoinGame {
+                address: Some(address),
+            }]
+        );
+        app.process_network_dialog_actions(actions)
+            .expect("second Enter starts the unresolved direct join");
+        assert!(app.active_scenario.is_none());
+        match app.active_definition_load.as_ref() {
+            Some(ScenarioDefinitionLoad::Seed { modules, .. }) => {
+                assert_eq!(modules, &["Objects.c4d".to_string()]);
+            }
+            other => panic!("direct join must install the Objects seed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn network_direct_query_ids_preserve_selection_across_out_of_order_results() {
+        let mut app = new_classic_menu_app(800, 600);
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
+            caption_back_extent: 51,
+            text_ip_extent: 18,
+            text_line_height: 22,
+            caption_line_height: 25,
+            title_line_height: 34,
+        };
+        let mut dialog = lc_frontend::startup_netdlg::NetDlgController::new(
+            lc_frontend::startup_netdlg::NetDlgConfig {
+                masterserver_signup: false,
+                record: false,
+            },
+            metrics,
+        );
+        dialog.resize(800, 600);
+        app.startup_view = StartupView::NetworkGame;
+        app.startup_network_dialog = Some(dialog);
+        app.startup_direct_reference_queries = vec![
+            StartupDirectReferenceQuery {
+                id: 10,
+                address: "first.invalid".to_string(),
+                state: StartupDirectReferenceQueryState::Pending,
+            },
+            StartupDirectReferenceQuery {
+                id: 20,
+                address: "second.invalid".to_string(),
+                state: StartupDirectReferenceQueryState::Pending,
+            },
+        ];
+        app.sync_startup_network_game_rows();
+        app.focus_startup_direct_reference_query(10);
+
+        let second = lc_network::NetworkGameReference {
+            title: "Second".to_string(),
+            game: "LegacyClonk".to_string(),
+            version: lc_network::CURRENT_GAME_VERSION,
+            build: lc_network::CURRENT_GAME_BUILD,
+            ..Default::default()
+        };
+        app.finish_startup_direct_reference_query(20, vec![second.clone()], Some(0));
+        assert_eq!(
+            app.startup_direct_reference_queries
+                .iter()
+                .map(|query| query.id)
+                .collect::<Vec<_>>(),
+            [10]
+        );
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .selected_game(),
+            Some(1),
+            "the still-pending first query must stay selected after the second resolves"
+        );
+
+        let first = lc_network::NetworkGameReference {
+            title: "First".to_string(),
+            game: "LegacyClonk".to_string(),
+            version: lc_network::CURRENT_GAME_VERSION,
+            build: lc_network::CURRENT_GAME_BUILD,
+            ..Default::default()
+        };
+        app.finish_startup_direct_reference_query(
+            10,
+            vec![second, first.clone()],
+            Some(1),
+        );
+        assert!(app.startup_direct_reference_queries.is_empty());
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .selected_game(),
+            Some(1)
+        );
+        match app.startup_network_join_target(1) {
+            Some(StartupNetworkJoinTarget::Reference(reference)) => {
+                assert_eq!(reference, first)
+            }
+            _ => panic!("resolved first query must select its own returned reference"),
+        }
+    }
+
+    #[test]
+    fn network_version_mismatch_modal_precedes_runtime_policy_and_never_starts_join() {
+        let mut app = new_classic_menu_app(800, 600);
+        let reference = lc_network::NetworkGameReference {
+            title: "Newer build".to_string(),
+            game: "LegacyClonk".to_string(),
+            version: lc_network::CURRENT_GAME_VERSION,
+            build: lc_network::CURRENT_GAME_BUILD + 1,
+            join_allowed: false,
+            ..Default::default()
+        };
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
+            caption_back_extent: 51,
+            text_ip_extent: 18,
+            text_line_height: 22,
+            caption_line_height: 25,
+            title_line_height: 34,
+        };
+        let mut dialog = lc_frontend::startup_netdlg::NetDlgController::new(
+            lc_frontend::startup_netdlg::NetDlgConfig {
+                masterserver_signup: false,
+                record: false,
+            },
+            metrics,
+        );
+        dialog.resize(800, 600);
+        dialog.set_games(vec![GameApp::startup_network_reference_row(&reference)]);
+        assert!(dialog.handle_key_down(KeyCode::Down).is_empty());
+        let actions = dialog.handle_key_down(KeyCode::Enter);
+        app.startup_view = StartupView::NetworkGame;
+        app.startup_network_dialog = Some(dialog);
+        app.startup_game_references = vec![reference];
+
+        app.process_network_dialog_actions(actions)
+            .expect("version mismatch is a nonfatal modal");
+
+        assert_eq!(app.message_dialogs.len(), 1);
+        let modal = &app.message_dialogs[0].state;
+        assert_eq!(modal.caption(), "Cannot join game");
+        assert_eq!(
+            modal.message(),
+            "Engine version mismatch: the game runs with LegacyClonk 4.9.11.0 [363] - you have LegacyClonk 4.9.11.0 [362]."
+        );
+        assert_eq!(
+            modal.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::OK
+        );
+        assert_eq!(
+            modal.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
+        assert!(app.pending_network_join.is_none());
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.network.is_none());
+    }
+
+    #[test]
+    fn network_no_runtime_join_requires_yes_and_retains_the_exact_reference() {
+        let mut app = new_classic_menu_app(800, 600);
+        let global_tcp = lc_network::NetworkAddress::new(
+            lc_network::NetworkProtocol::Tcp,
+            "8.8.8.8:11112".parse().unwrap(),
+        );
+        let private_udp = lc_network::NetworkAddress::new(
+            lc_network::NetworkProtocol::Udp,
+            "10.0.0.7:11113".parse().unwrap(),
+        );
+        let reference = lc_network::NetworkGameReference {
+            title: "Running game".to_string(),
+            game: "LegacyClonk".to_string(),
+            version: lc_network::CURRENT_GAME_VERSION,
+            build: lc_network::CURRENT_GAME_BUILD,
+            join_allowed: false,
+            password_needed: true,
+            addresses: vec![private_udp, global_tcp],
+            source_address: "127.0.0.1:11111".parse().unwrap(),
+            netpuncher_ipv4: 0x1122_3344,
+            netpuncher_ipv6: 0x5566_7788,
+            netpuncher_address: "puncher.invalid:11115".to_string(),
+            ..Default::default()
+        };
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
+            caption_back_extent: 51,
+            text_ip_extent: 18,
+            text_line_height: 22,
+            caption_line_height: 25,
+            title_line_height: 34,
+        };
+        let mut dialog = lc_frontend::startup_netdlg::NetDlgController::new(
+            lc_frontend::startup_netdlg::NetDlgConfig {
+                masterserver_signup: false,
+                record: false,
+            },
+            metrics,
+        );
+        dialog.resize(800, 600);
+        dialog.set_games(vec![GameApp::startup_network_reference_row(&reference)]);
+        assert!(dialog.handle_key_down(KeyCode::Down).is_empty());
+        let actions = dialog.handle_key_down(KeyCode::Enter);
+        app.startup_view = StartupView::NetworkGame;
+        app.startup_network_dialog = Some(dialog);
+        app.startup_game_references = vec![reference];
+
+        app.process_network_dialog_actions(actions.clone())
+            .expect("runtime policy opens confirmation");
+        let modal = &app.message_dialogs[0].state;
+        assert_eq!(modal.caption(), "Cannot join game");
+        assert_eq!(
+            modal.message(),
+            "The game has started already and runtime join is not allowed! Try joining anyway?"
+        );
+        assert_eq!(
+            modal.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::YES_NO
+        );
+        assert_eq!(
+            modal.focused_button(),
+            Some(lc_frontend::message_dialog::MessageDialogButton::Yes)
+        );
+        assert!(app.pending_network_join.is_none());
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline runtime join");
+        assert!(app.pending_network_join.is_none());
+        assert!(app.startup_network_connection.is_none());
+
+        app.process_network_dialog_actions(actions)
+            .expect("reopen runtime policy confirmation");
+        app.startup_game_references.clear();
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("accept retained runtime reference");
+
+        let settings = app
+            .pending_network_join
+            .as_ref()
+            .expect("accepted reference remains prepared behind password prompt");
+        assert_eq!(settings.server_addresses, [global_tcp, private_udp]);
+        assert_eq!(
+            settings.netpuncher_address.as_deref(),
+            Some("puncher.invalid:11115")
+        );
+        assert_eq!(settings.netpuncher_game_ids.ipv4, 0x1122_3344);
+        assert_eq!(settings.netpuncher_game_ids.ipv6, 0x5566_7788);
+        assert!(app.game_option_input_dialog.is_some());
+        assert!(app.startup_network_connection.is_none());
+    }
+
+    #[test]
+    fn network_row_double_click_runs_the_same_version_preflight_once() {
+        let mut app = new_classic_menu_app(640, 480);
+        let reference = lc_network::NetworkGameReference {
+            title: "Wrong version".to_string(),
+            game: "LegacyClonk".to_string(),
+            version: lc_network::CURRENT_GAME_VERSION,
+            build: lc_network::CURRENT_GAME_BUILD + 1,
+            ..Default::default()
+        };
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
+            caption_back_extent: 51,
+            text_ip_extent: 18,
+            text_line_height: 22,
+            caption_line_height: 25,
+            title_line_height: 34,
+        };
+        let layout = lc_frontend::startup_netdlg::net_dlg_layout(640, 480, &metrics);
+        let mut dialog = lc_frontend::startup_netdlg::NetDlgController::new(
+            lc_frontend::startup_netdlg::NetDlgConfig {
+                masterserver_signup: false,
+                record: false,
+            },
+            metrics,
+        );
+        dialog.resize(640, 480);
+        dialog.set_games(vec![GameApp::startup_network_reference_row(&reference)]);
+        app.startup_view = StartupView::NetworkGame;
+        app.startup_network_dialog = Some(dialog);
+        app.startup_game_references = vec![reference];
+        app.startup_game_search = None;
+        let point = PhysicalPosition::new(
+            f64::from(layout.list_entry.x + layout.list_entry.w / 2),
+            f64::from(layout.list_entry.y + layout.list_entry.h / 2),
+        );
+        app.handle_cursor_moved(point).expect("hover game row");
+
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("first row press");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("first row release only selects");
+        assert!(app.message_dialogs.is_empty());
+
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("second row press");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("second row release activates double click");
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert!(app.message_dialogs[0]
+            .state
+            .message()
+            .starts_with("Engine version mismatch:"));
+        assert!(app.netdlg_last_click.is_none());
+        assert!(app.pending_network_join.is_none());
+        assert!(app.startup_network_connection.is_none());
+    }
+
+    #[test]
     fn client_join_flow_password_prompt_retains_the_complete_prepared_reference() {
         let mut app = new_classic_menu_app(800, 600);
         let global_tcp = lc_network::NetworkAddress::new(
@@ -73881,22 +74666,31 @@ ScenInfoArea=70,5,25,90
         assert!(network_dialog
             .handle_key_down(KeyCode::Down)
             .is_empty());
-        let _ = network_dialog.handle_key_down(KeyCode::Tab);
-        assert_eq!(
-            network_dialog.focused_control(),
-            lc_frontend::startup_netdlg::NetDlgControl::JoinAddress
-        );
         let actions = network_dialog.handle_key_down(KeyCode::Enter);
         assert_eq!(
             actions,
-            [lc_frontend::startup_netdlg::NetDlgAction::JoinGame { address: None }]
+            [lc_frontend::startup_netdlg::NetDlgAction::JoinGame {
+                address: None,
+            }]
         );
         app.startup_network_dialog = Some(network_dialog);
         app.startup_game_references = vec![reference];
+        app.active_scenario = Some(FrontendScenario::fallback());
+        app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
+            modules: vec!["Stale.c4d".to_string()],
+            definition_root: None,
+        });
 
         app.process_network_dialog_actions(actions)
             .expect("selected complete reference opens the exact password prompt");
 
+        assert!(app.active_scenario.is_none());
+        match app.active_definition_load.as_ref() {
+            Some(ScenarioDefinitionLoad::Seed { modules, .. }) => {
+                assert_eq!(modules, &["Objects.c4d".to_string()]);
+            }
+            other => panic!("reference join must install the Objects seed, got {other:?}"),
+        }
         let settings = app
             .pending_network_join
             .as_ref()

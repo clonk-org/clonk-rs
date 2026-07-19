@@ -586,10 +586,89 @@ fn normalize_master_server_url(value: &str) -> String {
     }
 }
 
+fn direct_reference_endpoint(
+    address: &str,
+    default_port: u16,
+) -> Result<ReferenceEndpoint, String> {
+    let address = address.trim();
+    if address.is_empty() {
+        return Err("direct reference address is empty".to_string());
+    }
+    if let Ok(address) = address.parse::<SocketAddr>() {
+        return Ok(ReferenceEndpoint::Address(address));
+    }
+    if let Ok(address) = address.parse::<std::net::IpAddr>() {
+        return Ok(ReferenceEndpoint::Address(SocketAddr::new(
+            address,
+            default_port,
+        )));
+    }
+
+    let has_http_scheme = address
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"));
+    let has_https_scheme = address
+        .get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"));
+    if address.contains("://") && !has_http_scheme && !has_https_scheme {
+        return Err(format!(
+            "unsupported direct reference address scheme in `{address}`"
+        ));
+    }
+    let candidate = if has_http_scheme || has_https_scheme {
+        address.to_string()
+    } else {
+        format!("http://{address}")
+    };
+    let explicit_port = direct_url_has_explicit_port(&candidate);
+    let mut url = reqwest::Url::parse(&candidate)
+        .map_err(|error| format!("invalid direct reference address `{address}`: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+        return Err(format!("invalid direct reference address `{address}`"));
+    }
+    if !explicit_port {
+        url.set_port(Some(default_port)).map_err(|()| {
+            format!("invalid direct reference port {default_port} for `{address}`")
+        })?;
+    }
+    Ok(ReferenceEndpoint::Url(url.into()))
+}
+
+fn direct_url_has_explicit_port(url: &str) -> bool {
+    let authority = url
+        .split_once("://")
+        .map_or(url, |(_, remainder)| remainder)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    if let Some(close) = authority.find(']') {
+        return authority[close + 1..]
+            .strip_prefix(':')
+            .is_some_and(|port| {
+                !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())
+            });
+    }
+    authority.rsplit_once(':').is_some_and(|(host, port)| {
+        !host.is_empty() && !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
 #[derive(Clone, Debug)]
 pub enum StartupGameSearchEvent {
     Cleared,
     ReferencesUpdated(Vec<NetworkGameReference>),
+    DirectQueryResolved {
+        request_id: u64,
+        references: Vec<NetworkGameReference>,
+        selected_index: Option<usize>,
+    },
+    DirectQueryFailed {
+        request_id: u64,
+        message: String,
+    },
     MasterserverReply(MasterserverReplyInfo),
     SearchError {
         source: Option<ReferenceQuerySource>,
@@ -607,11 +686,16 @@ fn lan_probe_error_event(
     })
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum StartupGameSearchCommand {
     InitialRefresh,
     Refresh,
     SetInternetEnabled(bool),
+    QueryDirect {
+        request_id: u64,
+        address: String,
+        default_port: u16,
+    },
     Stop,
 }
 
@@ -680,6 +764,21 @@ impl StartupGameSearch {
             .map_err(|_| mpsc::SendError(()))
     }
 
+    pub fn query_direct(
+        &self,
+        request_id: u64,
+        address: String,
+        default_port: u16,
+    ) -> Result<(), mpsc::SendError<()>> {
+        self.commands
+            .send(StartupGameSearchCommand::QueryDirect {
+                request_id,
+                address,
+                default_port,
+            })
+            .map_err(|_| mpsc::SendError(()))
+    }
+
     pub fn events(&self) -> &mpsc::Receiver<StartupGameSearchEvent> {
         &self.events
     }
@@ -698,6 +797,7 @@ struct QueryResult {
     generation: u64,
     masterserver_generation: u64,
     source: ReferenceQuerySource,
+    direct_request_id: Option<u64>,
     result: Result<ReferenceQueryResponse, ReferenceFetchError>,
 }
 
@@ -763,6 +863,7 @@ async fn run_game_search(
                         execute_search_command(
                             command,
                             (generation, masterserver_generation),
+                            None,
                             &mut masterserver_query,
                             discovery.as_ref(),
                             &query_tx,
@@ -779,6 +880,7 @@ async fn run_game_search(
                         execute_search_command(
                             command,
                             (generation, masterserver_generation),
+                            None,
                             &mut masterserver_query,
                             discovery.as_ref(),
                             &query_tx,
@@ -793,6 +895,35 @@ async fn run_game_search(
                         }
                     }
                 }
+                StartupGameSearchCommand::QueryDirect {
+                    request_id,
+                    address,
+                    default_port,
+                } => match direct_reference_endpoint(&address, default_port) {
+                    Ok(endpoint) => {
+                        execute_search_command(
+                            SearchCommand::QueryReferences {
+                                endpoint,
+                                source: ReferenceQuerySource::DirectJoin,
+                                timeout: REFERENCE_QUERY_TIMEOUT,
+                            },
+                            (generation, masterserver_generation),
+                            Some(request_id),
+                            &mut masterserver_query,
+                            discovery.as_ref(),
+                            &query_tx,
+                            &events,
+                            &reference_config,
+                        )
+                        .await;
+                    }
+                    Err(message) => {
+                        let _ = events.send(StartupGameSearchEvent::DirectQueryFailed {
+                            request_id,
+                            message,
+                        });
+                    }
+                },
                 StartupGameSearchCommand::Stop => {
                     if let Some(query) = masterserver_query.take() {
                         query.abort();
@@ -802,7 +933,7 @@ async fn run_game_search(
             }
         }
         while let Ok(query) = query_rx.try_recv() {
-            if query.generation != generation
+            if (query.direct_request_id.is_none() && query.generation != generation)
                 || (query.source == ReferenceQuerySource::Masterserver
                     && (query.masterserver_generation != masterserver_generation
                         || !search.config.internet_enabled))
@@ -816,20 +947,53 @@ async fn run_game_search(
                         masterserver,
                     } = response;
                     let now = Instant::now();
+                    let selected_reference = query
+                        .direct_request_id
+                        .and_then(|_| references.first().cloned());
                     search.merge_references_at(now, references);
                     search.expire_references_at(now);
-                    let _ = events.send(StartupGameSearchEvent::ReferencesUpdated(
-                        search.references().to_vec(),
-                    ));
-                    if query.source == ReferenceQuerySource::Masterserver {
-                        let _ = events.send(StartupGameSearchEvent::MasterserverReply(masterserver));
+                    if let Some(request_id) = query.direct_request_id {
+                        let selected_index = selected_reference.as_ref().and_then(|selected| {
+                            search
+                                .references()
+                                .iter()
+                                .position(|reference| reference == selected)
+                                .or_else(|| {
+                                    search.references().iter().position(|reference| {
+                                        reference.is_same_host_and_address(selected)
+                                    })
+                                })
+                        });
+                        let _ = events.send(StartupGameSearchEvent::DirectQueryResolved {
+                            request_id,
+                            references: search.references().to_vec(),
+                            selected_index,
+                        });
+                    } else {
+                        let _ = events.send(StartupGameSearchEvent::ReferencesUpdated(
+                            search.references().to_vec(),
+                        ));
+                    }
+                    if query.direct_request_id.is_none()
+                        && query.source == ReferenceQuerySource::Masterserver
+                    {
+                        let _ =
+                            events.send(StartupGameSearchEvent::MasterserverReply(masterserver));
                     }
                 }
                 Err(error) => {
-                    let _ = events.send(StartupGameSearchEvent::SearchError {
-                        source: Some(query.source),
-                        message: error.to_string(),
-                    });
+                    let message = error.to_string();
+                    if let Some(request_id) = query.direct_request_id {
+                        let _ = events.send(StartupGameSearchEvent::DirectQueryFailed {
+                            request_id,
+                            message,
+                        });
+                    } else {
+                        let _ = events.send(StartupGameSearchEvent::SearchError {
+                            source: Some(query.source),
+                            message,
+                        });
+                    }
                 }
             }
         }
@@ -847,6 +1011,7 @@ async fn run_game_search(
                 execute_search_command(
                     command,
                     (generation, masterserver_generation),
+                    None,
                     &mut masterserver_query,
                     discovery.as_ref(),
                     &query_tx,
@@ -868,6 +1033,7 @@ async fn run_game_search(
                     execute_search_command(
                         command,
                         (generation, masterserver_generation),
+                        None,
                         &mut masterserver_query,
                         discovery.as_ref(),
                         &query_tx,
@@ -886,6 +1052,7 @@ async fn run_game_search(
 async fn execute_search_command(
     command: SearchCommand,
     query_generation: (u64, u64),
+    direct_request_id: Option<u64>,
     masterserver_query: &mut Option<tokio::task::JoinHandle<()>>,
     discovery: Result<&DiscoverySocket, &io::Error>,
     query_tx: &tokio::sync::mpsc::UnboundedSender<QueryResult>,
@@ -927,6 +1094,7 @@ async fn execute_search_command(
                     generation,
                     masterserver_generation,
                     source,
+                    direct_request_id,
                     result,
                 });
             });
@@ -1514,6 +1682,32 @@ fn parse_reference_addresses(value: &str) -> Result<Vec<NetworkAddress>, Referen
 mod tests {
     use super::*;
 
+    fn spawn_reference_server(responses: Vec<Vec<u8>>) -> (SocketAddr, thread::JoinHandle<()>) {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = thread::spawn(move || {
+            for body in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        (address, worker)
+    }
+
     #[test]
     fn cpp_join_address_preparation_applies_source_scope_and_stable_rank() {
         // InitClient copies the complete reference set, applies the source
@@ -1751,6 +1945,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn direct_reference_endpoints_apply_the_configured_default_port() {
+        let default_port = 12_345;
+
+        assert_eq!(
+            direct_reference_endpoint(" 127.0.0.1:23456 ", default_port).unwrap(),
+            ReferenceEndpoint::Address("127.0.0.1:23456".parse().unwrap())
+        );
+        assert_eq!(
+            direct_reference_endpoint("2001:db8::1", default_port).unwrap(),
+            ReferenceEndpoint::Address("[2001:db8::1]:12345".parse().unwrap())
+        );
+        assert_eq!(
+            direct_reference_endpoint("games.example.test", default_port).unwrap(),
+            ReferenceEndpoint::Url("http://games.example.test:12345/".to_string())
+        );
+        assert_eq!(
+            direct_reference_endpoint("games.example.test:23456", default_port).unwrap(),
+            ReferenceEndpoint::Url("http://games.example.test:23456/".to_string())
+        );
+        assert_eq!(
+            direct_reference_endpoint("http://games.example.test/reference", default_port).unwrap(),
+            ReferenceEndpoint::Url("http://games.example.test:12345/reference".to_string())
+        );
+        assert_eq!(
+            direct_reference_endpoint("https://games.example.test:23456", default_port).unwrap(),
+            ReferenceEndpoint::Url("https://games.example.test:23456/".to_string())
+        );
+
+        assert!(direct_reference_endpoint("  ", default_port).is_err());
+        assert!(direct_reference_endpoint("ftp://games.example.test", default_port).is_err());
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn malformed_reference_url_reports_the_parse_cause() {
         // C4StartupNetListEntry forwards C4Network2RefClient::SetServer's
@@ -1904,6 +2131,202 @@ mod tests {
         }
     }
 
+    #[test]
+    fn startup_direct_query_tags_merged_and_empty_results() {
+        let body = b"[Reference]\n\
+Title=First returned\n\
+State=Running\n\
+StartTime=1\n\
+JoinAllowed=1\n\
+Address=TCP:127.0.0.1:31112\n\
+Game=LegacyClonk\n\
+Version=4,9,10,0\n\
+Build=361\n\
+[Reference]\n\
+Title=Higher sorted\n\
+State=Lobby\n\
+StartTime=2\n\
+JoinAllowed=1\n\
+Address=TCP:127.0.0.1:31113\n\
+Game=LegacyClonk\n\
+Version=4,9,11,0\n\
+Build=362\n"
+            .to_vec();
+        let (address, server) = spawn_reference_server(vec![body, Vec::new()]);
+        let search = StartupGameSearch::start(NetworkGameSearchConfig {
+            internet_enabled: false,
+            discovery_port: 0,
+            ..NetworkGameSearchConfig::default()
+        })
+        .unwrap();
+
+        search
+            .query_direct(41, format!("  {address}  "), DEFAULT_REFERENCE_PORT)
+            .unwrap();
+        let first_references = match search
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+        {
+            StartupGameSearchEvent::DirectQueryResolved {
+                request_id,
+                references,
+                selected_index,
+            } => {
+                assert_eq!(request_id, 41);
+                assert_eq!(selected_index, Some(1));
+                assert_eq!(references.len(), 2);
+                assert_eq!(references[0].title, "Higher sorted");
+                assert_eq!(references[1].title, "First returned");
+                references
+            }
+            event => panic!("expected tagged direct-query result, got {event:?}"),
+        };
+
+        search
+            .query_direct(42, address.to_string(), DEFAULT_REFERENCE_PORT)
+            .unwrap();
+        match search
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+        {
+            StartupGameSearchEvent::DirectQueryResolved {
+                request_id,
+                references,
+                selected_index,
+            } => {
+                assert_eq!(request_id, 42);
+                assert_eq!(selected_index, None);
+                assert_eq!(references, first_references);
+            }
+            event => panic!("expected tagged empty direct-query result, got {event:?}"),
+        }
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn startup_direct_query_survives_refresh_generation_change() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_started_tx, request_started_rx) = mpsc::channel();
+        let (release_response_tx, release_response_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            request_started_tx.send(()).unwrap();
+            release_response_rx.recv().unwrap();
+            let body = b"[Reference]\n\
+Title=Delayed direct\n\
+State=Lobby\n\
+StartTime=1\n\
+JoinAllowed=1\n\
+Address=TCP:127.0.0.1:31112\n\
+Game=LegacyClonk\n\
+Version=4,9,11,0\n\
+Build=362\n";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+        });
+        let search = StartupGameSearch::start(NetworkGameSearchConfig {
+            internet_enabled: false,
+            discovery_port: 0,
+            ..NetworkGameSearchConfig::default()
+        })
+        .unwrap();
+
+        search
+            .query_direct(59, address.to_string(), DEFAULT_REFERENCE_PORT)
+            .unwrap();
+        request_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("direct request reached the delayed server");
+        search.refresh().unwrap();
+        loop {
+            if matches!(
+                search
+                    .events()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("refresh emits its cleared event"),
+                StartupGameSearchEvent::Cleared
+            ) {
+                break;
+            }
+        }
+        release_response_tx.send(()).unwrap();
+
+        let mut tagged_completion = false;
+        for _ in 0..10 {
+            match search.events().recv_timeout(Duration::from_secs(1)) {
+                Ok(StartupGameSearchEvent::DirectQueryResolved {
+                    request_id,
+                    references,
+                    selected_index,
+                }) => {
+                    assert_eq!(request_id, 59);
+                    assert_eq!(selected_index, Some(0));
+                    assert_eq!(references[0].title, "Delayed direct");
+                    tagged_completion = true;
+                    break;
+                }
+                Ok(StartupGameSearchEvent::DirectQueryFailed { request_id, .. }) => {
+                    assert_eq!(request_id, 59);
+                    tagged_completion = true;
+                    break;
+                }
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(
+            tagged_completion,
+            "refresh must not strand an in-flight tagged direct query"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn startup_direct_query_reports_tagged_endpoint_failures() {
+        let search = StartupGameSearch::start(NetworkGameSearchConfig {
+            internet_enabled: false,
+            discovery_port: 0,
+            ..NetworkGameSearchConfig::default()
+        })
+        .unwrap();
+
+        search
+            .query_direct(
+                73,
+                "ftp://games.example.test".to_string(),
+                DEFAULT_REFERENCE_PORT,
+            )
+            .unwrap();
+        match search
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+        {
+            StartupGameSearchEvent::DirectQueryFailed {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, 73);
+                assert!(message.contains("unsupported"), "{message}");
+            }
+            event => panic!("expected tagged direct-query failure, got {event:?}"),
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn discovery_initialization_failure_waits_for_explicit_refresh() {
         // C4StartupNetDlg ignores discovery initialization and its first send,
@@ -1926,6 +2349,7 @@ mod tests {
             execute_search_command(
                 command(trigger),
                 (0, 0),
+                None,
                 &mut masterserver_query,
                 discovery.as_ref(),
                 &query_tx,
@@ -1942,6 +2366,7 @@ mod tests {
         execute_search_command(
             command(LanProbeTrigger::ExplicitRefresh),
             (0, 0),
+            None,
             &mut masterserver_query,
             discovery.as_ref(),
             &query_tx,
