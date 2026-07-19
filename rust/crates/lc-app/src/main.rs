@@ -93,7 +93,7 @@ use lc_engine::{
     PlayerConfig, PlayerSelectControlData, RgbColor, Scenario, ScenarioError,
     MessageControlData, ScoreboardPresentationRequest, ScriptControlPolicy,
     ShowCommandsRequestStore, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket,
-    TeamConfiguration, Vector2, PLAYER_VIEW_MODE_SCROLLING,
+    TeamConfiguration, Vector2, PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
     MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL, MESSAGE_TYPE_PRIVATE,
     MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM, MESSAGE_TYPE_TEAM,
 };
@@ -11960,6 +11960,10 @@ impl StartupView {
 struct IngameMouseState {
     start: ViewportPointer,
     last: ViewportPointer,
+    /// Last endpoint at which `C4Player::FoWIsVisible` allowed DragSelect to
+    /// rebuild the local Selection. The pointer/frame keeps moving through
+    /// fog; the actual ordered membership is cached in `ingame_dragged_objects`.
+    selection_last: ViewportPointer,
     moved: bool,
     /// The stored DownCursor was Crosshair/Dig, so crossing the drag
     /// threshold enters C4MC_Drag_Selecting rather than moving an object.
@@ -12023,6 +12027,9 @@ struct IngameButtonMouseState {
     /// layer. Region drags use cached Carryable/Grab state; only the physical
     /// right button expands same-ID inventory groups.
     down_region: bool,
+    /// Fog replaced the native DownCursor with Nothing. Moving into a visible
+    /// area later must remain DragNone and use the release-time cursor.
+    down_cursor_nothing: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -12847,6 +12854,7 @@ impl IngameMouseState {
         Self {
             start,
             last: start,
+            selection_last: start,
             moved: false,
             selection_frame,
             selection_kind: IngameDragSelectionKind::Unknown,
@@ -12868,6 +12876,21 @@ impl IngameMouseState {
         }
     }
 
+    fn update_with_fog(&mut self, pointer: ViewportPointer, fog_blocked: bool) -> bool {
+        let was_moved = self.moved;
+        self.update(pointer);
+        if !was_moved && self.moved && fog_blocked {
+            // DragNone refuses to enter a drag while the threshold-crossing
+            // endpoint is fog-covered. A later visible endpoint may still
+            // start the retained button gesture.
+            self.moved = false;
+            return false;
+        }
+        if self.moved && self.selection_frame && !fog_blocked {
+            self.selection_last = pointer;
+        }
+        !was_moved && self.moved
+    }
 }
 
 impl IngameButtonMouseState {
@@ -12876,7 +12899,16 @@ impl IngameButtonMouseState {
             motion: IngameMouseState::new(start, down_target.is_none() && !down_region),
             down_target,
             down_region,
+            down_cursor_nothing: false,
         }
+    }
+
+    fn update_with_fog(&mut self, pointer: ViewportPointer, fog_blocked: bool) -> bool {
+        if self.down_cursor_nothing {
+            self.motion.last = pointer;
+            return false;
+        }
+        self.motion.update_with_fog(pointer, fog_blocked)
     }
 }
 
@@ -30239,6 +30271,7 @@ impl GameApp {
             let over_region = self
                 .ingame_viewport_region(pointer.owner, pointer.screen)
                 .is_some();
+            let fog_blocked = self.ingame_pointer_fog_blocked(pointer);
             let cancel_left_selection = over_region
                 && self
                     .mouse_state
@@ -30257,9 +30290,7 @@ impl GameApp {
                 .is_some_and(|state| state.motion.region_drag_started);
             let mut left_region_drag = None;
             if let Some(state) = self.mouse_state.as_mut() {
-                let was_moved = state.motion.moved;
-                state.motion.update(pointer);
-                if !was_moved && state.motion.moved {
+                if state.update_with_fog(pointer, fog_blocked) {
                     left_region_drag = state.motion.down_region.and_then(|region| match region {
                         IngameViewportRegion::Inventory(target) => Some(target),
                         IngameViewportRegion::Command(_) => None,
@@ -30268,9 +30299,7 @@ impl GameApp {
             }
             let mut right_region_drag = None;
             if let Some(state) = self.ingame_right_mouse_state.as_mut() {
-                let was_moved = state.motion.moved;
-                state.motion.update(pointer);
-                if !was_moved && state.motion.moved {
+                if state.update_with_fog(pointer, fog_blocked) {
                     right_region_drag =
                         state.motion.down_region.and_then(|region| match region {
                             IngameViewportRegion::Inventory(target) => Some(target),
@@ -30448,11 +30477,12 @@ impl GameApp {
         else {
             return Ok(None);
         };
+        let fog_blocked = self.ingame_pointer_fog_blocked(pointer);
         if let Some(state) = self.mouse_state.as_mut() {
-            state.motion.update(pointer);
+            state.update_with_fog(pointer, fog_blocked);
         }
         if let Some(state) = self.ingame_right_mouse_state.as_mut() {
-            state.motion.update(pointer);
+            state.update_with_fog(pointer, fog_blocked);
         }
         self.ingame_pointer = Some(pointer);
         self.update_ingame_drag_selection_kinds();
@@ -30524,6 +30554,11 @@ impl GameApp {
         &self,
         pointer: ViewportPointer,
     ) -> Option<IngameRegionDragCursor> {
+        if self.ingame_pointer_fog_blocked(pointer) {
+            // DragMoving forces Cursor_Nothing throughout fog, including
+            // drags that originated in a viewport inventory region.
+            return None;
+        }
         let object = self.ingame_dragged_objects.iter().find_map(|object| {
             self.engine
                 .object_snapshot(*object)
@@ -30590,6 +30625,9 @@ impl GameApp {
     }
 
     fn cancel_ingame_selection_for_region(&mut self, cancel_left: bool, cancel_right: bool) {
+        if cancel_left || cancel_right {
+            self.ingame_dragged_objects.clear();
+        }
         if cancel_left {
             if let Some(state) = self.mouse_state.as_mut() {
                 state.motion.selection_frame = false;
@@ -30679,29 +30717,42 @@ impl GameApp {
         Ok(true)
     }
 
-    fn ingame_drag_selection_kind(&self, motion: IngameMouseState) -> IngameDragSelectionKind {
+    fn ingame_drag_selection(
+        &self,
+        motion: IngameMouseState,
+    ) -> Option<(IngameDragSelectionKind, Vec<ObjectId>)> {
         if !motion.moved
             || !motion.selection_frame
-            || motion.selection_kind != IngameDragSelectionKind::Unknown
+            || self.ingame_pointer_fog_blocked(motion.last)
         {
-            return motion.selection_kind;
+            return None;
         }
         let first = ingame_pointer_world_pixel(motion.start);
-        let second = ingame_pointer_world_pixel(motion.last);
-        if !self
-            .engine
-            .mouse_drag_crew_in_rect(self.local_owner, first, second)
-            .is_empty()
-        {
-            IngameDragSelectionKind::Crew
-        } else if !self
-            .engine
-            .mouse_drag_carryables_in_rect(first, second)
-            .is_empty()
-        {
-            IngameDragSelectionKind::Objects
-        } else {
-            IngameDragSelectionKind::Unknown
+        let second = ingame_pointer_world_pixel(motion.selection_last);
+        match motion.selection_kind {
+            IngameDragSelectionKind::Crew => Some((
+                IngameDragSelectionKind::Crew,
+                self.engine
+                    .mouse_drag_crew_in_rect(self.local_owner, first, second),
+            )),
+            IngameDragSelectionKind::Objects => Some((
+                IngameDragSelectionKind::Objects,
+                self.engine.mouse_drag_carryables_in_rect(first, second),
+            )),
+            IngameDragSelectionKind::Unknown => {
+                let crew = self
+                    .engine
+                    .mouse_drag_crew_in_rect(self.local_owner, first, second);
+                if !crew.is_empty() {
+                    return Some((IngameDragSelectionKind::Crew, crew));
+                }
+                let objects = self.engine.mouse_drag_carryables_in_rect(first, second);
+                if !objects.is_empty() {
+                    Some((IngameDragSelectionKind::Objects, objects))
+                } else {
+                    Some((IngameDragSelectionKind::Unknown, Vec::new()))
+                }
+            }
         }
     }
 
@@ -30718,6 +30769,38 @@ impl GameApp {
         })
     }
 
+    fn ingame_pointer_fog_blocked(&self, pointer: ViewportPointer) -> bool {
+        let point = ingame_pointer_world_pixel(pointer);
+        if self.snapshot.landscape.as_ref().is_some_and(|landscape| {
+            point.x < 0
+                || point.y < 0
+                || i64::from(point.x) >= i64::from(landscape.width())
+                || point.y >= landscape.estimated_height()
+        }) {
+            return true;
+        }
+        self.snapshot
+            .players
+            .iter()
+            .find(|player| player.id == pointer.owner)
+            .is_some_and(|player| {
+                player.fog_of_war
+                    && !fow_point_is_visible(&self.snapshot, pointer.owner, point)
+            })
+    }
+
+    fn ingame_fog_allows_target(
+        &self,
+        pointer: ViewportPointer,
+        target: ObjectId,
+    ) -> bool {
+        !self.ingame_pointer_fog_blocked(pointer)
+            || self
+                .snapshot
+                .object(target)
+                .is_some_and(|object| object.category & C4D_IGNORE_FOW != 0)
+    }
+
     fn ingame_primary_mouse_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
         let primary_ocf = lc_engine::ocf::GRAB
             | lc_engine::ocf::CHOP
@@ -30726,8 +30809,18 @@ impl GameApp {
             | lc_engine::ocf::LIVING
             | lc_engine::ocf::CARRYABLE
             | lc_engine::ocf::EXCLUSIVE;
-        self.graphics
-            .object_at_point_with_ocf(&self.snapshot, owner, point, primary_ocf)
+        let target = self.graphics.object_at_point_with_ocf(
+            &self.snapshot,
+            owner,
+            point,
+            primary_ocf,
+        )?;
+        let blocked = self
+            .graphics
+            .viewport_point_at(point)
+            .filter(|pointer| pointer.owner == owner)
+            .is_some_and(|pointer| !self.ingame_fog_allows_target(pointer, target));
+        (!blocked).then_some(target)
     }
 
     fn ingame_mouse_select_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
@@ -30736,21 +30829,23 @@ impl GameApp {
     }
 
     fn update_ingame_drag_selection_kinds(&mut self) {
-        let left_kind = self
+        let left_selection = self
             .mouse_state
-            .map(|state| self.ingame_drag_selection_kind(state.motion));
-        let right_kind = self
+            .and_then(|state| self.ingame_drag_selection(state.motion));
+        let right_selection = self
             .ingame_right_mouse_state
-            .map(|state| self.ingame_drag_selection_kind(state.motion));
-        if let Some(kind) = left_kind {
+            .and_then(|state| self.ingame_drag_selection(state.motion));
+        if let Some((kind, selection)) = left_selection {
             if let Some(state) = self.mouse_state.as_mut() {
                 state.motion.selection_kind = kind;
             }
+            self.ingame_dragged_objects = selection;
         }
-        if let Some(kind) = right_kind {
+        if let Some((kind, selection)) = right_selection {
             if let Some(state) = self.ingame_right_mouse_state.as_mut() {
                 state.motion.selection_kind = kind;
             }
+            self.ingame_dragged_objects = selection;
         }
     }
 
@@ -31218,26 +31313,11 @@ impl GameApp {
                 IngameViewportRegion::Inventory(target) => Some(target),
                 IngameViewportRegion::Command(_) => None,
             });
-            // UpdateCursorTarget's primary FindVisObject mask. RightUp later
-            // refills with OCF_All for context, but DownTarget must ignore
-            // plain background objects exactly like C++ (cpp:469-477,1248).
-            let primary_ocf = lc_engine::ocf::GRAB
-                | lc_engine::ocf::CHOP
-                | lc_engine::ocf::CONTAINER
-                | lc_engine::ocf::CONSTRUCT
-                | lc_engine::ocf::LIVING
-                | lc_engine::ocf::CARRYABLE
-                | lc_engine::ocf::EXCLUSIVE;
             let down_target = region_target.or_else(|| {
                 if region.is_some() {
                     return None;
                 }
-                self.graphics.object_at_point_with_ocf(
-                    &self.snapshot,
-                    self.local_owner,
-                    pointer.screen,
-                    primary_ocf,
-                )
+                self.ingame_primary_mouse_target(self.local_owner, pointer.screen)
             });
             let mut state = IngameButtonMouseState::new(
                 pointer,
@@ -31245,6 +31325,11 @@ impl GameApp {
                 region.is_some(),
             );
             state.motion.down_region = region;
+            let fog_blocked = region.is_none() && self.ingame_pointer_fog_blocked(pointer);
+            if fog_blocked {
+                state.motion.selection_frame = false;
+                state.down_cursor_nothing = down_target.is_none();
+            }
             self.ingame_right_mouse_state = Some(state);
             return Ok(());
         }
@@ -31311,6 +31396,7 @@ impl GameApp {
         let context_target = primary_target.or_else(|| {
             self.graphics
                 .object_at_point(&self.snapshot, self.local_owner, pointer.screen)
+                .filter(|target| self.ingame_fog_allows_target(pointer, *target))
         });
         if let Some(target) = context_target {
             if let Some(select_target) = primary_target
@@ -31381,12 +31467,10 @@ impl GameApp {
             // type found. Crew frames queue CID_PlrSelect and clear; object
             // frames retain their local Selection for a subsequent moving
             // drag (C4MouseControl.cpp:795-817,909-968,1158-1169).
-            let first = ingame_pointer_world_pixel(drag.motion.start);
-            let second = ingame_pointer_world_pixel(drag.motion.last);
+            let selected = self.ingame_selection_candidates(drag.motion);
             match drag.motion.selection_kind {
                 IngameDragSelectionKind::Crew => {
                     self.ingame_dragged_objects.clear();
-                    let selected = self.engine.mouse_drag_crew_in_rect(owner, first, second);
                     self.submit_or_execute_player_select(PlayerSelectControlData {
                         player: owner,
                         objects: selected
@@ -31400,8 +31484,7 @@ impl GameApp {
                     self.refresh_focus();
                 }
                 IngameDragSelectionKind::Objects => {
-                    self.ingame_dragged_objects =
-                        self.engine.mouse_drag_carryables_in_rect(first, second);
+                    self.ingame_dragged_objects = selected;
                 }
                 IngameDragSelectionKind::Unknown => {
                     self.ingame_dragged_objects.clear();
@@ -31567,6 +31650,9 @@ impl GameApp {
         if drag.motion.last.owner != self.local_owner {
             return Ok(());
         }
+        if self.ingame_pointer_fog_blocked(drag.motion.last) {
+            return self.finish_ingame_noop_drag(drag.motion, selected.len());
+        }
         let position = ingame_pointer_world_pixel(drag.motion.last);
         let put_target = self
             .keyboard_modifiers
@@ -31635,6 +31721,9 @@ impl GameApp {
         let selected = region_selection.unwrap_or_else(|| vec![down_target]);
         if drag.motion.last.owner != self.local_owner {
             return Ok(());
+        }
+        if self.ingame_pointer_fog_blocked(drag.motion.last) {
+            return self.finish_ingame_noop_drag(drag.motion, selected.len());
         }
         let position = ingame_pointer_world_pixel(drag.motion.last);
         let put_target = self
@@ -31818,6 +31907,11 @@ impl GameApp {
             region.is_some(),
         );
         state.motion.down_region = region;
+        let fog_blocked = region.is_none() && self.ingame_pointer_fog_blocked(pointer);
+        if fog_blocked {
+            state.motion.selection_frame = false;
+            state.down_cursor_nothing = down_target.is_none();
+        }
         self.mouse_state = Some(state);
 
         if let Some(region) = region {
@@ -31970,10 +32064,11 @@ impl GameApp {
             return Ok(());
         }
         let point = ingame_pointer_world_pixel(pointer);
+        let fog_blocked = self.ingame_pointer_fog_blocked(pointer);
         // UpdateCursorTarget evaluates the nearby Jump cursor after Select,
         // so an eligible jump zone owns the click even over another crew
         // member (C4MouseControl.cpp:522-534,1129-1132).
-        if self.engine.mouse_jump_zone(pointer.owner, point) {
+        if !fog_blocked && self.engine.mouse_jump_zone(pointer.owner, point) {
             self.show_startup_hint = false;
             self.submit_or_execute_player_command(PlayerCommandControlData {
                 player: pointer.owner,
@@ -32001,6 +32096,9 @@ impl GameApp {
             self.snapshot = self.engine.snapshot();
             self.refresh_object_menu();
             self.refresh_focus();
+            return Ok(());
+        }
+        if fog_blocked {
             return Ok(());
         }
         self.show_startup_hint = false;
@@ -32034,6 +32132,9 @@ impl GameApp {
         }
         let point = ingame_pointer_world_pixel(pointer);
         let target = self.ingame_primary_mouse_target(pointer.owner, pointer.screen);
+        if self.ingame_pointer_fog_blocked(pointer) && target.is_none() {
+            return Ok(());
+        }
         let Some(command) = self.engine.mouse_left_double_command(
             pointer.owner,
             target,
@@ -46509,18 +46610,18 @@ impl GameApp {
     }
 
     fn ingame_selection_candidates(&self, motion: IngameMouseState) -> Vec<ObjectId> {
-        let first = ingame_pointer_world_pixel(motion.start);
-        let second = ingame_pointer_world_pixel(motion.last);
-        match motion.selection_kind {
-            IngameDragSelectionKind::Crew => {
-                self.engine
-                    .mouse_drag_crew_in_rect(self.local_owner, first, second)
-            }
-            IngameDragSelectionKind::Objects => {
-                self.engine.mouse_drag_carryables_in_rect(first, second)
-            }
-            IngameDragSelectionKind::Unknown => Vec::new(),
+        if motion.selection_kind == IngameDragSelectionKind::Unknown {
+            return Vec::new();
         }
+        self.ingame_dragged_objects
+            .iter()
+            .copied()
+            .filter(|object| {
+                self.engine.object_snapshot(*object).is_some_and(|object| {
+                    object.status != lc_engine::ObjectStatus::Deleted
+                })
+            })
+            .collect()
     }
 
     fn ingame_selection_frame(&self) -> Option<(Vec<ObjectId>, Vector2, GuiPoint)> {
@@ -54474,6 +54575,105 @@ fn ingame_pointer_world_pixel(pointer: ViewportPointer) -> Vector2 {
     Vector2::new(pointer.world.x as i32, pointer.world.y as i32)
 }
 
+fn fow_object_is_closed(snapshot: &SimulationSnapshot, object: &ObjectSnapshot) -> bool {
+    object
+        .container
+        .and_then(|container| snapshot.object(container))
+        .and_then(|container| {
+            snapshot
+                .definition_closed_containers
+                .get(&container.definition_id)
+        })
+        .is_some_and(|closed| *closed == 1)
+}
+
+/// Exact interaction predicate from `C4Player::FoWIsVisible`. This is
+/// deliberately independent from the renderer's faded modulation map.
+fn fow_point_is_visible(snapshot: &SimulationSnapshot, owner: i32, point: Vector2) -> bool {
+    let Some(player) = snapshot.players.iter().find(|player| player.id == owner) else {
+        return false;
+    };
+    let fow_player = snapshot.fow_players.get(&owner);
+    let fallback_view_objects;
+    let view_objects = if let Some(fow_player) = fow_player {
+        fow_player.view_objects.as_slice()
+    } else {
+        fallback_view_objects = snapshot
+            .objects
+            .iter()
+            .filter(|object| {
+                object.status != lc_engine::ObjectStatus::Deleted
+                    && object.plr_view_range != 0
+                    && (object.owner == owner
+                        || !snapshot
+                            .players
+                            .iter()
+                            .any(|player| player.id == object.owner))
+            })
+            .map(|object| object.id)
+            .collect::<Vec<_>>();
+        fallback_view_objects.as_slice()
+    };
+    let in_range = |object: &ObjectSnapshot, range: i32| {
+        if fow_object_is_closed(snapshot, object) {
+            return false;
+        }
+        let dx = i128::from(object.position.x) - i128::from(point.x);
+        let dy = i128::from(object.position.y) - i128::from(point.y);
+        let radius = i128::from(range).abs();
+        dx * dx + dy * dy < radius * radius
+    };
+
+    let mut seen = false;
+    for object in view_objects
+        .iter()
+        .filter_map(|object| snapshot.object(*object))
+    {
+        let range = object.plr_view_range;
+        if !in_range(object, range) {
+            continue;
+        }
+        if range < 0 {
+            // Faded generators darken the modulation map but do not block
+            // mouse interaction in FoWIsVisible.
+            if object.color_modulation & 0xff00_0000 == 0 {
+                return false;
+            }
+        } else if range > 0 {
+            seen = true;
+        }
+    }
+
+    if player.view_mode == PLAYER_VIEW_MODE_TARGET {
+        if let Some(target) = player
+            .view_target
+            .or_else(|| fow_player.and_then(|fow_player| fow_player.view_target))
+            .and_then(|target| snapshot.object(target))
+        {
+            let mut range = target.plr_view_range;
+            if range == 0 {
+                range = player
+                    .cursor
+                    .and_then(|cursor| snapshot.object(cursor))
+                    .map_or(0, |cursor| cursor.plr_view_range);
+            }
+            if range == 0 {
+                range = 500;
+            }
+            if in_range(target, range) {
+                if range < 0 {
+                    if target.color_modulation & 0xff00_0000 == 0 {
+                        return false;
+                    }
+                } else {
+                    seen = true;
+                }
+            }
+        }
+    }
+    seen
+}
+
 fn ingame_pointer_viewport_pixel(
     pointer: ViewportPointer,
     viewport: ActiveViewportProjection,
@@ -56507,6 +56707,546 @@ mod tests {
         let (manager, _events, commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         commands
+    }
+
+    fn configure_mouse_fog(
+        app: &mut GameApp,
+        range: i32,
+    ) -> (i32, ObjectId, Vector2, Option<ObjectId>) {
+        let owner = app.local_owner;
+        let cursor = app
+            .engine
+            .crew_cursor(owner)
+            .expect("mouse fog fixture has cursor crew");
+        app.engine
+            .player_mut(owner)
+            .expect("mouse fog fixture has local player")
+            .set_fog_of_war(true);
+        let mut update = ObjectUpdate::new();
+        update.plr_view_range = Some(range);
+        app.engine
+            .apply_object_update(cursor, update)
+            .expect("set exact mouse visibility radius");
+        let cursor = app
+            .engine
+            .object_snapshot(cursor)
+            .expect("cursor remains live");
+        (owner, cursor.id, cursor.position, cursor.layer)
+    }
+
+    fn spawn_mouse_fog_target(
+        app: &mut GameApp,
+        id: &str,
+        position: Vector2,
+        layer: Option<ObjectId>,
+        category: i32,
+    ) -> ObjectId {
+        let mut definition = Definition::from_script(id, id, "#strict\n")
+            .expect("mouse fog target definition compiles");
+        definition.set_category(category);
+        definition.set_collectible(true);
+        definition.set_shape_rect(Some(lc_engine::DefinitionRect::new(-3, -3, 6, 6)));
+        app.engine
+            .register_definition(definition)
+            .expect("register mouse fog target");
+        let spawn = layer
+            .map(|layer| {
+                SpawnConfig::new(id)
+                    .with_position(position)
+                    .with_layer(layer)
+            })
+            .unwrap_or_else(|| SpawnConfig::new(id).with_position(position));
+        app.engine
+            .spawn_object(spawn)
+            .expect("spawn mouse fog target")
+    }
+
+    #[test]
+    fn mouse_fog_blocks_hidden_left_click_and_cycles_hidden_right_target() {
+        let mut app = new_running_sandbox_app();
+        let (owner, cursor, cursor_position, layer) = configure_mouse_fog(&mut app, 40);
+        let target = spawn_mouse_fog_target(
+            &mut app,
+            "MFGH",
+            Vector2::new(cursor_position.x + 100, cursor_position.y),
+            layer,
+            lc_engine::CATEGORY_OBJECT | lc_engine::CATEGORY_MOUSE_SELECT,
+        );
+        render_mouse_test_app(&mut app);
+
+        let hidden_empty = [-100, -120, 120]
+            .into_iter()
+            .find_map(|offset| {
+                let world = Vector2::new(cursor_position.x + offset, cursor_position.y);
+                let (x, y) = app.graphics.world_to_screen(owner, world)?;
+                let point = GuiPoint::new(x.ceil(), y.ceil());
+                let pointer = app.graphics.viewport_point_at(point)?;
+                (pointer.owner == owner
+                    && app.ingame_pointer_fog_blocked(pointer)
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, point)
+                        .is_none()
+                    && app.ingame_viewport_region(owner, point).is_none())
+                .then_some(point)
+            })
+            .expect("viewport has an empty fog-covered point");
+        let target_point = mouse_test_object_point(&app, owner, target);
+        let target_pointer = app
+            .graphics
+            .viewport_point_at(GuiPoint::new(target_point.x.ceil(), target_point.y.ceil()))
+            .expect("hidden target point maps into viewport");
+        assert!(app.ingame_pointer_fog_blocked(target_pointer));
+        assert_eq!(app.ingame_primary_mouse_target(owner, target_point), None);
+        let expected_next = app
+            .engine
+            .player_mouse_select_next_object(owner)
+            .expect("sandbox crew cycle has a next object");
+        assert_eq!(expected_next, cursor);
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        app.ingame_last_left_down = None;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(hidden_empty.x),
+            f64::from(hidden_empty.y),
+        ))
+        .expect("move to hidden empty point");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hidden left-down");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("hidden left-up");
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(target_point.x),
+            f64::from(target_point.y),
+        ))
+        .expect("move onto hidden target");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("hidden right-down");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("hidden right-up");
+
+        let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+        assert!(direct.is_empty());
+        assert!(
+            player_commands.is_empty(),
+            "fog must suppress both MoveTo and hidden Context: {player_commands:?}"
+        );
+        let [(_, selection)] = selections.as_slice() else {
+            panic!("hidden right click must cycle exactly once, got {selections:?}");
+        };
+        assert_eq!(selection.player, owner);
+        assert_eq!(selection.objects, vec![expected_next.as_u64() as i32]);
+    }
+
+    #[test]
+    fn mouse_fog_keeps_ignore_fow_target_clickable() {
+        let mut app = new_running_sandbox_app();
+        let (owner, _cursor, cursor_position, layer) = configure_mouse_fog(&mut app, 40);
+        let target = spawn_mouse_fog_target(
+            &mut app,
+            "MFGI",
+            Vector2::new(cursor_position.x + 100, cursor_position.y),
+            layer,
+            lc_engine::CATEGORY_OBJECT | lc_engine::CATEGORY_MOUSE_SELECT | C4D_IGNORE_FOW,
+        );
+        render_mouse_test_app(&mut app);
+        let target_point = mouse_test_object_point(&app, owner, target);
+        let target_pointer = app
+            .graphics
+            .viewport_point_at(GuiPoint::new(target_point.x.ceil(), target_point.y.ceil()))
+            .expect("IgnoreFoW target point maps into viewport");
+        assert!(app.ingame_pointer_fog_blocked(target_pointer));
+        assert_eq!(
+            app.ingame_mouse_select_target(owner, target_point),
+            Some(target)
+        );
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        app.ingame_last_left_down = None;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(target_point.x),
+            f64::from(target_point.y),
+        ))
+        .expect("move onto IgnoreFoW target");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("IgnoreFoW left-down");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("IgnoreFoW left-up");
+
+        let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+        assert!(direct.is_empty());
+        assert!(player_commands.is_empty());
+        let [(_, selection)] = selections.as_slice() else {
+            panic!("IgnoreFoW target must remain clickable, got {selections:?}");
+        };
+        assert_eq!(selection.objects, vec![target.as_u64() as i32]);
+    }
+
+    #[test]
+    fn mouse_fog_turns_moving_object_release_into_noop_command() {
+        let mut app = new_running_sandbox_app();
+        let (owner, _cursor, cursor_position, layer) = configure_mouse_fog(&mut app, 60);
+        let target = spawn_mouse_fog_target(
+            &mut app,
+            "MFGD",
+            Vector2::new(cursor_position.x + 24, cursor_position.y),
+            layer,
+            lc_engine::CATEGORY_OBJECT,
+        );
+        render_mouse_test_app(&mut app);
+        let target_point = mouse_test_object_point(&app, owner, target);
+        let start = app
+            .graphics
+            .viewport_point_at(target_point)
+            .expect("visible drag source maps into the viewport");
+        assert!(!app.ingame_pointer_fog_blocked(start));
+        assert_eq!(
+            app.engine
+                .mouse_world_drag_source(owner, target, ingame_pointer_world_pixel(start)),
+            Some(MouseDragSource::Carryable)
+        );
+
+        let landscape = app.snapshot.landscape.as_ref().expect("sandbox landscape");
+        let width = i32::try_from(landscape.width()).expect("landscape width fits i32");
+        let height = landscape.estimated_height();
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("mouse fog fixture has a local viewport");
+        let visible_drag_point = (viewport.y..viewport.y + viewport.height as i32)
+            .flat_map(|y| {
+                (viewport.x..viewport.x + viewport.width as i32)
+                    .map(move |x| GuiPoint::new(x as f32, y as f32))
+            })
+            .find(|point| {
+                let Some(pointer) = app.graphics.viewport_point_at(*point) else {
+                    return false;
+                };
+                pointer.owner == owner
+                    && ((point.x - target_point.x).abs() >= 12.0
+                        || (point.y - target_point.y).abs() >= 12.0)
+                    && !app.ingame_pointer_fog_blocked(pointer)
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, *point)
+                        .is_none()
+                    && app.ingame_viewport_region(owner, *point).is_none()
+            })
+            .expect("sandbox has a visible point where DragMoving can begin");
+        let (hidden_point, hidden) = (viewport.y..viewport.y + viewport.height as i32)
+            .flat_map(|y| {
+                (viewport.x..viewport.x + viewport.width as i32)
+                    .map(move |x| GuiPoint::new(x as f32, y as f32))
+            })
+            .find_map(|point| {
+                let pointer = app.graphics.viewport_point_at(point)?;
+                let world = ingame_pointer_world_pixel(pointer);
+                (pointer.owner == owner
+                    && world.x >= 0
+                    && world.y >= 0
+                    && world.x < width
+                    && world.y < height
+                    && ((point.x - target_point.x).abs() >= 12.0
+                        || (point.y - target_point.y).abs() >= 12.0)
+                    && app.ingame_pointer_fog_blocked(pointer)
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, point)
+                        .is_none()
+                    && app.ingame_viewport_region(owner, point).is_none())
+                .then_some((point, world))
+            })
+            .expect("sandbox has an in-bounds fog-covered drag endpoint");
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        app.ingame_last_left_down = None;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(target_point.x),
+            f64::from(target_point.y),
+        ))
+        .expect("move to visible drag source");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("visible object left-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(visible_drag_point.x),
+            f64::from(visible_drag_point.y),
+        ))
+        .expect("begin DragMoving in visible terrain");
+        assert!(app.mouse_state.is_some_and(|state| state.motion.moved));
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(hidden_point.x),
+            f64::from(hidden_point.y),
+        ))
+        .expect("continue DragMoving into fog");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("fog-covered moving release is consumed");
+
+        let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+        assert!(direct.is_empty());
+        assert!(selections.is_empty());
+        let [(_, command)] = player_commands.as_slice() else {
+            panic!("fog-covered object release must send one no-op, got {player_commands:?}");
+        };
+        assert_eq!(command.player, owner);
+        assert_eq!(command.command, 0);
+        assert_eq!((command.x, command.y), (hidden.x, hidden.y));
+        assert_eq!((command.target, command.target2), (0, 0));
+        assert_eq!(command.add_mode, 1);
+    }
+
+    #[test]
+    fn mouse_fog_freezes_selection_members_at_last_visible_endpoint() {
+        let mut app = new_running_sandbox_app();
+        let (owner, _cursor, cursor_position, layer) = configure_mouse_fog(&mut app, 60);
+        let first = spawn_mouse_fog_target(
+            &mut app,
+            "MFG1",
+            Vector2::new(cursor_position.x + 24, cursor_position.y),
+            layer,
+            lc_engine::CATEGORY_OBJECT,
+        );
+        let second = spawn_mouse_fog_target(
+            &mut app,
+            "MFG2",
+            Vector2::new(cursor_position.x + 90, cursor_position.y),
+            layer,
+            lc_engine::CATEGORY_OBJECT,
+        );
+        render_mouse_test_app(&mut app);
+        let to_screen = |app: &GameApp, world: Vector2| {
+            let (x, y) = app
+                .graphics
+                .world_to_screen(owner, world)
+                .expect("selection point maps into viewport");
+            GuiPoint::new(x.ceil(), y.ceil())
+        };
+        let start = to_screen(
+            &app,
+            Vector2::new(cursor_position.x + 10, cursor_position.y - 10),
+        );
+        let visible_end = to_screen(
+            &app,
+            Vector2::new(cursor_position.x + 35, cursor_position.y + 10),
+        );
+        let hidden_end = to_screen(
+            &app,
+            Vector2::new(cursor_position.x + 110, cursor_position.y + 10),
+        );
+        for point in [start, visible_end, hidden_end] {
+            assert!(app
+                .graphics
+                .object_at_point(&app.snapshot, owner, point)
+                .is_none());
+            assert!(app.ingame_viewport_region(owner, point).is_none());
+        }
+        assert!(app
+            .graphics
+            .viewport_point_at(visible_end)
+            .is_some_and(|pointer| !app.ingame_pointer_fog_blocked(pointer)));
+        assert!(app
+            .graphics
+            .viewport_point_at(hidden_end)
+            .is_some_and(|pointer| app.ingame_pointer_fog_blocked(pointer)));
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(start.x),
+            f64::from(start.y),
+        ))
+        .expect("move to selection start");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("selection right-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(visible_end.x),
+            f64::from(visible_end.y),
+        ))
+        .expect("move to visible selection endpoint");
+        let visible_motion = app
+            .ingame_right_mouse_state
+            .expect("visible selection remains active")
+            .motion;
+        assert_eq!(visible_motion.selection_kind, IngameDragSelectionKind::Objects);
+        assert_eq!(app.ingame_selection_candidates(visible_motion), vec![first]);
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(hidden_end.x),
+            f64::from(hidden_end.y),
+        ))
+        .expect("move selection endpoint into fog");
+        let hidden_motion = app
+            .ingame_right_mouse_state
+            .expect("fogged selection remains active")
+            .motion;
+        assert_eq!(hidden_motion.last.screen, hidden_end);
+        assert_eq!(app.ingame_selection_candidates(hidden_motion), vec![first]);
+        assert_ne!(
+            app.ingame_selection_candidates(hidden_motion),
+            vec![first, second],
+            "fogged endpoint must not add the hidden member"
+        );
+
+        app.engine
+            .apply_object_update(
+                first,
+                ObjectUpdate::new().with_position(Vector2::new(
+                    cursor_position.x + 90,
+                    cursor_position.y,
+                )),
+            )
+            .expect("move the cached member out while the endpoint is fogged");
+        app.engine
+            .apply_object_update(
+                second,
+                ObjectUpdate::new().with_position(Vector2::new(
+                    cursor_position.x + 24,
+                    cursor_position.y,
+                )),
+            )
+            .expect("move an uncached member into the frozen rectangle");
+        app.snapshot = app.engine.snapshot();
+        assert_eq!(
+            app.engine.mouse_drag_carryables_in_rect(
+                ingame_pointer_world_pixel(hidden_motion.start),
+                ingame_pointer_world_pixel(hidden_motion.selection_last),
+            ),
+            vec![second],
+            "a live rectangle query now disagrees with native's cached Selection"
+        );
+        assert_eq!(
+            app.ingame_selection_candidates(hidden_motion),
+            vec![first],
+            "fog must freeze object identity, not only rectangle coordinates"
+        );
+
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("finish fogged selection frame");
+        assert_eq!(app.ingame_dragged_objects, vec![first]);
+    }
+
+    #[test]
+    fn mouse_fog_origin_drag_into_visible_terrain_uses_release_cursor() {
+        let mut app = new_running_sandbox_app();
+        let (owner, _cursor, _cursor_position, _layer) = configure_mouse_fog(&mut app, 40);
+        render_mouse_test_app(&mut app);
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("mouse fog fixture has a local viewport");
+        let points = || {
+            (viewport.y..viewport.y + viewport.height as i32).flat_map(|y| {
+                (viewport.x..viewport.x + viewport.width as i32)
+                    .map(move |x| GuiPoint::new(x as f32, y as f32))
+            })
+        };
+        let visible = points()
+            .find(|point| {
+                let Some(pointer) = app.graphics.viewport_point_at(*point) else {
+                    return false;
+                };
+                pointer.owner == owner
+                    && !app.ingame_pointer_fog_blocked(pointer)
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, *point)
+                        .is_none()
+                    && app.ingame_viewport_region(owner, *point).is_none()
+                    && !app
+                        .engine
+                        .mouse_jump_zone(owner, ingame_pointer_world_pixel(pointer))
+            })
+            .expect("viewport has visible empty terrain without a Jump cursor");
+        let hidden = points()
+            .find(|point| {
+                let Some(pointer) = app.graphics.viewport_point_at(*point) else {
+                    return false;
+                };
+                pointer.owner == owner
+                    && ((point.x - visible.x).abs() >= 12.0
+                        || (point.y - visible.y).abs() >= 12.0)
+                    && app.ingame_pointer_fog_blocked(pointer)
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, *point)
+                        .is_none()
+                    && app.ingame_viewport_region(owner, *point).is_none()
+            })
+            .expect("viewport has fog-covered empty terrain away from the release point");
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        app.ingame_last_left_down = None;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(hidden.x),
+            f64::from(hidden.y),
+        ))
+        .expect("move to fog-covered press point");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("fog-covered left-down");
+        assert!(app
+            .mouse_state
+            .is_some_and(|state| state.down_cursor_nothing));
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(visible.x),
+            f64::from(visible.y),
+        ))
+        .expect("move held pointer into visible terrain");
+        let release = app.ingame_pointer.expect("visible release pointer remains routed");
+        assert!(app.mouse_state.is_some_and(|state| {
+            !state.motion.moved && state.motion.last.screen == release.screen
+        }));
+        app.handle_mouse_button(ElementState::Released)
+            .expect("visible left-up uses the current cursor");
+
+        let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+        assert!(direct.is_empty());
+        assert!(selections.is_empty());
+        let [(_, command)] = player_commands.as_slice() else {
+            panic!("visible release must queue one MoveTo, got {player_commands:?}");
+        };
+        let release_world = ingame_pointer_world_pixel(release);
+        assert_eq!(command.command, CommandId::MoveTo as i32);
+        assert_eq!((command.x, command.y), (release_world.x, release_world.y));
+        assert_eq!((command.target, command.target2), (0, 0));
+    }
+
+    #[test]
+    fn mouse_fog_blocks_all_four_landscape_boundaries_even_when_disabled() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        app.engine
+            .player_mut(owner)
+            .expect("sandbox local player")
+            .set_fog_of_war(false);
+        app.snapshot = app.engine.snapshot();
+        let landscape = app.snapshot.landscape.as_ref().expect("sandbox landscape");
+        let width = i32::try_from(landscape.width()).expect("landscape width fits i32");
+        let height = landscape.estimated_height();
+        let valid_x = width / 2;
+        let valid_y = height / 2;
+        let pointers = [
+            Vector2::new(-1, valid_y),
+            Vector2::new(valid_x, -1),
+            Vector2::new(width, valid_y),
+            Vector2::new(valid_x, height),
+        ]
+        .map(|world| ViewportPointer {
+            owner,
+            world: FloatVector2::new(world.x as f32, world.y as f32),
+            screen: GuiPoint::new(-100.0, -100.0),
+        });
+        assert!(pointers
+            .iter()
+            .all(|pointer| app.ingame_pointer_fog_blocked(*pointer)));
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        for pointer in pointers {
+            app.handle_ingame_mouse_click(pointer)
+                .expect("out-of-bounds click is consumed");
+        }
+
+        let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+        assert!(direct.is_empty());
+        assert!(player_commands.is_empty());
+        assert!(selections.is_empty());
     }
 
     #[test]
@@ -89796,6 +90536,17 @@ ScenInfoArea=70,5,25,90
         // C4MouseControl move. Tests for that initialization explicitly clear
         // this latch before sending their first platform event.
         app.ingame_mouse_init_centered = true;
+        // The lightweight fallback spawns its crew outside CreateInfoObject,
+        // which normally installs C4FOW_Def_View_RangeX during player join.
+        // Keep this ubiquitous fixture at the same native mouse/FoW invariant.
+        if let Some(cursor) = app.engine.crew_cursor(app.local_owner) {
+            let mut update = ObjectUpdate::new();
+            update.plr_view_range = Some(500);
+            app.engine
+                .apply_object_update(cursor, update)
+                .expect("install sandbox cursor view range");
+            app.snapshot = app.engine.snapshot();
+        }
         app
     }
 
