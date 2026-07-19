@@ -3,6 +3,13 @@ name = "lc-frontend"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# The deterministic render probe is an explicitly invoked developer tool. Its
+# only test is ignored, so compiling and linking it in every workspace gate is
+# pure cold-build overhead.
+dev-feedback-render = []
+
 [dependencies]
 anyhow = "1.0.102"
 freetype-rs = "0.38.0"
@@ -19,3 +26,8 @@ image = { version = "0.24", default-features = false, features = ["bmp", "jpeg",
 lc-scaling = { path = "../lc-scaling" }
 serde_json = "1.0"
 tempfile = "3"
+
+[[test]]
+name = "dev_feedback_render"
+path = "tests/dev_feedback_render.rs"
+required-features = ["dev-feedback-render"]

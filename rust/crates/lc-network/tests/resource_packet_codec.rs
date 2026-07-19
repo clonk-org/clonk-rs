@@ -1,14 +1,11 @@
-#[path = "../src/resource_packet.rs"]
-mod resource_packet;
-
-use lc_engine::{LegacyCString, NetworkResourceCore};
-use resource_packet::{
+use crate::resource_packet::{
     decode_resource_core_payload, decode_resource_packet, encode_resource_core_payload,
     encode_resource_packet, ResourceChunkAvailability, ResourceChunkRange, ResourceDataPacket,
     ResourceDiscoverPacket, ResourcePacket, ResourcePacketCodecError, ResourceRequestPacket,
     ResourceStatusPacket, DISCOVER_RESOURCE_ID_CAPACITY, MAX_STOCK_DISCOVER_RESOURCE_IDS,
     MAX_STOCK_RESOURCE_DATA_BYTES,
 };
+use lc_engine::{LegacyCString, NetworkResourceCore};
 
 #[test]
 fn cpp_resource_discover_vector_uses_packed_count_and_native_ids() {

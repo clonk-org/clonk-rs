@@ -553,6 +553,8 @@ fn add_replay_and_render(plan: &mut CheckPlan, reason: &str) {
             "test",
             "-p",
             "lc-frontend",
+            "--features",
+            "dev-feedback-render",
             "--test",
             "dev_feedback_render",
             "dev_feedback_render",

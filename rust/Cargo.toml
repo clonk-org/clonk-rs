@@ -49,3 +49,11 @@ opt-level = 2
 debug = "line-tables-only"
 debug-assertions = true
 overflow-checks = true
+
+# Dependency frames are symbolized by their exported names; generating line
+# tables for every registry crate only adds cold codegen, link, and disk work.
+# Preserve the dev profile's optimized dependencies for test runtime; workspace
+# crates retain line tables through the profile above.
+[profile.test.package."*"]
+opt-level = 3
+debug = false

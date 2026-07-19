@@ -1,19 +1,14 @@
 #![allow(dead_code)] // Path-including the packet codec exposes helpers tested separately.
 
-#[path = "../src/resource_catalog.rs"]
-mod resource_catalog;
-#[path = "../src/resource_packet.rs"]
-mod resource_packet;
-
-use lc_engine::{LegacyCString, NetworkResourceCore};
-use resource_catalog::{
+use crate::resource_catalog::{
     ChunkSet, ChunkStoreOutcome, PeerStatusOutcome, ResourceCatalog, ResourceCatalogAction,
     ResourceLoadPoll, ResourceRegistration,
 };
-use resource_packet::{
-    encode_resource_packet, ResourceChunkAvailability, ResourceChunkRange,
-    ResourceDiscoverPacket, ResourcePacket, ResourceRequestPacket, ResourceStatusPacket,
+use crate::resource_packet::{
+    encode_resource_packet, ResourceChunkAvailability, ResourceChunkRange, ResourceDiscoverPacket,
+    ResourcePacket, ResourceRequestPacket, ResourceStatusPacket,
 };
+use lc_engine::{LegacyCString, NetworkResourceCore};
 
 fn registration(resource_id: i32) -> ResourceRegistration {
     ResourceRegistration {

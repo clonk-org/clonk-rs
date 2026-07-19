@@ -2086,6 +2086,7 @@ impl Scenario {
         S: AsRef<str>,
     {
         let group = Group::open(path)?;
+        let languages = languages.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         let definition_modules = (0..definition_groups.len())
             .map(|index| format!("__NetworkDefinition{index}.c4d"))
             .collect::<Vec<_>>();
@@ -2099,7 +2100,7 @@ impl Scenario {
         Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
             &group,
             &resolver,
-            languages,
+            &languages,
             random_seed,
             &[],
             Some(&definition_modules),
@@ -2298,10 +2299,11 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
     {
+        let languages = languages.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
             group,
             resolver,
-            languages,
+            &languages,
             random_seed,
             initial_definition_modules,
             definition_modules,
@@ -2311,22 +2313,20 @@ impl Scenario {
         )
     }
 
+    // Keep caller-friendly generic APIs above, but erase their types before
+    // entering the large legacy loader so it is code-generated only once.
     #[allow(clippy::too_many_arguments)]
-    fn load_from_group_with_languages_and_seed_and_definition_modules_inner<R, S>(
+    fn load_from_group_with_languages_and_seed_and_definition_modules_inner(
         group: &Group,
-        resolver: &R,
-        languages: &[S],
+        resolver: &dyn LegacyDefinitionResolver,
+        languages: &[&str],
         random_seed: u64,
         initial_definition_modules: &[String],
         definition_modules: Option<&[String]>,
         selector_definition_root: Option<&Path>,
         startup_player_count: i32,
         discover_folder_definitions: bool,
-    ) -> Result<Self, ScenarioError>
-    where
-        R: LegacyDefinitionResolver,
-        S: AsRef<str>,
-    {
+    ) -> Result<Self, ScenarioError> {
         match Self::load_from_group(group) {
             Ok(scenario) => Ok(scenario),
             Err(ScenarioError::ManifestMissing) => Self::load_legacy_from_group(
@@ -2466,21 +2466,17 @@ impl Scenario {
         Ok(InitialNetworkTeamMetadata::without_teams_file(&core.game))
     }
 
-    fn load_legacy_from_group<R, S>(
+    fn load_legacy_from_group(
         group: &Group,
-        resolver: &R,
-        languages: &[S],
+        resolver: &dyn LegacyDefinitionResolver,
+        languages: &[&str],
         random_seed: u64,
         initial_definition_modules: &[String],
         definition_modules: Option<&[String]>,
         selector_definition_root: Option<&Path>,
         startup_player_count: i32,
         discover_folder_definitions: bool,
-    ) -> Result<Self, ScenarioError>
-    where
-        R: LegacyDefinitionResolver,
-        S: AsRef<str>,
-    {
+    ) -> Result<Self, ScenarioError> {
         let mut manifest = parse_legacy_scenario_manifest(group)?;
         let language_packs = resolver.resolve_language_packs(group)?;
         let scenario_origin = manifest.core.head.origin.clone();
@@ -9353,7 +9349,7 @@ impl MapPixelClassifier {
 /// CrossMapMaterials allocates its dynamic entries.
 pub(crate) fn build_map_pixel_classifier(
     group: &Group,
-    resolver: &impl LegacyDefinitionResolver,
+    resolver: &dyn LegacyDefinitionResolver,
 ) -> Result<Option<MapPixelClassifier>, ScenarioError> {
     // Parse the root savegame ledger before any no-material/no-texmap return:
     // C++ still calls LoadEnumeration after an empty material loop, and a
@@ -10215,9 +10211,9 @@ const LEGACY_SKY_FADE_BOTTOM_DEFAULT: RgbColor = RgbColor::new(192, 196, 252);
 /// 128x128 (SurfaceEnsureSize, C4Sky.cpp:28-52,109-111), and applies the
 /// SkyScrollMode parallax mapping (C4Sky.cpp:114-125). Without one the sky is
 /// the `SkyDefFade` gradient (SetFadePalette, C4Sky.cpp:54-68).
-fn derive_legacy_sky<R: LegacyDefinitionResolver>(
+fn derive_legacy_sky(
     group: &Group,
-    resolver: &R,
+    resolver: &dyn LegacyDefinitionResolver,
     definition_roots: &[Group],
     manifest: &mut LegacyScenarioManifest,
     random_seed: u64,
@@ -13131,7 +13127,7 @@ fn is_missing_group_error(error: &GroupError) -> bool {
 
 fn resolve_one_definition_group(
     scenario: &Group,
-    resolver: &impl LegacyDefinitionResolver,
+    resolver: &dyn LegacyDefinitionResolver,
     spec: &str,
 ) -> Result<Group, ScenarioError> {
     let normalized = spec.replace('\\', "/");

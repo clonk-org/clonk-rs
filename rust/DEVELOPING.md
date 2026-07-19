@@ -70,7 +70,7 @@ a fixed 320x180 resolution:
 
 ```sh
 LC_DEV_CHECK_ARTIFACT_DIR=target/dev-check \
-  cargo test -p lc-frontend \
+  cargo test -p lc-frontend --features dev-feedback-render \
   --test dev_feedback_render -- \
   --ignored --exact dev_feedback_render
 ```
@@ -83,7 +83,7 @@ artifact:
 LC_DEV_CHECK_SNAPSHOT=target/dev-check/path/to/snapshot-final.json \
 LC_DEV_CHECK_FRAME_PNG=target/dev-check/repro/frame-final.png \
 LC_DEV_CHECK_RENDER_METRICS=target/dev-check/repro/render-metrics.json \
-  cargo test -p lc-frontend \
+  cargo test -p lc-frontend --features dev-feedback-render \
   --test dev_feedback_render -- \
   --ignored --exact dev_feedback_render
 ```

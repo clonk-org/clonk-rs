@@ -704,6 +704,7 @@ extern "C" {
 /// `rand()` stream. Loader, audio, and team assignment all share this owner.
 pub(crate) static CLASSIC_SAFE_RANDOM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[allow(dead_code)] // The lightweight lc-app library test harness omits network.rs.
 pub(crate) fn league_checksum_start() -> u32 {
     let _guard = CLASSIC_SAFE_RANDOM_LOCK
         .lock()
