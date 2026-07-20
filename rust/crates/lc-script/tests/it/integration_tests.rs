@@ -202,7 +202,7 @@ fn array_literal_empty_slots_match_cpp() {
     load_script(
         &mut engine,
         r#"
-        #strict 1
+        #strict
         global func EmptySlots() {
             return [[], [,], [,,], [1,], [1,,2], [,1,,], [[,],[2,]], [3,4]];
         }

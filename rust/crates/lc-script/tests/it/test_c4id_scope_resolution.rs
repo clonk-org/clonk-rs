@@ -39,7 +39,14 @@ fn test_c4id_after_arrow_operator() {
         }
     "#;
 
-    compile_without_diagnostics(source);
+    let script = Script::compile(source).expect("script loads with a legacy warning");
+    assert!(
+        script
+            .parse_diagnostics()
+            .iter()
+            .any(|error| error.message() == "stupid func label: OBRL"),
+        "C++ warns when a C4ID-shaped name is used as a function label"
+    );
 }
 
 #[test]

@@ -3,6 +3,10 @@ pub struct Token {
     pub kind: TokenKind,
     pub line: usize,
     pub column: usize,
+    /// Pointer-width unsigned spelling before C4Value's intentional i32
+    /// truncation. Directive grammar uses this to distinguish a literal 2/3
+    /// from a wider integer whose low 32 bits happen to equal 2/3.
+    raw_number: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -178,6 +182,24 @@ pub enum Symbol {
 
 impl Token {
     pub fn new(kind: TokenKind, line: usize, column: usize) -> Self {
-        Self { kind, line, column }
+        Self {
+            kind,
+            line,
+            column,
+            raw_number: None,
+        }
+    }
+
+    pub(crate) fn new_number(value: i32, raw_number: u64, line: usize, column: usize) -> Self {
+        Self {
+            kind: TokenKind::Number(value),
+            line,
+            column,
+            raw_number: Some(raw_number),
+        }
+    }
+
+    pub(crate) fn raw_number(&self) -> Option<u64> {
+        self.raw_number
     }
 }

@@ -58350,7 +58350,7 @@ public func RejectConstruction(x, y, builder)
         script
             .load_script(
                 r#"
-                #strict 1
+                #strict
                 func Probe() {
                     var array = [1], array_alias = array, other_array = [1];
                     var string = "x" .. "y", string_alias = string, other_string = "x" .. "y";

@@ -13,8 +13,11 @@ pub enum AccessLevel {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppendTo {
-    Id(String), // Append to specific definition
-    Wildcard,   // Append to all definitions (*)
+    Id {
+        id: String,
+        nowarn: bool,
+    },
+    Wildcard, // Append to all definitions (*)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

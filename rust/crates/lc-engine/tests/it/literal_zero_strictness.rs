@@ -4,10 +4,13 @@ use lc_script::{Engine, Value};
 fn evaluate(strict_level: u8, body: &str) -> Value {
     let mut engine = Engine::new();
     compat::register_host_functions(&mut engine);
+    let strict = if strict_level == 1 {
+        "#strict".to_owned()
+    } else {
+        format!("#strict {strict_level}")
+    };
     engine
-        .load_script(&format!(
-            "#strict {strict_level}\nfunc Probe() {{ {body} }}"
-        ))
+        .load_script(&format!("{strict}\nfunc Probe() {{ {body} }}"))
         .expect("strictness probe compiles");
     engine.call("Probe", &[]).expect("probe executes")
 }

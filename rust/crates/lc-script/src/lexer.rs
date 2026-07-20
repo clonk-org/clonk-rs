@@ -21,6 +21,10 @@ pub struct Lexer<'a> {
     /// any of the values are evaluated.
     string_literals: Vec<String>,
     input_is_c4_bytes: bool,
+    /// C4Aul's `Shift(..., false)` recognizes one leading `*` without
+    /// maximal-munching a following operator. `#appendto` uses this for its
+    /// target token.
+    split_next_leading_star: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -40,6 +44,7 @@ impl<'a> Lexer<'a> {
             diagnostics: Vec::new(),
             string_literals: Vec::new(),
             input_is_c4_bytes: false,
+            split_next_leading_star: false,
         }
     }
 
@@ -52,6 +57,10 @@ impl<'a> Lexer<'a> {
 
     pub(crate) fn set_strict_level(&mut self, strict_level: u8) {
         self.strict_level = strict_level;
+    }
+
+    pub(crate) fn split_next_leading_star(&mut self) {
+        self.split_next_leading_star = true;
     }
 
     pub(crate) fn take_diagnostics(&mut self) -> Vec<ParseError> {
@@ -67,8 +76,16 @@ impl<'a> Lexer<'a> {
             let (idx, ch, line, column) = match self.bump_char() {
                 Some(info) => info,
                 None => {
+                    self.split_next_leading_star = false;
                     return Ok(Token::new(TokenKind::Eof, self.line, self.column));
                 }
+            };
+            let begins_comment = ch == '/'
+                && matches!(self.peek_char(), Some('/' | '*'));
+            let split_leading_star = if ch <= ' ' || begins_comment {
+                false
+            } else {
+                std::mem::take(&mut self.split_next_leading_star)
             };
 
             match ch {
@@ -106,15 +123,15 @@ impl<'a> Lexer<'a> {
                             column,
                         ));
                     }
-                    return Ok(self.lex_identifier('S', idx, line, column));
+                    return self.lex_identifier('S', idx, line, column);
                 }
                 // C4AulParse.cpp:616-671 keeps `@` as a legacy identifier
                 // initial below STRICT2; its continuation is ordinary ID text.
                 '@' if self.strict_level < 2 => {
-                    return Ok(self.lex_identifier(ch, idx, line, column));
+                    return self.lex_identifier(ch, idx, line, column);
                 }
                 'a'..='z' | 'A'..='Z' | '_' => {
-                    return Ok(self.lex_identifier(ch, idx, line, column));
+                    return self.lex_identifier(ch, idx, line, column);
                 }
                 '0'..='9' => {
                     return self.lex_number(ch, idx, line, column);
@@ -246,6 +263,9 @@ impl<'a> Lexer<'a> {
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Minus), line, column));
                 }
                 '*' => {
+                    if split_leading_star {
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::Star), line, column));
+                    }
                     if self.peek_char() == Some('*') {
                         self.bump_char();
                         if self.peek_char() == Some('=') {
@@ -568,7 +588,7 @@ impl<'a> Lexer<'a> {
         start_idx: usize,
         line: usize,
         column: usize,
-    ) -> Token {
+    ) -> Result<Token, ParseError> {
         let mut end_idx = start_idx + first.len_utf8();
         while let Some(ch) = self.peek_char() {
             if ch.is_ascii_alphanumeric() || ch == '_' {
@@ -586,7 +606,18 @@ impl<'a> Lexer<'a> {
         {
             self.bump_char();
             self.bump_char();
-            return Token::new(TokenKind::GlobalCall, line, column);
+            return Ok(Token::new(TokenKind::GlobalCall, line, column));
+        }
+        let looks_like_c4id = lexeme.len() == 4
+            && lexeme
+                .chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_');
+        let next_is_call_or_label = self
+            .peek_char()
+            .map(|ch| ch == '(' || (ch == ':' && self.peek_char_at(1) != Some(':')))
+            .unwrap_or(false);
+        if looks_like_c4id && next_is_call_or_label {
+            return self.lex_stupid_func_label(lexeme.to_owned(), line, column);
         }
         let kind = match lexeme {
             "func" => TokenKind::Keyword(Keyword::Func),
@@ -620,28 +651,33 @@ impl<'a> Lexer<'a> {
                 // - Exactly 4 characters
                 // - Contains only uppercase letters, digits, or underscores
                 // - Not followed by '(' (function call) or ':' (label, except ::)
-                if lexeme.len() == 4
-                    && lexeme
-                        .chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-                {
-                    // Check what follows the identifier
-                    let next_is_call_or_label = self
-                        .peek_char()
-                        .map(|ch| ch == '(' || (ch == ':' && self.peek_char_at(1) != Some(':')))
-                        .unwrap_or(false);
-
-                    if !next_is_call_or_label {
-                        TokenKind::C4Id(lexeme.to_string())
-                    } else {
-                        TokenKind::Identifier(lexeme.to_string())
-                    }
+                if looks_like_c4id {
+                    TokenKind::C4Id(lexeme.to_string())
                 } else {
                     TokenKind::Identifier(lexeme.to_string())
                 }
             }
         };
-        Token::new(kind, line, column)
+        Ok(Token::new(kind, line, column))
+    }
+
+    fn lex_stupid_func_label(
+        &mut self,
+        lexeme: String,
+        line: usize,
+        column: usize,
+    ) -> Result<Token, ParseError> {
+        let error = ParseError::new(format!("stupid func label: {lexeme}"), line, column);
+        if self.strict_level >= 2 {
+            Err(error)
+        } else {
+            self.diagnostics.push(error);
+            Ok(Token::new(
+                TokenKind::Identifier(lexeme),
+                line,
+                column,
+            ))
+        }
     }
 
     fn lex_directive(
@@ -695,20 +731,21 @@ impl<'a> Lexer<'a> {
                         }
                     }
 
+                    let lexeme = &self.input[start_idx..end_idx];
+                    if matches!(self.peek_char(), Some('(' | ':')) {
+                        return self.lex_stupid_func_label(lexeme.to_owned(), line, column);
+                    }
+
                     // `%SCNxPTR` accepts the bare `0x` spelling as zero on
                     // the supported C++ runtime. Scan at pointer width, then
                     // intentionally truncate to C4ValueInt's signed 32 bits.
                     let hex_slice = &self.input[hex_start..end_idx];
                     if hex_slice.is_empty() {
-                        return Ok(Token::new(TokenKind::Number(0), line, column));
+                        return Ok(Token::new_number(0, 0, line, column));
                     }
                     match u64::from_str_radix(hex_slice, 16) {
                         Ok(value) => {
-                            return Ok(Token::new(
-                                TokenKind::Number(value as i32),
-                                line,
-                                column,
-                            ))
+                            return Ok(Token::new_number(value as i32, value, line, column));
                         }
                         Err(_) => {
                             return Err(ParseError::new(
@@ -750,6 +787,13 @@ impl<'a> Lexer<'a> {
                 }
             }
             let lexeme = &self.input[start_idx..end_idx];
+            let next_is_call_or_label = self
+                .peek_char()
+                .map(|ch| ch == '(' || (ch == ':' && self.peek_char_at(1) != Some(':')))
+                .unwrap_or(false);
+            if next_is_call_or_label {
+                return self.lex_stupid_func_label(lexeme.to_owned(), line, column);
+            }
             if lexeme.len() == 4
                 && lexeme
                     .chars()
@@ -769,8 +813,11 @@ impl<'a> Lexer<'a> {
         }
 
         let slice = &self.input[start_idx..end_idx];
+        if matches!(self.peek_char(), Some('(' | ':')) {
+            return self.lex_stupid_func_label(slice.to_owned(), line, column);
+        }
         match slice.parse::<i64>() {
-            Ok(value) => Ok(Token::new(TokenKind::Number(value as i32), line, column)),
+            Ok(value) => Ok(Token::new_number(value as i32, value as u64, line, column)),
             Err(_) => Err(ParseError::new(
                 format!("integer literal out of range: {slice}"),
                 line,
@@ -1221,6 +1268,40 @@ mod tests {
                 TokenKind::C4Id("3HUD".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn c4id_shaped_function_labels_warn_below_strict_two_and_error_at_strict_two() {
+        for (source, identifier) in [
+            ("CLNK(", "CLNK"),
+            ("2:", "2"),
+            ("0x2(", "0x2"),
+            ("1A(", "1A"),
+        ] {
+            let mut legacy = Lexer::new(source);
+            let token = legacy.next_token().expect("legacy spelling is warning-only");
+            assert_eq!(
+                token.kind,
+                TokenKind::Identifier(identifier.to_string()),
+                "source: {source}"
+            );
+            assert_eq!(
+                legacy.take_diagnostics()[0].message(),
+                format!("stupid func label: {identifier}"),
+                "source: {source}"
+            );
+
+            let mut strict = Lexer::new(source);
+            strict.set_strict_level(2);
+            let error = strict
+                .next_token()
+                .expect_err("STRICT2 rejects the same function-label spelling");
+            assert_eq!(
+                error.message(),
+                format!("stupid func label: {identifier}"),
+                "source: {source}"
+            );
+        }
     }
 
     #[test]

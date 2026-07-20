@@ -110,71 +110,17 @@ impl<'a> Parser<'a> {
         let mut functions = Vec::new();
 
         while !self.is_eof()? {
+            let declaration_token = self.peek()?.clone();
             // Check for directives
             if let Some(directive) = self.try_parse_directive()? {
-                match directive.as_str() {
-                    "#include" => {
-                        let id = self.next()?;
-                        match id.kind {
-                            TokenKind::Identifier(id_str) | TokenKind::C4Id(id_str) => {
-                                includes.push(id_str);
-                            }
-                            _ => {
-                                return Err(ParseError::new(
-                                    "expected definition ID after #include",
-                                    id.line,
-                                    id.column,
-                                ))
-                            }
-                        }
-                    }
-                    "#appendto" => {
-                        let next = self.next()?;
-                        appends.push(match &next.kind {
-                            TokenKind::Identifier(id) | TokenKind::C4Id(id) => {
-                                AppendTo::Id(id.clone())
-                            }
-                            TokenKind::Symbol(Symbol::Star) => AppendTo::Wildcard,
-                            _ => {
-                                return Err(ParseError::new(
-                                    "expected definition ID or '*' after #appendto",
-                                    next.line,
-                                    next.column,
-                                ))
-                            }
-                        });
-                        // Optional `nowarn` suffix (C4AUL_NoWarn,
-                        // C4AulParse.cpp:1463-1472) suppresses the
-                        // missing-target warning; parse-wise just consume.
-                        if let Ok(token) = self.peek() {
-                            if matches!(&token.kind, TokenKind::Identifier(word) if word == "nowarn")
-                            {
-                                self.next()?;
-                            }
-                        }
-                    }
-                    "#strict" => {
-                        // Default to level 1
-                        let mut level = 1;
-                        self.strict_level = level;
-                        self.lexer.set_strict_level(level);
-                        // Check if there's a number following
-                        if let Ok(token) = self.peek() {
-                            if let TokenKind::Number(n) = token.kind {
-                                if (1..=3).contains(&n) {
-                                    level = n as u8;
-                                    self.next()?; // consume the number
-                                }
-                            }
-                        }
-                        strict_level = Some(level);
-                        self.strict_level = level;
-                        self.lexer.set_strict_level(level);
-                    }
-                    _ => {
-                        // Unknown directive, skip it
-                    }
-                }
+                self.parse_script_directive(
+                    &directive,
+                    declaration_token.line,
+                    declaration_token.column,
+                    &mut includes,
+                    &mut appends,
+                    &mut strict_level,
+                )?;
             } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Local) {
                 // Parse local variable declarations
                 self.consume()?; // consume 'local'
@@ -245,75 +191,14 @@ impl<'a> Parser<'a> {
 
             let attempt = (|| -> Result<(), ParseError> {
                 if let Some(directive) = self.try_parse_directive()? {
-                    match directive.as_str() {
-                        "#include" => {
-                            let id = self.next()?;
-                            match id.kind {
-                                TokenKind::Identifier(id_str) | TokenKind::C4Id(id_str) => {
-                                    includes.push(id_str);
-                                }
-                                _ => {
-                                    return Err(ParseError::new(
-                                        "expected definition ID after #include",
-                                        id.line,
-                                        id.column,
-                                    ))
-                                }
-                            }
-                        }
-                        "#appendto" => {
-                            let next = self.next()?;
-                            appends.push(match &next.kind {
-                                TokenKind::Identifier(id) | TokenKind::C4Id(id) => {
-                                    AppendTo::Id(id.clone())
-                                }
-                                TokenKind::Symbol(Symbol::Star) => AppendTo::Wildcard,
-                                _ => {
-                                    return Err(ParseError::new(
-                                        "expected definition ID or '*' after #appendto",
-                                        next.line,
-                                        next.column,
-                                    ))
-                                }
-                            });
-                            if let Ok(token) = self.peek() {
-                                if matches!(&token.kind, TokenKind::Identifier(word) if word == "nowarn")
-                                {
-                                    self.next()?;
-                                }
-                            }
-                        }
-                        "#strict" => {
-                            // C++ stores STRICT1 before validating an
-                            // explicit level, so `#strict 4` retains level 1.
-                            strict_level = Some(1);
-                            self.strict_level = 1;
-                            self.lexer.set_strict_level(1);
-                            if let Ok(token) = self.peek().cloned() {
-                                if let TokenKind::Number(level) = token.kind {
-                                    if (1..=3).contains(&level) {
-                                        strict_level = Some(level as u8);
-                                        self.strict_level = level as u8;
-                                        self.lexer.set_strict_level(level as u8);
-                                        self.next()?;
-                                    } else {
-                                        return Err(ParseError::new(
-                                            "unknown strict level",
-                                            token.line,
-                                            token.column,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(ParseError::new(
-                                format!("unknown directive: {directive}"),
-                                declaration_token.line,
-                                declaration_token.column,
-                            ));
-                        }
-                    }
+                    self.parse_script_directive(
+                        &directive,
+                        declaration_token.line,
+                        declaration_token.column,
+                        &mut includes,
+                        &mut appends,
+                        &mut strict_level,
+                    )?;
                 } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Local) {
                     self.consume()?;
                     self.parse_var_decl_list(VarDeclKind::Local)?;
@@ -2456,6 +2341,104 @@ impl<'a> Parser<'a> {
         self.consume()
     }
 
+    fn parse_script_directive(
+        &mut self,
+        directive: &str,
+        directive_line: usize,
+        directive_column: usize,
+        includes: &mut Vec<String>,
+        appends: &mut Vec<AppendTo>,
+        strict_level: &mut Option<u8>,
+    ) -> Result<(), ParseError> {
+        match directive {
+            "#include" => {
+                let id = self.peek()?.clone();
+                let line = id.line;
+                let column = id.column;
+                match id.kind {
+                    TokenKind::C4Id(id) => {
+                        self.next()?;
+                        let _ = self.peek()?;
+                        includes.push(id);
+                    }
+                    _ => {
+                        return Err(ParseError::new(
+                            "expected definition ID after #include",
+                            line,
+                            column,
+                        ));
+                    }
+                }
+            }
+            "#appendto" => {
+                self.lexer.split_next_leading_star();
+                let target = self.peek()?.clone();
+                let line = target.line;
+                let column = target.column;
+                match target.kind {
+                    TokenKind::C4Id(id) => {
+                        self.next()?;
+                        // C4Aul accepts the exact lowercase `nowarn` suffix
+                        // only after an ID target, never after `*`.
+                        let token = self.peek()?.clone();
+                        let nowarn =
+                            matches!(&token.kind, TokenKind::Identifier(word) if word == "nowarn");
+                        if nowarn {
+                            self.next()?;
+                            let _ = self.peek()?;
+                        }
+                        appends.push(AppendTo::Id { id, nowarn });
+                    }
+                    TokenKind::Symbol(Symbol::Star) => {
+                        self.next()?;
+                        let _ = self.peek()?;
+                        appends.push(AppendTo::Wildcard);
+                    }
+                    _ => {
+                        return Err(ParseError::new(
+                            "expected definition ID or '*' after #appendto",
+                            line,
+                            column,
+                        ));
+                    }
+                }
+            }
+            "#strict" => {
+                // C4Aul stores STRICT1 before inspecting the optional level.
+                // Bare `#strict` therefore means 1, but an explicit integer
+                // is legal only when it is 2 or 3.
+                *strict_level = Some(1);
+                self.strict_level = 1;
+                self.lexer.set_strict_level(1);
+                let token = self.peek()?.clone();
+                if let TokenKind::Number(level) = token.kind {
+                    let raw_level = token.raw_number().unwrap_or(level as u64);
+                    if raw_level != 2 && raw_level != 3 {
+                        return Err(ParseError::new(
+                            "unknown strict level",
+                            token.line,
+                            token.column,
+                        ));
+                    }
+                    let level = raw_level as u8;
+                    *strict_level = Some(level);
+                    self.strict_level = level;
+                    self.lexer.set_strict_level(level);
+                    self.next()?;
+                    let _ = self.peek()?;
+                }
+            }
+            _ => {
+                return Err(ParseError::new(
+                    format!("unknown directive: {directive}"),
+                    directive_line,
+                    directive_column,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn try_parse_directive(&mut self) -> Result<Option<String>, ParseError> {
         let token = self.peek()?;
         match &token.kind {
@@ -2549,6 +2532,221 @@ fn static_const_multi_declarators_parse() {
 
     fn parse_expression_at_strict(source: &str, strict_level: u8) -> Result<Expr, ParseError> {
         Parser::with_strict_level(source, Some(strict_level)).parse_direct_exec_expression()
+    }
+
+    #[test]
+    fn directives_require_four_byte_c4id_targets() {
+        let valid = r#"
+#include CLNK
+#include 1HUD
+#include AB_1
+#appendto CLNK nowarn
+#appendto 1HUD
+#appendto AB_1
+#appendto*
+func Ok() { return 1; }
+"#;
+        let direct = parse_script(valid).expect("C4ID and wildcard targets parse");
+        assert_eq!(direct.includes, ["CLNK", "1HUD", "AB_1"]);
+        assert_eq!(
+            direct.appends,
+            [
+                AppendTo::Id {
+                    id: "CLNK".into(),
+                    nowarn: true,
+                },
+                AppendTo::Id {
+                    id: "1HUD".into(),
+                    nowarn: false,
+                },
+                AppendTo::Id {
+                    id: "AB_1".into(),
+                    nowarn: false,
+                },
+                AppendTo::Wildcard,
+            ]
+        );
+        let recovered = crate::Script::compile(valid).expect("recovering parser loads script");
+        assert!(recovered.parse_diagnostics().is_empty());
+        assert_eq!(recovered.includes(), ["CLNK", "1HUD", "AB_1"]);
+        assert_eq!(recovered.appends(), direct.appends);
+
+        for directive in ["#include", "#appendto"] {
+            for target in ["clnk", "ABC", "ABCDE", "Definition", "1234"] {
+                let source = format!("{directive} {target}\nfunc Ok() {{ return 1; }}");
+                let error = parse_script(&source).expect_err("non-C4ID target must be rejected");
+                assert!(
+                    error.message().contains("expected definition ID"),
+                    "unexpected error for {source:?}: {error}"
+                );
+
+                let recovered =
+                    crate::Script::compile(&source).expect("directive error is recoverable");
+                assert!(
+                    recovered
+                        .parse_diagnostics()
+                        .iter()
+                        .any(|error| error.message().contains("expected definition ID")),
+                    "missing target diagnostic for {source:?}"
+                );
+                assert!(recovered.includes().is_empty(), "source: {source}");
+                assert!(recovered.appends().is_empty(), "source: {source}");
+                assert!(recovered.functions().contains_key("Ok"), "source: {source}");
+            }
+        }
+
+        let wildcard_nowarn = "#appendto * nowarn";
+        assert!(parse_script(wildcard_nowarn).is_err());
+        let recovered =
+            crate::Script::compile(wildcard_nowarn).expect("stray nowarn is recoverable");
+        assert_eq!(recovered.appends(), [AppendTo::Wildcard]);
+        assert!(
+            !recovered.parse_diagnostics().is_empty(),
+            "nowarn is legal only after a C4ID target"
+        );
+
+        for source in ["#appendto**", "#appendto*=", "#appendto**="] {
+            assert!(parse_script(source).is_err(), "source: {source}");
+            let recovered = crate::Script::compile(source).expect("operator tail recovers");
+            assert_eq!(recovered.appends(), [AppendTo::Wildcard], "source: {source}");
+            assert!(!recovered.parse_diagnostics().is_empty(), "source: {source}");
+        }
+
+        let wrong_case = "#Include CLNK";
+        let error = parse_script(wrong_case).expect_err("directives are case-sensitive");
+        assert!(error.message().contains("unknown directive"));
+        let recovered = crate::Script::compile(wrong_case).expect("unknown directive recovers");
+        assert!(recovered
+            .parse_diagnostics()
+            .iter()
+            .any(|error| error.message().contains("unknown directive")));
+
+        let recovered = crate::Script::compile("#include #strict 2\nfunc Ok() { return 1; }")
+            .expect("invalid include target recovers at that target");
+        assert_eq!(recovered.strict_level(), Some(2));
+        assert!(recovered.functions().contains_key("Ok"));
+        assert!(recovered.includes().is_empty());
+
+        let recovered = crate::Script::compile("#appendto func Ok() { return 1; }")
+            .expect("invalid append target recovers at that target");
+        assert!(recovered.functions().contains_key("Ok"));
+        assert!(recovered.appends().is_empty());
+
+        for source in ["#include 1HUD(", "#appendto 1HUD:"] {
+            let error = parse_script(source).expect_err("call/label token is not a C4ID");
+            assert!(error.message().contains("expected definition ID"));
+            let recovered = crate::Script::compile(source).expect("target error recovers");
+            assert!(recovered.includes().is_empty(), "source: {source}");
+            assert!(recovered.appends().is_empty(), "source: {source}");
+        }
+
+        for source in [
+            "#include CLNK '",
+            "#appendto CLNK '",
+            "#appendto CLNK nowarn '",
+            "#appendto * '",
+        ] {
+            let recovered =
+                crate::Script::compile(source).expect("post-directive lexer error recovers");
+            assert!(
+                !recovered.parse_diagnostics().is_empty(),
+                "source: {source}"
+            );
+            assert!(recovered.includes().is_empty(), "source: {source}");
+            assert!(recovered.appends().is_empty(), "source: {source}");
+        }
+
+        for source in [
+            "#strict 2\n#include ABCD\nCLNK(",
+            "#strict 2\n#appendto ABCD\nCLNK(",
+            "#strict 2\n#appendto *\nCLNK(",
+        ] {
+            let recovered = crate::Script::compile(source).expect("lookahead error recovers");
+            assert!(recovered.includes().is_empty(), "source: {source}");
+            assert!(recovered.appends().is_empty(), "source: {source}");
+            assert!(
+                recovered
+                    .parse_diagnostics()
+                    .iter()
+                    .any(|error| error.message().contains("stupid func label: CLNK")),
+                "source: {source}; diagnostics: {:?}",
+                recovered.parse_diagnostics()
+            );
+        }
+
+        for prefix in ["", "#strict\n"] {
+            let source = format!("{prefix}#include ABCD\nCLNK(");
+            let recovered = crate::Script::compile(&source).expect("legacy warning recovers");
+            assert_eq!(recovered.includes(), ["ABCD"], "source: {source}");
+            assert!(
+                recovered
+                    .parse_diagnostics()
+                    .iter()
+                    .any(|error| error.message().contains("stupid func label: CLNK")),
+                "source: {source}; diagnostics: {:?}",
+                recovered.parse_diagnostics()
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_strict_one_is_rejected_but_bare_strict_is_one() {
+        let bare = "#strict\nfunc Ok() { return 1; }";
+        assert_eq!(
+            parse_script(bare).expect("bare strict parses").strict_level,
+            Some(1)
+        );
+        let recovered = crate::Script::compile(bare).expect("bare strict compiles");
+        assert_eq!(recovered.strict_level(), Some(1));
+        assert!(recovered.parse_diagnostics().is_empty());
+
+        for source in ["#strict 2(", "#strict 0x2("] {
+            assert!(parse_script(source).is_err(), "source: {source}");
+            let recovered = crate::Script::compile(source).expect("adjacency error recovers");
+            assert_eq!(recovered.strict_level(), Some(1), "source: {source}");
+            assert!(!recovered.parse_diagnostics().is_empty(), "source: {source}");
+        }
+
+        for (source, function_name) in [("#strict 2:", "2"), ("#strict 0x2:", "0x2")] {
+            let direct = parse_script(source).expect("colon begins a legacy function");
+            assert_eq!(direct.strict_level, Some(1), "source: {source}");
+            assert_eq!(direct.functions[0].name, function_name, "source: {source}");
+            let recovered = crate::Script::compile(source).expect("legacy function compiles");
+            assert_eq!(recovered.strict_level(), Some(1), "source: {source}");
+            assert!(recovered.functions().contains_key(function_name));
+            assert!(!recovered.parse_diagnostics().is_empty(), "source: {source}");
+        }
+
+        for (spelling, expected) in [("2", 2), ("3", 3), ("02", 2), ("0x2", 2)] {
+            let source = format!("#strict /* separator */ {spelling}\nfunc Ok() {{ return 1; }}");
+            assert_eq!(
+                parse_script(&source)
+                    .unwrap_or_else(|error| panic!("{source:?} should parse: {error}"))
+                    .strict_level,
+                Some(expected)
+            );
+            let recovered = crate::Script::compile(&source).expect("valid strict compiles");
+            assert_eq!(recovered.strict_level(), Some(expected));
+            assert!(recovered.parse_diagnostics().is_empty(), "source: {source}");
+        }
+
+        for spelling in ["0", "1", "4", "4294967298", "0x100000002"] {
+            let source = format!("#strict {spelling}\nfunc Ok() {{ return 1; }}");
+            let error = parse_script(&source).expect_err("invalid explicit strict must fail");
+            assert_eq!(error.message(), "unknown strict level");
+
+            let recovered =
+                crate::Script::compile(&source).expect("strict-level error is recoverable");
+            assert_eq!(recovered.strict_level(), Some(1));
+            assert!(recovered.functions().contains_key("Ok"), "source: {source}");
+            assert!(
+                recovered
+                    .parse_diagnostics()
+                    .iter()
+                    .any(|error| error.message() == "unknown strict level"),
+                "missing strict-level diagnostic for {source:?}"
+            );
+        }
     }
 
     // C4Aul precedence: unary `!` binds its operand only — `!A && B` is

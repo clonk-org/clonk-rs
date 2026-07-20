@@ -28128,15 +28128,17 @@ impl Engine {
                 .cloned();
             for target in targets {
                 let resolved: Vec<DefinitionId> = match &target {
-                    lc_script::AppendTo::Id(token) => {
+                    lc_script::AppendTo::Id { id: token, nowarn } => {
                         let id = DefinitionId::from(token.as_str());
                         if self.definitions.contains_key(&id) {
                             vec![id]
-                        } else {
+                        } else if !*nowarn {
                             // "script to #appendto not found"
                             // (C4AulLink.cpp:42-49) — a warning, never an
                             // error.
                             tracing::warn!(target = %token, "script to #appendto not found");
+                            Vec::new()
+                        } else {
                             Vec::new()
                         }
                     }
@@ -62765,6 +62767,34 @@ mod missing_include_regression {
                 .expect("known include still merged"),
             Value::Int(7)
         );
+    }
+
+    #[test]
+    fn appendto_nowarn_suppresses_only_its_missing_target_warning() {
+        let mut quiet = Engine::new();
+        register(
+            &mut quiet,
+            "APPA",
+            "#appendto MISS nowarn\npublic func Quiet() { return 1; }",
+        );
+        register(&mut quiet, "TARG", "public func Own() { return 1; }");
+        register(
+            &mut quiet,
+            "APPC",
+            "#appendto TARG nowarn\npublic func Present() { return 1; }",
+        );
+        let quiet_messages = capture_warnings(|| quiet.resolve_appends());
+        assert!(quiet_messages.is_empty());
+        assert!(quiet.definition_script_has_function("TARG", "Present"));
+
+        let mut loud = Engine::new();
+        register(
+            &mut loud,
+            "APPB",
+            "#appendto LOST\npublic func Loud() { return 1; }",
+        );
+        let loud_messages = capture_warnings(|| loud.resolve_appends());
+        assert_eq!(loud_messages, ["script to #appendto not found"]);
     }
 
     #[test]

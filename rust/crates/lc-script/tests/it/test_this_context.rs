@@ -158,7 +158,7 @@ fn this_parameter_shadows_context_function_like_cpp() {
     constant_engine
         .load_script(
             r#"
-            #strict 1
+            #strict
             func ConstantFallback() { return this(); }
             "#,
         )
