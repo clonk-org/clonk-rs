@@ -163,6 +163,59 @@ fn concat_arrays_appends() {
 }
 
 #[test]
+fn array_concat_rejects_result_over_max_size() {
+    const CPP_ARRAY_MAX_SIZE: usize = 1_000_000;
+
+    let globals = lc_script::new_global_variables();
+    let mut engine = Engine::new();
+    engine.set_global_variables(globals.clone());
+    engine
+        .load_script(
+            r#"#strict 3
+                static values;
+                func Install(items) { values = items; }
+                func Join(items) { values .. items; return 1; }
+                func Append(items) { values ..= items; return 1; }
+            "#,
+        )
+        .expect("array concat boundary script loads");
+
+    engine
+        .call(
+            "Install",
+            &[Value::Array(vec![
+                Value::Nil;
+                CPP_ARRAY_MAX_SIZE - 1
+            ])],
+        )
+        .expect("array below the C++ limit installs");
+    assert_eq!(
+        engine
+            .call("Append", &[Value::Array(vec![Value::Int(7)])])
+            .expect("a result exactly at MaxSize succeeds"),
+        Value::Int(1)
+    );
+
+    for function in ["Join", "Append"] {
+        let error = engine
+            .call(function, &[Value::Array(vec![Value::Int(8)])])
+            .expect_err("a result above MaxSize must fail");
+        let ScriptError::Runtime(error) = error else {
+            panic!("expected runtime error, got {error}");
+        };
+        assert_eq!(error.message(), "out of memory");
+    }
+
+    let globals = globals.borrow();
+    let stored = globals.get("values").expect("static array exists").borrow();
+    let Value::Array(values) = &*stored else {
+        panic!("static value must remain an array");
+    };
+    assert_eq!(values.len(), CPP_ARRAY_MAX_SIZE);
+    assert_eq!(values.last(), Some(&Value::Int(7)));
+}
+
+#[test]
 fn concat_maps_merges_with_right_side_winning() {
     assert_eq!(
         eval(

@@ -36,6 +36,13 @@ const ARRAY_MAX_SIZE: usize = 1_000_000;
 /// but not including, this index.
 const GLOBAL_SLOT_MAX_SIZE: i32 = 1_000_000;
 
+fn ensure_array_concat_size(left: usize, right: usize) -> Result<(), RuntimeError> {
+    match left.checked_add(right) {
+        Some(size) if size <= ARRAY_MAX_SIZE => Ok(()),
+        _ => Err(RuntimeError::new("out of memory")),
+    }
+}
+
 /// Run `f` with native-stack headroom, growing the stack when it runs low. Each
 /// script-call level of this tree-walking interpreter uses several KiB of native
 /// stack, so deep (but C++-legal, <=512) recursion would otherwise overflow the
@@ -4680,7 +4687,11 @@ impl<'a> Vm<'a> {
         operator: &str,
     ) -> Result<TrackedValue, RuntimeError> {
         match (&left.value, &right.value) {
-            (Value::Array(_), Value::Array(_)) => {
+            (Value::Array(left_values), Value::Array(right_values)) => {
+                // Reject before cloning/extending the parallel identity list.
+                // The value-level check below remains authoritative for
+                // untracked concat callers as well.
+                ensure_array_concat_size(left_values.len(), right_values.len())?;
                 let mut identities = match left.identity.as_ref() {
                     Some(RawIdentity::Heap(identity)) => match identity.as_ref() {
                         HeapIdentity::Array(identities) => identities.clone(),
@@ -4798,6 +4809,7 @@ impl<'a> Vm<'a> {
         match left {
             Value::Array(mut a) => match right {
                 Value::Array(b) => {
+                    ensure_array_concat_size(a.len(), b.len())?;
                     a.extend(b);
                     Ok(Value::Array(a))
                 }
