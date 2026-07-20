@@ -13,6 +13,7 @@ mod clonk_fonts;
 mod control_message;
 mod control_options;
 mod desktop_notification;
+mod display_sleep_inhibitor;
 mod draw_commands;
 mod game_message;
 mod game_over;
@@ -58,6 +59,7 @@ use clap::Parser;
 use control_message::{mentions_nick, ControlMessageState};
 use control_options::{binding_display_name, format_key_label};
 use desktop_notification::{DesktopNotification, DesktopNotifier};
+use display_sleep_inhibitor::DisplaySleepInhibitor;
 use game_over::{
     EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction, GameOverActivationKey,
     GameOverClassicResources, GameOverEntry, GameOverFocus, GameOverOutcome, GameOverSound,
@@ -7430,6 +7432,7 @@ fn main() -> Result<()> {
     let window = window_builder
         .build(&event_loop)
         .context("failed to create application window")?;
+    let mut display_sleep_inhibitor = DisplaySleepInhibitor::acquire();
     if display_options.maximized && matches!(display_options.mode, DisplayMode::Window) {
         window.set_maximized(true);
     }
@@ -7695,6 +7698,9 @@ fn main() -> Result<()> {
                 }
             }
             Event::LoopDestroyed => {
+                if let Some(inhibitor) = display_sleep_inhibitor.take() {
+                    inhibitor.release();
+                }
                 if !app.configuration_reset_requested {
                     if let Some(paths) = app_paths.as_ref() {
                         if let Err(error) = persist_dirty_gamepad_axis_calibration(
