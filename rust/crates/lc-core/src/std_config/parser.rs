@@ -8,6 +8,7 @@ pub(crate) enum ParsedItem<'a> {
     Entry {
         key: Cow<'a, str>,
         value: Cow<'a, str>,
+        escaped_bytes: Option<Vec<u8>>,
         comment: Option<String>,
     },
 }
@@ -45,14 +46,14 @@ pub(crate) fn parse_line(line: &str) -> Option<ParsedItem<'_>> {
     let value = raw_value.trim();
 
     let mut key_owned = key.to_string();
-    let value_owned = if let Some(decoded) =
+    let (value_owned, escaped_bytes) = if let Some(decoded) =
         super::decode_cpp_escaped_string_allowing_continuations(value.as_bytes(), usize::MAX)
     {
-        decoded_config_bytes_to_string(&decoded)
+        (decoded_config_bytes_to_string(&decoded), Some(decoded))
     } else {
         let mut unquoted = value.to_string();
         unescape_comment_markers(&mut unquoted);
-        unquoted
+        (unquoted, None)
     };
     unescape_comment_markers(&mut key_owned);
 
@@ -68,6 +69,7 @@ pub(crate) fn parse_line(line: &str) -> Option<ParsedItem<'_>> {
     Some(ParsedItem::Entry {
         key: Cow::Owned(key_owned),
         value: Cow::Owned(value_owned),
+        escaped_bytes,
         comment,
     })
 }
@@ -196,6 +198,7 @@ mod tests {
                 key,
                 value,
                 comment,
+                ..
             } => {
                 assert_eq!(key, "Name");
                 assert_eq!(value, "Player");

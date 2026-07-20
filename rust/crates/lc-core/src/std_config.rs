@@ -139,12 +139,20 @@ fn cpp_hex_digit(byte: u8) -> i32 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueFormat {
+    Automatic,
+    CppEscaped,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub section: Option<String>,
     pub key: String,
     pub value: String,
     pub comment: Option<String>,
+    value_format: ValueFormat,
+    escaped_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -197,16 +205,26 @@ impl Config {
                 ParsedItem::Entry {
                     key,
                     value,
+                    escaped_bytes,
                     comment,
                 } => {
                     let section_clone = current_section.clone();
                     config.ensure_section(section_clone.clone(), false);
                     let key_owned = key.into_owned();
+                    let value_format = if escaped_bytes.is_some()
+                        || is_cpp_escaped_config_field(section_clone.as_deref(), &key_owned)
+                    {
+                        ValueFormat::CppEscaped
+                    } else {
+                        ValueFormat::Automatic
+                    };
                     let entry = Entry {
                         section: section_clone.clone(),
                         key: key_owned.clone(),
                         value: value.into_owned(),
                         comment,
+                        value_format,
+                        escaped_bytes,
                     };
                     config
                         .entries
@@ -300,14 +318,24 @@ impl Config {
             // was attached to its INI node. The advanced editor writes only
             // changed values through this path while preserving all other
             // source metadata and vendor extensions.
+            if existing.value != value {
+                existing.escaped_bytes = None;
+            }
             existing.value = value;
             return;
         }
+        let value_format = if is_cpp_escaped_config_field(section, &key) {
+            ValueFormat::CppEscaped
+        } else {
+            ValueFormat::Automatic
+        };
         let entry = Entry {
             section: section_owned.clone(),
             key: key.clone(),
             value,
             comment: None,
+            value_format,
+            escaped_bytes: None,
         };
         let insertion_index = self
             .entries
@@ -350,12 +378,15 @@ impl Config {
         W: Write,
     {
         for comment in &self.standalone_comments {
-            writeln!(writer, "{comment}")?;
+            write!(writer, "{comment}\r\n")?;
         }
         let mut current_section: Option<&Option<String>> = None;
         for entry in self.entries.values() {
             let section_ref = &entry.section;
             if current_section != Some(section_ref) {
+                if current_section.is_some() {
+                    writer.write_all(b"\r\n")?;
+                }
                 if let Some(section_name) = section_ref.as_ref() {
                     let commented = self
                         .section_meta
@@ -363,29 +394,22 @@ impl Config {
                         .map(|meta| meta.commented)
                         .unwrap_or(false);
                     if commented {
-                        writeln!(writer, "#[{}]", section_name)?;
+                        write!(writer, "#[{}]\r\n", section_name)?;
                     } else {
-                        writeln!(writer, "[{}]", section_name)?;
+                        write!(writer, "[{}]\r\n", section_name)?;
                     }
-                } else if current_section.is_some() {
-                    writeln!(writer)?;
                 }
                 current_section = Some(section_ref);
             }
+            let value = serialized_value(entry);
             if let Some(comment) = &entry.comment {
                 // Keep entry comments inline, which is the form the parser
                 // can associate with the same name node on the next load.
                 // Emitting a standalone `#...` line silently detached it
                 // during an Options -> advanced editor save/reload cycle.
-                writeln!(
-                    writer,
-                    "{} = {} #{}",
-                    entry.key,
-                    quote_value(&entry.value),
-                    comment
-                )?;
+                write!(writer, "{}={} #{}\r\n", entry.key, value, comment)?;
             } else {
-                writeln!(writer, "{} = {}", entry.key, quote_value(&entry.value))?;
+                write!(writer, "{}={}\r\n", entry.key, value)?;
             }
         }
         Ok(())
@@ -405,32 +429,121 @@ fn standalone_comment(line: &str) -> Option<String> {
     }
 }
 
+fn serialized_value(entry: &Entry) -> String {
+    match entry.value_format {
+        ValueFormat::Automatic => quote_value(&entry.value),
+        ValueFormat::CppEscaped => cpp_escaped_value(
+            entry
+                .escaped_bytes
+                .as_deref()
+                .unwrap_or_else(|| entry.value.as_bytes()),
+        ),
+    }
+}
+
 fn quote_value(value: &str) -> String {
-    if !value.contains(|ch: char| ch.is_whitespace() || ch.is_control() || ch == '#' || ch == '"') {
+    if !value.is_empty()
+        && !value.contains(|ch: char| {
+            ch.is_whitespace()
+                || ch.is_control()
+                || ch == '#'
+                || ch == '"'
+                || ch == '\\'
+                || !ch.is_ascii()
+        })
+    {
         return value.to_string();
     }
+    cpp_escaped_value(value.as_bytes())
+}
+
+fn cpp_escaped_value(value: &[u8]) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('"');
-    for character in value.chars() {
-        match character {
-            '\u{7}' => quoted.push_str("\\a"),
-            '\u{8}' => quoted.push_str("\\b"),
-            '\u{c}' => quoted.push_str("\\f"),
-            '\n' => quoted.push_str("\\n"),
-            '\r' => quoted.push_str("\\r"),
-            '\t' => quoted.push_str("\\t"),
-            '\u{b}' => quoted.push_str("\\v"),
-            '"' => quoted.push_str("\\\""),
-            '\\' => quoted.push_str("\\\\"),
-            character if character.is_control() => {
+    let mut last_numeric_escape = false;
+    for &byte in value {
+        let escape_digit = last_numeric_escape && byte.is_ascii_digit();
+        last_numeric_escape = false;
+        if !escape_digit {
+            let named_escape = match byte {
+                b'\x07' => Some('a'),
+                b'\x08' => Some('b'),
+                b'\x0c' => Some('f'),
+                b'\n' => Some('n'),
+                b'\r' => Some('r'),
+                b'\t' => Some('t'),
+                b'\x0b' => Some('v'),
+                b'"' => Some('"'),
+                b'\\' => Some('\\'),
+                _ => None,
+            };
+            if let Some(escaped) = named_escape {
                 quoted.push('\\');
-                quoted.push_str(&format!("{:o}", character as u32));
+                quoted.push(escaped);
+                continue;
             }
-            character => quoted.push(character),
+            if (b' '..=b'~').contains(&byte) {
+                quoted.push(char::from(byte));
+                continue;
+            }
         }
+        quoted.push('\\');
+        push_unpadded_octal(&mut quoted, byte);
+        last_numeric_escape = true;
     }
     quoted.push('"');
     quoted
+}
+
+fn push_unpadded_octal(output: &mut String, byte: u8) {
+    let high = byte >> 6;
+    let middle = (byte >> 3) & 7;
+    let low = byte & 7;
+    if high != 0 {
+        output.push(char::from(b'0' + high));
+    }
+    if high != 0 || middle != 0 {
+        output.push(char::from(b'0' + middle));
+    }
+    output.push(char::from(b'0' + low));
+}
+
+fn is_cpp_escaped_config_field(section: Option<&str>, key: &str) -> bool {
+    match section {
+        Some("General") => matches!(
+            key,
+            "Name"
+                | "Language"
+                | "LanguageEx"
+                | "LanguageCharset"
+                | "Definitions"
+                | "Participants"
+                | "LogPath"
+                | "PlayerPath"
+                | "DefinitionPath"
+                | "UserPath"
+                | "SaveGameFolder"
+                | "SaveDemoFolder"
+                | "MissionAccess"
+                | "ScreenshotFolder"
+                | "FontName"
+        ),
+        Some("Network") => matches!(
+            key,
+            "WorkPath"
+                | "Comment"
+                | "LocalName"
+                | "Nick"
+                | "ServerAddress"
+                | "AlternateServerAddress"
+                | "UpdateServerAddress"
+                | "LastPassword"
+                | "PuncherAddress"
+                | "LeagueNick"
+        ),
+        Some("IRC") => matches!(key, "Server2" | "Nick" | "RealName" | "Channel"),
+        _ => false,
+    }
 }
 
 fn line_continues(line: &mut String) -> bool {
@@ -481,6 +594,44 @@ mod tests {
     use std::io::Cursor;
     use tempfile::tempdir;
 
+    fn cpp_value<'a>(config: &'a str, section: &str, key: &str) -> Option<&'a str> {
+        let header = format!("[{section}]");
+        let assignment = format!("{key}=");
+        let mut in_section = false;
+        for line in config.split(['\r', '\n']).filter(|line| !line.is_empty()) {
+            if line.starts_with('[') {
+                if in_section {
+                    return None;
+                }
+                in_section = line == header;
+            } else if in_section {
+                if let Some(value) = line.strip_prefix(&assignment) {
+                    return Some(value);
+                }
+            }
+        }
+        None
+    }
+
+    fn cpp_boolean(config: &str, section: &str, key: &str) -> Option<bool> {
+        let value = cpp_value(config, section, key)?.as_bytes();
+        if value.first() == Some(&b'1') && !value.get(1).is_some_and(u8::is_ascii_digit) {
+            Some(true)
+        } else if value.first() == Some(&b'0') && !value.get(1).is_some_and(u8::is_ascii_digit) {
+            Some(false)
+        } else if value.starts_with(b"true") {
+            Some(true)
+        } else if value.starts_with(b"false") {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    fn cpp_escaped(config: &str, section: &str, key: &str) -> Option<Vec<u8>> {
+        decode_cpp_escaped_string(cpp_value(config, section, key)?.as_bytes(), usize::MAX)
+    }
+
     #[test]
     fn parse_basic_config() {
         let data = b"Name = <i>Player</i> # main user\nEnabled=true\n\n";
@@ -528,8 +679,8 @@ mod tests {
         );
 
         let serialized = cfg.to_string().unwrap();
-        assert!(serialized.contains("Multiline = \"first\\nsecond\""));
-        assert!(serialized.contains("Title = \"Alice \\\"The #1\\\"\" #keep"));
+        assert!(serialized.contains("Multiline=\"first\\nsecond\""));
+        assert!(serialized.contains("Title=\"Alice \\\"The #1\\\"\" #keep"));
         let mut cursor = Cursor::new(serialized.as_bytes());
         let reloaded = Config::from_reader(&mut cursor).unwrap();
         assert_eq!(
@@ -591,6 +742,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("legacyclonk.config");
         cfg.save(&path).unwrap();
+        let serialized = std::fs::read_to_string(&path).unwrap();
+        assert!(serialized.contains("ServerAddress=\"https://league.clonkspot.org\"\r\n"));
         let reloaded = Config::load(&path).unwrap();
 
         assert_eq!(
@@ -605,7 +758,7 @@ mod tests {
         config.set_in(Some("IRC"), "Channel", "#clonken,#legacyclonk");
 
         let serialized = config.to_string().expect("config serializes");
-        assert!(serialized.contains("Channel = \"#clonken,#legacyclonk\""));
+        assert!(serialized.contains("Channel=\"#clonken,#legacyclonk\""));
         let mut reader = Cursor::new(serialized.as_bytes());
         let reloaded = Config::from_reader(&mut reader).expect("config reloads");
         assert_eq!(
@@ -682,7 +835,7 @@ mod tests {
         assert_eq!(entry.value, "New");
         assert_eq!(entry.comment.as_deref(), Some("keep this note"));
         let serialized = config.to_string().expect("serialize config");
-        assert!(serialized.contains("Name = New #keep this note"));
+        assert!(serialized.contains("Name=\"New\" #keep this note"));
         let mut reloaded = Cursor::new(serialized.as_bytes());
         let reloaded = Config::from_reader(&mut reloaded).expect("reload config");
         assert_eq!(
@@ -702,13 +855,13 @@ mod tests {
         config.set_in(Some("General"), "Name", "New");
 
         let serialized = config.to_string().expect("serialize config");
-        assert!(serialized.contains("# first note\n"));
-        assert!(serialized.contains("// trailing note\n"));
+        assert!(serialized.contains("# first note\r\n"));
+        assert!(serialized.contains("// trailing note\r\n"));
         let mut reader = Cursor::new(serialized.as_bytes());
         let reloaded = Config::from_reader(&mut reader).expect("reload config");
         let rewritten = reloaded.to_string().expect("rewrite config");
-        assert!(rewritten.contains("# first note\n"));
-        assert!(rewritten.contains("// trailing note\n"));
+        assert!(rewritten.contains("# first note\r\n"));
+        assert!(rewritten.contains("// trailing note\r\n"));
     }
 
     #[test]
@@ -718,6 +871,78 @@ mod tests {
         let cfg = Config::from_reader(&mut cursor).unwrap();
         let value = cfg.get_in(Some("General"), "Description").unwrap();
         assert_eq!(value, "First line\nsecond line\nthird line");
+    }
+
+    #[test]
+    fn l022_cpp_dump_rust_save_cpp_read_preserves_types_and_bytes() {
+        let cpp_dump = b"[General]\r\nEnabled=false\r\nOtherEnabled=true\r\nName=\"Alice\"\r\nLanguageEx=\"US\"\r\nSpecial=\"a b\\\"c\\\\d\"\r\nUtf8=\"M\\303\\274ller\"\r\nLegacy=\"\\374\"\r\nDigits=\"\\1\\61\\62\"\r\nQuotedNumber=\"1\"\r\n\r\n[Graphics]\r\nEngine=OpenGL\r\n";
+        let mut reader = Cursor::new(&cpp_dump[..]);
+        let config = Config::from_reader(&mut reader).expect("parse C++ config dump");
+
+        let serialized = config.to_string().expect("serialize through Rust");
+        assert_eq!(serialized.as_bytes(), cpp_dump);
+        assert_eq!(cpp_boolean(&serialized, "General", "Enabled"), Some(false));
+        assert_eq!(
+            cpp_boolean(&serialized, "General", "OtherEnabled"),
+            Some(true)
+        );
+        assert_eq!(
+            cpp_escaped(&serialized, "General", "Name"),
+            Some(b"Alice".to_vec())
+        );
+        assert_eq!(
+            cpp_escaped(&serialized, "General", "LanguageEx"),
+            Some(b"US".to_vec())
+        );
+        assert_eq!(
+            cpp_escaped(&serialized, "General", "Special"),
+            Some(b"a b\"c\\d".to_vec())
+        );
+        assert_eq!(
+            cpp_escaped(&serialized, "General", "Utf8"),
+            Some("Müller".as_bytes().to_vec())
+        );
+        assert_eq!(
+            cpp_escaped(&serialized, "General", "Legacy"),
+            Some(vec![0xfc])
+        );
+        assert_eq!(
+            cpp_escaped(&serialized, "General", "Digits"),
+            Some(vec![1, b'1', b'2'])
+        );
+        assert_eq!(
+            cpp_escaped(&serialized, "General", "QuotedNumber"),
+            Some(b"1".to_vec())
+        );
+        assert_eq!(cpp_value(&serialized, "Graphics", "Engine"), Some("OpenGL"));
+    }
+
+    #[test]
+    fn l022_new_native_strings_are_quoted_and_scalars_remain_raw() {
+        let mut config = Config::new();
+        config.set_in(Some("General"), "GamepadEnabled", "false");
+        config.set_in(Some("General"), "Name", "Müller \"Q\"\\path");
+        config.set_in(Some("General"), "LanguageEx", "US");
+        config.set_in(Some("Graphics"), "Engine", "OpenGL");
+
+        let serialized = config.to_string().expect("serialize native fields");
+        assert_eq!(
+            serialized,
+            "[General]\r\nGamepadEnabled=false\r\nName=\"M\\303\\274ller \\\"Q\\\"\\\\path\"\r\nLanguageEx=\"US\"\r\n\r\n[Graphics]\r\nEngine=OpenGL\r\n"
+        );
+        assert_eq!(
+            cpp_boolean(&serialized, "General", "GamepadEnabled"),
+            Some(false)
+        );
+        assert_eq!(
+            cpp_escaped(&serialized, "General", "Name"),
+            Some("Müller \"Q\"\\path".as_bytes().to_vec())
+        );
+        assert_eq!(
+            cpp_escaped(&serialized, "General", "LanguageEx"),
+            Some(b"US".to_vec())
+        );
+        assert_eq!(cpp_value(&serialized, "Graphics", "Engine"), Some("OpenGL"));
     }
 
     #[test]
