@@ -36,7 +36,8 @@ const CHASE_TARGET_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 const CONTROL_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 const CLIENT_BACKLOG_LIMIT: usize = 256;
 const CLIENT_MESH_PENDING_LIMIT: usize = 64;
-const DEFAULT_CONTROL_TARGET_FPS: i64 = 38;
+#[cfg(test)]
+const DEFAULT_CONTROL_TARGET_FPS: i32 = 38;
 const HOST_CLIENT_ID: ClientId = 0;
 static RESOURCE_RANDOM_STATE: AtomicU64 = AtomicU64::new(1);
 
@@ -727,6 +728,7 @@ pub enum HostCommand {
     ControlTickReached {
         tick: Tick,
         control_rate: i32,
+        target_fps: i32,
         reached_at: tokio::time::Instant,
     },
     ControlTickConsumed {
@@ -926,12 +928,14 @@ impl HostHandle {
         &self,
         tick: Tick,
         control_rate: i32,
+        target_fps: i32,
         reached_at: tokio::time::Instant,
     ) -> Result<(), HostError> {
         self.command_tx
             .send(HostCommand::ControlTickReached {
                 tick,
                 control_rate,
+                target_fps,
                 reached_at,
             })
             .await
@@ -4630,18 +4634,25 @@ struct AsyncControlWait {
     tick: Tick,
     reached_at: tokio::time::Instant,
     control_rate: i32,
+    target_fps: i32,
 }
 
 impl AsyncControlWait {
     fn deadline(self, async_max_wait_frames: i32) -> tokio::time::Instant {
-        self.reached_at + strict_async_control_wait(self.control_rate, async_max_wait_frames)
+        self.reached_at
+            + strict_async_control_wait(self.control_rate, async_max_wait_frames, self.target_fps)
     }
 }
 
-fn strict_async_control_wait(control_rate: i32, async_max_wait_frames: i32) -> Duration {
+fn strict_async_control_wait(
+    control_rate: i32,
+    async_max_wait_frames: i32,
+    target_fps: i32,
+) -> Duration {
+    debug_assert!(target_fps > 0, "control target FPS must be positive");
     let max_wait_ms = i64::from(control_rate)
         .saturating_mul(i64::from(async_max_wait_frames).saturating_mul(1_000))
-        / DEFAULT_CONTROL_TARGET_FPS;
+        / i64::from(target_fps.max(1));
     if max_wait_ms < 0 {
         Duration::ZERO
     } else {
@@ -5881,9 +5892,10 @@ async fn run_host(
                     HostCommand::ControlTickReached {
                         tick,
                         control_rate,
+                        target_fps,
                         reached_at,
                     } => {
-                        state.control_tick_reached(tick, control_rate, reached_at);
+                        state.control_tick_reached(tick, control_rate, target_fps, reached_at);
                         remove_stale_host_runtime_dynamic(&mut state);
                     }
                     HostCommand::ControlTickConsumed {
@@ -6785,22 +6797,30 @@ impl HostState {
         &mut self,
         tick: Tick,
         control_rate: i32,
+        target_fps: i32,
         reached_at: tokio::time::Instant,
     ) {
         self.client_performance.record_cadence(tick, reached_at);
         if tick != self.coordinator.current_tick() {
             return;
         }
-        if self
+        if let Some(waiting) = self
             .async_control_wait
-            .is_some_and(|waiting| waiting.tick == tick)
+            .as_mut()
+            .filter(|waiting| waiting.tick == tick)
         {
+            // ExecQueuedSyncCtrl may change ControlRate or SetPreSend after
+            // the first cadence stamp but before GetControl. Keep the first
+            // wait instant while refreshing the two live deadline inputs.
+            waiting.control_rate = control_rate;
+            waiting.target_fps = target_fps;
             return;
         }
         self.async_control_wait = Some(AsyncControlWait {
             tick,
             reached_at,
             control_rate,
+            target_fps,
         });
     }
 
@@ -11664,6 +11684,26 @@ mod tests {
     use tokio::time::{timeout, timeout_at};
 
     #[test]
+    fn async_control_wait_deadline_uses_the_reached_target_fps() {
+        let reached_at = tokio::time::Instant::now();
+        let wait = |target_fps| AsyncControlWait {
+            tick: 0,
+            reached_at,
+            control_rate: 2,
+            target_fps,
+        };
+
+        // floor(2 * 2 * 1000 / 38) + the strict-equality millisecond.
+        assert_eq!(
+            wait(DEFAULT_CONTROL_TARGET_FPS).deadline(2),
+            reached_at + Duration::from_millis(106)
+        );
+        // Doubling the target FPS changes the native deadline exactly:
+        // floor(2 * 2 * 1000 / 76) + 1 = 53ms.
+        assert_eq!(wait(76).deadline(2), reached_at + Duration::from_millis(53));
+    }
+
+    #[test]
     fn client_performance_stats_match_signed_cpp_ewma_at_consumption() {
         let base = tokio::time::Instant::now();
         let mut stats = ClientPerformanceStats::new(16);
@@ -13540,7 +13580,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let host = start_host(listener, HostConfig::default()).await.unwrap();
         let reached_at = tokio::time::Instant::now();
-        host.control_tick_reached(0, 1, reached_at).await.unwrap();
+        host.control_tick_reached(0, 1, DEFAULT_CONTROL_TARGET_FPS, reached_at)
+            .await
+            .unwrap();
         tokio::time::advance(Duration::from_millis(200)).await;
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x11))
             .await
@@ -20105,9 +20147,14 @@ mod tests {
         frozen_time_guard.abort();
         let _ = frozen_time_guard.await;
 
-        host.control_tick_reached(0, 2, tokio::time::Instant::now())
-            .await
-            .unwrap();
+        host.control_tick_reached(
+            0,
+            2,
+            DEFAULT_CONTROL_TARGET_FPS,
+            tokio::time::Instant::now(),
+        )
+        .await
+        .unwrap();
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
             .await
             .unwrap();
@@ -20166,9 +20213,14 @@ mod tests {
             let mut client_events = client.take_event_receiver();
             activate_joined_client(&host, &mut host_events, client.client_id()).await;
 
-            host.control_tick_reached(0, 2, tokio::time::Instant::now())
-                .await
-                .unwrap();
+            host.control_tick_reached(
+                0,
+                2,
+                DEFAULT_CONTROL_TARGET_FPS,
+                tokio::time::Instant::now(),
+            )
+            .await
+            .unwrap();
             host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0 + mode))
                 .await
                 .unwrap();
@@ -20213,9 +20265,14 @@ mod tests {
         let mut client_events = client.take_event_receiver();
         activate_joined_client(&host, &mut host_events, client.client_id()).await;
 
-        host.control_tick_reached(0, 2, tokio::time::Instant::now())
-            .await
-            .unwrap();
+        host.control_tick_reached(
+            0,
+            2,
+            DEFAULT_CONTROL_TARGET_FPS,
+            tokio::time::Instant::now(),
+        )
+        .await
+        .unwrap();
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
             .await
             .unwrap();
@@ -21162,9 +21219,14 @@ mod tests {
         host.publish_runtime_dynamic(runtime_dynamic_for_session_test(), 0, parameters.clone())
             .await
             .unwrap();
-        host.control_tick_reached(0, 1, tokio::time::Instant::now())
-            .await
-            .unwrap();
+        host.control_tick_reached(
+            0,
+            1,
+            DEFAULT_CONTROL_TARGET_FPS,
+            tokio::time::Instant::now(),
+        )
+        .await
+        .unwrap();
         assert!(
             host.remove_runtime_dynamic().await.unwrap(),
             "the dynamic must remain available at its exact control tick"
@@ -21177,9 +21239,14 @@ mod tests {
             .await
             .unwrap();
         wait_for_host_ready_tick(&mut events, 0).await;
-        host.control_tick_reached(1, 1, tokio::time::Instant::now())
-            .await
-            .unwrap();
+        host.control_tick_reached(
+            1,
+            1,
+            DEFAULT_CONTROL_TARGET_FPS,
+            tokio::time::Instant::now(),
+        )
+        .await
+        .unwrap();
         assert!(
             !host.remove_runtime_dynamic().await.unwrap(),
             "the host must automatically remove a dynamic once current tick is greater"

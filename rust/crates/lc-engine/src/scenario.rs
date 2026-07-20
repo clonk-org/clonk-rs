@@ -3904,7 +3904,6 @@ impl Scenario {
             .filter(|placement| !placement.no_initialize && self.landscape.is_some())
         {
             engine.run_legacy_init_placements(placement);
-            engine.surface_pending_runtime_flash_boundary()?;
             // C4Landscape::PostInitMap follows InitGoals inside the same
             // !NoInitialize/LandscapeLoaded block. Callback arrays execute
             // in field-registration order and each bitset in descending

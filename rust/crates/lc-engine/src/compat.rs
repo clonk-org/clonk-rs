@@ -107,20 +107,6 @@ fn fair_crew_definition_context() -> Option<(DefinitionId, PhysicalInfo)> {
     FAIR_CREW_DEFINITION_CONTEXT.with(|cell| cell.borrow().clone())
 }
 
-/// Private VM marker used to lift the unmodeled network side of
-/// `SetPreSend` out of the ordinary script-error fail-safe. The public,
-/// typed boundary is constructed by `crate::script_execution_error`.
-const SET_PRE_SEND_RUNTIME_BOUNDARY: &str =
-    "\u{1f}lc-engine:runtime-flash-producer:script-target-fps";
-
-pub(crate) fn is_set_pre_send_runtime_boundary(error: &crate::ScriptError) -> bool {
-    matches!(
-        error,
-        crate::ScriptError::Runtime(error)
-            if error.message() == SET_PRE_SEND_RUNTIME_BOUNDARY
-    )
-}
-
 const OWNER_ANY: i32 = -2;
 const MATERIAL_NONE: i32 = -1;
 const ANY_CONTAINER_SENTINEL: i32 = 123;
@@ -1964,6 +1950,9 @@ pub struct HostWorldContext {
     /// `Game.NetworkActive` session during parameter setup
     /// (C4GameParameters.cpp:429-434).
     network_game: bool,
+    /// `C4GameControl::isNetwork()`: unlike the persisted network-game
+    /// parameter this becomes false after ChangeToLocal.
+    network_control_mode: bool,
     /// `C4GameControl::SyncMode()`: network/replay control or an attached
     /// recording hides process-local view state from synchronized scripts.
     control_sync_mode: bool,
@@ -1977,6 +1966,8 @@ pub struct HostWorldContext {
     film_viewport_available: bool,
     /// App-owned console pause requests produced by `PauseGame`.
     pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
+    /// App-owned local pacing requests produced by `SetPreSend`.
+    network_target_fps_requests: Rc<RefCell<Vec<crate::NetworkTargetFpsRequest>>>,
     /// App-owned physical viewport mutations in exact script-call order.
     viewport_presentation_requests: Rc<RefCell<Vec<crate::ViewportPresentationRequest>>>,
     /// Effective `GetSmokeLevel` for sync-relevant FXU1 creation: 150 in
@@ -2125,11 +2116,13 @@ impl Default for HostWorldContext {
             player_info_league_scores: Rc::new(BTreeMap::new()),
             team_configuration: TeamConfiguration::default(),
             network_game: false,
+            network_control_mode: false,
             control_sync_mode: false,
             edit_cursor_target: None,
             replay_control: false,
             film_viewport_available: false,
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
+            network_target_fps_requests: Rc::new(RefCell::new(Vec::new())),
             viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
             max_players: 0,
@@ -2482,11 +2475,13 @@ impl HostWorldContext {
             player_info_league_scores: Rc::new(BTreeMap::new()),
             team_configuration: TeamConfiguration::default(),
             network_game: false,
+            network_control_mode: false,
             control_sync_mode: false,
             edit_cursor_target: None,
             replay_control: false,
             film_viewport_available: false,
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
+            network_target_fps_requests: Rc::new(RefCell::new(Vec::new())),
             viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
             max_players: 0,
@@ -2733,6 +2728,11 @@ impl HostWorldContext {
         self
     }
 
+    pub(crate) fn with_network_control_mode(mut self, network_control_mode: bool) -> Self {
+        self.network_control_mode = network_control_mode;
+        self
+    }
+
     pub(crate) fn with_control_sync_mode(mut self, control_sync_mode: bool) -> Self {
         self.control_sync_mode = control_sync_mode;
         self
@@ -2750,6 +2750,14 @@ impl HostWorldContext {
     ) -> Self {
         self.replay_control = replay_control;
         self.pause_game_requests = requests;
+        self
+    }
+
+    pub(crate) fn with_network_target_fps_requests(
+        mut self,
+        requests: Rc<RefCell<Vec<crate::NetworkTargetFpsRequest>>>,
+    ) -> Self {
+        self.network_target_fps_requests = requests;
         self
     }
 
@@ -2821,6 +2829,10 @@ impl HostWorldContext {
 
     pub(crate) fn network_game(&self) -> bool {
         self.network_game
+    }
+
+    pub(crate) fn network_control_mode(&self) -> bool {
+        self.network_control_mode
     }
 
     pub(crate) fn scenario_script(&self) -> Option<&Arc<ScriptEngine>> {
@@ -17714,17 +17726,8 @@ where
             game_over_triggered,
         ));
         let guard = EffectHostContextTlsGuard { cell, active: true };
-        let mut result = func();
+        let result = func();
         let context = guard.finish();
-        // Nested engine callbacks deliberately use C4Script's fail-safe
-        // policy and may turn an ordinary VM error into nil/false. The
-        // SetPreSend network path is different: it reached authoritative
-        // runtime state that this engine cannot represent. Preserve that
-        // fatal marker across every nested warn-and-continue funnel and
-        // surface it at the outer script-call boundary.
-        if context.runtime_flash_boundary {
-            result = Err(RuntimeError::new(SET_PRE_SEND_RUNTIME_BOUNDARY).into());
-        }
         let outcome = context.into_commands();
         AUDIO_CONTEXT.with(|cell| {
             *cell.borrow_mut() = Some(outcome.audio.state.clone());
@@ -41200,37 +41203,41 @@ fn set_game_speed(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnSetPreSend (C4Script.cpp:5695-5709): negative values fail before the
-/// network test, while every nonnegative offline call succeeds without
-/// inspecting the optional client-name filter. The network mutation owns a
-/// timed flash message and adaptive control state that Rust does not model;
-/// surface it through the dedicated fatal parity boundary instead of an
-/// ordinary script error that the engine would deliberately tolerate.
+/// FnSetPreSend (C4Script.cpp:5695-5707): typed arguments are converted before
+/// the native body. Negative values fail, nonnegative offline calls are no-op
+/// successes, and network calls enqueue a process-local target request. Each
+/// app matches the optional wildcard against its own client name.
 fn set_pre_send(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_fps = value_to_i32(
         args.first().unwrap_or(&Value::Nil),
         "SetPreSend",
         "target FPS",
     )?;
+    let client_pattern = parse_native_c4_string_argument(args.get(1), "SetPreSend", "client name")?;
     if target_fps < 0 {
         return Ok(Value::Bool(false));
     }
 
-    let network_game = HOST_CONTEXT.with(|cell| {
+    let network_control_mode = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
-            .is_some_and(|context| context.world.network_game())
+            .is_some_and(|context| context.world.network_control_mode())
     });
-    if !network_game {
+    if !network_control_mode {
         return Ok(Value::Bool(true));
     }
 
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
-            context.runtime_flash_boundary = true;
+            context.world.network_target_fps_requests.borrow_mut().push(
+                crate::NetworkTargetFpsRequest {
+                    target_fps: if target_fps == 0 { 38 } else { target_fps },
+                    client_pattern,
+                },
+            );
         }
     });
-    Err(RuntimeError::new(SET_PRE_SEND_RUNTIME_BOUNDARY))
+    Ok(Value::Bool(true))
 }
 
 /// FnGetObjectLayer (C4Script.cpp:5160-5166): the object's effective pLayer.
@@ -43171,10 +43178,6 @@ struct EffectHostContext {
     scenario_script_counter: i32,
     script_counter_request: Option<i32>,
     game_over_triggered: bool,
-    /// Sticky for the lifetime of one outer VM call. Nested fail-safe
-    /// callbacks may catch the RuntimeError, but may not erase this fatal
-    /// classic runtime boundary.
-    runtime_flash_boundary: bool,
     /// Saved `object` scopes of in-flight nested calls, one per nesting
     /// level (`None` = the level had no object scope). The active scope is
     /// always `object`; scopes move between locations by identity, so one
@@ -43433,7 +43436,6 @@ impl EffectHostContext {
             scenario_script_counter,
             script_counter_request: None,
             game_over_triggered,
-            runtime_flash_boundary: false,
             dormant_scopes: Vec::new(),
             global_call_contexts: Vec::new(),
             nested_objects: HashMap::new(),
@@ -49716,9 +49718,8 @@ mod tests {
 
     #[test]
     fn set_pre_send_preserves_cpp_negative_and_offline_results() {
-        // FnSetPreSend rejects negatives before consulting network state;
-        // offline calls otherwise succeed and never inspect pNewName
-        // (C4Script.cpp:5695-5709).
+        // Typed conversion precedes FnSetPreSend; its body then rejects
+        // negatives and makes every nonnegative local-control call a no-op.
         for (world, argument, expected) in [
             (
                 HostWorldContext::default(),
@@ -49726,7 +49727,7 @@ mod tests {
                 Value::Bool(false),
             ),
             (
-                HostWorldContext::default().with_network_game(true),
+                HostWorldContext::default().with_network_control_mode(true),
                 Value::Int(-1),
                 Value::Bool(false),
             ),
@@ -49742,7 +49743,7 @@ mod tests {
             ),
         ] {
             let (result, _) = with_effect_context(None, &[], world, 1, || {
-                set_pre_send(&[argument, Value::Array(vec![Value::Int(7)])])
+                set_pre_send(&[argument, Value::Nil])
             });
             assert_eq!(
                 result.expect("offline/negative SetPreSend succeeds"),
@@ -49752,14 +49753,35 @@ mod tests {
     }
 
     #[test]
-    fn network_set_pre_send_raises_the_private_runtime_boundary_marker() {
-        let world = HostWorldContext::default().with_network_game(true);
+    fn network_set_pre_send_enqueues_normalized_local_requests() {
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let world = HostWorldContext::default()
+            .with_network_control_mode(true)
+            .with_network_target_fps_requests(Rc::clone(&requests));
         let (result, _) = with_effect_context(None, &[], world, 1, || {
-            set_pre_send(&[Value::Int(30), Value::String("Remote*".into())])
+            assert_eq!(
+                set_pre_send(&[Value::Int(0)]).expect("zero target succeeds"),
+                Value::Bool(true)
+            );
+            set_pre_send(&[Value::Int(76), Value::String("Client A?i*".into())])
         });
-        let error =
-            crate::ScriptError::Runtime(result.expect_err("network SetPreSend must fail closed"));
-        assert!(is_set_pre_send_runtime_boundary(&error));
+        assert_eq!(
+            result.expect("network SetPreSend succeeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            requests.borrow().as_slice(),
+            [
+                crate::NetworkTargetFpsRequest {
+                    target_fps: 38,
+                    client_pattern: None,
+                },
+                crate::NetworkTargetFpsRequest {
+                    target_fps: 76,
+                    client_pattern: Some("Client A?i*".into()),
+                },
+            ]
+        );
     }
 
     #[test]

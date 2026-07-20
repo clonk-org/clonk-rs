@@ -199,7 +199,13 @@ enum NetworkRole {
 
 const MAX_CONTROL_RATE: i32 = 20;
 const MAX_CONTROL_PRESEND: i32 = 15;
-const DEFAULT_CONTROL_TARGET_FPS: i64 = 38;
+const DEFAULT_CONTROL_TARGET_FPS: i32 = 38;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ControlPreSendChange {
+    pub(crate) control_presend: i32,
+    pub(crate) target_fps: i32,
+}
 
 /// C4GameControl's frame-to-ControlTick cadence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,7 +214,8 @@ pub(crate) struct NetworkControlClock {
     control_rate: u64,
     control_sent: i32,
     control_presend: i32,
-    avg_control_send_time_us: i64,
+    target_fps: i32,
+    avg_control_send_time_us: i32,
     host_round_trip_ms: Option<i32>,
     target_tick: Option<i32>,
     local_activated: Option<bool>,
@@ -221,6 +228,7 @@ impl NetworkControlClock {
             control_rate: control_rate.clamp(1, MAX_CONTROL_RATE) as u64,
             control_sent: start_tick.saturating_sub(1),
             control_presend: 1,
+            target_fps: DEFAULT_CONTROL_TARGET_FPS,
             avg_control_send_time_us: 0,
             host_round_trip_ms: None,
             target_tick: None,
@@ -294,24 +302,51 @@ impl NetworkControlClock {
         self.control_presend
     }
 
+    pub(crate) fn target_fps(self) -> i32 {
+        self.target_fps
+    }
+
+    /// `C4GameControlNetwork::setTargetFPS` changes only the target. The
+    /// rolling-average calculation updates PreSend after a later consumed
+    /// control, so do not recalculate or reset the average here.
+    pub(crate) fn set_target_fps(&mut self, target_fps: i32) {
+        debug_assert!(target_fps > 0);
+        self.target_fps = target_fps;
+    }
+
     /// Smoothed control-send time in microseconds, matching
     /// `C4GameControlNetwork::getAvgControlSendTime()` and the `ACT` field in
     /// the runtime network client-list dialog.
     pub(crate) fn avg_control_send_time(self) -> i64 {
-        self.avg_control_send_time_us
+        i64::from(self.avg_control_send_time_us)
     }
 
-    fn update_control_presend(&mut self) {
+    fn update_control_presend(&mut self) -> Option<ControlPreSendChange> {
         let Some(round_trip_ms) = self.host_round_trip_ms.filter(|rtt| *rtt != 0) else {
-            return;
+            return None;
         };
-        self.avg_control_send_time_us = (self.avg_control_send_time_us * 149
-            + i64::from(round_trip_ms) * 1_000)
+        // Both fields and both expressions are `int32_t` in C++. Preserve
+        // the target's full script-visible range and the platform's two's-
+        // complement arithmetic instead of silently widening extreme values.
+        self.avg_control_send_time_us = self
+            .avg_control_send_time_us
+            .wrapping_mul(149)
+            .wrapping_add(round_trip_ms.wrapping_mul(1_000))
             / 150;
-        self.control_presend = ((DEFAULT_CONTROL_TARGET_FPS * self.avg_control_send_time_us)
-            / 1_000_000
-            + 1)
-            .clamp(1, i64::from(MAX_CONTROL_PRESEND)) as i32;
+        let next = self
+            .target_fps
+            .wrapping_mul(self.avg_control_send_time_us)
+            .wrapping_div(1_000_000)
+            .wrapping_add(1)
+            .clamp(1, MAX_CONTROL_PRESEND);
+        if next == self.control_presend {
+            return None;
+        }
+        self.control_presend = next;
+        Some(ControlPreSendChange {
+            control_presend: next,
+            target_fps: self.target_fps,
+        })
     }
 
     /// Current control tick on frames where C4GameControl executes control.
@@ -324,11 +359,17 @@ impl NetworkControlClock {
         Some(self.control_tick)
     }
 
+    /// C4GameControlNetwork::GetControl runs this before decoded controls.
+    /// Keeping it separate from tick advancement ensures a SetPreSend in the
+    /// current control cannot affect the sample that was already consumed.
+    pub(crate) fn calculate_performance(&mut self) -> Option<ControlPreSendChange> {
+        self.update_control_presend()
+    }
+
     /// Consume the tick whose control frame was admitted by `tick_for_frame`.
     /// Keep this independent of the current rate: a CID_Set in that frame may
     /// already have changed the cadence before execution completes.
     pub(crate) fn complete_control_frame(&mut self) {
-        self.update_control_presend();
         self.control_tick = self.control_tick.wrapping_add(1);
     }
 
@@ -1123,6 +1164,7 @@ impl Drop for PendingMasterserverSignup {
 struct ControlTickProbe {
     tick: Tick,
     control_rate: i32,
+    target_fps: i32,
     reached_at: tokio::time::Instant,
     queued: bool,
 }
@@ -3836,15 +3878,29 @@ impl NetworkManager {
             .blocking_send(NetworkCommand::ResetClientPerformance);
     }
 
-    pub fn control_tick_reached(&self, tick: Tick, control_rate: i32) {
+    pub fn control_tick_reached(
+        &self,
+        tick: Tick,
+        control_rate: i32,
+        target_fps: i32,
+        reached_at: tokio::time::Instant,
+    ) {
         let mut probe = self.control_tick_probe.lock();
         if probe.as_ref().is_none_or(|probe| probe.tick != tick) {
             *probe = Some(ControlTickProbe {
                 tick,
                 control_rate,
-                reached_at: tokio::time::Instant::now(),
+                target_fps,
+                reached_at,
                 queued: false,
             });
+        } else if let Some(probe) = probe.as_mut() {
+            if probe.control_rate != control_rate || probe.target_fps != target_fps {
+                probe.control_rate = control_rate;
+                probe.target_fps = target_fps;
+                // Queue a same-tick refresh with the original timestamp.
+                probe.queued = false;
+            }
         }
         let probe = probe.as_mut().expect("control-tick probe was initialized");
         if probe.queued {
@@ -5220,6 +5276,7 @@ async fn run_host_worker(
                         host.control_tick_reached(
                             probe.tick,
                             probe.control_rate,
+                            probe.target_fps,
                             probe.reached_at,
                         ),
                         &mut host_events,
@@ -5296,6 +5353,7 @@ async fn run_host_worker(
                                 host.control_tick_reached(
                                     queued_probe.tick,
                                     queued_probe.control_rate,
+                                    queued_probe.target_fps,
                                     queued_probe.reached_at,
                                 )
                                 .await
@@ -5309,6 +5367,7 @@ async fn run_host_worker(
                                 host.control_tick_reached(
                                     probe.tick,
                                     probe.control_rate,
+                                    probe.target_fps,
                                     probe.reached_at,
                                 )
                                 .await
@@ -8133,19 +8192,22 @@ mod tests {
         let (control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
         manager.control_tick_tx = control_tick_tx;
 
-        manager.control_tick_reached(7, 2);
-        let reached_at = {
+        let reached_at = tokio::time::Instant::now();
+        manager.control_tick_reached(7, 2, DEFAULT_CONTROL_TARGET_FPS, reached_at);
+        let stored_reached_at = {
             let probe = manager.control_tick_probe.lock();
             let probe = probe.as_ref().unwrap();
             assert!(probe.queued);
             probe.reached_at
         };
+        assert_eq!(stored_reached_at, reached_at);
         let queued = control_tick_rx.try_recv().unwrap();
         assert_eq!(queued.tick, 7);
         assert_eq!(queued.control_rate, 2);
+        assert_eq!(queued.target_fps, DEFAULT_CONTROL_TARGET_FPS);
         assert_eq!(queued.reached_at, reached_at);
 
-        manager.control_tick_reached(7, 2);
+        manager.control_tick_reached(7, 2, DEFAULT_CONTROL_TARGET_FPS, reached_at);
         assert!(matches!(
             control_tick_rx.try_recv(),
             Err(tokio_mpsc::error::TryRecvError::Empty)
@@ -8154,6 +8216,14 @@ mod tests {
             commands.command_rx.try_recv(),
             Err(tokio_mpsc::error::TryRecvError::Empty)
         ));
+
+        manager.control_tick_reached(7, 3, 76, reached_at + Duration::from_secs(1));
+        let refreshed = control_tick_rx.try_recv().unwrap();
+        assert_eq!(
+            (refreshed.tick, refreshed.control_rate, refreshed.target_fps),
+            (7, 3, 76)
+        );
+        assert_eq!(refreshed.reached_at, reached_at);
     }
 
     #[test]
@@ -13141,9 +13211,11 @@ Message=Server says Andr\xe9\r\n\
         assert_eq!(clock.avg_control_send_time(), 0);
         clock.observe_round_trip_ms(300);
         for _ in 0..13 {
+            clock.calculate_performance();
             clock.complete_control_frame();
         }
         assert_eq!(clock.control_presend(), 1);
+        clock.calculate_performance();
         clock.complete_control_frame();
         assert_eq!(clock.control_presend(), 2);
         assert_eq!(clock.avg_control_send_time(), 26_813);
@@ -13151,15 +13223,72 @@ Message=Server says Andr\xe9\r\n\
         let mut saturated = NetworkControlClock::new(0, 1);
         saturated.observe_round_trip_ms(1_000);
         for _ in 0..68 {
+            saturated.calculate_performance();
             saturated.complete_control_frame();
         }
         assert_eq!(saturated.control_presend(), 14);
+        saturated.calculate_performance();
         saturated.complete_control_frame();
         assert_eq!(saturated.control_presend(), 15);
         for _ in 0..150 {
+            saturated.calculate_performance();
             saturated.complete_control_frame();
         }
         assert_eq!(saturated.control_presend(), 15);
+    }
+
+    #[test]
+    fn control_presend_uses_live_target_fps_and_reports_only_changes() {
+        let mut clock = NetworkControlClock::new(0, 1);
+        clock.set_target_fps(76);
+        clock.observe_round_trip_ms(300);
+        for _ in 0..6 {
+            assert_eq!(clock.calculate_performance(), None);
+            clock.complete_control_frame();
+        }
+        assert_eq!(
+            clock.calculate_performance(),
+            Some(ControlPreSendChange {
+                control_presend: 2,
+                target_fps: 76,
+            })
+        );
+        clock.complete_control_frame();
+        for _ in 0..6 {
+            assert_eq!(clock.calculate_performance(), None);
+            clock.complete_control_frame();
+        }
+        let change = clock
+            .calculate_performance()
+            .expect("the fourteenth 300ms sample changes presend");
+        assert_eq!(
+            change,
+            ControlPreSendChange {
+                control_presend: 3,
+                target_fps: 76,
+            }
+        );
+        assert_eq!(clock.avg_control_send_time(), 26_813);
+        assert_eq!(clock.calculate_performance(), None);
+    }
+
+    #[test]
+    fn control_presend_preserves_native_int32_target_arithmetic() {
+        let mut clock = NetworkControlClock::new(0, 1);
+        clock.set_target_fps(i32::MAX);
+        clock.observe_round_trip_ms(1);
+
+        // Native stores the first EWMA sample as 6us, then evaluates the
+        // int32 product INT_MAX * 6 as -6. Widening that product would
+        // incorrectly saturate PreSend to 15.
+        assert_eq!(clock.calculate_performance(), None);
+        assert_eq!(clock.avg_control_send_time(), 6);
+        assert_eq!(clock.control_presend(), 1);
+
+        let mut ewma = NetworkControlClock::new(0, 1);
+        ewma.observe_round_trip_ms(i32::MAX);
+        assert_eq!(ewma.calculate_performance(), None);
+        assert_eq!(ewma.avg_control_send_time(), -6);
     }
 
     #[test]

@@ -950,14 +950,12 @@ struct PreparedGoLoadingState {
 #[derive(Debug)]
 enum ScenarioActivationError {
     Recoverable(String),
-    Fatal(EngineError),
 }
 
 impl fmt::Display for ScenarioActivationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Recoverable(message) => f.write_str(message),
-            Self::Fatal(error) => error.fmt(f),
         }
     }
 }
@@ -15541,19 +15539,15 @@ enum RuntimeFlashProducerBoundary {
     RuntimeJoin,
     ControlRate,
     FairCrew,
-    ScriptTargetFps,
-    AdaptivePreSend,
 }
 
 impl RuntimeFlashProducerBoundary {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 5] = [
         Self::ObserverPrompt,
         Self::ObserverClear,
         Self::RuntimeJoin,
         Self::ControlRate,
         Self::FairCrew,
-        Self::ScriptTargetFps,
-        Self::AdaptivePreSend,
     ];
 }
 
@@ -15677,6 +15671,9 @@ enum ClassicParityBoundary {
         detail: String,
     },
     RuntimeFlashResources {
+        detail: String,
+    },
+    NetworkControlPacing {
         detail: String,
     },
     RuntimeKeyConfig {
@@ -15828,6 +15825,10 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic timed flash-message resources are unavailable: {detail}; refusing partial flash pixels or producer mutation"
             ),
+            Self::NetworkControlPacing { detail } => write!(
+                f,
+                "classic network control pacing is unavailable: {detail}; refusing a partial local TargetFPS mutation"
+            ),
             Self::RuntimeKeyConfig { detail } => write!(
                 f,
                 "classic process-global key configuration is unavailable: {detail}; refusing to guess key ownership or dispatch"
@@ -15958,46 +15959,18 @@ fn classic_parity_engine_error(error: ClassicParityBoundary) -> EngineError {
     }
 }
 
-fn map_runtime_flash_producer_engine_error(error: EngineError) -> EngineError {
-    let producer = match error {
-        EngineError::RuntimeFlashProducerBoundary { producer, .. } => producer,
-        other => return other,
-    };
-    let producer = match producer {
-        lc_engine::RuntimeFlashProducerBoundary::ScriptTargetFps => {
-            RuntimeFlashProducerBoundary::ScriptTargetFps
-        }
-    };
-    classic_parity_engine_error(report_classic_parity_boundary(
-        ClassicParityBoundary::RuntimeFlashProducer(producer),
-    ))
-}
-
 fn scenario_activation_engine_error(
     scenario_title: &str,
     error: EngineError,
 ) -> ScenarioActivationError {
-    if matches!(&error, EngineError::RuntimeFlashProducerBoundary { .. }) {
-        ScenarioActivationError::Fatal(map_runtime_flash_producer_engine_error(error))
-    } else {
-        ScenarioActivationError::Recoverable(format!("Failed to start {scenario_title}: {error}"))
-    }
+    ScenarioActivationError::Recoverable(format!("Failed to start {scenario_title}: {error}"))
 }
 
 fn scenario_activation_scenario_error(
     scenario_title: &str,
     error: ScenarioError,
 ) -> ScenarioActivationError {
-    match error {
-        ScenarioError::Engine(error)
-            if matches!(&error, EngineError::RuntimeFlashProducerBoundary { .. }) =>
-        {
-            scenario_activation_engine_error(scenario_title, error)
-        }
-        other => ScenarioActivationError::Recoverable(format!(
-            "Failed to start {scenario_title}: {other}"
-        )),
-    }
+    ScenarioActivationError::Recoverable(format!("Failed to start {scenario_title}: {error}"))
 }
 
 fn classic_startup_subscreen_error(subscreen: ClassicStartupSubscreen) -> EngineError {
@@ -33846,6 +33819,66 @@ impl GameApp {
     fn set_runtime_flash_message(&mut self, text: &str, charset: RuntimeHelpCharset) -> Result<()> {
         let message = self.prepare_runtime_flash_message(text, charset)?;
         self.runtime_flash_message = message;
+        Ok(())
+    }
+
+    fn set_network_pacing_flash(&mut self, text: &str) -> Result<(), EngineError> {
+        self.set_runtime_flash_message(text, RuntimeHelpCharset::Windows1252)
+            .map_err(|error| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeFlashResources {
+                        detail: error.to_string(),
+                    },
+                ))
+            })
+    }
+
+    fn apply_control_presend_change(
+        &mut self,
+        change: network::ControlPreSendChange,
+    ) -> Result<(), EngineError> {
+        self.set_network_pacing_flash(&format!(
+            "PreSend: {}  - TargetFPS: {}",
+            change.control_presend, change.target_fps
+        ))
+    }
+
+    /// Apply process-local SetPreSend effects after their synchronized script
+    /// call. C++ matches only this peer's local name; mismatches are successful
+    /// no-ops and must not disturb the current target or flash.
+    fn apply_engine_network_target_fps_requests(&mut self) -> Result<(), EngineError> {
+        let requests = self.engine.take_network_target_fps_requests();
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok());
+        let local_name = local_client_id
+            .and_then(|client_id| self.control_clients.state(client_id))
+            .map(|client| client.name.as_bytes().to_vec())
+            .unwrap_or_else(|| b"???".to_vec());
+
+        for request in requests {
+            let matches = request.client_pattern.as_ref().is_none_or(|pattern| {
+                let pattern = lc_script::c4_string_bytes(pattern);
+                pattern.is_empty() || classic_raw_wildcard_match(&pattern, &local_name)
+            });
+            if !matches {
+                continue;
+            }
+            let Some(clock) = self.network_control_clock.as_mut() else {
+                return Err(classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::NetworkControlPacing {
+                        detail: "SetPreSend executed without a live network control clock"
+                            .to_string(),
+                    },
+                )));
+            };
+            clock.set_target_fps(request.target_fps);
+            self.set_network_pacing_flash(&format!("TargetFPS: {}", request.target_fps))?;
+        }
         Ok(())
     }
 
@@ -69304,6 +69337,12 @@ impl GameApp {
         self.clear_lobby_preload();
         let control_tick = self.engine.sync_check(local_client_id).control_tick;
         self.remove_remote_runtime_players(local_client_id);
+        // RemoveRemote callbacks still run while C4GameControl is in network
+        // mode. Apply any SetPreSend effects they produced before clearing the
+        // live clock and client-name registry below.
+        if let Err(error) = self.apply_engine_network_target_fps_requests() {
+            tracing::error!(%error, "failed to apply network pacing before ChangeToLocal");
+        }
         if let Ok(timing) = lc_engine::NetworkControlTiming::new(control_tick, 1) {
             self.engine.initialize_network_control_timing(timing);
         }
@@ -70393,7 +70432,6 @@ impl GameApp {
                         Ok(())
                     } else {
                         self.apply_join_player_control(join)
-                            .map_err(map_runtime_flash_producer_engine_error)
                     }
                 }
                 NetworkControl::RemovePlayer(control) => {
@@ -70485,7 +70523,7 @@ impl GameApp {
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
-                NetworkControl::Synchronize(control) => {
+                NetworkControl::Synchronize(control) => (|| {
                     if runtime_record_waiting && self.runtime_record_requested {
                         // C4Game::Synchronize calls OnGameSynchronizing before
                         // mutating synchronized state. Earlier packets in this
@@ -70508,9 +70546,8 @@ impl GameApp {
                             }
                         }
                     }
-                        self.engine
-                            .execute_synchronize_control_before_network(control.save_player_files)
-                            .map_err(map_runtime_flash_producer_engine_error)?;
+                    self.engine
+                        .execute_synchronize_control_before_network(control.save_player_files)?;
                     if control.save_player_files && !replaying {
                         // C4Game owns the state checkpoint; C4Player owns the
                         // physical group write. Its aggregate failure is not
@@ -70520,11 +70557,10 @@ impl GameApp {
                     if self.pending_runtime_dynamic_request.is_some() {
                         self.on_runtime_join_synchronized(tick);
                     }
-                        self.engine
-                            .execute_synchronize_control_after_network(control.sync_clearance)
-                            .map_err(map_runtime_flash_producer_engine_error)?;
+                    self.engine
+                        .execute_synchronize_control_after_network(control.sync_clearance)?;
                     Ok(())
-                }
+                })(),
                 NetworkControl::SyncCheck(packet) => {
                     self.handle_sync_check(packet);
                     Ok(())
@@ -70702,6 +70738,15 @@ impl GameApp {
                     }
                 }
             };
+            // Process-local SetPreSend effects happen at this packet's exact
+            // position. In particular, apply them before a later ClientRemove
+            // tears down the network clock and local-name registry. Drain even
+            // when this packet reports an error: native has already performed
+            // the mutation before the later failure.
+            let pacing_result = self.apply_engine_network_target_fps_requests();
+            if result.is_ok() {
+                result = pacing_result;
+            }
             if result.is_err()
                 || (stop_if_running_mode_exits && !matches!(self.mode, AppMode::Running))
                 || (require_live_network && self.network.is_none())
@@ -71320,12 +71365,6 @@ impl GameApp {
                     AppMode::Running
                 ));
             }
-            Err(error @ EngineError::RuntimeFlashProducerBoundary { .. }) => {
-                if locally_controlled {
-                    self.remove_local_control_assignment(predicted_owner);
-                }
-                return Err(error);
-            }
             Err(error) => {
                 if locally_controlled {
                     self.remove_local_control_assignment(predicted_owner);
@@ -71415,6 +71454,10 @@ impl GameApp {
         match self.mode {
             AppMode::Running => {
                 self.reconcile_initial_scoreboard();
+                // Loading callbacks and direct console/control entrypoints may
+                // have produced process-local pacing requests before this
+                // frame. Native makes them visible before the next Prepare.
+                self.apply_engine_network_target_fps_requests()?;
                 // Console/direct script execution remains available through
                 // the outer app loop while HaltCount stops Game::Execute. A
                 // queued PauseGame(true) must therefore be consumed before
@@ -71488,15 +71531,13 @@ impl GameApp {
                             },
                         },
                     };
-                    if let Some(tick) = control_tick {
-                        let control_rate = self
-                            .network_control_clock
-                            .map_or(1, NetworkControlClock::control_rate);
-                        // Native starts the async-client wait before DoInput.
-                        // Stamp this cadence attempt before local presend
-                        // frames can block on the network worker queue.
-                        network.control_tick_reached(tick, control_rate);
-                    }
+                    // Native records iWaitStart before DoInput and queued sync
+                    // controls, but PackCompleteCtrl cannot race those sync
+                    // controls on another thread. Capture that instant now and
+                    // arm the worker only after sync controls have supplied the
+                    // live rate and target FPS.
+                    let control_tick_reached_at =
+                        control_tick.map(|_| tokio::time::Instant::now());
                     for tick in due_ticks {
                         network.finalize_tick(tick);
                     }
@@ -71504,10 +71545,34 @@ impl GameApp {
                     if let Some(tick) = control_tick {
                         let sync_controls = self.network_sync.take_exact(tick);
                         if !sync_controls.is_empty() {
-                            self.apply_synchronized_controls(tick, sync_controls)?;
+                            let control_result =
+                                self.apply_synchronized_controls(tick, sync_controls);
+                            // ExecQueuedSyncCtrl runs before GetControl, so a
+                            // synchronized SetPreSend affects this frame's
+                            // subsequent performance calculation.
+                            let pacing_result = self.apply_engine_network_target_fps_requests();
+                            if let Err(error) = control_result {
+                                return Err(error);
+                            }
+                            pacing_result?;
                             if let Some(network) = self.network.as_ref() {
                                 network.reset_client_performance();
                             }
+                        }
+                        // ExecQueuedSyncCtrl has now supplied the live deadline
+                        // inputs. Arm the host once with the earlier native wait
+                        // start so an old TargetFPS cannot expire concurrently
+                        // before this update reaches the worker.
+                        if let (Some(network), Some(clock)) =
+                            (self.network.as_ref(), self.network_control_clock)
+                        {
+                            network.control_tick_reached(
+                                tick,
+                                clock.control_rate(),
+                                clock.target_fps(),
+                                control_tick_reached_at
+                                    .expect("control tick has a captured wait start"),
+                            );
                         }
 
                         // Network mode mirrors C4Game::Execute's Prepare gate:
@@ -71581,15 +71646,32 @@ impl GameApp {
                             return Ok(());
                         };
                         network.control_tick_consumed(tick, active_client_ids);
-                        self.apply_ready_controls(tick, controls)?;
+                        // C++ GetControl::CalcPerformance precedes decoded
+                        // Control.Execute. Its flash therefore precedes (and
+                        // may be replaced by) a SetPreSend flash in this batch.
+                        if let Some(change) = self
+                            .network_control_clock
+                            .as_mut()
+                            .and_then(NetworkControlClock::calculate_performance)
+                        {
+                            self.apply_control_presend_change(change)?;
+                        }
+                        let control_result = self.apply_ready_controls(tick, controls);
+                        if control_result.is_ok() {
+                            if let Some(clock) = self.network_control_clock.as_mut() {
+                                clock.complete_control_frame();
+                            }
+                        }
+                        // A request is an already-performed process-local
+                        // mutation even if a later control reports an error.
+                        let target_result = self.apply_engine_network_target_fps_requests();
+                        control_result?;
+                        target_result?;
                         // A client mismatch disconnects and returns to the menu.
                         // Do not execute one extra simulation frame after the
                         // ordered SyncCheck has changed session state.
                         if !matches!(self.mode, AppMode::Running) || self.network.is_none() {
                             return Ok(());
-                        }
-                        if let Some(clock) = self.network_control_clock.as_mut() {
-                            clock.complete_control_frame();
                         }
                     }
                 }
@@ -71622,7 +71704,9 @@ impl GameApp {
                 // then observes HaltCount at the start of the next Execute.
                 // Drain it even when the originating script reports an error.
                 self.apply_engine_pause_game_requests();
-                self.snapshot = tick_result.map_err(map_runtime_flash_producer_engine_error)?;
+                let target_result = self.apply_engine_network_target_fps_requests();
+                self.snapshot = tick_result?;
+                target_result?;
                 self.record_network_stats_frame();
                 self.reconcile_message_board_input_dialog()?;
                 let retired_viewport_owner = local_viewport_owners_before_tick
@@ -72684,7 +72768,6 @@ impl GameApp {
                 Ok(data) => {
                     if let Err(error) = self.activate_loaded_scenario(scenario.clone(), &data) {
                         let message = match error {
-                            ScenarioActivationError::Fatal(error) => return Err(error),
                             ScenarioActivationError::Recoverable(message) => message,
                         };
                         tracing::error!(scenario = %scenario.title, error = %message, "failed to start scenario");
@@ -82500,10 +82583,6 @@ impl GameApp {
                                 .insert(join.info_id, real_path.clone());
                             joined_player_files.push(real_path);
                         }
-                        Err(error @ EngineError::RuntimeFlashProducerBoundary { .. }) => {
-                            self.remove_local_control_assignment(predicted_owner);
-                            return Err(scenario_activation_engine_error(&scenario.title, error));
-                        }
                         Err(error) => {
                             self.remove_local_control_assignment(predicted_owner);
                             tracing::warn!(
@@ -82929,9 +83008,7 @@ impl GameApp {
         // controls; scenario Initialize runs only after the status barrier
         // (pristine 9ffa0a5d src/C4Game.cpp:455-482;
         // src/C4Network2.cpp:558-615, src/C4Game.cpp:2699-2736).
-        self.engine
-            .game_start_synchronize()
-            .map_err(map_runtime_flash_producer_engine_error)?;
+        self.engine.game_start_synchronize()?;
         let network_runtime_join = self
             .loading_state
             .as_ref()
@@ -87544,7 +87621,6 @@ fn is_focusable(object: &ObjectSnapshot) -> bool {
 /// (static_cast<bool>, C4Object.cpp:3300,3736) and never aborts over it.
 /// Returns the status-line message to show.
 fn control_script_error_to_status(err: EngineError) -> Result<String, EngineError> {
-    let err = map_runtime_flash_producer_engine_error(err);
     match err {
         EngineError::Script { ref source, .. } => Ok(format!("Script error: {err}: {source}")),
         EngineError::InvalidScriptOutput { .. } => Ok(format!("Script error: {err}")),
@@ -101392,18 +101468,6 @@ func Award()
             control_script_error_to_status(boundary),
             Err(EngineError::ClassicMenuParityBoundary { .. })
         ));
-
-        let target_fps = EngineError::RuntimeFlashProducerBoundary {
-            producer: lc_engine::RuntimeFlashProducerBoundary::ScriptTargetFps,
-            recovery: None,
-        };
-        let mapped = control_script_error_to_status(target_fps)
-            .expect_err("SetPreSend cannot become a non-fatal status line");
-        assert!(matches!(
-            mapped,
-            EngineError::ClassicMenuParityBoundary { ref detail }
-                if detail.contains("ScriptTargetFps")
-        ));
     }
 
     #[test]
@@ -101427,19 +101491,7 @@ func Award()
     }
 
     #[test]
-    fn set_pre_send_boundary_stays_fatal_during_scenario_activation() {
-        let error = EngineError::RuntimeFlashProducerBoundary {
-            producer: lc_engine::RuntimeFlashProducerBoundary::ScriptTargetFps,
-            recovery: None,
-        };
-        let activation = scenario_activation_engine_error("Network scenario", error);
-        assert!(matches!(
-            activation,
-            ScenarioActivationError::Fatal(EngineError::ClassicMenuParityBoundary {
-                ref detail,
-            }) if detail.contains("ScriptTargetFps")
-        ));
-
+    fn engine_errors_remain_recoverable_during_scenario_activation() {
         let recoverable = scenario_activation_engine_error(
             "Broken scenario",
             EngineError::UnknownDefinition("MISS".into()),
@@ -143676,6 +143728,151 @@ ScenInfoArea=70,5,25,90
         (events, commands)
     }
 
+    #[test]
+    fn network_set_pre_send_applies_matching_local_target_fps_and_flash_without_fatal_boundary() {
+        let mut app = new_running_sandbox_app();
+        let (_events, _commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.control_clients.replace_snapshot([
+            message_client(0, b"Host"),
+            message_client(7, b"Client Alice"),
+        ]);
+        app.engine.set_network_game(true);
+        app.engine.set_network_control_mode(true);
+        app.engine
+            .load_scenario_script_with_convention(
+                "SetPreSend app fixture",
+                concat!(
+                    "#strict\n",
+                    "func Mismatch() { return SetPreSend(55, \"Host*\"); }\n",
+                    "func Match() { return SetPreSend(76, \"client a?i*\"); }\n",
+                    "func Reset() { return SetPreSend(0, \"\"); }\n",
+                ),
+                true,
+            )
+            .expect("SetPreSend fixture links");
+        app.set_runtime_flash_message("unchanged", RuntimeHelpCharset::Windows1252)
+            .expect("seed existing flash");
+        let unchanged_flash = app.runtime_flash_message.clone();
+
+        app.engine
+            .call_scenario_script_function("Mismatch", Vec::new())
+            .expect("mismatching SetPreSend returns normally");
+        app.apply_engine_network_target_fps_requests()
+            .expect("mismatch is a successful local no-op");
+        assert_eq!(
+            app.network_control_clock
+                .expect("network clock")
+                .target_fps(),
+            38
+        );
+        assert_eq!(app.runtime_flash_message, unchanged_flash);
+
+        app.engine
+            .call_scenario_script_function("Match", Vec::new())
+            .expect("matching SetPreSend returns normally");
+        app.apply_engine_network_target_fps_requests()
+            .expect("matching request applies");
+        let clock = app.network_control_clock.expect("network clock");
+        assert_eq!(clock.target_fps(), 76);
+        assert_eq!(
+            clock.control_presend(),
+            1,
+            "setter does not recalculate inline"
+        );
+        let flash = app
+            .runtime_flash_message
+            .as_ref()
+            .expect("target FPS flash");
+        assert_eq!(flash.text, "TargetFPS: 76");
+        assert_eq!(flash.remaining_draws, 26);
+        assert_eq!(flash.y, app.runtime_flash_y());
+
+        app.engine
+            .call_scenario_script_function("Reset", Vec::new())
+            .expect("zero target returns normally");
+        app.apply_engine_network_target_fps_requests()
+            .expect("zero restores the native target");
+        assert_eq!(
+            app.network_control_clock
+                .expect("network clock")
+                .target_fps(),
+            38
+        );
+        assert_eq!(runtime_flash_text(&app), Some("TargetFPS: 38"));
+    }
+
+    #[test]
+    fn network_set_pre_send_applies_at_packet_position_before_change_to_local() {
+        let mut app = new_running_sandbox_app();
+        let (_events, _commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        app.control_clients.replace_snapshot([
+            message_client(0, b"Host"),
+            message_client(7, b"Client Alice"),
+        ]);
+        app.engine.set_network_game(true);
+        app.engine.set_network_control_mode(true);
+
+        app.apply_ready_controls(
+            0,
+            vec![
+                NetworkControl::Script(lc_engine::ScriptControlData {
+                    target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+                    strictness: lc_engine::ScriptStrictness::Strict3,
+                    script: lc_engine::LegacyCString::from_bytes(
+                        b"SetPreSend(76, \"client a*\")".to_vec(),
+                    )
+                    .expect("script is NUL-free"),
+                    by_client: 0,
+                }),
+                NetworkControl::ClientRemove(lc_engine::ClientRemoveControlData {
+                    client_id: 7,
+                    reason: lc_engine::LegacyCString::default(),
+                    by_client: 0,
+                }),
+            ],
+        )
+        .expect("SetPreSend applies before the following local-client removal");
+
+        assert!(app.network.is_none());
+        assert!(app.network_control_clock.is_none());
+        assert_eq!(runtime_flash_text(&app), Some("TargetFPS: 76"));
+    }
+
+    #[test]
+    fn adaptive_presend_uses_live_target_and_emits_the_exact_classic_flash() {
+        let mut app = new_running_sandbox_app();
+        let mut clock = NetworkControlClock::new(0, 1);
+        clock.set_target_fps(76);
+        clock.observe_round_trip_ms(300);
+        for _ in 0..6 {
+            assert!(clock.calculate_performance().is_none());
+            clock.complete_control_frame();
+        }
+        let change = clock
+            .calculate_performance()
+            .expect("the seventh sample changes presend to two");
+        app.apply_control_presend_change(change)
+            .expect("intermediate adaptive flash installs");
+        assert_eq!(
+            runtime_flash_text(&app),
+            Some("PreSend: 2  - TargetFPS: 76")
+        );
+        clock.complete_control_frame();
+        for _ in 0..6 {
+            assert!(clock.calculate_performance().is_none());
+            clock.complete_control_frame();
+        }
+        let change = clock
+            .calculate_performance()
+            .expect("live target changes the fourteenth sample to presend three");
+        app.apply_control_presend_change(change)
+            .expect("adaptive flash installs");
+        assert_eq!(
+            runtime_flash_text(&app),
+            Some("PreSend: 3  - TargetFPS: 76")
+        );
+    }
+
     fn queue_empty_ready_tick(app: &GameApp, events: &mpsc::Sender<NetworkEvent>) {
         events
             .send(NetworkEvent::ReadyTick {
@@ -183817,11 +184014,9 @@ func ControlDig() { dig_count = 1; return(1); }
             RuntimeFlashProducerBoundary::RuntimeJoin => "RuntimeJoin",
             RuntimeFlashProducerBoundary::ControlRate => "ControlRate",
             RuntimeFlashProducerBoundary::FairCrew => "FairCrew",
-            RuntimeFlashProducerBoundary::ScriptTargetFps => "ScriptTargetFps",
-            RuntimeFlashProducerBoundary::AdaptivePreSend => "AdaptivePreSend",
         });
-        assert_eq!(names.len(), 7);
-        assert_eq!(names.into_iter().collect::<HashSet<_>>().len(), 7);
+        assert_eq!(names.len(), 5);
+        assert_eq!(names.into_iter().collect::<HashSet<_>>().len(), 5);
 
         let mut app = new_running_sandbox_app();
         app.handle_modifiers_changed(ModifiersState::CTRL)
@@ -187735,6 +187930,7 @@ func ControlDig() { dig_count = 1; return(1); }
             }]);
         let mut clock = NetworkControlClock::new(40, 4);
         clock.observe_round_trip_ms(6_000);
+        clock.calculate_performance();
         clock.complete_control_frame();
         app.network_control_clock = Some(clock);
 

@@ -1483,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn material_script_set_pre_send_is_deferred_to_the_fatal_tick_boundary() {
+    fn material_script_set_pre_send_keeps_the_local_pacing_request() {
         let materials = materials(
             r#"
             [Material Goo]
@@ -1513,6 +1513,7 @@ mod tests {
         );
         let mut engine = engine_with(materials, landscape);
         engine.set_network_game(true);
+        engine.set_network_control_mode(true);
         engine
             .install_scenario_script(
                 "Scenario",
@@ -1522,16 +1523,14 @@ mod tests {
         assert!(engine.mass_mover_create(1, 4, false));
 
         engine.tick_mass_movers();
-        let error = engine
-            .tick()
-            .expect_err("material fail-safe must retain the fatal boundary");
-        assert!(matches!(
-            error,
-            crate::EngineError::RuntimeFlashProducerBoundary {
-                producer: crate::RuntimeFlashProducerBoundary::ScriptTargetFps,
-                recovery: None,
-            }
-        ));
+        engine.tick().expect("material SetPreSend stays non-fatal");
+        assert_eq!(
+            engine.take_network_target_fps_requests(),
+            vec![crate::NetworkTargetFpsRequest {
+                target_fps: 30,
+                client_pattern: None,
+            }]
+        );
     }
 
     /// Grid world: 5x5, water byte 20, earth byte 30 (DigFree).

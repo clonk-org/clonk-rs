@@ -8461,18 +8461,11 @@ fn script_execution_error(
     source: ScriptError,
     recovery: Option<Box<ScriptCallRecovery>>,
 ) -> EngineError {
-    if compat::is_set_pre_send_runtime_boundary(&source) {
-        EngineError::RuntimeFlashProducerBoundary {
-            producer: RuntimeFlashProducerBoundary::ScriptTargetFps,
-            recovery,
-        }
-    } else {
-        EngineError::Script {
-            definition,
-            function,
-            source,
-            recovery,
-        }
+    EngineError::Script {
+        definition,
+        function,
+        source,
+        recovery,
     }
 }
 
@@ -8485,16 +8478,6 @@ pub struct ScriptCallRecovery {
     pub(crate) outcome: compat::EffectContextOutcome,
     pub(crate) audio: AudioRegistry,
     pub(crate) rng: LcgRng,
-}
-
-/// A C++ timed-flash producer reached authoritative runtime state that the
-/// Rust engine does not model. This remains distinct from `Script`: C++'s
-/// fail-safe callback handling may log and continue after ordinary script
-/// errors, but silently continuing here would perform only half the native
-/// action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeFlashProducerBoundary {
-    ScriptTargetFps,
 }
 
 #[derive(Debug, Error)]
@@ -8525,14 +8508,6 @@ pub enum EngineError {
         /// call but roll nothing back (C4AulExec.cpp:1318-1342) — C++
         /// already mutated the live objects — so the engine funnel applies
         /// this before surfacing the error.
-        recovery: Option<Box<ScriptCallRecovery>>,
-    },
-    #[error("classic timed flash producer boundary: {producer:?}")]
-    RuntimeFlashProducerBoundary {
-        producer: RuntimeFlashProducerBoundary,
-        /// Preserve mutations that happened before the boundary exactly as
-        /// the ordinary script-error path does. Consumers must apply this
-        /// before propagating the fatal boundary.
         recovery: Option<Box<ScriptCallRecovery>>,
     },
     #[error("invalid script output in {function} of `{definition}`: {detail}")]
@@ -16935,6 +16910,16 @@ pub enum ViewportPresentationRequest {
     SetViewOffset { player: i32, offset: Vector2 },
 }
 
+/// Process-local network pacing request produced by the script `SetPreSend`
+/// builtin. Every peer executes the synchronized call, then the embedding app
+/// matches `client_pattern` against its own client name before applying the
+/// target and classic flash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkTargetFpsRequest {
+    pub target_fps: i32,
+    pub client_pattern: Option<String>,
+}
+
 impl ScriptControlPolicy {
     pub const fn live(console_active: bool) -> Self {
         Self {
@@ -17250,6 +17235,9 @@ pub struct Engine {
     /// Process-local console pause requests emitted by `PauseGame`. Shared
     /// into copied host contexts so nested calls preserve script call order.
     pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
+    /// Process-local pacing writes emitted by `SetPreSend`, in script-call
+    /// order. The app owns client-name matching, the network clock and flash.
+    network_target_fps_requests: Rc<RefCell<Vec<NetworkTargetFpsRequest>>>,
     /// Process-local physical viewport requests emitted by `SetFilmView` and
     /// `SetViewOffset`. Physical viewport ownership remains in the app.
     viewport_presentation_requests: Rc<RefCell<Vec<ViewportPresentationRequest>>>,
@@ -17341,11 +17329,6 @@ pub struct Engine {
     /// network restart. C++ does not compile it into save/snapshot state.
     restart_restore_info_mask: i32,
     game_over_triggered: bool,
-    /// A fatal classic runtime boundary raised from a callback path whose
-    /// legacy API cannot return `EngineError` (currently material-reaction
-    /// execution). It is surfaced by the enclosing/next engine tick rather
-    /// than being downgraded to the callback's ordinary fail-safe value.
-    pending_runtime_flash_boundary: Option<RuntimeFlashProducerBoundary>,
     /// Runtime-only C4Game::Evaluated guard. Restored games re-evaluate
     /// after their next synchronized frame just like C++.
     game_evaluated: bool,
@@ -19475,6 +19458,7 @@ impl Engine {
             pending_remove_player_controls: Vec::new(),
             pending_game_goal_menu_requests: Vec::new(),
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
+            network_target_fps_requests: Rc::new(RefCell::new(Vec::new())),
             viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
             edit_cursor_target: None,
             local_players: None,
@@ -19516,7 +19500,6 @@ impl Engine {
             next_mission: NextMissionState::default(),
             restart_restore_info_mask: 0,
             game_over_triggered: false,
-            pending_runtime_flash_boundary: None,
             game_evaluated: false,
             round_results: RoundResultsState::default(),
             objectives: ScenarioObjectives::default(),
@@ -19705,26 +19688,6 @@ impl Engine {
     ) {
         self.restore_script_globals(script_globals);
         self.global_effects = global_effects;
-    }
-
-    fn defer_runtime_flash_boundary(&mut self, error: EngineError) -> Option<EngineError> {
-        match error {
-            EngineError::RuntimeFlashProducerBoundary { producer, .. } => {
-                self.pending_runtime_flash_boundary.get_or_insert(producer);
-                None
-            }
-            other => Some(other),
-        }
-    }
-
-    fn surface_pending_runtime_flash_boundary(&mut self) -> Result<(), EngineError> {
-        let Some(producer) = self.pending_runtime_flash_boundary.take() else {
-            return Ok(());
-        };
-        Err(EngineError::RuntimeFlashProducerBoundary {
-            producer,
-            recovery: None,
-        })
     }
 
     pub fn show_scenario_intro(&mut self, text: &str) {
@@ -24888,6 +24851,12 @@ impl Engine {
         std::mem::take(&mut *self.pause_game_requests.borrow_mut())
     }
 
+    /// Drain local `SetPreSend` requests in exact script-call order. This is
+    /// runtime-only state and never enters synchronized snapshots or saves.
+    pub fn take_network_target_fps_requests(&mut self) -> Vec<NetworkTargetFpsRequest> {
+        std::mem::take(&mut *self.network_target_fps_requests.borrow_mut())
+    }
+
     /// Drain physical viewport mutations in exact script call order.
     pub fn take_viewport_presentation_requests(&mut self) -> Vec<ViewportPresentationRequest> {
         std::mem::take(&mut *self.viewport_presentation_requests.borrow_mut())
@@ -25623,12 +25592,14 @@ impl Engine {
                 .map(ScenarioScript::script_arc),
         )
         .with_network_game(self.network_game)
+        .with_network_control_mode(self.network_control_mode)
         .with_control_sync_mode(self.control_sync_mode())
         .with_edit_cursor_target(self.edit_cursor_target)
         .with_pause_game_requests(
             self.replay_control,
             Rc::clone(&self.pause_game_requests),
         )
+        .with_network_target_fps_requests(Rc::clone(&self.network_target_fps_requests))
         .with_viewport_presentation_requests(
             self.replay_control,
             Rc::clone(&self.viewport_presentation_requests),
@@ -26641,7 +26612,6 @@ impl Engine {
         if trigger_game_over {
             self.request_game_over()?;
         }
-        self.surface_pending_runtime_flash_boundary()?;
         Ok(created)
     }
 
@@ -30221,7 +30191,6 @@ impl Engine {
     }
 
     fn advance_tick(&mut self) -> Result<(), EngineError> {
-        self.surface_pending_runtime_flash_boundary()?;
         // The previous frame's C4Landscape::Draw ran DoRelights before its
         // blit. Start the new simulation frame after that presentation
         // boundary so fresh SetLandscapePixel writes may survive again.
@@ -31818,7 +31787,6 @@ impl Engine {
         }
         self.rebuild_sectors();
         let alive: HashSet<_> = self.objects.iter().map(|object| object.id).collect();
-        self.surface_pending_runtime_flash_boundary()?;
         // C4Game::Execute phase order (C4Game.cpp:810-822): ExecObjects
         // runs FIRST; then GlobalEffects, PXS, Particles, MassMover,
         // Weather, Landscape, Players, Messages, Script. Objects observe
@@ -31826,10 +31794,8 @@ impl Engine {
         // precede every world-system draw within the frame.
         self.tick_global_effects()?;
         self.tick_pxs();
-        self.surface_pending_runtime_flash_boundary()?;
         self.tick_particles();
         self.tick_mass_movers();
-        self.surface_pending_runtime_flash_boundary()?;
         self.weather_events.clear();
         if let Some(points) = self.environment.advance_frame(&mut self.rng, frame) {
             let _ = self.gamma.set_ramp(1, points);
@@ -32701,32 +32667,13 @@ impl Engine {
         definition_id: &str,
         clamp_velocity: bool,
     ) -> EngineError {
-        enum RecoveredError {
-            Script {
-                definition: String,
-                function: String,
-                source: ScriptError,
-            },
-            RuntimeFlashProducer(RuntimeFlashProducerBoundary),
-        }
-        let (error, recovery) = match error {
+        let (definition, function, source, recovery) = match error {
             EngineError::Script {
                 definition,
                 function,
                 source,
                 recovery: Some(recovery),
-            } => (
-                RecoveredError::Script {
-                    definition,
-                    function,
-                    source,
-                },
-                recovery,
-            ),
-            EngineError::RuntimeFlashProducerBoundary {
-                producer,
-                recovery: Some(recovery),
-            } => (RecoveredError::RuntimeFlashProducer(producer), recovery),
+            } => (definition, function, source, recovery),
             other => return other,
         };
         let ScriptCallRecovery {
@@ -32746,23 +32693,11 @@ impl Engine {
         ) {
             return apply_error;
         }
-        match error {
-            RecoveredError::Script {
-                definition,
-                function,
-                source,
-            } => EngineError::Script {
-                definition,
-                function,
-                source,
-                recovery: None,
-            },
-            RecoveredError::RuntimeFlashProducer(producer) => {
-                EngineError::RuntimeFlashProducerBoundary {
-                    producer,
-                    recovery: None,
-                }
-            }
+        EngineError::Script {
+            definition,
+            function,
+            source,
+            recovery: None,
         }
     }
 
@@ -34384,6 +34319,7 @@ impl Engine {
     pub fn restore_state(&mut self, state: &EngineState) -> Result<(), EngineError> {
         self.active_message_board_input = None;
         self.pending_game_goal_menu_requests.clear();
+        self.network_target_fps_requests.borrow_mut().clear();
         self.viewport_presentation_requests.borrow_mut().clear();
         self.film_viewport_available = false;
         self.player_info_league_progress_updates.clear();
@@ -44447,25 +44383,19 @@ impl Engine {
         // at zero construction (C4Object::DoCon removal)
         if !no_burn_decay {
             if let Err(error) = self.do_con(idx, -100) {
-                if let Some(error) = self.defer_runtime_flash_boundary(error) {
-                    tracing::warn!(%error, "fire DoCon callback failed; continuing");
-                }
+                tracing::warn!(%error, "fire DoCon callback failed; continuing");
             }
         }
         // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:780)
         if frame % 10 == 0 && !no_burn_damage {
             if let Err(error) = self.change_object_damage(idx, 2, C4FX_CALL_DMG_FIRE, caused_by) {
-                if let Some(error) = self.defer_runtime_flash_boundary(error) {
-                    tracing::warn!(%error, "fire damage callback failed; continuing");
-                }
+                tracing::warn!(%error, "fire damage callback failed; continuing");
             }
         }
         // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:782)
         if frame % 5 == 0 {
             if let Err(error) = self.change_object_energy(idx, -1, C4FX_CALL_ENG_FIRE, caused_by) {
-                if let Some(error) = self.defer_runtime_flash_boundary(error) {
-                    tracing::warn!(%error, "fire energy callback failed; continuing");
-                }
+                tracing::warn!(%error, "fire energy callback failed; continuing");
             }
         }
         // Background effects: Tick5 over valid landscape material
@@ -44956,12 +44886,7 @@ impl Engine {
                     )
                 };
                 if let Err(error) = self.bubble_out(bubble_x, bubble_y) {
-                    match error {
-                        boundary @ EngineError::RuntimeFlashProducerBoundary { .. } => {
-                            return Err(boundary);
-                        }
-                        other => tracing::warn!(%other, "BubbleOut failed; continuing"),
-                    }
+                    tracing::warn!(%error, "BubbleOut failed; continuing");
                 }
                 self.train_physical(idx, "Breath", 2, C4_MAX_PHYSICAL);
             } else {
@@ -47044,7 +46969,6 @@ impl Engine {
         &mut self,
         save_player_files: bool,
     ) -> Result<(), EngineError> {
-        self.surface_pending_runtime_flash_boundary()?;
         self.game_synchronize_before_network(save_player_files)
     }
 
@@ -47066,7 +46990,6 @@ impl Engine {
     /// Synchronize(false), after InitGame and before InitPlayers.
     #[doc(hidden)]
     pub fn game_start_synchronize(&mut self) -> Result<(), EngineError> {
-        self.surface_pending_runtime_flash_boundary()?;
         self.game_sync_clearance();
         self.game_synchronize(false)
     }
@@ -47987,9 +47910,7 @@ impl Engine {
         let mut failed = false;
         if let Err(error) = self.apply_scenario_batch(batch) {
             failed = true;
-            if let Some(error) = self.defer_runtime_flash_boundary(error) {
-                tracing::warn!(%error, "object-order script batch failed to apply");
-            }
+            tracing::warn!(%error, "object-order script batch failed to apply");
         }
         if synchronous_category_sort {
             // Global Resort() has no ResortProc node in C++; it sorts the
@@ -48006,11 +47927,8 @@ impl Engine {
                 self.objects[index].unsorted = true;
             }
         }
-        if let Some(error) = script_error {
+        if script_error.is_some() {
             failed = true;
-            // Raw-value execution already logged ordinary script failures;
-            // retain only fatal runtime boundaries for the enclosing tick.
-            let _ = self.defer_runtime_flash_boundary(error);
         }
 
         if failed {
@@ -53162,9 +53080,7 @@ impl Engine {
             if let Some(layer) = layer {
                 config = config.with_layer(layer);
             }
-            if let Err(error) = self.spawn_object_with_initial_lifecycle(config, Some(creator)) {
-                let _ = self.defer_runtime_flash_boundary(error);
-            }
+            let _ = self.spawn_object_with_initial_lifecycle(config, Some(creator));
         }
     }
 
@@ -53948,9 +53864,7 @@ impl Engine {
                             .with_owner(OWNER_NONE)
                             .with_controller(controller.unwrap_or(OWNER_NONE));
                         // Unknown definition: C4Id2Def → nullptr, no object.
-                        if let Err(error) = self.spawn_object(config) {
-                            let _ = self.defer_runtime_flash_boundary(error);
-                        }
+                        let _ = self.spawn_object(config);
                     }
                 }
             }
@@ -54756,15 +54670,11 @@ impl Engine {
         self.rng = rng;
         self.audio_registry = audio_state;
         if let Err(error) = self.apply_scenario_batch(batch) {
-            if let Some(error) = self.defer_runtime_flash_boundary(error) {
-                tracing::warn!(%error, "material reaction script batch failed to apply");
-            }
+            tracing::warn!(%error, "material reaction script batch failed to apply");
         }
-        if let Some(error) = script_error {
-            // Ordinary raw callback errors were logged by
-            // `call_value_for_script`; only the fatal boundary is retained.
-            let _ = self.defer_runtime_flash_boundary(error);
-        }
+        // Ordinary raw callback errors were already logged by
+        // `call_value_for_script`.
+        let _ = script_error;
         Some((value.unwrap_or(Value::Nil), finals))
     }
 
@@ -55068,10 +54978,7 @@ impl Engine {
         ) {
             Ok(Some(_)) => true,
             Ok(None) => false,
-            Err(error) => {
-                let _ = self.defer_runtime_flash_boundary(error);
-                false
-            }
+            Err(_) => false,
         }
     }
 
@@ -61403,28 +61310,56 @@ func Probe() {
 mod set_pre_send_regression {
     use super::*;
 
-    #[test]
-    fn network_set_pre_send_surfaces_a_typed_fatal_engine_boundary() {
+    fn network_engine() -> Engine {
         let mut engine = Engine::new();
         engine.set_network_game(true);
+        engine.set_network_control_mode(true);
+        engine
+    }
+
+    #[test]
+    fn network_set_pre_send_returns_normally_and_retains_ordered_requests() {
+        let mut engine = network_engine();
         engine
             .load_scenario_script_with_convention(
                 "SetPreSend.c",
-                "#strict\nfunc Probe() { return SetPreSend(30, \"Local*\"); }\n",
+                concat!(
+                    "#strict\nfunc Probe() { return [",
+                    "SetPreSend(-1), SetPreSend(0), ",
+                    "SetPreSend(76, \"Client A?i*\"), SetPreSend(55, \"Host*\")]; }\n",
+                ),
                 true,
             )
             .expect("SetPreSend is registered during script linking");
 
-        let error = engine
-            .call_scenario_script_function("Probe", Vec::new())
-            .expect_err("unmodeled network TargetFPS mutation must fail closed");
-        assert!(matches!(
-            error,
-            EngineError::RuntimeFlashProducerBoundary {
-                producer: RuntimeFlashProducerBoundary::ScriptTargetFps,
-                recovery: None,
-            }
-        ));
+        assert_eq!(
+            engine
+                .call_scenario_script_value("Probe", &[])
+                .expect("network SetPreSend never raises a parity boundary"),
+            Some(Value::Array(vec![
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+            ]))
+        );
+        assert_eq!(
+            engine.take_network_target_fps_requests(),
+            vec![
+                NetworkTargetFpsRequest {
+                    target_fps: 38,
+                    client_pattern: None,
+                },
+                NetworkTargetFpsRequest {
+                    target_fps: 76,
+                    client_pattern: Some("Client A?i*".into()),
+                },
+                NetworkTargetFpsRequest {
+                    target_fps: 55,
+                    client_pattern: Some("Host*".into()),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -61441,12 +61376,18 @@ mod set_pre_send_regression {
         engine
             .call_scenario_script_function("Probe", Vec::new())
             .expect("offline SetPreSend follows the native no-op path");
+        assert!(engine.take_network_target_fps_requests().is_empty());
+
+        engine.set_network_game(true);
+        engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect("preserved IsNetworkGame is still local control");
+        assert!(engine.take_network_target_fps_requests().is_empty());
     }
 
     #[test]
-    fn fail_safe_initialize_does_not_swallow_the_typed_boundary() {
-        let mut engine = Engine::new();
-        engine.set_network_game(true);
+    fn fail_safe_initialize_keeps_the_local_pacing_request() {
+        let mut engine = network_engine();
         engine
             .register_definition(
                 Definition::from_script(
@@ -61458,22 +61399,21 @@ mod set_pre_send_regression {
             )
             .expect("definition registers");
 
-        let error = engine
+        engine
             .spawn_object(SpawnConfig::new("PRES"))
-            .expect_err("fail-safe callbacks may not downgrade the parity boundary");
-        assert!(matches!(
-            error,
-            EngineError::RuntimeFlashProducerBoundary {
-                producer: RuntimeFlashProducerBoundary::ScriptTargetFps,
-                ..
-            }
-        ));
+            .expect("Initialize SetPreSend succeeds");
+        assert_eq!(
+            engine.take_network_target_fps_requests(),
+            vec![NetworkTargetFpsRequest {
+                target_fps: 30,
+                client_pattern: None,
+            }]
+        );
     }
 
     #[test]
-    fn nested_fail_safe_creation_cannot_erase_the_typed_boundary() {
-        let mut engine = Engine::new();
-        engine.set_network_game(true);
+    fn nested_creation_keeps_the_local_pacing_request() {
+        let mut engine = network_engine();
         engine
             .register_definition(
                 Definition::from_script(
@@ -61492,22 +61432,21 @@ mod set_pre_send_regression {
             )
             .expect("scenario script compiles");
 
-        let error = engine
+        engine
             .call_scenario_script_function("Probe", Vec::new())
-            .expect_err("nested creation fail-safe must retain the fatal boundary");
-        assert!(matches!(
-            error,
-            EngineError::RuntimeFlashProducerBoundary {
-                producer: RuntimeFlashProducerBoundary::ScriptTargetFps,
-                ..
-            }
-        ));
+            .expect("nested Construction SetPreSend succeeds");
+        assert_eq!(
+            engine.take_network_target_fps_requests(),
+            vec![NetworkTargetFpsRequest {
+                target_fps: 30,
+                client_pattern: None,
+            }]
+        );
     }
 
     #[test]
-    fn initialize_def_raw_value_funnel_propagates_the_typed_boundary() {
-        let mut engine = Engine::new();
-        engine.set_network_game(true);
+    fn initialize_def_keeps_the_local_pacing_request() {
+        let mut engine = network_engine();
         engine
             .register_definition(
                 Definition::from_script(
@@ -61519,16 +61458,16 @@ mod set_pre_send_regression {
             )
             .expect("definition registers");
 
-        let error = engine
+        engine
             .initialize_definition_scripts()
-            .expect_err("InitializeDef fail-safe must retain the fatal boundary");
-        assert!(matches!(
-            error,
-            EngineError::RuntimeFlashProducerBoundary {
-                producer: RuntimeFlashProducerBoundary::ScriptTargetFps,
-                recovery: None,
-            }
-        ));
+            .expect("InitializeDef SetPreSend succeeds");
+        assert_eq!(
+            engine.take_network_target_fps_requests(),
+            vec![NetworkTargetFpsRequest {
+                target_fps: 30,
+                client_pattern: None,
+            }]
+        );
     }
 }
 

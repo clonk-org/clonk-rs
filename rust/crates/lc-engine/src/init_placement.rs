@@ -352,10 +352,7 @@ impl Engine {
             .with_owner(OWNER_NONE);
         match self.spawn_object_with_initial_lifecycle(config, None) {
             Ok(object) => object,
-            Err(error) => {
-                let _ = self.defer_runtime_flash_boundary(error);
-                None
-            }
+            Err(_) => None,
         }
     }
 
@@ -377,10 +374,7 @@ impl Engine {
             .with_construction(con);
         match self.spawn_object_with_initial_lifecycle(config, None) {
             Ok(object) => object,
-            Err(error) => {
-                let _ = self.defer_runtime_flash_boundary(error);
-                None
-            }
+            Err(_) => None,
         }
     }
 
