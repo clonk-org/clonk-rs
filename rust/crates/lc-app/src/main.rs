@@ -7528,10 +7528,7 @@ fn handle_window_event(
     control_flow: &mut ControlFlow,
 ) -> Result<()> {
     match event {
-        WindowEvent::CloseRequested => {
-            app.finalize_pending_league_end_for_teardown();
-            control_flow.set_exit();
-        }
+        WindowEvent::CloseRequested => app.handle_window_close_requested(),
         WindowEvent::Resized(size)
         | WindowEvent::ScaleFactorChanged {
             new_inner_size: &mut size,
@@ -64170,6 +64167,23 @@ impl GameApp {
     fn refresh_participants_label(&mut self) {
         let label = load_participants_label(self.app_paths.as_ref());
         self.main_menu_state.update_participants_label(label);
+    }
+
+    /// C4FullScreen::Close intercepts the native window close while a round
+    /// is running. A refused/duplicate abort dialog still keeps the process
+    /// alive; only startup/loading close requests enter ordinary teardown.
+    fn handle_window_close_requested(&mut self) {
+        if self.mode == AppMode::Running {
+            let dialog_owner = if self.primary_physical_viewport_is_no_owner() {
+                OWNER_NONE
+            } else {
+                self.local_owner
+            };
+            self.show_abort_dialog(dialog_owner);
+            return;
+        }
+        self.finalize_pending_league_end_for_teardown();
+        self.request_exit();
     }
 
     fn request_exit(&mut self) {
@@ -178074,6 +178088,110 @@ func ControlDig() { dig_count = 1; return(1); }
         loading
             .handle_key(VirtualKeyCode::C, ElementState::Released)
             .expect("loading IRC chord release remains outside the runtime helper");
+    }
+
+    #[test]
+    fn l019_window_close_confirms_running_round_and_nonrunning_close_exits() {
+        let mut app = new_running_sandbox_app();
+        app.update().expect("advance round before declining close");
+        let running_frame = app.engine.frame();
+        let running_scenario = app
+            .active_scenario
+            .as_ref()
+            .expect("active sandbox scenario")
+            .identifier
+            .clone();
+
+        app.handle_window_close_requested();
+        assert_eq!(
+            app.ingame_menu
+                .get(app.local_owner)
+                .map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::AbortConfirm)
+        );
+        assert!(!app.take_exit_request());
+        let no = app
+            .ingame_menu
+            .get(app.local_owner)
+            .expect("window-close abort confirmation")
+            .items()
+            .iter()
+            .position(|item| item.action == MenuAction::NoOp)
+            .expect("No button");
+        app.ingame_menu
+            .get_mut(app.local_owner)
+            .expect("window-close abort confirmation")
+            .set_selection(no);
+        app.handle_menu_command_failsafe(
+            app.local_owner,
+            ControlCommand::MenuEnter,
+            CommandKind::Press,
+        )
+        .expect("decline window-close abort");
+        assert!(matches!(app.mode, AppMode::Running));
+        assert_eq!(app.engine.frame(), running_frame);
+        assert_eq!(
+            app.active_scenario
+                .as_ref()
+                .map(|scenario| scenario.identifier.as_str()),
+            Some(running_scenario.as_str())
+        );
+
+        app.handle_window_close_requested();
+        app.handle_menu_command_failsafe(
+            app.local_owner,
+            ControlCommand::MenuEnter,
+            CommandKind::Press,
+        )
+        .expect("confirm window-close abort");
+        assert!(matches!(app.mode, AppMode::Menu));
+        assert!(app.active_scenario.is_none());
+        assert!(!app.take_exit_request(), "Yes ends the round, not the process");
+
+        app.handle_window_close_requested();
+        assert!(
+            app.take_exit_request(),
+            "the window-event footer turns this into ControlFlow::Exit so dirty display options persist"
+        );
+
+        let mut loading = new_running_sandbox_app();
+        loading.mode = AppMode::Loading;
+        loading.handle_window_close_requested();
+        assert!(loading.take_exit_request());
+        assert!(loading.ingame_menu.is_none());
+    }
+
+    #[test]
+    fn l019_window_close_uses_observer_owner_and_never_exits_on_dialog_refusal() {
+        let mut observer = new_running_sandbox_app();
+        let removed_owner = observer.local_owner;
+        observer
+            .engine
+            .remove_player(removed_owner)
+            .expect("remove local player for passive observer");
+        observer.engine.set_local_players([]);
+        observer.local_controls = LocalControlRegistry::default();
+        observer.snapshot = observer.engine.snapshot();
+        observer.refresh_non_authoritative_physical_viewports();
+        assert!(observer.primary_physical_viewport_is_no_owner());
+
+        observer.handle_window_close_requested();
+        observer.handle_window_close_requested();
+        assert_eq!(
+            observer
+                .ingame_menu
+                .get(OWNER_NONE)
+                .map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::AbortConfirm)
+        );
+        assert_eq!(observer.ingame_menu.iter().count(), 1);
+        assert!(!observer.take_exit_request());
+
+        let mut game_over = new_game_over_keyboard_app();
+        game_over.handle_window_close_requested();
+        assert!(game_over.game_over_dialog.is_some());
+        assert!(game_over.ingame_menu.is_none());
+        assert!(!game_over.take_exit_request());
     }
 
     #[test]
