@@ -29,12 +29,7 @@ where
         Err(err) => panic!("failed to open baseline {}: {err}", baseline_path.display()),
     };
 
-    let frames = baseline
-        .as_ref()
-        .map(|recording| recording.frames().len())
-        .unwrap_or(default_frames);
-
-    let actual = generator(frames)
+    let actual = generator(default_frames)
         .unwrap_or_else(|err| panic!("failed to generate recording for snapshot: {err}"));
 
     if update {
@@ -67,6 +62,12 @@ where
             baseline_path.display()
         )
     });
+    assert_eq!(
+        baseline.frames().len(),
+        default_frames,
+        "baseline {} has a stale frame count",
+        baseline_path.display()
+    );
 
     let playback = Playback::from_recording(baseline);
     playback

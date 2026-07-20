@@ -1,5 +1,4 @@
 mod audit;
-mod dev_check;
 
 use anyhow::{anyhow, bail, Context, Result};
 use lc_engine::fixtures::SNAPSHOT_SCENARIOS;
@@ -12,6 +11,7 @@ use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
+use xtask::dev_check;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -801,14 +801,17 @@ fn parity_command(args: &[String]) -> Result<()> {
             let status = Command::new("cargo")
                 .current_dir(&paths.workspace_dir)
                 .args([
-                    "test",
+                    "nextest",
+                    "run",
                     "-p",
-                    "lc-engine",
-                    "--lib",
-                    "parity_differential_matches_cpp_golden",
+                    "lc-engine-unit-tests",
+                    "--test",
+                    "engine_inline",
+                    "-E",
+                    "test(parity_differential_matches_cpp_golden)",
                 ])
                 .status()
-                .context("failed to run cargo test for parity verify")?;
+                .context("failed to run cargo nextest for parity verify")?;
             if !status.success() {
                 bail!("parity differential check failed ({status})");
             }

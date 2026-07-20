@@ -11,7 +11,7 @@ without changing compile time.
 
 ## Measurement artifacts
 
-`cargo xtask dev-check` writes each run below
+`cargo dev-check` writes each run below
 `target/dev-check/<run-id>/`. Keep the whole directory so a result retains its
 selected commands, outcomes, timings, and replay evidence:
 
@@ -99,12 +99,52 @@ This is a 49.7% cold-build reduction and a 33.9% end-to-end reduction on that
 machine, with a 4.3s warm-suite cost. Re-measure rather than extrapolating the
 result to a different toolchain or runner.
 
+### Test-harness and scheduling follow-up
+
+The next feedback-loop pass kept production engine code at test-profile
+optimization while moving all three engine test wrappers into the
+`lc-engine-unit-tests` leaf package at optimization level 0. Test inventories
+were compared before and after the move; the 1,951 inline tests were
+byte-identical, and the unchanged integration source contributed another 266
+tests. On the same M4 Max/Rust 1.87.0 checkout:
+
+| Isolated workload | Result |
+| --- | ---: |
+| Inline engine wrapper, old level-3 clean compile | 86.87s |
+| Inline engine wrapper, leaf level-0 clean compile | 26.89s |
+| Integration wrapper, leaf level-0 compile with dependencies ready | 7.66s |
+| All three engine binaries, 3,256 tests | 36.948s |
+| Full app binary, 1,385 tests | 48.794s |
+| Lightweight `dev-check` dispatcher, cold / warm | 1.78s / about 0.35s |
+
+The exact inline-wrapper A/B removes 59.98s (69.0%) of compiler work. The
+engine and app suite figures are component measurements, not numbers to add:
+nextest schedules the two surfaces concurrently in the workspace gate.
+
+The same pass also:
+
+- keeps 256 test-profile codegen units when CI sets `CARGO_INCREMENTAL=0`;
+- starts real-scenario tests before short unit work to avoid a serial tail;
+- uses synthetic GUI fixtures by default in app tests, retaining classic
+  resources only for pixel/resource-sensitive cases;
+- splits dependency-light `dev-check` planning from engine-backed xtask tools;
+- upgrades CPAL to the bindgen-free CoreAudio backend and removes that cold
+  native binding-generation step; and
+- treats snapshot and differential checks as part of the workspace nextest
+  run instead of executing them a second time afterward.
+
+The final rebased landing gate compiled its remaining warm-cache work in 9.75s
+and passed 7,357 tests in 95.772s. Several other workers were active and the
+base gained 29 tests during the pass, so this is retained as correctness and
+warm-build evidence rather than promoted to a comparable execution baseline.
+Use an idle machine for the final cached and cold workspace measurements.
+
 The first local reference baseline was recorded on 2026-07-12 from
 `dd32e5d3` with content `67a54d0`, Rust 1.87.0, macOS/Darwin arm64, and an
 Apple M4 Max. The representative command was:
 
 ```sh
-cargo xtask dev-check \
+cargo dev-check \
   --changed rust/crates/lc-engine/src/compat.rs \
   --budget-seconds 60 --keep-going
 ```
@@ -154,7 +194,7 @@ These are planning targets, not measured baselines:
 | Metric | Provisional target | Enforcement |
 | --- | --- | --- |
 | Focused `dev-check` work | Start no new ordinary check after its 60s budget | Enforced by the developer-feedback command; a required render diagnostic may still run. |
-| Cached full Rust gate | p50 below 5 minutes on the pinned CI runner | Report until 20 comparable default-branch runs exist. |
+| Cached full Rust test execution | Local reference below 60s; CI p50 below 2 minutes | Report until 20 comparable default-branch runs exist. |
 | In-game end-to-end frame | p99 below 25ms on a stable performance runner | Report on hosted runners; enforce only on stable hardware. |
 | Hard in-game cadence | Never budget above 28ms | Architectural limit from `INGAME_FRAME_INTERVAL`, not a measured baseline. |
 
@@ -170,18 +210,16 @@ Render one explicit replay snapshot:
 LC_DEV_CHECK_SNAPSHOT=target/dev-check/path/to/snapshot-final.json \
 LC_DEV_CHECK_FRAME_PNG=target/dev-check/repro/frame-final.png \
 LC_DEV_CHECK_RENDER_METRICS=target/dev-check/repro/render-metrics.json \
-  cargo test -p lc-frontend --features dev-feedback-render \
-  --test dev_feedback_render -- \
-  --ignored --exact dev_feedback_render
+  cargo nextest run -p lc-frontend --features dev-feedback-render \
+  --test dev_feedback_render -- dev_feedback_render --ignored --exact
 ```
 
 Or let the probe select the newest `snapshot-final.json` recursively:
 
 ```sh
 LC_DEV_CHECK_ARTIFACT_DIR=target/dev-check \
-  cargo test -p lc-frontend --features dev-feedback-render \
-  --test dev_feedback_render -- \
-  --ignored --exact dev_feedback_render
+  cargo nextest run -p lc-frontend --features dev-feedback-render \
+  --test dev_feedback_render -- dev_feedback_render --ignored --exact
 ```
 
 Compare JSON reports only after verifying their input paths/fingerprints and

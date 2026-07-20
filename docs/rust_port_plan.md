@@ -143,12 +143,12 @@
 
 **Scenario Discovery:**
 ```bash
-cargo test -p lc-app load_frontend_scenarios_discovers_repository_content
+cargo nextest run -p lc-app load_frontend_scenarios_discovers_repository_content
 ```
 
 **Test Status:**
 ```bash
-cargo test --workspace  # passes
+cargo nextest run --workspace  # passes
 ```
 
 **Panic Count:**
@@ -163,7 +163,7 @@ rg "script.register_host_function" rust/crates/lc-engine/src/compat.rs | wc -l  
 
 **AI Commands:**
 ```bash
-cargo test -p lc-engine \
+cargo nextest run -p lc-engine-unit-tests --test engine_inline \
   command::tests::acquire_transfers_item_from_shared_container \
   command::tests::acquire_enters_container_when_adjacent \
   command::tests::buy_spawns_item_and_updates_player_state \
@@ -178,7 +178,7 @@ cargo test -p lc-engine \
 
 **Sell Command:**
 ```bash
-cargo test -p lc-engine \
+cargo nextest run -p lc-engine-unit-tests --test engine_inline \
   command::tests::sell_requires_definition \
   command::tests::sell_requests_enter_when_outside \
   command::tests::sell_completes_when_inside \
@@ -187,7 +187,7 @@ cargo test -p lc-engine \
 
 **Chop Command:**
 ```bash
-cargo test -p lc-engine \
+cargo nextest run -p lc-engine-unit-tests --test engine_inline \
   command::tests::chop_sets_action_when_in_range \
   command::tests::chop_requests_move_when_far \
   command::tests::chop_requests_ungrab_when_pushing \
@@ -196,7 +196,7 @@ cargo test -p lc-engine \
 
 **Throw Command:**
 ```bash
-cargo test -p lc-engine \
+cargo nextest run -p lc-engine-unit-tests --test engine_inline \
   command::tests::throw_requests_acquire_when_item_missing \
   command::tests::throw_pushes_move_to_target_when_out_of_range \
   command::tests::throw_sets_throw_action_when_in_range \
@@ -205,7 +205,7 @@ cargo test -p lc-engine \
 
 **Dig Command:**
 ```bash
-cargo test -p lc-engine \
+cargo nextest run -p lc-engine-unit-tests --test engine_inline \
   command::tests::dig_requests_ungrab_when_pushing \
   command::tests::dig_requests_exit_when_contained \
   command::tests::dig_sets_dig_action_when_walking \
@@ -214,7 +214,7 @@ cargo test -p lc-engine \
 
 **PushTo Command:**
 ```bash
-cargo test -p lc-engine \
+cargo nextest run -p lc-engine-unit-tests --test engine_inline \
   command::tests::push_to_requests_grab_when_actor_not_pushing \
   command::tests::push_to_requests_enter_when_destination_requires_container \
   command::tests::push_to_completes_with_wait_and_ungrab_when_in_position

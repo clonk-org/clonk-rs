@@ -48,6 +48,10 @@ opt-level = 3
 [profile.test]
 opt-level = 3
 lto = "off"
+# CI disables incremental compilation for cache portability. Keep the same
+# broad codegen parallelism Cargo gives incremental local builds so the large
+# app and engine test wrappers do not become single long LLVM/link tails.
+codegen-units = 256
 # Full DWARF dominates codegen, linking, and disk use for the very large test
 # harnesses. Line tables retain source locations in failures and backtraces.
 debug = "line-tables-only"
@@ -63,8 +67,8 @@ opt-level = 3
 debug = false
 
 # The main application test harness is the largest final link in the workspace.
-# Assertions already report source locations, so skip its remaining line tables
-# to reduce cold codegen, link input, and target-directory growth.
+# Keep this explicit so future global profile changes do not accidentally add
+# debug data back to the 150k-line test wrapper.
 [profile.test.package.lc-app]
 debug = false
 
@@ -75,8 +79,9 @@ debug = false
 opt-level = 0
 debug = false
 
-# Keep the simulation engine optimized while avoiding LLVM optimization and
-# line-table generation for its 72k-line integration-test harness.
+# Keep the production simulation engine optimized while avoiding LLVM
+# optimization and line-table generation for all leaf test harnesses: the
+# extracted 72k-line suite, inline engine units, and integration scenarios.
 [profile.test.package.lc-engine-unit-tests]
 opt-level = 0
 debug = false

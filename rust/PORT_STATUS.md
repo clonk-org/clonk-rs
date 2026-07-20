@@ -129,8 +129,8 @@ of showing Rust fallbacks.
 ## Gates
 
 ```sh
-cargo nextest run -p lc-engine -E 'test(/^(real_tutorial(0[1-9]|10)_(virtual_play|route)|real_tutorial02_balloon_platform)::/)'
-cargo nextest run -p lc-engine -E 'test(/^virtual_player_harness::/)'
+cargo nextest run -p lc-engine-unit-tests --test engine_it -E 'test(/^(real_tutorial(0[1-9]|10)_(virtual_play|route)|real_tutorial02_balloon_platform)::/)'
+cargo nextest run -p lc-engine-unit-tests --test engine_it -E 'test(/^virtual_player_harness::/)'
 cargo nextest run -p lc-app -E 'test(/app_virtual_keyboard_(completes|flings|opens)/)'
 cargo nextest run --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings

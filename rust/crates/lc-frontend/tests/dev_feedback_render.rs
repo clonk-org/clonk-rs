@@ -14,7 +14,7 @@ const HEIGHT: u32 = 180;
 const CACHED_SAMPLES: usize = 10;
 
 #[test]
-#[ignore = "developer feedback timing probe; invoked by cargo xtask dev-check"]
+#[ignore = "developer feedback timing probe; invoked by cargo dev-check"]
 fn dev_feedback_render() -> Result<(), Box<dyn Error>> {
     let snapshot_path = snapshot_path()?;
     let snapshot: SimulationSnapshot = serde_json::from_reader(fs::File::open(&snapshot_path)?)?;

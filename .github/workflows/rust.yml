@@ -46,6 +46,11 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.91
+
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -56,7 +61,7 @@ jobs:
       - name: Run change-aware checks
         env:
           LC_DEV_CHECK_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: cargo xtask dev-check --base "$LC_DEV_CHECK_BASE" --budget-seconds 60
+        run: cargo dev-check --base "$LC_DEV_CHECK_BASE" --budget-seconds 60
 
       - name: Upload developer-feedback artifacts
         if: always()
@@ -111,10 +116,4 @@ jobs:
         run: cargo nextest run --workspace --locked
 
       - name: Run workspace lints
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Verify deterministic engine snapshots
-        run: cargo xtask engine-snapshots verify
-
-      - name: Verify C++ to Rust differential parity
-        run: cargo xtask parity verify
+        run: cargo clippy --profile test --workspace --all-targets --features xtask/engine-tools --locked -- -D warnings

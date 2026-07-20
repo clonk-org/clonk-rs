@@ -158,7 +158,8 @@ C++ source and regenerate.
 
 ```sh
 # Verify:
-cargo nextest run -p lc-engine -E 'test(parity_differential_matches_cpp_golden)'
+cargo nextest run -p lc-engine-unit-tests --test engine_inline \
+  -E 'test(parity_differential_matches_cpp_golden)'
 #   or, via the xtask wrapper:
 cargo xtask parity verify
 

@@ -71545,7 +71545,7 @@ mod tests {
 
     #[test]
     fn l053_help_click_describes_ocf_all_target_without_commands_or_drag() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let owner = app.local_owner;
         let (target, point) = install_mouse_help_target(
             &mut app,
@@ -71755,7 +71755,7 @@ mod tests {
 
     #[test]
     fn l053_help_suppresses_open_ingame_menu_and_right_up_exits() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let owner = app.local_owner;
         app.activate_ingame_main_menu_for_player(owner)
             .expect("open player menu for Help interception");
@@ -74524,7 +74524,7 @@ mod tests {
 
     #[test]
     fn viewport_button_stack_is_wired_into_the_late_app_render() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         app.display_flags.show_commands = false;
         app.display_flags.show_command_keys = false;
         render_mouse_test_app(&mut app);
@@ -74588,7 +74588,7 @@ mod tests {
 
     #[test]
     fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let removed_owner = app.local_owner;
         app.engine
             .remove_player(removed_owner)
@@ -74930,6 +74930,7 @@ mod tests {
     #[test]
     fn hud_command_autostop_release_survives_menu_opened_by_press() {
         let (mut app, owner, points) = command_bar_fixture(true);
+        install_classic_test_assets(&mut app);
         let point = points
             .iter()
             .find_map(|(command, point)| (*command == 3).then_some(*point))
@@ -75002,6 +75003,7 @@ mod tests {
     fn script_menu_owns_threshold_crossing_inventory_drag_move() {
         let (mut app, owner, cursor, _first, _target, inventory_point) =
             inventory_region_fixture();
+        install_classic_test_assets(&mut app);
         install_test_cursor_menu(&mut app, cursor, two_item_script_menu(cursor));
         assert!(app
             .ingame_inventory_region_target(owner, inventory_point)
@@ -83294,7 +83296,7 @@ func Award()
 
     #[test]
     fn running_render_draws_supported_globals_and_ignores_remote_or_missing_targets() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let visible = lc_engine::MessageSnapshot {
             id: 1,
             kind: MessageKind::Global,
@@ -83872,7 +83874,7 @@ func Award()
 
     #[test]
     fn scale_one_point_five_hud_uses_fractional_native_font_bundle() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         app.configure_running_state("H".to_string(), DEFAULT_GROUND_HEIGHT);
         install_native_test_fonts(&mut app, 1.5);
         let fonts = app.native_startup_fonts.as_deref().expect("native fonts");
@@ -83890,7 +83892,7 @@ func Award()
 
     #[test]
     fn scale_one_point_five_message_batch_carries_its_isolated_clipper() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let decoration = lc_engine::ObjectMenuFrameDecoration {
             source_definition: "TEST".to_string(),
             background_color: 0x8032_3232,
@@ -83963,7 +83965,7 @@ func Award()
 
     #[test]
     fn secondary_local_viewport_draws_its_player_global_message_only_there() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let local = app
             .snapshot
             .players
@@ -100593,7 +100595,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             ModifiersState::ALT,
             ModifiersState::ALT | ModifiersState::LOGO,
         ] {
-            let mut runtime_app = new_running_sandbox_app();
+            let mut runtime_app = new_classic_running_sandbox_app();
             runtime_app
                 .bindings
                 .rebind(ControlBindingId::Left, VirtualKeyCode::C);
@@ -100680,7 +100682,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             Ok(lc_network::IrcClientEvent::Connected)
         ));
 
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         app.startup_irc_server = address;
         app.startup_irc_client = Some(handle);
         render_mouse_test_app(&mut app);
@@ -104536,7 +104538,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             .replace(menu.local_owner, Some(IngameMenuState::surrender_menu()));
         check(menu, "running player menu");
 
-        let mut evaluation = new_running_sandbox_app();
+        let mut evaluation = new_classic_running_sandbox_app();
         evaluation.handle_game_over().expect("open evaluation");
         check(evaluation, "running evaluation");
     }
@@ -111215,7 +111217,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn options_sound_held_arrow_advances_before_each_rendered_frame() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         app.return_to_menu();
         app.resize(800, 600).expect("resize menu");
         app.audio
@@ -116607,10 +116609,21 @@ ScenInfoArea=70,5,25,90
     }
 
     fn new_running_sandbox_app() -> GameApp {
+        // Most state/input tests need the shipped CLNK definition but not the
+        // much heavier shipped frontend bundle. Pixel/resource contracts use
+        // the explicit classic constructor below.
         let paths = cached_app_paths().expect("discover sandbox crew definition");
         new_running_sandbox_app_with_definitions(SandboxDefinitionLoad::InstallCrew(
             paths.as_ref(),
         ))
+    }
+
+    fn new_classic_running_sandbox_app() -> GameApp {
+        let paths = cached_app_paths().expect("discover sandbox crew definition");
+        new_running_sandbox_app_with_definitions_and_assets(
+            SandboxDefinitionLoad::InstallCrew(paths.as_ref()),
+            SandboxFixtureAssets::Classic,
+        )
     }
 
     fn new_state_only_running_sandbox_app() -> GameApp {
@@ -116661,6 +116674,13 @@ ScenInfoArea=70,5,25,90
         app
     }
 
+    fn new_classic_lightweight_running_sandbox_app() -> GameApp {
+        new_running_sandbox_app_with_definitions_and_assets(
+            SandboxDefinitionLoad::None,
+            SandboxFixtureAssets::Classic,
+        )
+    }
+
     fn new_lightweight_running_sandbox_app() -> GameApp {
         new_running_sandbox_app_with_definitions(SandboxDefinitionLoad::None)
     }
@@ -116670,7 +116690,7 @@ ScenInfoArea=70,5,25,90
     ) -> GameApp {
         new_running_sandbox_app_with_definitions_and_assets(
             definition_load,
-            SandboxFixtureAssets::Classic,
+            SandboxFixtureAssets::Synthetic,
         )
     }
 
@@ -117304,7 +117324,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn ctrlrec_end_finishes_the_replay_and_restores_local_control() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         app.control_playback = Some(
             ControlRecordPlayback::from_bytes(&[0, lc_engine::RCT_END])
                 .expect("open end-only replay"),
@@ -118987,7 +119007,7 @@ ScenInfoArea=70,5,25,90
             assert!(app.running_chat.is_none());
         }
 
-        let mut unmatched_vote_hotkey = new_running_sandbox_app();
+        let mut unmatched_vote_hotkey = new_classic_running_sandbox_app();
         unmatched_vote_hotkey
             .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
             .expect("push exclusive vote for unmatched Alt mnemonic");
@@ -119190,7 +119210,7 @@ ScenInfoArea=70,5,25,90
             )
         };
 
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         app.start_running_chat(RunningChatMode::All);
         for character in "alpha beta".chars() {
             app.handle_text_input(character).expect("type chat text");
@@ -119470,7 +119490,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         install_message_fixture(&mut app);
         assert!(
             app.execute_message_control(message_control(
@@ -119929,7 +119949,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn cursor_portrait_does_not_fall_back_to_definition_picture_or_crew_icon() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         assert!(
             app.graphics.hud_graphics().crew.is_some(),
             "fixture must carry Crew.png so the forbidden fallback is observable"
@@ -121449,7 +121469,7 @@ ScenInfoArea=70,5,25,90
         // (pristine src/C4Viewport.cpp:505-529,546-563;
         // src/C4GraphicsSystem.cpp:445-459; src/C4GUI.cpp:802-845;
         // src/C4Menu.cpp:1114-1121; src/C4Viewport.cpp:1549-1563).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let primary = app.local_owner;
         let secondary = primary + 1;
         let primary_crew = app
@@ -122496,7 +122516,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn l066_film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let owner = app.local_owner;
         let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
 
@@ -123291,7 +123311,7 @@ ScenInfoArea=70,5,25,90
         assert_eq!(observer_inputs.len(), 1);
         assert_eq!(observer_inputs[0].owner, OWNER_NONE);
 
-        let mut game_over_observer = new_running_sandbox_app();
+        let mut game_over_observer = new_classic_running_sandbox_app();
         game_over_observer
             .assets
             .require_classic_game_over_resources()
@@ -132074,7 +132094,7 @@ protected func InputCallback(string answer, int player)
         // FnEliminatePlayer(plr, true) appends CID_RemovePlr to Game.Input;
         // it does not erase the player while the calling control/frame is
         // still executing (C4Script.cpp:2823-2833; C4PlayerList.cpp:480-484).
-        let mut app = new_lightweight_running_sandbox_app();
+        let mut app = new_classic_lightweight_running_sandbox_app();
         let player = app.local_owner;
         assert_eq!(
             app.ui_sound_log
@@ -132362,7 +132382,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn offline_direct_elimination_waits_for_next_control_rate_frame() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let player = app.local_owner;
         app.engine.set_control_rate(3);
         app.snapshot = app.engine.tick().expect("advance past cadence frame zero");
@@ -134604,7 +134624,7 @@ protected func InputCallback(string answer, int player)
         // their ActivateMenu:Main close command; the Main page stays closed.
         // Every C4MainMenu::OnClosed queues one synchronized ClearPressed
         // (C4GuiDialogs.cpp:386-425; C4MainMenu.cpp:313-329).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         let tick = app.local_control_submission_tick();
@@ -134722,7 +134742,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn player_menu_title_close_visibility_follows_mouse_owner_and_disable_mouse() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let owner = app.local_owner;
         app.open_ingame_menu().expect("open mouse owner's menu");
         let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -144673,7 +144693,7 @@ protected func InputCallback(string answer, int player)
         Vector2,
         i32,
     ) {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let owner = app.local_owner;
         let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
         app.engine
@@ -145529,7 +145549,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // gameplay (C4Player.cpp:1502-1513). This is the app half of the
         // mandatory Dragon Rock difficulty/type menu path.
         lc_logging::init();
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let cursor = app
             .engine
             .crew_cursor(app.local_owner)
@@ -145652,7 +145672,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn engine_dialog_menu_renders_classic_style_instead_of_fallback() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let cursor = app
             .engine
             .crew_cursor(app.local_owner)
@@ -145687,7 +145707,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // navigation to it before gameplay (C4Object.cpp:1961-1980,
         // 2044-2062; C4Viewport.cpp:983-995; C4Player.cpp:1502-1513).
         lc_logging::init();
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let cursor = app
             .engine
             .crew_cursor(app.local_owner)
@@ -145734,7 +145754,7 @@ func ControlDig() { dig_count = 1; return(1); }
     #[test]
     fn engine_info_menu_renders_the_classic_style_instead_of_a_fallback() {
         lc_logging::init();
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let owner = app.local_owner;
         let cursor = app
             .engine
@@ -145800,7 +145820,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // it, and Dialog's Ico_Close queues COM_MenuClose
         // (C4Menu.cpp:213-242, 1237-1262; C4ObjectMenu.cpp:461-478).
         lc_logging::init();
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let cursor = app
             .engine
             .crew_cursor(app.local_owner)
@@ -145911,7 +145931,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn l065_running_menu_wheels_are_pixel_persistent_and_never_reach_gameplay() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let owner = app.local_owner;
         let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
         let menu = long_script_menu(cursor, 12);
@@ -146055,7 +146075,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn l065_title_drag_is_captured_exactly_and_resize_resets_location() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let owner = app.local_owner;
         let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
         install_test_cursor_menu(&mut app, cursor, long_script_menu(cursor, 8));
@@ -146125,7 +146145,7 @@ func ControlDig() { dig_count = 1; return(1); }
             "viewport ResetLocation restores anchored placement"
         );
 
-        let mut player_app = new_running_sandbox_app();
+        let mut player_app = new_classic_running_sandbox_app();
         let player = player_app.local_owner;
         let players = (0..8)
             .map(|index| NewPlayerEntry {
@@ -146206,7 +146226,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn l065_script_menu_scroll_and_drag_state_is_per_viewport_owner() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let primary = app.local_owner;
         let secondary = primary + 1;
         let primary_cursor = app.engine.crew_cursor(primary).expect("primary cursor");
@@ -146317,7 +146337,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn script_menu_pointer_resource_failure_never_clicks_through_to_the_world() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let mut frame = vec![0_u8; 320 * 200 * 4];
         app.render(&mut frame).expect("establish viewport layout");
         let viewport = app
@@ -146424,7 +146444,7 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     fn new_game_over_keyboard_app() -> GameApp {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         app.handle_game_over().expect("show game-over dialog");
         assert!(app.game_over_dialog.is_some());
         if let Some(audio) = app.audio.as_mut() {
@@ -146815,7 +146835,14 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     fn new_scoreboard_test_app(script: &str) -> GameApp {
-        let mut app = new_running_sandbox_app();
+        configure_scoreboard_test_app(new_running_sandbox_app(), script)
+    }
+
+    fn new_classic_scoreboard_test_app(script: &str) -> GameApp {
+        configure_scoreboard_test_app(new_classic_running_sandbox_app(), script)
+    }
+
+    fn configure_scoreboard_test_app(mut app: GameApp, script: &str) -> GameApp {
         app.reconcile_initial_scoreboard();
         app.status_text.clear();
         app.snapshot.hud.messages.clear();
@@ -147138,7 +147165,7 @@ func ControlDig() { dig_count = 1; return(1); }
         );
         assert!(app.context_menu.is_some());
 
-        let mut exclusive_release = new_scoreboard_test_app(
+        let mut exclusive_release = new_classic_scoreboard_test_app(
             r#"global func Initialize()
                {
                    SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
@@ -147178,7 +147205,7 @@ func ControlDig() { dig_count = 1; return(1); }
             "the out-of-scope release clears only raw repeat bookkeeping",
         );
 
-        let mut dialog_press = new_scoreboard_test_app(
+        let mut dialog_press = new_classic_scoreboard_test_app(
             r#"global func Initialize()
                {
                    SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
@@ -147283,7 +147310,7 @@ func ControlDig() { dig_count = 1; return(1); }
         );
         assert!(message.message_dialog_consumed_keys.is_empty());
 
-        let mut game_over = new_scoreboard_test_app(BOARD);
+        let mut game_over = new_classic_scoreboard_test_app(BOARD);
         game_over
             .handle_game_over()
             .expect("show game-over focus dialog");
@@ -147336,7 +147363,7 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(rebound_context.context_menu.is_some());
         assert!(rebound_context.ingame_menu.is_some());
 
-        let mut game_over_context = new_scoreboard_test_app(BOARD);
+        let mut game_over_context = new_classic_scoreboard_test_app(BOARD);
         game_over_context
             .handle_game_over()
             .expect("show game-over context dialog");
@@ -147620,7 +147647,7 @@ func ControlDig() { dig_count = 1; return(1); }
         {
             DoScoreboardShow(0);
         }"#;
-        let mut app = new_scoreboard_test_app(GAME_OVER_BOARD);
+        let mut app = new_classic_scoreboard_test_app(GAME_OVER_BOARD);
         app.engine
             .player_mut(app.local_owner)
             .expect("local player")
@@ -147671,7 +147698,7 @@ func ControlDig() { dig_count = 1; return(1); }
         app.render(&mut frame)
             .expect("a later runtime DoDlgShow may reopen and render after Continue");
 
-        let mut save_browser = new_scoreboard_test_app(GAME_OVER_BOARD);
+        let mut save_browser = new_classic_scoreboard_test_app(GAME_OVER_BOARD);
         save_browser
             .open_save_browser()
             .expect("open fullscreen save-browser descendant");
@@ -147681,7 +147708,7 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(save_browser.save_browser.is_none());
         assert!(!save_browser.save_browser_return_to_menu);
 
-        let mut object_menu = new_scoreboard_test_app(GAME_OVER_BOARD);
+        let mut object_menu = new_classic_scoreboard_test_app(GAME_OVER_BOARD);
         assert!(object_menu.open_object_menu().expect("open object menu"));
         call_scoreboard_function_and_update(&mut object_menu, "ShowAndEnd");
         assert!(object_menu.game_over_dialog.is_some());
@@ -147844,7 +147871,7 @@ func ControlDig() { dig_count = 1; return(1); }
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
         persist_config_value(&paths, "General", "LanguageEx", "DE")
             .expect("select German resources");
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         app.app_paths = Some(paths);
         app.handle_game_over()
             .expect("show localized evaluation dialog");
@@ -148950,7 +148977,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn runtime_flash_renders_non_cp1252_utf8_through_font_regular() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         app.status_text.clear();
         app.snapshot.hud.messages.clear();
         let mut baseline = vec![0_u8; 320 * 200 * 4];
@@ -150548,9 +150575,9 @@ func ControlDig() { dig_count = 1; return(1); }
             app.runtime_music_enabled = true;
         };
 
-        let mut default_app = new_lightweight_running_sandbox_app();
+        let mut default_app = new_classic_lightweight_running_sandbox_app();
         let default_music = load_test_music(&default_app);
-        let mut rebound_app = new_lightweight_running_sandbox_app();
+        let mut rebound_app = new_classic_lightweight_running_sandbox_app();
         rebound_app
             .bindings
             .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
@@ -150560,7 +150587,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("local player")
             .control
             .control_style = true;
-        let mut sound_app = new_lightweight_running_sandbox_app();
+        let mut sound_app = new_classic_lightweight_running_sandbox_app();
         let mut covered = [false; 14];
         for ((default_menu, rebound_menu), sound_menu) in default_pages
             .into_iter()
@@ -150666,9 +150693,9 @@ func ControlDig() { dig_count = 1; return(1); }
         }
         assert!(covered.into_iter().all(|covered| covered));
 
-        let mut default_app = new_lightweight_running_sandbox_app();
+        let mut default_app = new_classic_lightweight_running_sandbox_app();
         let default_music = load_test_music(&default_app);
-        let mut rebound = new_lightweight_running_sandbox_app();
+        let mut rebound = new_classic_lightweight_running_sandbox_app();
         rebound
             .bindings
             .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
@@ -150678,7 +150705,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("local player")
             .control
             .control_style = true;
-        let mut sound = new_lightweight_running_sandbox_app();
+        let mut sound = new_classic_lightweight_running_sandbox_app();
         for style in 0..=3 {
             for text_progressing in [false, true] {
                 let install_menu = |app: &mut GameApp| {
@@ -150948,6 +150975,7 @@ func ControlDig() { dig_count = 1; return(1); }
                     toggle_scoreboard(&mut app, ModifiersState::empty());
                     app
                 }
+                Layer::GameOver | Layer::GameOverNext => new_classic_running_sandbox_app(),
                 _ => new_running_sandbox_app(),
             };
             match layer {
@@ -151099,7 +151127,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn runtime_flash_draws_above_f1_help_and_below_recursive_context_gui() {
-        let mut help = new_running_sandbox_app();
+        let mut help = new_classic_running_sandbox_app();
         help.status_text.clear();
         help.snapshot.hud.messages.clear();
         help.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
@@ -151127,7 +151155,7 @@ func ControlDig() { dig_count = 1; return(1); }
         help.render(&mut actual).expect("render help then flash");
         assert_eq!(actual, expected.pixels());
 
-        let mut context = new_running_sandbox_app();
+        let mut context = new_classic_running_sandbox_app();
         context.status_text.clear();
         context.snapshot.hud.messages.clear();
         context
@@ -151602,7 +151630,7 @@ func ControlDig() { dig_count = 1; return(1); }
     #[test]
     fn runtime_f1_key_config_ownership_is_snapshotted_once_per_game() {
         let _lock = env_lock().lock();
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let install = tempdir().expect("runtime help install fixture");
         let user_data = tempdir().expect("runtime help user fixture");
         fs::create_dir_all(install.path().join("planet/System.c4g"))
@@ -151766,7 +151794,7 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(error.to_string().contains("UpperBoard resource"));
         assert!(!missing_board.runtime_help_visible);
 
-        let mut tiny = new_running_sandbox_app();
+        let mut tiny = new_classic_running_sandbox_app();
         tiny.graphics = GraphicsSystem::new(
             320,
             50,
@@ -151801,7 +151829,7 @@ func ControlDig() { dig_count = 1; return(1); }
             before_surface.as_slice()
         );
 
-        let mut recover = new_running_sandbox_app();
+        let mut recover = new_classic_running_sandbox_app();
         recover
             .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
             .expect("show help with supported Full geometry");
@@ -151816,7 +151844,7 @@ func ControlDig() { dig_count = 1; return(1); }
     #[test]
     fn runtime_f1_help_toggles_on_each_down_renders_and_release_falls_through() {
         for modifiers in [ModifiersState::empty(), ModifiersState::LOGO] {
-            let mut app = new_running_sandbox_app();
+            let mut app = new_classic_running_sandbox_app();
             app.status_text.clear();
             app.snapshot.hud.messages.clear();
             app.handle_modifiers_changed(modifiers)
@@ -151860,7 +151888,7 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(game_over.runtime_help_visible);
         assert!(game_over.game_over_dialog.is_some());
 
-        let mut message = new_running_sandbox_app();
+        let mut message = new_classic_running_sandbox_app();
         message
             .push_message_dialog(
                 lc_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -151877,7 +151905,7 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(message.runtime_help_visible);
         assert_eq!(message.message_dialogs.len(), 1);
 
-        let mut context = new_running_sandbox_app();
+        let mut context = new_classic_running_sandbox_app();
         context
             .open_context_menu_at(
                 vec![ContextMenuEntry::<AppContextMenuCommand>::new(
@@ -151893,7 +151921,7 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(context.runtime_help_visible);
         assert!(context.context_menu.is_some());
 
-        let mut object = new_running_sandbox_app();
+        let mut object = new_classic_running_sandbox_app();
         assert!(object.open_object_menu().expect("open object menu"));
         object
             .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
@@ -151901,7 +151929,7 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(object.runtime_help_visible);
         assert!(object.object_menu.is_some());
 
-        let mut ingame = new_running_sandbox_app();
+        let mut ingame = new_classic_running_sandbox_app();
         ingame.open_ingame_menu().expect("open in-game menu");
         ingame
             .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
@@ -152101,7 +152129,7 @@ func ControlDig() { dig_count = 1; return(1); }
             ingame_menu::MenuPage::HostDisconnect => 12,
             ingame_menu::MenuPage::AbortConfirm => 13,
         };
-        let mut default_app = new_running_sandbox_app();
+        let mut default_app = new_classic_running_sandbox_app();
         let mut rebound_app = new_running_sandbox_app();
         rebound_app
             .bindings
@@ -152168,7 +152196,7 @@ func ControlDig() { dig_count = 1; return(1); }
         }
         assert!(covered_pages.into_iter().all(|covered| covered));
 
-        let mut observer = new_running_sandbox_app();
+        let mut observer = new_classic_running_sandbox_app();
         observer
             .engine
             .remove_player(observer.local_owner)
@@ -152250,7 +152278,7 @@ func ControlDig() { dig_count = 1; return(1); }
         {
             SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
         }"#;
-        let mut default_scoreboard = new_scoreboard_test_app(board_script);
+        let mut default_scoreboard = new_classic_scoreboard_test_app(board_script);
         toggle_scoreboard(&mut default_scoreboard, ModifiersState::empty());
         let mut scoreboard_only = vec![0_u8; 320 * 200 * 4];
         default_scoreboard
@@ -152284,7 +152312,7 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(!scoreboard.runtime_help_visible);
         assert!(scoreboard.scoreboard_dialog.is_some());
 
-        let mut save_browser = new_running_sandbox_app();
+        let mut save_browser = new_classic_running_sandbox_app();
         save_browser
             .open_save_browser()
             .expect("open app save browser state");
@@ -152319,7 +152347,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn running_context_menu_renders_above_runtime_f1_help() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         app.status_text.clear();
         app.snapshot.hud.messages.clear();
         let mut baseline = vec![0_u8; 320 * 200 * 4];
@@ -152367,8 +152395,8 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn runtime_f1_recurses_through_all_engine_menu_styles_and_progress_states() {
-        let mut app = new_running_sandbox_app();
-        let mut rebound = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
+        let mut rebound = new_classic_running_sandbox_app();
         rebound
             .bindings
             .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
@@ -152518,7 +152546,7 @@ func ControlDig() { dig_count = 1; return(1); }
         ));
         assert!(!input_app.runtime_help_visible);
 
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         app.runtime_help_visible = true;
         app.runtime_help_text_cache = OnceLock::new();
         app.runtime_help_text_cache
@@ -152791,7 +152819,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn runtime_client_list_renders_with_the_classic_gui_resource_set() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
         app.control_clients
             .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
@@ -153592,7 +153620,7 @@ func ControlDig() { dig_count = 1; return(1); }
     #[test]
     fn surrender_from_menu_ends_local_round() {
         lc_logging::init();
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         app.apply_ingame_menu_action(MenuAction::Surrender)
             .expect("surrender");
         for _ in 0..30 {
@@ -154134,7 +154162,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // voted-out result, clears the network into local control, and calls
         // DoGameOver immediately so the removed client cannot continue alone
         // (src/C4Control.cpp:1497-1506; src/C4Network2.cpp:746-789).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_classic_running_sandbox_app();
         let local_client = 7;
         app.engine
             .player_mut(app.local_owner)

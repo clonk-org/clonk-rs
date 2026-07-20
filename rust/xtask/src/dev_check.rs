@@ -7,7 +7,8 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HELP: &str = "\
-Usage: cargo xtask dev-check [options]\n\
+Usage: cargo dev-check [options]\n\
+       cargo xtask dev-check [options]\n\
 \n\
 Options:\n\
   --base REF             Include committed changes since merge-base(REF, HEAD).\n\
@@ -452,8 +453,6 @@ fn plan_checks(changes: &ChangeSet, options: &Options) -> CheckPlan {
     });
     if options.full {
         add_workspace(&mut plan, "--full requested");
-        add_snapshots(&mut plan, "--full requested");
-        add_parity(&mut plan, "--full requested");
         if content_changed {
             add_sweep(&mut plan, None, "--full with content changes");
         }
@@ -533,13 +532,14 @@ fn add_replay_and_render(plan: &mut CheckPlan, reason: &str) {
         CheckCwd::Workspace,
         "cargo",
         &[
-            "test",
+            "nextest",
+            "run",
             "-p",
-            "lc-engine",
+            "lc-engine-unit-tests",
             "--test",
-            "it",
-            "dev_feedback_replay::committed_real_scenario_replays_are_deterministic",
+            "engine_it",
             "--",
+            "dev_feedback_replay::committed_real_scenario_replays_are_deterministic",
             "--exact",
         ],
         reason,
@@ -550,15 +550,16 @@ fn add_replay_and_render(plan: &mut CheckPlan, reason: &str) {
         CheckCwd::Workspace,
         "cargo",
         &[
-            "test",
+            "nextest",
+            "run",
             "-p",
             "lc-frontend",
             "--features",
             "dev-feedback-render",
             "--test",
             "dev_feedback_render",
-            "dev_feedback_render",
             "--",
+            "dev_feedback_render",
             "--ignored",
             "--exact",
         ],
@@ -622,7 +623,12 @@ fn add_test_target(
     filter: Option<&str>,
     reason: &str,
 ) {
-    let mut args = vec!["test", "-p", package, "--test", target];
+    let (package, target) = if package == "lc-engine" && target == "it" {
+        ("lc-engine-unit-tests", "engine_it")
+    } else {
+        (package, target)
+    };
+    let mut args = vec!["nextest", "run", "-p", package, "--test", target];
     if let Some(filter) = filter {
         args.push(filter);
     }
@@ -642,11 +648,18 @@ fn add_test_target(
 
 fn add_engine_checks(plan: &mut CheckPlan, path: &str, reason: &str) {
     plan.add(
-        "lc-engine-lib",
+        "lc-engine-inline",
         CheckKind::Unit,
         CheckCwd::Workspace,
         "cargo",
-        &["test", "-p", "lc-engine", "--lib"],
+        &[
+            "nextest",
+            "run",
+            "-p",
+            "lc-engine-unit-tests",
+            "--test",
+            "engine_inline",
+        ],
         reason,
     );
     plan.add(
@@ -655,7 +668,8 @@ fn add_engine_checks(plan: &mut CheckPlan, path: &str, reason: &str) {
         CheckCwd::Workspace,
         "cargo",
         &[
-            "test",
+            "nextest",
+            "run",
             "-p",
             "lc-engine-unit-tests",
             "--test",
@@ -749,7 +763,7 @@ fn add_script_checks(plan: &mut CheckPlan, reason: &str) {
         CheckKind::Unit,
         CheckCwd::Workspace,
         "cargo",
-        &["test", "-p", "lc-script", "--lib"],
+        &["nextest", "run", "-p", "lc-script", "--lib"],
         reason,
     );
     plan.add(
@@ -757,7 +771,7 @@ fn add_script_checks(plan: &mut CheckPlan, reason: &str) {
         CheckKind::Integration,
         CheckCwd::Workspace,
         "cargo",
-        &["test", "-p", "lc-script", "--test", "it"],
+        &["nextest", "run", "-p", "lc-script", "--test", "it"],
         reason,
     );
 }
@@ -768,7 +782,15 @@ fn add_engine_filter(plan: &mut CheckPlan, id: &str, filter: &str, kind: CheckKi
         kind,
         CheckCwd::Workspace,
         "cargo",
-        &["test", "-p", "lc-engine", "--test", "it", filter],
+        &[
+            "nextest",
+            "run",
+            "-p",
+            "lc-engine-unit-tests",
+            "--test",
+            "engine_it",
+            filter,
+        ],
         reason,
     );
 }
@@ -779,7 +801,7 @@ fn add_package(plan: &mut CheckPlan, package: &str, reason: &str) {
         CheckKind::Unit,
         CheckCwd::Workspace,
         "cargo",
-        &["test", "-p", package],
+        &["nextest", "run", "-p", package],
         reason,
     );
 }
@@ -790,7 +812,7 @@ fn add_workspace(plan: &mut CheckPlan, reason: &str) {
         CheckKind::Workspace,
         CheckCwd::Workspace,
         "cargo",
-        &["test", "--workspace"],
+        &["nextest", "run", "--workspace"],
         reason,
     );
 }
@@ -1427,7 +1449,7 @@ fn json_string(value: &str) -> String {
     result
 }
 
-pub(crate) fn command(args: &[String]) -> Result<()> {
+pub fn command(args: &[String]) -> Result<()> {
     let options = Options::parse(args)?;
     if options.help {
         print!("{HELP}");
@@ -1662,20 +1684,29 @@ mod tests {
         assert_eq!(plan.commands[0].kind, CheckKind::Replay);
         assert_eq!(plan.commands[1].kind, CheckKind::RenderProbe);
         assert_eq!(plan.commands[2].kind, CheckKind::Hygiene);
-        assert!(plan.has_args(&["test", "-p", "lc-engine", "--lib"]));
         assert!(plan.has_args(&[
-            "test",
+            "nextest",
+            "run",
+            "-p",
+            "lc-engine-unit-tests",
+            "--test",
+            "engine_inline",
+        ]));
+        assert!(plan.has_args(&[
+            "nextest",
+            "run",
             "-p",
             "lc-engine-unit-tests",
             "--test",
             "unit",
         ]));
         assert!(plan.has_args(&[
-            "test",
+            "nextest",
+            "run",
             "-p",
-            "lc-engine",
+            "lc-engine-unit-tests",
             "--test",
-            "it",
+            "engine_it",
             "real_scenario_harness::",
         ]));
     }
@@ -1699,11 +1730,12 @@ mod tests {
         assert_eq!(plan.commands[0].kind, CheckKind::Replay);
         assert_eq!(plan.commands[1].kind, CheckKind::RenderProbe);
         assert!(plan.has_args(&[
-            "test",
+            "nextest",
+            "run",
             "-p",
-            "lc-engine",
+            "lc-engine-unit-tests",
             "--test",
-            "it",
+            "engine_it",
             "real_scenario_harness::",
         ]));
         assert!(!plan.has_args(&["xtask", "scenario-sweep"]));
@@ -1718,7 +1750,15 @@ mod tests {
             "hangle_movement::",
             "real_tutorial02_balloon_platform::",
         ] {
-            assert!(plan.has_args(&["test", "-p", "lc-engine", "--test", "it", filter,]));
+            assert!(plan.has_args(&[
+                "nextest",
+                "run",
+                "-p",
+                "lc-engine-unit-tests",
+                "--test",
+                "engine_it",
+                filter,
+            ]));
         }
     }
 
@@ -1729,11 +1769,12 @@ mod tests {
             false,
         );
         assert!(plan.has_args(&[
-            "test",
+            "nextest",
+            "run",
             "-p",
-            "lc-engine",
+            "lc-engine-unit-tests",
             "--test",
-            "it",
+            "engine_it",
             "real_alchemy_revision::",
         ]));
         assert_eq!(plan.commands.len(), 2, "hygiene plus the focused module");
@@ -1743,7 +1784,15 @@ mod tests {
     fn tutorial_content_maps_to_filtered_sweep_and_headless_tests() {
         let plan = plan_for_paths(&["content/Tutorial.c4f/Tutorial02.c4s/Script.c"], false);
         assert!(plan.has_args(&["xtask", "scenario-sweep", "Tutorial.c4f/Tutorial02.c4s",]));
-        assert!(plan.has_args(&["test", "-p", "lc-engine", "--test", "it", "tutorial02_",]));
+        assert!(plan.has_args(&[
+            "nextest",
+            "run",
+            "-p",
+            "lc-engine-unit-tests",
+            "--test",
+            "engine_it",
+            "tutorial02_",
+        ]));
     }
 
     #[test]
@@ -1756,7 +1805,7 @@ mod tests {
             ],
             false,
         );
-        assert!(plan.has_args(&["test", "--workspace"]));
+        assert!(plan.has_args(&["nextest", "run", "--workspace"]));
         assert!(plan.has_args(&["xtask", "engine-snapshots", "verify"]));
         assert!(plan.has_args(&["xtask", "parity", "verify"]));
     }
@@ -1782,14 +1831,12 @@ mod tests {
     #[test]
     fn full_plan_uses_broad_gates_and_content_sweep() {
         let plan = plan_for_paths(&["content/Objects.c4d/Foo.c4d/Script.c"], true);
-        assert!(plan.has_args(&["test", "--workspace"]));
-        assert!(plan.has_args(&["xtask", "engine-snapshots", "verify"]));
-        assert!(plan.has_args(&["xtask", "parity", "verify"]));
+        assert!(plan.has_args(&["nextest", "run", "--workspace"]));
         assert!(plan.has_args(&["xtask", "scenario-sweep"]));
         assert_eq!(
             plan.commands.len(),
-            7,
-            "replay, render, hygiene, and four broad gates"
+            5,
+            "replay, render, hygiene, workspace tests, and content sweep"
         );
     }
 

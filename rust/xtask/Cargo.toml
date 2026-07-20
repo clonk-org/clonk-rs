@@ -2,12 +2,39 @@
 name = "xtask"
 version = "0.1.0"
 edition = "2021"
+autobins = false
+default-run = "xtask"
+
+[features]
+default = []
+engine-tools = [
+    "dep:lc-engine",
+    "dep:lc-logging",
+    "dep:lc-resources",
+    "dep:tracing",
+    "dep:walkdir",
+    "dep:zip",
+]
 
 [dependencies]
 anyhow = "1"
-walkdir = "2"
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
-lc-engine = { path = "../crates/lc-engine" }
-lc-logging = { path = "../crates/lc-logging" }
-lc-resources = { path = "../crates/lc-resources" }
-tracing = "0.1"
+walkdir = { version = "2", optional = true }
+zip = { version = "0.6", default-features = false, features = ["deflate"], optional = true }
+lc-engine = { path = "../crates/lc-engine", optional = true }
+lc-logging = { path = "../crates/lc-logging", optional = true }
+lc-resources = { path = "../crates/lc-resources", optional = true }
+tracing = { version = "0.1", optional = true }
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "xtask"
+path = "src/dispatcher.rs"
+test = false
+
+[[bin]]
+name = "xtask-engine-tools"
+path = "src/main.rs"
+required-features = ["engine-tools"]
+test = false

@@ -2,6 +2,14 @@
 name = "lc-engine"
 version = "0.1.0"
 edition = "2021"
+autotests = false
+
+# The inline unit and integration surfaces are compiled from their original
+# source paths by the opt-level-0 lc-engine-unit-tests leaf package. Building
+# them here as well would repeat level-3 test-wrapper codegen on every complete
+# workspace gate.
+[lib]
+test = false
 
 [features]
 default = []
@@ -27,20 +35,10 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"], option
 # Benchmark-only: keeping Criterion optional prevents `cargo test -p lc-engine`
 # from changing the shared Serde feature graph for every downstream crate.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"], optional = true }
-# Exposed only so lc-app's dev graph can pre-unify the features used by this
-# crate's property tests. The non-optional dev dependency below still makes
-# `cargo test -p lc-engine` work without an explicit feature.
+# Exposed only so lc-app's dev graph can pre-unify the features used by the
+# engine property tests. The extracted engine_inline target mirrors the
+# non-optional test dependency in lc-engine-unit-tests.
 proptest = { version = "1", default-features = false, features = ["std"], optional = true }
-
-[dev-dependencies]
-# The remaining inline and integration tests name these directly.
-lc-script = { path = "../lc-script" }
-lc-resources = { path = "../lc-resources" }
-serde_json = "1"
-tempfile = "3"
-proptest = { version = "1", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "0.3", features = ["registry"] }
-once_cell = "1"
 
 [[bench]]
 name = "engine_tick"

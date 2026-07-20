@@ -15,23 +15,26 @@ local and CI diagnostics comparable.
 
 Use `dev-check` while editing. It maps changed paths to the smallest useful
 compile, unit, replay, and render checks and records each result under
-`target/dev-check/`.
+`target/dev-check/`. The dedicated alias is intentionally dependency-light, so
+planning a check does not first build the engine and resource stack.
 
 ```sh
-cargo xtask dev-check --base origin/main --budget-seconds 60
+cargo dev-check --base origin/main --budget-seconds 60
 ```
+
+`cargo xtask dev-check` remains an equivalent compatibility spelling.
 
 The 60-second budget limits focused feedback; it is not a performance pass or
 a substitute for the full parity gate. Inspect the plan without running it:
 
 ```sh
-cargo xtask dev-check --base origin/main --plan
+cargo dev-check --base origin/main --plan
 ```
 
 For an uncommitted or otherwise explicit path, add `--changed` once per path:
 
 ```sh
-cargo xtask dev-check \
+cargo dev-check \
   --changed rust/crates/lc-engine/src/compat.rs \
   --budget-seconds 60
 ```
@@ -39,10 +42,15 @@ cargo xtask dev-check \
 Use a focused crate test when its name is already known:
 
 ```sh
-cargo test -p lc-engine --lib test_name
-cargo test -p lc-engine-unit-tests --test unit test_name
-cargo test -p lc-engine --test it module_name::test_name
+cargo nextest run -p lc-engine-unit-tests --test engine_inline test_name
+cargo nextest run -p lc-engine-unit-tests --test unit test_name
+cargo nextest run -p lc-engine-unit-tests --test engine_it module_name::test_name
 ```
+
+All engine test wrappers live in `lc-engine-unit-tests` so Cargo can compile
+their orchestration code quickly while keeping the production `lc-engine`
+library optimized. A bare `-p lc-engine` selection therefore checks the
+library package but does not select these three test binaries.
 
 Do not run `cargo clean` between feedback cycles. Cargo's local incremental
 state is valuable to the edit-test loop. CI disables incremental compilation
@@ -70,9 +78,8 @@ a fixed 320x180 resolution:
 
 ```sh
 LC_DEV_CHECK_ARTIFACT_DIR=target/dev-check \
-  cargo test -p lc-frontend --features dev-feedback-render \
-  --test dev_feedback_render -- \
-  --ignored --exact dev_feedback_render
+  cargo nextest run -p lc-frontend --features dev-feedback-render \
+  --test dev_feedback_render -- dev_feedback_render --ignored --exact
 ```
 
 By default the probe writes `frame-final.png` and `render-metrics.json` beside
@@ -83,9 +90,8 @@ artifact:
 LC_DEV_CHECK_SNAPSHOT=target/dev-check/path/to/snapshot-final.json \
 LC_DEV_CHECK_FRAME_PNG=target/dev-check/repro/frame-final.png \
 LC_DEV_CHECK_RENDER_METRICS=target/dev-check/repro/render-metrics.json \
-  cargo test -p lc-frontend --features dev-feedback-render \
-  --test dev_feedback_render -- \
-  --ignored --exact dev_feedback_render
+  cargo nextest run -p lc-frontend --features dev-feedback-render \
+  --test dev_feedback_render -- dev_feedback_render --ignored --exact
 ```
 
 `LC_TEST_ARTIFACT_DIR` is also searched when `LC_DEV_CHECK_SNAPSHOT` is not
@@ -99,18 +105,17 @@ GitHub Actions uploads the entire `rust/target/dev-check` tree from the
 ## Full pre-merge gate
 
 Focused feedback answers "what did this edit most likely break?" The full gate
-answers "is the workspace still mergeable?" Run all four commands before
+answers "is the workspace still mergeable?" Run both commands before
 handoff or merge:
 
 ```sh
 cargo nextest run --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo xtask engine-snapshots verify
-cargo xtask parity verify
+cargo clippy --profile test --workspace --all-targets --features xtask/engine-tools --locked -- -D warnings
 ```
 
-The workspace test run already includes the focused tutorial and virtual-play
-tests; running those filters again in the full gate only duplicates work.
+The workspace test run includes deterministic engine snapshots, C++↔Rust
+differential parity, and the focused tutorial and virtual-play tests; running
+those checks again in the full gate only duplicates work.
 Behavior changes can additionally require the relevant scenario sweep/audit
 and rebuilt live C++ comparison described in `PORT_STATUS.md`.
 
