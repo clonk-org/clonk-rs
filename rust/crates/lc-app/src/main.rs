@@ -112168,21 +112168,18 @@ ScenInfoArea=70,5,25,90
             .as_ref()
             .expect("live prepared host")
             .local_addresses();
-        assert_eq!(local_addresses.len(), 2);
-        assert_eq!(
-            local_addresses[0].protocol,
-            lc_network::NetworkProtocol::Tcp
-        );
-        assert_eq!(
-            local_addresses[1].protocol,
-            lc_network::NetworkProtocol::Udp
-        );
-        assert_eq!(
-            local_addresses[0].endpoint.ip(),
-            local_addresses[1].endpoint.ip()
-        );
-        assert_ne!(local_addresses[0].endpoint.port(), 0);
-        assert_eq!(local_addresses[1].endpoint.port(), 11_113);
+        assert!(matches!(local_addresses.len(), 1 | 2));
+        let tcp = local_addresses.first().expect("prepared host TCP address");
+        assert_eq!(tcp.protocol, lc_network::NetworkProtocol::Tcp);
+        assert_ne!(tcp.endpoint.port(), 0);
+        if let Some(udp) = local_addresses.get(1) {
+            // C4Network2IO starts TCP and UDP independently and publishes only
+            // live transports. A parallel test or process may own PortUDP;
+            // that is a valid TCP-only host, not an admission failure.
+            assert_eq!(udp.protocol, lc_network::NetworkProtocol::Udp);
+            assert_eq!(udp.endpoint.ip(), tcp.endpoint.ip());
+            assert_eq!(udp.endpoint.port(), 11_113);
+        }
         let advertised = app
             .advertised_game_reference
             .as_ref()
