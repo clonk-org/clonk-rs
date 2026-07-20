@@ -38437,6 +38437,9 @@ impl GameApp {
             }
             _ => return None,
         };
+        if !self.menu_owner_has_unsuppressed_viewport(player) {
+            return None;
+        }
         let area = if player == OWNER_NONE {
             let surface = self.graphics.surface();
             Rect::new(0, 0, surface.width(), surface.height())
@@ -40596,6 +40599,9 @@ impl GameApp {
         point: GuiPoint,
     ) -> Result<Option<EngineScriptMenuPointerTarget>, EngineError> {
         if self.engine.film_replay() || !self.mouse_control {
+            return Ok(None);
+        }
+        if !self.menu_owner_has_unsuppressed_viewport(owner) {
             return Ok(None);
         }
         let Some((target, menu)) = self.engine.cursor_object_menu(owner) else {
@@ -63747,6 +63753,90 @@ impl GameApp {
         }
     }
 
+    fn viewport_player_is_eliminated(&self, owner: i32) -> bool {
+        self.snapshot
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .is_some_and(|player| {
+                player.surrendered
+                    || matches!(
+                        player.status,
+                        lc_engine::PlayerStatus::Eliminated
+                            | lc_engine::PlayerStatus::Surrendered
+                    )
+            })
+    }
+
+    fn physical_viewport_is_unsuppressed(&self, viewport: PhysicalViewportState) -> bool {
+        viewport.displayed_player == OWNER_NONE
+            || self.snapshot.players.iter().any(|player| {
+                player.id == viewport.displayed_player
+                    && !self.viewport_player_is_eliminated(player.id)
+            })
+    }
+
+    fn menu_owner_has_unsuppressed_viewport(&self, menu_owner: i32) -> bool {
+        let owner_exists = self
+            .snapshot
+            .players
+            .iter()
+            .any(|player| player.id == menu_owner);
+        self.physical_viewports.iter().copied().any(|viewport| {
+            let hosts_menu = if menu_owner == OWNER_NONE {
+                viewport.is_no_owner_viewport
+            } else {
+                owner_exists && viewport.displayed_player == menu_owner
+            };
+            hosts_menu && self.physical_viewport_is_unsuppressed(viewport)
+        })
+    }
+
+    fn ingame_menu_has_visible_surface(&self, menu_owner: i32) -> bool {
+        if self.menu_owner_has_unsuppressed_viewport(menu_owner) {
+            return true;
+        }
+        // Preserve the generic whole-surface compatibility path only for an
+        // unresolved synthetic menu key. Real C4Player menus require a
+        // physical viewport that currently displays their player.
+        menu_owner != OWNER_NONE
+            && !self
+                .snapshot
+                .players
+                .iter()
+                .any(|player| player.id == menu_owner)
+            && self
+                .physical_viewports
+                .iter()
+                .copied()
+                .any(|viewport| self.physical_viewport_is_unsuppressed(viewport))
+    }
+
+    fn viewport_elimination_notice_text(&self, owner: i32) -> Option<String> {
+        let player = self
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.id == owner)?;
+        if !self.viewport_player_is_eliminated(owner) {
+            return None;
+        }
+        let surrendered = player.surrendered
+            || player.status == lc_engine::PlayerStatus::Surrendered;
+        let (key, fallback) = if surrendered {
+            ("IDS_PLR_SURRENDERED", "Player %s|has surrendered.")
+        } else {
+            ("IDS_PLR_ELIMINATED", "Player %s|eliminated.")
+        };
+        let template = self
+            .startup_tooltip_resources
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| fallback.to_string());
+        let name = c4_presentation_text(&player.name);
+        Some(format_resource_string(template, &[&name]))
+    }
+
     fn render_running(&mut self, frame: &mut [u8], defer_native_game_messages: bool) -> Result<()> {
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         // C4Viewport suppresses only its gameplay overlays for a film replay;
@@ -63761,7 +63851,9 @@ impl GameApp {
                 .require_classic_game_over_resources_with_hud(self.current_hud_graphics_ref())
                 .map_err(report_classic_parity_boundary)?;
         }
-        if viewport_overlays_visible {
+        if viewport_overlays_visible
+            && self.menu_owner_has_unsuppressed_viewport(self.local_owner)
+        {
             if let Some(browser) = self.save_browser.as_ref() {
                 let boundary = report_classic_parity_boundary(ClassicParityBoundary::SaveBrowser(
                     browser.mode().clone(),
@@ -63770,7 +63862,9 @@ impl GameApp {
                 return Err(anyhow::Error::new(boundary));
             }
         }
-        if viewport_overlays_visible {
+        if viewport_overlays_visible
+            && self.menu_owner_has_unsuppressed_viewport(self.local_owner)
+        {
             if let Some(menu) = self.object_menu.as_ref() {
                 let boundary = report_classic_parity_boundary(
                     ClassicParityBoundary::AppObjectMenu(menu.mode()),
@@ -63789,13 +63883,21 @@ impl GameApp {
                 report_classic_parity_boundary(ClassicParityBoundary::RunningViewport(reason))
             })?;
             for viewport in script_menu_viewports {
+                if self.viewport_player_is_eliminated(viewport.owner) {
+                    continue;
+                }
                 if !script_menu_owners.contains(&viewport.owner) {
                     script_menu_owners.push(viewport.owner);
                 }
             }
         }
+        let has_visible_ingame_menu = viewport_overlays_visible
+            && self
+                .ingame_menu
+                .iter()
+                .any(|(owner, _)| self.ingame_menu_has_visible_surface(owner));
         if viewport_overlays_visible
-            && (self.ingame_menu.is_some()
+            && (has_visible_ingame_menu
                 || script_menu_owners
                     .iter()
                     .any(|&owner| self.engine.cursor_object_menu(owner).is_some()))
@@ -64393,13 +64495,14 @@ impl GameApp {
             self.next_pending_native_overlay();
         }
 
-        if viewport_overlays_visible && self.ingame_menu.is_some() {
+        if has_visible_ingame_menu {
             let fonts = self.assets.clonk_fonts.clone();
             let fallback = self.assets.font_arc();
             let players = self
                 .ingame_menu
                 .iter()
                 .map(|(player, _)| player)
+                .filter(|&player| self.ingame_menu_has_visible_surface(player))
                 .collect::<Vec<_>>();
             {
                 let show_commands = self.display_flags.show_commands;
@@ -64464,8 +64567,52 @@ impl GameApp {
                 }
             }
         }
-        if ordered_native && viewport_overlays_visible && self.ingame_menu.is_some() {
+        if ordered_native && has_visible_ingame_menu {
             self.next_pending_native_overlay();
+        }
+
+        let elimination_notices = if viewport_overlays_visible {
+            self.graphics
+                .active_viewport_projections()
+                .into_iter()
+                .filter_map(|viewport| {
+                    self.viewport_elimination_notice_text(viewport.owner)
+                        .map(|text| (viewport.rect, text))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if !elimination_notices.is_empty() {
+            let fonts = self
+                .assets
+                .clonk_fonts
+                .clone()
+                .expect("global GUI preflight guarantees FontRegular");
+            let surface = self.graphics.surface_mut();
+            let previous_clip = surface.clip();
+            for (viewport, text) in elimination_notices {
+                let width = i32::try_from(viewport.width).unwrap_or(i32::MAX);
+                let height = i32::try_from(viewport.height).unwrap_or(i32::MAX);
+                surface.set_clip(viewport);
+                fonts.text.draw_with_gamma(
+                    surface,
+                    viewport.x.saturating_add(width / 2),
+                    viewport.y.saturating_add(height.saturating_mul(2) / 3),
+                    &text,
+                    [255, 0, 0, 0xfa],
+                    lc_graphics::clonk_font::TextAlign::Center,
+                    true,
+                    Some(&frame_gamma),
+                );
+            }
+            match previous_clip {
+                Some(clip) => surface.set_clip(clip),
+                None => surface.clear_clip(),
+            }
+            if ordered_native {
+                self.next_pending_native_overlay();
+            }
         }
 
         let message_viewports = self.graphics.active_viewport_projections();
@@ -128117,6 +128264,239 @@ ScenInfoArea=70,5,25,90
         app.handle_key(VirtualKeyCode::Right, ElementState::Pressed)
             .expect("production film-view key dispatch remains active");
         assert_eq!(app.film_view_player, Some(next_owner));
+    }
+
+    #[test]
+    fn eliminated_and_surrendered_viewports_draw_localized_notice_instead_of_menus() {
+        let mut app = new_classic_running_sandbox_app();
+        let owner = app.local_owner;
+        let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        app.display_flags.show_commands = false;
+        app.engine
+            .player_mut(owner)
+            .expect("sandbox player")
+            .set_name("Ada");
+        app.snapshot = app.engine.snapshot();
+        app.snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == owner)
+            .expect("sandbox snapshot player")
+            .status = PlayerStatus::Eliminated;
+
+        let mut notice_only = vec![0_u8; app.graphics.surface().pixels().len()];
+        app.render(&mut notice_only)
+            .expect("render eliminated viewport notice");
+
+        let mut invalid_hidden_menu = two_item_script_menu(cursor);
+        invalid_hidden_menu.style = 99;
+        install_test_cursor_menu(&mut app, cursor, invalid_hidden_menu);
+        app.ingame_menu
+            .replace(owner, Some(IngameMenuState::surrender_menu()));
+        let mut with_hidden_menus = vec![0_u8; app.graphics.surface().pixels().len()];
+        app.render(&mut with_hidden_menus)
+            .expect("eliminated viewport skips menu preflight and drawing");
+        assert_eq!(
+            with_hidden_menus, notice_only,
+            "script and player menus contribute no eliminated-viewport pixels"
+        );
+
+        app.ingame_menu.clear();
+        app.save_browser = Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
+        let mut with_hidden_save_menu = vec![0_u8; app.graphics.surface().pixels().len()];
+        app.render(&mut with_hidden_save_menu)
+            .expect("eliminated viewport skips the legacy save-menu boundary");
+        assert_eq!(
+            with_hidden_save_menu, notice_only,
+            "the legacy save-menu fallback contributes no eliminated-viewport pixels"
+        );
+        app.save_browser = None;
+
+        let mut retargeted = new_classic_running_sandbox_app();
+        let local_owner = retargeted.local_owner;
+        let eliminated_target = local_owner + 1;
+        let retargeted_cursor = retargeted
+            .engine
+            .crew_cursor(local_owner)
+            .expect("retargeted sandbox cursor");
+        retargeted
+            .engine
+            .register_player(PlayerConfig::new(eliminated_target, "Retargeted"))
+            .expect("register eliminated film target");
+        retargeted.snapshot = retargeted.engine.snapshot();
+        retargeted
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == eliminated_target)
+            .expect("retargeted snapshot player")
+            .status = PlayerStatus::Eliminated;
+        assert!(retargeted.set_physical_film_view(eliminated_target));
+        let mut retargeted_notice = vec![0_u8; retargeted.graphics.surface().pixels().len()];
+        retargeted
+            .render(&mut retargeted_notice)
+            .expect("render eliminated target through an owned physical viewport");
+        retargeted.ingame_menu.replace(
+            local_owner,
+            IngameMenuState::main_menu(&MainMenuConditions::default()),
+        );
+        let mut retargeted_hidden_script_menu = two_item_script_menu(retargeted_cursor);
+        retargeted_hidden_script_menu.style = 99;
+        install_test_cursor_menu(
+            &mut retargeted,
+            retargeted_cursor,
+            retargeted_hidden_script_menu,
+        );
+        retargeted.save_browser =
+            Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
+        let mut with_retargeted_menus =
+            vec![0_u8; retargeted.graphics.surface().pixels().len()];
+        retargeted
+            .render(&mut with_retargeted_menus)
+            .expect("retargeted eliminated viewport suppresses local-owner menus");
+        assert_eq!(
+            with_retargeted_menus, retargeted_notice,
+            "SetFilmView suppression follows the displayed player, not the physical owner"
+        );
+        let retargeted_viewport = retargeted
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.owner == eliminated_target)
+            .expect("retargeted eliminated viewport remains active")
+            .rect;
+        assert_eq!(
+            retargeted.ingame_menu_pointer_target(GuiPoint::new(
+                retargeted_viewport.x as f32 + retargeted_viewport.width as f32 / 2.0,
+                retargeted_viewport.y as f32 + retargeted_viewport.height as f32 / 2.0,
+            )),
+            None
+        );
+        assert_eq!(
+            retargeted
+                .script_menu_pointer_target_for_owner(
+                    local_owner,
+                    GuiPoint::new(
+                        retargeted_viewport.x as f32
+                            + retargeted_viewport.width as f32 / 2.0,
+                        retargeted_viewport.y as f32
+                            + retargeted_viewport.height as f32 / 2.0,
+                    ),
+                )
+                .expect("retargeted hidden script-menu routing is inert"),
+            None
+        );
+
+        app.clear_physical_viewport_states();
+        let observer = app.ownerless_physical_viewport_state();
+        app.physical_viewports.push(observer);
+        app.physical_viewports_authoritative = true;
+        assert!(app.set_physical_film_view(owner));
+        let mut ownerless_notice_only = vec![0_u8; app.graphics.surface().pixels().len()];
+        app.render(&mut ownerless_notice_only)
+            .expect("render eliminated player through physical observer viewport");
+        app.ingame_menu
+            .replace(OWNER_NONE, Some(IngameMenuState::surrender_menu()));
+        let mut with_hidden_fullscreen_menu =
+            vec![0_u8; app.graphics.surface().pixels().len()];
+        app.render(&mut with_hidden_fullscreen_menu)
+            .expect("eliminated observer target suppresses the fullscreen menu");
+        assert_eq!(
+            with_hidden_fullscreen_menu, ownerless_notice_only,
+            "the fullscreen menu contributes no eliminated-viewport pixels"
+        );
+
+        let viewport = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.owner == owner)
+            .expect("eliminated player retains a viewport")
+            .rect;
+        let menu_point = GuiPoint::new(
+            viewport.x as f32 + viewport.width as f32 / 2.0,
+            viewport.y as f32 + viewport.height as f32 / 2.0,
+        );
+        assert_eq!(
+            app.script_menu_pointer_target_for_owner(owner, menu_point)
+                .expect("hidden script menu pointer routing is inert"),
+            None
+        );
+        app.local_controls = LocalControlRegistry::default();
+        app.mouse_control = true;
+        assert_eq!(app.ingame_menu_pointer_target(menu_point), None);
+
+        app.startup_tooltip_resources.insert(
+            "IDS_PLR_ELIMINATED".to_string(),
+            "Spieler %s|eliminiert!".to_string(),
+        );
+        app.startup_tooltip_resources.insert(
+            "IDS_PLR_SURRENDERED".to_string(),
+            "Spieler %s|hat aufgegeben.".to_string(),
+        );
+        install_native_test_fonts(&mut app, 3.0);
+        let (_, _, eliminated_plan) = render_ordered_test_frame(&mut app, 3.0, 960, 600);
+        let eliminated_commands = eliminated_plan
+            .batches
+            .iter()
+            .flat_map(|batch| &batch.text)
+            .collect::<Vec<_>>();
+        let eliminated = eliminated_commands
+            .iter()
+            .copied()
+            .find(|command| command.text == "Spieler Ada|eliminiert!")
+            .expect("localized eliminated notice reaches FontRegular");
+        assert_eq!(
+            eliminated.role,
+            lc_graphics::clonk_font::ClonkFontRole::GuiText
+        );
+        assert_eq!(eliminated.color, [255, 0, 0, 250]);
+        assert_eq!(
+            eliminated.align,
+            lc_graphics::clonk_font::TextAlign::Center
+        );
+        assert!(eliminated.markup, "the resource pipe splits two lines");
+        assert_eq!(eliminated.clip, Some(viewport));
+        assert_eq!(
+            (eliminated.x, eliminated.y),
+            (
+                viewport.x + viewport.width as i32 / 2,
+                viewport.y + 2 * viewport.height as i32 / 3,
+            )
+        );
+        assert!(eliminated_commands.iter().all(|command| !matches!(
+            command.text.as_str(),
+            "Choose" | "First" | "Surrender" | "Yes"
+        )));
+
+        let surrendered_player = app
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == owner)
+            .expect("sandbox snapshot player");
+        surrendered_player.status = PlayerStatus::Surrendered;
+        surrendered_player.surrendered = true;
+        let (_, _, surrendered_plan) = render_ordered_test_frame(&mut app, 3.0, 960, 600);
+        let surrendered_commands = surrendered_plan
+            .batches
+            .iter()
+            .flat_map(|batch| &batch.text)
+            .collect::<Vec<_>>();
+        let surrendered = surrendered_commands
+            .iter()
+            .copied()
+            .find(|command| command.text == "Spieler Ada|hat aufgegeben.")
+            .expect("localized surrendered notice reaches FontRegular");
+        assert_eq!(surrendered.color, [255, 0, 0, 250]);
+        assert_eq!(
+            surrendered.align,
+            lc_graphics::clonk_font::TextAlign::Center
+        );
+        assert!(surrendered_commands.iter().all(|command| !matches!(
+            command.text.as_str(),
+            "Choose" | "First" | "Surrender" | "Yes"
+        )));
     }
 
     #[test]
