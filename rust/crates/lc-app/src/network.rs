@@ -382,6 +382,7 @@ struct NetworkWorkerReady {
     league_start_response: Option<lc_network::LeagueStartResponse>,
     league_runtime_available: bool,
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
+    network_io_statistics: lc_network::NetworkIoStatistics,
 }
 
 #[derive(Debug)]
@@ -1043,6 +1044,7 @@ pub struct NetworkManager {
     league_start_response: Option<lc_network::LeagueStartResponse>,
     league_runtime_available: AtomicBool,
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
+    network_io_statistics: lc_network::NetworkIoStatistics,
     #[cfg(test)]
     test_runtime_client_states: Arc<Mutex<Vec<RuntimeNetworkClientState>>>,
     #[cfg(test)]
@@ -2702,6 +2704,7 @@ impl NetworkManager {
             league_start_response: ready.league_start_response,
             league_runtime_available,
             league_record_runtime: ready.league_record_runtime,
+            network_io_statistics: ready.network_io_statistics,
             #[cfg(test)]
             test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
@@ -2730,6 +2733,27 @@ impl NetworkManager {
             .recv()
             .map_err(|_| anyhow!("network worker ended before returning live connections"))?
             .map_err(|message| anyhow!(message))
+    }
+
+    /// Returns the most recently completed C++-cadence input/output samples,
+    /// generating a due one-second edge from the live socket accounting first.
+    pub fn protocol_rate_samples(
+        &self,
+    ) -> (lc_network::ProtocolRateSample, lc_network::ProtocolRateSample) {
+        self.network_io_statistics
+            .generate_statistics(current_millis());
+        let snapshot = self.network_io_statistics.snapshot();
+        let rate = |value: u64| i32::try_from(value).unwrap_or(i32::MAX);
+        (
+            lc_network::ProtocolRateSample::new(
+                rate(snapshot.tcp.input_rate),
+                rate(snapshot.udp.input_rate),
+            ),
+            lc_network::ProtocolRateSample::new(
+                rate(snapshot.tcp.output_rate),
+                rate(snapshot.udp.output_rate),
+            ),
+        )
     }
 
     pub fn lobby_client_telemetry(
@@ -3982,6 +4006,7 @@ impl NetworkManager {
                 league_start_response: None,
                 league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
+                network_io_statistics: lc_network::NetworkIoStatistics::new(0),
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
                 test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
             },
@@ -4012,6 +4037,7 @@ impl NetworkManager {
                 league_start_response: None,
                 league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
+                network_io_statistics: lc_network::NetworkIoStatistics::new(0),
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
                 test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
             },
@@ -4066,6 +4092,7 @@ impl NetworkManager {
                 league_start_response: None,
                 league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
+                network_io_statistics: lc_network::NetworkIoStatistics::new(0),
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
                 test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
             },
@@ -5026,6 +5053,7 @@ async fn run_host_worker(
         league_start_response,
         league_runtime_available: league_runtime.is_some(),
         league_record_runtime: league_record_runtime.clone(),
+        network_io_statistics: host.io_statistics(),
     }));
     if let Some(error) = tcp_bind_error {
         let _ = event_tx.send(NetworkEvent::Error(error));
@@ -6134,6 +6162,7 @@ async fn run_client_worker(
         league_start_response: None,
         league_runtime_available: league_runtime.is_some(),
         league_record_runtime: None,
+        network_io_statistics: client.io_statistics(),
     }));
     netpuncher_state.lock().local_addresses.clear();
     let mut client_events = client.take_event_receiver();

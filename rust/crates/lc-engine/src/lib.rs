@@ -21914,6 +21914,22 @@ impl Engine {
             )
     }
 
+    /// Drain each player's control/action counters in exact native
+    /// `C4PlayerList` link order for one network-statistics control sample.
+    /// Players with no input are included with zero counts.
+    pub fn take_player_control_counts(&mut self) -> Vec<(i32, i32, i32)> {
+        let player_ids = self.player_ids_in_order();
+        player_ids
+            .into_iter()
+            .filter_map(|player_id| {
+                self.players.get_mut(&player_id).map(|player| {
+                    let (control_count, action_count) = player.take_control_counts();
+                    (player_id, control_count, action_count)
+                })
+            })
+            .collect()
+    }
+
     /// The first live player in exact native `C4PlayerList` link order.
     pub fn first_player_id(&self) -> Option<i32> {
         self.player_order
@@ -57693,6 +57709,49 @@ mod control_message_say_regression {
         assert!(
             engine.is_replay_film(),
             "ViewportCheck keeps using persistent Head.Replay after ChangeToLocal"
+        );
+    }
+}
+
+#[cfg(test)]
+mod network_stats_control_counts_regression {
+    use super::*;
+    use crate::player::CountedControlType;
+
+    #[test]
+    fn l143_control_counts_drain_without_resetting_action_deduplication() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(PlayerConfig::new(5, "First"))
+            .expect("first player registers");
+        engine
+            .register_player(PlayerConfig::new(2, "Second"))
+            .expect("second player registers");
+
+        engine.count_player_control(5, CountedControlType::Command, 77, 1);
+        engine.count_player_control(5, CountedControlType::Command, 77, 1);
+        engine.count_player_control(2, CountedControlType::DirectCom, 9, 1);
+
+        assert_eq!(
+            engine.players().map(Player::id).collect::<Vec<_>>(),
+            vec![5, 2],
+            "the fixture exercises native link order rather than map order"
+        );
+        assert_eq!(
+            engine.take_player_control_counts(),
+            vec![(5, 2, 1), (2, 1, 1)]
+        );
+        assert_eq!(
+            engine.take_player_control_counts(),
+            vec![(5, 0, 0), (2, 0, 0)],
+            "each statistics sample drains only the counters"
+        );
+
+        engine.count_player_control(5, CountedControlType::Command, 77, 1);
+        assert_eq!(
+            engine.take_player_control_counts(),
+            vec![(5, 1, 0), (2, 0, 0)],
+            "LastControl survives the drain and suppresses the repeated action"
         );
     }
 }

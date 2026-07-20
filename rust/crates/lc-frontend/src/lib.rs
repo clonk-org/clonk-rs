@@ -20,6 +20,7 @@ pub mod input_dialog;
 pub mod league_signup;
 pub mod loader_screen;
 pub mod message_dialog;
+pub mod network_chart;
 pub mod network_start_wait;
 pub mod progress_dialog;
 pub mod rename_edit;

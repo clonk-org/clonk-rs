@@ -954,6 +954,16 @@ impl Player {
         true
     }
 
+    /// Drain the control-frame statistics without disturbing
+    /// `C4Player::LastControl`. Native action de-duplication spans statistics
+    /// samples, so only the two sampled counters are reset here.
+    pub(crate) fn take_control_counts(&mut self) -> (i32, i32) {
+        (
+            std::mem::take(&mut self.control_count),
+            std::mem::take(&mut self.action_count),
+        )
+    }
+
     pub fn control_set(&self) -> i32 {
         self.control_set
     }

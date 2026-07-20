@@ -159,7 +159,8 @@ use lc_graphics::clonk_font::{
 };
 use lc_gui::{ButtonTextures, Rect as GuiRect};
 use lc_network::{
-    ClientId, ControlRecordPlayback, ControlRecordWriter, LeagueEndRecord, ParticipantKind, Tick,
+    ClientId, ClientPingSample, ControlRecordPlayback, ControlRecordWriter, LeagueEndRecord,
+    NetworkStats, ParticipantKind, PlayerControlSample, ProtocolRateSample, Tick,
 };
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
@@ -3257,7 +3258,7 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
     None
 }
 
-fn parse_runtime_key_chord(raw: &str) -> Result<Option<RuntimeKeyChord>> {
+fn parse_runtime_key_chord(raw: &str, action: &str) -> Result<Option<RuntimeKeyChord>> {
     let raw = raw.trim();
     if raw.is_empty() || raw.eq_ignore_ascii_case("None") {
         return Ok(None);
@@ -3274,14 +3275,14 @@ fn parse_runtime_key_chord(raw: &str) -> Result<Option<RuntimeKeyChord>> {
             } else if section.eq_ignore_ascii_case("Shift") {
                 ModifiersState::SHIFT
             } else {
-                anyhow::bail!("undefined NetObsNextPlayer key modifier `{section}`");
+                anyhow::bail!("undefined {action} key modifier `{section}`");
             };
             modifiers |= modifier;
         } else {
             key = runtime_key_name(section);
             anyhow::ensure!(
                 key.is_some(),
-                "unsupported NetObsNextPlayer keyboard key `{section}`"
+                "unsupported {action} keyboard key `{section}`"
             );
         }
     }
@@ -3292,6 +3293,7 @@ fn parse_runtime_key_config(bytes: &[u8]) -> Result<RuntimeKeyConfig> {
     let text = String::from_utf8_lossy(bytes);
     let mut in_keys = false;
     let mut net_observer_seen = false;
+    let mut chart_toggle_seen = false;
     let mut config = RuntimeKeyConfig::default();
     for (line_index, raw_line) in text.lines().enumerate() {
         let line = raw_line.trim().trim_start_matches('\u{feff}');
@@ -3311,23 +3313,39 @@ fn parse_runtime_key_config(bytes: &[u8]) -> Result<RuntimeKeyConfig> {
                 line_index + 1
             );
         };
-        anyhow::ensure!(
-            name.trim() == "NetObsNextPlayer",
-            "Extra.c4g/KeyConfig.txt custom global-key remapping is not represented"
-        );
-        if net_observer_seen {
-            // StdCompilerINIRead retains the first value for a duplicate
-            // entry, including duplicates in a later [Keys] section.
-            continue;
+        match name.trim() {
+            "NetObsNextPlayer" => {
+                if net_observer_seen {
+                    // StdCompilerINIRead retains the first value for a duplicate
+                    // entry, including duplicates in a later [Keys] section.
+                    continue;
+                }
+                net_observer_seen = true;
+                config.net_observer_next_player = value
+                    .split(',')
+                    .map(|raw| parse_runtime_key_chord(raw, "NetObsNextPlayer"))
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect();
+            }
+            "ChartToggle" => {
+                if chart_toggle_seen {
+                    continue;
+                }
+                chart_toggle_seen = true;
+                config.chart_toggle = value
+                    .split(',')
+                    .map(|raw| parse_runtime_key_chord(raw, "ChartToggle"))
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect();
+            }
+            _ => anyhow::bail!(
+                "Extra.c4g/KeyConfig.txt custom global-key remapping is not represented"
+            ),
         }
-        net_observer_seen = true;
-        config.net_observer_next_player = value
-            .split(',')
-            .map(parse_runtime_key_chord)
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect();
     }
     Ok(config)
 }
@@ -5094,6 +5112,25 @@ impl FrontendAssets {
                 scroll: self.startup_dialog_images.get("GUIScroll.png")?,
             },
         )
+    }
+
+    fn network_chart_resources(
+        &self,
+    ) -> Option<lc_frontend::network_chart::NetworkChartResources<'_>> {
+        let caption = self.startup_dialog_images.get("GUICaption.png")?;
+        let button = self.startup_dialog_images.get("GUIButton.png")?;
+        let button_down = self.startup_dialog_images.get("GUIButtonDown.png")?;
+        let button_highlight = self.game_over_button_highlight.as_ref()?;
+        Some(lc_frontend::network_chart::NetworkChartResources {
+            skin: lc_frontend::classic_gui::ClassicGuiSkin::new(
+                caption,
+                button,
+                button_down,
+                Some(button_highlight),
+            ),
+            fonts: self.clonk_fonts.as_deref()?,
+            icons: self.startup_dialog_images.get("GUIIcons.png")?,
+        })
     }
 
     fn definition_sel_resources(
@@ -11788,6 +11825,18 @@ impl ConstructionMenuDrag {
     }
 }
 
+/// Runtime dialogs that inherit C4GUI::Dialog's default z=0. Screen keeps
+/// equal-z dialogs in show/activation order: the last entry is drawn and hit
+/// tested on top.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeDefaultDialog {
+    Scoreboard,
+    NetworkChart,
+    ClientList,
+    GameOver,
+    ExternalIrc,
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -11877,6 +11926,8 @@ struct GameApp {
     startup_irc_initial_connect_pending: bool,
     /// Shared double-click latch for the embedded and standalone chat views.
     irc_dialog_last_click: Option<(GuiPoint, Instant)>,
+    /// Left gesture retained by the standalone z=0 chat dialog.
+    external_irc_pointer_capture: bool,
     startup_game_search: Option<lc_network::StartupGameSearch>,
     #[cfg(test)]
     startup_game_search_test_events: VecDeque<lc_network::StartupGameSearchEvent>,
@@ -12102,6 +12153,11 @@ struct GameApp {
     /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
     frames_per_second: i32,
     frames_since_second: i32,
+    /// C4Game::pNetworkStatistics exists for every running game. Only the
+    /// Pings presentation tab is conditional on an enabled network session.
+    network_stats: Option<NetworkStats>,
+    network_stats_clients: HashSet<ClientId>,
+    network_stats_players: HashSet<i32>,
     control_clients: ControlClientRegistry,
     /// `C4GameControlClient::iNextControl` for the activated-client copy.
     /// Native resets every entry to the current ControlTick whenever
@@ -12271,6 +12327,8 @@ struct GameApp {
     /// one was shown most recently so equal-z rendering and input stay in the
     /// native insertion order.
     runtime_client_list_above_game_over: bool,
+    /// Bottom-to-top order of the running Screen's default-z dialogs.
+    runtime_default_dialog_order: Vec<RuntimeDefaultDialog>,
     /// Runtime-only C4Scoreboard::pDlg lifecycle. The engine owns the saved
     /// cells/refcount; this flag changes only at DoDlgShow/game-start/Tab and
     /// the explicit game-over/Clear close sites.
@@ -12388,9 +12446,13 @@ struct GameApp {
     /// C4MessageBoard's mode, LogBuffer cursor, and per-graphics-frame
     /// Fader/ScreenFader state.
     message_board: ClassicMessageBoardState,
-    /// ProcessCommand's C4ChartDialog toggle. L143 owns the actual dialog and
-    /// live network-statistics presentation.
-    network_chart_open: bool,
+    /// Process-global C4ChartDialog singleton and its stronger Escape latch.
+    network_chart_dialog: Option<lc_frontend::network_chart::NetworkChartDialog>,
+    network_chart_consumed_keys: HashSet<VirtualKeyCode>,
+    network_chart_pointer_capture: bool,
+    /// `ActivateDialog`/new-dialog insertion can move the z=0 chart after
+    /// already shown z=+1/+2 dialogs in the Screen's absolute list.
+    network_chart_elevated: bool,
     /// Process-global C4ChatInputDialog projection for ordinary game chat.
     running_chat: Option<RunningChatState>,
     /// A paste may close its chat owner on key-down; retain the physical V
@@ -13448,6 +13510,7 @@ impl RuntimeKeyChord {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RuntimeKeyConfig {
     net_observer_next_player: Vec<RuntimeKeyChord>,
+    chart_toggle: Vec<RuntimeKeyChord>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22705,6 +22768,7 @@ impl GameApp {
             external_irc_dialog: None,
             startup_irc_initial_connect_pending: false,
             irc_dialog_last_click: None,
+            external_irc_pointer_capture: false,
             startup_game_search: None,
             #[cfg(test)]
             startup_game_search_test_events: VecDeque::new(),
@@ -22820,6 +22884,9 @@ impl GameApp {
             network_stream_address,
             frames_per_second: 0,
             frames_since_second: 0,
+            network_stats: None,
+            network_stats_clients: HashSet::new(),
+            network_stats_players: HashSet::new(),
             control_clients,
             network_client_next_control_ticks,
             network_client_activity: NetworkClientActivity::default(),
@@ -22896,6 +22963,7 @@ impl GameApp {
             runtime_client_list: None,
             runtime_client_list_consumed_keys: HashSet::new(),
             runtime_client_list_above_game_over: false,
+            runtime_default_dialog_order: Vec::new(),
             scoreboard_dialog: None,
             scoreboard_initial_reconcile_pending: false,
             scoreboard_close_pointer_capture: false,
@@ -22944,7 +23012,10 @@ impl GameApp {
             netdlg_last_click: None,
             netdlg_join_edit_last_click: None,
             message_board: ClassicMessageBoardState::default(),
-            network_chart_open: false,
+            network_chart_dialog: None,
+            network_chart_consumed_keys: HashSet::new(),
+            network_chart_pointer_capture: false,
+            network_chart_elevated: false,
             running_chat: None,
             chat_paste_consumed_keys: HashSet::new(),
             message_input_history: VecDeque::new(),
@@ -23072,6 +23143,7 @@ impl GameApp {
                 .as_ref()
                 .is_none_or(|message| message.remaining_draws == 0)
             && self.runtime_client_list.is_none()
+            && self.network_chart_dialog.is_none()
             && self.scoreboard_dialog.is_none()
             && self.game_over_dialog.is_none()
             && self.game_option_input_dialog.is_none()
@@ -24529,6 +24601,7 @@ impl GameApp {
         self.ingame_menu_close_pointer_capture = None;
         self.script_menu_close_pointer_capture = None;
         self.scoreboard_pointer_left();
+        self.cancel_network_chart_pointer_capture();
         self.menu_title_drag = None;
         for menu in self.ingame_menu.by_player.values_mut() {
             menu.reset_location();
@@ -25204,7 +25277,10 @@ impl GameApp {
         if self.external_irc_dialog_visible && self.context_menu.is_some() {
             return Ok(());
         }
-        if self.external_irc_dialog_visible {
+        if self.external_irc_dialog_visible
+            && (!matches!(self.mode, AppMode::Running)
+                || self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc))
+        {
             let Some(fonts) = self.assets.clonk_fonts.clone() else {
                 return Ok(());
             };
@@ -26088,6 +26164,16 @@ impl GameApp {
         if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
+        if self.network_chart_is_elevated_pointer_layer()
+            && self.context_menu.is_none()
+            && self
+                .running_pointer_position
+                .is_some_and(|point| self.network_chart_contains_point(point))
+        {
+            return Ok(());
+        }
+        let message_dialog_fallback_blocks_world =
+            self.runtime_pointer_fallback_is_exclusive();
         let context_routed_before_running_dialogs = self.mode == AppMode::Running
             && self.context_menu.is_some()
             && !self.running_dialog_stack.is_empty();
@@ -26105,12 +26191,55 @@ impl GameApp {
                 }
             }
         }
+        let mut top_default_target = None;
         if self.mode == AppMode::Running {
-            let shared_target = self
+            if let Some(point) = self.running_pointer_position {
+                for dialog_kind in self
+                    .runtime_default_dialog_order_snapshot()
+                    .into_iter()
+                    .rev()
+                {
+                    if self.runtime_default_dialog_contains_point(dialog_kind, point)? {
+                        top_default_target = Some(dialog_kind);
+                        break;
+                    }
+                }
+            }
+        }
+        if self.mode == AppMode::Running {
+            let mut shared_target = self
                 .running_pointer_position
                 .map(|point| self.top_scoreboard_message_pointer_target(point, false))
                 .transpose()?
                 .flatten();
+            if let Some(entry @ (RunningDialogStackEntry::Scoreboard
+            | RunningDialogStackEntry::RuntimeClientList)) = shared_target
+            {
+                let split = self
+                    .running_dialog_stack
+                    .iter()
+                    .position(|candidate| candidate.z_order() > 0)
+                    .unwrap_or(self.running_dialog_stack.len());
+                let entry_is_in_tail = self
+                    .running_dialog_stack
+                    .iter()
+                    .rposition(|candidate| *candidate == entry)
+                    .is_some_and(|position| position >= split);
+                let shared_default = match entry {
+                    RunningDialogStackEntry::Scoreboard => RuntimeDefaultDialog::Scoreboard,
+                    RunningDialogStackEntry::RuntimeClientList => {
+                        RuntimeDefaultDialog::ClientList
+                    }
+                    RunningDialogStackEntry::Message(_) | RunningDialogStackEntry::Chat => {
+                        unreachable!("only default-z shared dialogs reach this branch")
+                    }
+                };
+                if !entry_is_in_tail
+                    && top_default_target.is_some_and(|target| target != shared_default)
+                {
+                    shared_target = None;
+                }
+            }
             match shared_target {
                 Some(RunningDialogStackEntry::RuntimeClientList) => {
                     let native_delta = match delta {
@@ -26145,7 +26274,6 @@ impl GameApp {
                     self.cancel_ingame_mouse_gestures();
                     return Ok(());
                 }
-                None if self.running_shared_gui_has_keyboard_focus() => return Ok(()),
                 None => {}
             }
         } else if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
@@ -26187,7 +26315,7 @@ impl GameApp {
                 }
             }
         }
-        if self.external_irc_dialog_visible {
+        if self.external_irc_dialog_visible && !matches!(self.mode, AppMode::Running) {
             let native_delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
                 MouseScrollDelta::PixelDelta(position) => {
@@ -26297,7 +26425,68 @@ impl GameApp {
         }
         if self.game_option_input_dialog.is_some()
             && self.game_option_input_owns_running_pointer_event()
+            && top_default_target.is_none()
         {
+            return Ok(());
+        }
+        if matches!(self.mode, AppMode::Running) {
+            let native_delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            if let Some(point) = self.running_pointer_position {
+                for dialog_kind in self
+                    .runtime_default_dialog_order_snapshot()
+                    .into_iter()
+                    .rev()
+                {
+                    if !self.runtime_default_dialog_contains_point(dialog_kind, point)? {
+                        continue;
+                    }
+                    match dialog_kind {
+                        RuntimeDefaultDialog::ExternalIrc => {
+                            let actions = self
+                                .external_irc_dialog
+                                .as_mut()
+                                .map(|dialog| dialog.handle_wheel(point, native_delta))
+                                .unwrap_or_default();
+                            self.process_network_dialog_actions(actions)?;
+                        }
+                        RuntimeDefaultDialog::GameOver => {
+                            let (width, height) = {
+                                let surface = self.graphics.surface();
+                                (surface.width(), surface.height())
+                            };
+                            if let Some(dialog) = self.game_over_dialog.as_mut() {
+                                dialog.handle_pointer_move(point.x, point.y, width, height);
+                                dialog.handle_wheel(native_delta, width, height);
+                            }
+                        }
+                        RuntimeDefaultDialog::ClientList => {
+                            if let Some((preferred, line_height)) =
+                                self.runtime_client_list_input_geometry()
+                            {
+                                if let Some(dialog) = self.runtime_client_list.as_mut() {
+                                    dialog.handle_wheel(
+                                        point,
+                                        native_delta,
+                                        preferred,
+                                        line_height,
+                                    );
+                                }
+                            }
+                        }
+                        RuntimeDefaultDialog::NetworkChart
+                        | RuntimeDefaultDialog::Scoreboard => {}
+                    }
+                    self.mark_menu_dirty();
+                    return Ok(());
+                }
+            }
+        }
+        if message_dialog_fallback_blocks_world {
             return Ok(());
         }
         if self.startup_dialog_fade_active() {
@@ -26345,67 +26534,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        let runtime_client_list_can_receive_wheel = self.runtime_client_list.is_some()
-            && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over);
-        if self.mode == AppMode::Running
-            && self.runtime_client_list.is_some()
-            && self.game_over_dialog.is_none()
-            && self.scoreboard_is_above_runtime_client_list()
-            && self.scoreboard_contains_running_pointer()?
-        {
-            self.suspend_ingame_pointer_for_gui();
-            self.cancel_ingame_mouse_gestures();
-            return Ok(());
-        }
-        if self.mode == AppMode::Running && runtime_client_list_can_receive_wheel {
-            let native_delta = match delta {
-                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
-                MouseScrollDelta::PixelDelta(position) => {
-                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
-                }
-            };
-            let geometry = self.runtime_client_list_input_geometry();
-            let point = self.running_pointer_position;
-            let consumed = geometry
-                .zip(point)
-                .and_then(|((preferred, line_height), point)| {
-                    self.runtime_client_list.as_mut().map(|dialog| {
-                        dialog.handle_wheel(point, native_delta, preferred, line_height)
-                    })
-                })
-                .unwrap_or(false);
-            if consumed {
-                self.mark_menu_dirty();
-                return Ok(());
-            }
-        }
-        if self.mode == AppMode::Running && self.game_over_dialog.is_some() {
-            if !self.game_over_dialog_is_mouse_active() {
-                return Ok(());
-            }
-            let native_delta = match delta {
-                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
-                MouseScrollDelta::PixelDelta(position) => {
-                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
-                }
-            };
-            let width = self.graphics.surface().width();
-            let height = self.graphics.surface().height();
-            let changed = self
-                .game_over_dialog
-                .as_mut()
-                .is_some_and(|dialog| dialog.handle_wheel(native_delta, width, height));
-            if changed {
-                self.mark_menu_dirty();
-            }
-            return Ok(());
-        }
         if self.mode == AppMode::Running {
-            if self.scoreboard_contains_running_pointer()? {
-                self.suspend_ingame_pointer_for_gui();
-                self.cancel_ingame_mouse_gestures();
-                return Ok(());
-            }
             let native_delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
                 MouseScrollDelta::PixelDelta(position) => {
@@ -26813,7 +26942,10 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if !self.external_irc_dialog_visible {
+        if !self.external_irc_dialog_visible
+            || (matches!(self.mode, AppMode::Running)
+                && !self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc))
+        {
             return Ok(false);
         }
         let modifiers = self.keyboard_modifiers
@@ -28339,6 +28471,623 @@ impl GameApp {
         }
     }
 
+    fn reconcile_network_stats_series(&mut self) {
+        if self.network_stats.is_none() {
+            return;
+        }
+
+        let clients = self
+            .control_clients
+            .snapshot()
+            .into_iter()
+            .filter_map(|client| {
+                ClientId::try_from(client.client_id).ok().map(|client_id| {
+                    (
+                        client_id,
+                        legacy_presentation_text(client.name.as_bytes()),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let client_ids = clients
+            .iter()
+            .map(|(client_id, _)| *client_id)
+            .collect::<HashSet<_>>();
+        let players = self
+            .engine
+            .players()
+            .map(|player| {
+                let color = player.color().map_or(0x00ff_ffff, |color| {
+                    (u32::from(color.r) << 16)
+                        | (u32::from(color.g) << 8)
+                        | u32::from(color.b)
+                });
+                (player.id(), player.name().to_string(), color)
+            })
+            .collect::<Vec<_>>();
+        let player_ids = players
+            .iter()
+            .map(|(player_id, _, _)| *player_id)
+            .collect::<HashSet<_>>();
+        let removed_clients = self
+            .network_stats_clients
+            .difference(&client_ids)
+            .copied()
+            .collect::<Vec<_>>();
+        let removed_players = self
+            .network_stats_players
+            .difference(&player_ids)
+            .copied()
+            .collect::<Vec<_>>();
+
+        let stats = self
+            .network_stats
+            .as_mut()
+            .expect("network statistics presence checked above");
+        for client_id in removed_clients {
+            stats.remove_client(client_id);
+        }
+        for (client_id, name) in clients {
+            if !self.network_stats_clients.contains(&client_id) {
+                stats.register_client(client_id, name);
+            }
+        }
+        for player_id in removed_players {
+            stats.remove_player(player_id);
+        }
+        for (player_id, name, color) in players {
+            if !self.network_stats_players.contains(&player_id) {
+                stats.register_player(player_id, name, color);
+            }
+        }
+        self.network_stats_clients = client_ids;
+        self.network_stats_players = player_ids;
+    }
+
+    fn record_network_stats_control_frame(&mut self) {
+        let control_rate = self.engine.control_rate();
+        if !matches!(self.mode, AppMode::Running)
+            || self.network_stats.is_none()
+            || control_rate <= 0
+            || self.engine.frame() % control_rate as u64 != 0
+        {
+            return;
+        }
+        self.reconcile_network_stats_series();
+        let samples = self
+            .engine
+            .take_player_control_counts()
+            .into_iter()
+            .map(|(player_id, controls, actions)| PlayerControlSample {
+                player_id,
+                controls,
+                actions,
+            })
+            .collect::<Vec<_>>();
+        if let Some(stats) = self.network_stats.as_mut() {
+            stats.record_control_frame(control_rate, samples);
+        }
+    }
+
+    fn record_network_stats_frame(&mut self) {
+        if !matches!(self.mode, AppMode::Running) || self.network_stats.is_none() {
+            return;
+        }
+        let object_count = self
+            .snapshot
+            .objects
+            .iter()
+            // C4ObjectList::ObjectCount checks the raw nonzero Status field:
+            // both Normal (1) and Inactive (2) objects are represented.
+            .filter(|object| object.status != lc_engine::ObjectStatus::Deleted)
+            .count();
+        if let Some(stats) = self.network_stats.as_mut() {
+            stats.record_frame(i32::try_from(object_count).unwrap_or(i32::MAX));
+        }
+    }
+
+    fn record_network_stats_second(&mut self) {
+        if !matches!(self.mode, AppMode::Running) || self.network_stats.is_none() {
+            return;
+        }
+        self.reconcile_network_stats_series();
+        let mut message_pings = BTreeMap::<ClientId, i32>::new();
+        if let Some(connections) = self
+            .network
+            .as_ref()
+            .and_then(|network| network.runtime_connections().ok())
+        {
+            for connection in connections {
+                if matches!(connection.usage.as_str(), "Msg" | "Data/Msg") {
+                    message_pings
+                        .entry(connection.client_id)
+                        .or_insert(connection.ping_ms);
+                }
+            }
+        }
+        let pings = message_pings
+            .into_iter()
+            .map(|(client_id, lag_ms)| ClientPingSample {
+                client_id,
+                lag_ms: Some(lag_ms),
+            })
+            .collect::<Vec<_>>();
+        if let Some(stats) = self.network_stats.as_mut() {
+            let (input, output) = self.network.as_ref().map_or(
+                (
+                    ProtocolRateSample::new(0, 0),
+                    ProtocolRateSample::new(0, 0),
+                ),
+                NetworkManager::protocol_rate_samples,
+            );
+            stats.record_second(self.frames_per_second, input, output, pings);
+        }
+    }
+
+    fn network_chart_graph_snapshot(
+        graph: lc_network::NetworkStatsGraph<'_>,
+        network_input_title: &str,
+        network_output_title: &str,
+    ) -> lc_frontend::network_chart::NetworkChartGraphSnapshot {
+        let series = (0..graph.series_count())
+            .filter_map(|index| graph.series(index))
+            .map(|series| {
+                let start_time = series.start_time();
+                let values = (start_time..series.end_time())
+                    .map(|time| series.value(time))
+                    .collect::<Vec<_>>();
+                let title = match series.title() {
+                    "Network input" => network_input_title,
+                    "Network output" => network_output_title,
+                    title => title,
+                };
+                lc_frontend::network_chart::NetworkChartSeriesSnapshot::new(
+                    title,
+                    series.color(),
+                    start_time,
+                    values,
+                )
+            })
+            .collect();
+        lc_frontend::network_chart::NetworkChartGraphSnapshot::new(graph.title(), series)
+    }
+
+    fn refresh_network_chart_dialog(&mut self) {
+        let Some(aliases) = self.network_chart_dialog.as_ref().map(|dialog| {
+            dialog
+                .tab_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        }) else {
+            return;
+        };
+        let network_input_title =
+            self.runtime_resource_text("IDS_NET_INPUT", "Network Input");
+        let network_output_title =
+            self.runtime_resource_text("IDS_NET_OUTPUT", "Network Output");
+        let Some(stats) = self.network_stats.as_mut() else {
+            return;
+        };
+        stats.update();
+        let snapshots = aliases
+            .iter()
+            .filter_map(|alias| {
+                stats
+                    .graph_by_name(alias)
+                    .map(|graph| {
+                        (
+                            alias.clone(),
+                            Self::network_chart_graph_snapshot(
+                                graph,
+                                &network_input_title,
+                                &network_output_title,
+                            ),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        if let Some(dialog) = self.network_chart_dialog.as_mut() {
+            for (alias, graph) in snapshots {
+                dialog.set_graph_snapshot(&alias, graph);
+            }
+        }
+    }
+
+    fn runtime_default_dialog_visible(&self, dialog: RuntimeDefaultDialog) -> bool {
+        match dialog {
+            RuntimeDefaultDialog::Scoreboard => self.scoreboard_dialog.is_some(),
+            RuntimeDefaultDialog::NetworkChart => self.network_chart_dialog.is_some(),
+            RuntimeDefaultDialog::ClientList => self.runtime_client_list.is_some(),
+            RuntimeDefaultDialog::GameOver => self.game_over_dialog.is_some(),
+            RuntimeDefaultDialog::ExternalIrc => self.external_irc_dialog_visible,
+        }
+    }
+
+    /// Returns a complete bottom-to-top projection. The fallback entries keep
+    /// older direct-state fixtures deterministic; production show/close paths
+    /// populate the retained order explicitly.
+    fn runtime_default_dialog_order_snapshot(&self) -> Vec<RuntimeDefaultDialog> {
+        let mut order = self
+            .runtime_default_dialog_order
+            .iter()
+            .copied()
+            .filter(|dialog| self.runtime_default_dialog_visible(*dialog))
+            .collect::<Vec<_>>();
+        let fallback = if self.runtime_client_list_above_game_over {
+            [
+                RuntimeDefaultDialog::Scoreboard,
+                RuntimeDefaultDialog::NetworkChart,
+                RuntimeDefaultDialog::GameOver,
+                RuntimeDefaultDialog::ClientList,
+                RuntimeDefaultDialog::ExternalIrc,
+            ]
+        } else {
+            [
+                RuntimeDefaultDialog::Scoreboard,
+                RuntimeDefaultDialog::NetworkChart,
+                RuntimeDefaultDialog::ClientList,
+                RuntimeDefaultDialog::GameOver,
+                RuntimeDefaultDialog::ExternalIrc,
+            ]
+        };
+        for dialog in fallback {
+            if self.runtime_default_dialog_visible(dialog) && !order.contains(&dialog) {
+                order.push(dialog);
+            }
+        }
+        order
+    }
+
+    fn sync_runtime_default_dialog_compatibility(&mut self) {
+        let order = self.runtime_default_dialog_order_snapshot();
+        let client = order
+            .iter()
+            .position(|dialog| *dialog == RuntimeDefaultDialog::ClientList);
+        let game_over = order
+            .iter()
+            .position(|dialog| *dialog == RuntimeDefaultDialog::GameOver);
+        self.runtime_client_list_above_game_over =
+            client.zip(game_over).is_some_and(|(client, game_over)| client > game_over);
+    }
+
+    fn show_or_raise_runtime_default_dialog(&mut self, dialog: RuntimeDefaultDialog) {
+        let mut order = self.runtime_default_dialog_order_snapshot();
+        order.retain(|candidate| *candidate != dialog);
+        order.push(dialog);
+        if self.network_chart_elevated
+            && dialog != RuntimeDefaultDialog::NetworkChart
+            && self.network_chart_dialog.is_some()
+        {
+            order.retain(|candidate| *candidate != RuntimeDefaultDialog::NetworkChart);
+            order.push(RuntimeDefaultDialog::NetworkChart);
+        }
+        self.runtime_default_dialog_order = order;
+        self.sync_runtime_default_dialog_compatibility();
+    }
+
+    fn activate_runtime_default_dialog(&mut self, dialog: RuntimeDefaultDialog) {
+        match dialog {
+            RuntimeDefaultDialog::Scoreboard => {
+                self.activate_running_dialog_stack_only(RunningDialogStackEntry::Scoreboard);
+            }
+            RuntimeDefaultDialog::ClientList => {
+                self.activate_running_dialog_stack_only(
+                    RunningDialogStackEntry::RuntimeClientList,
+                );
+            }
+            RuntimeDefaultDialog::NetworkChart
+            | RuntimeDefaultDialog::GameOver
+            | RuntimeDefaultDialog::ExternalIrc => {}
+        }
+        self.show_or_raise_runtime_default_dialog(dialog);
+        if dialog == RuntimeDefaultDialog::NetworkChart {
+            self.network_chart_elevated = !self.message_dialogs.is_empty()
+                || self.running_chat_controller().is_some();
+            if self.network_chart_elevated {
+                self.message_dialog_active_index = None;
+                self.set_running_chat_active(false);
+            }
+        } else {
+            if self.network_chart_elevated {
+                let mut order = self.runtime_default_dialog_order_snapshot();
+                order.retain(|candidate| *candidate != dialog);
+                order.push(dialog);
+                self.runtime_default_dialog_order = order;
+            }
+            self.network_chart_elevated = false;
+            self.sync_runtime_default_dialog_compatibility();
+        }
+    }
+
+    fn hide_runtime_default_dialog(&mut self, dialog: RuntimeDefaultDialog) {
+        let chart_was_elevated = dialog == RuntimeDefaultDialog::NetworkChart
+            && self.network_chart_elevated;
+        let chart_owned_input = chart_was_elevated && self.network_chart_elevated_owns_input();
+        let mut order = self.runtime_default_dialog_order_snapshot();
+        order.retain(|candidate| *candidate != dialog);
+        self.runtime_default_dialog_order = order;
+        if dialog == RuntimeDefaultDialog::NetworkChart {
+            self.network_chart_elevated = false;
+            if chart_owned_input {
+                match self.running_active_dialog {
+                    Some(RunningDialogStackEntry::Chat) if self.running_chat.is_some() => {
+                        self.set_running_chat_active(true);
+                    }
+                    Some(RunningDialogStackEntry::Message(stack_id)) => {
+                        self.message_dialog_active_index = self.running_message_index(stack_id);
+                    }
+                    _ => {
+                        self.message_dialog_active_index = None;
+                    }
+                }
+            }
+        }
+        self.sync_runtime_default_dialog_compatibility();
+    }
+
+    fn reset_runtime_default_dialog_order(&mut self) {
+        self.runtime_default_dialog_order.clear();
+        self.network_chart_elevated = false;
+        if self.external_irc_dialog_visible {
+            self.runtime_default_dialog_order
+                .push(RuntimeDefaultDialog::ExternalIrc);
+        }
+        self.runtime_client_list_above_game_over = false;
+    }
+
+    fn runtime_default_dialog_is_top(&self, dialog: RuntimeDefaultDialog) -> bool {
+        self.runtime_default_dialog_order_snapshot().last().copied() == Some(dialog)
+    }
+
+    fn runtime_top_default_dialog_is_exclusive(&self) -> bool {
+        matches!(
+            self.runtime_default_dialog_order_snapshot().last(),
+            Some(RuntimeDefaultDialog::GameOver | RuntimeDefaultDialog::ExternalIrc)
+        )
+    }
+
+    fn runtime_pointer_fallback_is_exclusive(&self) -> bool {
+        if self.network_chart_elevated {
+            return false;
+        }
+        if self.running_chat_controller().is_some()
+            || self.top_message_dialog_is_exclusive_vote()
+        {
+            return true;
+        }
+        self.message_dialogs.is_empty() && self.runtime_top_default_dialog_is_exclusive()
+    }
+
+    fn runtime_default_dialog_is_above(
+        &self,
+        upper: RuntimeDefaultDialog,
+        lower: RuntimeDefaultDialog,
+    ) -> bool {
+        let order = self.runtime_default_dialog_order_snapshot();
+        order.iter().position(|dialog| *dialog == upper).zip(
+            order.iter().position(|dialog| *dialog == lower),
+        ).is_some_and(|(upper, lower)| upper > lower)
+    }
+
+    fn toggle_network_chart(&mut self) {
+        self.cancel_network_chart_pointer_capture();
+        if self.network_chart_dialog.take().is_some() {
+            self.hide_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
+            return;
+        }
+        self.reconcile_network_stats_series();
+        let caption = self.runtime_resource_text("IDS_NET_STATISTICS", "Statistics");
+        self.network_chart_dialog = Some(
+            lc_frontend::network_chart::NetworkChartDialog::new_with_caption(
+                self.network.is_some(),
+                caption,
+            ),
+        );
+        self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
+        self.refresh_network_chart_dialog();
+    }
+
+    /// The chart is a non-exclusive shared-screen dialog. Only its explicit
+    /// fullscreen Escape binding is reachable during play, and the callback
+    /// is conditional on the chart still being the active top dialog.
+    fn runtime_modal_above_network_chart(&self) -> bool {
+        self.league_signup_dialog.is_some()
+            || self.definition_selector.is_some()
+            || self.startup_options_advanced_dialog.is_some()
+            || self.startup_player_properties_dialog.is_some()
+            || self
+                .network_start_wait
+                .as_ref()
+                .is_some_and(|wait| wait.visible)
+    }
+
+    fn network_chart_is_active_dialog(&self) -> bool {
+        matches!(self.mode, AppMode::Running)
+            && self.network_chart_dialog.is_some()
+            && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::NetworkChart)
+            && self.context_menu.is_none()
+            && !self.runtime_modal_above_network_chart()
+            && (self.network_chart_elevated_owns_input()
+                || (self.message_dialogs.is_empty()
+                    && self.game_option_input_dialog.is_none()))
+    }
+
+    fn network_chart_elevated_owns_input(&self) -> bool {
+        self.network_chart_elevated
+            && self.message_dialog_active_index.is_none()
+            && !self.running_chat_active()
+    }
+
+    fn network_chart_renders_elevated(&self) -> bool {
+        matches!(self.mode, AppMode::Running)
+            && self.network_chart_elevated
+            && self.network_chart_dialog.is_some()
+            && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::NetworkChart)
+            && !self.runtime_modal_above_network_chart()
+    }
+
+    fn network_chart_is_elevated_pointer_layer(&self) -> bool {
+        self.network_chart_renders_elevated() && self.context_menu.is_none()
+    }
+
+    fn network_chart_owns_stronger_escape(&self) -> bool {
+        self.network_chart_is_active_dialog()
+            && !self.local_player_key_binding_in_scope(VirtualKeyCode::Escape)
+    }
+
+    fn gamepad_player_button_in_scope(
+        &self,
+        slot: GamepadSlot,
+        button: LegacyGamepadButton,
+    ) -> bool {
+        self.gamepad_bindings
+            .control_candidates_for_button(
+                slot.index(),
+                button.index(),
+                ElementState::Pressed,
+            )
+            .any(|(control_set, _)| {
+                i32::try_from(control_set)
+                    .ok()
+                    .and_then(|control_set| self.local_controls.owner_for_set(control_set))
+                    .and_then(|owner| self.engine.player(owner))
+                    .is_some()
+            })
+    }
+
+    fn handle_network_chart_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> bool {
+        if self.network_chart_consumed_keys.contains(&key) {
+            if state == ElementState::Released {
+                self.network_chart_consumed_keys.remove(&key);
+            }
+            return true;
+        }
+        if key != VirtualKeyCode::Escape
+            || !self.network_chart_owns_stronger_escape()
+            || !(self.keyboard_modifiers
+                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT))
+                .is_empty()
+        {
+            return false;
+        }
+        let action = self
+            .network_chart_dialog
+            .as_mut()
+            .map(|dialog| {
+                dialog.handle_key(KeyCode::Escape, state == ElementState::Pressed)
+            })
+            .unwrap_or(lc_frontend::network_chart::NetworkChartDialogAction::Ignored);
+        match action {
+            lc_frontend::network_chart::NetworkChartDialogAction::Ignored => false,
+            lc_frontend::network_chart::NetworkChartDialogAction::Handled
+            | lc_frontend::network_chart::NetworkChartDialogAction::Captured => {
+                if state == ElementState::Pressed {
+                    self.network_chart_consumed_keys.insert(key);
+                }
+                true
+            }
+            lc_frontend::network_chart::NetworkChartDialogAction::Close => {
+                self.cancel_network_chart_pointer_capture();
+                self.network_chart_dialog = None;
+                self.hide_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
+                self.network_chart_consumed_keys.insert(key);
+                true
+            }
+        }
+    }
+
+    fn handle_network_chart_pointer_button(&mut self, state: ElementState) -> bool {
+        if !matches!(self.mode, AppMode::Running) || self.network_chart_dialog.is_none() {
+            self.cancel_network_chart_pointer_capture();
+            return false;
+        }
+        let release_captured =
+            state == ElementState::Released && self.network_chart_pointer_capture;
+        let Some(point) = self.running_pointer_position else {
+            if release_captured {
+                self.cancel_network_chart_pointer_capture();
+            }
+            return release_captured;
+        };
+        let assets = Arc::clone(&self.assets);
+        let Some(resources) = assets.network_chart_resources() else {
+            return release_captured;
+        };
+        let preferred = scoreboard_preferred_rect(
+            self.graphics
+                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+        );
+        let action = self
+            .network_chart_dialog
+            .as_mut()
+            .map(|dialog| match state {
+                ElementState::Pressed => dialog.pointer_down(point, preferred, resources),
+                ElementState::Released => dialog.pointer_up(point, preferred, resources),
+            })
+            .unwrap_or(lc_frontend::network_chart::NetworkChartDialogAction::Ignored);
+        let handled = release_captured
+            || action != lc_frontend::network_chart::NetworkChartDialogAction::Ignored;
+        if action == lc_frontend::network_chart::NetworkChartDialogAction::Close {
+            self.network_chart_dialog = None;
+            self.hide_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
+        }
+        match state {
+            ElementState::Pressed => {
+                self.network_chart_pointer_capture =
+                    action == lc_frontend::network_chart::NetworkChartDialogAction::Captured
+            }
+            ElementState::Released => self.network_chart_pointer_capture = false,
+        }
+        if handled {
+            self.cancel_ingame_mouse_gestures();
+        }
+        handled
+    }
+
+    fn cancel_network_chart_pointer_capture(&mut self) {
+        self.network_chart_pointer_capture = false;
+        if let Some(dialog) = self.network_chart_dialog.as_mut() {
+            dialog.cancel_pointer_capture();
+        }
+    }
+
+    fn handle_network_chart_pointer_move(&mut self, point: GuiPoint) -> bool {
+        let (Some(dialog), Some(resources)) = (
+            self.network_chart_dialog.as_mut(),
+            self.assets.network_chart_resources(),
+        ) else {
+            return false;
+        };
+        let preferred = scoreboard_preferred_rect(
+            self.graphics
+                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+        );
+        dialog.pointer_move(point, preferred, resources)
+    }
+
+    fn network_chart_contains_point(&self, point: GuiPoint) -> bool {
+        let (Some(dialog), Some(resources)) = (
+            self.network_chart_dialog.as_ref(),
+            self.assets.network_chart_resources(),
+        ) else {
+            return false;
+        };
+        let preferred = scoreboard_preferred_rect(
+            self.graphics
+                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+        );
+        let bounds = dialog.layout(preferred, resources).bounds;
+        point.x >= bounds.x as f32
+            && point.x < bounds.x.saturating_add(bounds.w) as f32
+            && point.y >= bounds.y as f32
+            && point.y < bounds.y.saturating_add(bounds.h) as f32
+    }
+
     fn runtime_network_role(&self) -> RuntimeNetworkRole {
         let Some(network) = self.network.as_ref() else {
             return RuntimeNetworkRole::Offline;
@@ -28488,8 +29237,8 @@ impl GameApp {
     }
 
     /// Extra.c4g/KeyConfig.txt can replace any process-global binding. This
-    /// cache models NetObsNextPlayer; every other represented override still
-    /// rejects keyboard edges before any UI or control mutation.
+    /// cache models NetObsNextPlayer and ChartToggle; every other represented
+    /// override still rejects keyboard edges before any UI or control mutation.
     fn guard_runtime_key_dispatch(&self, key: VirtualKeyCode) -> Result<(), EngineError> {
         self.runtime_key_config().map(|_| ()).map_err(|error| {
             let boundary = match key {
@@ -28642,13 +29391,20 @@ impl GameApp {
     }
 
     fn local_player_key_binding_in_scope(&self, key: VirtualKeyCode) -> bool {
-        !self.runtime_gui_has_keyboard_focus()
-            && self.snapshot.hud.local_players.contains(&self.local_owner)
-            && self.engine.player(self.local_owner).is_some()
+        self.game_over_dialog.is_none()
+            && (!self.runtime_gui_has_keyboard_focus() || self.network_chart_elevated)
+            && !self.runtime_top_default_dialog_is_exclusive()
             && self
                 .bindings
-                .event_for_key(key, ElementState::Pressed)
-                .is_some()
+                .control_candidates_for_key(key, ElementState::Pressed)
+                .any(|(control_set, _)| {
+                    i32::try_from(control_set)
+                        .ok()
+                        .and_then(|control_set| self.local_controls.owner_for_set(control_set))
+                        .filter(|owner| self.snapshot.hud.local_players.contains(owner))
+                        .and_then(|owner| self.engine.player(owner))
+                        .is_some()
+                })
     }
 
     fn scoreboard_request(&self) -> ScoreboardPresentationRequest {
@@ -28863,7 +29619,9 @@ impl GameApp {
     }
 
     fn remove_running_dialog(&mut self, entry: RunningDialogStackEntry) {
-        let was_active = self.running_active_dialog == Some(entry);
+        let was_named_active = self.running_active_dialog == Some(entry);
+        let chart_owned_input = self.network_chart_elevated_owns_input();
+        let was_active = was_named_active && !chart_owned_input;
         if was_active {
             // Screen::CloseDialog releases the one screen-global drag element
             // and aborts its context menu before selecting the next active
@@ -28873,13 +29631,19 @@ impl GameApp {
         }
         self.running_dialog_stack
             .retain(|current| *current != entry);
-        if was_active {
+        if was_named_active {
             let next = self.running_dialog_stack.last().copied();
-            self.set_running_active_dialog(next);
+            if self.network_chart_elevated {
+                // Keep the shared Screen projection current without granting
+                // its successor input through the visually higher chart.
+                self.running_active_dialog = next;
+            } else {
+                self.set_running_active_dialog(next);
+            }
         }
     }
 
-    fn activate_running_dialog(&mut self, entry: RunningDialogStackEntry) {
+    fn activate_running_dialog_stack_only(&mut self, entry: RunningDialogStackEntry) {
         if !self
             .running_dialog_stack
             .iter()
@@ -28898,6 +29662,20 @@ impl GameApp {
             .retain(|current| *current != entry);
         self.running_dialog_stack.push(entry);
         self.set_running_active_dialog(Some(entry));
+    }
+
+    fn activate_running_dialog(&mut self, entry: RunningDialogStackEntry) {
+        match entry {
+            RunningDialogStackEntry::Scoreboard => {
+                self.activate_runtime_default_dialog(RuntimeDefaultDialog::Scoreboard);
+            }
+            RunningDialogStackEntry::RuntimeClientList => {
+                self.activate_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
+            }
+            RunningDialogStackEntry::Message(_) | RunningDialogStackEntry::Chat => {
+                self.activate_running_dialog_stack_only(entry);
+            }
+        }
     }
 
     fn running_dialog_is_above(
@@ -28944,6 +29722,9 @@ impl GameApp {
     fn running_shared_gui_has_keyboard_focus(&self) -> bool {
         if self.mode != AppMode::Running {
             return true;
+        }
+        if self.network_chart_renders_elevated() {
+            return false;
         }
         match self.running_dialog_stack.last().copied() {
             Some(RunningDialogStackEntry::Chat) => true,
@@ -29019,20 +29800,6 @@ impl GameApp {
         self.play_input_dialog_sound_events(sounds);
     }
 
-    fn runtime_client_list_contains_point(&self, point: GuiPoint) -> bool {
-        let Some((preferred, line_height)) = self.runtime_client_list_input_geometry() else {
-            return false;
-        };
-        let Some(dialog) = self.runtime_client_list.as_ref() else {
-            return false;
-        };
-        let bounds = dialog.layout(preferred, line_height).bounds;
-        point.x >= bounds.x as f32
-            && point.x < (bounds.x + bounds.w) as f32
-            && point.y >= bounds.y as f32
-            && point.y < (bounds.y + bounds.h) as f32
-    }
-
     fn top_scoreboard_message_pointer_target_cached(
         &self,
         point: GuiPoint,
@@ -29078,15 +29845,7 @@ impl GameApp {
         // CMouse owns one screen-global pDragElement. While it exists, the
         // active shared dialog remains a hit outside its bounds regardless of
         // which dialog owns the captured element.
-        let global_drag_open = include_capture
-            && (self.scoreboard_close_pointer_capture
-                || self.scoreboard_runtime.title_drag.is_some()
-                || self.message_dialog_pointer_capture_index.is_some()
-                || self
-                    .runtime_client_list
-                    .as_ref()
-                    .is_some_and(|dialog| dialog.has_pointer_capture())
-                || self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left));
+        let global_drag_open = include_capture && self.running_shared_pointer_capture_open();
         let stack = self.running_dialog_stack.clone();
         for entry in stack.into_iter().rev() {
             match entry {
@@ -29128,6 +29887,79 @@ impl GameApp {
         Ok(None)
     }
 
+    fn running_shared_pointer_capture_open(&self) -> bool {
+        self.scoreboard_close_pointer_capture
+            || self.scoreboard_runtime.title_drag.is_some()
+            || self.message_dialog_pointer_capture_index.is_some()
+            || self
+                .runtime_client_list
+                .as_ref()
+                .is_some_and(|dialog| dialog.has_pointer_capture())
+            || self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left)
+    }
+
+    fn running_shared_entry_is_in_tail(&self, entry: RunningDialogStackEntry) -> bool {
+        let split = self
+            .running_dialog_stack
+            .iter()
+            .position(|candidate| candidate.z_order() > 0)
+            .unwrap_or(self.running_dialog_stack.len());
+        self.running_dialog_stack
+            .iter()
+            .rposition(|candidate| *candidate == entry)
+            .is_some_and(|position| position >= split)
+    }
+
+    fn top_runtime_default_dialog_at(
+        &mut self,
+        point: GuiPoint,
+    ) -> Result<Option<RuntimeDefaultDialog>, EngineError> {
+        for dialog in self
+            .runtime_default_dialog_order_snapshot()
+            .into_iter()
+            .rev()
+        {
+            if self.runtime_default_dialog_contains_point(dialog, point)? {
+                return Ok(Some(dialog));
+            }
+        }
+        Ok(None)
+    }
+
+    fn top_running_shared_pointer_target(
+        &mut self,
+        point: GuiPoint,
+        include_capture: bool,
+    ) -> Result<Option<RunningDialogStackEntry>, EngineError> {
+        let target = self.top_scoreboard_message_pointer_target(point, include_capture)?;
+        if include_capture && self.running_shared_pointer_capture_open() {
+            return Ok(target);
+        }
+        let Some(entry) = target else {
+            return Ok(None);
+        };
+        let shared_default = match entry {
+            RunningDialogStackEntry::Scoreboard => Some(RuntimeDefaultDialog::Scoreboard),
+            RunningDialogStackEntry::RuntimeClientList => {
+                Some(RuntimeDefaultDialog::ClientList)
+            }
+            RunningDialogStackEntry::Message(_) | RunningDialogStackEntry::Chat => None,
+        };
+        let Some(shared_default) = shared_default else {
+            return Ok(Some(entry));
+        };
+        if self.running_shared_entry_is_in_tail(entry) {
+            return Ok(Some(entry));
+        }
+        if self
+            .top_runtime_default_dialog_at(point)?
+            .is_some_and(|dialog| dialog != shared_default)
+        {
+            return Ok(None);
+        }
+        Ok(Some(entry))
+    }
+
     fn scoreboard_pointer_occluded(&mut self) {
         if self.scoreboard_close_pointer_capture && self.scoreboard_runtime.close_hovered {
             self.play_ui_sound("ArrowHit");
@@ -29139,7 +29971,7 @@ impl GameApp {
         &mut self,
         point: GuiPoint,
     ) -> Result<bool, EngineError> {
-        let target = self.top_scoreboard_message_pointer_target(point, true)?;
+        let target = self.top_running_shared_pointer_target(point, true)?;
         match target {
             Some(RunningDialogStackEntry::Scoreboard) => {
                 if self.primary_pointer_left_down {
@@ -29196,7 +30028,7 @@ impl GameApp {
         let Some(point) = self.running_pointer_position else {
             return Ok(false);
         };
-        let target = self.top_scoreboard_message_pointer_target(point, false)?;
+        let target = self.top_running_shared_pointer_target(point, false)?;
         if self.mode == AppMode::Running && state == ElementState::Released {
             self.release_occluded_running_pointer_captures(target);
         }
@@ -29301,12 +30133,14 @@ impl GameApp {
             ..ScoreboardDialogRuntime::default()
         };
         self.show_running_dialog(RunningDialogStackEntry::Scoreboard);
+        self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::Scoreboard);
     }
 
     fn close_scoreboard_dialog(&mut self) -> bool {
         let closed = self.scoreboard_dialog.take().is_some();
         self.scoreboard_pointer_left();
         self.remove_running_dialog(RunningDialogStackEntry::Scoreboard);
+        self.hide_runtime_default_dialog(RuntimeDefaultDialog::Scoreboard);
         self.scoreboard_runtime = ScoreboardDialogRuntime::default();
         closed
     }
@@ -29375,14 +30209,18 @@ impl GameApp {
     /// context menu's unrecognized Tab falls through to the lower priorities
     /// (C4KeyboardInput.h:343-353; C4GuiMenu.cpp:302-325).
     fn scoreboard_tab_has_higher_priority_route(&self) -> bool {
-        self.context_menu.is_none() && self.runtime_gui_has_keyboard_focus()
+        self.context_menu.is_none()
+            && ((self.runtime_gui_has_keyboard_focus() && !self.network_chart_elevated)
+                || self.runtime_top_default_dialog_is_exclusive())
     }
 
     fn local_tab_player_control_in_scope(&self) -> bool {
         // Configured player controls are PRIO_PlrControl. They are outside the
         // input scope while an exclusive dialog has keyboard focus. Ordinary
         // dialogs remain non-exclusive on the shared running Screen.
-        !self.runtime_gui_has_keyboard_focus()
+        self.game_over_dialog.is_none()
+            && (!self.runtime_gui_has_keyboard_focus() || self.network_chart_elevated)
+            && !self.runtime_top_default_dialog_is_exclusive()
             && self.snapshot.hud.local_players.contains(&self.local_owner)
             && self.engine.player(self.local_owner).is_some()
             && ControlBindingId::ALL
@@ -29458,7 +30296,11 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if self.external_irc_dialog_visible {
+        if self.context_menu.is_none()
+            && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
+            && self.message_dialogs.is_empty()
+            && self.game_option_input_dialog.is_none()
+        {
             return Ok(false);
         }
         if !matches!(self.mode, AppMode::Running) || key != VirtualKeyCode::Tab {
@@ -30034,6 +30876,7 @@ impl GameApp {
             self.runtime_client_list = None;
             self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
             self.runtime_client_list_above_game_over = false;
+            self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
         }
         true
     }
@@ -30046,7 +30889,7 @@ impl GameApp {
                 self.close_context_menu_silently();
             }
             self.runtime_client_list_consumed_keys.clear();
-            self.runtime_client_list_above_game_over = false;
+            self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
             return Ok(());
         }
         if !matches!(
@@ -30065,7 +30908,6 @@ impl GameApp {
         let (options, rows, status) = self.runtime_client_list_snapshot();
         let option_caption_reference = self.classic_lobby_option_labels().runtime_join;
         self.runtime_client_list_consumed_keys.clear();
-        self.runtime_client_list_above_game_over = self.game_over_dialog.is_some();
         self.runtime_client_list = Some(
             lc_frontend::runtime_client_list::RuntimeClientListDialog::new(
                 self.runtime_resource_string("IDS_NET_CAPTION"),
@@ -30077,6 +30919,7 @@ impl GameApp {
             .with_info_caption(self.runtime_resource_string("IDS_NET_CLIENT_INFO")),
         );
         self.show_running_dialog(RunningDialogStackEntry::RuntimeClientList);
+        self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
         Ok(())
     }
 
@@ -30097,6 +30940,7 @@ impl GameApp {
                 self.runtime_client_list = None;
                 self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
                 self.runtime_client_list_above_game_over = false;
+                self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
                 return Ok(());
             }
             RuntimeClientListAction::OpenInfo(_) => {
@@ -30113,6 +30957,7 @@ impl GameApp {
                     self.runtime_client_list = None;
                     self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
                     self.runtime_client_list_above_game_over = false;
+                    self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
                 }
                 return Ok(());
             }
@@ -30231,10 +31076,70 @@ impl GameApp {
         Some((preferred, font.line_height))
     }
 
+    fn runtime_client_list_contains_point(&self, point: GuiPoint) -> bool {
+        let (Some(dialog), Some((preferred, line_height))) = (
+            self.runtime_client_list.as_ref(),
+            self.runtime_client_list_input_geometry(),
+        ) else {
+            return false;
+        };
+        let bounds = dialog.layout(preferred, line_height).bounds;
+        point.x >= bounds.x as f32
+            && point.x < bounds.x.saturating_add(bounds.w) as f32
+            && point.y >= bounds.y as f32
+            && point.y < bounds.y.saturating_add(bounds.h) as f32
+    }
+
+    fn game_over_dialog_contains_point(&self, point: GuiPoint) -> bool {
+        let surface = self.graphics.surface();
+        self.game_over_dialog.as_ref().is_some_and(|dialog| {
+            dialog.classic_dialog_contains_point(
+                point.x,
+                point.y,
+                surface.width(),
+                surface.height(),
+            )
+        })
+    }
+
+    fn runtime_default_dialog_contains_point(
+        &mut self,
+        dialog: RuntimeDefaultDialog,
+        point: GuiPoint,
+    ) -> Result<bool, EngineError> {
+        Ok(match dialog {
+            RuntimeDefaultDialog::Scoreboard => {
+                self.scoreboard_pointer_target(point)?.is_some()
+            }
+            RuntimeDefaultDialog::NetworkChart => self.network_chart_contains_point(point),
+            RuntimeDefaultDialog::ClientList => self.runtime_client_list_contains_point(point),
+            RuntimeDefaultDialog::GameOver => self.game_over_dialog_contains_point(point),
+            RuntimeDefaultDialog::ExternalIrc => self.external_irc_dialog_contains_point(point),
+        })
+    }
+
+    fn game_over_pointer_route_hit(&self, point: GuiPoint) -> bool {
+        self.runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver)
+            || self.game_over_dialog_contains_point(point)
+            || self
+                .game_over_dialog
+                .as_ref()
+                .is_some_and(GameOverState::has_pointer_capture)
+    }
+
     fn runtime_client_list_owns_game_over(&self) -> bool {
-        self.runtime_client_list_above_game_over
-            && self.runtime_client_list.is_some()
+        self.runtime_client_list.is_some()
             && self.game_over_dialog.is_some()
+            && self.runtime_default_dialog_is_above(
+                RuntimeDefaultDialog::ClientList,
+                RuntimeDefaultDialog::GameOver,
+            )
+    }
+
+    fn runtime_client_list_is_active(&self) -> bool {
+        self.runtime_client_list.is_some()
+            && (!matches!(self.mode, AppMode::Running)
+                || self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList))
     }
 
     fn runtime_client_list_strong_gamepad_callback_is_active(&self) -> bool {
@@ -30243,6 +31148,7 @@ impl GameApp {
                 .runtime_client_list
                 .as_ref()
                 .is_some_and(|dialog| !dialog.is_info_only())
+            && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList)
             && self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
             && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
             && self.context_menu.is_none()
@@ -30251,7 +31157,7 @@ impl GameApp {
     fn game_over_dialog_is_mouse_active(&self) -> bool {
         self.mode == AppMode::Running
             && self.game_over_dialog.is_some()
-            && !self.runtime_client_list_owns_game_over()
+            && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver)
             && self.message_dialogs.is_empty()
             && self.game_option_input_dialog.is_none()
             && self.definition_selector.is_none()
@@ -30540,9 +31446,6 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(RuntimeGlobalKeyOutcome::Unhandled);
         }
-        if self.external_irc_dialog_visible {
-            return Ok(RuntimeGlobalKeyOutcome::Unhandled);
-        }
         // X11/SDL update C4KeyboardInput::PressedKeys from the raw physical
         // edge before scope/priority dispatch. Keep the latch even when the
         // first down belongs to a global or modified route, so a later
@@ -30574,7 +31477,8 @@ impl GameApp {
             }
             return Ok(RuntimeGlobalKeyOutcome::Handled);
         }
-        if c4_modifiers == ModifiersState::SHIFT
+        if !self.runtime_top_default_dialog_is_exclusive()
+            && c4_modifiers == ModifiersState::SHIFT
             && matches!(key, VirtualKeyCode::Up | VirtualKeyCode::Down)
         {
             if state == ElementState::Pressed {
@@ -30712,6 +31616,138 @@ impl GameApp {
         }
     }
 
+    /// Runs the default-unbound PRIO_Base ChartToggle after the modeled
+    /// higher- and earlier-priority native routes have had first refusal.
+    fn handle_runtime_chart_toggle_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> bool {
+        if !matches!(self.mode, AppMode::Running) {
+            return false;
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let unmodified_arrow = c4_modifiers.is_empty()
+            && matches!(
+                key,
+                VirtualKeyCode::Left
+                    | VirtualKeyCode::Right
+                    | VirtualKeyCode::Up
+                    | VirtualKeyCode::Down
+            );
+        let edit_cursor_key = !c4_modifiers.contains(ModifiersState::ALT)
+            && matches!(key, VirtualKeyCode::Left | VirtualKeyCode::Right);
+        let alt_hotkey_modifiers = c4_modifiers == ModifiersState::ALT
+            || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
+        let dialog_callbacks_active = self.context_menu.is_none();
+        let active_context_key = c4_modifiers.is_empty()
+            && self.context_menu.as_ref().is_some_and(|menu| {
+                context_menu_key_code(key).is_some_and(|key| menu.owns_key(key))
+                    || context_menu_hotkey(key).is_some_and(|hotkey| menu.owns_hotkey(hotkey))
+            });
+        let active_game_over_hotkey = dialog_callbacks_active
+            && self
+            .runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver)
+            .then(|| startup_dialog_hotkey(key))
+            .flatten()
+            .and_then(|hotkey| {
+                self.game_over_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.hotkey_action(hotkey))
+            })
+            .is_some()
+            && alt_hotkey_modifiers;
+        let active_game_over_list_key = dialog_callbacks_active
+            && unmodified_arrow
+            && matches!(key, VirtualKeyCode::Up | VirtualKeyCode::Down)
+            && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver)
+            && self
+                .game_over_dialog
+                .as_ref()
+                .is_some_and(|dialog| {
+                    matches!(dialog.focused(), Some(GameOverFocus::PlayerList(_)))
+                });
+        let active_vote_hotkey = dialog_callbacks_active
+            && alt_hotkey_modifiers
+            && self.top_message_dialog_is_exclusive_vote()
+            && message_dialog_hotkey(key).is_some_and(|hotkey| {
+                self.active_message_dialog_index()
+                    .and_then(|index| self.message_dialogs.get(index))
+                    .is_some_and(|dialog| dialog.state.has_hotkey(hotkey))
+            });
+        let external_irc_control_key = dialog_callbacks_active
+            && self
+            .runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
+            && self.external_irc_dialog.as_ref().is_some_and(|dialog| {
+                let edit_shortcut = c4_modifiers == ModifiersState::CTRL
+                    && matches!(
+                        key,
+                        VirtualKeyCode::A
+                            | VirtualKeyCode::C
+                            | VirtualKeyCode::V
+                            | VirtualKeyCode::X
+                    );
+                let chat_page = dialog.chat_page()
+                    == lc_frontend::startup_netdlg::NetDlgChatPage::Chats;
+                (dialog.chat_edit_is_focused() && (edit_cursor_key || edit_shortcut))
+                    || (chat_page
+                        && ((c4_modifiers.is_empty()
+                            && matches!(key, VirtualKeyCode::Up | VirtualKeyCode::Down))
+                            || (c4_modifiers == ModifiersState::CTRL
+                                && key == VirtualKeyCode::F4)))
+                    || (alt_hotkey_modifiers
+                        && context_menu_hotkey(key)
+                            .is_some_and(|hotkey| dialog.chat_dialog_has_hotkey(hotkey)))
+            });
+        // These built-ins are registered before ChartToggle at PRIO_Base (or
+        // are represented by a stronger callback) and therefore win an exact
+        // duplicate custom chord.
+        if (c4_modifiers.is_empty()
+            && key == VirtualKeyCode::F2)
+            || (c4_modifiers == ModifiersState::ALT && key == VirtualKeyCode::C)
+            || (unmodified_arrow
+                && self.viewport_cycle_scope_available()
+                && self.viewport_scope_excludes_player_control())
+            || (unmodified_arrow
+                && self.primary_physical_viewport_is_no_owner()
+                && self.ingame_menu.is_some())
+            || (dialog_callbacks_active
+                && self.running_chat_active()
+                && (c4_modifiers == ModifiersState::CTRL
+                    || edit_cursor_key
+                    || (c4_modifiers.is_empty()
+                        && matches!(
+                            key,
+                            VirtualKeyCode::F2
+                                | VirtualKeyCode::Up
+                                | VirtualKeyCode::Down
+                        ))))
+            || active_context_key
+            || active_game_over_hotkey
+            || active_game_over_list_key
+            || active_vote_hotkey
+            || external_irc_control_key
+        {
+            return false;
+        }
+        let matches = self.runtime_key_config().is_ok_and(|config| {
+            config
+                .chart_toggle
+                .iter()
+                .any(|binding| binding.matches(key, self.keyboard_modifiers))
+        });
+        if !matches
+            || (c4_modifiers.is_empty() && self.local_player_key_binding_in_scope(key))
+        {
+            return false;
+        }
+        if state == ElementState::Pressed {
+            self.toggle_network_chart();
+        }
+        true
+    }
+
     fn handle_runtime_irc_toggle_key(
         &mut self,
         key: VirtualKeyCode,
@@ -30824,12 +31860,32 @@ impl GameApp {
         if self.handle_frontend_global_key(key, state)? {
             return Ok(());
         }
+        if self.network_chart_dialog.is_some()
+            && key == VirtualKeyCode::Escape
+            && (self.keyboard_modifiers
+                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT))
+                .is_empty()
+            && self.local_player_key_binding_in_scope(key)
+        {
+            // PRIO_PlrControl precedes the chart's PRIO_Dlg stronger Escape.
+            self.handle_engine_key(key, state)?;
+            return Ok(());
+        }
+        // C4ChartDialog's fullscreen PRIO_Dlg Escape callback precedes all
+        // process-global PRIO_Base actions, including a configured
+        // ChartToggle using the same physical key.
+        if self.handle_network_chart_key(key, state) {
+            return Ok(());
+        }
         let runtime_engine_dispatch_suppressed = match self.handle_runtime_global_key(key, state)? {
             RuntimeGlobalKeyOutcome::Handled => return Ok(()),
             RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch => true,
             RuntimeGlobalKeyOutcome::Unhandled => false,
         };
         if self.handle_scoreboard_key(key, state)? {
+            return Ok(());
+        }
+        if self.handle_runtime_chart_toggle_key(key, state) {
             return Ok(());
         }
         self.mark_menu_dirty();
@@ -31174,8 +32230,9 @@ impl GameApp {
         if self.options_modified_gui_key_is_inert(key) {
             return Ok(());
         }
-        let runtime_client_list_above_game_over = self.runtime_client_list_owns_game_over();
-        if runtime_client_list_above_game_over && self.handle_runtime_client_list_key(key, state)? {
+        let runtime_client_list_active = self.runtime_client_list_is_active()
+            || self.runtime_client_list_consumed_keys.contains(&key);
+        if runtime_client_list_active && self.handle_runtime_client_list_key(key, state)? {
             return Ok(());
         }
         if self.game_over_dialog_is_active() {
@@ -31303,11 +32360,6 @@ impl GameApp {
                 }
                 _ => {}
             }
-            return Ok(());
-        }
-        if !runtime_client_list_above_game_over
-            && self.handle_runtime_client_list_key(key, state)?
-        {
             return Ok(());
         }
         if self.handle_runtime_irc_toggle_key(key, state)? {
@@ -31919,6 +32971,7 @@ impl GameApp {
             self.cancel_classic_host_lobby_interaction();
         }
         self.message_dialog_consumed_keys.clear();
+        self.network_chart_consumed_keys.clear();
         self.runtime_client_list_consumed_keys.clear();
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
@@ -33983,7 +35036,8 @@ impl GameApp {
     /// FilmView/FreeView scope. Nonexclusive overlays (scoreboard, client
     /// list, and player-owned menus) deliberately do not participate.
     fn viewport_cycle_scope_available(&self) -> bool {
-        !self.runtime_gui_has_keyboard_focus()
+        (!self.runtime_gui_has_keyboard_focus() || self.network_chart_elevated)
+            && !self.runtime_top_default_dialog_is_exclusive()
             && !(self.primary_physical_viewport_is_no_owner() && self.ingame_menu.is_some())
     }
 
@@ -36998,7 +38052,7 @@ impl GameApp {
                     by_client: 0,
                 })?;
             }
-            b"chart" => self.network_chart_open = !self.network_chart_open,
+            b"chart" => self.toggle_network_chart(),
             _ => {
                 let registered = self.engine.message_board_commands().iter().any(|command| {
                     lc_script::c4_string_bytes(&command.name) == name
@@ -37045,6 +38099,7 @@ impl GameApp {
             "Enter chat messages here and send them with enter.",
         );
         self.suspend_ingame_pointer_for_gui();
+        self.network_chart_elevated = false;
         self.message_dialog_active_index = None;
         self.running_chat = Some(RunningChatState {
             history_index: -1,
@@ -37081,6 +38136,7 @@ impl GameApp {
                 .with_placement(InputDialogPlacement::BottomThird)
         };
         self.suspend_ingame_pointer_for_gui();
+        self.network_chart_elevated = false;
         self.message_dialog_active_index = None;
         self.running_chat = Some(RunningChatState {
             history_index: -1,
@@ -37148,6 +38204,18 @@ impl GameApp {
         })
     }
 
+    fn running_chat_contains_point(&self, point: GuiPoint) -> bool {
+        self.running_chat_controller().is_some()
+            && self.game_option_input_layout().as_ref().is_some_and(|layout| {
+                Self::point_in_input_dialog_bounds(point, layout)
+            })
+    }
+
+    fn running_chat_contains_current_pointer(&self) -> bool {
+        self.running_pointer_position
+            .is_some_and(|point| self.running_chat_contains_point(point))
+    }
+
     fn running_chat_text(&self) -> Option<&str> {
         self.running_chat_controller().map(InputDialogController::text)
     }
@@ -37201,14 +38269,21 @@ impl GameApp {
         {
             self.game_option_input_dialog = None;
         }
+        if self.message_dialogs.is_empty() {
+            self.network_chart_elevated = false;
+        }
         self.close_context_menu_silently();
         self.game_option_input_last_click = None;
         if was_active {
-            self.message_dialog_active_index = match self.running_active_dialog {
-                Some(RunningDialogStackEntry::Message(stack_id)) => {
-                    self.running_message_index(stack_id)
+            self.message_dialog_active_index = if self.network_chart_elevated {
+                None
+            } else {
+                match self.running_active_dialog {
+                    Some(RunningDialogStackEntry::Message(stack_id)) => {
+                        self.running_message_index(stack_id)
+                    }
+                    _ => None,
                 }
-                _ => None,
             };
         }
         // Releases swallowed by the modal cannot clear the raw repeat/Tab
@@ -38785,6 +39860,7 @@ impl GameApp {
             Properties,
             Advanced,
             Chat,
+            NetworkChart,
             GameOver,
             Base,
         }
@@ -38809,6 +39885,15 @@ impl GameApp {
             let options_gamepad_open =
                 options_input_scope && self.gamepads.options_open_slot() == Some(source_slot);
             let eligible_gamepad_gui = screen_gamepad_open;
+            let network_chart_gamepad_open = eligible_gamepad_gui
+                && self.network_chart_is_active_dialog();
+            let chart_player_control_owns_cluster = network_chart_gamepad_open
+                && cluster_events.iter().any(|event| match event {
+                    GamepadEvent::Button { slot, button, .. } => {
+                        self.gamepad_player_button_in_scope(*slot, *button)
+                    }
+                    _ => false,
+                });
             let gamepad_capture_open = self.message_dialogs.last().is_some_and(|pending| {
                 matches!(
                     pending.continuation,
@@ -38817,7 +39902,9 @@ impl GameApp {
                             == lc_frontend::startup_options_controls::ControlDevice::Gamepad
                 )
             });
-            let mut owner = if self.running_chat_keyboard_active() {
+            let mut owner = if network_chart_gamepad_open {
+                ClusterOwner::NetworkChart
+            } else if self.running_chat_keyboard_active() {
                 if self.context_menu.is_some() {
                     ClusterOwner::ContextPending
                 } else {
@@ -39024,6 +40111,10 @@ impl GameApp {
                                     ClusterOwner::Suppressed
                                 } else if self.external_irc_dialog_visible {
                                     ClusterOwner::Suppressed
+                                } else if eligible_gamepad_gui
+                                    && self.network_chart_is_active_dialog()
+                                {
+                                    ClusterOwner::NetworkChart
                                 } else {
                                     ClusterOwner::Base
                                 };
@@ -39092,6 +40183,38 @@ impl GameApp {
                             }
                             GamepadEvent::GuiButton { .. } | GamepadEvent::Action { .. } => {}
                         },
+                        ClusterOwner::NetworkChart => {
+                            if chart_player_control_owns_cluster {
+                                if let GamepadEvent::Button {
+                                    slot,
+                                    button,
+                                    state,
+                                } = event
+                                {
+                                    self.handle_gamepad_button(slot, button, state)?;
+                                }
+                            } else {
+                                match event {
+                                    GamepadEvent::GuiButton {
+                                        class: GuiButtonClass::High,
+                                        state: ElementState::Pressed,
+                                        ..
+                                    } => {
+                                        self.toggle_network_chart();
+                                        owner = ClusterOwner::Suppressed;
+                                    }
+                                    GamepadEvent::GuiButton {
+                                        class: GuiButtonClass::High,
+                                        ..
+                                    }
+                                    | GamepadEvent::Action {
+                                        action: GamepadActionType::Cancel,
+                                        ..
+                                    } => {}
+                                    event => self.handle_gamepad_event(event)?,
+                                }
+                            }
+                        }
                         ClusterOwner::GameOver => {
                             self.handle_game_over_gamepad_event(event)?;
                         }
@@ -40458,6 +41581,14 @@ impl GameApp {
             // routing, so a newly higher layer cannot freeze a dialog drag.
             self.handle_runtime_client_list_pointer_move(point);
         }
+        if self.network_chart_pointer_capture {
+            // CMouse advances the title drag before ordinary hit-testing and
+            // retains only the caption/close control through release.
+            let _ = self.handle_network_chart_pointer_move(point);
+            self.suspend_ingame_pointer_for_gui();
+            self.cancel_ingame_mouse_gestures();
+            return Ok(());
+        }
         if self.mode == AppMode::Running {
             self.ingame_gui_pointer = Some(point);
             // CMouse invokes DoDragging before top-down dialog routing, even
@@ -40523,7 +41654,13 @@ impl GameApp {
                 self.suspend_ingame_pointer_for_gui();
                 return Ok(());
             }
-            let shared_target = self.top_scoreboard_message_pointer_target(point, true)?;
+            if self.network_chart_is_elevated_pointer_layer()
+                && self.network_chart_contains_point(point)
+            {
+                self.suspend_ingame_pointer_for_gui();
+                return Ok(());
+            }
+            let shared_target = self.top_running_shared_pointer_target(point, true)?;
             if shared_target.is_some() && shared_target != Some(RunningDialogStackEntry::Chat) {
                 if let Some(controller) = self.running_chat_controller_mut() {
                     controller.pointer_left();
@@ -40593,10 +41730,28 @@ impl GameApp {
                     self.handle_message_dialog_pointer_move_at(target, point);
                 }
             }
-            if shared_pointer_consumed || self.running_shared_gui_has_keyboard_focus() {
+            let lower_default_hit = if !chat_hit
+                && lower_capture.is_none()
+                && self.top_message_dialog_hit_index(point).is_none()
+            {
+                self.handle_runtime_default_dialog_pointer_move(point)?
+            } else {
+                false
+            };
+            if shared_pointer_consumed
+                || lower_default_hit
+                || (!self.network_chart_elevated
+                    && self.running_shared_gui_has_keyboard_focus())
+            {
                 self.suspend_ingame_pointer_for_gui();
                 return Ok(());
             }
+        }
+        if self.network_chart_is_elevated_pointer_layer()
+            && self.network_chart_contains_point(point)
+        {
+            self.suspend_ingame_pointer_for_gui();
+            return Ok(());
         }
         if self.running_chat_controller().is_none()
             && !self.message_dialogs.is_empty()
@@ -40631,7 +41786,7 @@ impl GameApp {
                 return Ok(());
             }
         }
-        if self.external_irc_dialog_visible {
+        if self.external_irc_dialog_visible && !matches!(self.mode, AppMode::Running) {
             if self.message_dialogs.is_empty() {
                 let actions = self
                     .assets
@@ -40725,32 +41880,17 @@ impl GameApp {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        let runtime_client_list_above_game_over =
-            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
-        if runtime_client_list_above_game_over
+        if !matches!(self.mode, AppMode::Running)
             && self.handle_runtime_client_list_pointer_move(point)
         {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        if let Some(dialog) = self.game_over_dialog.as_mut() {
-            let surface = self.graphics.surface();
-            dialog.handle_pointer_move(point.x, point.y, surface.width(), surface.height());
-            let sounds = dialog.take_sound_events();
-            self.play_game_over_sound_events(sounds);
+        if self.handle_runtime_default_dialog_pointer_move(point)? {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        if !runtime_client_list_above_game_over
-            && self.scoreboard_is_above_runtime_client_list()
-            && self.handle_scoreboard_pointer_move(point)?
-        {
-            self.suspend_ingame_pointer_for_gui();
-            return Ok(());
-        }
-        if !runtime_client_list_above_game_over
-            && self.handle_runtime_client_list_pointer_move(point)
-        {
+        if self.runtime_pointer_fallback_is_exclusive() {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
@@ -41155,6 +42295,7 @@ impl GameApp {
             || self.context_menu.is_some()
             || self.game_option_input_dialog.is_some()
             || self.game_over_dialog.is_some()
+            || self.network_chart_pointer_capture
         {
             return Ok(false);
         }
@@ -41640,11 +42781,15 @@ impl GameApp {
             || self.context_menu.is_some()
             || self.game_option_input_dialog.is_some()
             || self.game_over_dialog.is_some()
+            || self.network_chart_pointer_capture
         {
             return Ok(None);
         }
         let construction_drag_active = self.ingame_construction_drag_active();
         if !construction_drag_active && self.handle_runtime_client_list_pointer_move(gui_point) {
+            return Ok(None);
+        }
+        if !construction_drag_active && self.network_chart_contains_point(gui_point) {
             return Ok(None);
         }
 
@@ -43074,7 +44219,7 @@ impl GameApp {
             return Ok(false);
         };
         Ok(matches!(
-            self.top_scoreboard_message_pointer_target(point, false)?,
+            self.top_running_shared_pointer_target(point, false)?,
             Some(RunningDialogStackEntry::Scoreboard)
         ))
     }
@@ -43104,6 +44249,130 @@ impl GameApp {
         }
     }
 
+    fn handle_runtime_default_dialog_primary_button(
+        &mut self,
+        button_state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running) {
+            return Ok(false);
+        }
+        for dialog_kind in self
+            .runtime_default_dialog_order_snapshot()
+            .into_iter()
+            .rev()
+        {
+            let handled = match dialog_kind {
+                RuntimeDefaultDialog::ExternalIrc => {
+                    self.handle_runtime_external_irc_pointer_button(button_state)?
+                }
+                RuntimeDefaultDialog::GameOver => {
+                    let hit = self
+                        .running_pointer_position
+                        .is_some_and(|point| self.game_over_pointer_route_hit(point))
+                        || self
+                            .game_over_dialog
+                            .as_ref()
+                            .is_some_and(GameOverState::has_pointer_capture);
+                    if !hit {
+                        false
+                    } else {
+                        let (width, height) = {
+                            let surface = self.graphics.surface();
+                            (surface.width(), surface.height())
+                        };
+                        let action = self
+                            .game_over_dialog
+                            .as_mut()
+                            .and_then(|dialog| match button_state {
+                                ElementState::Pressed => {
+                                    dialog.handle_pointer_down(width, height);
+                                    None
+                                }
+                                ElementState::Released => {
+                                    dialog.handle_pointer_up(width, height)
+                                }
+                            });
+                        let sounds = self
+                            .game_over_dialog
+                            .as_mut()
+                            .map(GameOverState::take_sound_events)
+                            .unwrap_or_default();
+                        self.play_game_over_sound_events(sounds);
+                        if let Some(action) = action {
+                            self.handle_game_over_action(action)?;
+                        }
+                        true
+                    }
+                }
+                RuntimeDefaultDialog::ClientList => {
+                    self.handle_runtime_client_list_pointer_button(button_state)?
+                }
+                RuntimeDefaultDialog::NetworkChart => {
+                    self.handle_network_chart_pointer_button(button_state)
+                }
+                RuntimeDefaultDialog::Scoreboard => {
+                    self.handle_scoreboard_pointer_button(button_state)?
+                }
+            };
+            if handled {
+                if button_state == ElementState::Pressed
+                    && self.runtime_default_dialog_visible(dialog_kind)
+                {
+                    self.activate_runtime_default_dialog(dialog_kind);
+                }
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn handle_runtime_default_dialog_pointer_move(
+        &mut self,
+        point: GuiPoint,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running) {
+            return Ok(false);
+        }
+        for dialog_kind in self
+            .runtime_default_dialog_order_snapshot()
+            .into_iter()
+            .rev()
+        {
+            let captured = match dialog_kind {
+                RuntimeDefaultDialog::ExternalIrc => {
+                    self.handle_runtime_external_irc_pointer_move(point)?
+                }
+                RuntimeDefaultDialog::GameOver => {
+                    if self.game_over_pointer_route_hit(point) {
+                        let surface = self.graphics.surface();
+                        let (width, height) = (surface.width(), surface.height());
+                        if let Some(dialog) = self.game_over_dialog.as_mut() {
+                            dialog.handle_pointer_move(point.x, point.y, width, height);
+                        }
+                        let sounds = self
+                            .game_over_dialog
+                            .as_mut()
+                            .map(GameOverState::take_sound_events)
+                            .unwrap_or_default();
+                        self.play_game_over_sound_events(sounds);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                RuntimeDefaultDialog::ClientList => {
+                    self.handle_runtime_client_list_pointer_move(point)
+                }
+                RuntimeDefaultDialog::NetworkChart => self.network_chart_contains_point(point),
+                RuntimeDefaultDialog::Scoreboard => self.handle_scoreboard_pointer_move(point)?,
+            };
+            if captured {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn handle_right_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
@@ -43126,6 +44395,16 @@ impl GameApp {
         {
             return Ok(());
         }
+        if self.network_chart_is_elevated_pointer_layer()
+            && self.context_menu.is_none()
+            && self
+                .running_pointer_position
+                .is_some_and(|point| self.network_chart_contains_point(point))
+        {
+            return Ok(());
+        }
+        let message_dialog_fallback_blocks_world =
+            self.runtime_pointer_fallback_is_exclusive();
         let context_routed_before_running_dialogs = self.mode == AppMode::Running
             && self.context_menu.is_some()
             && !self.running_dialog_stack.is_empty();
@@ -43139,7 +44418,7 @@ impl GameApp {
         if self.mode == AppMode::Running {
             let shared_target = self
                 .running_pointer_position
-                .map(|point| self.top_scoreboard_message_pointer_target(point, false))
+                .map(|point| self.top_running_shared_pointer_target(point, false))
                 .transpose()?
                 .flatten();
             if matches!(
@@ -43149,7 +44428,9 @@ impl GameApp {
                         | RunningDialogStackEntry::Message(_)
                         | RunningDialogStackEntry::RuntimeClientList
                 )
-            ) || shared_target.is_none() && self.running_shared_gui_has_keyboard_focus()
+            ) || shared_target.is_none()
+                && !self.network_chart_elevated
+                && self.running_shared_gui_has_keyboard_focus()
             {
                 self.suspend_ingame_pointer_for_gui();
                 self.cancel_ingame_mouse_gestures();
@@ -43201,7 +44482,15 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.external_irc_dialog_visible {
+        if !matches!(self.mode, AppMode::Running)
+            && self
+                .runtime_client_list
+                .as_ref()
+                .is_some_and(|dialog| dialog.is_info_only())
+        {
+            return Ok(());
+        }
+        if self.external_irc_dialog_visible && !matches!(self.mode, AppMode::Running) {
             if button_state == ElementState::Pressed {
                 let outcome = self
                     .external_irc_dialog
@@ -43238,40 +44527,48 @@ impl GameApp {
             }
             return Ok(());
         }
-        let runtime_client_list_above_game_over =
-            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
-        if runtime_client_list_above_game_over {
+        if matches!(self.mode, AppMode::Running) {
             if let Some(point) = self.running_pointer_position {
-                if self.handle_runtime_client_list_pointer_move(point) {
+                for dialog_kind in self
+                    .runtime_default_dialog_order_snapshot()
+                    .into_iter()
+                    .rev()
+                {
+                    if !self.runtime_default_dialog_contains_point(dialog_kind, point)? {
+                        continue;
+                    }
+                    match dialog_kind {
+                        RuntimeDefaultDialog::ExternalIrc
+                            if button_state == ElementState::Pressed =>
+                        {
+                            let outcome = self
+                                .external_irc_dialog
+                                .as_mut()
+                                .map(|dialog| {
+                                    dialog.request_context_menu_at(
+                                        point,
+                                        clipboard_text_available(),
+                                    )
+                                })
+                                .unwrap_or_default();
+                            self.process_network_dialog_actions(outcome.actions)?;
+                        }
+                        RuntimeDefaultDialog::ClientList => {
+                            self.handle_runtime_client_list_pointer_move(point);
+                        }
+                        RuntimeDefaultDialog::Scoreboard
+                        | RuntimeDefaultDialog::NetworkChart
+                        | RuntimeDefaultDialog::GameOver
+                        | RuntimeDefaultDialog::ExternalIrc => {}
+                    }
                     self.suspend_ingame_pointer_for_gui();
                     self.cancel_ingame_mouse_gestures();
                     return Ok(());
                 }
             }
         }
-        if runtime_client_list_above_game_over && button_state == ElementState::Pressed {
-            self.runtime_client_list_above_game_over = false;
-        }
-        if self.game_over_dialog.is_some() {
+        if message_dialog_fallback_blocks_world {
             return Ok(());
-        }
-        if !runtime_client_list_above_game_over
-            && self.runtime_client_list.is_some()
-            && self.scoreboard_is_above_runtime_client_list()
-            && self.scoreboard_contains_running_pointer()?
-        {
-            self.suspend_ingame_pointer_for_gui();
-            self.cancel_ingame_mouse_gestures();
-            return Ok(());
-        }
-        if !runtime_client_list_above_game_over {
-            if let Some(point) = self.running_pointer_position {
-                if self.handle_runtime_client_list_pointer_move(point) {
-                    self.suspend_ingame_pointer_for_gui();
-                    self.cancel_ingame_mouse_gestures();
-                    return Ok(());
-                }
-            }
         }
         if self.startup_dialog_fade_active() {
             return Ok(());
@@ -43389,6 +44686,16 @@ impl GameApp {
         {
             return Ok(());
         }
+        if self.network_chart_is_elevated_pointer_layer()
+            && self.context_menu.is_none()
+            && self
+                .running_pointer_position
+                .is_some_and(|point| self.network_chart_contains_point(point))
+        {
+            return Ok(());
+        }
+        let message_dialog_fallback_blocks_world =
+            self.runtime_pointer_fallback_is_exclusive();
         let context_routed_before_running_dialogs = self.mode == AppMode::Running
             && self.context_menu.is_some()
             && !self.running_dialog_stack.is_empty();
@@ -43402,7 +44709,7 @@ impl GameApp {
         if self.mode == AppMode::Running {
             let shared_target = self
                 .running_pointer_position
-                .map(|point| self.top_scoreboard_message_pointer_target(point, false))
+                .map(|point| self.top_running_shared_pointer_target(point, false))
                 .transpose()?
                 .flatten();
             if matches!(
@@ -43412,7 +44719,9 @@ impl GameApp {
                         | RunningDialogStackEntry::Message(_)
                         | RunningDialogStackEntry::RuntimeClientList
                 )
-            ) || shared_target.is_none() && self.running_shared_gui_has_keyboard_focus()
+            ) || shared_target.is_none()
+                && !self.network_chart_elevated
+                && self.running_shared_gui_has_keyboard_focus()
             {
                 self.suspend_ingame_pointer_for_gui();
                 self.cancel_ingame_mouse_gestures();
@@ -43479,7 +44788,7 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.external_irc_dialog_visible {
+        if self.external_irc_dialog_visible && !matches!(self.mode, AppMode::Running) {
             if button_state == ElementState::Pressed {
                 let primary = primary_clipboard_text();
                 let fonts = self.assets.clonk_fonts.clone();
@@ -43530,6 +44839,42 @@ impl GameApp {
             return Ok(());
         }
         if input_dialog_release_latched {
+            return Ok(());
+        }
+        if matches!(self.mode, AppMode::Running) {
+            if let Some(point) = self.running_pointer_position {
+                for dialog_kind in self
+                    .runtime_default_dialog_order_snapshot()
+                    .into_iter()
+                    .rev()
+                {
+                    if !self.runtime_default_dialog_contains_point(dialog_kind, point)? {
+                        continue;
+                    }
+                    if dialog_kind == RuntimeDefaultDialog::ExternalIrc
+                        && button_state == ElementState::Pressed
+                    {
+                        let primary = primary_clipboard_text();
+                        let fonts = self.assets.clonk_fonts.clone();
+                        let outcome = fonts
+                            .as_deref()
+                            .and_then(|fonts| {
+                                self.external_irc_dialog.as_mut().map(|dialog| {
+                                    dialog.handle_pointer_middle_down(
+                                        point,
+                                        primary.as_deref(),
+                                        &fonts.text,
+                                    )
+                                })
+                            })
+                            .unwrap_or_default();
+                        self.process_network_dialog_actions(outcome.actions)?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        if message_dialog_fallback_blocks_world {
             return Ok(());
         }
         if self.startup_dialog_fade_active() {
@@ -43586,35 +44931,6 @@ impl GameApp {
                 }
             }
             return Ok(());
-        }
-        let runtime_client_list_above_game_over =
-            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
-        if runtime_client_list_above_game_over {
-            if let Some(point) = self.running_pointer_position {
-                if self.handle_runtime_client_list_pointer_move(point) {
-                    self.suspend_ingame_pointer_for_gui();
-                    self.cancel_ingame_mouse_gestures();
-                    return Ok(());
-                }
-            }
-        }
-        if self.game_over_dialog.is_some() {
-            return Ok(());
-        }
-        if self.runtime_client_list.is_some()
-            && self.scoreboard_is_above_runtime_client_list()
-            && self.scoreboard_contains_running_pointer()?
-        {
-            self.suspend_ingame_pointer_for_gui();
-            self.cancel_ingame_mouse_gestures();
-            return Ok(());
-        }
-        if let Some(point) = self.running_pointer_position {
-            if self.handle_runtime_client_list_pointer_move(point) {
-                self.suspend_ingame_pointer_for_gui();
-                self.cancel_ingame_mouse_gestures();
-                return Ok(());
-            }
         }
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_middle_button(button_state);
@@ -45135,6 +46451,8 @@ impl GameApp {
             && std::mem::take(&mut self.league_signup_pointer_capture);
         let input_dialog_release_latched = button_state == ElementState::Released
             && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left);
+        let network_chart_release_latched = button_state == ElementState::Released
+            && self.network_chart_pointer_capture;
         if input_dialog_release_latched {
             self.game_option_input_pointer_capture = None;
             self.stop_game_option_input_pointer_drag_at_current_position();
@@ -45144,6 +46462,11 @@ impl GameApp {
                 // Edit; releasing elsewhere may therefore reach B/A below.
                 self.release_game_option_input_pointer_elements();
             }
+        }
+        if network_chart_release_latched {
+            let _ = self.handle_network_chart_pointer_button(ElementState::Released);
+            self.release_occluded_running_pointer_captures(None);
+            return Ok(());
         }
         if self.consume_closed_context_pointer_release(button_state, ContextMenuPointerButton::Left)
         {
@@ -45165,6 +46488,18 @@ impl GameApp {
             self.occlude_running_dialog_pointer_hovers();
             return Ok(());
         }
+        if self.network_chart_is_elevated_pointer_layer()
+            && self.context_menu.is_none()
+            && self.handle_network_chart_pointer_button(button_state)
+        {
+            if button_state == ElementState::Pressed && self.network_chart_dialog.is_some() {
+                self.activate_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
+            }
+            if button_state == ElementState::Released {
+                self.release_occluded_running_pointer_captures(None);
+            }
+            return Ok(());
+        }
         if self.running_chat_controller().is_some() {
             let lower_capture = self.captured_message_dialog_index();
             if !context_routed_before_running_dialogs
@@ -45182,7 +46517,7 @@ impl GameApp {
             }
             let shared_target = self
                 .running_pointer_position
-                .map(|point| self.top_scoreboard_message_pointer_target(point, false))
+                .map(|point| self.top_running_shared_pointer_target(point, false))
                 .transpose()?
                 .flatten();
             if shared_target.is_some() && shared_target != Some(RunningDialogStackEntry::Chat) {
@@ -45233,7 +46568,17 @@ impl GameApp {
                 }
                 return Ok(());
             }
-            if self.running_shared_gui_has_keyboard_focus() {
+            // Shared Screen hit-testing continues below the compact z=+2
+            // chat. It remains exclusive only as the no-dialog-hit fallback.
+            let lower_default_hit =
+                self.handle_runtime_default_dialog_primary_button(button_state)?;
+            if lower_default_hit
+                || (!self.network_chart_elevated
+                    && self.running_shared_gui_has_keyboard_focus())
+            {
+                if lower_default_hit && button_state == ElementState::Released {
+                    self.release_occluded_running_pointer_captures(None);
+                }
                 return Ok(());
             }
         }
@@ -45274,7 +46619,7 @@ impl GameApp {
                 return Ok(());
             }
         }
-        if self.external_irc_dialog_visible {
+        if self.external_irc_dialog_visible && !matches!(self.mode, AppMode::Running) {
             if !self.message_dialogs.is_empty() {
                 return Ok(());
             }
@@ -45451,60 +46796,27 @@ impl GameApp {
         if input_dialog_release_latched {
             return Ok(());
         }
-        let runtime_client_list_above_game_over =
-            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
-        if runtime_client_list_above_game_over
+        if !matches!(self.mode, AppMode::Running)
             && self.handle_runtime_client_list_pointer_button(button_state)?
         {
             return Ok(());
         }
-        if runtime_client_list_above_game_over && button_state == ElementState::Pressed {
-            self.runtime_client_list_above_game_over = false;
-        }
-        if self.game_over_dialog.is_some() {
-            let (width, height) = {
-                let surface = self.graphics.surface();
-                (surface.width(), surface.height())
-            };
-            let action = self
-                .game_over_dialog
-                .as_mut()
-                .and_then(|dialog| match button_state {
-                    ElementState::Pressed => {
-                        dialog.handle_pointer_down(width, height);
-                        None
-                    }
-                    ElementState::Released => dialog.handle_pointer_up(width, height),
-                });
-            let sounds = self
-                .game_over_dialog
-                .as_mut()
-                .map(GameOverState::take_sound_events)
-                .unwrap_or_default();
-            self.play_game_over_sound_events(sounds);
-            if let Some(action) = action {
-                self.handle_game_over_action(action)?;
+        if self.handle_runtime_default_dialog_primary_button(button_state)? {
+            if button_state == ElementState::Released {
+                self.release_occluded_running_pointer_captures(None);
             }
             return Ok(());
         }
         if self.mode == AppMode::Running && button_state == ElementState::Released {
             let target = self
                 .running_pointer_position
-                .map(|point| self.top_scoreboard_message_pointer_target(point, false))
+                .map(|point| self.top_running_shared_pointer_target(point, false))
                 .transpose()?
                 .flatten();
             self.release_occluded_running_pointer_captures(target);
         }
-        if !runtime_client_list_above_game_over
-            && self.runtime_client_list.is_some()
-            && self.scoreboard_is_above_runtime_client_list()
-            && self.handle_scoreboard_pointer_button(button_state)?
-        {
-            return Ok(());
-        }
-        if !runtime_client_list_above_game_over
-            && self.handle_runtime_client_list_pointer_button(button_state)?
-        {
+        if self.runtime_pointer_fallback_is_exclusive() {
+            self.cancel_ingame_mouse_gestures();
             return Ok(());
         }
         if self.startup_dialog_fade_active() {
@@ -45983,7 +47295,23 @@ impl GameApp {
                 }
             }
         }
-        if self.external_irc_dialog_visible {
+        if self.network_chart_pointer_capture && phase != TouchPhase::Started {
+            match phase {
+                TouchPhase::Moved => {
+                    let _ = self.handle_network_chart_pointer_move(position);
+                }
+                TouchPhase::Ended => {
+                    let _ = self.handle_network_chart_pointer_button(ElementState::Released);
+                }
+                TouchPhase::Cancelled => {
+                    self.cancel_network_chart_pointer_capture();
+                }
+                TouchPhase::Started => unreachable!(),
+            }
+            self.cancel_ingame_mouse_gestures();
+            return Ok(());
+        }
+        if self.external_irc_dialog_visible && !matches!(self.mode, AppMode::Running) {
             match phase {
                 TouchPhase::Started => {
                     self.handle_cursor_moved(PhysicalPosition::new(
@@ -46096,22 +47424,25 @@ impl GameApp {
                 }
             }
         }
+        let elevated_chart_hit = self.network_chart_is_elevated_pointer_layer()
+            && self.context_menu.is_none()
+            && self.network_chart_contains_point(position);
+        let retained_shared_capture = self.running_shared_pointer_capture_open();
         let running_message_shared_target = if self.mode == AppMode::Running
             && self.running_chat_controller().is_none()
-            && !self.message_dialogs.is_empty()
+            && (!self.message_dialogs.is_empty() || retained_shared_capture)
+            && (!elevated_chart_hit || retained_shared_capture)
         {
-            self.top_scoreboard_message_pointer_target(position, true)?
+            self.top_running_shared_pointer_target(position, true)?
         } else {
             None
         };
         if self.mode == AppMode::Running
-            && !self.message_dialogs.is_empty()
             && phase == TouchPhase::Ended
         {
             self.release_occluded_running_pointer_captures(running_message_shared_target);
         }
-        if !self.message_dialogs.is_empty()
-            && self.running_chat_controller().is_none()
+        if self.running_chat_controller().is_none()
             && matches!(
                 running_message_shared_target,
                 Some(RunningDialogStackEntry::Scoreboard)
@@ -46124,8 +47455,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if !self.message_dialogs.is_empty()
-            && self.running_chat_controller().is_none()
+        if self.running_chat_controller().is_none()
             && matches!(
                 running_message_shared_target,
                 Some(RunningDialogStackEntry::RuntimeClientList)
@@ -46140,6 +47470,7 @@ impl GameApp {
                 running_message_shared_target,
                 Some(RunningDialogStackEntry::Message(_))
             ) || running_message_shared_target.is_none()
+                && !self.network_chart_elevated
                 && self.running_shared_gui_has_keyboard_focus())
         {
             self.mark_menu_dirty();
@@ -46464,63 +47795,132 @@ impl GameApp {
             self.game_option_input_pointer_capture = None;
             return Ok(());
         }
-        let runtime_client_list_above_game_over =
-            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
-        if runtime_client_list_above_game_over
+        if !matches!(self.mode, AppMode::Running)
             && self.handle_runtime_client_list_touch(position, phase)?
         {
             return Ok(());
         }
-        if runtime_client_list_above_game_over && phase == TouchPhase::Started {
-            self.runtime_client_list_above_game_over = false;
-        }
-        if self.game_over_dialog.is_some() {
-            let (width, height) = {
-                let surface = self.graphics.surface();
-                (surface.width(), surface.height())
-            };
-            if !matches!(phase, TouchPhase::Cancelled) {
-                if let Some(dialog) = self.game_over_dialog.as_mut() {
-                    dialog.handle_pointer_move(position.x, position.y, width, height);
+        if matches!(self.mode, AppMode::Running) {
+            for dialog_kind in self
+                .runtime_default_dialog_order_snapshot()
+                .into_iter()
+                .rev()
+            {
+                let handled = match dialog_kind {
+                    RuntimeDefaultDialog::ExternalIrc => {
+                        let hit = self.external_irc_dialog_contains_point(position)
+                            || self.external_irc_pointer_capture;
+                        if !hit {
+                            false
+                        } else {
+                            match phase {
+                                TouchPhase::Started => {
+                                    self.handle_runtime_external_irc_pointer_move(position)?;
+                                    self.handle_runtime_external_irc_pointer_button(
+                                        ElementState::Pressed,
+                                    )?
+                                }
+                                TouchPhase::Moved => {
+                                    self.handle_runtime_external_irc_pointer_move(position)?
+                                }
+                                TouchPhase::Ended => self
+                                    .handle_runtime_external_irc_pointer_button(
+                                        ElementState::Released,
+                                    )?,
+                                TouchPhase::Cancelled => {
+                                    self.external_irc_pointer_capture = false;
+                                    if let Some(dialog) = self.external_irc_dialog.as_mut() {
+                                        dialog.pointer_left();
+                                    }
+                                    true
+                                }
+                            }
+                        }
+                    }
+                    RuntimeDefaultDialog::GameOver => {
+                        if !self.game_over_pointer_route_hit(position) {
+                            false
+                        } else {
+                            let (width, height) = {
+                                let surface = self.graphics.surface();
+                                (surface.width(), surface.height())
+                            };
+                            if !matches!(phase, TouchPhase::Cancelled) {
+                                if let Some(dialog) = self.game_over_dialog.as_mut() {
+                                    dialog.handle_pointer_move(
+                                        position.x,
+                                        position.y,
+                                        width,
+                                        height,
+                                    );
+                                }
+                            }
+                            let action = match phase {
+                                TouchPhase::Started => {
+                                    if let Some(dialog) = self.game_over_dialog.as_mut() {
+                                        dialog.handle_pointer_down(width, height);
+                                    }
+                                    None
+                                }
+                                TouchPhase::Ended => self
+                                    .game_over_dialog
+                                    .as_mut()
+                                    .and_then(|dialog| dialog.handle_pointer_up(width, height)),
+                                TouchPhase::Cancelled => {
+                                    self.pointer_left_unchecked();
+                                    None
+                                }
+                                TouchPhase::Moved => None,
+                            };
+                            let sounds = self
+                                .game_over_dialog
+                                .as_mut()
+                                .map(GameOverState::take_sound_events)
+                                .unwrap_or_default();
+                            self.play_game_over_sound_events(sounds);
+                            if let Some(action) = action {
+                                self.handle_game_over_action(action)?;
+                            }
+                            true
+                        }
+                    }
+                    RuntimeDefaultDialog::ClientList => {
+                        self.handle_runtime_client_list_touch(position, phase)?
+                    }
+                    RuntimeDefaultDialog::NetworkChart => match phase {
+                        TouchPhase::Started => {
+                            self.handle_network_chart_pointer_button(ElementState::Pressed)
+                        }
+                        TouchPhase::Moved => self.network_chart_contains_point(position),
+                        TouchPhase::Ended => {
+                            self.handle_network_chart_pointer_button(ElementState::Released)
+                        }
+                        TouchPhase::Cancelled => {
+                            let captured = self.network_chart_pointer_capture;
+                            self.cancel_network_chart_pointer_capture();
+                            captured
+                        }
+                    },
+                    RuntimeDefaultDialog::Scoreboard => {
+                        self.handle_scoreboard_touch(position, phase)?
+                    }
+                };
+                if handled {
+                    if dialog_kind == RuntimeDefaultDialog::Scoreboard
+                        && matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled)
+                    {
+                        self.pointer_left_unchecked();
+                    }
+                    if phase == TouchPhase::Started
+                        && self.runtime_default_dialog_visible(dialog_kind)
+                    {
+                        self.activate_runtime_default_dialog(dialog_kind);
+                    }
+                    return Ok(());
                 }
             }
-            let mut action = None;
-            if phase == TouchPhase::Started {
-                if let Some(dialog) = self.game_over_dialog.as_mut() {
-                    dialog.handle_pointer_down(width, height);
-                }
-            } else if phase == TouchPhase::Ended {
-                action = self
-                    .game_over_dialog
-                    .as_mut()
-                    .and_then(|dialog| dialog.handle_pointer_up(width, height));
-            } else if phase == TouchPhase::Cancelled {
-                self.pointer_left_unchecked();
-            }
-            let sounds = self
-                .game_over_dialog
-                .as_mut()
-                .map(GameOverState::take_sound_events)
-                .unwrap_or_default();
-            self.play_game_over_sound_events(sounds);
-            if let Some(action) = action {
-                self.handle_game_over_action(action)?;
-            }
-            return Ok(());
         }
-        if !runtime_client_list_above_game_over
-            && self.runtime_client_list.is_some()
-            && self.scoreboard_is_above_runtime_client_list()
-            && self.handle_scoreboard_touch(position, phase)?
-        {
-            if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                self.pointer_left_unchecked();
-            }
-            return Ok(());
-        }
-        if !runtime_client_list_above_game_over
-            && self.handle_runtime_client_list_touch(position, phase)?
-        {
+        if self.runtime_pointer_fallback_is_exclusive() {
             return Ok(());
         }
         if self.mode == AppMode::Running {
@@ -46870,6 +48270,7 @@ impl GameApp {
         if self.context_menu.is_none() {
             self.context_menu_pointer_capture = None;
         }
+        self.cancel_network_chart_pointer_capture();
         let messages_open = !self.message_dialogs.is_empty();
         for index in 0..self.message_dialogs.len() {
             self.message_dialog_pointer_left_at(index);
@@ -48467,6 +49868,97 @@ impl GameApp {
         )
     }
 
+    fn external_irc_dialog_contains_point(&self, point: GuiPoint) -> bool {
+        let Some(bounds) = self
+            .external_irc_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.chat_bounds_override())
+        else {
+            return false;
+        };
+        point.x >= bounds.x as f32
+            && point.x < bounds.x.saturating_add(bounds.w) as f32
+            && point.y >= bounds.y as f32
+            && point.y < bounds.y.saturating_add(bounds.h) as f32
+    }
+
+    fn handle_runtime_external_irc_pointer_move(
+        &mut self,
+        point: GuiPoint,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running)
+            || !self.external_irc_dialog_visible
+            || (!self.external_irc_dialog_contains_point(point)
+                && !self.external_irc_pointer_capture)
+        {
+            return Ok(false);
+        }
+        let actions = self
+            .assets
+            .clonk_fonts
+            .clone()
+            .and_then(|fonts| {
+                self.external_irc_dialog
+                    .as_mut()
+                    .map(|dialog| dialog.handle_pointer_move(point, &fonts.text))
+            })
+            .unwrap_or_default();
+        self.process_network_dialog_actions(actions)?;
+        Ok(true)
+    }
+
+    fn handle_runtime_external_irc_pointer_button(
+        &mut self,
+        button_state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running) || !self.external_irc_dialog_visible {
+            self.external_irc_pointer_capture = false;
+            return Ok(false);
+        }
+        let release_captured = button_state == ElementState::Released
+            && std::mem::take(&mut self.external_irc_pointer_capture);
+        let Some(point) = self.running_pointer_position else {
+            return Ok(release_captured);
+        };
+        if !release_captured && !self.external_irc_dialog_contains_point(point) {
+            return Ok(false);
+        }
+        if button_state == ElementState::Pressed {
+            self.external_irc_pointer_capture = true;
+            self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
+        }
+        let Some(fonts) = self.assets.clonk_fonts.clone() else {
+            return Ok(true);
+        };
+        let mut actions = self
+            .external_irc_dialog
+            .as_mut()
+            .map(|dialog| match button_state {
+                ElementState::Pressed => dialog.handle_pointer_down(point, &fonts.text),
+                ElementState::Released => dialog.handle_pointer_up(point, &fonts.text),
+            })
+            .unwrap_or_default();
+        if button_state == ElementState::Released {
+            let now = Instant::now();
+            let double = self.irc_dialog_last_click.is_some_and(|(last, at)| {
+                now.saturating_duration_since(at) < CPP_DOUBLE_CLICK_INTERVAL
+                    && (last.x - point.x).abs() <= 4.0
+                    && (last.y - point.y).abs() <= 4.0
+            });
+            self.irc_dialog_last_click = (!double).then_some((point, now));
+            if double {
+                actions.extend(
+                    self.external_irc_dialog
+                        .as_mut()
+                        .map(|dialog| dialog.handle_pointer_double_click(point, &fonts.text))
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        self.process_network_dialog_actions(actions)?;
+        Ok(true)
+    }
+
     fn show_external_irc_dialog(&mut self) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         let resource_check = self
@@ -48513,6 +50005,7 @@ impl GameApp {
         }
         self.external_irc_dialog = Some(dialog);
         self.external_irc_dialog_visible = true;
+        self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
         self.irc_dialog_last_click = None;
         self.sync_startup_irc_snapshot();
         if let Some(dialog) = self.external_irc_dialog.as_mut() {
@@ -48529,7 +50022,9 @@ impl GameApp {
         self.close_context_menu_silently();
         self.external_irc_dialog_visible = false;
         self.external_irc_dialog = None;
+        self.hide_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
         self.irc_dialog_last_click = None;
+        self.external_irc_pointer_capture = false;
         self.mark_menu_dirty();
     }
 
@@ -52272,7 +53767,7 @@ impl GameApp {
                 row,
             ),
         );
-        self.runtime_client_list_above_game_over = false;
+        self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
         self.mark_menu_dirty();
         Ok(true)
     }
@@ -60497,7 +61992,9 @@ impl GameApp {
     fn open_network_game_dialog(&mut self) {
         self.external_irc_dialog_visible = false;
         self.external_irc_dialog = None;
+        self.hide_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
         self.irc_dialog_last_click = None;
+        self.external_irc_pointer_capture = false;
         self.close_context_menu_silently();
         self.status_text.clear();
         self.startup_network_refresh_waiting_for_clear = false;
@@ -60791,7 +62288,7 @@ impl GameApp {
         self.running_dialog_stack.clear();
         self.running_active_dialog = None;
         self.runtime_client_list_consumed_keys.clear();
-        self.runtime_client_list_above_game_over = false;
+        self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
         self.message_input_history.clear();
         self.close_context_menu_silently();
         self.abort_startup_crew_rename();
@@ -61536,7 +63033,7 @@ impl GameApp {
         self.runtime_client_list = None;
         self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
         self.runtime_client_list_consumed_keys.clear();
-        self.runtime_client_list_above_game_over = false;
+        self.hide_runtime_default_dialog(RuntimeDefaultDialog::ClientList);
         self.control_messages.clear_clients();
         self.network_game_advertiser = None;
         self.advertised_game_reference = None;
@@ -63439,6 +64936,7 @@ impl GameApp {
                 self.apply_direct_film_view_projection();
                 let _ = self.apply_pending_viewport_presentation_requests();
                 let local_viewport_owners_before_tick = self.execute_local_team_selections()?;
+                self.record_network_stats_control_frame();
                 let tick_result = self.engine.tick();
                 // PauseGame is a process-local console request emitted from
                 // scripts during this tick. Native applies it immediately,
@@ -63446,6 +64944,7 @@ impl GameApp {
                 // Drain it even when the originating script reports an error.
                 self.apply_engine_pause_game_requests();
                 self.snapshot = tick_result.map_err(map_runtime_flash_producer_engine_error)?;
+                self.record_network_stats_frame();
                 self.reconcile_message_board_input_dialog()?;
                 let retired_viewport_owner = local_viewport_owners_before_tick
                     .iter()
@@ -63615,6 +65114,7 @@ impl GameApp {
         self.engine.sec1_timer();
         let after = self.engine.game_time();
         self.frames_per_second = std::mem::take(&mut self.frames_since_second);
+        self.record_network_stats_second();
         let client_list_changed = self.refresh_runtime_client_list_on_sec1();
         if after != before {
             self.snapshot.game_time = after;
@@ -63932,6 +65432,7 @@ impl GameApp {
 
     fn dismiss_game_over_dialog(&mut self) {
         if self.game_over_dialog.take().is_some() {
+            self.hide_runtime_default_dialog(RuntimeDefaultDialog::GameOver);
             self.play_ui_sound("DoorClose");
             self.pointer_left_unchecked();
         }
@@ -64343,8 +65844,8 @@ impl GameApp {
             format!("{scenario_title}: {}", dialog.subtitle())
         };
         self.status_text = status_message;
-        self.runtime_client_list_above_game_over = false;
         self.game_over_dialog = Some(dialog);
+        self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::GameOver);
         Ok(())
     }
 
@@ -65907,15 +67408,25 @@ impl GameApp {
                 .and_then(|resources| resources.validate()),
         )?;
         let chat_above = self.running_chat_controller().is_some();
-        if !chat_above && self.mode != AppMode::Running {
+        let chart_above = self.network_chart_elevated;
+        let chart_stays_above = chart_above && chat_above;
+        if chart_above && !chart_stays_above {
+            self.network_chart_elevated = false;
+        }
+        if !chat_above && !chart_stays_above && self.mode != AppMode::Running {
             self.close_context_menu_silently();
         }
-        if self.message_dialogs.is_empty() {
-            if !chat_above && self.mode != AppMode::Running {
-                self.cancel_underlying_interaction();
-            }
+        if self.message_dialogs.is_empty()
+            && !chat_above
+            && !chart_stays_above
+            && self.mode != AppMode::Running
+        {
+                // Release the underlying screen's hover/drag capture before
+                // the C4GUI input-z dialog takes over. Chat has z=+2, so a
+                // newly inserted default-z message remains underneath it.
+            self.cancel_underlying_interaction();
         }
-        if !chat_above && self.mode != AppMode::Running {
+        if !chat_above && !chart_stays_above && self.mode != AppMode::Running {
             self.pressed_engine_keys.clear();
         }
         let running_stack_id = self.next_running_message_stack_id;
@@ -65926,7 +67437,7 @@ impl GameApp {
             continuation,
         });
         self.show_running_dialog(RunningDialogStackEntry::Message(running_stack_id));
-        if !chat_above {
+        if !chat_above && !chart_stays_above {
             self.message_dialog_active_index = self.message_dialogs.len().checked_sub(1);
         }
         self.mark_menu_dirty();
@@ -66001,7 +67512,8 @@ impl GameApp {
         let removed_entry =
             RunningDialogStackEntry::Message(self.message_dialogs[index].running_stack_id);
         let was_active = if self.mode == AppMode::Running {
-            self.running_active_dialog == Some(removed_entry)
+            !self.network_chart_elevated_owns_input()
+                && self.running_active_dialog == Some(removed_entry)
         } else {
             self.message_dialog_active_index == Some(index)
         };
@@ -66021,18 +67533,25 @@ impl GameApp {
                 Some(captured) if captured > index => Some(captured - 1),
                 Some(captured) if captured == index => None,
                 captured => captured,
-            };
+        };
         if was_active {
             if self.mode == AppMode::Running {
-                self.message_dialog_active_index = match self.running_active_dialog {
-                    Some(RunningDialogStackEntry::Message(stack_id)) => {
-                        self.running_message_index(stack_id)
-                    }
-                    _ => None,
-                };
-                if self.running_active_dialog == Some(RunningDialogStackEntry::Chat) {
+                if self.network_chart_elevated {
+                    self.message_dialog_active_index = None;
                     if let Some(chat) = self.running_chat.as_mut() {
-                        chat.active = true;
+                        chat.active = false;
+                    }
+                } else {
+                    self.message_dialog_active_index = match self.running_active_dialog {
+                        Some(RunningDialogStackEntry::Message(stack_id)) => {
+                            self.running_message_index(stack_id)
+                        }
+                        _ => None,
+                    };
+                    if self.running_active_dialog == Some(RunningDialogStackEntry::Chat) {
+                        if let Some(chat) = self.running_chat.as_mut() {
+                            chat.active = true;
+                        }
                     }
                 }
             } else if self.running_chat.is_some() {
@@ -66040,6 +67559,9 @@ impl GameApp {
             } else {
                 self.message_dialog_active_index = self.message_dialogs.len().checked_sub(1);
             }
+        }
+        if self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
+            self.network_chart_elevated = false;
         }
         Some((pending, was_active))
     }
@@ -66594,6 +68116,9 @@ impl GameApp {
 
     fn active_message_dialog_index(&self) -> Option<usize> {
         if self.mode == AppMode::Running {
+            if self.network_chart_elevated_owns_input() {
+                return None;
+            }
             let RunningDialogStackEntry::Message(stack_id) = self.running_active_dialog? else {
                 return None;
             };
@@ -66877,8 +68402,6 @@ impl GameApp {
         let Some(top_index) = self.message_dialogs.len().checked_sub(1) else {
             return false;
         };
-        let exclusive_top = self.running_chat_controller().is_none()
-            && self.top_message_dialog_is_exclusive_vote();
         let capture_open = self.captured_message_dialog_index().is_some();
         let active_index = self.active_message_dialog_index();
         let target_index = if self.mode != AppMode::Running {
@@ -66891,7 +68414,6 @@ impl GameApp {
                         Self::point_in_message_dialog_bounds(point, &layout)
                     }) || (capture_open && active_index == Some(*index))
                 })
-                .or_else(|| exclusive_top.then_some(top_index))
         };
 
         if self.primary_pointer_left_down {
@@ -66988,15 +68510,13 @@ impl GameApp {
         let Some(top_index) = self.message_dialogs.len().checked_sub(1) else {
             return Ok(false);
         };
-        let exclusive_top = self.running_chat_controller().is_none()
-            && self.top_message_dialog_is_exclusive_vote();
         let hit_index = self
             .running_pointer_position
             .and_then(|point| self.top_message_dialog_hit_index(point));
         let target_index = if self.mode != AppMode::Running {
             Some(top_index)
         } else {
-            hit_index.or_else(|| exclusive_top.then_some(top_index))
+            hit_index
         };
         let Some(target_index) = target_index else {
             if state == ElementState::Released {
@@ -67259,7 +68779,9 @@ impl GameApp {
             .external_irc_dialog
             .as_ref()
             .context("C4ChatDlg controller is unavailable")?;
-        let draw_focus = self.message_dialogs.is_empty() && self.context_menu.is_none();
+        let draw_focus = self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
+            && self.message_dialogs.is_empty()
+            && self.context_menu.is_none();
         lc_frontend::startup_netdlg::NetDlgScreen::render_standalone_chat_dialog(
             self.graphics.surface_mut(),
             &assets,
@@ -67276,6 +68798,7 @@ impl GameApp {
         gamma: Option<&lc_graphics::GammaRamp>,
     ) -> Result<bool> {
         if !self.external_irc_dialog_visible
+            || !self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
             || !self.message_dialogs.is_empty()
             || self.context_menu.is_some()
         {
@@ -67326,6 +68849,29 @@ impl GameApp {
                     .map(|_| StartupTooltip::text(String::new()))
             })
         };
+        let top_default_target = self
+            .runtime_default_dialog_order_snapshot()
+            .into_iter()
+            .rev()
+            .find(|dialog| match dialog {
+                RuntimeDefaultDialog::Scoreboard => {
+                    self.scoreboard_pointer_target_cached(point).is_some()
+                }
+                RuntimeDefaultDialog::NetworkChart => self.network_chart_contains_point(point),
+                RuntimeDefaultDialog::ClientList => {
+                    self.runtime_client_list_contains_point(point)
+                }
+                RuntimeDefaultDialog::GameOver => self.game_over_dialog_contains_point(point),
+                RuntimeDefaultDialog::ExternalIrc => {
+                    self.external_irc_dialog_contains_point(point)
+                }
+            });
+        if matches!(
+            top_default_target,
+            Some(RuntimeDefaultDialog::NetworkChart | RuntimeDefaultDialog::ExternalIrc)
+        ) {
+            return None;
+        }
         if self.mode == AppMode::Running
             && self.game_over_dialog.is_none()
             && !self.running_dialog_stack.is_empty()
@@ -67382,7 +68928,7 @@ impl GameApp {
             return None;
         }
         if self.mode == AppMode::Running {
-            if self.game_over_dialog.is_some() && !self.runtime_client_list_owns_game_over() {
+            if !self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList) {
                 return None;
             }
             let scoreboard_above_client = self.runtime_client_list.is_none()
@@ -67408,6 +68954,9 @@ impl GameApp {
             if !scoreboard_above_client {
                 return self.scoreboard_tooltip_target_cached(point);
             }
+        }
+        if self.external_irc_dialog_visible {
+            return None;
         }
         if let Some(controller) = self.definition_selector.as_ref() {
             let layout = self.definition_selector_layout()?;
@@ -67454,6 +69003,11 @@ impl GameApp {
         let Some(tooltip_pointer) = self.startup_tooltip.eligible_pointer() else {
             return Ok(());
         };
+        if self.network_chart_is_elevated_pointer_layer()
+            && self.network_chart_contains_point(tooltip_pointer)
+        {
+            return Ok(());
+        }
         let assets = Arc::clone(&self.assets);
         let Some(resources) = assets.message_dialog_resources() else {
             return Ok(());
@@ -67540,6 +69094,7 @@ impl GameApp {
 
     fn game_option_input_activity(&self) -> (bool, bool) {
         let keyboard_active = self.context_menu.is_none()
+            && !self.network_chart_elevated
             && (self.running_chat_active() || self.message_dialogs.is_empty());
         let mouse_active = self.context_menu.is_none()
             && (matches!(self.mode, AppMode::Running) || keyboard_active);
@@ -67624,6 +69179,11 @@ impl GameApp {
             let Some(pointer) = self.startup_tooltip.eligible_pointer() else {
                 return Ok(());
             };
+            if self.network_chart_is_elevated_pointer_layer()
+                && self.network_chart_contains_point(pointer)
+            {
+                return Ok(());
+            }
             if self.top_scoreboard_message_pointer_target_cached(pointer)
                 != Some(RunningDialogStackEntry::Chat)
             {
@@ -68046,6 +69606,35 @@ impl GameApp {
         )
     }
 
+    fn render_network_chart_layer(
+        &mut self,
+        frame_gamma: &lc_graphics::GammaRamp,
+        ordered_native: bool,
+    ) -> Result<()> {
+        self.refresh_network_chart_dialog();
+        let Some(dialog) = self.network_chart_dialog.as_ref() else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        let resources = assets
+            .network_chart_resources()
+            .expect("network chart resources were preflighted before rendering");
+        let preferred = scoreboard_preferred_rect(
+            self.graphics
+                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+        );
+        dialog.render(
+            self.graphics.surface_mut(),
+            preferred,
+            resources,
+            Some(frame_gamma),
+        )?;
+        if ordered_native {
+            self.next_pending_native_overlay();
+        }
+        Ok(())
+    }
+
     fn render_runtime_client_list_layer(
         &mut self,
         frame_gamma: &lc_graphics::GammaRamp,
@@ -68096,6 +69685,7 @@ impl GameApp {
             self.runtime_client_list
                 .as_ref()
                 .is_some_and(|dialog| dialog.is_info_only())
+                && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList)
                 && self.running_active_dialog
                     == Some(RunningDialogStackEntry::RuntimeClientList)
                 && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
@@ -68109,7 +69699,9 @@ impl GameApp {
 
     fn runtime_client_list_draw_active(&self) -> bool {
         if self.mode == AppMode::Running {
-            self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
+            self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList)
+                && self.running_active_dialog
+                    == Some(RunningDialogStackEntry::RuntimeClientList)
                 && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
                 && self.context_menu.is_none()
         } else {
@@ -68195,11 +69787,17 @@ impl GameApp {
 
     fn render_running_dialog_stack(
         &mut self,
+        start_index: usize,
         scoreboard_font_images: Option<&HashMap<String, ImageData>>,
         frame_gamma: &lc_graphics::GammaRamp,
         ordered_native: bool,
     ) -> Result<()> {
-        let stack = self.running_dialog_stack.clone();
+        let stack = self
+            .running_dialog_stack
+            .iter()
+            .copied()
+            .skip(start_index)
+            .collect::<Vec<_>>();
         let now = Instant::now();
         for entry in stack {
             match entry {
@@ -68895,6 +70493,15 @@ impl GameApp {
                     "C4Network2ClientListDlg",
                 )?;
             }
+        }
+        if self.network_chart_dialog.is_some() {
+            check(
+                self.assets
+                    .network_chart_resources()
+                    .context("exact C4ChartDialog resource set is absent")
+                    .and_then(|resources| resources.validate()),
+                "C4ChartDialog",
+            )?;
         }
         if self.external_irc_dialog_visible {
             check(
@@ -70659,52 +72266,84 @@ impl GameApp {
             }
         }
 
-        let use_running_dialog_stack =
-            self.mode == AppMode::Running && self.game_over_dialog.is_none();
-        if !use_running_dialog_stack {
-            if let Some(font_images) = scoreboard_font_images.as_ref() {
-                self.render_scoreboard_layer(font_images, &frame_gamma, ordered_native)?;
-            }
-        }
-
-        let runtime_client_list_above_game_over = self.runtime_client_list_owns_game_over();
+        let use_running_dialog_stack = self.mode == AppMode::Running;
+        let render_network_chart_elevated = self.network_chart_renders_elevated();
+        let running_stack_split = if use_running_dialog_stack {
+            self.running_dialog_stack
+                .iter()
+                .position(|entry| entry.z_order() > 0)
+                .unwrap_or(self.running_dialog_stack.len())
+        } else {
+            0
+        };
+        let running_stack_tail = if use_running_dialog_stack {
+            self.running_dialog_stack[running_stack_split..].to_vec()
+        } else {
+            Vec::new()
+        };
         let game_over_mouse_active = self.game_over_dialog_is_mouse_active();
         let game_over_active = self.game_over_dialog_is_active();
-        if !use_running_dialog_stack && !runtime_client_list_above_game_over {
-            self.render_runtime_client_list_layer(&frame_gamma, ordered_native)?;
-        }
-
-        if let Some(dialog) = self.game_over_dialog.as_ref() {
-            let font = self.assets.font_arc();
-            let hud = self.current_hud_graphics();
-            let classic = self
-                .assets
-                .game_over_classic_resources(hud.as_ref())
-                .expect("game-over resources were preflighted before rendering");
-            dialog.render_with_gamma_active(
-                self.graphics.surface_mut(),
-                font.as_ref(),
-                Some(classic),
-                Some(&frame_gamma),
-                game_over_active,
-                game_over_mouse_active,
-            );
-            if ordered_native {
-                self.next_pending_native_overlay();
+        for dialog_kind in self.runtime_default_dialog_order_snapshot() {
+            if render_network_chart_elevated
+                && dialog_kind == RuntimeDefaultDialog::NetworkChart
+            {
+                continue;
             }
-        }
-
-        if !use_running_dialog_stack && runtime_client_list_above_game_over {
-            self.render_runtime_client_list_layer(&frame_gamma, ordered_native)?;
-        }
-
-        if self.external_irc_dialog_visible {
-            self.render_external_irc_dialog(Some(&frame_gamma))?;
-            if ordered_native {
-                self.next_pending_native_overlay();
+            let represented_in_running_tail = match dialog_kind {
+                RuntimeDefaultDialog::Scoreboard => running_stack_tail
+                    .contains(&RunningDialogStackEntry::Scoreboard),
+                RuntimeDefaultDialog::ClientList => running_stack_tail
+                    .contains(&RunningDialogStackEntry::RuntimeClientList),
+                RuntimeDefaultDialog::NetworkChart
+                | RuntimeDefaultDialog::GameOver
+                | RuntimeDefaultDialog::ExternalIrc => false,
+            };
+            if represented_in_running_tail {
+                continue;
             }
-            if self.render_external_irc_dialog_tooltip(Some(&frame_gamma))? && ordered_native {
-                self.next_pending_native_overlay();
+            match dialog_kind {
+                RuntimeDefaultDialog::Scoreboard => {
+                    if let Some(font_images) = scoreboard_font_images.as_ref() {
+                        self.render_scoreboard_layer(
+                            font_images,
+                            &frame_gamma,
+                            ordered_native,
+                        )?;
+                    }
+                }
+                RuntimeDefaultDialog::NetworkChart => {
+                    self.render_network_chart_layer(&frame_gamma, ordered_native)?;
+                }
+                RuntimeDefaultDialog::ClientList => {
+                    self.render_runtime_client_list_layer(&frame_gamma, ordered_native)?;
+                }
+                RuntimeDefaultDialog::GameOver => {
+                    if let Some(dialog) = self.game_over_dialog.as_ref() {
+                        let font = self.assets.font_arc();
+                        let hud = self.current_hud_graphics();
+                        let classic = self
+                            .assets
+                            .game_over_classic_resources(hud.as_ref())
+                            .expect("game-over resources were preflighted before rendering");
+                        dialog.render_with_gamma_active(
+                            self.graphics.surface_mut(),
+                            font.as_ref(),
+                            Some(classic),
+                            Some(&frame_gamma),
+                            game_over_active,
+                            game_over_mouse_active,
+                        );
+                        if ordered_native {
+                            self.next_pending_native_overlay();
+                        }
+                    }
+                }
+                RuntimeDefaultDialog::ExternalIrc => {
+                    self.render_external_irc_dialog(Some(&frame_gamma))?;
+                    if ordered_native {
+                        self.next_pending_native_overlay();
+                    }
+                }
             }
         }
         self.render_league_signup_dialog(Some(&frame_gamma))?;
@@ -70716,6 +72355,7 @@ impl GameApp {
         }
         if use_running_dialog_stack {
             self.render_running_dialog_stack(
+                running_stack_split,
                 scoreboard_font_images.as_ref(),
                 &frame_gamma,
                 ordered_native,
@@ -70733,7 +72373,14 @@ impl GameApp {
                 self.next_pending_native_overlay();
             }
         }
-        if self.context_menu.is_some() && (!running_chat_input_open || use_running_dialog_stack) {
+        if render_network_chart_elevated {
+            self.render_network_chart_layer(&frame_gamma, ordered_native)?;
+        }
+        if self.context_menu.is_some()
+            && (!running_chat_input_open
+                || use_running_dialog_stack
+                || self.network_chart_elevated)
+        {
             // C4GUI::Screen draws its recursively owned context chain after
             // every dialog, so it stays above viewport menus, F1 help,
             // scoreboard, evaluation and message dialogs.
@@ -70742,6 +72389,9 @@ impl GameApp {
             } else if let Some(context_menu) = self.context_menu.as_ref() {
                 context_menu.render(self.graphics.surface_mut(), Some(&frame_gamma))?;
             }
+        }
+        if self.render_external_irc_dialog_tooltip(Some(&frame_gamma))? && ordered_native {
+            self.next_pending_native_overlay();
         }
         if self.render_game_over_tooltip(Some(&frame_gamma))? && ordered_native {
             self.next_pending_native_overlay();
@@ -72109,6 +73759,13 @@ impl GameApp {
         self.scoreboard_initial_reconcile_pending = false;
         self.scoreboard_close_pointer_capture = false;
         self.scoreboard_runtime = ScoreboardDialogRuntime::default();
+        self.network_stats = None;
+        self.network_stats_clients.clear();
+        self.network_stats_players.clear();
+        self.network_chart_dialog = None;
+        self.network_chart_consumed_keys.clear();
+        self.network_chart_pointer_capture = false;
+        self.reset_runtime_default_dialog_order();
         // C4Application::QuitGame runs Game.Default and enters PreInit before
         // showing startup again. This is when a language selected in the
         // previous startup session finally replaces Game.Rank.
@@ -72801,6 +74458,7 @@ impl GameApp {
         self.pending_lobby_player_selection = None;
         self.definition_selector_last_click = None;
         self.game_over_dialog = None;
+        self.hide_runtime_default_dialog(RuntimeDefaultDialog::GameOver);
         if scenario.path.is_none() {
             return self.start_sandbox_scenario(scenario);
         }
@@ -74730,6 +76388,9 @@ impl GameApp {
         self.ingame_ignore_left_up = false;
         self.frames_per_second = 0;
         self.frames_since_second = 0;
+        self.network_stats = Some(NetworkStats::new());
+        self.network_stats_clients.clear();
+        self.network_stats_players.clear();
         self.scenario_label = label;
         self.fallback_ground = fallback_ground;
         let width = self.graphics.surface().width();
@@ -74794,7 +76455,6 @@ impl GameApp {
         self.running_dialog_stack.clear();
         self.running_active_dialog = None;
         self.runtime_client_list_consumed_keys.clear();
-        self.runtime_client_list_above_game_over = false;
         self.runtime_key_config_cache = OnceLock::new();
         let _ = self.runtime_key_config_cache.set(
             load_runtime_global_key_config(self.app_paths.as_ref())
@@ -74804,8 +76464,12 @@ impl GameApp {
         self.scoreboard_initial_reconcile_pending = false;
         self.scoreboard_close_pointer_capture = false;
         self.scoreboard_runtime = ScoreboardDialogRuntime::default();
-        self.network_chart_open = false;
+        self.network_chart_dialog = None;
+        self.network_chart_consumed_keys.clear();
+        self.network_chart_pointer_capture = false;
+        self.reset_runtime_default_dialog_order();
         self.mode = AppMode::Running;
+        self.reconcile_network_stats_series();
         // Startup hint + join log line for the HUD. Game.Time is owned by the
         // engine and pulsed by the event loop's one-second accumulator.
         // ShowStartup is set on player init (C4Player.cpp:1735).
@@ -131386,9 +133050,9 @@ ScenInfoArea=70,5,25,90
         app.process_running_chat_text("/msgboard 0");
         assert_eq!(app.message_board.mode, MessageBoardMode::Hidden);
         app.process_running_chat_text("/chart");
-        assert!(app.network_chart_open);
+        assert!(app.network_chart_dialog.is_some());
         app.process_running_chat_text("/chart");
-        assert!(!app.network_chart_open);
+        assert!(app.network_chart_dialog.is_none());
 
         app.runtime_network_control_mode = Some(0);
         app.process_running_chat_text("/decentralctrl");
@@ -131429,6 +133093,841 @@ ScenInfoArea=70,5,25,90
         assert!(latest_message_board_logical_entry(&app)
             .as_deref()
             .is_some_and(|line| line.contains("not allowed in league")));
+    }
+
+    #[test]
+    fn l143_network_chart_tracks_running_network_sandbox_and_toggles_as_singleton() {
+        let mut app = new_running_sandbox_app();
+        assert!(app.network_stats.is_some(), "running initialization owns live stats");
+        let (events, _commands) = install_running_network_stub(&mut app, 0, 0, 1);
+
+        for _ in 0..3 {
+            queue_empty_ready_tick(&app, &events);
+            app.update().expect("execute one network-sandbox frame");
+        }
+        app.sec1_timer().expect("sample the running second");
+
+        let cursor = app.engine.crew_cursor(app.local_owner).expect("sandbox crew");
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate::new().with_status(lc_engine::ObjectStatus::Inactive),
+            )
+            .expect("deactivate sandbox crew");
+        app.snapshot = app.engine.snapshot();
+        assert!(app
+            .snapshot
+            .objects
+            .iter()
+            .any(|object| object.status == lc_engine::ObjectStatus::Inactive));
+        let expected_object_count = app
+            .snapshot
+            .objects
+            .iter()
+            .filter(|object| object.status != lc_engine::ObjectStatus::Deleted)
+            .count() as f32;
+        let object_sample_time = app
+            .network_stats
+            .as_ref()
+            .expect("live stats")
+            .object_count_graph()
+            .end_time();
+        app.record_network_stats_frame();
+        assert_eq!(
+            app.network_stats
+                .as_ref()
+                .expect("live stats")
+                .object_count_graph()
+                .value(object_sample_time),
+            expected_object_count,
+            "native object count includes inactive objects"
+        );
+
+        let second_counter = app
+            .network_stats
+            .as_ref()
+            .expect("live stats")
+            .second_counter();
+        app.mode = AppMode::Loading;
+        app.record_network_stats_second();
+        assert_eq!(
+            app.network_stats
+                .as_ref()
+                .expect("stats survive the start barrier")
+                .second_counter(),
+            second_counter,
+            "pre-GO loading must not append a per-second sample"
+        );
+        app.mode = AppMode::Running;
+
+        app.process_running_chat_text("/chart");
+        let dialog = app
+            .network_chart_dialog
+            .as_ref()
+            .expect("/chart opens the singleton dialog");
+        assert_eq!(
+            dialog.tab_names(),
+            ["oc", "FPS", "NetIO", "Pings", "Control", "APM"]
+        );
+        assert!(
+            dialog.tabs().iter().all(|tab| !tab.graph.is_empty()),
+            "every live graph receives at least one frame/second/control sample"
+        );
+        let object_graph = dialog.active_graph().expect("object-count graph is selected");
+        assert!(object_graph.end_time() - object_graph.start_time() >= 3);
+
+        let chart_point = {
+            let resources = app
+                .assets
+                .network_chart_resources()
+                .expect("synthetic chart resources");
+            let preferred = scoreboard_preferred_rect(
+                app.graphics
+                    .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
+            );
+            let layout = app
+                .network_chart_dialog
+                .as_ref()
+                .expect("open chart")
+                .layout(preferred, resources);
+            GuiPoint::new(
+                layout.caption.x.saturating_add(8) as f32,
+                layout.caption.y.saturating_add(layout.caption.h / 2) as f32,
+            )
+        };
+        app.running_pointer_position = Some(chart_point);
+        assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
+        assert!(app.network_chart_pointer_capture);
+        app.ingame_pointer = None;
+        app.ingame_edge_scroll = None;
+        app.handle_cursor_moved(PhysicalPosition::new(10_000.0, 10_000.0))
+            .expect("captured chart drag stays GUI-owned outside its bounds");
+        assert!(app.network_chart_pointer_capture);
+        assert!(app.ingame_pointer.is_none());
+        assert!(app.ingame_edge_scroll.is_none());
+        app.handle_mouse_button_classified(ElementState::Released, false)
+            .expect("outside release clears chart capture");
+        assert!(!app.network_chart_pointer_capture);
+
+        app.process_running_chat_text("/chart");
+        assert!(
+            app.network_chart_dialog.is_none(),
+            "a second activation closes the singleton"
+        );
+        assert!(app.network_stats.is_some(), "closing presentation retains sampling");
+
+        app.return_to_menu_for_relaunch();
+        assert!(app.network_stats.is_none(), "game teardown drops live stats");
+        assert!(app.network_chart_dialog.is_none());
+    }
+
+    #[test]
+    fn l143_chart_toggle_key_is_default_unbound_configurable_and_escape_owned() {
+        assert!(RuntimeKeyConfig::default().chart_toggle.is_empty());
+        let parsed = parse_runtime_key_config(
+            b"[Keys]\nChartToggle=F8\n[Keys]\nChartToggle=F7\n",
+        )
+        .expect("parse the represented default-unbound chart action");
+        assert_eq!(
+            parsed.chart_toggle,
+            vec![RuntimeKeyChord {
+                key: VirtualKeyCode::F8,
+                modifiers: ModifiersState::empty(),
+            }],
+            "StdCompilerINIRead keeps the first action value"
+        );
+
+        let mut app = new_running_sandbox_app();
+        app.runtime_key_config_cache = OnceLock::new();
+        app.runtime_key_config_cache
+            .set(Ok(parsed))
+            .expect("install chart key registry");
+        app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+            .expect("configured ChartToggle opens");
+        assert!(app.network_chart_dialog.is_some());
+        app.handle_key(VirtualKeyCode::F8, ElementState::Released)
+            .expect("ChartToggle release is consumed");
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("chart owns stronger bare Escape");
+        assert!(app.network_chart_dialog.is_none());
+        assert!(
+            app.message_dialogs.is_empty(),
+            "chart Escape must not also open the abort dialog"
+        );
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("matching Escape release remains chart-owned");
+
+        app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+            .expect("configured ChartToggle reopens");
+        app.handle_key(VirtualKeyCode::F8, ElementState::Released)
+            .expect("configured release remains consumed");
+
+        assert!(
+            !app.handle_network_chart_key(VirtualKeyCode::Up, ElementState::Pressed),
+            "the non-exclusive chart must not invent GUI-scope arrow navigation"
+        );
+        assert_eq!(
+            app.network_chart_dialog
+                .as_ref()
+                .expect("chart remains open")
+                .active_tab_index(),
+            0
+        );
+
+        app.start_running_chat(RunningChatMode::All);
+        assert!(app.running_chat_active());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("foreground chat owns the first Escape");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("foreground chat owns the matching release");
+        assert!(app.running_chat_controller().is_none());
+        assert!(
+            app.network_chart_dialog.is_some(),
+            "closing foreground chat must retain the background chart"
+        );
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("new top chart owns the next Escape");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("chart owns the matching release");
+        assert!(app.network_chart_dialog.is_none());
+        assert!(app.message_dialogs.is_empty());
+
+        app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+            .expect("configured ChartToggle still reopens");
+        app.handle_key(VirtualKeyCode::F8, ElementState::Released)
+            .expect("configured release remains consumed");
+        app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+            .expect("configured ChartToggle closes");
+        assert!(app.network_chart_dialog.is_none());
+
+        let mut priority = new_running_sandbox_app();
+        priority.runtime_key_config_cache = OnceLock::new();
+        priority
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(b"[Keys]\nChartToggle=F2\n").unwrap()))
+            .expect("install duplicate base-priority chord");
+        priority
+            .handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("earlier ChatOpen binding wins duplicate ChartToggle chord");
+        assert!(priority.running_chat_active());
+        assert!(priority.network_chart_dialog.is_none());
+    }
+
+    #[test]
+    fn l143_chart_toggle_respects_reachable_native_key_priorities() {
+        let configured = |binding: &str| {
+            let mut app = new_classic_running_sandbox_app();
+            app.runtime_key_config_cache = OnceLock::new();
+            let source = format!("[Keys]\nChartToggle={binding}\n");
+            app.runtime_key_config_cache
+                .set(Ok(parse_runtime_key_config(source.as_bytes()).unwrap()))
+                .expect("install chart key registry");
+            app
+        };
+
+        for (name, key) in [
+            ("F5", VirtualKeyCode::F5),
+            ("F6", VirtualKeyCode::F6),
+            ("F7", VirtualKeyCode::F7),
+        ] {
+            let mut app = configured(name);
+            app.handle_key(key, ElementState::Pressed)
+                .expect("bare function key reaches ChartToggle");
+            assert!(app.network_chart_dialog.is_some(), "{name}");
+        }
+
+        for (binding, key, modifiers) in [
+            ("Left", VirtualKeyCode::Left, ModifiersState::empty()),
+            ("Shift+Right", VirtualKeyCode::Right, ModifiersState::SHIFT),
+            ("Ctrl+Left", VirtualKeyCode::Left, ModifiersState::CTRL),
+            (
+                "Ctrl+Shift+Right",
+                VirtualKeyCode::Right,
+                ModifiersState::CTRL | ModifiersState::SHIFT,
+            ),
+        ] {
+            let mut chat = configured(binding);
+            chat.start_running_chat(RunningChatMode::All);
+            chat.keyboard_modifiers = modifiers;
+            assert!(
+                !chat.handle_runtime_chart_toggle_key(key, ElementState::Pressed),
+                "focused chat Edit owns {binding}"
+            );
+            assert!(chat.network_chart_dialog.is_none());
+        }
+
+        let mut observer_menu = configured("Left");
+        observer_menu.clear_physical_viewport_states();
+        let observer = observer_menu.ownerless_physical_viewport_state();
+        observer_menu.physical_viewports.push(observer);
+        observer_menu.physical_viewports_authoritative = true;
+        observer_menu.ingame_menu.replace(
+            observer_menu.local_owner,
+            IngameMenuState::main_menu(&MainMenuConditions {
+                has_player: false,
+                player_count: 0,
+                ..MainMenuConditions::default()
+            }),
+        );
+        assert!(observer_menu.primary_physical_viewport_is_no_owner());
+        assert!(!observer_menu.handle_runtime_chart_toggle_key(
+            VirtualKeyCode::Left,
+            ElementState::Pressed
+        ));
+
+        let mut irc = configured("F8");
+        irc.show_external_irc_dialog()
+            .expect("show standalone IRC dialog");
+        irc.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+            .expect("unclaimed IRC key reaches ChartToggle");
+        assert!(irc.external_irc_dialog_visible);
+        assert!(irc.network_chart_dialog.is_some());
+        assert!(irc.runtime_default_dialog_is_top(RuntimeDefaultDialog::NetworkChart));
+
+        let mut irc_unclaimed = configured("Alt+Z");
+        irc_unclaimed
+            .show_external_irc_dialog()
+            .expect("show standalone IRC dialog");
+        irc_unclaimed.keyboard_modifiers = ModifiersState::ALT;
+        irc_unclaimed
+            .handle_key(VirtualKeyCode::Z, ElementState::Pressed)
+            .expect("unowned IRC mnemonic falls through");
+        assert!(irc_unclaimed.network_chart_dialog.is_some());
+
+        let mut irc_edit = configured("Ctrl+Shift+Left");
+        irc_edit
+            .show_external_irc_dialog()
+            .expect("show standalone IRC edit");
+        irc_edit
+            .external_irc_dialog
+            .as_mut()
+            .expect("standalone IRC controller")
+            .force_chat_mode_and_focus();
+        irc_edit.keyboard_modifiers = ModifiersState::CTRL | ModifiersState::SHIFT;
+        assert!(!irc_edit.handle_runtime_chart_toggle_key(
+            VirtualKeyCode::Left,
+            ElementState::Pressed
+        ));
+
+        let mut irc_connect = configured("Up");
+        irc_connect
+            .show_external_irc_dialog()
+            .expect("show standalone IRC login");
+        irc_connect
+            .handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+            .expect("Connect-focused login has no arrow callback");
+        assert!(irc_connect.network_chart_dialog.is_some());
+
+        let mut game_over = new_game_over_keyboard_app();
+        game_over.runtime_key_config_cache = OnceLock::new();
+        game_over
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nChartToggle=Alt+E\n",
+            )
+            .unwrap()))
+            .expect("install game-over chart key");
+        game_over.keyboard_modifiers = ModifiersState::ALT;
+        assert!(!game_over.handle_runtime_chart_toggle_key(
+            VirtualKeyCode::E,
+            ElementState::Pressed
+        ));
+
+        let mut game_over_list = new_game_over_keyboard_app();
+        game_over_list.runtime_key_config_cache = OnceLock::new();
+        game_over_list
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(b"[Keys]\nChartToggle=Up\n").unwrap()))
+            .expect("install player-list chart key");
+        for _ in 0..2 {
+            game_over_list
+                .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("advance evaluation focus");
+            game_over_list
+                .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("release evaluation focus key");
+        }
+        assert!(matches!(
+            game_over_list
+                .game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::focused),
+            Some(GameOverFocus::PlayerList(_))
+        ));
+        assert!(!game_over_list.handle_runtime_chart_toggle_key(
+            VirtualKeyCode::Up,
+            ElementState::Pressed
+        ));
+
+        let mut vote = configured("Alt+Y");
+        vote.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                "Vote?",
+                "Voting",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                true,
+            ),
+            MessageDialogContinuation::LeagueSurrender,
+        )
+        .expect("show exclusive vote");
+        vote.keyboard_modifiers = ModifiersState::ALT;
+        assert!(!vote.handle_runtime_chart_toggle_key(
+            VirtualKeyCode::Y,
+            ElementState::Pressed
+        ));
+
+        let mut player_escape = configured("F8");
+        player_escape.local_controls.remove(player_escape.local_owner);
+        player_escape.local_controls.initialize(LocalControlInit {
+            owner: player_escape.local_owner,
+            preferred_set: 1,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        assert!(player_escape.bindings.rebind_for_set(
+            1,
+            ControlBindingId::Left,
+            VirtualKeyCode::Escape,
+        ));
+        player_escape
+            .handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+            .expect("open chart above a player Escape binding");
+        player_escape
+            .handle_key(VirtualKeyCode::F8, ElementState::Released)
+            .expect("release chart toggle");
+        assert!(!player_escape.network_chart_owns_stronger_escape());
+        player_escape
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("PRIO_PlrControl Escape wins");
+        assert!(player_escape.network_chart_dialog.is_some());
+        player_escape
+            .handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("release player Escape");
+    }
+
+    #[test]
+    fn l143_chart_uses_native_placement_caption_drag_and_close_control() {
+        let mut app = new_running_sandbox_app();
+        app.resize(1280, 720).expect("resize chart chrome fixture");
+        app.toggle_network_chart();
+        let assets = Arc::clone(&app.assets);
+        let resources = assets
+            .network_chart_resources()
+            .expect("synthetic chart resources");
+        let preferred = scoreboard_preferred_rect(
+            app.graphics
+                .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
+        );
+        let layout = app
+            .network_chart_dialog
+            .as_ref()
+            .expect("open chart")
+            .layout(preferred, resources);
+        assert_eq!((layout.bounds.x, layout.bounds.y), (preferred.x + 30, preferred.y + 30));
+
+        let caption = GuiPoint::new(
+            (layout.caption.x + 8) as f32,
+            (layout.caption.y + layout.caption.h / 2) as f32,
+        );
+        app.running_pointer_position = Some(caption);
+        assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
+        assert!(app.network_chart_pointer_capture);
+        let moved = GuiPoint::new(caption.x + 37.0, caption.y + 19.0);
+        app.running_pointer_position = Some(moved);
+        assert!(app.handle_network_chart_pointer_move(moved));
+        assert!(app.handle_network_chart_pointer_button(ElementState::Released));
+        assert!(!app.network_chart_pointer_capture);
+        let moved_layout = app
+            .network_chart_dialog
+            .as_ref()
+            .expect("dragged chart")
+            .layout(preferred, resources);
+        assert_eq!(
+            (moved_layout.bounds.x, moved_layout.bounds.y),
+            (layout.bounds.x + 37, layout.bounds.y + 19)
+        );
+
+        let body = GuiPoint::new(
+            (moved_layout.chart.x + moved_layout.chart.w / 2) as f32,
+            (moved_layout.chart.y + moved_layout.chart.h / 2) as f32,
+        );
+        app.running_pointer_position = Some(body);
+        assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
+        assert!(
+            !app.network_chart_pointer_capture,
+            "chart body clicks are consumed without becoming a drag element"
+        );
+        assert!(app.handle_network_chart_pointer_button(ElementState::Released));
+
+        let close = GuiPoint::new(
+            (moved_layout.close_button.x + moved_layout.close_button.w / 2) as f32,
+            (moved_layout.close_button.y + moved_layout.close_button.h / 2) as f32,
+        );
+        app.running_pointer_position = Some(close);
+        assert!(app.handle_network_chart_pointer_button(ElementState::Pressed));
+        assert!(app.network_chart_pointer_capture);
+        assert!(app.handle_network_chart_pointer_button(ElementState::Released));
+        assert!(app.network_chart_dialog.is_none());
+    }
+
+    #[test]
+    fn l143_chart_gamepad_high_close_respects_player_control_priority() {
+        let slot = GamepadSlot::new(0);
+        let mut chart = new_running_sandbox_app();
+        chart.toggle_network_chart();
+        chart
+            .process_gamepad_event_batch([
+                GamepadEvent::GuiButton {
+                    slot,
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Action {
+                    slot,
+                    action: GamepadActionType::Cancel,
+                    state: ElementState::Pressed,
+                },
+            ])
+            .expect("primary GUI gamepad closes the active chart");
+        assert!(chart.network_chart_dialog.is_none());
+        assert!(chart.message_dialogs.is_empty());
+
+        let mut player = new_running_sandbox_app();
+        player.local_controls = LocalControlRegistry::default();
+        player.local_controls.initialize(LocalControlInit {
+            owner: player.local_owner,
+            preferred_set: slot.control_set(),
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        let physical = LegacyGamepadButton::new(3);
+        assert!(player.gamepad_bindings.rebind_button(
+            0,
+            ControlBindingId::Left,
+            slot.index(),
+            physical.index(),
+        ));
+        player.toggle_network_chart();
+        player
+            .process_gamepad_event_batch([
+                GamepadEvent::GuiButton {
+                    slot,
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Button {
+                    slot,
+                    button: physical,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Action {
+                    slot,
+                    action: GamepadActionType::Cancel,
+                    state: ElementState::Pressed,
+                },
+            ])
+            .expect("PRIO_PlrControl owns the high-button cluster");
+        assert!(player.network_chart_dialog.is_some());
+        assert_ne!(
+            player
+                .engine
+                .player(player.local_owner)
+                .expect("local sandbox player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0
+        );
+    }
+
+    #[test]
+    fn l143_default_z_dialog_order_tracks_show_raise_and_close() {
+        let mut app = new_game_over_keyboard_app();
+        assert_eq!(
+            app.runtime_default_dialog_order_snapshot(),
+            vec![RuntimeDefaultDialog::GameOver]
+        );
+
+        app.toggle_network_chart();
+        configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
+        app.toggle_runtime_client_list().expect("open client list");
+        app.external_irc_dialog_visible = true;
+        app.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
+        assert_eq!(
+            app.runtime_default_dialog_order_snapshot(),
+            vec![
+                RuntimeDefaultDialog::GameOver,
+                RuntimeDefaultDialog::NetworkChart,
+                RuntimeDefaultDialog::ClientList,
+                RuntimeDefaultDialog::ExternalIrc,
+            ]
+        );
+        assert!(app.runtime_client_list_above_game_over);
+        assert!(app.runtime_top_default_dialog_is_exclusive());
+
+        app.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::GameOver);
+        assert!(app.runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver));
+        assert!(!app.runtime_client_list_above_game_over);
+        app.dismiss_game_over_dialog();
+        assert!(app.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc));
+        app.external_irc_dialog_visible = false;
+        app.hide_runtime_default_dialog(RuntimeDefaultDialog::ExternalIrc);
+        assert!(app.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList));
+        app.toggle_runtime_client_list().expect("close client list");
+        assert!(app.runtime_default_dialog_is_top(RuntimeDefaultDialog::NetworkChart));
+        app.toggle_network_chart();
+        assert!(app.runtime_default_dialog_order_snapshot().is_empty());
+    }
+
+    #[test]
+    fn l143_non_left_runtime_dialog_hits_swallow_without_raising() {
+        let mut app = new_game_over_keyboard_app();
+        app.resize(1280, 720).expect("resize pointer-routing fixture");
+        let outside = GuiPoint::new(0.0, 0.0);
+        assert!(!app.game_over_dialog_contains_point(outside));
+        assert!(app.game_over_pointer_route_hit(outside));
+
+        app.toggle_network_chart();
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let game_over_only = (0..height).step_by(4).find_map(|y| {
+            (0..width)
+                .step_by(4)
+                .map(|x| GuiPoint::new(x as f32, y as f32))
+                .find(|point| {
+                    app.game_over_dialog_contains_point(*point)
+                        && !app.network_chart_contains_point(*point)
+                })
+        })
+        .expect("evaluation has an exposed point outside the chart");
+        assert!(app.game_over_dialog_contains_point(game_over_only));
+        assert!(!app.network_chart_contains_point(game_over_only));
+        assert!(!app.game_over_pointer_route_hit(outside));
+        let order = app.runtime_default_dialog_order_snapshot();
+        app.running_pointer_position = Some(game_over_only);
+
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
+            .expect("lower game-over swallows an in-bounds wheel");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("lower game-over swallows an in-bounds right press");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("lower game-over swallows an in-bounds right release");
+        app.handle_other_mouse_button(ElementState::Pressed)
+            .expect("lower game-over swallows an in-bounds middle press");
+        app.handle_other_mouse_button(ElementState::Released)
+            .expect("lower game-over swallows an in-bounds middle release");
+        assert_eq!(app.runtime_default_dialog_order_snapshot(), order);
+        assert!(app.runtime_default_dialog_is_top(RuntimeDefaultDialog::NetworkChart));
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(game_over_only.x),
+            f64::from(game_over_only.y),
+        ))
+            .expect("move reaches the exposed lower game-over chassis");
+        app.handle_mouse_button_classified(ElementState::Pressed, false)
+            .expect("left press activates the exposed lower game-over dialog");
+        assert!(app.runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver));
+        app.handle_mouse_button_classified(ElementState::Released, false)
+            .expect("release the game-over activation gesture");
+    }
+
+    #[test]
+    fn l143_exclusive_vote_outside_hit_still_reaches_exposed_chart() {
+        let mut app = new_running_sandbox_app();
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                "Vote?",
+                "Voting",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Small,
+                true,
+            ),
+            MessageDialogContinuation::LeagueSurrender,
+        )
+        .expect("show exclusive vote above chart");
+        app.toggle_network_chart();
+        assert!(!app.network_chart_elevated);
+        let resources = app
+            .assets
+            .network_chart_resources()
+            .expect("synthetic chart resources");
+        let preferred = scoreboard_preferred_rect(
+            app.graphics
+                .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
+        );
+        let chart_layout = app
+            .network_chart_dialog
+            .as_ref()
+            .expect("open chart")
+            .layout(preferred, resources);
+        let exposed = (chart_layout.chart.y
+            ..chart_layout.chart.y.saturating_add(chart_layout.chart.h))
+            .step_by(4)
+            .find_map(|y| {
+                (chart_layout.chart.x
+                    ..chart_layout.chart.x.saturating_add(chart_layout.chart.w))
+                    .step_by(4)
+                    .map(|x| GuiPoint::new(x as f32, y as f32))
+                    .find(|point| app.top_message_dialog_hit_index(*point).is_none())
+            })
+            .expect("chart has an exposed point outside the smaller vote");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(exposed.x),
+            f64::from(exposed.y),
+        ))
+        .expect("shared Screen scans past the non-hit vote");
+        app.handle_mouse_button_classified(ElementState::Pressed, false)
+            .expect("exposed chart receives left press");
+        assert!(!app.network_chart_pointer_capture);
+        assert!(app.network_chart_elevated);
+        assert_eq!(app.message_dialog_active_index, None);
+        app.handle_mouse_button_classified(ElementState::Released, false)
+            .expect("release exposed chart gesture");
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert!(app.network_chart_owns_stronger_escape());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("elevated chart owns Escape above the vote");
+        assert!(app.network_chart_dialog.is_none());
+        assert_eq!(app.message_dialog_active_index, Some(0));
+    }
+
+    #[test]
+    fn chart_elevation_keeps_visual_order_separate_from_reactivated_chat_input() {
+        let mut app = new_running_sandbox_app();
+        app.start_running_chat(RunningChatMode::All);
+        app.toggle_network_chart();
+        app.activate_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
+        assert!(app.network_chart_elevated);
+        assert!(app.network_chart_is_active_dialog());
+        assert!(!app.running_chat_active());
+
+        app.set_running_chat_active(true);
+        assert!(app.running_chat_active());
+        assert!(app.network_chart_renders_elevated());
+        assert!(!app.network_chart_is_active_dialog());
+
+        let resources = app
+            .assets
+            .network_chart_resources()
+            .expect("synthetic chart resources");
+        let preferred = scoreboard_preferred_rect(
+            app.graphics
+                .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
+        );
+        let chart = app
+            .network_chart_dialog
+            .as_ref()
+            .expect("open chart")
+            .layout(preferred, resources)
+            .chart;
+        let chart_point = GuiPoint::new(
+            chart.x.saturating_add(chart.w as i32 / 2) as f32,
+            chart.y.saturating_add(chart.h as i32 / 2) as f32,
+        );
+        app.running_pointer_position = Some(chart_point);
+        app.handle_mouse_button_classified(ElementState::Pressed, false)
+            .expect("visually elevated chart receives LeftDown");
+        assert!(app.network_chart_is_active_dialog());
+        assert!(!app.running_chat_active());
+        app.handle_mouse_button_classified(ElementState::Released, false)
+            .expect("release chart gesture");
+
+        app.set_running_chat_active(true);
+        app.toggle_network_chart();
+        assert!(app.network_chart_dialog.is_none());
+        assert!(
+            app.running_chat_active(),
+            "closing an inactive elevated chart must not overwrite reactivated chat ownership"
+        );
+    }
+
+    #[test]
+    fn chart_restores_projected_successor_after_active_underlay_is_removed() {
+        let mut app = new_running_sandbox_app();
+        for caption in ["First", "Second"] {
+            app.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::new(
+                    caption,
+                    caption,
+                    lc_frontend::message_dialog::MessageDialogButtons::OK,
+                    lc_frontend::message_dialog::MessageDialogIcon::None,
+                    lc_frontend::message_dialog::MessageDialogSize::Small,
+                    false,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("show chart underlay message");
+        }
+        let successor = app.message_dialogs[0].running_stack_id;
+        let removed = app.message_dialogs[1].running_stack_id;
+
+        app.toggle_network_chart();
+        app.activate_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
+        assert!(app.network_chart_elevated_owns_input());
+
+        app.message_dialog_active_index = Some(1);
+        app.activate_running_dialog(RunningDialogStackEntry::Message(removed));
+        assert!(app.network_chart_renders_elevated());
+        assert!(!app.network_chart_is_active_dialog());
+
+        let (_, was_active) = app
+            .remove_message_dialog_at(1)
+            .expect("remove active chart underlay");
+        assert!(was_active);
+        assert_eq!(
+            app.running_active_dialog,
+            Some(RunningDialogStackEntry::Message(successor))
+        );
+        assert!(app.network_chart_elevated_owns_input());
+        assert!(app.network_chart_is_active_dialog());
+        assert_eq!(app.active_message_dialog_index(), None);
+
+        app.toggle_network_chart();
+        assert!(app.network_chart_dialog.is_none());
+        assert_eq!(app.message_dialog_active_index, Some(0));
+        assert_eq!(app.active_message_dialog_index(), Some(0));
+    }
+
+    #[test]
+    fn chart_hide_restores_projected_message_instead_of_inactive_chat() {
+        let mut app = new_running_sandbox_app();
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Notice",
+                "Message under chart",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("show chart underlay message");
+        let message = app.message_dialogs[0].running_stack_id;
+        app.start_running_chat(RunningChatMode::All);
+        app.set_running_chat_active(false);
+        app.message_dialog_active_index = Some(0);
+        app.activate_running_dialog(RunningDialogStackEntry::Message(message));
+
+        app.toggle_network_chart();
+        app.activate_runtime_default_dialog(RuntimeDefaultDialog::NetworkChart);
+        assert!(app.network_chart_elevated_owns_input());
+        assert_eq!(
+            app.running_active_dialog,
+            Some(RunningDialogStackEntry::Message(message))
+        );
+
+        app.toggle_network_chart();
+        assert!(app.network_chart_dialog.is_none());
+        assert_eq!(app.message_dialog_active_index, Some(0));
+        assert!(!app.running_chat_active());
     }
 
     #[test]
@@ -132368,16 +134867,16 @@ ScenInfoArea=70,5,25,90
             .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
             .expect("push exclusive vote for outside-pointer routing");
         vote_pointer.running_pointer_position = Some(GuiPoint::new(0.0, 0.0));
-        assert!(vote_pointer.handle_message_dialog_pointer_move(GuiPoint::new(0.0, 0.0)));
+        assert!(!vote_pointer.handle_message_dialog_pointer_move(GuiPoint::new(0.0, 0.0)));
         assert!(
-            vote_pointer
+            !vote_pointer
                 .handle_message_dialog_pointer_button(ElementState::Pressed)
-                .expect("exclusive vote consumes outside pointer down")
+                .expect("outside vote hit-test falls through to shared Screen scanning")
         );
         assert!(
-            vote_pointer
+            !vote_pointer
                 .handle_message_dialog_pointer_button(ElementState::Released)
-                .expect("exclusive vote consumes outside pointer up")
+                .expect("outside vote release falls through to shared Screen scanning")
         );
 
         let mut vote_return = new_running_sandbox_app();
@@ -151410,8 +153909,21 @@ protected func InputCallback(string answer, int player)
 
         assert_eq!(app.engine.selected_crew(owner), vec![second]);
         assert_eq!(app.engine.crew_cursor(owner), Some(second));
+        let stats = app.network_stats.as_ref().expect("running stats survive");
+        let controls = stats
+            .player_control_graph(owner)
+            .expect("player control graph survives");
+        let actions = stats
+            .player_action_graph(owner)
+            .expect("player action graph survives");
+        assert_eq!(controls.raw_value(controls.end_time() - 1), 1.0);
+        assert_eq!(actions.raw_value(actions.end_time() - 1), 1.0);
         let player = app.engine.player(owner).expect("player survives");
-        assert_eq!((player.control_count(), player.action_count()), (1, 1));
+        assert_eq!(
+            (player.control_count(), player.action_count()),
+            (0, 0),
+            "the running statistics sample drains native per-control-frame counters"
+        );
     }
 
     #[test]

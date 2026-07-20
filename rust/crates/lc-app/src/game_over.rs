@@ -834,6 +834,33 @@ impl GameOverState {
         }
     }
 
+    /// Hit-test the actual evaluation dialog chassis. The running Screen may
+    /// keep an active exclusive dialog fullscreen-blocking, but lower z=0
+    /// dialogs must use these bounds so uncovered screen areas fall through.
+    pub fn classic_dialog_contains_point(
+        &self,
+        x: f32,
+        y: f32,
+        surface_width: u32,
+        surface_height: u32,
+    ) -> bool {
+        // The chassis dimensions do not depend on the measured button width,
+        // so this remains exact even before the first resource-backed render.
+        let rect = surface_rect(
+            self.classic_layout_with_button_width(
+                surface_width,
+                surface_height,
+                self.classic_button_width.unwrap_or(1),
+            )
+            .dialog,
+        );
+        point_in_rect(x, y, rect)
+    }
+
+    pub fn has_pointer_capture(&self) -> bool {
+        self.pointer_pressed_focus().is_some()
+    }
+
     pub fn handle_pointer_down(&mut self, surface_width: u32, surface_height: u32) {
         self.pointer_surface_size = Some((surface_width, surface_height));
         if let Some(index) = self.pointer_position.and_then(|(x, y)| {

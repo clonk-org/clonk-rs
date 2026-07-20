@@ -1491,6 +1491,16 @@ impl NetDlgController {
         &self.chat_strings
     }
 
+    /// Whether the visible standalone chat page owns an Alt mnemonic through
+    /// one of its classic GUI controls. The login page currently has the
+    /// localized Connect button; chat sheets expose no mnemonic buttons.
+    pub fn chat_dialog_has_hotkey(&self, character: char) -> bool {
+        self.chat_page == NetDlgChatPage::Login
+            && expand_hotkey_markup(&self.chat_strings.connect)
+                .1
+                .is_some_and(|hotkey| hotkey.eq_ignore_ascii_case(&character))
+    }
+
     /// Overrides the full outer chat-dialog rectangle. This is used by the
     /// standalone `C4ChatDlg` surface; its top caption is carved from these
     /// bounds and all pointer hit testing follows the same geometry.
@@ -1607,6 +1617,12 @@ impl NetDlgController {
 
     pub const fn chat_page(&self) -> NetDlgChatPage {
         self.chat_page
+    }
+
+    pub const fn chat_edit_is_focused(&self) -> bool {
+        matches!(self.mode, NetDlgMode::Chat)
+            && matches!(self.focus, NetDlgControl::ChatInput)
+            && !self.chat_connect_focused
     }
 
     pub const fn chat_connection_state(&self) -> NetDlgChatConnectionState {

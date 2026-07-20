@@ -790,6 +790,37 @@ impl<A: Clone> ClassicContextMenu<A> {
         outcome
     }
 
+    /// Read-only counterpart to the PRIO_Context key callbacks. This is used
+    /// by lower-priority global bindings to decide whether the deepest menu
+    /// would consume the chord before mutating either owner.
+    pub fn owns_key(&self, key: KeyCode) -> bool {
+        if !self.open {
+            return false;
+        }
+        match key {
+            KeyCode::Up | KeyCode::Down | KeyCode::Right | KeyCode::Escape | KeyCode::Enter => {
+                true
+            }
+            KeyCode::Left => self.root.submenu.is_some(),
+            KeyCode::Space
+            | KeyCode::Tab
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown => false,
+        }
+    }
+
+    pub fn owns_hotkey(&self, hotkey: char) -> bool {
+        self.open
+            && self
+                .root
+                .deepest()
+                .entries
+                .iter()
+                .any(|entry| entry.hotkey == Some(hotkey.to_ascii_uppercase()))
+    }
+
     pub fn handle_gamepad_direction(
         &mut self,
         direction: ContextMenuDirection,

@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     io,
     net::{SocketAddr, SocketAddrV6},
+    ops::Deref,
     time::Duration,
 };
 
@@ -31,6 +32,7 @@ pub const RELIABLE_UDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 pub const RELIABLE_UDP_CONNECT_RETRIES: u8 = 5;
 pub const RELIABLE_UDP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 pub const RELIABLE_UDP_OUTGOING_PACKET_CAPACITY: usize = 10_000;
+const UDP_STATISTICS_CONNECTION_ID: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReliableUdpPeerStatus {
@@ -684,9 +686,27 @@ pub struct ReliableUdpSocketDriver {
     socket: UdpSocket,
     core: ReliableUdpEndpointCore,
     punchers: ReliableUdpPuncherRoutes,
+    statistics: Option<AttachedUdpConnectionStatistics>,
     started_at: Instant,
     receive_buffer: Vec<u8>,
     last_send: Option<ReliableUdpLastSend>,
+}
+
+#[derive(Debug)]
+struct AttachedUdpConnectionStatistics(crate::ConnectionStatisticsRecorder);
+
+impl Deref for AttachedUdpConnectionStatistics {
+    type Target = crate::ConnectionStatisticsRecorder;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for AttachedUdpConnectionStatistics {
+    fn drop(&mut self) {
+        self.0.close();
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -774,10 +794,26 @@ impl ReliableUdpSocketDriver {
             socket,
             core: ReliableUdpEndpointCore::new_at(Duration::ZERO),
             punchers: ReliableUdpPuncherRoutes::default(),
+            statistics: None,
             started_at,
             receive_buffer: vec![0; u16::MAX as usize + 1],
             last_send: None,
         })
+    }
+
+    /// Binds a driver whose statistics are measured at the physical UDP
+    /// socket. This is intentionally below `ReliableUdpPeerStream`, whose
+    /// synthetic TCP-style frames never appear on the wire.
+    pub fn bind_with_statistics(
+        bind_address: SocketAddr,
+        statistics: crate::NetworkIoStatistics,
+    ) -> io::Result<Self> {
+        let mut driver = Self::bind(bind_address)?;
+        driver.statistics = Some(AttachedUdpConnectionStatistics(statistics.open_connection(
+            UDP_STATISTICS_CONNECTION_ID,
+            crate::NetworkProtocol::Udp,
+        )));
+        Ok(driver)
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -862,10 +898,13 @@ impl ReliableUdpSocketDriver {
         let sent_at_ms = self.elapsed().as_millis() as u32;
         let wire = encode_netpuncher_punch(sent_at_ms);
         self.last_send = Some(ReliableUdpLastSend::BestEffort);
-        self.socket
+        let sent = self.socket
             .send_to(&wire, reliable_udp_send_address(punchee_address))
-            .await
-            .map(|_| ())
+            .await?;
+        if let Some(statistics) = &self.statistics {
+            statistics.record_output(sent);
+        }
+        Ok(())
     }
 
     pub async fn connect(&mut self, peer: SocketAddr) -> io::Result<Vec<ReliableUdpEvent>> {
@@ -890,7 +929,12 @@ impl ReliableUdpSocketDriver {
         tokio::select! {
             result = self.socket.recv_from(&mut self.receive_buffer) => {
                 match result {
-                    Ok((length, source)) => ReliableUdpPollReady::Datagram(length, source),
+                    Ok((length, source)) => {
+                        if let Some(statistics) = &self.statistics {
+                            statistics.record_input(length);
+                        }
+                        ReliableUdpPollReady::Datagram(length, source)
+                    }
                     Err(error) => ReliableUdpPollReady::SocketError(error),
                 }
             }
@@ -1060,13 +1104,20 @@ impl ReliableUdpSocketDriver {
             } else {
                 ReliableUdpLastSend::BestEffort
             });
-            if let Err(error) = self
+            match self
                 .socket
                 .send_to(&datagram.payload, datagram.destination)
                 .await
             {
-                if peer_backed {
-                    first_send_error.get_or_insert((error, peer));
+                Ok(sent) => {
+                    if let Some(statistics) = &self.statistics {
+                        statistics.record_output(sent);
+                    }
+                }
+                Err(error) => {
+                    if peer_backed {
+                        first_send_error.get_or_insert((error, peer));
+                    }
                 }
             }
         }
@@ -2170,5 +2221,52 @@ mod tests {
                 .is_err(),
             "a repeated close must not emit another datagram"
         );
+    }
+
+    #[tokio::test]
+    async fn l143_socket_driver_drop_closes_statistics_route() {
+        let statistics = crate::NetworkIoStatistics::new(0);
+        let key = crate::ConnectionStatisticsKey::new(
+            UDP_STATISTICS_CONNECTION_ID,
+            crate::NetworkProtocol::Udp,
+        );
+        let wildcard = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
+
+        let driver =
+            ReliableUdpSocketDriver::bind_with_statistics(wildcard, statistics.clone()).unwrap();
+        assert!(statistics.connection_statistics(key).is_some());
+        drop(driver);
+
+        assert_eq!(statistics.connection_statistics(key), None);
+        assert!(statistics.snapshot().connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn l143_socket_driver_statistics_count_physical_udp_datagrams() {
+        let statistics = crate::NetworkIoStatistics::new(0);
+        let wildcard = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
+        let mut driver =
+            ReliableUdpSocketDriver::bind_with_statistics(wildcard, statistics.clone()).unwrap();
+        let spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let mut buffer = [0; 64];
+
+        driver.punch(spy.local_addr().unwrap()).await.unwrap();
+        let (_, driver_address) =
+            tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        spy.send_to(&[0x7f], driver_address).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), driver.poll())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(statistics.generate_statistics(1_001));
+        let udp = statistics.protocol_statistics(crate::NetworkProtocol::Udp);
+        assert!(udp.input_rate > 0);
+        assert!(udp.output_rate > 0);
     }
 }

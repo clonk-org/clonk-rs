@@ -653,6 +653,16 @@ impl ReliableUdpSessionHub {
         Self::from_driver(ReliableUdpSocketDriver::bind(bind_address)?)
     }
 
+    pub fn bind_with_statistics(
+        bind_address: SocketAddr,
+        statistics: crate::NetworkIoStatistics,
+    ) -> io::Result<Self> {
+        Self::from_driver(ReliableUdpSocketDriver::bind_with_statistics(
+            bind_address,
+            statistics,
+        )?)
+    }
+
     pub fn from_driver(driver: ReliableUdpSocketDriver) -> io::Result<Self> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
             io::Error::new(

@@ -27,6 +27,7 @@ use lc_engine::{ClientCoreControlData, LegacyCString, PlayerInfoUpdateRequest};
 use std::convert::TryFrom;
 use std::io;
 use std::mem::size_of;
+use std::ops::Deref;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -315,12 +316,30 @@ fn cpp_frame_body_size(size: usize) -> Result<u32, TransportError> {
 #[derive(Debug)]
 pub struct ControlTransport<S> {
     stream: S,
+    statistics: Option<AttachedConnectionStatistics>,
     outbound_packet_log: crate::RecoverablePacketLog,
     /// Accumulated inbound bytes; a partial frame stays buffered here so a
     /// dropped `read_message` future never loses stream position. Mirrors
     /// `C4NetIOTCP::Peer::IBuf` (src/C4NetIO.cpp:1415): incomplete frames are
     /// retained until more bytes arrive.
     read_buf: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct AttachedConnectionStatistics(crate::ConnectionStatisticsRecorder);
+
+impl Deref for AttachedConnectionStatistics {
+    type Target = crate::ConnectionStatisticsRecorder;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for AttachedConnectionStatistics {
+    fn drop(&mut self) {
+        self.0.close();
+    }
 }
 
 impl<S> ControlTransport<S>
@@ -330,9 +349,30 @@ where
     pub fn new(stream: S) -> Self {
         Self {
             stream,
+            statistics: None,
             outbound_packet_log: crate::RecoverablePacketLog::default(),
             read_buf: Vec::new(),
         }
+    }
+
+    /// Attaches one live route recorder to the transport's actual stream I/O.
+    /// Reliable-UDP streams deliberately do not use this hook: their in-memory
+    /// framing adapter is not the wire boundary, so the UDP socket driver owns
+    /// that accounting instead.
+    pub fn with_statistics(
+        stream: S,
+        statistics: crate::ConnectionStatisticsRecorder,
+    ) -> Self {
+        Self {
+            stream,
+            statistics: Some(AttachedConnectionStatistics(statistics)),
+            outbound_packet_log: crate::RecoverablePacketLog::default(),
+            read_buf: Vec::new(),
+        }
+    }
+
+    pub fn set_statistics(&mut self, statistics: crate::ConnectionStatisticsRecorder) {
+        self.statistics = Some(AttachedConnectionStatistics(statistics));
     }
 
     /// Returns the underlying stream, discarding any buffered partial frame.
@@ -381,6 +421,9 @@ where
             let read = self.stream.read(&mut chunk).await?;
             if read == 0 {
                 return Err(TransportError::Io(io::ErrorKind::UnexpectedEof.into()));
+            }
+            if let Some(statistics) = &self.statistics {
+                statistics.record_input(read);
             }
             self.read_buf.extend_from_slice(&chunk[..read]);
         }
@@ -574,6 +617,9 @@ where
         self.outbound_packet_log
             .record_outbound(frame[FRAME_HEADER_LEN..].to_vec());
         self.stream.write_all(&frame).await?;
+        if let Some(statistics) = &self.statistics {
+            statistics.record_output(frame.len());
+        }
         self.stream.flush().await?;
         Ok(())
     }
@@ -595,6 +641,9 @@ where
         frame.extend_from_slice(packet);
         self.outbound_packet_log.record_outbound(packet.to_vec());
         self.stream.write_all(&frame).await?;
+        if let Some(statistics) = &self.statistics {
+            statistics.record_output(frame.len());
+        }
         self.stream.flush().await?;
         Ok(())
     }
@@ -2830,5 +2879,63 @@ mod tests {
             ControlMessage::Request { from_tick: 64 }
         );
         writer.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn l143_tcp_transport_statistics_record_successful_wire_reads_and_writes() {
+        let statistics = crate::NetworkIoStatistics::new(0);
+        let recorder = statistics.open_connection(17, NetworkProtocol::Tcp);
+        let key = recorder.key();
+        let (client, mut server) = duplex(128);
+        let mut transport = ControlTransport::with_statistics(client, recorder);
+        let ping = PingPacket {
+            sent_at: 123,
+            packet_counter: 4,
+        };
+        let inbound = ControlTransport::<tokio::io::DuplexStream>::encode_message_frame(
+            ControlMessage::Ping(ping),
+        )
+        .unwrap();
+        server.write_all(&inbound).await.unwrap();
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Ping(ping)
+        );
+        transport
+            .send_message(ControlMessage::Pong(ping))
+            .await
+            .unwrap();
+
+        assert!(statistics.generate_statistics(1_001));
+        let connection = statistics.connection_statistics(key).unwrap();
+        let expected = ((inbound.len() as u64 + crate::TCP_STATISTICS_HEADER_BYTES) * 1_000)
+            / 1_001;
+        assert_eq!(connection.input_rate, expected);
+        assert_eq!(connection.output_rate, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn l143_transport_drop_closes_statistics_route() {
+        let statistics = crate::NetworkIoStatistics::new(0);
+        let recorder = statistics.open_connection(23, NetworkProtocol::Tcp);
+        let key = recorder.key();
+        let (stream, _peer) = duplex(16);
+        let transport = ControlTransport::with_statistics(stream, recorder);
+
+        assert!(statistics.connection_statistics(key).is_some());
+        drop(transport);
+
+        assert_eq!(statistics.connection_statistics(key), None);
+        assert!(statistics.snapshot().connections.is_empty());
+
+        let recorder = statistics.open_connection(24, NetworkProtocol::Tcp);
+        let key = recorder.key();
+        let (stream, _peer) = duplex(16);
+        let transport = ControlTransport::with_statistics(stream, recorder);
+        let stream = transport.into_inner();
+
+        assert_eq!(statistics.connection_statistics(key), None);
+        drop(stream);
     }
 }

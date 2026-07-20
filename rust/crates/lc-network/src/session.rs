@@ -9,7 +9,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
@@ -38,6 +38,13 @@ const CLIENT_MESH_PENDING_LIMIT: usize = 64;
 const DEFAULT_CONTROL_TARGET_FPS: i64 = 38;
 const HOST_CLIENT_ID: ClientId = 0;
 static RESOURCE_RANDOM_STATE: AtomicU64 = AtomicU64::new(1);
+
+fn network_statistics_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis() as u64
+}
 
 fn resource_safe_random(range: usize) -> usize {
     if range == 0 {
@@ -805,11 +812,16 @@ pub struct HostHandle {
     shutdown_tx: Option<oneshot::Sender<()>>,
     join_handle: tokio::task::JoinHandle<()>,
     udp_local_addr: Option<SocketAddr>,
+    io_statistics: crate::NetworkIoStatistics,
 }
 
 impl HostHandle {
     pub fn udp_local_addr(&self) -> Option<SocketAddr> {
         self.udp_local_addr
+    }
+
+    pub fn io_statistics(&self) -> crate::NetworkIoStatistics {
+        self.io_statistics.clone()
     }
 
     pub fn events(&mut self) -> &mut mpsc::Receiver<HostEvent> {
@@ -1378,6 +1390,7 @@ struct PreparedClientMesh {
     udp_hub: Option<crate::ReliableUdpSessionHub>,
     puncher_events: Option<mpsc::Receiver<crate::NetpuncherIoEvent>>,
     puncher_init: Arc<Mutex<ClientPuncherInitState>>,
+    io_statistics: crate::NetworkIoStatistics,
 }
 
 struct ClientPuncherInitState {
@@ -1397,6 +1410,8 @@ async fn prepare_client_mesh(
     config: &ClientConfig,
     require_udp: bool,
 ) -> Result<PreparedClientMesh, ClientError> {
+    let io_statistics =
+        crate::NetworkIoStatistics::new(network_statistics_now_ms());
     let mut first_bind_error = None;
     let tcp_listener = match config.mesh_tcp_bind_address {
         Some(bind_address) => match bind_client_mesh_tcp_listener(bind_address).await {
@@ -1416,7 +1431,10 @@ async fn prepare_client_mesh(
             .then_some(SocketAddr::from(([0_u16; 8], 0)))
     });
     let mut udp_hub = match udp_bind_address {
-        Some(bind_address) => match crate::ReliableUdpSessionHub::bind(bind_address) {
+        Some(bind_address) => match crate::ReliableUdpSessionHub::bind_with_statistics(
+            bind_address,
+            io_statistics.clone(),
+        ) {
             Ok(hub) => Some(hub),
             Err(error) => {
                 first_bind_error.get_or_insert_with(|| {
@@ -1547,6 +1565,7 @@ async fn prepare_client_mesh(
         udp_hub,
         puncher_events,
         puncher_init,
+        io_statistics,
     })
 }
 
@@ -1556,10 +1575,13 @@ async fn prepare_client_mesh(
 pub struct HostUdpBinding {
     hub: Option<crate::ReliableUdpSessionHub>,
     start_error: Option<String>,
+    io_statistics: crate::NetworkIoStatistics,
 }
 
 impl HostUdpBinding {
     pub fn bind(config: &HostConfig) -> Self {
+        let io_statistics =
+            crate::NetworkIoStatistics::new(network_statistics_now_ms());
         let udp_bind_address = (config.configured_udp_port != Some(0))
             .then(|| {
                 config.udp_bind_address.or_else(|| {
@@ -1569,21 +1591,27 @@ impl HostUdpBinding {
             })
             .flatten();
         match udp_bind_address {
-            Some(bind_address) => match crate::ReliableUdpSessionHub::bind(bind_address) {
+            Some(bind_address) => match crate::ReliableUdpSessionHub::bind_with_statistics(
+                bind_address,
+                io_statistics.clone(),
+            ) {
                 Ok(hub) => Self {
                     hub: Some(hub),
                     start_error: None,
+                    io_statistics,
                 },
                 Err(error) => Self {
                     hub: None,
                     start_error: Some(format!(
                         "failed to start reliable-UDP listener at {bind_address}: {error}"
                     )),
+                    io_statistics,
                 },
             },
             None => Self {
                 hub: None,
                 start_error: None,
+                io_statistics,
             },
         }
     }
@@ -1639,6 +1667,7 @@ async fn start_host_with_udp_binding_and_backend(
     let HostUdpBinding {
         hub: udp_hub,
         start_error: udp_start_error,
+        io_statistics,
     } = udp_binding;
     let tcp_local_addr = listener
         .as_ref()
@@ -1652,6 +1681,7 @@ async fn start_host_with_udp_binding_and_backend(
     let (command_tx, command_rx) = mpsc::channel::<HostCommand>(64);
     let (event_tx, event_rx) = mpsc::channel::<HostEvent>(64);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let task_io_statistics = io_statistics.clone();
     let join_handle = tokio::spawn(async move {
         run_host(
             listener,
@@ -1659,6 +1689,7 @@ async fn start_host_with_udp_binding_and_backend(
             udp_start_error,
             config,
             resource_backend,
+            task_io_statistics,
             command_rx,
             event_tx.clone(),
             shutdown_rx,
@@ -1674,6 +1705,7 @@ async fn start_host_with_udp_binding_and_backend(
         shutdown_tx: Some(shutdown_tx),
         join_handle,
         udp_local_addr,
+        io_statistics,
     })
 }
 
@@ -1966,6 +1998,7 @@ async fn connect_client_stream_attempt<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let io_statistics = client_mesh.io_statistics.clone();
     let ClientConfig {
         name,
         group_maker,
@@ -1990,13 +2023,19 @@ where
         nick: wire_name,
         lobby_ready: false,
     };
+    let primary_connection_id = 0;
     let request = crate::ConnectionRequest {
         core: local_core.clone(),
         build: CURRENT_GAME_BUILD,
         password: password.clone(),
-        connection_id: 0,
+        connection_id: primary_connection_id,
     };
     let mut transport = crate::ControlTransport::new(stream);
+    if matches!(host_protocol, crate::NetworkProtocol::Tcp) {
+        transport.set_statistics(
+            io_statistics.open_connection(primary_connection_id, crate::NetworkProtocol::Tcp),
+        );
+    }
     let bootstrap = match liveness {
         Some(liveness) => {
             crate::connection_handshake::run_client_connection_handshake_with_liveness(
@@ -2030,6 +2069,7 @@ where
     })?;
     let primary_local_connection_id = bootstrap.local_connection_id;
     let primary_remote_connection_id = bootstrap.remote_connection_id;
+    debug_assert_eq!(primary_local_connection_id, primary_connection_id);
     let primary_liveness = bootstrap.liveness.clone();
     let host_core = bootstrap.peer_core.clone();
     let mut join_data = bootstrap.join_data;
@@ -2373,6 +2413,7 @@ where
         expected_host_core: host_core.clone(),
         password: password.clone(),
         connection_ids: connection_ids.clone(),
+        io_statistics: io_statistics.clone(),
     });
     let pending_secondary = if secondary_udp_addr.is_some() {
         udp_reconnect.as_mut().map(ClientUdpReconnect::start)
@@ -2390,6 +2431,7 @@ where
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join_handle = tokio::spawn(run_client_loop_with_routes(
         routes,
+        io_statistics.clone(),
         command_rx,
         event_tx,
         shutdown_rx,
@@ -2418,6 +2460,7 @@ where
         join_handle,
         client_id,
         join_data: Some(join_data),
+        io_statistics,
     })
 }
 
@@ -2464,6 +2507,7 @@ async fn connect_mesh_tcp_route(
     expected_peer_core: lc_engine::ClientCoreControlData,
     password: lc_engine::LegacyCString,
     connection_id: u32,
+    io_statistics: crate::NetworkIoStatistics,
 ) -> Result<ConnectedMeshRoute, ClientError> {
     let initiator_id = ClientId::try_from(local_core.client_id).unwrap_or(ClientId::MAX);
     let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(addr))
@@ -2477,7 +2521,10 @@ async fn connect_mesh_tcp_route(
         .map_err(ClientError::Connect)?;
     stream.set_nodelay(true).ok();
     let peer_addr = stream.peer_addr().map_err(ClientError::Connect)?;
-    let mut transport = crate::ControlTransport::new(stream);
+    let mut transport = crate::ControlTransport::with_statistics(
+        stream,
+        io_statistics.open_connection(connection_id, crate::NetworkProtocol::Tcp),
+    );
     let handshake = crate::connection_handshake::run_known_peer_connection_handshake(
         &mut transport,
         crate::ConnectionRequest {
@@ -2561,6 +2608,7 @@ async fn connect_mesh_tcp_socket_route(
     password: lc_engine::LegacyCString,
     connection_id: u32,
     delay: Duration,
+    io_statistics: crate::NetworkIoStatistics,
 ) -> Result<ConnectedMeshRoute, ClientError> {
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
@@ -2576,7 +2624,10 @@ async fn connect_mesh_tcp_socket_route(
         .map_err(ClientError::Connect)?;
     stream.set_nodelay(true).ok();
     let peer_addr = stream.peer_addr().map_err(ClientError::Connect)?;
-    let mut transport = crate::ControlTransport::new(stream);
+    let mut transport = crate::ControlTransport::with_statistics(
+        stream,
+        io_statistics.open_connection(connection_id, crate::NetworkProtocol::Tcp),
+    );
     let handshake = crate::connection_handshake::run_known_peer_connection_handshake(
         &mut transport,
         crate::ConnectionRequest {
@@ -2627,9 +2678,13 @@ async fn accept_mesh_tcp_route(
     canonical_peer_cores: BTreeMap<i32, lc_engine::ClientCoreControlData>,
     password: lc_engine::LegacyCString,
     connection_id: u32,
+    io_statistics: crate::NetworkIoStatistics,
 ) -> Result<ConnectedMeshRoute, ClientError> {
     stream.set_nodelay(true).ok();
-    let mut transport = crate::ControlTransport::new(stream);
+    let mut transport = crate::ControlTransport::with_statistics(
+        stream,
+        io_statistics.open_connection(connection_id, crate::NetworkProtocol::Tcp),
+    );
     let handshake = crate::connection_handshake::run_registered_peer_connection_handshake(
         &mut transport,
         crate::ConnectionRequest {
@@ -2734,6 +2789,7 @@ fn spawn_mesh_dial(
     connection_ids: &Arc<AtomicU32>,
     interface_ids: &[u32],
     udp_handle: Option<&crate::ReliableUdpSessionHandle>,
+    io_statistics: &crate::NetworkIoStatistics,
 ) {
     let Ok(peer_id_wire) = ClientId::try_from(peer_id) else {
         return;
@@ -2769,6 +2825,7 @@ fn spawn_mesh_dial(
             }
             let local_core = local_core.clone();
             let connection_ids = connection_ids.clone();
+            let io_statistics = io_statistics.clone();
             pending.spawn(async move {
                 let mut last_error = None;
                 for endpoint in endpoints {
@@ -2781,6 +2838,7 @@ fn spawn_mesh_dial(
                         peer_core.clone(),
                         lc_engine::LegacyCString::default(),
                         connection_id,
+                        io_statistics.clone(),
                     )
                     .await
                     {
@@ -2989,6 +3047,7 @@ struct ClientTcpReconnect {
     expected_host_core: lc_engine::ClientCoreControlData,
     password: lc_engine::LegacyCString,
     connection_ids: Arc<AtomicU32>,
+    io_statistics: crate::NetworkIoStatistics,
 }
 
 impl ClientTcpReconnect {
@@ -3000,6 +3059,7 @@ impl ClientTcpReconnect {
             self.expected_host_core.clone(),
             self.password.clone(),
             connection_id,
+            self.io_statistics.clone(),
         ))
     }
 }
@@ -3034,6 +3094,7 @@ async fn connect_secondary_tcp_route(
     expected_host_core: lc_engine::ClientCoreControlData,
     password: lc_engine::LegacyCString,
     connection_id: u32,
+    io_statistics: crate::NetworkIoStatistics,
 ) -> Result<ConnectedClientRoute<TcpStream>, ClientError> {
     let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(addr))
         .await
@@ -3046,7 +3107,10 @@ async fn connect_secondary_tcp_route(
         .map_err(ClientError::Connect)?;
     stream.set_nodelay(true).ok();
     let peer_addr = stream.peer_addr().map_err(ClientError::Connect)?;
-    let mut transport = crate::ControlTransport::new(stream);
+    let mut transport = crate::ControlTransport::with_statistics(
+        stream,
+        io_statistics.open_connection(connection_id, crate::NetworkProtocol::Tcp),
+    );
     let handshake = crate::connection_handshake::run_client_route_handshake(
         &mut transport,
         crate::ConnectionRequest {
@@ -3305,9 +3369,14 @@ pub struct ClientHandle {
     join_handle: tokio::task::JoinHandle<()>,
     client_id: ClientId,
     join_data: Option<JoinDataEnvelope>,
+    io_statistics: crate::NetworkIoStatistics,
 }
 
 impl ClientHandle {
+    pub fn io_statistics(&self) -> crate::NetworkIoStatistics {
+        self.io_statistics.clone()
+    }
+
     pub fn events(&mut self) -> &mut mpsc::Receiver<ClientEvent> {
         self.event_rx
             .as_mut()
@@ -5121,6 +5190,7 @@ async fn run_host(
     udp_start_error: Option<String>,
     config: HostConfig,
     resource_backend: Option<crate::ResourceTransferBackend>,
+    io_statistics: crate::NetworkIoStatistics,
     mut commands: mpsc::Receiver<HostCommand>,
     event_tx: mpsc::Sender<HostEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
@@ -5333,6 +5403,7 @@ async fn run_host(
                             addr,
                             state.config.local_core.clone(),
                             connection_id,
+                            io_statistics.clone(),
                             admission_tx.clone(),
                             client_tx.clone(),
                         );
@@ -5362,6 +5433,7 @@ async fn run_host(
                             crate::NetworkProtocol::Udp,
                             state.config.local_core.clone(),
                             connection_id,
+                            io_statistics.clone(),
                             admission_tx.clone(),
                             client_tx.clone(),
                         );
@@ -5673,6 +5745,7 @@ async fn run_host(
                 request_missing_controls(&mut state).await;
             }
             _ = resource_timer.tick() => {
+                io_statistics.generate_statistics(network_statistics_now_ms());
                 // C4Network2IO::CheckTimeout removes closed routes once their
                 // ten-second post-mortem recovery window has elapsed.
                 state.closed_routes.expire();
@@ -5715,6 +5788,7 @@ fn spawn_host_accept(
     addr: SocketAddr,
     local_core: lc_engine::ClientCoreControlData,
     connection_id: u32,
+    io_statistics: crate::NetworkIoStatistics,
     admission_tx: mpsc::Sender<HostAdmissionRequest>,
     host_tx: mpsc::Sender<HostLoopMessage>,
 ) {
@@ -5732,6 +5806,7 @@ fn spawn_host_accept(
         crate::NetworkProtocol::Tcp,
         local_core,
         connection_id,
+        io_statistics,
         admission_tx,
         host_tx,
     );
@@ -5744,6 +5819,7 @@ fn spawn_host_transport<S>(
     protocol: crate::NetworkProtocol,
     local_core: lc_engine::ClientCoreControlData,
     connection_id: u32,
+    io_statistics: crate::NetworkIoStatistics,
     admission_tx: mpsc::Sender<HostAdmissionRequest>,
     host_tx: mpsc::Sender<HostLoopMessage>,
 ) where
@@ -5757,6 +5833,11 @@ fn spawn_host_transport<S>(
             connection_id,
         };
         let mut transport = crate::ControlTransport::new(stream);
+        if matches!(protocol, crate::NetworkProtocol::Tcp) {
+            transport.set_statistics(
+                io_statistics.open_connection(connection_id, crate::NetworkProtocol::Tcp),
+            );
+        }
         let handshake =
             match run_host_connection_handshake(&mut transport, request, &admission_tx).await {
                 Ok(handshake) => handshake,
@@ -9215,6 +9296,7 @@ async fn run_client_loop_with_addresses<S>(
     );
     run_client_loop_with_routes(
         routes,
+        crate::NetworkIoStatistics::new(network_statistics_now_ms()),
         commands,
         event_tx,
         shutdown_rx,
@@ -9241,6 +9323,7 @@ async fn run_client_loop_with_addresses<S>(
 
 async fn run_client_loop_with_routes(
     mut transport: ClientRouteManager,
+    io_statistics: crate::NetworkIoStatistics,
     mut commands: mpsc::Receiver<ClientCommand>,
     event_tx: mpsc::Sender<ClientEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
@@ -9512,6 +9595,7 @@ async fn run_client_loop_with_routes(
                     let mut known_peers = client_cores.clone();
                     known_peers.remove(&local_core.client_id);
                     let local_core = local_core.clone();
+                    let io_statistics = io_statistics.clone();
                     pending_mesh_routes.spawn(async move {
                         let result = accept_mesh_tcp_route(
                             stream,
@@ -9520,6 +9604,7 @@ async fn run_client_loop_with_routes(
                             known_peers,
                             lc_engine::LegacyCString::default(),
                             connection_id,
+                            io_statistics,
                         )
                         .await;
                         MeshRouteCompletion {
@@ -9961,6 +10046,7 @@ async fn run_client_loop_with_routes(
                                     &connection_ids,
                                     &mesh_interface_ids,
                                     mesh_udp_handle.as_ref(),
+                                    &io_statistics,
                                 );
                             }
                         }
@@ -9970,6 +10056,7 @@ async fn run_client_loop_with_routes(
                 }
             }
             _ = resource_timer.tick() => {
+                io_statistics.generate_statistics(network_statistics_now_ms());
                 transport.expire_closed_routes();
                 let mesh_now = mesh_epoch.elapsed();
                 let due_peers = mesh_peers
@@ -10020,6 +10107,7 @@ async fn run_client_loop_with_routes(
                             &connection_ids,
                             &mesh_interface_ids,
                             mesh_udp_handle.as_ref(),
+                            &io_statistics,
                         );
                     }
                 }
@@ -10336,6 +10424,7 @@ async fn run_client_loop_with_routes(
                                 &connection_ids,
                                 &mesh_interface_ids,
                                 mesh_udp_handle.as_ref(),
+                                &io_statistics,
                             );
                         }
                         let insertion = crate::append_received_address(
@@ -10437,6 +10526,7 @@ async fn run_client_loop_with_routes(
                             connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
                         let endpoint = packet.address.endpoint;
                         let local_core = local_core.clone();
+                        let io_statistics = io_statistics.clone();
                         pending_mesh_routes.spawn(async move {
                             let result = connect_mesh_tcp_socket_route(
                                 peer_id,
@@ -10448,6 +10538,7 @@ async fn run_client_loop_with_routes(
                                 lc_engine::LegacyCString::default(),
                                 connection_id,
                                 delay,
+                                io_statistics,
                             )
                             .await;
                             MeshRouteCompletion {
@@ -12956,6 +13047,7 @@ mod tests {
             shutdown_tx: Some(shutdown_tx),
             join_handle: tokio::spawn(async {}),
             udp_local_addr: None,
+            io_statistics: crate::NetworkIoStatistics::new(0),
         };
         let setter = tokio::spawn(async move { handle.set_join_allowed(true).await });
 
@@ -12986,6 +13078,7 @@ mod tests {
             shutdown_tx: Some(shutdown_tx),
             join_handle: tokio::spawn(async {}),
             udp_local_addr: None,
+            io_statistics: crate::NetworkIoStatistics::new(0),
         };
         let status = NetworkStatus {
             state: NETWORK_STATE_GO,
@@ -13026,6 +13119,7 @@ mod tests {
             shutdown_tx: Some(shutdown_tx),
             join_handle: tokio::spawn(async {}),
             udp_local_addr: None,
+            io_statistics: crate::NetworkIoStatistics::new(0),
         };
         let status = NetworkStatus {
             state: NETWORK_STATE_GO,
@@ -13095,6 +13189,7 @@ mod tests {
             shutdown_tx: Some(shutdown_tx),
             join_handle: tokio::spawn(async {}),
             udp_local_addr: None,
+            io_statistics: crate::NetworkIoStatistics::new(0),
         };
         let secret = lc_engine::LegacyCString::from_bytes(b"secret".to_vec()).unwrap();
         let setter = tokio::spawn(async move { handle.set_password(Some(secret)).await });
@@ -14561,6 +14656,7 @@ mod tests {
             shutdown_tx: Some(shutdown_tx),
             join_handle,
             udp_local_addr: None,
+            io_statistics: crate::NetworkIoStatistics::new(0),
         };
 
         timeout(EVENT_WAIT, handle.shutdown())
@@ -14597,6 +14693,7 @@ mod tests {
             join_handle,
             client_id: 1,
             join_data: None,
+            io_statistics: crate::NetworkIoStatistics::new(0),
         };
 
         timeout(EVENT_WAIT, handle.shutdown())
@@ -15708,6 +15805,7 @@ mod tests {
             join_handle: tokio::spawn(async {}),
             client_id: 1,
             join_data: None,
+            io_statistics: crate::NetworkIoStatistics::new(0),
         };
         let dynamic_id = dynamic.id;
         let removal = tokio::spawn(async move { handle.remove_resource(dynamic_id).await });
@@ -16176,6 +16274,7 @@ mod tests {
             join_handle,
             client_id: 7,
             join_data: Some(join_data),
+            io_statistics: crate::NetworkIoStatistics::new(0),
         };
 
         let core = handle.publish_player_resource(request).await.unwrap();
@@ -23434,6 +23533,7 @@ mod tests {
             )),
             client_id: 1,
             join_data: None,
+            io_statistics: crate::NetworkIoStatistics::new(0),
         };
 
         handle.graceful_part().await.expect("graceful client part");
