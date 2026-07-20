@@ -10217,6 +10217,30 @@ struct ActiveViewportEdgeScroll {
     edge: ViewportEdgeScroll,
 }
 
+const FREE_VIEW_SCROLL_MOMENTUM_WINDOW: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy, Debug, Default)]
+struct FreeViewScrollMomentum {
+    velocity: Vector2,
+    most_recent: Option<Instant>,
+}
+
+impl FreeViewScrollMomentum {
+    fn apply(&mut self, requested: Vector2, now: Instant) -> Vector2 {
+        let carries = self.most_recent.is_some_and(|most_recent| {
+            now.checked_duration_since(most_recent)
+                .is_some_and(|elapsed| elapsed < FREE_VIEW_SCROLL_MOMENTUM_WINDOW)
+        });
+        let mut applied = requested;
+        if carries {
+            applied += self.velocity;
+        }
+        self.velocity = applied;
+        self.most_recent = Some(now);
+        applied
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RetainedViewportMouse {
     viewport_index: usize,
@@ -10595,6 +10619,10 @@ struct GameApp {
     /// every subsequently executed game tick applies it again until the
     /// pointer leaves the exact clamped viewport border.
     ingame_edge_scroll: Option<ActiveViewportEdgeScroll>,
+    /// C4GraphicsSystem::FreeScroll's process-presentation velocity and
+    /// MostRecentScrolling clock. Repeated bare arrows carry the complete
+    /// prior vector for 100ms without mutating deterministic player state.
+    free_view_scroll_momentum: FreeViewScrollMomentum,
     /// Presentation-only C4MouseControl caption timing and placement.
     ingame_mouse_caption: IngameMouseCaptionState,
     running_pointer_position: Option<GuiPoint>,
@@ -20480,6 +20508,7 @@ impl GameApp {
             ingame_mouse_init_centered: false,
             ingame_viewport_mouse: None,
             ingame_edge_scroll: None,
+            free_view_scroll_momentum: FreeViewScrollMomentum::default(),
             ingame_mouse_caption: IngameMouseCaptionState::default(),
             running_pointer_position: None,
             primary_pointer_left_down: false,
@@ -21238,6 +21267,7 @@ impl GameApp {
             hud_graphics,
         );
         graphics.inherit_liquid_animation_cycle(&self.graphics);
+        graphics.inherit_pending_observer_scroll(&self.graphics);
         graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
         graphics.set_game_palette(game_palette);
         graphics.set_liquid_animation(liquid_animation);
@@ -28425,6 +28455,15 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> bool {
+        self.handle_viewport_player_cycle_key_at(key, state, Instant::now())
+    }
+
+    fn handle_viewport_player_cycle_key_at(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+        now: Instant,
+    ) -> bool {
         if !self.viewport_cycle_scope_available() {
             return false;
         }
@@ -28436,18 +28475,25 @@ impl GameApp {
         }
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        if c4_modifiers.is_empty()
-            && matches!(
-                key,
-                VirtualKeyCode::Left
-                    | VirtualKeyCode::Right
-                    | VirtualKeyCode::Up
-                    | VirtualKeyCode::Down
-            )
-        {
-            // The earlier same-priority FreeViewScroll callbacks consume bare
-            // arrows before a custom NetObsNextPlayer binding can run.
-            return false;
+        if c4_modifiers.is_empty() {
+            let requested = match key {
+                VirtualKeyCode::Left => Some(Vector2::new(-5, 0)),
+                VirtualKeyCode::Right => Some(Vector2::new(5, 0)),
+                VirtualKeyCode::Up => Some(Vector2::new(0, -5)),
+                VirtualKeyCode::Down => Some(Vector2::new(0, 5)),
+                _ => None,
+            };
+            if let Some(requested) = requested {
+                let applied = self.free_view_scroll_momentum.apply(requested, now);
+                // Native mutates Viewports.front() after checking that a
+                // NO_OWNER-classified viewport exists. The active camera may
+                // not be projected yet, but the built-in callback still owns
+                // this key ahead of a custom NetObsNextPlayer binding.
+                if !self.graphics.scroll_observer_viewport(0, applied) {
+                    self.graphics.queue_primary_observer_scroll(applied);
+                }
+                return true;
+            }
         }
         let binding_matches = self.runtime_key_config().is_ok_and(|config| {
             config
@@ -116147,6 +116193,173 @@ ScenInfoArea=70,5,25,90
             .handle_key(VirtualKeyCode::N, ElementState::Pressed)
             .expect("owned viewport ignores a FreeView-only binding");
         assert_eq!(owned.film_view_player, None);
+    }
+
+    #[test]
+    fn l077_ownerless_arrow_scroll_carries_momentum_without_player_mutation() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        app.engine
+            .replace_player_viewports(
+                owner,
+                vec![lc_engine::PlayerViewport::new(Vector2::new(800, 180))
+                    .with_focus(Some(focus))],
+            )
+            .expect("place camera away from every scroll bound");
+        app.engine.set_local_players([]);
+        app.local_controls = LocalControlRegistry::default();
+        app.mouse_control = false;
+        app.snapshot = app.engine.snapshot();
+        app.film_view_player = Some(owner);
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("render the player-assigned physical observer viewport");
+
+        let initial = app.graphics.active_viewport_projections()[0];
+        assert_eq!(initial.owner, owner);
+        assert!(initial.is_no_owner_viewport);
+        assert!(app.primary_physical_viewport_is_no_owner());
+        let players_before = app.engine.snapshot().players;
+
+        app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+            .expect("production FreeView Left dispatch");
+        let production_left = app.graphics.active_viewport_projections()[0];
+        assert_eq!(production_left.target_x, initial.target_x - 5);
+        assert_eq!(production_left.target_y, initial.target_y);
+        app.handle_key(VirtualKeyCode::Left, ElementState::Released)
+            .expect("FreeView key-up has no callback");
+        assert_eq!(
+            app.graphics.active_viewport_projections()[0].target_x,
+            production_left.target_x
+        );
+
+        app.free_view_scroll_momentum = FreeViewScrollMomentum::default();
+        let start = app.graphics.active_viewport_projections()[0];
+        let now = Instant::now();
+        assert!(app.handle_viewport_player_cycle_key_at(
+            VirtualKeyCode::Left,
+            ElementState::Pressed,
+            now,
+        ));
+        let first_left = app.graphics.active_viewport_projections()[0];
+        assert_eq!(first_left.target_x, start.target_x - 5);
+        assert_eq!(first_left.target_y, start.target_y);
+
+        assert!(!app.handle_viewport_player_cycle_key_at(
+            VirtualKeyCode::Left,
+            ElementState::Released,
+            now + Duration::from_millis(25),
+        ));
+        assert_eq!(app.graphics.active_viewport_projections()[0], first_left);
+
+        assert!(app.handle_viewport_player_cycle_key_at(
+            VirtualKeyCode::Left,
+            ElementState::Pressed,
+            now + Duration::from_millis(50),
+        ));
+        let second_left = app.graphics.active_viewport_projections()[0];
+        assert_eq!(second_left.target_x, start.target_x - 15);
+        assert_eq!(second_left.target_y, start.target_y);
+
+        assert!(app.handle_viewport_player_cycle_key_at(
+            VirtualKeyCode::Up,
+            ElementState::Pressed,
+            now + Duration::from_millis(75),
+        ));
+        let cross_axis = app.graphics.active_viewport_projections()[0];
+        assert_eq!(cross_axis.target_x, start.target_x - 25);
+        assert_eq!(cross_axis.target_y, start.target_y - 5);
+
+        assert!(app.handle_viewport_player_cycle_key_at(
+            VirtualKeyCode::Right,
+            ElementState::Pressed,
+            now + Duration::from_millis(175),
+        ));
+        let reset_right = app.graphics.active_viewport_projections()[0];
+        assert_eq!(reset_right.target_x, start.target_x - 20);
+        assert_eq!(reset_right.target_y, start.target_y - 5);
+
+        assert!(app.handle_viewport_player_cycle_key_at(
+            VirtualKeyCode::Down,
+            ElementState::Pressed,
+            now + Duration::from_millis(275),
+        ));
+        let reset_down = app.graphics.active_viewport_projections()[0];
+        assert_eq!(reset_down.target_x, start.target_x - 20);
+        assert_eq!(reset_down.target_y, start.target_y);
+        assert_eq!(app.engine.snapshot().players, players_before);
+        assert_eq!(app.film_view_player, Some(owner));
+
+        let mut owned = new_running_sandbox_app();
+        let mut owned_frame = vec![0_u8; 320 * 200 * 4];
+        owned
+            .render(&mut owned_frame)
+            .expect("render the ordinary local-player viewport");
+        assert!(!owned.primary_physical_viewport_is_no_owner());
+        let owned_camera = owned.graphics.active_viewport_projections()[0];
+        owned
+            .engine
+            .player_mut(owned.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        for (binding, key, command) in [
+            (
+                ControlBindingId::Left,
+                VirtualKeyCode::Left,
+                lc_engine::COM_LEFT,
+            ),
+            (
+                ControlBindingId::Right,
+                VirtualKeyCode::Right,
+                lc_engine::COM_RIGHT,
+            ),
+            (
+                ControlBindingId::Up,
+                VirtualKeyCode::Up,
+                lc_engine::COM_UP,
+            ),
+            (
+                ControlBindingId::Down,
+                VirtualKeyCode::Down,
+                lc_engine::COM_DOWN,
+            ),
+        ] {
+            owned.bindings.rebind(binding, key);
+            owned
+                .handle_key(key, ElementState::Pressed)
+                .expect("owned arrow reaches its configured player control");
+            assert_ne!(
+                owned
+                    .engine
+                    .player(owned.local_owner)
+                    .expect("local player")
+                    .control
+                    .pressed_coms
+                    & (1 << command),
+                0,
+            );
+            owned
+                .handle_key(key, ElementState::Released)
+                .expect("owned arrow release reaches player control");
+            assert_eq!(
+                owned
+                    .engine
+                    .player(owned.local_owner)
+                    .expect("local player")
+                    .control
+                    .pressed_coms
+                    & (1 << command),
+                0,
+            );
+        }
+        let owned_after = owned.graphics.active_viewport_projections()[0];
+        assert_eq!(
+            (owned_after.target_x, owned_after.target_y),
+            (owned_camera.target_x, owned_camera.target_y)
+        );
+        assert!(owned.free_view_scroll_momentum.most_recent.is_none());
     }
 
     #[test]

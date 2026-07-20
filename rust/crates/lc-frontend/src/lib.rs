@@ -2639,6 +2639,10 @@ pub struct GraphicsSystem {
     game_palette: Arc<GamePalette>,
     active_viewports: Vec<ActiveViewport>,
     camera_states: HashMap<CameraKey, CameraState>,
+    /// FreeView input may arrive after a graphics rebuild but before the
+    /// first physical viewport is projected. Retain that primary-camera
+    /// displacement so the key press is not lost before the next render.
+    pending_primary_observer_scroll: Vector2,
     /// Gamma currently installed in CStdDDraw. A runtime SetGamma mutates the
     /// snapshot controls during the game tick, but C4GraphicsSystem applies
     /// them only after drawing that render pass; a fresh graphics system has
@@ -2726,6 +2730,7 @@ impl GraphicsSystem {
             game_palette: Arc::new(GamePalette::default()),
             active_viewports: Vec::new(),
             camera_states: HashMap::new(),
+            pending_primary_observer_scroll: Vector2::ZERO,
             active_gamma_control_points: None,
             render_phase_identity: Arc::new(()),
             render_phase_generation: 0,
@@ -2794,6 +2799,12 @@ impl GraphicsSystem {
     /// [`GraphicsSystem`] rebuild without exposing or synchronizing it.
     pub fn inherit_liquid_animation_cycle(&mut self, previous: &Self) {
         self.liquid_animation_cycle = previous.liquid_animation_cycle;
+    }
+
+    /// Preserve FreeView input across consecutive output rebuilds that occur
+    /// before any physical viewport has been projected.
+    pub fn inherit_pending_observer_scroll(&mut self, previous: &Self) {
+        self.pending_primary_observer_scroll = previous.pending_primary_observer_scroll;
     }
 
     pub fn set_sky(&mut self, sky: Option<SkyRenderState>) {
@@ -3012,10 +3023,16 @@ impl GraphicsSystem {
 
     /// Apply one direct C4MouseControl scroll step to an unassigned
     /// fullscreen observer viewport. Temporary film-view player assignment
-    /// does not change this physical classification. Returns false when no
-    /// classified observer camera state exists; a clamped scroll returns true.
+    /// does not change this physical classification. A primary scroll queued
+    /// before the first post-rebuild projection is applied by that render.
+    /// Returns false for any other missing or owned camera; a clamped scroll
+    /// returns true.
     pub fn scroll_observer_viewport(&mut self, index: usize, delta: Vector2) -> bool {
         let Some(viewport) = self.active_viewports.get(index) else {
+            if index == 0 && self.active_viewports.is_empty() {
+                self.queue_primary_observer_scroll(delta);
+                return true;
+            }
             return false;
         };
         if !viewport.is_no_owner_viewport {
@@ -3080,6 +3097,12 @@ impl GraphicsSystem {
         viewport.viewport_x = (view_x + border_left) as f32;
         viewport.viewport_y = (view_y + border_top) as f32;
         true
+    }
+
+    /// Queue a primary FreeView displacement after the app-level physical
+    /// NO_OWNER check when the live projection is absent or stale.
+    pub fn queue_primary_observer_scroll(&mut self, delta: Vector2) {
+        self.pending_primary_observer_scroll += delta;
     }
 
     /// Draw one selected C4MouseControl cursor from the resolution-selected
@@ -4089,11 +4112,21 @@ impl GraphicsSystem {
             slot: camera_slot,
         };
         let key = input.camera_identity.unwrap_or(key);
+        let pending_observer_scroll = if self.active_viewports.is_empty() {
+            let pending = std::mem::take(&mut self.pending_primary_observer_scroll);
+            if input.is_no_owner_viewport {
+                pending
+            } else {
+                Vector2::ZERO
+            }
+        } else {
+            Vector2::ZERO
+        };
 
         let state = self.camera_states.entry(key).or_insert_with(|| {
             CameraState::new(world_width, world_height, view_width, view_height)
         });
-        let (view_x, view_y) = if input.owner == OWNER_NONE {
+        let (mut view_x, mut view_y) = if input.owner == OWNER_NONE {
             if input.is_no_owner_viewport {
                 state.no_owner_position(view_width, view_height, world_width, world_height)
             } else {
@@ -4117,6 +4150,16 @@ impl GraphicsSystem {
             );
             position
         };
+        if pending_observer_scroll != Vector2::ZERO {
+            state.view_x = state.view_x.saturating_add(pending_observer_scroll.x);
+            state.view_y = state.view_y.saturating_add(pending_observer_scroll.y);
+            (view_x, view_y) = state.no_owner_position(
+                view_width,
+                view_height,
+                world_width,
+                world_height,
+            );
+        }
         let offset = if input.owner == OWNER_NONE {
             Vector2::ZERO
         } else {
@@ -17032,6 +17075,111 @@ mod tests {
         graphics.active_viewports[0].is_no_owner_viewport = false;
         assert!(!graphics.scroll_observer_viewport(0, Vector2::new(10, 0)));
         assert!(!graphics.scroll_observer_viewport(99, Vector2::new(10, 0)));
+    }
+
+    #[test]
+    fn observer_scroll_queued_before_projection_moves_the_first_rendered_camera() {
+        let snapshot = camera_world_snapshot();
+        let new_graphics = || {
+            GraphicsSystem::new(
+                100,
+                80,
+                80,
+                "Queued observer scroll",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            )
+        };
+        let input = || {
+            ViewportInput::new(
+                OWNER_NONE,
+                Vector2::new(500, 500),
+                1.0,
+                &snapshot.objects[0],
+            )
+            .with_physical_camera_identity(41, 0)
+        };
+
+        let mut baseline = new_graphics();
+        baseline.render_frame(&snapshot, &[input()]);
+        let baseline_projection = baseline.active_viewport_projections()[0];
+
+        let mut queued = new_graphics();
+        assert!(queued.active_viewports.is_empty());
+        assert!(queued.scroll_observer_viewport(0, Vector2::new(5, 0)));
+        assert!(queued.scroll_observer_viewport(0, Vector2::new(10, -5)));
+        assert_eq!(
+            queued.pending_primary_observer_scroll,
+            Vector2::new(15, -5)
+        );
+        let mut rebuilt = new_graphics();
+        rebuilt.inherit_pending_observer_scroll(&queued);
+        queued = new_graphics();
+        queued.inherit_pending_observer_scroll(&rebuilt);
+        assert_eq!(
+            queued.pending_primary_observer_scroll,
+            Vector2::new(15, -5),
+            "consecutive resize rebuilds preserve unprojected FreeView input"
+        );
+        queued.render_frame(&snapshot, &[input()]);
+
+        let projection = queued.active_viewport_projections()[0];
+        assert_eq!(projection.target_x, baseline_projection.target_x + 15);
+        assert_eq!(projection.target_y, baseline_projection.target_y - 5);
+        assert_eq!(queued.pending_primary_observer_scroll, Vector2::ZERO);
+    }
+
+    #[test]
+    fn queued_observer_scroll_replaces_a_stale_owned_projection() {
+        let snapshot = camera_world_snapshot();
+        let new_graphics = || {
+            GraphicsSystem::new(
+                100,
+                80,
+                80,
+                "Stale observer projection",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            )
+        };
+        let ownerless = || {
+            ViewportInput::ownerless(Vector2::new(500, 500), 1.0)
+                .with_physical_camera_identity(42, 0)
+        };
+
+        let mut baseline = new_graphics();
+        baseline.render_frame(&snapshot, &[ownerless()]);
+        let baseline_projection = baseline.active_viewport_projections()[0];
+
+        let mut transitioning = new_graphics();
+        transitioning.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                0,
+                Vector2::new(500, 500),
+                1.0,
+                &snapshot.objects[0],
+            )
+            .with_physical_camera_identity(41, 0)],
+        );
+        assert!(!transitioning.active_viewports[0].is_no_owner_viewport);
+        transitioning.drop_physical_camera(41);
+        let delta = Vector2::new(5, -5);
+        assert!(!transitioning.scroll_observer_viewport(0, delta));
+        transitioning.queue_primary_observer_scroll(delta);
+        transitioning.render_frame(&snapshot, &[ownerless()]);
+
+        let projection = transitioning.active_viewport_projections()[0];
+        assert_eq!(projection.target_x, baseline_projection.target_x + 5);
+        assert_eq!(projection.target_y, baseline_projection.target_y - 5);
+        assert_eq!(
+            transitioning.pending_primary_observer_scroll,
+            Vector2::ZERO
+        );
     }
 
     #[test]
