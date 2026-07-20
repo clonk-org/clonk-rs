@@ -10223,6 +10223,79 @@ fn resize_startup_player_image(image: &ImageData, maximum: u32) -> ImageData {
     ImageData::new(resized_width, resized_height, pixels)
 }
 
+fn load_startup_portrait_image(path: &Path) -> std::result::Result<ImageData, String> {
+    let rgba = image::open(path)
+        .map_err(|error| format!("failed to decode {}: {error}", path.display()))?
+        .into_rgba8();
+    let (width, height) = rgba.dimensions();
+    Ok(ImageData::new(width, height, rgba.into_raw()))
+}
+
+const DEFAULT_USER_PORTRAITS: [(&str, &str); 9] = [
+    ("Portrait1.png", "Clonk.png"),
+    ("PortraitBandit.png", "Bandit.png"),
+    ("PortraitIndianChief.png", "IndianChief.png"),
+    ("PortraitKing.png", "King.png"),
+    ("PortraitKnight.png", "Knight.png"),
+    ("PortraitMage.png", "Mage.png"),
+    ("PortraitPiranha.png", "Piranha.png"),
+    ("PortraitSheriff.png", "Sheriff.png"),
+    ("PortraitWipf.png", "Wipf.png"),
+];
+
+fn extract_default_startup_portraits_once(paths: &AppPaths) {
+    let config_path = paths.config_file();
+    let mut config = match Config::load(&config_path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+        Err(error) => {
+            tracing::warn!(%error, path = %config_path.display(), "failed to read portrait extraction flag");
+            return;
+        }
+    };
+    if config
+        .get_in(Some("General"), "UserPortraitsWritten")
+        .is_some_and(parse_config_bool)
+    {
+        return;
+    }
+
+    if let Err(error) = fs::create_dir_all(paths.user_data_dir()) {
+        tracing::warn!(%error, path = %paths.user_data_dir().display(), "failed to create portrait directory");
+    } else {
+        match main_graphics_group(paths) {
+            Ok(graphics) => {
+                for (source, destination) in DEFAULT_USER_PORTRAITS {
+                    let result = graphics
+                        .read_file(source)
+                        .map_err(|error| error.to_string())
+                        .and_then(|bytes| {
+                            fs::write(paths.user_data_dir().join(destination), bytes)
+                                .map_err(|error| error.to_string())
+                        });
+                    if let Err(error) = result {
+                        tracing::warn!(%error, source, destination, "failed to extract bundled portrait");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to open bundled portraits");
+            }
+        }
+    }
+
+    config.set_in(Some("General"), "UserPortraitsWritten", "1");
+    if let Some(parent) = config_path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            tracing::warn!(%error, path = %parent.display(), "failed to create config directory for portrait flag");
+            return;
+        }
+    }
+    if let Err(error) = config.save(&config_path) {
+        tracing::warn!(%error, path = %config_path.display(), "failed to persist portrait extraction flag");
+    }
+}
+
 fn startup_player_image_write(
     update: &lc_frontend::startup_plrproperties::PlayerImageUpdate,
 ) -> PlayerImageWrite {
@@ -22901,6 +22974,19 @@ impl GameApp {
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
+            let native_delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            let changed = self
+                .startup_player_properties_dialog
+                .as_mut()
+                .is_some_and(|pending| pending.controller.handle_wheel(native_delta));
+            if changed {
+                self.mark_menu_dirty();
+            }
             return Ok(());
         }
         if self.definition_selector.is_some() {
@@ -32451,6 +32537,7 @@ impl GameApp {
             ContextPending,
             Context,
             Input,
+            Properties,
             Advanced,
             Chat,
             GameOver,
@@ -32501,6 +32588,12 @@ impl GameApp {
                 ClusterOwner::Definition
             } else if self.game_option_input_dialog.is_some() {
                 ClusterOwner::Input
+            } else if self.startup_player_properties_dialog.is_some() {
+                if eligible_gamepad_gui {
+                    ClusterOwner::Properties
+                } else {
+                    ClusterOwner::Suppressed
+                }
             } else if self.startup_options_advanced_dialog.is_some() {
                 if eligible_gamepad_gui {
                     ClusterOwner::Advanced
@@ -32578,6 +32671,12 @@ impl GameApp {
                                     ClusterOwner::Suppressed
                                 } else if self.game_option_input_dialog.is_some() {
                                     ClusterOwner::Input
+                                } else if self.startup_player_properties_dialog.is_some() {
+                                    if eligible_gamepad_gui {
+                                        ClusterOwner::Properties
+                                    } else {
+                                        ClusterOwner::Suppressed
+                                    }
                                 } else if self.runtime_client_list_owns_game_over() {
                                     ClusterOwner::Suppressed
                                 } else if self.mode == AppMode::Running
@@ -32598,6 +32697,31 @@ impl GameApp {
                         ClusterOwner::Input => {
                             self.handle_game_option_input_dialog_gamepad_event(event)?;
                         }
+                        ClusterOwner::Properties => match event {
+                            GamepadEvent::GuiButton {
+                                class: GuiButtonClass::Low,
+                                ..
+                            } => {
+                                self.handle_gamepad_event(event)?;
+                                suppress_base_select_alias = true;
+                            }
+                            GamepadEvent::GuiButton {
+                                class: GuiButtonClass::High,
+                                ..
+                            } => {
+                                self.handle_gamepad_event(event)?;
+                                suppress_base_cancel_alias = true;
+                            }
+                            GamepadEvent::Action {
+                                action: GamepadActionType::Select,
+                                ..
+                            } if suppress_base_select_alias => {}
+                            GamepadEvent::Action {
+                                action: GamepadActionType::Cancel,
+                                ..
+                            } if suppress_base_cancel_alias => {}
+                            event => self.handle_gamepad_event(event)?,
+                        },
                         ClusterOwner::Advanced => match event {
                             GamepadEvent::GuiButton {
                                 class: GuiButtonClass::Low,
@@ -45101,53 +45225,154 @@ impl GameApp {
                     self.mark_menu_dirty();
                 }
                 PlayerPropertiesAction::ChoosePicture => {
-                    self.choose_next_startup_player_picture();
+                    self.open_startup_player_portrait_selector();
+                }
+                PlayerPropertiesAction::PortraitLocationChanged { index, path } => {
+                    self.reload_startup_player_portrait_location(index, &path);
+                }
+                PlayerPropertiesAction::ApplyPicture(commit) => {
+                    self.apply_startup_player_portrait_selection(commit);
                 }
                 PlayerPropertiesAction::Submit => self.save_open_startup_player_properties(),
             }
         }
     }
 
-    fn choose_next_startup_player_picture(&mut self) {
-        let Some((current, color)) = self
-            .startup_player_properties_dialog
-            .as_ref()
-            .map(|pending| {
-                (
-                    pending.controller.portrait_preview().cloned(),
-                    pending.controller.player().pref_color_dw,
-                )
-            })
-        else {
-            return;
-        };
-        let portraits = (1..=5)
-            .filter_map(|index| self.assets.dialog_image(&format!("Portrait{index}.png")))
-            .collect::<Vec<_>>();
-        if portraits.is_empty() {
+    fn open_startup_player_portrait_selector(&mut self) {
+        let Some(paths) = self.app_paths.as_ref() else {
             if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
                 pending.controller.set_validation_error(Some(
-                    "No stock player portraits are available".to_string(),
+                    "Application paths are unavailable".to_string(),
                 ));
             }
             return;
+        };
+        extract_default_startup_portraits_once(paths);
+        let user_path = paths.user_data_dir().to_path_buf();
+        let program_path = paths.install_root().to_path_buf();
+        let mut locations = vec![lc_frontend::startup_portraitsel::PortraitLocation::new(
+            "LegacyClonk User Path",
+            user_path.clone(),
+        )];
+        if program_path != user_path {
+            locations.push(lc_frontend::startup_portraitsel::PortraitLocation::new(
+                "LegacyClonk Program Directory",
+                program_path,
+            ));
         }
-        let current_index = current
-            .as_ref()
-            .and_then(|current| portraits.iter().position(|portrait| portrait == current));
-        let portrait = portraits[(current_index.map_or(0, |index| index + 1)) % portraits.len()]
-            .clone();
-        let portrait = resize_startup_player_image(&portrait, 150);
-        let big_icon = startup_player_big_icon(&portrait, color);
+        let entries = lc_frontend::startup_portraitsel::portrait_files_in_location(&user_path);
+        let (entries, scan_error) = match entries {
+            Ok(entries) => (entries, None),
+            Err(error) => (
+                Vec::new(),
+                Some(format!("failed to scan {}: {error}", user_path.display())),
+            ),
+        };
         if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
-            pending.controller.replace_images(portrait, big_icon);
+            pending
+                .controller
+                .open_portrait_selector(locations, 0, entries);
+            pending.controller.clear_validation_error();
+            if let Some(error) = scan_error {
+                pending.controller.set_portrait_selector_error(error);
+            }
+        }
+        self.startup_tooltip.pointer_left();
+        self.mark_menu_dirty();
+    }
+
+    fn reload_startup_player_portrait_location(&mut self, index: usize, path: &Path) {
+        match lc_frontend::startup_portraitsel::portrait_files_in_location(path) {
+            Ok(entries) => {
+                if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                    pending
+                        .controller
+                        .replace_portrait_location_entries(index, entries);
+                }
+            }
+            Err(error) => {
+                if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                    pending.controller.fail_portrait_location_entries(
+                        index,
+                        format!("failed to scan {}: {error}", path.display()),
+                    );
+                }
+            }
+        }
+        self.mark_menu_dirty();
+    }
+
+    fn apply_startup_player_portrait_selection(
+        &mut self,
+        commit: lc_frontend::startup_portraitsel::PortraitSelCommit,
+    ) {
+        use lc_frontend::startup_portraitsel::PortraitChoice;
+
+        let color = self
+            .startup_player_properties_dialog
+            .as_ref()
+            .map(|pending| pending.controller.player().pref_color_dw)
+            .unwrap_or_default();
+        let (portrait, big_icon) = match commit.choice {
+            PortraitChoice::None => (None, None),
+            PortraitChoice::File(path) => {
+                if !commit.set_picture && !commit.set_big_icon {
+                    (None, None)
+                } else {
+                    let image = match load_startup_portrait_image(&path) {
+                        Ok(image) => image,
+                        Err(error) => {
+                            if let Some(pending) =
+                                self.startup_player_properties_dialog.as_mut()
+                            {
+                                pending.controller.set_portrait_selector_error(error);
+                            }
+                            self.mark_menu_dirty();
+                            return;
+                        }
+                    };
+                    let portrait = commit
+                        .set_picture
+                        .then(|| resize_startup_player_image(&image, 150));
+                    let big_icon = commit
+                        .set_big_icon
+                        .then(|| startup_player_big_icon(&image, color));
+                    (portrait, big_icon)
+                }
+            }
+        };
+        if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+            pending.controller.apply_picture_selection(
+                portrait,
+                big_icon,
+                commit.set_picture,
+                commit.set_big_icon,
+            );
+            pending.controller.close_portrait_selector();
             pending.controller.clear_validation_error();
         }
         self.mark_menu_dirty();
     }
 
+    fn advance_startup_player_portrait_thumbnail(&mut self) {
+        let request = self
+            .startup_player_properties_dialog
+            .as_mut()
+            .and_then(|pending| pending.controller.advance_portrait_selector_idle());
+        let Some(request) = request else {
+            return;
+        };
+        let thumbnail = load_startup_portrait_image(&request.path)
+            .map(|image| resize_startup_player_image(&image, 100));
+        if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+            pending
+                .controller
+                .complete_portrait_thumbnail(&request, thumbnail);
+        }
+    }
+
     fn save_open_startup_player_properties(&mut self) {
-        let Some((origin, player, comment, portrait, mut big_icon)) = self
+        let Some((origin, player, comment, portrait, big_icon)) = self
             .startup_player_properties_dialog
             .as_ref()
             .map(|pending| {
@@ -45162,14 +45387,6 @@ impl GameApp {
         else {
             return;
         };
-        if let (PlayerImageWrite::Replace(portrait), PlayerImageWrite::Replace(_)) =
-            (&portrait, &big_icon)
-        {
-            big_icon = PlayerImageWrite::Replace(startup_player_big_icon(
-                portrait,
-                player.pref_color_dw,
-            ));
-        }
         let existing_path = match &origin {
             StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
             | StartupPlayerPropertiesOrigin::SelectionNew => None,
@@ -56754,6 +56971,7 @@ impl GameApp {
         match self.mode {
             AppMode::Menu => {
                 let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+                self.advance_startup_player_portrait_thumbnail();
                 self.preflight_startup_presentation()?;
                 self.preflight_visible_gui_overlay_resources()?;
                 if self.startup_view == StartupView::NetworkGame
@@ -97938,6 +98156,388 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(controller.big_icon_preview().is_some_and(|image| {
             image.width() <= 64 && image.height() <= 64
         }));
+    }
+
+    #[test]
+    fn l094_picture_button_opens_progressive_selector_and_none_preserves_unchecked_icon() {
+        let _lock = env_lock().lock();
+        let program_data = tempdir().expect("portrait program data");
+        let user_data = tempdir().expect("portrait user data");
+        fs::create_dir_all(program_data.path().join("planet/System.c4g"))
+            .expect("create program path marker");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(program_data.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover portrait paths");
+        paths.ensure_user_dirs().expect("create portrait user path");
+        write_preview_image(
+            &paths.user_data_dir().join("Custom.PNG"),
+            [12, 34, 56, 255],
+            image::ImageFormat::Png,
+        );
+        write_preview_image(
+            &program_data.path().join("Program.BMP"),
+            [65, 43, 21, 255],
+            image::ImageFormat::Bmp,
+        );
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.app_paths = Some(paths.clone());
+        app.open_new_startup_player_properties();
+        let old_portrait = ImageData::new(1, 1, vec![1, 2, 3, 255]);
+        let old_icon = ImageData::new(1, 1, vec![4, 5, 6, 255]);
+        let pending = app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("new player properties");
+        pending
+            .controller
+            .replace_images(old_portrait, old_icon.clone());
+        let old_icon_update = pending.controller.big_icon_update().clone();
+
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
+        ]);
+        let selector = app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .expect("Picture opens the nested selector");
+        assert_eq!(selector.locations().len(), 2);
+        assert_eq!(selector.locations()[0].path, paths.user_data_dir());
+        assert_eq!(selector.locations()[1].path, paths.install_root());
+        assert_eq!(
+            selector.items()[0].choice(),
+            &lc_frontend::startup_portraitsel::PortraitChoice::None
+        );
+        assert_eq!(selector.items().len(), 2);
+        assert!(matches!(
+            selector.items()[1].thumbnail(),
+            lc_frontend::startup_portraitsel::PortraitThumbnail::Pending
+        ));
+        assert_eq!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .expect("properties remain open")
+                .controller
+                .big_icon_update(),
+            &old_icon_update,
+            "opening the selector does not mutate either image intent"
+        );
+
+        app.advance_startup_player_portrait_thumbnail();
+        assert!(matches!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .and_then(|pending| pending.controller.portrait_selector())
+                .expect("selector remains open")
+                .items()[1]
+                .thumbnail(),
+            lc_frontend::startup_portraitsel::PortraitThumbnail::Ready(_)
+        ));
+
+        for _ in 0..5 {
+            let actions = app
+                .startup_player_properties_dialog
+                .as_mut()
+                .expect("properties remain open")
+                .controller
+                .handle_key_down(KeyCode::Tab);
+            assert!(actions.is_empty());
+        }
+        let actions = app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("properties remain open")
+            .controller
+            .handle_key_down(KeyCode::Right);
+        app.process_startup_player_properties_actions(actions);
+        let selector = app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .expect("selector remains open after changing location");
+        assert_eq!(selector.current_location_index(), 1);
+        assert_eq!(selector.items().len(), 2);
+        assert_eq!(selector.items()[1].filename(), Some("Program.BMP"));
+
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::ApplyPicture(
+                lc_frontend::startup_portraitsel::PortraitSelCommit {
+                    choice: lc_frontend::startup_portraitsel::PortraitChoice::None,
+                    set_picture: true,
+                    set_big_icon: false,
+                },
+            ),
+        ]);
+        let controller = &app
+            .startup_player_properties_dialog
+            .as_ref()
+            .expect("properties stay open after portrait commit")
+            .controller;
+        assert!(controller.portrait_selector().is_none());
+        assert_eq!(
+            controller.portrait_update(),
+            &lc_frontend::startup_plrproperties::PlayerImageUpdate::Clear
+        );
+        assert_eq!(controller.big_icon_update(), &old_icon_update);
+        assert_eq!(controller.big_icon_preview(), Some(&old_icon));
+
+        let before_portrait = controller.portrait_update().clone();
+        let before_icon = controller.big_icon_update().clone();
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
+        ]);
+        let actions = app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("properties remain open")
+            .controller
+            .handle_key_down(KeyCode::Escape);
+        assert!(actions.is_empty(), "selector cancel is handled by the parent controller");
+        let controller = &app
+            .startup_player_properties_dialog
+            .as_ref()
+            .expect("selector cancel must not close properties")
+            .controller;
+        assert!(controller.portrait_selector().is_none());
+        assert_eq!(controller.portrait_update(), &before_portrait);
+        assert_eq!(controller.big_icon_update(), &before_icon);
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn l094_first_portrait_selector_open_extracts_stock_portraits_once() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("portrait user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover portrait paths");
+        paths.ensure_user_dirs().expect("create portrait user path");
+        let graphics = main_graphics_group(&paths).expect("open bundled portraits");
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.app_paths = Some(paths.clone());
+        app.open_new_startup_player_properties();
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
+        ]);
+
+        for (source, destination) in DEFAULT_USER_PORTRAITS {
+            assert_eq!(
+                fs::read(paths.user_data_dir().join(destination))
+                    .expect("read extracted stock portrait"),
+                graphics
+                    .read_file(source)
+                    .expect("read source stock portrait")
+            );
+        }
+        let config = Config::load(paths.config_file()).expect("read extraction flag");
+        assert!(
+            config
+                .get_in(Some("General"), "UserPortraitsWritten")
+                .is_some_and(parse_config_bool)
+        );
+
+        let clonk_path = paths.user_data_dir().join("Clonk.png");
+        fs::write(&clonk_path, b"user replacement").expect("replace extracted portrait");
+        let actions = app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("properties remain open")
+            .controller
+            .handle_key_down(KeyCode::Escape);
+        assert!(actions.is_empty());
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
+        ]);
+        assert_eq!(
+            fs::read(clonk_path).expect("read retained replacement"),
+            b"user replacement",
+            "the persisted flag makes stock extraction one-shot"
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn l094_portrait_selector_consumes_the_gamepad_select_alias_cluster() {
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_new_startup_player_properties();
+        let pending = app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("new player properties");
+        pending.controller.replace_images(
+            ImageData::new(1, 1, vec![1, 2, 3, 255]),
+            ImageData::new(1, 1, vec![4, 5, 6, 255]),
+        );
+        pending.controller.open_portrait_selector(
+            vec![lc_frontend::startup_portraitsel::PortraitLocation::new(
+                "User",
+                PathBuf::from("."),
+            )],
+            0,
+            Vec::new(),
+        );
+        assert!(pending
+            .controller
+            .handle_key_down(KeyCode::Down)
+            .is_empty());
+        assert_eq!(
+            pending
+                .controller
+                .portrait_selector()
+                .and_then(|selector| selector.selected_index()),
+            Some(0)
+        );
+
+        let slot = GamepadSlot::new(0);
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                slot,
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                slot,
+                action: GamepadActionType::Select,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("portrait selector owns the complete physical input cluster");
+
+        let controller = &app
+            .startup_player_properties_dialog
+            .as_ref()
+            .expect("the abstract Select alias must not submit the parent properties dialog")
+            .controller;
+        assert!(controller.portrait_selector().is_none());
+        assert!(controller.validation_error().is_none());
+        assert_eq!(
+            controller.portrait_update(),
+            &lc_frontend::startup_plrproperties::PlayerImageUpdate::Clear
+        );
+        assert_eq!(
+            controller.big_icon_update(),
+            &lc_frontend::startup_plrproperties::PlayerImageUpdate::Clear
+        );
+        assert!(app.status_text.is_empty());
+
+        app.startup_player_properties_dialog
+            .as_mut()
+            .expect("properties remain open")
+            .controller
+            .open_portrait_selector(
+                vec![lc_frontend::startup_portraitsel::PortraitLocation::new(
+                    "User",
+                    PathBuf::from("."),
+                )],
+                0,
+                Vec::new(),
+            );
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                slot,
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                slot,
+                action: GamepadActionType::Cancel,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("portrait selector owns the complete cancel cluster");
+        let controller = &app
+            .startup_player_properties_dialog
+            .as_ref()
+            .expect("the abstract Cancel alias must not close the parent properties dialog")
+            .controller;
+        assert!(controller.portrait_selector().is_none());
+        assert!(controller.validation_error().is_none());
+        assert!(app.status_text.is_empty());
+    }
+
+    #[test]
+    fn l094_saving_a_file_picture_preserves_an_unchecked_lobby_icon() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("portrait user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover portrait paths");
+        paths.ensure_user_dirs().expect("create portrait user path");
+        let player_root = user_data.path().join("Players");
+        persist_config_value(
+            &paths,
+            "General",
+            "PlayerPath",
+            player_root.to_string_lossy().into_owned(),
+        )
+        .expect("configure isolated player path");
+        let selected_path = paths.user_data_dir().join("Selected.PNG");
+        write_preview_image(
+            &selected_path,
+            [0, 0, 255, 255],
+            image::ImageFormat::Png,
+        );
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.app_paths = Some(paths.clone());
+        app.open_new_startup_player_properties();
+        let old_icon = ImageData::new(2, 1, vec![4, 5, 6, 255, 7, 8, 9, 255]);
+        let pending = app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("new player properties");
+        pending.controller.set_name("UncheckedIcon");
+        pending.controller.replace_images(
+            ImageData::new(1, 1, vec![1, 2, 3, 255]),
+            old_icon.clone(),
+        );
+
+        app.apply_startup_player_portrait_selection(
+            lc_frontend::startup_portraitsel::PortraitSelCommit {
+                choice: lc_frontend::startup_portraitsel::PortraitChoice::File(selected_path),
+                set_picture: true,
+                set_big_icon: false,
+            },
+        );
+        assert_eq!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .expect("properties remain open")
+                .controller
+                .big_icon_update(),
+            &lc_frontend::startup_plrproperties::PlayerImageUpdate::Replace(old_icon.clone())
+        );
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
+        ]);
+
+        let saved = Group::open(&player_root.join("UncheckedIcon.c4p"))
+            .expect("open saved player group");
+        let encoded_icon = saved.read_file("BigIcon.png").expect("read saved lobby icon");
+        let decoded_icon = image::load_from_memory(&encoded_icon)
+            .expect("decode saved lobby icon")
+            .into_rgba8();
+        assert_eq!(decoded_icon.dimensions(), (2, 1));
+        assert_eq!(decoded_icon.into_raw(), old_icon.pixels());
+        reset_cached_app_paths();
     }
 
     #[test]

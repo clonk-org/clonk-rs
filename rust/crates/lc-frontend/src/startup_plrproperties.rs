@@ -7,11 +7,16 @@
 
 use crate::classic_gui::{ClassicButtonState, ClassicGuiSkin, IntRect};
 use crate::startup_main_menu::StartupTooltip;
+use crate::startup_portraitsel::{
+    PortraitFileEntry, PortraitLocation, PortraitSelAction, PortraitSelCommit,
+    PortraitSelController, PortraitSelResources, PortraitThumbnailRequest,
+};
 use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use lc_engine::player_file::PlayerFile;
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
 use lc_graphics::{Color, GammaRamp, Rect as SurfaceRect, Surface};
 use lc_gui::Rect as GuiRect;
+use std::path::PathBuf;
 
 /// `C4PlayerInfoCore::PlayerColors`, in `0x00RRGGBB` form.
 pub const PLAYER_COLORS: [u32; 12] = [
@@ -42,11 +47,13 @@ pub enum PlayerImageUpdate {
     Clear,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlayerPropertiesAction {
     Submit,
     Cancel,
     ChoosePicture,
+    PortraitLocationChanged { index: usize, path: PathBuf },
+    ApplyPicture(PortraitSelCommit),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +239,7 @@ pub struct PlayerPropertiesController {
     portrait_update: PlayerImageUpdate,
     big_icon_update: PlayerImageUpdate,
     validation_error: Option<String>,
+    portrait_selector: Option<PortraitSelController>,
     focus: PlayerPropertiesControl,
     pointer_position: Option<GuiPoint>,
     hovered: Option<PlayerPropertiesControl>,
@@ -329,6 +337,7 @@ impl PlayerPropertiesController {
             portrait_update,
             big_icon_update,
             validation_error: None,
+            portrait_selector: None,
             // The C++ name edit is the initially focused control.
             focus: PlayerPropertiesControl::Name,
             pointer_position: None,
@@ -340,6 +349,9 @@ impl PlayerPropertiesController {
     pub fn resize(&mut self, width: i32, height: i32) {
         self.width = width.max(1);
         self.height = height.max(1);
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            selector.resize(self.width, self.height);
+        }
         self.hovered = self
             .pointer_position
             .and_then(|point| self.hit_control(point));
@@ -377,7 +389,7 @@ impl PlayerPropertiesController {
     }
 
     pub fn delete_name_char(&mut self) -> bool {
-        if self.focus != PlayerPropertiesControl::Name {
+        if self.portrait_selector.is_some() || self.focus != PlayerPropertiesControl::Name {
             return false;
         }
         let changed = self.player.name.pop().is_some();
@@ -461,6 +473,102 @@ impl PlayerPropertiesController {
         self.clear_big_icon();
     }
 
+    /// Applies one accepted portrait-selector choice without disturbing an
+    /// unchecked channel. `None` for a checked channel is the working
+    /// `<none>` item and therefore records an explicit clear.
+    pub fn apply_picture_selection(
+        &mut self,
+        portrait: Option<ImageData>,
+        big_icon: Option<ImageData>,
+        set_picture: bool,
+        set_big_icon: bool,
+    ) {
+        if set_picture {
+            match portrait {
+                Some(image) => self.replace_portrait(image),
+                None => self.clear_portrait(),
+            }
+        }
+        if set_big_icon {
+            match big_icon {
+                Some(image) => self.replace_big_icon(image),
+                None => self.clear_big_icon(),
+            }
+        }
+    }
+
+    pub fn open_portrait_selector(
+        &mut self,
+        locations: Vec<PortraitLocation>,
+        current_location: usize,
+        entries: Vec<PortraitFileEntry>,
+    ) {
+        let mut selector = PortraitSelController::new(
+            locations,
+            current_location,
+            entries,
+            self.portrait_preview.is_some(),
+            self.big_icon_preview.is_some(),
+        );
+        selector.resize(self.width, self.height);
+        self.pointer_position = None;
+        self.hovered = None;
+        self.pointer_pressed = None;
+        self.portrait_selector = Some(selector);
+    }
+
+    pub const fn portrait_selector(&self) -> Option<&PortraitSelController> {
+        self.portrait_selector.as_ref()
+    }
+
+    pub fn portrait_selector_mut(&mut self) -> Option<&mut PortraitSelController> {
+        self.portrait_selector.as_mut()
+    }
+
+    pub fn replace_portrait_location_entries(
+        &mut self,
+        location_index: usize,
+        entries: Vec<PortraitFileEntry>,
+    ) -> bool {
+        self.portrait_selector
+            .as_mut()
+            .is_some_and(|selector| selector.replace_location_entries(location_index, entries))
+    }
+
+    pub fn fail_portrait_location_entries(
+        &mut self,
+        location_index: usize,
+        error: impl Into<String>,
+    ) {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            selector.fail_location_entries(location_index, error);
+        }
+    }
+
+    pub fn advance_portrait_selector_idle(&mut self) -> Option<PortraitThumbnailRequest> {
+        self.portrait_selector.as_mut()?.advance_idle()
+    }
+
+    pub fn complete_portrait_thumbnail(
+        &mut self,
+        request: &PortraitThumbnailRequest,
+        thumbnail: Result<ImageData, String>,
+    ) -> bool {
+        self.portrait_selector
+            .as_mut()
+            .is_some_and(|selector| selector.complete_thumbnail(request, thumbnail))
+    }
+
+    pub fn close_portrait_selector(&mut self) {
+        self.portrait_selector = None;
+    }
+
+    pub fn set_portrait_selector_error(&mut self, error: impl Into<String>) {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            selector.set_validation_error(error);
+        }
+    }
+
     pub fn color(&self) -> u32 {
         self.player.pref_color_dw & 0x00ff_ffff
     }
@@ -528,7 +636,10 @@ impl PlayerPropertiesController {
     }
 
     pub fn pointer_position(&self) -> Option<GuiPoint> {
-        self.pointer_position
+        self.portrait_selector
+            .as_ref()
+            .and_then(PortraitSelController::pointer_position)
+            .or(self.pointer_position)
     }
 
     /// Returns exactly the tooltips assigned by the native player-properties
@@ -539,6 +650,9 @@ impl PlayerPropertiesController {
         point: GuiPoint,
         book_small: &ClonkFont,
     ) -> Option<StartupTooltip> {
+        if self.portrait_selector.is_some() {
+            return None;
+        }
         let layout = self.layout();
         if contains(layout.control_preview, point) {
             return Some(StartupTooltip::resource("IDS_DLGTIP_PLAYERCONTROL"));
@@ -576,6 +690,15 @@ impl PlayerPropertiesController {
     }
 
     pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            match position {
+                Some(point) => {
+                    selector.handle_pointer_move(point);
+                }
+                None => selector.pointer_left(),
+            }
+            return;
+        }
         self.pointer_position = position;
         self.hovered = position.and_then(|point| self.hit_control(point));
         if position.is_none() {
@@ -584,10 +707,18 @@ impl PlayerPropertiesController {
     }
 
     pub fn pointer_left(&mut self) {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            selector.pointer_left();
+            return;
+        }
         self.set_pointer_position(None);
     }
 
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<PlayerPropertiesAction> {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            let actions = selector.handle_pointer_move(position);
+            return self.finish_portrait_selector_actions(actions);
+        }
         self.pointer_position = Some(position);
         self.hovered = self.hit_control(position);
         if self.pointer_pressed.is_some_and(is_slider) {
@@ -597,6 +728,10 @@ impl PlayerPropertiesController {
     }
 
     pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<PlayerPropertiesAction> {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            let actions = selector.handle_pointer_down(position);
+            return self.finish_portrait_selector_actions(actions);
+        }
         self.pointer_position = Some(position);
         self.hovered = self.hit_control(position);
         if contains(self.layout().close, position) {
@@ -614,6 +749,10 @@ impl PlayerPropertiesController {
     }
 
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<PlayerPropertiesAction> {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            let actions = selector.handle_pointer_up(position);
+            return self.finish_portrait_selector_actions(actions);
+        }
         self.pointer_position = Some(position);
         self.hovered = self.hit_control(position);
         let Some(pressed) = self.pointer_pressed.take() else {
@@ -628,6 +767,9 @@ impl PlayerPropertiesController {
     /// Adds printable window text while the name edit owns focus. The limit
     /// is measured in native C4 bytes, not UTF-8 storage bytes.
     pub fn handle_text_input(&mut self, text: &str) -> Vec<PlayerPropertiesAction> {
+        if self.portrait_selector.is_some() {
+            return Vec::new();
+        }
         if self.focus != PlayerPropertiesControl::Name {
             return Vec::new();
         }
@@ -645,6 +787,10 @@ impl PlayerPropertiesController {
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<PlayerPropertiesAction> {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            let actions = selector.handle_key_down(key);
+            return self.finish_portrait_selector_actions(actions);
+        }
         match key {
             KeyCode::Escape => vec![PlayerPropertiesAction::Cancel],
             KeyCode::Enter => vec![PlayerPropertiesAction::Submit],
@@ -669,8 +815,18 @@ impl PlayerPropertiesController {
         }
     }
 
-    pub fn handle_key_up(&mut self, _key: KeyCode) -> Vec<PlayerPropertiesAction> {
+    pub fn handle_key_up(&mut self, key: KeyCode) -> Vec<PlayerPropertiesAction> {
+        if let Some(selector) = self.portrait_selector.as_mut() {
+            let actions = selector.handle_key_up(key);
+            return self.finish_portrait_selector_actions(actions);
+        }
         Vec::new()
+    }
+
+    pub fn handle_wheel(&mut self, native_delta: i32) -> bool {
+        self.portrait_selector
+            .as_mut()
+            .is_some_and(|selector| selector.handle_wheel(native_delta))
     }
 
     fn layout(&self) -> PlayerPropertiesLayout {
@@ -766,6 +922,25 @@ impl PlayerPropertiesController {
             | PlayerPropertiesControl::Blue => {}
         }
         Vec::new()
+    }
+
+    fn finish_portrait_selector_actions(
+        &mut self,
+        actions: Vec<PortraitSelAction>,
+    ) -> Vec<PlayerPropertiesAction> {
+        let mut outer = Vec::new();
+        for action in actions {
+            match action {
+                PortraitSelAction::Cancel => self.close_portrait_selector(),
+                PortraitSelAction::ChangeLocation { index, path } => {
+                    outer.push(PlayerPropertiesAction::PortraitLocationChanged { index, path });
+                }
+                PortraitSelAction::Accept(commit) => {
+                    outer.push(PlayerPropertiesAction::ApplyPicture(commit));
+                }
+            }
+        }
+        outer
     }
 }
 
@@ -1048,6 +1223,10 @@ impl PlayerPropertiesScreen {
                 gamma,
             );
         }
+
+        if let Some(selector) = controller.portrait_selector.as_ref() {
+            selector.render(surface, PortraitSelResources { skin, fonts }, gamma);
+        }
     }
 }
 
@@ -1265,6 +1444,56 @@ mod tests {
             state.handle_key_down(KeyCode::Space),
             vec![PlayerPropertiesAction::ChoosePicture]
         );
+    }
+
+    #[test]
+    fn portrait_choice_updates_only_checked_image_channels() {
+        let old_portrait = ImageData::new(1, 1, vec![10, 20, 30, 255]);
+        let old_icon = ImageData::new(1, 1, vec![40, 50, 60, 255]);
+        let mut state = PlayerPropertiesController::edit(
+            0,
+            PlayerFile::default(),
+            "",
+            Some(old_portrait),
+            Some(old_icon.clone()),
+        );
+
+        state.apply_picture_selection(None, None, true, false);
+        assert_eq!(state.portrait_update(), &PlayerImageUpdate::Clear);
+        assert_eq!(state.big_icon_update(), &PlayerImageUpdate::Keep);
+        assert_eq!(state.big_icon_preview(), Some(&old_icon));
+
+        let replacement = ImageData::new(1, 1, vec![70, 80, 90, 255]);
+        state.apply_picture_selection(None, Some(replacement.clone()), false, true);
+        assert_eq!(state.portrait_update(), &PlayerImageUpdate::Clear);
+        assert_eq!(
+            state.big_icon_update(),
+            &PlayerImageUpdate::Replace(replacement)
+        );
+    }
+
+    #[test]
+    fn open_portrait_selector_keeps_text_backspace_and_pointer_out_of_parent() {
+        let mut state = controller();
+        state.set_name("Parent");
+        let original_color = state.player().pref_color_dw;
+        state.open_portrait_selector(
+            vec![PortraitLocation::new("User Path", "/tmp")],
+            0,
+            Vec::new(),
+        );
+
+        assert!(state.handle_text_input("X").is_empty());
+        assert!(!state.delete_name_char());
+        let color_next = state.layout().color_next;
+        let point = GuiPoint::new(
+            (color_next.x + color_next.w / 2) as f32,
+            (color_next.y + color_next.h / 2) as f32,
+        );
+        assert!(state.handle_pointer_down(point).is_empty());
+        assert!(state.handle_pointer_up(point).is_empty());
+        assert_eq!(state.name(), "Parent");
+        assert_eq!(state.player().pref_color_dw, original_color);
     }
 
     #[test]
