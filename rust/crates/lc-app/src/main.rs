@@ -7123,13 +7123,28 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let classic = parse_classic_command_line(&cli.classic_arguments);
     install_classic_language_override(&classic);
-    lc_logging::init_verbose(classic.verbose);
 
     let explicit_config = classic
         .config_file
         .as_deref()
         .or(cli.config_file.as_deref());
     let app_paths = cached_app_paths_with_config_file(explicit_config).ok();
+    if let Some(paths) = app_paths.as_ref() {
+        let log_path = paths.logs_dir().join("Clonk.log");
+        match lc_logging::init_verbose_with_file(classic.verbose, &log_path) {
+            Ok(()) => tracing::info!(
+                path = %log_path.display(),
+                "engine session log initialized"
+            ),
+            Err(err) => tracing::warn!(
+                error = %err,
+                path = %log_path.display(),
+                "failed to initialize engine session log; continuing with stderr logging"
+            ),
+        }
+    } else {
+        lc_logging::init_verbose(classic.verbose);
+    }
     if let Some(paths) = app_paths.as_ref() {
         if let Err(err) = paths.ensure_user_dirs() {
             tracing::warn!(

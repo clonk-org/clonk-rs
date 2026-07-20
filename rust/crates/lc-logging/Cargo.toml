@@ -8,3 +8,6 @@ test = false
 
 [dependencies]
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+[dev-dependencies]
+tracing = "0.1"
