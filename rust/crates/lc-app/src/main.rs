@@ -271,6 +271,7 @@ fn tutorial_seven_gamma_color(color: Color) -> Color {
 
 const BACK_ENTRY_TITLE: &str = "← Back";
 const SAVE_DIR_NAME: &str = "Savegames";
+const DEFAULT_CLASSIC_SAVE_GAME_FOLDER: &str = "Savegames.c4f";
 const QUICK_SAVE_FILE: &str = "quicksave.lcsave";
 const SAVE_FILE_VERSION: SaveFileVersion = SaveFileVersion::new(1, 0, 0);
 const MOUSE_DRAG_THRESHOLD: f32 = 6.0;
@@ -17697,6 +17698,115 @@ fn resolve_save_directory() -> PathBuf {
     }
 }
 
+fn configured_savegame_directory(paths: Option<&AppPaths>) -> PathBuf {
+    let Some(paths) = paths else {
+        // The built-in pathless Rust sandbox has no C4Config/ExePath
+        // provenance. Keep its existing app-data fallback explicit.
+        return resolve_save_directory();
+    };
+
+    let configured = match load_classic_loader_config(paths) {
+        Ok(Some(config)) => classic_loader_config_value(&config, "SaveGameFolder")
+            .unwrap_or(DEFAULT_CLASSIC_SAVE_GAME_FOLDER)
+            .to_string(),
+        Ok(None) => DEFAULT_CLASSIC_SAVE_GAME_FOLDER.to_string(),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "failed to read configured savegame folder; using classic default"
+            );
+            DEFAULT_CLASSIC_SAVE_GAME_FOLDER.to_string()
+        }
+    };
+    let configured = PathBuf::from(configured);
+    if configured.is_absolute() {
+        configured
+    } else {
+        // C4Game::QuickSave switches to Config.General.ExePath before using
+        // the (usually relative) Config.General.SaveGameFolder value.
+        paths.install_root().join(configured)
+    }
+}
+
+fn cpp_filename_only(name: &str) -> &str {
+    match name.rfind('.') {
+        Some(dot) if dot + 1 < name.len() => &name[..dot],
+        _ => name,
+    }
+}
+
+fn looks_like_cpp_integer(value: &str) -> bool {
+    let digits = value
+        .as_bytes()
+        .strip_prefix(b"+")
+        .or_else(|| value.as_bytes().strip_prefix(b"-"))
+        .unwrap_or(value.as_bytes());
+    !digits.is_empty() && digits.iter().all(u8::is_ascii_digit)
+}
+
+fn is_c4_folder_group(name: &str) -> bool {
+    name.rsplit_once('.')
+        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("c4f"))
+}
+
+fn classic_savegame_scenario_name_from_parts(
+    leaf: &str,
+    parent: Option<&str>,
+    fallback_title: &str,
+) -> String {
+    let stem = cpp_filename_only(leaf);
+
+    if looks_like_cpp_integer(stem) {
+        return parent
+            .filter(|parent| is_c4_folder_group(parent))
+            .map(cpp_filename_only)
+            .unwrap_or(stem)
+            .to_string();
+    }
+
+    let stripped = stem.trim_end_matches(|character: char| character.is_ascii_digit());
+    if stripped.is_empty() {
+        // LooksLikeInteger catches every ASCII digit-only stem. This fallback
+        // only protects synthetic/pathless fixtures with no usable group name.
+        sanitize_save_label(fallback_title)
+    } else {
+        stripped.to_string()
+    }
+}
+
+fn classic_savegame_scenario_name(scenario: &FrontendScenario) -> String {
+    // Game.ScenarioFilename is authoritative in C++. The catalog identifier
+    // is only a Rust-only fallback for the pathless sandbox.
+    if let Some(path) = scenario.path.as_deref() {
+        if let Some(leaf) = path.file_name().map(|name| name.to_string_lossy()) {
+            let parent = path
+                .parent()
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy());
+            return classic_savegame_scenario_name_from_parts(
+                leaf.as_ref(),
+                parent.as_deref(),
+                &scenario.title,
+            );
+        }
+    }
+
+    let logical_components = scenario
+        .identifier
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    let leaf = logical_components.last().copied().unwrap_or("");
+    let parent = (logical_components.len() >= 2)
+        .then(|| logical_components[logical_components.len() - 2]);
+    classic_savegame_scenario_name_from_parts(leaf, parent, &scenario.title)
+}
+
+fn classic_savegame_slot_path(root: &Path, scenario_name: &str, slot: u8) -> PathBuf {
+    root.join(format!("{scenario_name}.c4f"))
+        .join(format!("{scenario_name}{slot}.c4s"))
+}
+
 fn ensure_save_directory() -> Result<PathBuf> {
     let dir = resolve_save_directory();
     fs::create_dir_all(&dir)
@@ -30788,13 +30898,14 @@ impl GameApp {
         }
     }
 
-    /// The ten savegame slots (C4MainMenu.cpp:483-494): C++ probes
-    /// `ScenName.c4f/ScenNameN.c4s`; the rust port probes the deterministic
-    /// slot files in the save directory.
+    /// The ten savegame slots (C4MainMenu.cpp:474-494).
     fn savegame_slots(&self) -> [SaveSlotState; 10] {
+        let root = configured_savegame_directory(self.app_paths.as_ref());
+        let scenario_name = self.savegame_slot_base();
         let mut slots = [SaveSlotState { free: true }; 10];
         for (index, slot) in slots.iter_mut().enumerate() {
-            slot.free = !self.savegame_slot_path((index + 1) as u8).exists();
+            slot.free = !classic_savegame_slot_path(&root, &scenario_name, (index + 1) as u8)
+                .exists();
         }
         slots
     }
@@ -30802,21 +30913,30 @@ impl GameApp {
     fn savegame_slot_base(&self) -> String {
         self.active_scenario
             .as_ref()
-            .map(|scenario| scenario.title.clone())
-            .unwrap_or_else(|| self.scenario_label.clone())
+            .map(classic_savegame_scenario_name)
+            .unwrap_or_else(|| sanitize_save_label(&self.scenario_label))
     }
 
     fn savegame_slot_path(&self, slot: u8) -> PathBuf {
-        let base = sanitize_save_label(&format!("{}{}", self.savegame_slot_base(), slot));
-        resolve_save_directory().join(format!("{base}.lcsave"))
+        classic_savegame_slot_path(
+            &configured_savegame_directory(self.app_paths.as_ref()),
+            &self.savegame_slot_base(),
+            slot,
+        )
     }
 
     /// `Game.QuickSave(strFilename, strTitle)` for a menu slot
     /// (C4MainMenu.cpp:797-804) via the existing save plumbing.
     fn save_to_slot(&mut self, slot: u8) {
-        let label = format!("{} {}", self.savegame_slot_base(), slot);
+        // begin_loading_scenario retains the language-resolved Title.txt
+        // value here, matching Game.Parameters.ScenarioTitle.
+        let label = self
+            .active_scenario
+            .as_ref()
+            .map(|scenario| scenario.title.clone())
+            .unwrap_or_else(|| self.scenario_label.clone());
         let path = self.savegame_slot_path(slot);
-        if let Err(err) = self.perform_named_save(&label, Some(path)) {
+        if let Err(err) = self.perform_named_save_with_exact_label(&label, Some(path)) {
             tracing::error!(error = ?err, slot, "slot save failed");
             self.status_text = format!("Save failed: {err:#}");
         }
@@ -31313,6 +31433,23 @@ impl GameApp {
     }
 
     fn perform_named_save(&mut self, label: &str, target: Option<PathBuf>) -> Result<PathBuf> {
+        self.perform_named_save_with_label_policy(label, target, false)
+    }
+
+    fn perform_named_save_with_exact_label(
+        &mut self,
+        label: &str,
+        target: Option<PathBuf>,
+    ) -> Result<PathBuf> {
+        self.perform_named_save_with_label_policy(label, target, true)
+    }
+
+    fn perform_named_save_with_label_policy(
+        &mut self,
+        label: &str,
+        target: Option<PathBuf>,
+        preserve_label: bool,
+    ) -> Result<PathBuf> {
         if self.mode != AppMode::Running {
             anyhow::bail!("cannot save while not running a scenario");
         }
@@ -31322,7 +31459,9 @@ impl GameApp {
             .clone()
             .unwrap_or_else(FrontendScenario::fallback);
         let engine_state = self.engine.capture_state();
-        let sanitized_label = if label.trim().is_empty() {
+        let stored_label = if preserve_label {
+            label.to_string()
+        } else if label.trim().is_empty() {
             self.generate_default_save_label()
         } else {
             label.trim().to_string()
@@ -31338,16 +31477,16 @@ impl GameApp {
             ),
             definition_load: self.active_definition_load.clone(),
             focus_id: self.focus_id,
-            user_label: Some(sanitized_label.clone()),
+            user_label: Some(stored_label.clone()),
             runtime_music_enabled: Some(self.runtime_music_enabled),
             engine_state,
         };
 
-        let dir = ensure_save_directory()?;
         let path = match target {
             Some(path) => path,
             None => {
-                let base = sanitize_save_label(&sanitized_label);
+                let dir = ensure_save_directory()?;
+                let base = sanitize_save_label(&stored_label);
                 unique_save_path(&dir, &base)
             }
         };
@@ -159150,6 +159289,121 @@ func ControlDig() { dig_count = 1; return(1); }
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn savegame_slot_path_uses_configured_folder_and_scenname_scheme() {
+        let fixture = tempdir().expect("savegame path fixture");
+        let user_data = fixture.path().join("user-data");
+        let configured_folder = fixture.path().join("Configured Saves.c4f");
+        let (_guard, paths) = exact_loader_test_paths(&user_data, None);
+        persist_config_value(
+            &paths,
+            "General",
+            "SaveGameFolder",
+            configured_folder.to_string_lossy().into_owned(),
+        )
+        .expect("configure nondefault savegame folder");
+
+        let mut app = new_state_only_lightweight_running_sandbox_app();
+        app.app_paths = Some(paths.clone());
+
+        let localized_title = "  Höhlenübung: Zurück  ";
+        let mut old_style = FrontendScenario::fallback();
+        old_style.path = Some(
+            paths
+                .install_root()
+                .join("planet/Missions.c4f/01.c4s"),
+        );
+        old_style.identifier = "StaleAlias.c4f/Wrong999.c4s".to_string();
+        old_style.title = localized_title.to_string();
+        app.active_scenario = Some(old_style.clone());
+
+        let old_slot = configured_folder
+            .join("Missions.c4f")
+            .join("Missions1.c4s");
+        assert_eq!(app.savegame_slot_path(1), old_slot);
+        assert_eq!(
+            app.savegame_slot_path(10),
+            configured_folder
+                .join("Missions.c4f")
+                .join("Missions10.c4s")
+        );
+
+        let mut new_style = old_style;
+        new_style.identifier = "AnotherAlias.c4f/AlsoWrong.c4s".to_string();
+        new_style.path = Some(
+            paths
+                .install_root()
+                .join("planet/Tutorial.c4f/Tutorial007.c4s"),
+        );
+        app.active_scenario = Some(new_style);
+        assert_eq!(
+            app.savegame_slot_path(10),
+            configured_folder
+                .join("Tutorial.c4f")
+                .join("Tutorial10.c4s")
+        );
+
+        let mut loose_numeric = FrontendScenario::fallback();
+        loose_numeric.identifier = "Loose/01.c4s".to_string();
+        loose_numeric.path = Some(paths.install_root().join("planet/Loose/01.c4s"));
+        app.active_scenario = Some(loose_numeric);
+        assert_eq!(
+            app.savegame_slot_path(1),
+            configured_folder.join("01.c4f").join("011.c4s"),
+            "a regular directory is not Game.pParentGroup"
+        );
+
+        persist_config_value(
+            &paths,
+            "General",
+            "SaveGameFolder",
+            "Relative Saves.c4f",
+        )
+        .expect("configure relative savegame folder");
+        assert_eq!(
+            configured_savegame_directory(Some(&paths)),
+            paths.install_root().join("Relative Saves.c4f")
+        );
+        persist_config_value(
+            &paths,
+            "General",
+            "SaveGameFolder",
+            configured_folder.to_string_lossy().into_owned(),
+        )
+        .expect("restore absolute savegame folder");
+
+        app.active_scenario = Some({
+            let mut scenario = FrontendScenario::fallback();
+            scenario.identifier = "Missions.c4f/01.c4s".to_string();
+            scenario.path = Some(
+                paths
+                    .install_root()
+                    .join("planet/Missions.c4f/01.c4s"),
+            );
+            scenario.title = localized_title.to_string();
+            scenario
+        });
+        app.save_to_slot(1);
+        let saved: SavedGameFile = serde_json::from_reader(
+            File::open(&old_slot).expect("classic-named Rust slot payload"),
+        )
+        .expect("deserialize saved slot");
+        assert_eq!(saved.user_label.as_deref(), Some(localized_title));
+        assert_eq!(saved.scenario.title, localized_title);
+        assert_eq!(
+            load_save_entry(&old_slot)
+                .expect("load classic-named Rust slot metadata")
+                .display_name,
+            localized_title
+        );
+        assert!(
+            !paths.user_data_dir().join(SAVE_DIR_NAME).exists(),
+            "slot save must not create the hardcoded Rust save directory"
+        );
+        assert!(looks_like_cpp_integer("+999999999999999999999999"));
+        assert!(looks_like_cpp_integer("-01"));
     }
 
     #[test]
