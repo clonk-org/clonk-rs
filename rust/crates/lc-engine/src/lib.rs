@@ -15731,6 +15731,25 @@ impl ScenarioScript {
             .collect()
     }
 
+    /// `C4AulScript::GetSFunc(index)` walks the script function list from its
+    /// tail, so the console sees later declarations before earlier ones.
+    fn local_function_names_in_get_sfunc_order(&self) -> Vec<String> {
+        let mut functions = self
+            .script
+            .functions()
+            .iter()
+            .filter(|(name, _)| self.script.has_local_function(name))
+            .map(|(name, function)| (function.source_line(), name.clone()))
+            .collect::<Vec<_>>();
+        functions.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.cmp(&right.1))
+        });
+        functions.into_iter().map(|(_, name)| name).collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn initialize(
         &mut self,
@@ -16509,6 +16528,15 @@ pub struct ScriptControlPolicy {
     pub is_replay: bool,
     pub console_active: bool,
     pub allow_scripting_in_replays: bool,
+}
+
+/// Function names offered by the developer console's script-entry
+/// autocomplete. The platform shell owns presentation because Win32 prepends
+/// scenario functions and a divider while GTK appends bare names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleScriptCompletionCatalog {
+    pub engine_functions: Vec<String>,
+    pub scenario_functions: Vec<String>,
 }
 
 /// Goal rows produced by one synchronized `ActivateGameGoalMenu` call.
@@ -23807,6 +23835,33 @@ impl Engine {
 
         self.direct_exec_script_control_global(&source, "console script", strict_level)
             .map(Some)
+    }
+
+    /// Rebuild `C4Console::UpdateInputCtrl`'s two function groups from the
+    /// live script engine. Native functions honor C++ `GetPublic`; scenario
+    /// functions use the local `GetSFunc(index)` view regardless of script
+    /// access. The groups remain distinct for platform-specific combo-box
+    /// layout, and scenario declarations retain `GetSFunc`'s reverse-source
+    /// traversal so Win32 can reverse them again when inserting at index zero.
+    pub fn console_script_completion_catalog(&self) -> ConsoleScriptCompletionCatalog {
+        let mut engine_functions =
+            compat::public_console_host_function_names(&self.script_control_global_host());
+        if let Some(functions) = self.global_script_functions.as_deref() {
+            engine_functions.extend(functions.keys().cloned());
+        }
+        engine_functions.sort();
+        engine_functions.dedup();
+
+        let scenario_functions = self
+            .scenario_script
+            .as_ref()
+            .map(ScenarioScript::local_function_names_in_get_sfunc_order)
+            .unwrap_or_default();
+
+        ConsoleScriptCompletionCatalog {
+            engine_functions,
+            scenario_functions,
+        }
     }
 
     /// Build the script-engine scope used by `SCOPE_Global`. It deliberately

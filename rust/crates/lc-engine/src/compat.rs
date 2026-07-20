@@ -14407,6 +14407,82 @@ fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 }
 
+/// Native functions hidden from `C4Console::UpdateInputCtrl` by C++
+/// `GetPublic() == false`. Most use `AddFunc`'s final `false`; the cast helpers
+/// hard-code the same visibility. Rust's VM does not otherwise need native
+/// visibility metadata, so keep this console-only projection by registration.
+const NON_PUBLIC_CONSOLE_HOST_FUNCTIONS: &[&str] = &[
+    "AssignVar",
+    "ScoreboardCol",
+    "CastInt",
+    "CastBool",
+    "CastC4ID",
+    "CastAny",
+    "Call",
+    "Or",
+    "Not",
+    "And",
+    "BitAnd",
+    "Sum",
+    "Sub",
+    "Mul",
+    "Div",
+    "Mod",
+    "Pow",
+    "LessThan",
+    "GreaterThan",
+    "SEqual",
+    "SetContactDensity",
+    "ObjectSetAction",
+    "SoundLevel",
+    "SetCrewStatus",
+    "DrawVolcanoBranch",
+    "FlameConsumeMaterial",
+    "TestMessageBoard",
+    "CallMessageBoard",
+    "AbortMessageBoard",
+    "OnMessageBoardAnswer",
+    "GetSystemTime",
+    "IsNewgfx",
+    "GetObjectLayer",
+    "SetObjectLayer",
+    "SetGameSpeed",
+    "DrawMatChunks",
+    "SetTextureIndex",
+    "RemoveUnusedTexMapEntries",
+    "SetObjDrawTransform2",
+    "LoadScenarioSection",
+    "SetObjectStatus",
+    "GetObjectStatus",
+    "AdjustWalkRotation",
+    "FxFireStart",
+    "FxFireTimer",
+    "FxFireStop",
+    "FxFireInfo",
+    "SetPreSend",
+    "GetPlayerID",
+    "InitScenarioPlayer",
+    "OnOwnerRemoved",
+    "SetScoreboardData",
+    "GetScoreboardString",
+    "GetScoreboardData",
+    "DoScoreboardShow",
+    "SortScoreboard",
+    "AddEvaluationData",
+    "GetLeagueScore",
+    "HideSettlementScoreInEvaluation",
+    "GetUnusedOverlayID",
+    "FatalError",
+];
+
+pub(crate) fn public_console_host_function_names(script: &ScriptEngine) -> Vec<String> {
+    script
+        .host_function_names()
+        .into_iter()
+        .filter(|name| !NON_PUBLIC_CONSOLE_HOST_FUNCTIONS.contains(&name.as_str()))
+        .collect()
+}
+
 pub fn register_host_functions(script: &mut ScriptEngine) {
     // Every script host knows the engine constant table
     // (RegisterGlobalConstant, C4Script.cpp:6580-6581).

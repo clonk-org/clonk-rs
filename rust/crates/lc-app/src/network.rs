@@ -1755,6 +1755,28 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_decided_controls_and_messages(
+        &mut self,
+    ) -> (
+        Vec<(Tick, lc_engine::ControlPacket, bool)>,
+        Vec<MessageControlData>,
+    ) {
+        let mut controls = Vec::new();
+        let mut messages = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            match command {
+                NetworkCommand::SubmitDecidedControl {
+                    tick,
+                    control,
+                    sync,
+                } => controls.push((tick, control, sync)),
+                NetworkCommand::SubmitMessage(message) => messages.push(message),
+                command => panic!("unexpected console-input command: {command:?}"),
+            }
+        }
+        (controls, messages)
+    }
+
     pub(crate) fn take_player_info_updates(&mut self) -> Vec<lc_network::PlayerInfoUpdateRequest> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -2930,6 +2952,21 @@ impl NetworkManager {
         script.by_client = i32::try_from(self.local_client_id)
             .map_err(|_| anyhow!("local client id exceeds the script-control wire field"))?;
         self.submit_decided_control(tick, lc_engine::ControlPacket::Script(script), sync)
+    }
+
+    pub fn submit_decided_em_move_object_control(
+        &self,
+        tick: Tick,
+        mut control: lc_engine::EmMoveObjectControlData,
+        sync: bool,
+    ) -> Result<()> {
+        control.by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the editor-control wire field"))?;
+        self.submit_decided_control(
+            tick,
+            lc_engine::ControlPacket::EmMoveObject(control),
+            sync,
+        )
     }
 
     pub fn submit_custom_command(

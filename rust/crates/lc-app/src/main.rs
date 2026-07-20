@@ -14681,6 +14681,60 @@ enum RuntimeNetworkRole {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeveloperConsoleCompletionStyle {
+    Win32,
+    Gtk,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DeveloperConsoleCompletionEntry {
+    Function(String),
+    Separator,
+}
+
+/// Apply the native script-entry combo conventions to the engine-owned
+/// autocomplete catalog. Win32 prepends scenario functions and a divider and
+/// displays calls; GTK appends bare scenario names after the engine list.
+fn developer_console_completion_entries(
+    catalog: &lc_engine::ConsoleScriptCompletionCatalog,
+    style: DeveloperConsoleCompletionStyle,
+) -> Vec<DeveloperConsoleCompletionEntry> {
+    let function = |name: &str, calls: bool| {
+        DeveloperConsoleCompletionEntry::Function(if calls {
+            format!("{name}()")
+        } else {
+            name.to_string()
+        })
+    };
+    match style {
+        DeveloperConsoleCompletionStyle::Win32 => {
+            let mut entries = catalog
+                .scenario_functions
+                .iter()
+                .rev()
+                .map(|name| function(name, true))
+                .collect::<Vec<_>>();
+            if !catalog.scenario_functions.is_empty() {
+                entries.push(DeveloperConsoleCompletionEntry::Separator);
+            }
+            entries.extend(
+                catalog
+                    .engine_functions
+                    .iter()
+                    .map(|name| function(name, true)),
+            );
+            entries
+        }
+        DeveloperConsoleCompletionStyle::Gtk => catalog
+            .engine_functions
+            .iter()
+            .chain(&catalog.scenario_functions)
+            .map(|name| function(name, false))
+            .collect(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RuntimeNetworkStatusBarrier {
     status: lc_network::NetworkStatus,
     local_reached: bool,
@@ -40776,6 +40830,51 @@ impl GameApp {
         self.apply_ready_controls(tick, vec![NetworkControl::Script(script)])
     }
 
+    fn submit_or_execute_editor_selection_script(
+        &mut self,
+        control: lc_engine::EmMoveObjectControlData,
+    ) -> Result<(), EngineError> {
+        let tick = self.local_control_submission_tick();
+        if let Some(network) = self.network.as_ref() {
+            let sync = self.running_control_prefers_sync();
+            if let Err(error) =
+                network.submit_decided_em_move_object_control(tick, control, sync)
+            {
+                tracing::error!(%error, "failed to submit editor selection script");
+            }
+            return Ok(());
+        }
+        self.apply_ready_controls(tick, vec![NetworkControl::EmMoveObject(control)])
+    }
+
+    /// `C4EditCursor::In`, called by the separate property-dialog script
+    /// entry. Selection ownership stays with the edit cursor; this snapshots
+    /// its live C++-ordered object numbers into one `EMMO_Script` packet.
+    fn submit_editor_selection_script(
+        &mut self,
+        text: &str,
+        selected_object_numbers: &[i32],
+    ) -> Result<(), EngineError> {
+        let Some(script) =
+            lc_engine::LegacyCString::from_bytes(lc_script::c4_string_bytes(text))
+        else {
+            tracing::warn!("editor selection script contained an embedded NUL");
+            return Ok(());
+        };
+        self.submit_or_execute_editor_selection_script(lc_engine::EmMoveObjectControlData {
+            action: lc_engine::EMMO_SCRIPT,
+            objects: selected_object_numbers.to_vec(),
+            strictness: self.running_console_script_strictness(),
+            script,
+            by_client: if self.control_playback.is_some() {
+                -1
+            } else {
+                0
+            },
+            ..Default::default()
+        })
+    }
+
     fn submit_or_execute_running_custom_command(
         &mut self,
         command: lc_engine::CustomCommandControlData,
@@ -41456,6 +41555,64 @@ impl GameApp {
 
     fn process_console_message_input(&mut self, text: &str) {
         self.process_message_input_text(text, false);
+    }
+
+    /// Command-only half of `C4MessageInput::ProcessCommand`. In particular,
+    /// `/sound` is unknown here; `#/sound` reaches `ProcessInput` below and
+    /// produces the private message control used by the developer console.
+    fn process_developer_console_command(&mut self, text: &str) -> Result<(), EngineError> {
+        if self.process_control_message_local_command(text) {
+            return Ok(());
+        }
+        match self.process_running_chat_command(text)? {
+            true => {}
+            false => self.append_unknown_running_command(text),
+        }
+        Ok(())
+    }
+
+    /// Backend for `C4Console::In`. This is deliberately separate from the
+    /// `/console` stdin `C4Application::OnCommand` path: the blocked native
+    /// console shell will supply its own active/editing state and widget.
+    fn process_developer_console_input(
+        &mut self,
+        text: &str,
+        editing: bool,
+    ) -> Result<bool, EngineError> {
+        if text.starts_with('/') {
+            self.process_developer_console_command(text)?;
+            return Ok(true);
+        }
+        if let Some(message) = text.strip_prefix('#') {
+            self.process_console_message_input(message);
+            return Ok(true);
+        }
+        if !editing {
+            let message = self.runtime_resource_text(
+                "IDS_CNS_NONETEDIT",
+                "No editing while replaying.",
+            );
+            tracing::warn!(%message, "developer console script rejected");
+            self.status_text = message;
+            return Ok(false);
+        }
+        let Some(script) =
+            lc_engine::LegacyCString::from_bytes(lc_script::c4_string_bytes(text))
+        else {
+            tracing::warn!("developer console script contained an embedded NUL");
+            return Ok(true);
+        };
+        self.submit_or_execute_running_script(lc_engine::ScriptControlData {
+            target_object: lc_engine::SCRIPT_SCOPE_CONSOLE,
+            strictness: self.running_console_script_strictness(),
+            script,
+            by_client: if self.control_playback.is_some() {
+                -1
+            } else {
+                0
+            },
+        })?;
+        Ok(true)
     }
 
     fn process_message_input_text(&mut self, text: &str, store_history: bool) {
@@ -67385,6 +67542,7 @@ impl GameApp {
         let require_live_network = self.network.is_some();
         let replaying = self.control_playback.is_some();
         let allow_scripting_in_replays = replaying && self.allow_scripting_in_replays;
+        let console_active = self.console_mode;
         let mut result = Ok(());
         for control in controls {
             result = match control {
@@ -67515,7 +67673,7 @@ impl GameApp {
                         if replaying {
                             ScriptControlPolicy::replay(allow_scripting_in_replays)
                         } else {
-                            ScriptControlPolicy::live(false)
+                            ScriptControlPolicy::live(console_active)
                         },
                     )
                     .map(|_| ()),
@@ -67566,7 +67724,7 @@ impl GameApp {
                         if replaying {
                             ScriptControlPolicy::replay(allow_scripting_in_replays)
                         } else {
-                            ScriptControlPolicy::live(false)
+                            ScriptControlPolicy::live(console_active)
                         },
                     )
                     .map(|_| ()),
@@ -87225,6 +87383,200 @@ mod tests {
         );
         assert!(app.startup_dialog_fade.is_none());
         reset_cached_app_paths();
+    }
+
+    #[test]
+    fn m10_l046_command_and_hash_routes_bypass_plain_script_control() {
+        let mut app = new_state_only_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
+
+        assert!(app
+            .process_developer_console_input("/help", false)
+            .expect("slash input reaches ProcessCommand"));
+
+        assert!(app
+            .process_developer_console_input("#/sound Bell", false)
+            .expect("hash input reaches ProcessInput"));
+        let (controls, messages) = commands.take_submitted_decided_controls_and_messages();
+        assert!(controls.is_empty());
+        assert_eq!(
+            messages,
+            vec![MessageControlData {
+                message_type: MESSAGE_TYPE_SOUND,
+                player: app.local_owner,
+                to_player: -1,
+                message: LegacyCString::from_bytes(b"Bell".to_vec())
+                    .expect("fixture message has no NUL"),
+                by_client: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn m10_l046_plain_script_checks_editing_and_emits_decide_console_scope() {
+        let _lock = env_lock().lock();
+        let fixture = tempdir().expect("developer console strictness configuration");
+        let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+        let mut config = Config::new();
+        config.set_in(
+            Some("Developer"),
+            "ConsoleScriptStrictness",
+            "Strict2",
+        );
+        config
+            .save(paths.config_file())
+            .expect("save developer console configuration");
+
+        let mut app = new_state_only_running_sandbox_app();
+        app.app_paths = Some(paths);
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
+
+        assert!(!app
+            .process_developer_console_input("SetGravity(41)", false)
+            .expect("replay editing gate refuses plain script"));
+        assert_eq!(app.status_text, "No editing while replaying.");
+        assert!(commands.take_submitted_decided_controls().is_empty());
+
+        assert!(app
+            .process_developer_console_input("SetGravity(42)", true)
+            .expect("editable console accepts plain script"));
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, lc_engine::ControlPacket::Script(script), false)] = decided.as_slice() else {
+            panic!("expected one queued console script, got {decided:?}");
+        };
+        assert_eq!(script.target_object, lc_engine::SCRIPT_SCOPE_CONSOLE);
+        assert_eq!(script.strictness, lc_engine::ScriptStrictness::Strict2);
+        assert_eq!(script.script.as_bytes(), b"SetGravity(42)");
+        assert_eq!(script.by_client, 0);
+    }
+
+    #[test]
+    fn m10_l046_property_script_wraps_live_selection_as_emmo_script() {
+        let mut app = new_state_only_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+
+        app.submit_editor_selection_script("Mark()", &[41, 7, 41])
+            .expect("property script snapshots the edit-cursor selection");
+
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, lc_engine::ControlPacket::EmMoveObject(control), false)] = decided.as_slice()
+        else {
+            panic!("expected one queued editor script, got {decided:?}");
+        };
+        assert_eq!(control.action, lc_engine::EMMO_SCRIPT);
+        assert_eq!(control.objects, vec![41, 7, 41]);
+        assert_eq!((control.tx, control.ty, control.target_object), (0, 0, -1));
+        assert_eq!(control.strictness, lc_engine::ScriptStrictness::Strict3);
+        assert_eq!(control.script.as_bytes(), b"Mark()");
+        assert_eq!(control.by_client, 7);
+    }
+
+    #[test]
+    fn m10_l046_completion_matches_win32_and_gtk_function_layout() {
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "CompletionGlobals.c".to_string(),
+                "global func EngineProbe() { return true; }".to_string(),
+            )]),
+            1,
+        );
+        engine
+            .install_scenario_script(
+                "Scenario",
+                "func ScenarioAlpha() { return true; }\n\
+                 protected func ScenarioHidden() { return true; }\n\
+                 global func ScenarioGlobal() { return true; }",
+            )
+            .expect("install completion scenario");
+
+        let catalog = engine.console_script_completion_catalog();
+        assert!(catalog.engine_functions.iter().any(|name| name == "Abs"));
+        assert!(catalog
+            .engine_functions
+            .iter()
+            .any(|name| name == "EngineProbe"));
+        assert!(catalog
+            .engine_functions
+            .iter()
+            .any(|name| name == "ScenarioGlobal"));
+        assert!(!catalog
+            .engine_functions
+            .iter()
+            .any(|name| name == "SetContactDensity"));
+        for hidden in ["ScoreboardCol", "CastInt", "CastBool", "CastC4ID", "CastAny"] {
+            assert!(!catalog.engine_functions.iter().any(|name| name == hidden));
+        }
+        assert_eq!(
+            catalog.scenario_functions,
+            ["ScenarioHidden".to_string(), "ScenarioAlpha".to_string()]
+        );
+
+        let win32 = developer_console_completion_entries(
+            &catalog,
+            DeveloperConsoleCompletionStyle::Win32,
+        );
+        let separator = win32
+            .iter()
+            .position(|entry| *entry == DeveloperConsoleCompletionEntry::Separator)
+            .expect("Win32 inserts the scenario divider");
+        assert_eq!(separator, catalog.scenario_functions.len());
+        assert_eq!(
+            &win32[..separator],
+            &[
+                DeveloperConsoleCompletionEntry::Function("ScenarioAlpha()".to_string()),
+                DeveloperConsoleCompletionEntry::Function("ScenarioHidden()".to_string()),
+            ]
+        );
+        assert!(win32[separator + 1..].iter().any(|entry| {
+            entry
+                == &DeveloperConsoleCompletionEntry::Function("EngineProbe()".to_string())
+        }));
+
+        let gtk = developer_console_completion_entries(
+            &catalog,
+            DeveloperConsoleCompletionStyle::Gtk,
+        );
+        assert!(!gtk
+            .iter()
+            .any(|entry| *entry == DeveloperConsoleCompletionEntry::Separator));
+        assert_eq!(
+            &gtk[gtk.len() - catalog.scenario_functions.len()..],
+            &[
+                DeveloperConsoleCompletionEntry::Function("ScenarioHidden".to_string()),
+                DeveloperConsoleCompletionEntry::Function("ScenarioAlpha".to_string()),
+            ]
+        );
+        assert!(gtk.iter().any(|entry| {
+            entry == &DeveloperConsoleCompletionEntry::Function("EngineProbe".to_string())
+        }));
+    }
+
+    #[test]
+    fn m10_l046_nonhost_console_packet_uses_console_active_policy() {
+        let packet = || {
+            NetworkControl::Script(lc_engine::ScriptControlData {
+                target_object: lc_engine::SCRIPT_SCOPE_CONSOLE,
+                strictness: lc_engine::ScriptStrictness::Strict3,
+                script: LegacyCString::from_bytes(b"SetGravity(77)".to_vec())
+                    .expect("fixture script has no NUL"),
+                by_client: 7,
+            })
+        };
+
+        let mut inactive = new_state_only_running_sandbox_app();
+        let initial_gravity = inactive.engine.physics().gravity;
+        inactive
+            .apply_ready_controls(0, vec![packet()])
+            .expect("inactive console rejects non-host script without failing the batch");
+        assert_eq!(inactive.engine.physics().gravity, initial_gravity);
+
+        let mut active = new_state_only_running_sandbox_app();
+        active.console_mode = true;
+        active
+            .apply_ready_controls(0, vec![packet()])
+            .expect("active console executes non-host script");
+        assert_eq!(active.engine.physics().gravity, 77);
     }
 
     #[test]
