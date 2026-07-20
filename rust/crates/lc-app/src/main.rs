@@ -31166,7 +31166,8 @@ impl GameApp {
                     .filter(|player| player.team() == Some(team.id))
                     .map(|player| c4_presentation_text(player.name()))
                     .collect::<Vec<_>>();
-                if participants.is_empty() {
+                let has_participants = !team.player_ids.is_empty();
+                if !has_participants {
                     add_new_team = false;
                 }
                 let team_name = c4_presentation_text(&team.name);
@@ -31178,6 +31179,9 @@ impl GameApp {
                 TeamSelectionEntry {
                     id: team.id,
                     caption,
+                    icon_spec: team.icon_spec.clone(),
+                    color: team.color,
+                    has_participants,
                 }
             })
             .collect::<Vec<_>>();
@@ -31185,9 +31189,27 @@ impl GameApp {
             entries.push(TeamSelectionEntry {
                 id: -1,
                 caption: "New Team".to_string(),
+                icon_spec: None,
+                color: 0,
+                has_participants: false,
             });
         }
         entries
+    }
+
+    fn cache_team_selection_icons(&mut self, entries: &[TeamSelectionEntry]) {
+        let team_icons = {
+            let resources = self.script_text_spec_resources();
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let icon_spec = entry.icon_spec.as_deref()?;
+                    resolve_script_font_image(&self.engine, icon_spec, entry.color, resources)
+                        .map(|image| (entry.id, image))
+                })
+                .collect()
+        };
+        self.ensure_ingame_menu_gfx().team_icons = team_icons;
     }
 
     fn open_initial_team_selection(&mut self, owner: i32) {
@@ -31212,12 +31234,15 @@ impl GameApp {
         let unchanged = existing.is_some_and(|menu| {
             menu.items().len() == entries.len()
                 && menu.items().iter().zip(&entries).all(|(item, entry)| {
-                    item.caption == entry.caption && item.action == MenuAction::SelectTeam(entry.id)
+                    item.caption == entry.caption
+                        && item.symbol == entry.symbol()
+                        && item.action == MenuAction::SelectTeam(entry.id)
                 })
         });
         if unchanged {
             return;
         }
+        self.cache_team_selection_icons(&entries);
         if owner == self.local_owner {
             self.close_object_menu();
         }
@@ -32182,6 +32207,7 @@ impl GameApp {
             MenuAction::ActivateTeamSelection => {
                 if let Some(status) = self.engine.player(player).map(lc_engine::Player::status) {
                     let entries = self.team_selection_entries();
+                    self.cache_team_selection_icons(&entries);
                     let menu = if status == lc_engine::PlayerStatus::TeamSelection {
                         IngameMenuState::team_selection_menu_from_main(&entries)
                     } else {
@@ -33189,6 +33215,7 @@ impl GameApp {
                     .or_else(|| self.assets.dialog_image("Player.png")),
                 caption_bar: self.assets.dialog_image("GUICaption.png"),
                 definition_icons: HashMap::new(),
+                team_icons: HashMap::new(),
                 font_images: HashMap::new(),
                 frame_decoration: None,
                 menu_location: None,
@@ -136406,6 +136433,72 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn l135_team_selection_entries_cache_icon_specs_and_player_info_occupancy() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let mut definition =
+            Definition::from_script("TICO", "Team icon", "").expect("team icon definition");
+        definition.set_picture(Some(lc_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }));
+        definition.set_sprite_image(Some(lc_engine::DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([0xff, 0xff, 0xff, 0xff]),
+            color_mask: Some(Arc::from([0xff_u8])),
+        }));
+        app.engine
+            .register_definition(definition)
+            .expect("register team icon definition");
+        app.engine.set_teams(vec![
+            lc_engine::TeamInfo::new(1, "Declared", 0x0011_2233)
+                .with_player_ids(vec![999])
+                .with_icon_spec("TICO"),
+            lc_engine::TeamInfo::new(2, "Missing", 0x0044_5566).with_icon_spec("MISS"),
+        ]);
+
+        let entries = app.team_selection_entries();
+        assert_eq!(
+            (
+                entries[0].icon_spec.as_deref(),
+                entries[0].color,
+                entries[0].has_participants,
+            ),
+            (Some("TICO"), 0x0011_2233, true),
+            "C4Team::GetPlayerCount includes retained, not-yet-joined PlayerInfo IDs"
+        );
+        assert_eq!(
+            (
+                entries[1].icon_spec.as_deref(),
+                entries[1].color,
+                entries[1].has_participants,
+            ),
+            (Some("MISS"), 0x0044_5566, false)
+        );
+
+        app.engine
+            .set_player_status(owner, PlayerStatus::TeamSelection)
+            .expect("open initial team selection for the local player");
+        app.open_initial_team_selection(owner);
+        let team_icons = &app
+            .ingame_menu_gfx
+            .as_ref()
+            .expect("team menu graphics cache")
+            .team_icons;
+        assert_eq!(
+            team_icons.get(&1).map(ImageData::pixels),
+            Some([0x11, 0x22, 0x33, 0xff].as_slice())
+        );
+        assert!(
+            !team_icons.contains_key(&2),
+            "an unresolved IconSpec must remain eligible for the renderer fallback"
+        );
+    }
+
+    #[test]
     fn team_selection_participant_names_decode_native_bytes_for_presentation() {
         let mut app = new_running_sandbox_app();
         let occupant = app.local_owner;
@@ -136536,10 +136629,10 @@ ScenInfoArea=70,5,25,90
         app.engine
             .set_teams(vec![lc_engine::TeamInfo::new(1, "Existing", 0x00f4_0000)]);
         app.engine.set_auto_generate_teams(true);
+        let local_owner = app.local_owner;
         app.engine
-            .player_mut(app.local_owner)
-            .expect("sandbox player remains")
-            .set_team(Some(1));
+            .set_player_team(local_owner, Some(1))
+            .expect("sandbox player joins the existing team");
         let tick = app.local_control_submission_tick();
         events
             .send(NetworkEvent::ReadyTick {
@@ -163629,6 +163722,9 @@ func ControlDig() { dig_count = 1; return(1); }
                 IngameMenuState::team_selection_menu(&[TeamSelectionEntry {
                     id: 1,
                     caption: "Team".to_string(),
+                    icon_spec: None,
+                    color: 0,
+                    has_participants: false,
                 }]),
                 IngameMenuState::goals_menu(std::slice::from_ref(&entry)),
                 IngameMenuState::rules_menu(std::slice::from_ref(&entry)),
@@ -165312,6 +165408,9 @@ func ControlDig() { dig_count = 1; return(1); }
                 IngameMenuState::team_selection_menu(&[TeamSelectionEntry {
                     id: 1,
                     caption: "Team".to_string(),
+                    icon_spec: None,
+                    color: 0,
+                    has_participants: false,
                 }]),
                 IngameMenuState::goals_menu(std::slice::from_ref(&entry)),
                 IngameMenuState::rules_menu(std::slice::from_ref(&entry)),

@@ -72,7 +72,7 @@ pub const ICO_DISCONNECT: u8 = 49;
 pub const ICO_VIEW: u8 = 50;
 
 /// GfxR facet references for menu symbols (C4GraphicsResource.cpp:199-227).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MenuSymbol {
     /// `GfxR->fctMenu.GetPhase(x)`: Menu.png row 0, 35x35 cells
     /// (C4GraphicsResource.cpp:219).
@@ -99,6 +99,15 @@ pub enum MenuSymbol {
     /// optionally overlaid with the Captain facet for a fulfilled goal
     /// (C4MainMenu.cpp:368-372).
     Definition { id: String, fulfilled: bool },
+    /// One `C4MN_TeamSelection` / `C4MN_TeamSwitch` row. Rendering resolves
+    /// `IconSpec` first, then uses the team's owner-colored Crew facet when
+    /// occupied, and finally the generic team GUI icon (C4MainMenu.cpp:200-212).
+    Team {
+        id: i32,
+        icon_spec: Option<String>,
+        color: u32,
+        has_participants: bool,
+    },
 }
 
 /// Display submenu toggles ("Display:*" commands, C4MainMenu.cpp:855-884).
@@ -445,6 +454,20 @@ pub struct HostilityEntry {
 pub struct TeamSelectionEntry {
     pub id: i32,
     pub caption: String,
+    pub icon_spec: Option<String>,
+    pub color: u32,
+    pub has_participants: bool,
+}
+
+impl TeamSelectionEntry {
+    pub(crate) fn symbol(&self) -> MenuSymbol {
+        MenuSymbol::Team {
+            id: self.id,
+            icon_spec: self.icon_spec.clone(),
+            color: self.color,
+            has_participants: self.has_participants,
+        }
+    }
 }
 
 /// One ordered `Game.Network.Clients` row displayed by
@@ -555,7 +578,7 @@ impl IngameMenuState {
             .map(|team| {
                 MenuItem::new(
                     team.caption.clone(),
-                    MenuSymbol::GuiIcon(ICO_TEAM),
+                    team.symbol(),
                     if switching {
                         MenuAction::SwitchTeam(team.id)
                     } else {
@@ -580,9 +603,7 @@ impl IngameMenuState {
     /// (C4Player.cpp:1762-1771; C4MainMenu.cpp:175-232).
     ///
     /// C++ resolves each team's `IconSpec`, then falls back to a colorized
-    /// crew for occupied teams or the team GUI icon for empty teams. The
-    /// current `MenuSymbol` renderer cannot carry an `IconSpec` plus its team
-    /// color, so every row uses that GUI-icon fallback until it can.
+    /// crew for occupied teams or the team GUI icon for empty teams.
     pub fn team_selection_menu(teams: &[TeamSelectionEntry]) -> Self {
         Self::team_menu(teams, false, false)
     }
@@ -1659,6 +1680,9 @@ pub struct IngameMenuGraphics {
     pub caption_bar: Option<ImageData>,
     /// Definition pictures for [`MenuSymbol::Definition`] items.
     pub definition_icons: HashMap<String, ImageData>,
+    /// Successfully resolved team `IconSpec` pictures keyed by team ID.
+    /// Missing entries deliberately select the classic fallback chain.
+    pub team_icons: HashMap<i32, ImageData>,
     /// `CStdFont::SetCustomImages(Game.Defs)` results for `{{TextSpec}}`
     /// tokens embedded in classic Info/Dialog menu text.
     pub font_images: HashMap<String, ImageData>,
@@ -1732,6 +1756,7 @@ impl IngameMenuGraphics {
                 .definition_icons
                 .get(id)
                 .map(|img| (img, Rect::new(0, 0, img.width(), img.height()))),
+            MenuSymbol::Team { .. } => None,
         }
     }
 
@@ -1828,6 +1853,52 @@ impl IngameMenuGraphics {
                     gamma,
                 );
             }
+        }
+    }
+
+    fn draw_team_symbol(
+        &self,
+        surface: &mut Surface,
+        id: i32,
+        color: u32,
+        has_participants: bool,
+        dest: Rect,
+        gamma: Option<&GammaRamp>,
+    ) {
+        if let Some(image) = self.team_icons.get(&id) {
+            draw_image_region_aspect(
+                surface,
+                image,
+                Rect::new(0, 0, image.width(), image.height()),
+                dest,
+                false,
+                gamma,
+            );
+            return;
+        }
+        if has_participants {
+            if let Some(crew) = self.hud.crew.as_ref() {
+                // C4Surface::SetClr maps zero to the default blue 0xff.
+                let color = if color == 0 { 0xff } else { color };
+                let owner = Color::opaque(
+                    ((color >> 16) & 0xff) as u8,
+                    ((color >> 8) & 0xff) as u8,
+                    (color & 0xff) as u8,
+                );
+                let colored = lc_frontend::hud::colorize_by_owner(crew, owner);
+                draw_image_region_aspect(
+                    surface,
+                    &colored,
+                    Rect::new(0, 0, colored.width(), colored.height()),
+                    dest,
+                    false,
+                    gamma,
+                );
+            }
+            return;
+        }
+        if let Some((image, src)) = self.symbol_source(&MenuSymbol::GuiIcon(ICO_TEAM)) {
+            draw_image_region_aspect(surface, image, src, dest, false, gamma);
         }
     }
 }
@@ -1965,6 +2036,21 @@ fn draw_menu(
             }
             MenuSymbol::Definition { id, fulfilled } => {
                 gfx.draw_definition_symbol(surface, id, *fulfilled, symbol_rect, gamma);
+            }
+            MenuSymbol::Team {
+                id,
+                icon_spec: _,
+                color,
+                has_participants,
+            } => {
+                gfx.draw_team_symbol(
+                    surface,
+                    *id,
+                    *color,
+                    *has_participants,
+                    symbol_rect,
+                    gamma,
+                );
             }
             _ => {
                 if let Some((image, src)) = gfx.symbol_source(&item.symbol) {
@@ -2419,10 +2505,16 @@ mod tests {
             TeamSelectionEntry {
                 id: 7,
                 caption: "Blue Team (Clonko)".to_string(),
+                icon_spec: None,
+                color: 0x0000_00ff,
+                has_participants: true,
             },
             TeamSelectionEntry {
                 id: 3,
                 caption: "Red Team".to_string(),
+                icon_spec: None,
+                color: 0x00ff_0000,
+                has_participants: false,
             },
         ];
         let mut menu = IngameMenuState::team_selection_menu(&teams);
@@ -2450,6 +2542,92 @@ mod tests {
                 close_menu: true
             }
         ));
+    }
+
+    #[test]
+    fn l135_team_selection_menu_uses_declared_icon_spec_and_cpp_fallbacks() {
+        let teams = vec![
+            TeamSelectionEntry {
+                id: 1,
+                caption: "Resolved".to_string(),
+                icon_spec: Some("ICON".to_string()),
+                color: 0x0011_2233,
+                has_participants: true,
+            },
+            TeamSelectionEntry {
+                id: 2,
+                caption: "Unresolved".to_string(),
+                icon_spec: Some("MISS".to_string()),
+                color: 0x0024_68ac,
+                has_participants: true,
+            },
+            TeamSelectionEntry {
+                id: 3,
+                caption: "Crew".to_string(),
+                icon_spec: None,
+                color: 0x0012_3456,
+                has_participants: true,
+            },
+            TeamSelectionEntry {
+                id: 4,
+                caption: "Empty".to_string(),
+                icon_spec: None,
+                color: 0,
+                has_participants: false,
+            },
+        ];
+        let menu = IngameMenuState::team_selection_menu(&teams);
+        let declared = Color::opaque(0xe1, 0x22, 0x33);
+        let generic = Color::opaque(0xf0, 0xd1, 0x12);
+        let gfx = IngameMenuGraphics {
+            hud: HudGraphics {
+                crew: Some(ImageData::new(1, 1, vec![0, 0, 0xff, 0xff])),
+                ..HudGraphics::default()
+            },
+            gui_icons: Some(ImageData::new(
+                40 * 6,
+                40 * 4,
+                [generic.r, generic.g, generic.b, generic.a].repeat(40 * 6 * 40 * 4),
+            )),
+            team_icons: HashMap::from([(
+                1,
+                ImageData::new(1, 1, vec![declared.r, declared.g, declared.b, declared.a]),
+            )]),
+            ..IngameMenuGraphics::default()
+        };
+        let draw = |symbol: &MenuSymbol| {
+            let MenuSymbol::Team {
+                id,
+                color,
+                has_participants,
+                ..
+            } = symbol
+            else {
+                panic!("team row must retain a semantic team symbol");
+            };
+            let mut surface = Surface::new(1, 1, lc_graphics::PixelFormat::Rgba8888);
+            gfx.draw_team_symbol(
+                &mut surface,
+                *id,
+                *color,
+                *has_participants,
+                Rect::new(0, 0, 1, 1),
+                None,
+            );
+            surface.get_pixel(0, 0)
+        };
+
+        assert_eq!(draw(&menu.items()[0].symbol), Some(declared));
+        assert_eq!(
+            draw(&menu.items()[1].symbol),
+            Some(Color::opaque(0x24, 0x68, 0xac)),
+            "an unresolved IconSpec must fall through to the occupied-team crew"
+        );
+        assert_eq!(
+            draw(&menu.items()[2].symbol),
+            Some(Color::opaque(0x12, 0x34, 0x56))
+        );
+        assert_eq!(draw(&menu.items()[3].symbol), Some(generic));
     }
 
     // C4MainMenu::ActivateMain for a local fullscreen single-player round
@@ -2685,10 +2863,16 @@ mod tests {
             TeamSelectionEntry {
                 id: 7,
                 caption: "Blue Team".to_string(),
+                icon_spec: None,
+                color: 0x0000_00ff,
+                has_participants: false,
             },
             TeamSelectionEntry {
                 id: -1,
                 caption: "New Team".to_string(),
+                icon_spec: None,
+                color: 0,
+                has_participants: false,
             },
         ];
         let initial_from_main = IngameMenuState::team_selection_menu_from_main(&teams);
