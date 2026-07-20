@@ -204,10 +204,10 @@ use serde::{
 use sha1::{Digest, Sha1};
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
 use startup_player_files::{
-    PlayerActivationRefusal, PlayerImageWrite, SavedStartupPlayer, StartupCrewFile,
-    StartupCrewMutationError, StartupPlayerFile, delete_crew_file, delete_player_file,
-    crew_file_name_for_title, discover_crew_files, discover_player_files, discover_player_files_in,
-    load_local_player_big_icon, load_network_player_big_icon,
+    PlayerActivationRefusal, PlayerImageWrite, PlayerPropertiesSaveError, SavedStartupPlayer,
+    StartupCrewFile, StartupCrewMutationError, StartupPlayerFile, crew_file_name_for_title,
+    delete_crew_file, delete_player_file, discover_crew_files, discover_player_files,
+    discover_player_files_in, load_local_player_big_icon, load_network_player_big_icon,
     load_packed_network_player_big_icon, load_player_big_icon_from_group, persist_activations,
     rename_crew, save_player_properties, set_crew_death_message, set_crew_participation,
 };
@@ -45392,32 +45392,68 @@ impl GameApp {
             | StartupPlayerPropertiesOrigin::SelectionNew => None,
             StartupPlayerPropertiesOrigin::SelectionEdit { path, .. } => Some(path.as_path()),
         };
-        let result = self
-            .app_paths
-            .as_ref()
-            .ok_or_else(|| "application paths are unavailable".to_string())
-            .and_then(|paths| {
-                save_player_properties(
-                    paths,
-                    existing_path,
-                    &player,
-                    &comment,
-                    &portrait,
-                    &big_icon,
-                )
-                .map_err(|error| error.to_string())
-            });
+        let Some(paths) = self.app_paths.as_ref() else {
+            let error = "application paths are unavailable".to_string();
+            tracing::error!(%error, "failed to save startup player properties");
+            self.record_startup_player_properties_save_failure(error);
+            return;
+        };
+        let result = save_player_properties(
+            paths,
+            existing_path,
+            &player,
+            &comment,
+            &portrait,
+            &big_icon,
+        );
         match result {
             Ok(saved) => self.finish_startup_player_properties_save(saved, origin),
+            Err(error @ (PlayerPropertiesSaveError::EmptyName
+            | PlayerPropertiesSaveError::NameTaken { .. })) => {
+                tracing::error!(%error, "startup player name validation failed");
+                let message = match &error {
+                    PlayerPropertiesSaveError::EmptyName => self.runtime_resource_text(
+                        "IDS_ERR_PLRNAME_EMPTY",
+                        "You must specify a player name!",
+                    ),
+                    PlayerPropertiesSaveError::NameTaken { name, .. } => format_resource_string(
+                        self.runtime_resource_text(
+                            "IDS_ERR_PLRNAME_TAKEN",
+                            "%s is already taken",
+                        ),
+                        &[name],
+                    ),
+                    _ => unreachable!("guarded player-name validation error"),
+                };
+                if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                    pending.controller.clear_validation_error();
+                }
+                self.status_text.clear();
+                if let Err(dialog_error) = self.push_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                        message.clone(),
+                        "",
+                        lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                    ),
+                    MessageDialogContinuation::None,
+                ) {
+                    tracing::error!(%dialog_error, "failed to show player-name validation dialog");
+                    self.record_startup_player_properties_save_failure(message);
+                }
+            }
             Err(error) => {
                 tracing::error!(%error, "failed to save startup player properties");
-                if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
-                    pending.controller.set_validation_error(Some(error.clone()));
-                }
-                self.status_text = error;
-                self.mark_menu_dirty();
+                self.record_startup_player_properties_save_failure(error.to_string());
             }
         }
+    }
+
+    fn record_startup_player_properties_save_failure(&mut self, error: String) {
+        if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+            pending.controller.set_validation_error(Some(error.clone()));
+        }
+        self.status_text = error;
+        self.mark_menu_dirty();
     }
 
     fn finish_startup_player_properties_save(
@@ -98829,14 +98865,21 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.process_startup_player_properties_actions(vec![
             lc_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
         ]);
-        assert!(
-            app.startup_player_properties_dialog
-                .as_ref()
-                .and_then(|pending| pending.controller.validation_error())
-                .is_some(),
-            "invalid OK keeps the editor open with a warning"
+        assert_eq!(
+            app.message_dialogs
+                .last()
+                .expect("empty-name modal")
+                .state
+                .message(),
+            "You must specify a player name!"
         );
+        assert!(app
+            .startup_player_properties_dialog
+            .as_ref()
+            .is_some_and(|pending| pending.controller.validation_error().is_none()));
         assert!(app.startup_player_files.is_empty());
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss empty-name modal");
         app.startup_player_properties_dialog
             .as_mut()
             .expect("new editor")
@@ -98893,6 +98936,130 @@ public func Grant(password) { return GainMissionAccess(password); }
             Some(renamed.to_string_lossy().as_ref())
         );
         reset_cached_app_paths();
+    }
+
+    fn startup_player_properties_validation_app(
+        user_data: &Path,
+    ) -> (EnvGuard, AppPaths, PathBuf, GameApp) {
+        let (guard, paths) = exact_loader_test_paths(user_data, None);
+        let player_root = user_data.join("Players");
+        fs::create_dir_all(&player_root).expect("create validation player root");
+        persist_config_value(
+            &paths,
+            "General",
+            "PlayerPath",
+            player_root.to_string_lossy(),
+        )
+        .expect("configure validation player path");
+        let mut app = new_classic_menu_app(640, 480);
+        app.app_paths = Some(paths.clone());
+        app.open_player_selection_dialog();
+        app.open_new_startup_player_properties();
+        (guard, paths, player_root, app)
+    }
+
+    fn set_distinct_player_properties_fields(
+        app: &mut GameApp,
+        name: &str,
+    ) -> (PlayerFile, String) {
+        let controller = &mut app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("open player-properties form")
+            .controller;
+        controller.set_name(name);
+        controller.set_comment("Retained validation comment");
+        let player = controller.player_mut();
+        player.pref_color = 3;
+        player.pref_color_dw = 0x12_34_56;
+        player.pref_control = 5;
+        player.pref_mouse = true;
+        player.pref_control_style = false;
+        player.pref_auto_context_menu = false;
+        (controller.player().clone(), controller.comment().to_string())
+    }
+
+    fn assert_player_properties_validation_modal(
+        app: &GameApp,
+        expected_message: &str,
+        expected_player: &PlayerFile,
+        expected_comment: &str,
+    ) {
+        use lc_frontend::message_dialog::{
+            MessageDialogButtons, MessageDialogIcon, MessageDialogSize,
+        };
+
+        let modal = app.message_dialogs.last().expect("name validation modal");
+        assert_eq!(modal.state.message(), expected_message);
+        assert_eq!(modal.state.caption(), "");
+        assert_eq!(modal.state.buttons(), MessageDialogButtons::OK);
+        assert_eq!(modal.state.icon(), MessageDialogIcon::ERROR);
+        assert_eq!(modal.state.size(), MessageDialogSize::Regular);
+        assert!(matches!(modal.continuation, MessageDialogContinuation::None));
+        let form = app
+            .startup_player_properties_dialog
+            .as_ref()
+            .expect("properties form remains below modal");
+        assert_eq!(form.controller.player(), expected_player);
+        assert_eq!(form.controller.comment(), expected_comment);
+        assert_eq!(form.controller.validation_error(), None);
+        assert!(app.status_text.is_empty());
+    }
+
+    #[test]
+    fn startup_player_properties_empty_name_shows_modal_message_dialog() {
+        let user_data = tempdir().expect("empty-name user data");
+        let (_guard, _paths, _player_root, mut app) =
+            startup_player_properties_validation_app(user_data.path());
+        let (expected_player, expected_comment) =
+            set_distinct_player_properties_fields(&mut app, "");
+
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
+        ]);
+
+        assert_player_properties_validation_modal(
+            &app,
+            "You must specify a player name!",
+            &expected_player,
+            &expected_comment,
+        );
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss empty-name modal");
+        assert!(app.message_dialogs.is_empty());
+        let form = app.startup_player_properties_dialog.as_ref().unwrap();
+        assert_eq!(form.controller.player(), &expected_player);
+        assert_eq!(form.controller.comment(), expected_comment);
+    }
+
+    #[test]
+    fn startup_player_properties_duplicate_name_shows_modal_message_dialog() {
+        let user_data = tempdir().expect("duplicate-name user data");
+        let (_guard, _paths, player_root, mut app) =
+            startup_player_properties_validation_app(user_data.path());
+        let occupied = player_root.join("Taken.c4p");
+        fs::create_dir(&occupied).expect("create colliding player group");
+        let (expected_player, expected_comment) =
+            set_distinct_player_properties_fields(&mut app, "Taken");
+
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
+        ]);
+
+        assert_player_properties_validation_modal(
+            &app,
+            "Taken is already taken",
+            &expected_player,
+            &expected_comment,
+        );
+        assert!(occupied.is_dir());
+        assert!(app.startup_player_files.is_empty());
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss duplicate-name modal");
+        assert!(app.message_dialogs.is_empty());
+        let form = app.startup_player_properties_dialog.as_ref().unwrap();
+        assert_eq!(form.controller.player(), &expected_player);
+        assert_eq!(form.controller.comment(), expected_comment);
     }
 
     #[test]
