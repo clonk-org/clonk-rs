@@ -69,6 +69,9 @@ pub struct ClientSettings {
     pub local_resource_roots: Vec<PathBuf>,
     pub league_transport: lc_network::LeagueHttpTransportConfig,
     pub league_auth: lc_network::LeagueAuthRequestHead,
+    /// League HTTP host retained from accepted JoinData for later local-player
+    /// authentication dialogs after the join envelope is released.
+    pub league_server_name: String,
     pub mesh_tcp_bind_address: Option<SocketAddr>,
     pub mesh_udp_bind_address: Option<SocketAddr>,
     pub netpuncher_address: Option<String>,
@@ -98,6 +101,7 @@ impl ClientSettings {
             local_resource_roots: Vec::new(),
             league_transport: lc_network::LeagueHttpTransportConfig::default(),
             league_auth: lc_network::LeagueAuthRequestHead::default(),
+            league_server_name: String::new(),
             mesh_tcp_bind_address: Some(wildcard),
             mesh_udp_bind_address: Some(wildcard),
             netpuncher_address: None,
@@ -1471,7 +1475,7 @@ impl TestNetworkCommands {
         Vec<lc_engine::ControlPlayerInfoEntry>,
         Vec<lc_network::PlayerInfoUpdateRequest>,
     ) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut order = Vec::new();
         let mut publications = 0;
         let mut auth_heads = Vec::new();
@@ -1507,6 +1511,12 @@ impl TestNetworkCommands {
                     player_infos.push(request);
                     break;
                 }
+                // Opening the native modal cancels any active synchronized
+                // player menu before it submits league credentials.
+                Ok(NetworkCommand::SubmitLocal {
+                    event: ControlEvent::ClearPressed,
+                    ..
+                }) => {}
                 Ok(NetworkCommand::Shutdown) => break,
                 Ok(command) => panic!("unexpected league-client command: {command:?}"),
                 Err(tokio_mpsc::error::TryRecvError::Empty) => {
@@ -1516,6 +1526,46 @@ impl TestNetworkCommands {
             }
         }
         (order, auth_heads, auth_players, player_infos)
+    }
+
+    pub(crate) fn complete_league_player_auths(
+        mut self,
+        auth_responses: Vec<lc_network::LeagueAuthResponse>,
+    ) -> (
+        Vec<lc_network::LeagueAuthRequestHead>,
+        Vec<lc_engine::ControlPlayerInfoEntry>,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut auth_heads = Vec::new();
+        let mut auth_players = Vec::new();
+        while std::time::Instant::now() < deadline && auth_players.len() < auth_responses.len() {
+            match self.command_rx.try_recv() {
+                Ok(NetworkCommand::LeagueAuthenticatePlayer {
+                    auth,
+                    player,
+                    completion,
+                }) => {
+                    let response = auth_responses
+                        .get(auth_players.len())
+                        .cloned()
+                        .ok_or_else(|| "test did not provide an Auth response".to_string());
+                    auth_heads.push(auth);
+                    auth_players.push(player);
+                    let _ = completion.send(response);
+                }
+                Ok(NetworkCommand::SubmitLocal {
+                    event: ControlEvent::ClearPressed,
+                    ..
+                }) => {}
+                Ok(NetworkCommand::Shutdown) => break,
+                Ok(command) => panic!("unexpected league-auth command: {command:?}"),
+                Err(tokio_mpsc::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(tokio_mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        (auth_heads, auth_players)
     }
 
     pub(crate) fn complete_host_league_player_checks(
@@ -3235,18 +3285,17 @@ impl NetworkManager {
             .map_err(|_| anyhow!("network worker is not accepting league round results"))
     }
 
-    /// Runs the local-player `Action=Auth` exchange and installs its one-use
-    /// AUID. A missing league runtime is the native `!pLeagueClient` failure.
-    pub fn authenticate_league_player(
+    /// Runs the local-player `Action=Auth` exchange and returns the raw reply.
+    /// A missing league runtime is the native `!pLeagueClient` failure.
+    pub fn league_player_auth_response(
         &self,
         auth: lc_network::LeagueAuthRequestHead,
-        player: &mut lc_engine::ControlPlayerInfoEntry,
-    ) -> Result<bool> {
+        player: &lc_engine::ControlPlayerInfoEntry,
+    ) -> Result<lc_network::LeagueAuthResponse> {
         let Some(pending) = self.begin_authenticate_league_player(auth, player)? else {
-            return Ok(false);
+            return Err(anyhow!("league runtime is unavailable"));
         };
-        let response = pending.wait()?;
-        Ok(response.apply_player_auth(player))
+        pending.wait()
     }
 
     pub(crate) fn begin_authenticate_league_player(
@@ -3268,6 +3317,18 @@ impl NetworkManager {
         Ok(Some(PendingLeaguePlayerAuth {
             completion: completed,
         }))
+    }
+
+    pub fn authenticate_league_player(
+        &self,
+        auth: lc_network::LeagueAuthRequestHead,
+        player: &mut lc_engine::ControlPlayerInfoEntry,
+    ) -> Result<bool> {
+        if !self.league_runtime_available.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let response = self.league_player_auth_response(auth, player)?;
+        Ok(response.apply_player_auth(player))
     }
 
     /// Runs the host's `Action=Join` check and applies the synchronized league

@@ -284,6 +284,19 @@ const MENU_DRAG_THRESHOLD: f32 = 5.0;
 /// arrives less than 400 ms after the first (C4FullScreen.cpp:327-350;
 /// C4Viewport.cpp:657-676).
 const CPP_DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+
+fn classic_press_is_double_click(last_click: &mut Option<Instant>, now: Instant) -> bool {
+    if last_click.is_some_and(|last| {
+        now.saturating_duration_since(last) < CPP_DOUBLE_CLICK_INTERVAL
+    }) {
+        *last_click = None;
+        true
+    } else {
+        *last_click = Some(now);
+        false
+    }
+}
+
 static APP_PATH_CACHE: Mutex<Option<std::result::Result<Arc<AppPaths>, PathsError>>> =
     Mutex::new(None);
 
@@ -4924,6 +4937,36 @@ impl FrontendAssets {
         })
     }
 
+    fn league_signup_resources(
+        &self,
+    ) -> Result<lc_frontend::league_signup::LeagueSignupResources<'_>> {
+        let image = |name| {
+            self.startup_dialog_images
+                .get(name)
+                .with_context(|| format!("{name} is unavailable"))
+        };
+        let highlight = self
+            .game_over_button_highlight
+            .as_ref()
+            .context("clean classic button highlight is unavailable")?;
+        Ok(lc_frontend::league_signup::LeagueSignupResources {
+            skin: lc_frontend::classic_gui::ClassicGuiSkin::new(
+                image("GUICaption.png")?,
+                image("GUIButton.png")?,
+                image("GUIButtonDown.png")?,
+                Some(highlight),
+            ),
+            fonts: self
+                .clonk_fonts
+                .as_deref()
+                .context("CStdFont-faithful GUI fonts are unavailable")?,
+            icons: image("GUIIcons.png")?,
+            icons_extended: image("GUIIcons2.png")?,
+            checkbox: image("GUICheckbox.png")?,
+            button_highlight: highlight,
+        })
+    }
+
     fn network_start_wait_resources(
         &self,
     ) -> Result<lc_frontend::network_start_wait::NetworkStartWaitResources<'_>> {
@@ -9314,6 +9357,7 @@ enum MessageDialogContinuation {
     LeaguePlayerAuthCancelled,
     LeagueEndRetry,
     LeagueEndRejected,
+    LeagueSignupCancelled,
     LeagueVote { subject: LeagueVoteSubject },
     LeagueSurrender,
     OptionsScaleTest {
@@ -9371,6 +9415,8 @@ enum PendingLeaguePlayerAuthStage {
 struct PendingLeaguePlayerAuth {
     continuation: LeaguePlayerAuthContinuation,
     stage: PendingLeaguePlayerAuthStage,
+    auth: lc_network::LeagueAuthRequestHead,
+    mode: lc_frontend::league_signup::LeagueSignupMode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9440,6 +9486,15 @@ impl ScenarioSelectorMode {
 struct PendingGameOptionInputDialog {
     purpose: PendingInputDialogPurpose,
     controller: InputDialogController,
+}
+
+struct PendingLeagueSignupDialog {
+    controller: lc_frontend::league_signup::LeagueSignupController,
+    /// Existing credentials retained across the native login/register pair.
+    /// Registration fills only NewAccount/NewPassword and still sends these
+    /// old Account/Password fields.
+    auth: lc_network::LeagueAuthRequestHead,
+    continuation: LeaguePlayerAuthContinuation,
 }
 
 struct PendingOptionsAdvancedDialog {
@@ -9787,6 +9842,10 @@ enum AppContextMenuCommand {
     LobbyKick(i32),
     LobbySheet(LobbySheet),
     NetworkJoinEdit(lc_frontend::startup_netdlg::NetDlgEditContextCommand),
+    LeagueSignupEdit {
+        field: lc_frontend::league_signup::LeagueSignupField,
+        command: lc_frontend::league_signup::LeagueSignupEditContextCommand,
+    },
     LobbyChat(LobbyChatContextCommand),
     ScenarioSearch(ScenselSearchContextCommand),
     StartupCrewRename(lc_frontend::startup_netdlg::NetDlgEditContextCommand),
@@ -11777,6 +11836,10 @@ struct GameApp {
     pending_league_player_auth: Option<PendingLeaguePlayerAuth>,
     network: Option<NetworkManager>,
     network_mode: Option<NetworkMode>,
+    /// Process-session credentials mutated by C4LeagueSignupDialog. Native
+    /// persists LeagueAccount but deliberately keeps LeaguePassword only in
+    /// memory, so never write this override through the INI helper.
+    league_auth_session: Option<lc_network::LeagueAuthRequestHead>,
     network_lobby: Option<NetworkLobbyState>,
     classic_host_lobby: Option<ClassicHostLobbyState>,
     lobby_preload_task: Option<LobbyPreloadTask>,
@@ -11912,6 +11975,9 @@ struct GameApp {
     /// Physical primary-button state (`CMouse::LDown`), independent of any
     /// control that installed itself as `pDragElement`.
     primary_pointer_left_down: bool,
+    /// SDL/X11 classify the second application-wide left press as LeftDouble
+    /// before GUI hit-testing, regardless of which control saw the first.
+    last_application_left_press: Option<Instant>,
     /// Player menu whose title close button retained the current left-down.
     /// C4GUI::Button invokes only when that same button receives left-up.
     ingame_menu_close_pointer_capture: Option<i32>,
@@ -11995,6 +12061,13 @@ struct GameApp {
     /// App-owned classic dialogs, in C4GUI z-order. Pointer hit-testing starts
     /// at the top; every entry is rendered bottom-to-top without a scrim.
     message_dialogs: Vec<PendingMessageDialog>,
+    /// Native C4LeagueSignupDialog kept below its validation/cancellation
+    /// MessageDialog while the current local player auth is suspended.
+    league_signup_dialog: Option<PendingLeagueSignupDialog>,
+    /// UserClose(false) blocks inside its cancellation notification before
+    /// returning failure to LeaguePlrAuth. Reject the current player and
+    /// resume the remaining players only after that notification closes.
+    cancelled_league_signup_continuation: Option<LeaguePlayerAuthContinuation>,
     /// Keyboard-active z=+1 dialog. This can differ from the visual top while
     /// a z=+2 chat exists: inserting another message below chat does not call
     /// `Screen::ActivateDialog`.
@@ -12041,6 +12114,9 @@ struct GameApp {
     /// A modal may close on key-down. Retain consumed physical keys until
     /// their matching key-up so the underlying screen cannot activate.
     message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
+    league_signup_consumed_keys: HashSet<VirtualKeyCode>,
+    league_signup_pointer_capture: bool,
+    league_signup_pointer_position: Option<GuiPoint>,
     definition_selector_consumed_keys: HashSet<VirtualKeyCode>,
     /// Physical keys consumed by the join-address Edit until their matching
     /// release, even if a multiline paste moves focus back to the game list.
@@ -20141,9 +20217,9 @@ fn load_league_auth_settings(paths: Option<&AppPaths>) -> lc_network::LeagueAuth
     let value = |key| lc_app::configured_native_value(&config, "Network", key).unwrap_or_default();
     lc_network::LeagueAuthRequestHead {
         account: value("LeagueNick"),
-        // Native keeps this session-only; accepting the key here also gives
-        // headless/front-end integrations an explicit injection point.
-        password: value("LeaguePassword"),
+        // C4Config deliberately omits LeaguePassword from its compiler. It
+        // exists only in Config.Network for the lifetime of this process.
+        password: LegacyCString::default(),
         new_account: lc_engine::LegacyCString::default(),
         new_password: lc_engine::LegacyCString::default(),
     }
@@ -20156,6 +20232,14 @@ fn load_league_auto_login(paths: Option<&AppPaths>) -> bool {
         .unwrap_or(true)
 }
 
+fn load_network_nick(paths: Option<&AppPaths>) -> LegacyCString {
+    let config = load_native_config_bytes(paths);
+    lc_app::configured_native_value(&config, "Network", "Nick").unwrap_or_default()
+}
+
+/// Curl's C++ HTTP backend exposes only `Uri::Part::Host` to the signup
+/// caption. Keep schemes, paths, credentials and numeric ports out of that
+/// presentation without changing the exact endpoint used by the worker.
 fn league_server_name(endpoint: &str) -> String {
     let authority = endpoint
         .split_once("://")
@@ -20188,6 +20272,23 @@ fn league_server_name(endpoint: &str) -> String {
         .to_string()
 }
 
+fn retain_client_league_server_name(
+    network_mode: Option<&mut NetworkMode>,
+    league_address: &LegacyCString,
+) -> String {
+    let server_name = league_server_name(&legacy_presentation_text(league_address.as_bytes()));
+    if let Some(NetworkMode::Client(settings)) = network_mode {
+        settings.league_server_name.clone_from(&server_name);
+    }
+    server_name
+}
+
+fn retained_client_league_server_name(network_mode: Option<&NetworkMode>) -> String {
+    match network_mode {
+        Some(NetworkMode::Client(settings)) => settings.league_server_name.clone(),
+        Some(NetworkMode::Host(_)) | None => String::new(),
+    }
+}
 fn load_network_advertiser_settings(
     paths: Option<&AppPaths>,
 ) -> lc_network::NetworkGameAdvertiserConfig {
@@ -20474,6 +20575,17 @@ fn persist_native_config_values(
         fs::create_dir_all(parent)?;
     }
     fs::write(path, updated)
+}
+
+fn persist_league_account_preference(paths: &AppPaths, account: &LegacyCString) -> io::Result<()> {
+    persist_native_config_values(
+        paths,
+        "Network",
+        &[(
+            "LeagueNick",
+            lc_app::NativeConfigValue::CppEscapedString(account.as_bytes()),
+        )],
+    )
 }
 
 fn apply_startup_options_config(
@@ -22371,6 +22483,7 @@ impl GameApp {
             pending_league_player_auth: None,
             network,
             network_mode,
+            league_auth_session: None,
             network_lobby,
             classic_host_lobby: None,
             lobby_preload_task: None,
@@ -22444,6 +22557,7 @@ impl GameApp {
             ingame_mouse_caption: IngameMouseCaptionState::default(),
             running_pointer_position: None,
             primary_pointer_left_down: false,
+            last_application_left_press: None,
             ingame_menu_close_pointer_capture: None,
             script_menu_close_pointer_capture: None,
             menu_title_drag: None,
@@ -22476,6 +22590,8 @@ impl GameApp {
             scoreboard_initial_reconcile_pending: false,
             scoreboard_close_pointer_capture: false,
             message_dialogs: Vec::new(),
+            league_signup_dialog: None,
+            cancelled_league_signup_continuation: None,
             message_dialog_active_index: None,
             message_dialog_pointer_capture_index: None,
             definition_selector: None,
@@ -22491,6 +22607,9 @@ impl GameApp {
             context_menu_pointer_dismissed_lobby_option: None,
             context_menu_pointer_capture: None,
             message_dialog_consumed_keys: HashSet::new(),
+            league_signup_consumed_keys: HashSet::new(),
+            league_signup_pointer_capture: false,
+            league_signup_pointer_position: None,
             definition_selector_consumed_keys: HashSet::new(),
             netdlg_edit_consumed_keys: HashSet::new(),
             definition_selector_pointer_capture: false,
@@ -22940,6 +23059,9 @@ impl GameApp {
     }
 
     fn league_player_auth_settings(&self) -> lc_network::LeagueAuthRequestHead {
+        if let Some(auth) = self.league_auth_session.as_ref() {
+            return auth.clone();
+        }
         match self.network_mode.as_ref() {
             Some(NetworkMode::Client(settings)) => settings.league_auth.clone(),
             Some(NetworkMode::Host(_)) | None => {
@@ -22959,27 +23081,329 @@ impl GameApp {
                 .map(|league| league_server_name(&league.endpoint))
                 .unwrap_or_default();
         }
-        self.pending_network_join_data
-            .as_ref()
-            .map(|join_data| {
-                legacy_presentation_text(join_data.parameters.league_address.as_bytes())
-            })
-            .map(|endpoint| league_server_name(&endpoint))
-            .unwrap_or_default()
+        if let Some(join_data) = self.pending_network_join_data.as_ref() {
+            return league_server_name(&legacy_presentation_text(
+                join_data.parameters.league_address.as_bytes(),
+            ));
+        }
+        retained_client_league_server_name(self.network_mode.as_ref())
+    }
+
+    fn set_league_player_auth_settings(&mut self, auth: lc_network::LeagueAuthRequestHead) {
+        if let Some(NetworkMode::Client(settings)) = self.network_mode.as_mut() {
+            settings.league_auth = auth.clone();
+        }
+        if let Some(paths) = self.app_paths.as_ref() {
+            if let Err(error) = persist_league_account_preference(paths, &auth.account) {
+                tracing::warn!(%error, "failed to persist league account preference");
+            }
+        }
+        self.league_auth_session = Some(auth);
+    }
+
+    fn league_login_prompt_required(&self) -> bool {
+        self.league_player_auth_settings().password.is_empty()
+            || !load_league_auto_login(self.app_paths.as_ref())
+    }
+
+    fn league_signup_strings(&self) -> lc_frontend::league_signup::LeagueSignupStrings {
+        lc_frontend::league_signup::LeagueSignupStrings {
+            caption_on_server: self.runtime_resource_text(
+                "IDS_DLG_LEAGUESIGNUPON",
+                "League Login on %s",
+            ),
+            login_message: self.runtime_resource_text(
+                "IDS_MSG_PASSWORDFORPLAYER",
+                "League login for player %s:",
+            ),
+            registration_message: self.runtime_resource_text(
+                "IDS_MSG_LEAGUE_REGISTRATION",
+                "Player %s: This is your first login at the league. Your can specify your desired league user name and league password below.",
+            ),
+            account_label: self.runtime_resource_text(
+                "IDS_CTL_LEAGUE_ACCOUNT",
+                "League user name:",
+            ),
+            password_checkbox: self.runtime_resource_text(
+                "IDS_CTL_LEAGUE_CHK_PLRPW",
+                "Specify league password",
+            ),
+            password_checkbox_tooltip: self.runtime_resource_text(
+                "IDS_DESC_LEAGUECHECKPASSWORD",
+                "Enable to enter your own password. If you do not enter a password of your own, the personal WebCode will be used which is already stored on this system.",
+            ),
+            password_label: self.runtime_resource_text(
+                "IDS_CTL_LEAGUE_PLRPW",
+                "League password:",
+            ),
+            password_confirmation_label: self.runtime_resource_text(
+                "IDS_CTL_LEAGUE_PLRPW2",
+                "League password (repeat):",
+            ),
+            ok: self.runtime_resource_text("IDS_DLG_OK", "&OK"),
+            cancel: self.runtime_resource_text("IDS_DLG_CANCEL", "Cancel"),
+            close_tooltip: self.runtime_resource_text("IDS_MNU_CLOSE", "Close"),
+            invalid_entry_caption: self
+                .runtime_resource_text("IDS_DLG_INVALIDENTRY", "Invalid Entry"),
+            missing_account: self.runtime_resource_text(
+                "IDS_MSG_LEAGUEMISSINGUSERNAME",
+                "Please enter a user name!",
+            ),
+            invalid_account: self.runtime_resource_text(
+                "IDS_MSG_LEAGUEINVALIDUSERNAME",
+                "The user name contains invalid characters.",
+            ),
+            account_too_short: self.runtime_resource_text(
+                "IDS_MSG_LEAGUEUSERNAMETOOSHORT",
+                "The user name is too short.",
+            ),
+            missing_password: self.runtime_resource_text(
+                "IDS_MSG_LEAGUEMISSINGPASSWORD",
+                "Please enter a password!",
+            ),
+            password_mismatch: self.runtime_resource_text(
+                "IDS_MSG_LEAGUEMISMATCHPASSWORD",
+                "Repeated password mismatch. Please re-enter password!",
+            ),
+            cancelled_caption: self
+                .runtime_resource_text("IDS_DLG_LEAGUESIGNUP", "League Login"),
+            cancelled_message: self.runtime_resource_text(
+                "IDS_MSG_LEAGUESIGNUPCANCELLED",
+                "League login for player %s cancelled. Without login this player can not take part in this round!",
+            ),
+        }
+    }
+
+    fn open_league_signup_dialog(
+        &mut self,
+        mode: lc_frontend::league_signup::LeagueSignupMode,
+        auth: lc_network::LeagueAuthRequestHead,
+        continuation: LeaguePlayerAuthContinuation,
+    ) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "C4LeagueSignupDialog",
+            self.assets
+                .league_signup_resources()
+                .context("exact C4LeagueSignupDialog resource set is absent")
+                .and_then(|resources| resources.validate()),
+        )?;
+        let player_name = Self::league_auth_continuation_player_name(&continuation);
+        let server_name = Self::league_auth_continuation_server_name(&continuation).to_owned();
+        let account_preference = match mode {
+            lc_frontend::league_signup::LeagueSignupMode::Login => {
+                legacy_presentation_text(auth.account.as_bytes())
+            }
+            lc_frontend::league_signup::LeagueSignupMode::Registration => {
+                legacy_presentation_text(load_network_nick(self.app_paths.as_ref()).as_bytes())
+            }
+        };
+        let password_preference = match mode {
+            lc_frontend::league_signup::LeagueSignupMode::Login => {
+                legacy_presentation_text(auth.password.as_bytes())
+            }
+            lc_frontend::league_signup::LeagueSignupMode::Registration => String::new(),
+        };
+        let config =
+            lc_frontend::league_signup::LeagueSignupConfig::new(player_name, server_name, mode)
+                .with_preferences(account_preference, password_preference);
+        let pointer_position = self.running_pointer_position;
+        self.close_context_menu_silently();
+        self.cancel_underlying_interaction();
+        self.league_signup_consumed_keys.clear();
+        self.league_signup_pointer_capture = false;
+        // MouseInput carries no coordinates. Retain the application's last
+        // pointer so a stationary cursor can click the newly opened dialog.
+        self.league_signup_pointer_position = pointer_position;
+        self.league_signup_dialog = Some(PendingLeagueSignupDialog {
+            controller: lc_frontend::league_signup::LeagueSignupController::new(
+                config,
+                self.league_signup_strings(),
+            ),
+            auth,
+            continuation,
+        });
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn process_league_signup_actions(
+        &mut self,
+        actions: Vec<lc_frontend::league_signup::LeagueSignupAction>,
+    ) -> Result<(), EngineError> {
+        use lc_frontend::league_signup::{LeagueSignupAction, LeagueSignupMode};
+
+        let sounds = self
+            .league_signup_dialog
+            .as_mut()
+            .map(|dialog| dialog.controller.take_sound_events())
+            .unwrap_or_default();
+        for sound in sounds {
+            self.play_ui_sound(match sound {
+                lc_frontend::league_signup::LeagueSignupSound::ArrowHit => "ArrowHit",
+                lc_frontend::league_signup::LeagueSignupSound::Click => "Click",
+            });
+        }
+        if !actions.is_empty() {
+            self.mark_menu_dirty();
+        }
+        for action in actions {
+            match action {
+                LeagueSignupAction::FocusChanged(_)
+                | LeagueSignupAction::TextChanged { .. }
+                | LeagueSignupAction::PasswordEnabledChanged(_) => {}
+                LeagueSignupAction::OpenEditContextMenu(request) => {
+                    let field = request.field;
+                    let entries = request
+                        .items
+                        .into_iter()
+                        .map(|item| {
+                            let (label_key, tooltip_key) = match item.command {
+                                lc_frontend::league_signup::LeagueSignupEditContextCommand::Cut => {
+                                    ("IDS_DLG_CUT", "IDS_DLGTIP_CUT")
+                                }
+                                lc_frontend::league_signup::LeagueSignupEditContextCommand::Copy => {
+                                    ("IDS_DLG_COPY", "IDS_DLGTIP_COPY")
+                                }
+                                lc_frontend::league_signup::LeagueSignupEditContextCommand::Paste => {
+                                    ("IDS_DLG_PASTE", "IDS_DLGTIP_PASTE")
+                                }
+                                lc_frontend::league_signup::LeagueSignupEditContextCommand::Clear => {
+                                    ("IDS_DLG_CLEAR", "IDS_DLGTIP_CLEAR")
+                                }
+                                lc_frontend::league_signup::LeagueSignupEditContextCommand::SelectAll => {
+                                    ("IDS_DLG_SELALL", "IDS_DLGTIP_SELALL")
+                                }
+                            };
+                            ContextMenuEntry::new(startup_resource_string(
+                                self.app_paths.as_ref(),
+                                label_key,
+                                &item.label,
+                            ))
+                            .with_tooltip(startup_resource_string(
+                                self.app_paths.as_ref(),
+                                tooltip_key,
+                                &item.tooltip,
+                            ))
+                            .with_icon(ContextMenuIcon::None)
+                            .with_action(AppContextMenuCommand::LeagueSignupEdit {
+                                field,
+                                command: item.command,
+                            })
+                        })
+                        .collect();
+                    self.open_context_menu_at(entries, request.anchor)?;
+                }
+                LeagueSignupAction::ClipboardTransfer { field, text, cut } => {
+                    match arboard::Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.set_text(text))
+                    {
+                        Ok(()) if cut => {
+                            let layout = self.league_signup_layout();
+                            let fonts = self.assets.clonk_fonts.clone();
+                            let follow_up = layout
+                                .as_ref()
+                                .zip(fonts.as_deref())
+                                .and_then(|(layout, fonts)| {
+                                    self.league_signup_dialog.as_mut().map(|dialog| {
+                                        dialog.controller.confirm_clipboard_cut(
+                                            field,
+                                            layout,
+                                            &fonts.text,
+                                        )
+                                    })
+                                })
+                                .unwrap_or_default();
+                            self.process_league_signup_actions(follow_up)?;
+                        }
+                        Ok(()) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to copy league-signup edit text");
+                        }
+                    }
+                }
+                LeagueSignupAction::ValidationFailed(failure) => {
+                    self.league_signup_pointer_capture = false;
+                    if let Some(dialog) = self.league_signup_dialog.as_mut() {
+                        dialog.controller.cancel_interaction();
+                    }
+                    self.push_message_dialog(
+                        lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                            failure.message,
+                            failure.caption,
+                            lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                        ),
+                        MessageDialogContinuation::None,
+                    )?;
+                }
+                LeagueSignupAction::Submitted(submission) => {
+                    let Some(pending) = self.league_signup_dialog.take() else {
+                        break;
+                    };
+                    self.league_signup_pointer_capture = false;
+                    let mut auth = pending.auth;
+                    let mode = pending.controller.mode();
+                    match mode {
+                        LeagueSignupMode::Login => {
+                            auth.account = LegacyCString::from_bytes(submission.account)
+                                .expect("validated league account cannot contain NUL");
+                            auth.password =
+                                LegacyCString::from_bytes(submission.password.unwrap_or_default())
+                                    .expect("validated league password cannot contain NUL");
+                            auth.new_account = LegacyCString::default();
+                            auth.new_password = LegacyCString::default();
+                            self.set_league_player_auth_settings(auth.clone());
+                        }
+                        LeagueSignupMode::Registration => {
+                            auth.new_account = LegacyCString::from_bytes(submission.account)
+                                .expect("validated league account cannot contain NUL");
+                            auth.new_password = submission.password.map_or_else(
+                                || auth.password.clone(),
+                                |password| {
+                                    LegacyCString::from_bytes(password)
+                                        .expect("validated league password cannot contain NUL")
+                                },
+                            );
+                        }
+                    }
+                    let _ = self.begin_league_player_auth_exchange(
+                        pending.continuation,
+                        auth,
+                        mode,
+                    )?;
+                    break;
+                }
+                LeagueSignupAction::Aborted { caption, message } => {
+                    let Some(pending) = self.league_signup_dialog.take() else {
+                        break;
+                    };
+                    self.league_signup_pointer_capture = false;
+                    self.cancelled_league_signup_continuation = Some(pending.continuation);
+                    self.push_message_dialog(
+                        lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                            message,
+                            caption,
+                            lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                        ),
+                        MessageDialogContinuation::LeagueSignupCancelled,
+                    )?;
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn league_auth_continuation_has_current(
         continuation: &LeaguePlayerAuthContinuation,
     ) -> bool {
         match continuation {
-            LeaguePlayerAuthContinuation::InitialClient { request, index, .. } => {
+            LeaguePlayerAuthContinuation::InitialClient { request, index, .. }
+            | LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
                 *index < request.players.len()
             }
             LeaguePlayerAuthContinuation::StartupHost { players, index, .. } => {
                 *index < players.len()
-            }
-            LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
-                *index < request.players.len()
             }
         }
     }
@@ -22988,15 +23412,13 @@ impl GameApp {
         continuation: &LeaguePlayerAuthContinuation,
     ) -> String {
         let player = match continuation {
-            LeaguePlayerAuthContinuation::InitialClient { request, index, .. } => {
+            LeaguePlayerAuthContinuation::InitialClient { request, index, .. }
+            | LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
                 &request.players[*index]
             }
             LeaguePlayerAuthContinuation::StartupHost { players, index, .. } => &players[*index],
-            LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
-                &request.players[*index]
-            }
         };
-        legacy_presentation_text(player.name.as_bytes())
+        legacy_presentation_text(control_player_effective_name(player))
     }
 
     fn league_auth_continuation_server_name(
@@ -23004,16 +23426,16 @@ impl GameApp {
     ) -> &str {
         match continuation {
             LeaguePlayerAuthContinuation::InitialClient { server_name, .. }
-            | LeaguePlayerAuthContinuation::StartupHost { server_name, .. }
-            | LeaguePlayerAuthContinuation::RuntimePlayer { server_name, .. } => server_name,
+            | LeaguePlayerAuthContinuation::RuntimePlayer { server_name, .. }
+            | LeaguePlayerAuthContinuation::StartupHost { server_name, .. } => server_name,
         }
     }
 
     fn advance_league_auth_continuation(continuation: &mut LeaguePlayerAuthContinuation) {
         match continuation {
             LeaguePlayerAuthContinuation::InitialClient { index, .. }
-            | LeaguePlayerAuthContinuation::StartupHost { index, .. }
-            | LeaguePlayerAuthContinuation::RuntimePlayer { index, .. } => *index += 1,
+            | LeaguePlayerAuthContinuation::RuntimePlayer { index, .. }
+            | LeaguePlayerAuthContinuation::StartupHost { index, .. } => *index += 1,
         }
     }
 
@@ -23021,14 +23443,12 @@ impl GameApp {
         continuation: &mut LeaguePlayerAuthContinuation,
     ) {
         match continuation {
-            LeaguePlayerAuthContinuation::InitialClient { request, index, .. } => {
+            LeaguePlayerAuthContinuation::InitialClient { request, index, .. }
+            | LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
                 request.players.swap_remove(*index);
             }
             LeaguePlayerAuthContinuation::StartupHost { players, index, .. } => {
                 players.swap_remove(*index);
-            }
-            LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
-                request.players.swap_remove(*index);
             }
         }
     }
@@ -23038,14 +23458,12 @@ impl GameApp {
         response: &lc_network::LeagueAuthResponse,
     ) -> bool {
         match continuation {
-            LeaguePlayerAuthContinuation::InitialClient { request, index, .. } => {
+            LeaguePlayerAuthContinuation::InitialClient { request, index, .. }
+            | LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
                 response.apply_player_auth(&mut request.players[*index])
             }
             LeaguePlayerAuthContinuation::StartupHost { players, index, .. } => {
                 response.apply_player_auth(&mut players[*index])
-            }
-            LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
-                response.apply_player_auth(&mut request.players[*index])
             }
         }
     }
@@ -23122,84 +23540,104 @@ impl GameApp {
         }
     }
 
-    fn continue_league_player_auth(
+    fn begin_league_player_auth_exchange(
         &mut self,
         mut continuation: LeaguePlayerAuthContinuation,
+        auth: lc_network::LeagueAuthRequestHead,
+        mode: lc_frontend::league_signup::LeagueSignupMode,
     ) -> Result<LeaguePlayerAuthStatus, EngineError> {
         if self.pending_league_player_auth.is_some() {
             tracing::warn!("refusing to replace an in-flight league player authentication");
             return Ok(LeaguePlayerAuthStatus::Completed(false));
         }
-        loop {
-            if !Self::league_auth_continuation_has_current(&continuation) {
-                return Ok(self.finish_league_auth_continuation(continuation));
+        if !Self::league_auth_continuation_has_current(&continuation) {
+            return Ok(self.finish_league_auth_continuation(continuation));
+        }
+        let exchange = match &continuation {
+            LeaguePlayerAuthContinuation::InitialClient { request, index, .. }
+            | LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
+                match self.network.as_ref() {
+                    Some(network) => network.begin_authenticate_league_player(
+                        auth.clone(),
+                        &request.players[*index],
+                    ),
+                    None => Ok(None),
+                }
             }
-            let auth = self.league_player_auth_settings();
-            let exchange = match &continuation {
-                LeaguePlayerAuthContinuation::InitialClient { request, index, .. } => {
-                    match self.network.as_ref() {
-                        Some(network) => network.begin_authenticate_league_player(
-                            auth.clone(),
-                            &request.players[*index],
-                        ),
-                        None => Ok(None),
-                    }
-                }
-                LeaguePlayerAuthContinuation::StartupHost {
-                    manager,
-                    players,
-                    index,
-                    ..
-                } => manager.begin_authenticate_league_player(auth, &players[*index]),
-                LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
-                    match self.network.as_ref() {
-                        Some(network) => network.begin_authenticate_league_player(
-                            auth,
-                            &request.players[*index],
-                        ),
-                        None => Ok(None),
-                    }
-                }
-            };
-            let exchange = match exchange {
-                Ok(Some(exchange)) => exchange,
-                Ok(None) => {
-                    Self::reject_league_auth_continuation_player(&mut continuation);
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "failed to begin league player authentication");
-                    Self::reject_league_auth_continuation_player(&mut continuation);
-                    continue;
-                }
-            };
-            let player = Self::league_auth_continuation_player_name(&continuation);
-            let server = Self::league_auth_continuation_server_name(&continuation).to_string();
-            let message = format_resource_string(
-                self.runtime_resource_text(
-                    "IDS_MSG_TRYLEAGUESIGNUP",
-                    "League login for player %s on %s...",
-                ),
-                &[&player, &server],
-            );
-            let caption = self.runtime_resource_text("IDS_DLG_LEAGUESIGNUP", "League Login");
-            self.push_message_dialog(
-                lc_frontend::message_dialog::MessageDialogState::new(
-                    message,
-                    caption,
-                    lc_frontend::message_dialog::MessageDialogButtons::CANCEL,
-                    lc_frontend::message_dialog::MessageDialogIcon::Standard(3),
-                    lc_frontend::message_dialog::MessageDialogSize::Regular,
-                    false,
-                ),
-                MessageDialogContinuation::LeaguePlayerAuthWait,
-            )?;
-            self.pending_league_player_auth = Some(PendingLeaguePlayerAuth {
+            LeaguePlayerAuthContinuation::StartupHost {
+                manager,
+                players,
+                index,
+                ..
+            } => manager.begin_authenticate_league_player(auth.clone(), &players[*index]),
+        };
+        let exchange = match exchange {
+            Ok(Some(exchange)) => exchange,
+            Ok(None) => {
+                Self::reject_league_auth_continuation_player(&mut continuation);
+                return self.continue_league_player_auth(continuation);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to begin league player authentication");
+                Self::reject_league_auth_continuation_player(&mut continuation);
+                return self.continue_league_player_auth(continuation);
+            }
+        };
+        let player = Self::league_auth_continuation_player_name(&continuation);
+        let server = Self::league_auth_continuation_server_name(&continuation).to_string();
+        let message = format_resource_string(
+            self.runtime_resource_text(
+                "IDS_MSG_TRYLEAGUESIGNUP",
+                "League login for player %s on %s...",
+            ),
+            &[&player, &server],
+        );
+        let caption = self.runtime_resource_text("IDS_DLG_LEAGUESIGNUP", "League Login");
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                message,
+                caption,
+                lc_frontend::message_dialog::MessageDialogButtons::CANCEL,
+                lc_frontend::message_dialog::MessageDialogIcon::Standard(3),
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            MessageDialogContinuation::LeaguePlayerAuthWait,
+        )?;
+        self.pending_league_player_auth = Some(PendingLeaguePlayerAuth {
+            continuation,
+            stage: PendingLeaguePlayerAuthStage::Waiting(exchange),
+            auth,
+            mode,
+        });
+        Ok(LeaguePlayerAuthStatus::Pending)
+    }
+
+    fn continue_league_player_auth(
+        &mut self,
+        continuation: LeaguePlayerAuthContinuation,
+    ) -> Result<LeaguePlayerAuthStatus, EngineError> {
+        if self.pending_league_player_auth.is_some() || self.league_signup_dialog.is_some() {
+            tracing::warn!("refusing to replace an in-flight league player authentication");
+            return Ok(LeaguePlayerAuthStatus::Completed(false));
+        }
+        if !Self::league_auth_continuation_has_current(&continuation) {
+            return Ok(self.finish_league_auth_continuation(continuation));
+        }
+        let auth = self.league_player_auth_settings();
+        if self.league_login_prompt_required() {
+            self.open_league_signup_dialog(
+                lc_frontend::league_signup::LeagueSignupMode::Login,
+                auth,
                 continuation,
-                stage: PendingLeaguePlayerAuthStage::Waiting(exchange),
-            });
+            )?;
             return Ok(LeaguePlayerAuthStatus::Pending);
         }
+        self.begin_league_player_auth_exchange(
+            continuation,
+            auth,
+            lc_frontend::league_signup::LeagueSignupMode::Login,
+        )
     }
 
     fn begin_startup_host_league_auth(
@@ -23269,6 +23707,27 @@ impl GameApp {
         }
     }
 
+    fn reopen_league_player_auth_form(
+        &mut self,
+        mut pending: PendingLeaguePlayerAuth,
+    ) -> Result<(), EngineError> {
+        // C4Network2::LeaguePlrAuth clears only the process-global password
+        // after the error/cancellation modal closes. Its loop keeps the
+        // local Password value for registration's no-custom-password
+        // fallback, while a login retry starts with an empty password edit.
+        self.clear_remembered_league_password();
+        pending.auth.new_account = LegacyCString::default();
+        pending.auth.new_password = LegacyCString::default();
+        if pending.mode == lc_frontend::league_signup::LeagueSignupMode::Login {
+            pending.auth.password = LegacyCString::default();
+        }
+        self.open_league_signup_dialog(
+            pending.mode,
+            pending.auth,
+            pending.continuation,
+        )
+    }
+
     fn push_league_player_check_error(&mut self, message: String) -> Result<(), EngineError> {
         self.push_message_dialog(
             lc_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -23297,11 +23756,33 @@ impl GameApp {
         self.dismiss_league_player_auth_wait();
         match result {
             Ok(response)
+                if response.is_register()
+                    && pending.mode
+                        == lc_frontend::league_signup::LeagueSignupMode::Login =>
+            {
+                if !response.account.is_empty() {
+                    pending.auth.account = response.account;
+                }
+                pending.auth.new_account = LegacyCString::default();
+                pending.auth.new_password = LegacyCString::default();
+                self.open_league_signup_dialog(
+                    lc_frontend::league_signup::LeagueSignupMode::Registration,
+                    pending.auth,
+                    pending.continuation,
+                )?;
+            }
+            Ok(response)
                 if Self::apply_league_auth_response(
                     &mut pending.continuation,
                     &response,
                 ) =>
             {
+                if pending.mode
+                    == lc_frontend::league_signup::LeagueSignupMode::Registration
+                    && !response.account.is_empty()
+                {
+                    pending.auth.account.clone_from(&response.account);
+                }
                 if load_league_auto_login(self.app_paths.as_ref()) {
                     Self::advance_league_auth_continuation(&mut pending.continuation);
                     let _ = self.continue_league_player_auth(pending.continuation)?;
@@ -23350,10 +23831,18 @@ impl GameApp {
                 self.pending_league_player_auth = Some(pending);
             }
             Ok(response) => {
-                let server_message = if response.message.is_empty() {
+                if pending.mode
+                    == lc_frontend::league_signup::LeagueSignupMode::Registration
+                    && !response.account.is_empty()
+                {
+                    pending.auth.account.clone_from(&response.account);
+                }
+                pending.auth.new_account = LegacyCString::default();
+                pending.auth.new_password = LegacyCString::default();
+                let server_message = if response.is_success() && response.auid.is_empty() {
                     self.runtime_resource_text(
-                        "IDS_NET_ERR_LEAGUE_EMPTYREPLY",
-                        "Empty reply",
+                        "IDS_MSG_LEAGUESERVERREPLYWITHOUTA",
+                        "League server reply without authentication-id!",
                     )
                 } else {
                     legacy_presentation_text(response.message.as_bytes())
@@ -23699,6 +24188,13 @@ impl GameApp {
         self.release_message_dialog_pointer_elements();
         self.menu_frame_cache = None;
         self.context_menu_pointer_capture = None;
+        if let Some(dialog) = self.league_signup_dialog.as_mut() {
+            dialog.controller.cancel_interaction();
+            dialog.controller.reset_location();
+        }
+        self.league_signup_consumed_keys.clear();
+        self.league_signup_pointer_capture = false;
+        self.league_signup_pointer_position = None;
         if let Some(dialog) = self.game_option_input_dialog.as_mut() {
             dialog.controller.cancel_interaction();
         }
@@ -24338,6 +24834,26 @@ impl GameApp {
             return Ok(());
         }
         if !self.message_dialogs.is_empty() && !self.running_chat_active() {
+            return Ok(());
+        }
+        if self.league_signup_dialog.is_some() {
+            if self.context_menu.is_none() {
+                let mut encoded = [0_u8; 4];
+                let text = character.encode_utf8(&mut encoded);
+                let layout = self.league_signup_layout();
+                let fonts = self.assets.clonk_fonts.clone();
+                let actions = self
+                    .league_signup_dialog
+                    .as_mut()
+                    .map(|dialog| match (layout.as_ref(), fonts.as_deref()) {
+                        (Some(layout), Some(fonts)) => dialog
+                            .controller
+                            .handle_text_input_with_layout(text, layout, &fonts.text),
+                        _ => dialog.controller.handle_text_input(text),
+                    })
+                    .unwrap_or_default();
+                self.process_league_signup_actions(actions)?;
+            }
             return Ok(());
         }
         if self
@@ -25196,6 +25712,9 @@ impl GameApp {
             return Ok(());
         }
         if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
+            return Ok(());
+        }
+        if self.league_signup_dialog.is_some() {
             return Ok(());
         }
         if self
@@ -26327,6 +26846,144 @@ impl GameApp {
         // C4GUI::Screen routes every key exclusively to the top modal. Some
         // edit/controller bindings intentionally report pass-through, but it
         // is pass-through within the modal dialog, never to ScenarioBrowser.
+        Ok(true)
+    }
+
+    fn handle_league_signup_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.league_signup_dialog.is_none() {
+            return Ok(false);
+        }
+        if self.context_menu.is_some() {
+            return Ok(true);
+        }
+        use lc_frontend::league_signup::{
+            LeagueSignupEditClipboardShortcut, LeagueSignupEditKey, LeagueSignupKeyModifiers,
+        };
+        let layout = self.league_signup_layout();
+        let fonts = self.assets.clonk_fonts.clone();
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let modifiers = LeagueSignupKeyModifiers {
+            shift: c4_modifiers.shift(),
+            control: c4_modifiers.ctrl(),
+        };
+        let hotkey_modifiers = c4_modifiers == ModifiersState::ALT
+            || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
+        let actions = match state {
+            ElementState::Pressed if hotkey_modifiers => context_menu_hotkey(key)
+                .and_then(|character| {
+                    self.league_signup_dialog
+                        .as_mut()
+                        .map(|dialog| dialog.controller.handle_hotkey(character))
+                })
+                .unwrap_or_default(),
+            ElementState::Pressed
+                if c4_modifiers == ModifiersState::CTRL
+                    && matches!(
+                        key,
+                        VirtualKeyCode::A
+                            | VirtualKeyCode::C
+                            | VirtualKeyCode::X
+                            | VirtualKeyCode::V
+                    ) =>
+            {
+                let shortcut = match key {
+                    VirtualKeyCode::A => Some(LeagueSignupEditClipboardShortcut::SelectAll),
+                    VirtualKeyCode::C => Some(LeagueSignupEditClipboardShortcut::Copy),
+                    VirtualKeyCode::X => Some(LeagueSignupEditClipboardShortcut::Cut),
+                    VirtualKeyCode::V => Some(LeagueSignupEditClipboardShortcut::Paste),
+                    _ => None,
+                };
+                let clipboard = (shortcut == Some(LeagueSignupEditClipboardShortcut::Paste))
+                    .then(|| {
+                        arboard::Clipboard::new()
+                            .and_then(|mut clipboard| clipboard.get_text())
+                            .ok()
+                    })
+                    .flatten();
+                shortcut
+                    .and_then(|shortcut| {
+                        layout
+                            .as_ref()
+                            .zip(fonts.as_deref())
+                            .and_then(|(layout, fonts)| {
+                                self.league_signup_dialog.as_mut().map(|dialog| {
+                                    dialog.controller.handle_clipboard_shortcut(
+                                        shortcut,
+                                        clipboard.as_deref(),
+                                        layout,
+                                        &fonts.text,
+                                    )
+                                })
+                            })
+                    })
+                    .unwrap_or_default()
+            }
+            ElementState::Pressed if c4_modifiers.is_empty() && key == VirtualKeyCode::Apps => {
+                layout
+                    .as_ref()
+                    .and_then(|layout| {
+                        self.league_signup_dialog.as_ref().map(|dialog| {
+                            dialog
+                                .controller
+                                .request_context_menu_from_key(clipboard_text_available(), layout)
+                        })
+                    })
+                    .unwrap_or_default()
+            }
+            ElementState::Pressed if !c4_modifiers.alt() => {
+                let edit_key = match key {
+                    VirtualKeyCode::Back => Some(LeagueSignupEditKey::Backspace),
+                    VirtualKeyCode::Delete => Some(LeagueSignupEditKey::Delete),
+                    VirtualKeyCode::Home => Some(LeagueSignupEditKey::Home),
+                    VirtualKeyCode::End => Some(LeagueSignupEditKey::End),
+                    VirtualKeyCode::Left => Some(LeagueSignupEditKey::Left),
+                    VirtualKeyCode::Right => Some(LeagueSignupEditKey::Right),
+                    _ => None,
+                };
+                if let Some(edit_key) = edit_key {
+                    self.league_signup_dialog
+                        .as_mut()
+                        .map(|dialog| match (layout.as_ref(), fonts.as_deref()) {
+                            (Some(layout), Some(fonts)) => {
+                                dialog.controller.handle_edit_key_with_layout(
+                                    edit_key,
+                                    modifiers,
+                                    layout,
+                                    &fonts.text,
+                                )
+                            }
+                            _ => dialog.controller.handle_edit_key(edit_key, modifiers),
+                        })
+                        .unwrap_or_default()
+                } else if let Some(gui_key) =
+                    league_signup_dialog_key_code(key, c4_modifiers)
+                {
+                    self.league_signup_dialog
+                        .as_mut()
+                        .map(|dialog| dialog.controller.handle_key_down(gui_key, modifiers.shift))
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            }
+            ElementState::Released => league_signup_dialog_key_code(key, c4_modifiers)
+                .and_then(|gui_key| {
+                    self.league_signup_dialog
+                        .as_mut()
+                        .map(|dialog| dialog.controller.handle_key_up(gui_key))
+                })
+                .unwrap_or_default(),
+            ElementState::Pressed => Vec::new(),
+        };
+        if state == ElementState::Pressed {
+            self.league_signup_consumed_keys.insert(key);
+        }
+        self.process_league_signup_actions(actions)?;
         Ok(true)
     }
 
@@ -27661,6 +28318,7 @@ impl GameApp {
             && self.context_menu.is_none()
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
+            && self.league_signup_dialog.is_none()
     }
 
     fn startup_options_dialog_is_active(&self) -> bool {
@@ -28669,8 +29327,27 @@ impl GameApp {
                 return Ok(());
             }
         }
+        let league_signup_release_latched =
+            state == ElementState::Released && self.league_signup_consumed_keys.remove(&key);
+        if league_signup_release_latched && !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
         let message_dialog_was_open = !self.message_dialogs.is_empty();
         if self.handle_message_dialog_key(key, state)? {
+            return Ok(());
+        }
+        if self.league_signup_dialog.is_some() && self.context_menu.is_some() {
+            let modifiers = self.keyboard_modifiers
+                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            if modifiers.is_empty() {
+                let _ = self.handle_context_menu_key(key, state)?;
+            }
+            return Ok(());
+        }
+        if self.handle_league_signup_key(key, state)? {
+            return Ok(());
+        }
+        if league_signup_release_latched {
             return Ok(());
         }
         if message_dialog_was_open && self.handle_running_chat_open_key(key, state) {
@@ -29670,6 +30347,9 @@ impl GameApp {
         if let Some(dialog) = self.game_option_input_dialog.as_mut() {
             dialog.controller.cancel_interaction();
         }
+        if let Some(dialog) = self.league_signup_dialog.as_mut() {
+            dialog.controller.cancel_interaction();
+        }
         self.scenario_game_options.cancel_interaction();
         if self.classic_host_lobby_active() {
             self.cancel_classic_host_lobby_interaction();
@@ -29678,6 +30358,9 @@ impl GameApp {
         self.runtime_client_list_consumed_keys.clear();
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
+        self.league_signup_consumed_keys.clear();
+        self.league_signup_pointer_capture = false;
+        self.league_signup_pointer_position = None;
         self.game_option_input_consumed_keys.clear();
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = None;
@@ -33289,6 +33972,10 @@ impl GameApp {
             synchronized_team_configuration(&join_data.parameters),
             team_registry,
         ));
+        retain_client_league_server_name(
+            self.network_mode.as_mut(),
+            &join_data.parameters.league_address,
+        );
         self.pending_network_join_data = None;
         self.mode = AppMode::Loading;
         Ok(())
@@ -35700,17 +36387,18 @@ impl GameApp {
                         if !scenario_title.is_empty() {
                             self.scenario_label = scenario_title;
                         }
+                        let joined_league_server_name = retain_client_league_server_name(
+                            self.network_mode.as_mut(),
+                            &join_data.parameters.league_address,
+                        );
                         let is_client =
                             matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_)));
                         let local_is_observer =
                             self.control_clients.is_observer(join_data.client_id);
                         let initial_player_info_ready = if is_client && !local_is_observer {
-                            let endpoint = legacy_presentation_text(
-                                join_data.parameters.league_address.as_bytes(),
-                            );
                             match self.submit_initial_client_player_info(
                                 join_data.client_id,
-                                league_server_name(&endpoint),
+                                joined_league_server_name,
                             ) {
                                 LeaguePlayerAuthStatus::Completed(submitted) => submitted,
                                 LeaguePlayerAuthStatus::Pending => false,
@@ -36382,6 +37070,7 @@ impl GameApp {
             GamepadCapture,
             OptionsDevice,
             Message,
+            LeagueSignup,
             RuntimeClientInfo,
             Definition,
             ContextPending,
@@ -36452,6 +37141,8 @@ impl GameApp {
                 ClusterOwner::ContextPending
             } else if !self.message_dialogs.is_empty() {
                 ClusterOwner::Message
+            } else if self.league_signup_dialog.is_some() {
+                ClusterOwner::LeagueSignup
             } else if self
                 .runtime_client_list
                 .as_ref()
@@ -36543,6 +37234,18 @@ impl GameApp {
                                 self.handle_message_dialog_gamepad_event(event)?;
                             }
                         }
+                        ClusterOwner::LeagueSignup => {
+                            if let GamepadEvent::Button {
+                                slot,
+                                button,
+                                state,
+                            } = event
+                            {
+                                self.handle_gamepad_button(slot, button, state)?;
+                            } else {
+                                self.handle_league_signup_gamepad_event(event)?;
+                            }
+                        }
                         ClusterOwner::RuntimeClientInfo => match event {
                             GamepadEvent::GuiButton {
                                 class: GuiButtonClass::High,
@@ -36601,6 +37304,8 @@ impl GameApp {
                                     ClusterOwner::RuntimeClientInfo
                                 } else if self.game_option_input_dialog.is_some() {
                                     ClusterOwner::Input
+                                } else if self.league_signup_dialog.is_some() {
+                                    ClusterOwner::LeagueSignup
                                 } else if self.startup_player_properties_dialog.is_some() {
                                     if eligible_gamepad_gui {
                                         ClusterOwner::Properties
@@ -36985,6 +37690,66 @@ impl GameApp {
             self.finish_message_dialog_at(active_index, result)?;
         }
         Ok(())
+    }
+
+    fn handle_league_signup_gamepad_event(
+        &mut self,
+        event: GamepadEvent,
+    ) -> Result<(), EngineError> {
+        let actions = self
+            .league_signup_dialog
+            .as_mut()
+            .map(|dialog| match event {
+                GamepadEvent::Direction {
+                    button,
+                    state: ElementState::Pressed,
+                    ..
+                } if matches!(button, ControlButton::Left | ControlButton::Right) => dialog
+                    .controller
+                    .handle_key_down(KeyCode::Tab, button == ControlButton::Left),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Pressed,
+                    ..
+                } => {
+                    use lc_frontend::league_signup::LeagueSignupControl;
+                    let key = match dialog.controller.focused_control() {
+                        Some(
+                            LeagueSignupControl::Account
+                            | LeagueSignupControl::Password
+                            | LeagueSignupControl::PasswordConfirmation,
+                        )
+                        | None => KeyCode::Enter,
+                        Some(
+                            LeagueSignupControl::PasswordCheckbox
+                            | LeagueSignupControl::Close
+                            | LeagueSignupControl::Ok
+                            | LeagueSignupControl::Cancel,
+                        ) => KeyCode::Space,
+                    };
+                    dialog.controller.handle_key_down(key, false)
+                }
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Released,
+                    ..
+                } => dialog.controller.handle_key_up(KeyCode::Space),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                    ..
+                } => dialog.controller.handle_key_down(KeyCode::Escape, false),
+                GamepadEvent::Clear { .. } => {
+                    dialog.controller.cancel_interaction();
+                    Vec::new()
+                }
+                GamepadEvent::Direction { .. }
+                | GamepadEvent::Button { .. }
+                | GamepadEvent::Action { .. }
+                | GamepadEvent::GuiButton { .. } => Vec::new(),
+            })
+            .unwrap_or_default();
+        self.process_league_signup_actions(actions)
     }
 
     fn handle_game_over_gamepad_event(&mut self, event: GamepadEvent) -> Result<(), EngineError> {
@@ -37811,6 +38576,108 @@ impl GameApp {
         Ok(())
     }
 
+    fn league_signup_layout(&self) -> Option<lc_frontend::league_signup::LeagueSignupLayout> {
+        let dialog = self.league_signup_dialog.as_ref()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        Some(
+            dialog
+                .controller
+                .layout(surface.width() as i32, surface.height() as i32, &fonts.text),
+        )
+    }
+
+    fn handle_league_signup_pointer_move(&mut self, point: GuiPoint) -> Result<bool, EngineError> {
+        if self.league_signup_dialog.is_none() {
+            return Ok(false);
+        }
+        self.league_signup_pointer_position = Some(point);
+        let layout = self.league_signup_layout();
+        let fonts = self.assets.clonk_fonts.clone();
+        let actions = layout
+            .as_ref()
+            .and_then(|layout| {
+                fonts.as_deref().and_then(|fonts| {
+                    self.league_signup_dialog.as_mut().map(|dialog| {
+                        dialog
+                            .controller
+                            .handle_pointer_move(point, layout, &fonts.text)
+                    })
+                })
+            })
+            .unwrap_or_default();
+        self.process_league_signup_actions(actions)?;
+        Ok(true)
+    }
+
+    fn league_signup_pointer_left(&mut self, clear_position: bool) {
+        let sounds = self
+            .league_signup_dialog
+            .as_mut()
+            .map(|dialog| {
+                dialog.controller.pointer_left();
+                dialog.controller.take_sound_events()
+            })
+            .unwrap_or_default();
+        for sound in sounds {
+            self.play_ui_sound(match sound {
+                lc_frontend::league_signup::LeagueSignupSound::ArrowHit => "ArrowHit",
+                lc_frontend::league_signup::LeagueSignupSound::Click => "Click",
+            });
+        }
+        self.league_signup_pointer_capture = false;
+        if clear_position {
+            self.league_signup_pointer_position = None;
+        }
+    }
+
+    fn handle_league_signup_pointer_button(
+        &mut self,
+        state: ElementState,
+        left_double_click: bool,
+    ) -> Result<bool, EngineError> {
+        if self.league_signup_dialog.is_none() {
+            return Ok(false);
+        }
+        let Some(point) = self
+            .league_signup_pointer_position
+            .or(self.running_pointer_position)
+        else {
+            return Ok(true);
+        };
+        self.league_signup_pointer_position = Some(point);
+        let Some(layout) = self.league_signup_layout() else {
+            return Ok(true);
+        };
+        let fonts = self.assets.clonk_fonts.clone();
+        let actions = self
+            .league_signup_dialog
+            .as_mut()
+            .map(|dialog| match state {
+                ElementState::Pressed => fonts.as_deref().map_or_else(Vec::new, |fonts| {
+                    if left_double_click {
+                        dialog.controller.handle_pointer_double_click(
+                            point,
+                            &layout,
+                            &fonts.text,
+                        )
+                    } else {
+                        dialog
+                            .controller
+                            .handle_pointer_down(point, &layout, &fonts.text)
+                    }
+                }),
+                ElementState::Released => fonts.as_deref().map_or_else(Vec::new, |fonts| {
+                    dialog
+                        .controller
+                        .handle_pointer_up(point, &layout, &fonts.text)
+                }),
+            })
+            .unwrap_or_default();
+        self.process_league_signup_actions(actions)?;
+        Ok(true)
+    }
+
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
@@ -37959,6 +38826,18 @@ impl GameApp {
         if self.running_chat_controller().is_none()
             && self.handle_message_dialog_pointer_move(point)
         {
+            self.suspend_ingame_pointer_for_gui();
+            return Ok(());
+        }
+        if self.league_signup_dialog.is_some() && self.context_menu.is_some() {
+            self.league_signup_pointer_position = Some(point);
+            if self.handle_context_menu_pointer_move(point)? {
+                self.league_signup_pointer_left(false);
+                self.suspend_ingame_pointer_for_gui();
+                return Ok(());
+            }
+        }
+        if self.handle_league_signup_pointer_move(point)? {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
@@ -40342,6 +41221,34 @@ impl GameApp {
         if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
             return Ok(());
         }
+        if self.league_signup_dialog.is_some() {
+            if self
+                .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Right)?
+            {
+                return Ok(());
+            }
+            if self.context_menu.is_some() {
+                return Ok(());
+            }
+            if button_state == ElementState::Pressed {
+                let layout = self.league_signup_layout();
+                let point = self.league_signup_pointer_position;
+                let actions = point
+                    .zip(layout.as_ref())
+                    .and_then(|(point, layout)| {
+                        self.league_signup_dialog.as_mut().map(|dialog| {
+                            dialog.controller.request_context_menu_at(
+                                point,
+                                clipboard_text_available(),
+                                layout,
+                            )
+                        })
+                    })
+                    .unwrap_or_default();
+                self.process_league_signup_actions(actions)?;
+            }
+            return Ok(());
+        }
         if self.startup_options_advanced_dialog.is_some() {
             return Ok(());
         }
@@ -40543,6 +41450,38 @@ impl GameApp {
             return Ok(());
         }
         if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
+            return Ok(());
+        }
+        if self.league_signup_dialog.is_some() {
+            if self
+                .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Other)?
+            {
+                return Ok(());
+            }
+            if self.context_menu.is_some() {
+                return Ok(());
+            }
+            if button_state == ElementState::Pressed {
+                let point = self.league_signup_pointer_position;
+                let layout = self.league_signup_layout();
+                let fonts = self.assets.clonk_fonts.clone();
+                let primary = primary_clipboard_text();
+                let actions = point
+                    .zip(layout.as_ref())
+                    .zip(fonts.as_deref())
+                    .and_then(|((point, layout), fonts)| {
+                        self.league_signup_dialog.as_mut().map(|dialog| {
+                            dialog.controller.handle_pointer_middle_down(
+                                point,
+                                primary.as_deref(),
+                                layout,
+                                &fonts.text,
+                            )
+                        })
+                    })
+                    .unwrap_or_default();
+                self.process_league_signup_actions(actions)?;
+            }
             return Ok(());
         }
         if self.startup_options_advanced_dialog.is_some() {
@@ -42093,6 +43032,19 @@ impl GameApp {
     }
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
+        let left_double_click = button_state == ElementState::Pressed
+            && classic_press_is_double_click(
+                &mut self.last_application_left_press,
+                Instant::now(),
+            );
+        self.handle_mouse_button_classified(button_state, left_double_click)
+    }
+
+    fn handle_mouse_button_classified(
+        &mut self,
+        button_state: ElementState,
+        left_double_click: bool,
+    ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.primary_pointer_left_down = button_state == ElementState::Pressed;
         self.context_menu_pointer_dismissed_lobby_team_player = None;
@@ -42140,6 +43092,9 @@ impl GameApp {
             // topmost selector itself may acquire this latch.
             self.definition_selector_pointer_capture =
                 self.definition_selector.is_some() && self.message_dialogs.is_empty();
+            self.league_signup_pointer_capture = self.league_signup_dialog.is_some()
+                && self.context_menu.is_none()
+                && self.message_dialogs.is_empty();
             self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
                 && self.running_chat_controller().is_none()
                 && self.context_menu.is_none()
@@ -42148,6 +43103,8 @@ impl GameApp {
         }
         let definition_selector_release_latched = button_state == ElementState::Released
             && std::mem::take(&mut self.definition_selector_pointer_capture);
+        let league_signup_release_latched = button_state == ElementState::Released
+            && std::mem::take(&mut self.league_signup_pointer_capture);
         let input_dialog_release_latched = button_state == ElementState::Released
             && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left);
         if input_dialog_release_latched {
@@ -42223,6 +43180,26 @@ impl GameApp {
         if self.running_chat_controller().is_none()
             && self.handle_message_dialog_pointer_button(button_state)?
         {
+            return Ok(());
+        }
+        if self.league_signup_dialog.is_some() {
+            if self.context_menu.is_some() {
+                if self.handle_context_menu_pointer_button(
+                    button_state,
+                    ContextMenuPointerButton::Left,
+                )? {
+                    self.league_signup_pointer_left(false);
+                    return Ok(());
+                }
+                if button_state == ElementState::Pressed {
+                    self.league_signup_pointer_capture = true;
+                }
+            }
+            if self.handle_league_signup_pointer_button(button_state, left_double_click)? {
+                return Ok(());
+            }
+        }
+        if league_signup_release_latched {
             return Ok(());
         }
         if self.external_irc_dialog_visible {
@@ -42870,6 +43847,11 @@ impl GameApp {
     }
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
+        let left_double_click = phase == TouchPhase::Started
+            && classic_press_is_double_click(
+                &mut self.last_application_left_press,
+                Instant::now(),
+            );
         self.guard_classic_global_gui_bootstrap()?;
         match phase {
             TouchPhase::Started => self.primary_pointer_left_down = true,
@@ -42915,7 +43897,7 @@ impl GameApp {
                         f64::from(position.x),
                         f64::from(position.y),
                     ))?;
-                    self.handle_mouse_button(ElementState::Pressed)?;
+                    self.handle_mouse_button_classified(ElementState::Pressed, left_double_click)?;
                 }
                 TouchPhase::Moved => {
                     self.handle_cursor_moved(PhysicalPosition::new(
@@ -42940,7 +43922,7 @@ impl GameApp {
                         f64::from(position.x),
                         f64::from(position.y),
                     ))?;
-                    self.handle_mouse_button(ElementState::Pressed)?;
+                    self.handle_mouse_button_classified(ElementState::Pressed, left_double_click)?;
                 }
                 TouchPhase::Moved => {
                     self.handle_cursor_moved(PhysicalPosition::new(
@@ -42963,6 +43945,9 @@ impl GameApp {
         if phase == TouchPhase::Started {
             self.definition_selector_pointer_capture =
                 self.definition_selector.is_some() && self.message_dialogs.is_empty();
+            self.league_signup_pointer_capture = self.league_signup_dialog.is_some()
+                && self.context_menu.is_none()
+                && self.message_dialogs.is_empty();
             self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
                 && self.context_menu.is_none()
                 && (self.message_dialogs.is_empty() || self.running_chat_controller().is_some()))
@@ -42972,6 +43957,9 @@ impl GameApp {
         let definition_selector_release_latched =
             matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled)
                 && std::mem::take(&mut self.definition_selector_pointer_capture);
+        let league_signup_release_latched =
+            matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled)
+                && std::mem::take(&mut self.league_signup_pointer_capture);
         if phase == TouchPhase::Ended
             && self.consume_closed_context_pointer_release(
                 ElementState::Released,
@@ -43014,6 +44002,82 @@ impl GameApp {
                 }
                 TouchPhase::Moved => {}
             }
+            return Ok(());
+        }
+        if self.league_signup_dialog.is_some() {
+            self.mark_menu_dirty();
+            self.league_signup_pointer_position =
+                (!matches!(phase, TouchPhase::Cancelled)).then_some(position);
+            if phase == TouchPhase::Cancelled {
+                self.close_context_menu_silently();
+                self.league_signup_pointer_left(true);
+                return Ok(());
+            }
+            if self.context_menu.is_some() {
+                let move_captured = self.handle_context_menu_pointer_move(position)?;
+                let button_captured = match phase {
+                    TouchPhase::Started => self.handle_context_menu_pointer_button(
+                        ElementState::Pressed,
+                        ContextMenuPointerButton::Left,
+                    )?,
+                    TouchPhase::Moved => false,
+                    TouchPhase::Ended => self.handle_context_menu_pointer_button(
+                        ElementState::Released,
+                        ContextMenuPointerButton::Left,
+                    )?,
+                    TouchPhase::Cancelled => unreachable!("handled above"),
+                };
+                if move_captured || button_captured {
+                    self.league_signup_pointer_left(false);
+                    return Ok(());
+                }
+                if phase == TouchPhase::Started {
+                    self.league_signup_pointer_capture = true;
+                }
+            }
+            let layout = self.league_signup_layout();
+            let fonts = self.assets.clonk_fonts.clone();
+            let actions = layout
+                .as_ref()
+                .and_then(|layout| {
+                    self.league_signup_dialog
+                        .as_mut()
+                        .map(|dialog| match phase {
+                            TouchPhase::Started => fonts.as_deref().map_or_else(Vec::new, |fonts| {
+                                if left_double_click {
+                                    dialog.controller.handle_pointer_double_click(
+                                        position,
+                                        layout,
+                                        &fonts.text,
+                                    )
+                                } else {
+                                    dialog.controller.handle_pointer_down(
+                                        position,
+                                        layout,
+                                        &fonts.text,
+                                    )
+                                }
+                            }),
+                            TouchPhase::Moved => fonts.as_deref().map_or_else(Vec::new, |fonts| {
+                                dialog
+                                    .controller
+                                    .handle_pointer_move(position, layout, &fonts.text)
+                            }),
+                            TouchPhase::Ended => fonts.as_deref().map_or_else(Vec::new, |fonts| {
+                                dialog.controller.handle_pointer_up(
+                                    position,
+                                    layout,
+                                    &fonts.text,
+                                )
+                            }),
+                            TouchPhase::Cancelled => unreachable!("handled above"),
+                        })
+                })
+                .unwrap_or_default();
+            self.process_league_signup_actions(actions)?;
+            return Ok(());
+        }
+        if league_signup_release_latched {
             return Ok(());
         }
         if let Some(layout) = self.network_start_wait_layout() {
@@ -43639,6 +44703,13 @@ impl GameApp {
         if messages_open && self.running_chat_controller().is_none() {
             return;
         }
+        if self.league_signup_dialog.is_some() {
+            if let Some(menu) = self.context_menu.as_mut() {
+                let _ = menu.handle_pointer_left();
+            }
+            self.league_signup_pointer_left(true);
+            return;
+        }
         if self.external_irc_dialog_visible {
             if let Some(menu) = self.context_menu.as_mut() {
                 let _ = menu.handle_pointer_left();
@@ -43803,6 +44874,11 @@ impl GameApp {
     fn cancel_underlying_interaction(&mut self) {
         self.pointer_left_unchecked();
         if self.game_over_dialog.is_some() {
+            return;
+        }
+        if let Some(dialog) = self.league_signup_dialog.as_mut() {
+            dialog.controller.cancel_interaction();
+            self.league_signup_pointer_capture = false;
             return;
         }
         if let Some(dialog) = self.game_option_input_dialog.as_mut() {
@@ -45760,6 +46836,47 @@ impl GameApp {
             })
             .unwrap_or_default();
         self.process_network_dialog_actions(actions)?;
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn apply_league_signup_edit_context_command(
+        &mut self,
+        field: lc_frontend::league_signup::LeagueSignupField,
+        command: lc_frontend::league_signup::LeagueSignupEditContextCommand,
+    ) -> Result<(), EngineError> {
+        if self.league_signup_dialog.is_none() {
+            tracing::error!(?field, ?command, "stale league-signup context command");
+            return Ok(());
+        }
+        let clipboard = matches!(
+            command,
+            lc_frontend::league_signup::LeagueSignupEditContextCommand::Paste
+        )
+        .then(|| {
+            arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.get_text())
+                .ok()
+        })
+        .flatten();
+        let layout = self.league_signup_layout();
+        let fonts = self.assets.clonk_fonts.clone();
+        let actions = layout
+            .as_ref()
+            .zip(fonts.as_deref())
+            .and_then(|(layout, fonts)| {
+                self.league_signup_dialog.as_mut().map(|dialog| {
+                    dialog.controller.apply_edit_context_command(
+                        field,
+                        command,
+                        clipboard.as_deref(),
+                        layout,
+                        &fonts.text,
+                    )
+                })
+            })
+            .unwrap_or_default();
+        self.process_league_signup_actions(actions)?;
         self.mark_menu_dirty();
         Ok(())
     }
@@ -49442,14 +50559,11 @@ impl GameApp {
     }
 
     fn clear_remembered_league_password(&mut self) {
+        if let Some(auth) = self.league_auth_session.as_mut() {
+            auth.password = LegacyCString::default();
+        }
         if let Some(NetworkMode::Client(settings)) = self.network_mode.as_mut() {
             settings.league_auth.password = LegacyCString::default();
-        }
-        let Some(paths) = self.app_paths.as_ref() else {
-            return;
-        };
-        if let Err(error) = persist_config_value(paths, "Network", "LeaguePassword", "") {
-            tracing::warn!(%error, "failed to clear remembered league password");
         }
     }
 
@@ -49936,6 +51050,9 @@ impl GameApp {
                     }
                     AppContextMenuCommand::NetworkJoinEdit(command) => {
                         self.apply_network_join_edit_context_command(command)?;
+                    }
+                    AppContextMenuCommand::LeagueSignupEdit { field, command } => {
+                        self.apply_league_signup_edit_context_command(field, command)?;
                     }
                     AppContextMenuCommand::LobbyChat(command) => {
                         self.process_classic_lobby_chat_request(
@@ -56540,6 +57657,11 @@ impl GameApp {
         self.close_context_menu_silently();
         self.startup_player_properties_dialog = None;
         self.game_option_input_dialog = None;
+        self.league_signup_dialog = None;
+        self.cancelled_league_signup_continuation = None;
+        self.league_signup_consumed_keys.clear();
+        self.league_signup_pointer_capture = false;
+        self.league_signup_pointer_position = None;
         self.game_option_input_consumed_keys.clear();
         self.game_option_input_pointer_capture = None;
         self.game_option_pointer_capture = false;
@@ -62261,7 +63383,6 @@ impl GameApp {
                     let player = Self::league_auth_continuation_player_name(
                         &pending.continuation,
                     );
-                    self.clear_remembered_league_password();
                     let message = format_resource_string(
                         self.runtime_resource_text(
                             "IDS_MSG_LEAGUESIGNUPCANCELLED",
@@ -62282,11 +63403,14 @@ impl GameApp {
                     )?;
                 }
             }
-            MessageDialogContinuation::LeaguePlayerAuthError
-            | MessageDialogContinuation::LeaguePlayerAuthCancelled => {
-                self.clear_remembered_league_password();
+            MessageDialogContinuation::LeaguePlayerAuthError => {
                 if let Some(pending) = self.pending_league_player_auth.take() {
-                    let _ = self.continue_league_player_auth(pending.continuation)?;
+                    self.reopen_league_player_auth_form(pending)?;
+                }
+            }
+            MessageDialogContinuation::LeaguePlayerAuthCancelled => {
+                if let Some(pending) = self.pending_league_player_auth.take() {
+                    self.reopen_league_player_auth_form(pending)?;
                 }
             }
             MessageDialogContinuation::LeagueEndRetry => {
@@ -62304,6 +63428,12 @@ impl GameApp {
             }
             MessageDialogContinuation::LeagueEndRejected => {
                 self.finish_pending_league_end_terminal()?;
+            }
+            MessageDialogContinuation::LeagueSignupCancelled => {
+                if let Some(mut continuation) = self.cancelled_league_signup_continuation.take() {
+                    Self::reject_league_auth_continuation_player(&mut continuation);
+                    let _ = self.continue_league_player_auth(continuation)?;
+                }
             }
             MessageDialogContinuation::LeagueVote { subject } => {
                 self.complete_league_vote_response(
@@ -63092,6 +64222,103 @@ impl GameApp {
         Ok(())
     }
 
+    fn render_league_signup_dialog(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Result<()> {
+        let Some(dialog) = self.league_signup_dialog.as_ref() else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        let resources = assets
+            .league_signup_resources()
+            .context("classic C4LeagueSignupDialog resources are unavailable")?;
+        dialog.controller.render(
+            self.graphics.surface_mut(),
+            resources,
+            self.message_dialogs.is_empty() && self.context_menu.is_none(),
+            gamma,
+        )
+    }
+
+    fn league_signup_tooltip(&self, width: i32, height: i32) -> Option<(GuiPoint, String)> {
+        if !self.message_dialogs.is_empty() || self.context_menu.is_some() {
+            return None;
+        }
+        let pointer = self.startup_tooltip.eligible_pointer()?;
+        let dialog = self.league_signup_dialog.as_ref()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let layout = dialog.controller.layout(width, height, &fonts.text);
+        let text = dialog.controller.tooltip_at(pointer, &layout)?.to_owned();
+        (!text.is_empty()).then_some((pointer, text))
+    }
+
+    fn render_league_signup_tooltip(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Result<bool> {
+        let (width, height) = {
+            let surface = self.graphics.surface();
+            (surface.width() as i32, surface.height() as i32)
+        };
+        let Some((pointer, text)) = self.league_signup_tooltip(width, height) else {
+            return Ok(false);
+        };
+        let font = self
+            .assets
+            .global_tooltip_font
+            .clone()
+            .context("classic shadowless tooltip font is unavailable")?;
+        lc_frontend::context_menu::draw_classic_tooltip(
+            self.graphics.surface_mut(),
+            &font,
+            pointer,
+            &text,
+            gamma,
+        );
+        Ok(true)
+    }
+
+    fn render_loading_league_signup_dialog(&self, surface: &mut Surface) -> Result<()> {
+        let Some(dialog) = self.league_signup_dialog.as_ref() else {
+            return Ok(());
+        };
+        let resources = self
+            .assets
+            .league_signup_resources()
+            .map_err(|error| self.loader_boundary(error.to_string()))?;
+        dialog
+            .controller
+            .render(
+                surface,
+                resources,
+                self.message_dialogs.is_empty() && self.context_menu.is_none(),
+                self.loader_gamma.as_ref(),
+            )
+            .map_err(|error| self.loader_boundary(error.to_string()))
+    }
+
+    fn render_loading_league_signup_tooltip(&self, surface: &mut Surface) -> Result<bool> {
+        let Some((pointer, text)) =
+            self.league_signup_tooltip(surface.width() as i32, surface.height() as i32)
+        else {
+            return Ok(false);
+        };
+        let font = self
+            .assets
+            .global_tooltip_font
+            .as_deref()
+            .context("classic shadowless tooltip font is unavailable")?;
+        lc_frontend::context_menu::draw_classic_tooltip(
+            surface,
+            font,
+            pointer,
+            &text,
+            self.loader_gamma.as_ref(),
+        );
+        Ok(true)
+    }
+
     fn render_external_irc_dialog(&mut self, gamma: Option<&lc_graphics::GammaRamp>) -> Result<()> {
         if !self.external_irc_dialog_visible {
             return Ok(());
@@ -63389,6 +64616,7 @@ impl GameApp {
                 .is_some_and(|wait| wait.visible)
             || self.definition_selector.is_some()
             || self.game_option_input_dialog.is_some()
+            || self.league_signup_dialog.is_some()
             || self.startup_options_advanced_dialog.is_some()
         {
             return None;
@@ -63710,6 +64938,7 @@ impl GameApp {
         let active = self.context_menu.is_none()
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
+            && self.league_signup_dialog.is_none()
             && self.message_dialogs.is_empty()
             && self.runtime_client_list.is_none()
             && !self.external_irc_dialog_visible;
@@ -63758,6 +64987,7 @@ impl GameApp {
         let active = self.context_menu.is_none()
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
+            && self.league_signup_dialog.is_none()
             && self.message_dialogs.is_empty()
             && self.runtime_client_list.is_none()
             && !self.external_irc_dialog_visible;
@@ -63918,6 +65148,12 @@ impl GameApp {
                             self.next_pending_native_overlay();
                         }
                     }
+                    if self.league_signup_dialog.is_some() {
+                        self.render_league_signup_dialog(gamma.as_ref())?;
+                        if ordered_native {
+                            self.next_pending_native_overlay();
+                        }
+                    }
                     if self.external_irc_dialog_visible {
                         self.render_external_irc_dialog(gamma.as_ref())?;
                         if ordered_native {
@@ -64017,6 +65253,7 @@ impl GameApp {
                     && self.startup_player_properties_dialog.is_none()
                     && self.startup_options_advanced_dialog.is_none()
                     && self.game_option_input_dialog.is_none()
+                    && self.league_signup_dialog.is_none()
                     && self.definition_selector.is_none()
                     && self.message_dialogs.is_empty()
                     && self.runtime_client_list.is_none()
@@ -64039,10 +65276,12 @@ impl GameApp {
                 let version = self.menu_render_version;
                 let definition_selector_open = self.definition_selector.is_some();
                 let game_option_input_open = self.game_option_input_dialog.is_some();
+                let league_signup_open = self.league_signup_dialog.is_some();
                 // A fading C4GUI::Dialog is inactive even when it retains its
                 // focused control. Reuse the renderer's inactive-focus path.
                 let context_menu_open = self.context_menu.is_some()
                     || self.startup_player_properties_dialog.is_some()
+                    || league_signup_open
                     || self.external_irc_dialog_visible
                     || self.runtime_client_list.is_some()
                     || fade_draw_inactive;
@@ -64074,7 +65313,7 @@ impl GameApp {
                     context_menu_open,
                     definition_selector_open,
                     game_option_input_open,
-                    !self.message_dialogs.is_empty(),
+                    !self.message_dialogs.is_empty() || league_signup_open,
                     &self.scenario_game_options,
                     self.scenario_selector_mode,
                     self.startup_options_dialog.as_ref(),
@@ -64202,6 +65441,15 @@ impl GameApp {
                         self.next_pending_native_overlay();
                     }
                 }
+                if league_signup_open {
+                    self.render_league_signup_dialog(Some(startup_gamma()))?;
+                    if ordered_native {
+                        self.next_pending_native_overlay();
+                    }
+                    if self.render_league_signup_tooltip(Some(startup_gamma()))? && ordered_native {
+                        self.next_pending_native_overlay();
+                    }
+                }
                 if self.external_irc_dialog_visible {
                     self.render_external_irc_dialog(Some(startup_gamma()))?;
                     if ordered_native {
@@ -64243,6 +65491,7 @@ impl GameApp {
                         || self.startup_player_properties_dialog.is_some()
                         || definition_selector_open
                         || game_option_input_open
+                        || league_signup_open
                         || self.external_irc_dialog_visible
                         || self.runtime_client_list.is_some()
                         || !self.message_dialogs.is_empty())
@@ -64410,6 +65659,14 @@ impl GameApp {
             check(
                 self.assets.input_dialog_resources().map(|_| ()),
                 "C4GUI::InputDialog",
+            )?;
+        }
+        if self.league_signup_dialog.is_some() {
+            check(
+                self.assets
+                    .league_signup_resources()
+                    .and_then(|resources| resources.validate()),
+                "C4LeagueSignupDialog",
             )?;
         }
         if self.context_menu.is_some() {
@@ -64685,6 +65942,7 @@ impl GameApp {
             && !defer_native_text
             && !ordered_native
             && self.message_dialogs.is_empty()
+            && self.league_signup_dialog.is_none()
             && !self
                 .network_start_wait
                 .as_ref()
@@ -64751,6 +66009,17 @@ impl GameApp {
                 self.next_pending_native_overlay();
             }
             let gamma = self.loader_gamma.clone();
+            self.render_league_signup_dialog(gamma.as_ref())
+                .map_err(|error| self.loader_boundary(error.to_string()))?;
+            if self.league_signup_dialog.is_some() {
+                self.next_pending_native_overlay();
+            }
+            if self
+                .render_league_signup_tooltip(gamma.as_ref())
+                .map_err(|error| self.loader_boundary(error.to_string()))?
+            {
+                self.next_pending_native_overlay();
+            }
             self.render_message_dialogs(gamma.as_ref())
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
             self.render_message_dialog_tooltip(gamma.as_ref())
@@ -64786,6 +66055,8 @@ impl GameApp {
                 .render(&mut surface, &resources, true, self.loader_gamma.as_ref())
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
         }
+        self.render_loading_league_signup_dialog(&mut surface)?;
+        self.render_loading_league_signup_tooltip(&mut surface)?;
         self.render_loading_message_dialogs(&mut surface)?;
         frame.copy_from_slice(surface.pixels());
         Ok(())
@@ -66234,6 +67505,13 @@ impl GameApp {
                 self.next_pending_native_overlay();
             }
         }
+        self.render_league_signup_dialog(Some(&frame_gamma))?;
+        if ordered_native && self.league_signup_dialog.is_some() {
+            self.next_pending_native_overlay();
+        }
+        if self.render_league_signup_tooltip(Some(&frame_gamma))? && ordered_native {
+            self.next_pending_native_overlay();
+        }
         self.render_message_dialogs(Some(&frame_gamma))?;
         if ordered_native && !self.message_dialogs.is_empty() {
             self.next_pending_native_overlay();
@@ -67575,6 +68853,11 @@ impl GameApp {
         self.message_dialogs.clear();
         self.message_dialog_active_index = None;
         self.message_dialog_pointer_capture_index = None;
+        self.league_signup_dialog = None;
+        self.cancelled_league_signup_continuation = None;
+        self.league_signup_consumed_keys.clear();
+        self.league_signup_pointer_capture = false;
+        self.league_signup_pointer_position = None;
         self.primary_pointer_left_down = false;
         self.message_dialog_consumed_keys.clear();
         self.definition_selector = None;
@@ -70303,6 +71586,11 @@ impl GameApp {
         // ordinary one-line mode on the next initialization.
         self.running_chat = None;
         self.game_option_input_dialog = None;
+        self.league_signup_dialog = None;
+        self.cancelled_league_signup_continuation = None;
+        self.league_signup_consumed_keys.clear();
+        self.league_signup_pointer_capture = false;
+        self.league_signup_pointer_position = None;
         let line_height = self.graphics.message_board_line_height();
         self.message_board.initialize(
             load_message_board_enabled(self.app_paths.as_ref()),
@@ -73797,6 +75085,36 @@ fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
         VirtualKeyCode::End => Some(KeyCode::End),
         VirtualKeyCode::PageUp => Some(KeyCode::PageUp),
         VirtualKeyCode::PageDown => Some(KeyCode::PageDown),
+        _ => None,
+    }
+}
+
+fn league_signup_dialog_key_code(
+    code: VirtualKeyCode,
+    modifiers: ModifiersState,
+) -> Option<KeyCode> {
+    match code {
+        VirtualKeyCode::Return
+        | VirtualKeyCode::NumpadEnter
+        | VirtualKeyCode::Escape
+        | VirtualKeyCode::Space
+            if modifiers.is_empty() =>
+        {
+            map_key_code(code)
+        }
+        VirtualKeyCode::Tab
+            if modifiers.is_empty() || modifiers == ModifiersState::SHIFT =>
+        {
+            Some(KeyCode::Tab)
+        }
+        VirtualKeyCode::Up
+        | VirtualKeyCode::Down
+        | VirtualKeyCode::PageUp
+        | VirtualKeyCode::PageDown
+            if modifiers.is_empty() =>
+        {
+            map_key_code(code)
+        }
         _ => None,
     }
 }
@@ -98932,6 +100250,10 @@ public func Grant(password) { return GainMissionAccess(password); }
             player_name: "Host".to_string(),
             prepared: None,
         }));
+        app.league_auth_session = Some(lc_network::LeagueAuthRequestHead {
+            password: LegacyCString::from_bytes(b"remembered secret".to_vec()).unwrap(),
+            ..Default::default()
+        });
         app.network_is_league = true;
         app.host_lobby_countdown = Some(HostLobbyCountdown::with_seconds(5));
         app.apply_lobby_countdown_presentation(lc_network::LobbyCountdownPacket::new(5));
@@ -98972,6 +100294,12 @@ public func Grant(password) { return GainMissionAccess(password); }
             .controller
             .countdown()
             .is_locked());
+        assert!(app
+            .league_auth_session
+            .as_ref()
+            .expect("league session")
+            .password
+            .is_empty());
         assert!(
             load_league_auth_settings(Some(&paths)).password.is_empty(),
             "league removal rerequires authentication"
@@ -135495,6 +136823,32 @@ ScenInfoArea=70,5,25,90
         );
     }
 
+    fn poll_league_auth_until(
+        app: &mut GameApp,
+        context: &str,
+        mut complete: impl FnMut(&GameApp) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !complete(app) {
+            assert!(Instant::now() < deadline, "timed out waiting for {context}");
+            app.poll_league_player_auth().expect("poll Auth exchange");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn abort_open_league_signup(app: &mut GameApp) {
+        let abort = app
+            .league_signup_dialog
+            .as_mut()
+            .expect("league signup dialog")
+            .controller
+            .abort();
+        app.process_league_signup_actions(vec![abort])
+            .expect("abort league signup");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss league signup cancellation notice");
+    }
+
     #[test]
     fn league_client_authenticates_each_published_player_and_submits_only_auid_survivors() {
         // JoinLocalPlayer publishes player resources first, authenticates each
@@ -135590,9 +136944,6 @@ ScenInfoArea=70,5,25,90
             lc_network::decode_league_auth_response(
                 b"[Response]\r\nStatus=Success\r\nAUID=accepted-token\r\n",
             ),
-            lc_network::decode_league_auth_response(
-                b"[Response]\r\nStatus=Success\r\nAUID=\r\n",
-            ),
         ];
         let observer = thread::spawn(move || {
             commands.complete_initial_league_client_join(cores, responses)
@@ -135602,23 +136953,25 @@ ScenInfoArea=70,5,25,90
             app.submit_initial_client_player_info(7, "league.example".to_string()),
             LeaguePlayerAuthStatus::Pending
         );
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while app.message_dialogs.last().is_none_or(|dialog| {
-            !matches!(
-                dialog.continuation,
-                MessageDialogContinuation::LeaguePlayerAuthError
+        poll_league_auth_until(&mut app, "Auth error", |app| {
+            matches!(
+                app.message_dialogs.last().map(|dialog| &dialog.continuation),
+                Some(MessageDialogContinuation::LeaguePlayerAuthError)
             )
-        }) {
-            assert!(Instant::now() < deadline, "timed out waiting for Auth error");
-            app.poll_league_player_auth().expect("poll Auth exchange");
-            thread::sleep(Duration::from_millis(1));
-        }
+        });
         app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
             .expect("acknowledge rejected Auth");
-        assert!(matches!(
-            app.message_dialogs.last().map(|dialog| &dialog.continuation),
-            Some(MessageDialogContinuation::LeaguePlayerAuthWait)
-        ));
+        let retry = {
+            let retry = &mut app
+                .league_signup_dialog
+                .as_mut()
+                .expect("rejected Auth reopens login")
+                .controller;
+            retry.set_password("replacement");
+            retry.submit()
+        };
+        app.process_league_signup_actions(vec![retry])
+            .expect("submit rejected Auth retry");
         app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
             .expect("Abort drops the rejected player");
         let (order, auth_heads, auth_players, requests) =
@@ -135659,37 +137012,23 @@ ScenInfoArea=70,5,25,90
         let observer = thread::spawn(move || {
             commands.complete_initial_league_client_join(
                 all_rejected_cores,
-                vec![
-                    lc_network::decode_league_auth_response(
-                        b"[Response]\r\nStatus=Failure\r\n",
-                    ),
-                    lc_network::decode_league_auth_response(
-                        b"[Response]\r\nStatus=Success\r\nAUID=\r\n",
-                    ),
-                ],
+                Vec::new(),
             )
         });
         assert_eq!(
             app.submit_initial_client_player_info(7, "league.example".to_string()),
             LeaguePlayerAuthStatus::Pending
         );
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while app.message_dialogs.last().is_none_or(|dialog| {
-            !matches!(
-                dialog.continuation,
-                MessageDialogContinuation::LeaguePlayerAuthError
+        poll_league_auth_until(&mut app, "Auth error", |app| {
+            matches!(
+                app.message_dialogs.last().map(|dialog| &dialog.continuation),
+                Some(MessageDialogContinuation::LeaguePlayerAuthError)
             )
-        }) {
-            assert!(Instant::now() < deadline, "timed out waiting for Auth error");
-            app.poll_league_player_auth().expect("poll Auth exchange");
-            thread::sleep(Duration::from_millis(1));
-        }
+        });
         app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
             .expect("acknowledge first rejected Auth");
-        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
-            .expect("Abort drops the first rejected player");
-        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
-            .expect("Abort drops the second rejected player");
+        abort_open_league_signup(&mut app);
+        abort_open_league_signup(&mut app);
         let (_, _, _, requests) = observer.join().expect("all-rejected observer");
         assert_eq!(requests.len(), 1);
         assert!(
@@ -135709,16 +137048,17 @@ ScenInfoArea=70,5,25,90
         let (manager, _events, mut commands) =
             NetworkManager::test_stub_with_league_commands_for_client_id(7);
         app.network = Some(manager);
+        let auth = lc_network::LeagueAuthRequestHead {
+            account: LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
+            password: LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+            ..Default::default()
+        };
         app.network_mode = Some(NetworkMode::Client(
             ClientSettings::new(
                 SocketAddr::from(([127, 0, 0, 1], 11_112)),
                 "Client",
             )
-            .with_league_auth(lc_network::LeagueAuthRequestHead {
-                account: LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
-                password: LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
-                ..Default::default()
-            }),
+            .with_league_auth(auth.clone()),
         ));
         let player = lc_engine::ControlPlayerInfoEntry {
             name: LegacyCString::from_bytes(b"Exact Player".to_vec()).unwrap(),
@@ -135731,11 +137071,15 @@ ScenInfoArea=70,5,25,90
         };
 
         assert_eq!(
-            app.continue_league_player_auth(LeaguePlayerAuthContinuation::InitialClient {
-                request: request(),
-                index: 0,
-                server_name: "league.example".to_string(),
-            })
+            app.begin_league_player_auth_exchange(
+                LeaguePlayerAuthContinuation::InitialClient {
+                    request: request(),
+                    index: 0,
+                    server_name: "league.example".to_string(),
+                },
+                auth.clone(),
+                lc_frontend::league_signup::LeagueSignupMode::Login,
+            )
             .expect("begin league Auth"),
             LeaguePlayerAuthStatus::Pending
         );
@@ -135818,11 +137162,15 @@ ScenInfoArea=70,5,25,90
         assert_eq!(submitted.players[0].auth_id.as_bytes(), b"one-use-token");
 
         assert_eq!(
-            app.continue_league_player_auth(LeaguePlayerAuthContinuation::InitialClient {
-                request: request(),
-                index: 0,
-                server_name: "league.example".to_string(),
-            })
+            app.begin_league_player_auth_exchange(
+                LeaguePlayerAuthContinuation::InitialClient {
+                    request: request(),
+                    index: 0,
+                    server_name: "league.example".to_string(),
+                },
+                auth,
+                lc_frontend::league_signup::LeagueSignupMode::Login,
+            )
             .expect("begin abandoned league Auth"),
             LeaguePlayerAuthStatus::Pending
         );
@@ -135852,31 +137200,39 @@ ScenInfoArea=70,5,25,90
         let (manager, _events, mut commands) =
             NetworkManager::test_stub_with_league_commands_for_client_id(7);
         app.network = Some(manager);
+        let auth = lc_network::LeagueAuthRequestHead {
+            account: LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
+            password: LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+            ..Default::default()
+        };
         app.network_mode = Some(NetworkMode::Client(
             ClientSettings::new(
                 SocketAddr::from(([127, 0, 0, 1], 11_112)),
                 "Client",
             )
-            .with_league_auth(lc_network::LeagueAuthRequestHead {
-                account: LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
-                password: LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
-                ..Default::default()
-            }),
+            .with_league_auth(auth.clone()),
         ));
         let player = lc_engine::ControlPlayerInfoEntry {
             name: LegacyCString::from_bytes(b"Exact Player".to_vec()).unwrap(),
             ..Default::default()
         };
-        app.continue_league_player_auth(LeaguePlayerAuthContinuation::InitialClient {
-            request: lc_network::PlayerInfoUpdateRequest {
-                client_id: 7,
-                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-                players: vec![player.clone()],
-            },
-            index: 0,
-            server_name: "league.example".to_string(),
-        })
-        .expect("begin league Auth");
+        assert_eq!(
+            app.begin_league_player_auth_exchange(
+                LeaguePlayerAuthContinuation::InitialClient {
+                    request: lc_network::PlayerInfoUpdateRequest {
+                        client_id: 7,
+                        flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                        players: vec![player.clone()],
+                    },
+                    index: 0,
+                    server_name: "league.example".to_string(),
+                },
+                auth,
+                lc_frontend::league_signup::LeagueSignupMode::Login,
+            )
+            .expect("begin league Auth"),
+            LeaguePlayerAuthStatus::Pending
+        );
         let rejected = commands.receive_league_player_auth();
         assert_eq!(rejected.auth.password.as_bytes(), b"password");
         assert!(rejected.complete(Ok(lc_network::decode_league_auth_response(
@@ -135894,9 +137250,21 @@ ScenInfoArea=70,5,25,90
 
         app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
             .expect("acknowledge server error and retry");
+        let retry_submission = {
+            let retry = &mut app
+                .league_signup_dialog
+                .as_mut()
+                .expect("login retry")
+                .controller;
+            assert!(retry.password().is_empty());
+            retry.set_password("replacement");
+            retry.submit()
+        };
+        app.process_league_signup_actions(vec![retry_submission])
+            .expect("submit login retry");
         let retry = commands.receive_league_player_auth();
         assert_eq!(retry.player, player);
-        assert!(retry.auth.password.is_empty());
+        assert_eq!(retry.auth.password.as_bytes(), b"replacement");
         assert!(retry.complete(Ok(lc_network::decode_league_auth_response(
             b"[Response]\r\nStatus=Success\r\nAUID=retry-token\r\nAccount=Master\r\n",
         ))));
@@ -135915,6 +137283,59 @@ ScenInfoArea=70,5,25,90
         };
         assert_eq!(submitted.players[0].auth_id.as_bytes(), b"retry-token");
         assert!(load_league_auth_settings(Some(&paths)).password.is_empty());
+
+        // A declined registration welcome loops in registration mode. Native
+        // retains the local old Password fallback and the server's canonical
+        // AccountMaster while clearing only the process-global password.
+        let registration_auth = lc_network::LeagueAuthRequestHead {
+            account: LegacyCString::from_bytes(b"old-master".to_vec()).unwrap(),
+            password: LegacyCString::from_bytes(b"old-password".to_vec()).unwrap(),
+            new_account: LegacyCString::from_bytes(b"requested".to_vec()).unwrap(),
+            new_password: LegacyCString::from_bytes(b"old-password".to_vec()).unwrap(),
+        };
+        assert_eq!(
+            app.begin_league_player_auth_exchange(
+                LeaguePlayerAuthContinuation::InitialClient {
+                    request: lc_network::PlayerInfoUpdateRequest {
+                        client_id: 7,
+                        flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                        players: vec![player],
+                    },
+                    index: 0,
+                    server_name: "league.example".to_string(),
+                },
+                registration_auth,
+                lc_frontend::league_signup::LeagueSignupMode::Registration,
+            )
+            .expect("begin registration Auth"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        let registration = commands.receive_league_player_auth();
+        assert!(registration.complete(Ok(lc_network::decode_league_auth_response(
+            b"[Response]\r\nStatus=Success\r\nAUID=registration-token\r\nAccount=canonical-master\r\n",
+        ))));
+        app.poll_league_player_auth()
+            .expect("resolve registration Auth");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("decline registration welcome");
+        assert!(matches!(
+            app.message_dialogs.last().map(|dialog| &dialog.continuation),
+            Some(MessageDialogContinuation::LeaguePlayerAuthCancelled)
+        ));
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss registration cancellation notice");
+        let registration_retry = app
+            .league_signup_dialog
+            .as_ref()
+            .expect("registration welcome cancellation reopens registration");
+        assert_eq!(
+            registration_retry.controller.mode(),
+            lc_frontend::league_signup::LeagueSignupMode::Registration
+        );
+        assert_eq!(registration_retry.auth.account.as_bytes(), b"canonical-master");
+        assert_eq!(registration_retry.auth.password.as_bytes(), b"old-password");
+        assert!(registration_retry.auth.new_account.is_empty());
+        assert!(registration_retry.auth.new_password.is_empty());
     }
 
     #[test]
@@ -135928,34 +137349,39 @@ ScenInfoArea=70,5,25,90
         let (manager, _events, mut commands) =
             NetworkManager::test_stub_with_league_commands_for_client_id(7);
         app.network = Some(manager);
+        let auth = lc_network::LeagueAuthRequestHead {
+            account: LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
+            password: LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+            ..Default::default()
+        };
         app.network_mode = Some(NetworkMode::Client(
             ClientSettings::new(
                 SocketAddr::from(([127, 0, 0, 1], 11_112)),
                 "Client",
             )
-            .with_league_auth(lc_network::LeagueAuthRequestHead {
-                account: LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
-                password: LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
-                ..Default::default()
-            }),
+            .with_league_auth(auth.clone()),
         ));
         let player = lc_engine::ControlPlayerInfoEntry {
             name: LegacyCString::from_bytes(b"Runtime Player".to_vec()).unwrap(),
             ..Default::default()
         };
         assert_eq!(
-            app.continue_league_player_auth(LeaguePlayerAuthContinuation::RuntimePlayer {
-                request: lc_network::PlayerInfoUpdateRequest {
-                    client_id: 7,
-                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![player.clone()],
+            app.begin_league_player_auth_exchange(
+                LeaguePlayerAuthContinuation::RuntimePlayer {
+                    request: lc_network::PlayerInfoUpdateRequest {
+                        client_id: 7,
+                        flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                        players: vec![player.clone()],
+                    },
+                    index: 0,
+                    server_name: "league.example".to_string(),
+                    host: false,
+                    alternate_resource_id: 0,
+                    alternate_color: 0,
                 },
-                index: 0,
-                server_name: "league.example".to_string(),
-                host: false,
-                alternate_resource_id: 0,
-                alternate_color: 0,
-            })
+                auth,
+                lc_frontend::league_signup::LeagueSignupMode::Login,
+            )
             .expect("begin runtime league Auth"),
             LeaguePlayerAuthStatus::Pending
         );
@@ -135986,6 +137412,11 @@ ScenInfoArea=70,5,25,90
         persist_config_value(&paths, "Network", "LeagueAutoLogin", "0")
             .expect("disable league auto-login");
         let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let auth = lc_network::LeagueAuthRequestHead {
+            account: LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
+            password: LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+            ..Default::default()
+        };
         let player = |name: &[u8]| lc_engine::ControlPlayerInfoEntry {
             name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
             ..Default::default()
@@ -135994,15 +137425,19 @@ ScenInfoArea=70,5,25,90
         let (first_manager, _events, mut first_commands) =
             NetworkManager::test_stub_with_league_commands_for_client_id(0);
         assert_eq!(
-            app.continue_league_player_auth(LeaguePlayerAuthContinuation::StartupHost {
-                mode: NetworkMode::Host(host_network_settings()),
-                manager: first_manager,
-                selected_scenario: None,
-                purpose: StartupNetworkPurpose::StagedHost,
-                players: vec![player(b"First Host")],
-                index: 0,
-                server_name: "league.example".to_string(),
-            })
+            app.begin_league_player_auth_exchange(
+                LeaguePlayerAuthContinuation::StartupHost {
+                    mode: NetworkMode::Host(host_network_settings()),
+                    manager: first_manager,
+                    selected_scenario: None,
+                    purpose: StartupNetworkPurpose::StagedHost,
+                    players: vec![player(b"First Host")],
+                    index: 0,
+                    server_name: "league.example".to_string(),
+                },
+                auth.clone(),
+                lc_frontend::league_signup::LeagueSignupMode::Login,
+            )
             .expect("begin first host Auth"),
             LeaguePlayerAuthStatus::Pending
         );
@@ -136030,15 +137465,19 @@ ScenInfoArea=70,5,25,90
         let (second_manager, _events, mut second_commands) =
             NetworkManager::test_stub_with_league_commands_for_client_id(0);
         assert_eq!(
-            app.continue_league_player_auth(LeaguePlayerAuthContinuation::StartupHost {
-                mode: NetworkMode::Host(host_network_settings()),
-                manager: second_manager,
-                selected_scenario: None,
-                purpose: StartupNetworkPurpose::StagedHost,
-                players: vec![player(b"Second Host")],
-                index: 0,
-                server_name: "league.example".to_string(),
-            })
+            app.begin_league_player_auth_exchange(
+                LeaguePlayerAuthContinuation::StartupHost {
+                    mode: NetworkMode::Host(host_network_settings()),
+                    manager: second_manager,
+                    selected_scenario: None,
+                    purpose: StartupNetworkPurpose::StagedHost,
+                    players: vec![player(b"Second Host")],
+                    index: 0,
+                    server_name: "league.example".to_string(),
+                },
+                auth,
+                lc_frontend::league_signup::LeagueSignupMode::Login,
+            )
             .expect("begin replacement host Auth"),
             LeaguePlayerAuthStatus::Pending
         );
@@ -136057,6 +137496,839 @@ ScenInfoArea=70,5,25,90
         assert!(!abandoned.complete(Ok(
             lc_network::LeagueAuthResponse::default()
         )));
+    }
+
+    #[test]
+    fn league_signup_retains_client_server_caption_after_join_envelope_release() {
+        let mut mode = NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        ));
+        {
+            let joined_league_address =
+                LegacyCString::from_bytes(b"https://league.example:443/action".to_vec()).unwrap();
+            assert_eq!(
+                retain_client_league_server_name(Some(&mut mode), &joined_league_address),
+                "league.example"
+            );
+        }
+
+        assert_eq!(
+            retained_client_league_server_name(Some(&mode)),
+            "league.example",
+            "the caption host must survive release of the JoinData envelope"
+        );
+    }
+
+    #[test]
+    fn league_signup_persists_account_but_not_session_password() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated league configuration");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let account = LegacyCString::from_bytes(b"Andr\xe9".to_vec()).unwrap();
+
+        persist_league_account_preference(&paths, &account).expect("persist native league account");
+        let config = fs::read(paths.config_file()).expect("read native league configuration");
+        assert_eq!(
+            lc_app::configured_native_value(&config, "Network", "LeagueNick")
+                .expect("persisted LeagueNick")
+                .as_bytes(),
+            b"Andr\xe9"
+        );
+        assert!(
+            lc_app::configured_native_value(&config, "Network", "LeaguePassword").is_none(),
+            "C++ keeps the entered password in process memory only"
+        );
+
+        // C4Config never compiles LeaguePassword. Even a stale hand-written
+        // key cannot become an auto-login credential after process startup.
+        persist_native_config_values(
+            &paths,
+            "Network",
+            &[
+                (
+                    "LeaguePassword",
+                    lc_app::NativeConfigValue::CppEscapedString(b"secret"),
+                ),
+                ("LeagueAutoLogin", lc_app::NativeConfigValue::RawAscii("1")),
+            ],
+        )
+        .expect("seed ignored disk password");
+        let mut app = new_menu_app_with_paths(320, 200, &paths);
+        assert!(load_league_auth_settings(Some(&paths)).password.is_empty());
+        assert!(app.league_login_prompt_required());
+
+        app.league_auth_session = Some(lc_network::LeagueAuthRequestHead {
+            account,
+            password: LegacyCString::from_bytes(b"session secret".to_vec()).unwrap(),
+            ..Default::default()
+        });
+        assert!(!app.league_login_prompt_required());
+        persist_native_config_values(
+            &paths,
+            "Network",
+            &[("LeagueAutoLogin", lc_app::NativeConfigValue::RawAscii("0"))],
+        )
+        .expect("disable league auto-login");
+        assert!(app.league_login_prompt_required());
+    }
+
+    #[test]
+    fn league_signup_edit_interactions_match_classic_edit_behavior() {
+        use lc_frontend::league_signup::{
+            LeagueSignupAction, LeagueSignupConfig, LeagueSignupControl,
+            LeagueSignupEditClipboardShortcut, LeagueSignupEditContextCommand,
+            LeagueSignupEditKey, LeagueSignupField, LeagueSignupKeyModifiers, LeagueSignupMode,
+            LeagueSignupStrings,
+        };
+
+        let app = new_classic_running_sandbox_app();
+        let font = &app.assets.clonk_fonts.as_deref().expect("classic fonts").text;
+        let mut login = lc_frontend::league_signup::LeagueSignupController::new(
+            LeagueSignupConfig::new("Player", "league.example", LeagueSignupMode::Login)
+                .with_preferences("account", "secret"),
+            LeagueSignupStrings::default(),
+        );
+        let layout = login.layout(1280, 720, font);
+
+        login.set_account(&"wide".repeat(80));
+        login.set_focus(LeagueSignupControl::Account);
+        login.handle_edit_key_with_layout(
+            LeagueSignupEditKey::End,
+            LeagueSignupKeyModifiers::default(),
+            &layout,
+            font,
+        );
+        assert!(login.field_horizontal_scroll(LeagueSignupField::Account) > 0);
+
+        login.set_account("alpha beta");
+        login.set_focus(LeagueSignupControl::Password);
+        let beta_x = layout.account.edit.x
+            + 4
+            + font.measure("alpha be", false).0;
+        let edit_y = layout.account.edit.y + layout.account.edit.h / 2;
+        login.handle_pointer_double_click(
+            GuiPoint::new(beta_x as f32, edit_y as f32),
+            &layout,
+            font,
+        );
+        let (start, end) = login
+            .field_selection(LeagueSignupField::Account)
+            .expect("double-click word selection");
+        assert_eq!(&login.account()[start..end], "beta");
+        assert_eq!(
+            login.focused_control(),
+            Some(LeagueSignupControl::Password),
+            "LeftDouble does not synthesize Control's LeftDown focus transfer"
+        );
+
+        let left = GuiPoint::new((layout.account.edit.x + 5) as f32, edit_y as f32);
+        let right = GuiPoint::new(
+            (layout.account.edit.x + layout.account.edit.w - 5) as f32,
+            edit_y as f32,
+        );
+        login.handle_pointer_down(left, &layout, font);
+        login.handle_pointer_up(right, &layout, font);
+        assert!(login.field_selection(LeagueSignupField::Account).is_some());
+
+        login.set_focus(LeagueSignupControl::Password);
+        login.handle_clipboard_shortcut(
+            LeagueSignupEditClipboardShortcut::SelectAll,
+            None,
+            &layout,
+            font,
+        );
+        assert!(matches!(
+            login
+                .handle_clipboard_shortcut(
+                    LeagueSignupEditClipboardShortcut::Copy,
+                    None,
+                    &layout,
+                    font,
+                )
+                .as_slice(),
+            [LeagueSignupAction::ClipboardTransfer { text, cut: false, .. }]
+                if text == "secret"
+        ));
+        assert!(matches!(
+            login
+                .handle_clipboard_shortcut(
+                    LeagueSignupEditClipboardShortcut::Cut,
+                    None,
+                    &layout,
+                    font,
+                )
+                .as_slice(),
+            [LeagueSignupAction::ClipboardTransfer { cut: true, .. }]
+        ));
+        assert!(matches!(
+            login
+                .confirm_clipboard_cut(LeagueSignupField::Password, &layout, font)
+                .as_slice(),
+            [LeagueSignupAction::TextChanged { .. }]
+        ));
+        assert!(login.password().is_empty());
+
+        login.set_focus(LeagueSignupControl::Account);
+        login.handle_clipboard_shortcut(
+            LeagueSignupEditClipboardShortcut::SelectAll,
+            None,
+            &layout,
+            font,
+        );
+        login.handle_clipboard_shortcut(
+            LeagueSignupEditClipboardShortcut::Paste,
+            Some("raw|paste"),
+            &layout,
+            font,
+        );
+        assert_eq!(login.account(), "raw\u{a6}paste");
+        login.set_focus(LeagueSignupControl::Password);
+        login.handle_pointer_middle_down(left, Some("|primary"), &layout, font);
+        assert!(login.account().contains("|primary"));
+        assert_eq!(
+            login.focused_control(),
+            Some(LeagueSignupControl::Password),
+            "native MiddleDown edits without transferring focus"
+        );
+
+        login.set_focus(LeagueSignupControl::Account);
+        login.handle_clipboard_shortcut(
+            LeagueSignupEditClipboardShortcut::SelectAll,
+            None,
+            &layout,
+            font,
+        );
+        let context = login.request_context_menu_at(left, true, &layout);
+        assert!(matches!(
+            context.as_slice(),
+            [LeagueSignupAction::OpenEditContextMenu(request)]
+                if request.field == LeagueSignupField::Account
+                    && request.items.iter().any(|item| item.command == LeagueSignupEditContextCommand::Cut)
+                    && request.items.iter().any(|item| item.command == LeagueSignupEditContextCommand::Paste)
+        ));
+
+        login.set_account("account");
+        login.set_password("old");
+        login.set_focus(LeagueSignupControl::Password);
+        let pasted = login.handle_clipboard_shortcut(
+            LeagueSignupEditClipboardShortcut::Paste,
+            Some("new-password\nignored"),
+            &layout,
+            font,
+        );
+        assert!(pasted
+            .iter()
+            .any(|action| matches!(action, LeagueSignupAction::Submitted(_))));
+
+        let mut movable = lc_frontend::league_signup::LeagueSignupController::new(
+            LeagueSignupConfig::new("Player", "league.example", LeagueSignupMode::Login),
+            LeagueSignupStrings::default(),
+        );
+        let movable_layout = movable.layout(1280, 720, font);
+        let caption_point = GuiPoint::new(
+            (movable_layout.caption.x + 10) as f32,
+            (movable_layout.caption.y + 10) as f32,
+        );
+        let moved_point = GuiPoint::new(caption_point.x + 17.0, caption_point.y - 9.0);
+        movable.handle_pointer_down(caption_point, &movable_layout, font);
+        movable.handle_pointer_move(moved_point, &movable_layout, font);
+        movable.handle_pointer_up(moved_point, &movable_layout, font);
+        assert_eq!(movable.dialog_offset(), (17, -9));
+        movable.reset_location();
+        assert_eq!(movable.dialog_offset(), (0, 0));
+
+        let mut registration = lc_frontend::league_signup::LeagueSignupController::new(
+            LeagueSignupConfig::new(
+                "Player",
+                "league.example",
+                LeagueSignupMode::Registration,
+            ),
+            LeagueSignupStrings::default(),
+        );
+        registration.set_password_enabled(true);
+        registration.set_focus(LeagueSignupControl::Password);
+        registration.set_password_enabled(false);
+        assert_eq!(registration.focused_control(), None);
+        assert!(matches!(
+            registration.handle_key_down(KeyCode::Tab, false).as_slice(),
+            [LeagueSignupAction::FocusChanged(LeagueSignupControl::Close)]
+        ));
+
+        let collapsed = registration.layout(1280, 720, font);
+        let checkbox = collapsed.password_checkbox.as_ref().expect("checkbox");
+        let checkbox_point = GuiPoint::new(
+            (checkbox.square.x + checkbox.square.w / 2) as f32,
+            (checkbox.square.y + checkbox.square.h / 2) as f32,
+        );
+        let ok_point = GuiPoint::new(
+            (collapsed.ok_button.x + 2) as f32,
+            (collapsed.ok_button.y + 2) as f32,
+        );
+        registration.handle_pointer_down(ok_point, &collapsed, font);
+        assert!(matches!(
+            registration
+                .handle_pointer_up(checkbox_point, &collapsed, font)
+                .as_slice(),
+            [LeagueSignupAction::PasswordEnabledChanged(true)]
+        ));
+        assert_eq!(
+            registration.take_sound_events(),
+            vec![
+                lc_frontend::league_signup::LeagueSignupSound::ArrowHit,
+                lc_frontend::league_signup::LeagueSignupSound::ArrowHit,
+                lc_frontend::league_signup::LeagueSignupSound::ArrowHit,
+            ],
+            "pressed-button release and checkbox toggle each keep their native sound"
+        );
+
+        for key in [
+            VirtualKeyCode::Return,
+            VirtualKeyCode::NumpadEnter,
+            VirtualKeyCode::Escape,
+            VirtualKeyCode::Space,
+        ] {
+            assert!(league_signup_dialog_key_code(key, ModifiersState::CTRL).is_none());
+            assert!(league_signup_dialog_key_code(key, ModifiersState::SHIFT).is_none());
+        }
+        assert_eq!(
+            league_signup_dialog_key_code(VirtualKeyCode::Tab, ModifiersState::SHIFT),
+            Some(KeyCode::Tab)
+        );
+        assert!(
+            league_signup_dialog_key_code(VirtualKeyCode::Tab, ModifiersState::CTRL).is_none()
+        );
+
+        let first_press = Instant::now();
+        let mut last_press = None;
+        assert!(!classic_press_is_double_click(
+            &mut last_press,
+            first_press
+        ));
+        assert!(classic_press_is_double_click(
+            &mut last_press,
+            first_press + Duration::from_millis(399)
+        ));
+        assert!(last_press.is_none(), "native clears the double-click timer");
+        assert!(!classic_press_is_double_click(
+            &mut last_press,
+            first_press + Duration::from_millis(800)
+        ));
+    }
+
+    #[test]
+    fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
+        use lc_frontend::league_signup::{
+            LeagueSignupControl, LeagueSignupField, LeagueSignupMode,
+        };
+
+        let mut app = new_classic_running_sandbox_app();
+        // Keep the already-loaded exact GUI bundle while making credentials,
+        // auto-login and the registration Nick preference deterministic.
+        app.app_paths = None;
+        app.network_is_league = true;
+        let pending_player = || lc_engine::ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"Exact Player".to_vec()).unwrap(),
+            forced_name: LegacyCString::from_bytes(b"Forced Player".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let pending_request = || lc_network::PlayerInfoUpdateRequest {
+            client_id: 7,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![pending_player()],
+        };
+        let continuation = |request| LeaguePlayerAuthContinuation::InitialClient {
+            request,
+            index: 0,
+            server_name: "league.example".to_string(),
+        };
+
+        // Empty LeaguePassword returns to the event loop with the login form
+        // installed. Since no observer is servicing the command channel yet,
+        // reaching this assertion also proves no Auth request was submitted.
+        let (manager, _event_tx, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.league_auth_session = Some(lc_network::LeagueAuthRequestHead::default());
+        assert_eq!(
+            app.continue_league_player_auth(continuation(pending_request()))
+                .expect("open missing-password login"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        let login = &app
+            .league_signup_dialog
+            .as_ref()
+            .expect("login dialog")
+            .controller;
+        assert_eq!(login.mode(), LeagueSignupMode::Login);
+        assert_eq!(login.focused_control(), Some(LeagueSignupControl::Password));
+        assert!(login.field_visible(LeagueSignupField::Account));
+        assert!(login.field_visible(LeagueSignupField::Password));
+        assert!(!login.field_visible(LeagueSignupField::PasswordConfirmation));
+
+        let invalid = app
+            .league_signup_dialog
+            .as_mut()
+            .expect("login dialog")
+            .controller
+            .submit();
+        app.process_league_signup_actions(vec![invalid])
+            .expect("show validation modal");
+        let validation = app.message_dialogs.last().expect("validation modal");
+        assert_eq!(validation.state.caption(), "Invalid Entry");
+        assert_eq!(
+            validation.state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
+        assert_eq!(
+            app.league_signup_dialog
+                .as_ref()
+                .expect("login remains open")
+                .controller
+                .focused_control(),
+            Some(LeagueSignupControl::Account)
+        );
+        app.finish_message_dialog_at(
+            app.message_dialogs.len() - 1,
+            lc_frontend::message_dialog::MessageDialogResult::Ok,
+        )
+        .expect("dismiss validation modal");
+
+        let observer = thread::spawn(move || {
+            commands.complete_initial_league_client_join(
+                Vec::new(),
+                vec![lc_network::decode_league_auth_response(
+                    b"[Response]\r\nStatus=Success\r\nAUID=login-token\r\n",
+                )],
+            )
+        });
+        let submission = {
+            let login = &mut app
+                .league_signup_dialog
+                .as_mut()
+                .expect("login dialog")
+                .controller;
+            login.set_account("account");
+            login.set_password("password");
+            login.submit()
+        };
+        app.process_league_signup_actions(vec![submission])
+            .expect("submit login form");
+        poll_league_auth_until(&mut app, "login completion", |app| {
+            app.pending_league_player_auth.is_none()
+        });
+        let (order, auth_heads, _, requests) = observer.join().expect("login observer");
+        assert_eq!(order, vec!["auth", "player-info"]);
+        assert_eq!(auth_heads.len(), 1);
+        assert_eq!(auth_heads[0].account.as_bytes(), b"account");
+        assert_eq!(auth_heads[0].password.as_bytes(), b"password");
+        assert!(auth_heads[0].new_account.is_empty());
+        assert!(auth_heads[0].new_password.is_empty());
+        assert_eq!(requests[0].players[0].auth_id.as_bytes(), b"login-token");
+
+        // A server refusal is not a failed player join. Native shows the
+        // league error first, clears only the process password when that
+        // modal closes, and retries the same player with an empty login edit.
+        let failed_auth = lc_network::LeagueAuthRequestHead {
+            account: LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
+            password: LegacyCString::from_bytes(b"outdated".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let (manager, _event_tx, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.league_auth_session = Some(failed_auth.clone());
+        let observer = thread::spawn(move || {
+            commands.complete_initial_league_client_join(
+                Vec::new(),
+                vec![
+                    lc_network::decode_league_auth_response(
+                        b"[Response]\r\nStatus=Failure\r\nMessage=Invalid password\r\n",
+                    ),
+                    lc_network::decode_league_auth_response(
+                        b"[Response]\r\nStatus=Success\r\nAUID=retry-token\r\n",
+                    ),
+                ],
+            )
+        });
+        assert_eq!(
+            app.continue_league_player_auth(continuation(pending_request()))
+                .expect("show failed-auth message"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        poll_league_auth_until(&mut app, "failed-auth message", |app| {
+            matches!(
+                app.message_dialogs.last().map(|dialog| &dialog.continuation),
+                Some(MessageDialogContinuation::LeaguePlayerAuthError)
+            )
+        });
+        assert!(app.league_signup_dialog.is_none());
+        let failure = app.message_dialogs.last().expect("failed-auth message");
+        assert_eq!(failure.state.caption(), "League Login Failed");
+        assert_eq!(failure.state.message(), "League server reply: Invalid password");
+        assert_eq!(
+            app.league_auth_session
+                .as_ref()
+                .expect("credentials remain while message is modal")
+                .password
+                .as_bytes(),
+            b"outdated"
+        );
+        app.finish_message_dialog_at(
+            app.message_dialogs.len() - 1,
+            lc_frontend::message_dialog::MessageDialogResult::Ok,
+        )
+        .expect("dismiss failed-auth message");
+        let retry = &app
+            .league_signup_dialog
+            .as_ref()
+            .expect("login retry")
+            .controller;
+        assert_eq!(retry.mode(), LeagueSignupMode::Login);
+        assert_eq!(retry.account(), "account");
+        assert!(retry.password().is_empty());
+        assert!(app
+            .league_auth_session
+            .as_ref()
+            .expect("session credentials")
+            .password
+            .is_empty());
+        let retry_submission = {
+            let retry = &mut app
+                .league_signup_dialog
+                .as_mut()
+                .expect("login retry")
+                .controller;
+            retry.set_password("replacement");
+            retry.submit()
+        };
+        app.process_league_signup_actions(vec![retry_submission])
+            .expect("submit login retry");
+        poll_league_auth_until(&mut app, "login retry completion", |app| {
+            app.pending_league_player_auth.is_none()
+        });
+        let (order, auth_heads, _, requests) = observer.join().expect("retry observer");
+        assert_eq!(order, vec!["auth", "auth", "player-info"]);
+        assert_eq!(auth_heads[0], failed_auth);
+        assert_eq!(auth_heads[1].password.as_bytes(), b"replacement");
+        assert_eq!(requests[0].players[0].auth_id.as_bytes(), b"retry-token");
+
+        // Abort always closes without validation. Native shows its Notify
+        // modal before returning failure to the outer swap-remove loop; only
+        // after that modal closes is the empty initial PlayerInfo submitted.
+        let (manager, _event_tx, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.league_auth_session = Some(lc_network::LeagueAuthRequestHead::default());
+        assert_eq!(
+            app.continue_league_player_auth(continuation(pending_request()))
+                .expect("open cancellable login"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        let abort = app
+            .league_signup_dialog
+            .as_mut()
+            .expect("cancellable login")
+            .controller
+            .abort();
+        app.process_league_signup_actions(vec![abort])
+            .expect("abort login form");
+        assert!(app.league_signup_dialog.is_none());
+        assert_eq!(
+            app.message_dialogs.last().map(|dialog| dialog.state.icon()),
+            Some(lc_frontend::message_dialog::MessageDialogIcon::NOTIFY)
+        );
+        let observer = thread::spawn(move || {
+            commands.complete_initial_league_client_join(Vec::new(), Vec::new())
+        });
+        app.finish_message_dialog_at(
+            app.message_dialogs.len() - 1,
+            lc_frontend::message_dialog::MessageDialogResult::Ok,
+        )
+        .expect("dismiss cancellation notice");
+        let (order, auth_heads, _, requests) = observer.join().expect("abort observer");
+        assert_eq!(order, vec!["player-info"]);
+        assert!(auth_heads.is_empty());
+        assert!(requests[0].players.is_empty());
+
+        // A Register response, not an empty stored account, selects the
+        // registration form. With its optional password unchecked, native
+        // sends the old login password as NewPassword.
+        let old_auth = lc_network::LeagueAuthRequestHead {
+            account: LegacyCString::from_bytes(b"old-account".to_vec()).unwrap(),
+            password: LegacyCString::from_bytes(b"old-password".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let (manager, _event_tx, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.league_auth_session = Some(old_auth.clone());
+        let observer = thread::spawn(move || {
+            commands.complete_initial_league_client_join(
+                Vec::new(),
+                vec![
+                    lc_network::decode_league_auth_response(
+                        b"[Response]\r\nStatus=Register\r\nAccount=master-account\r\n",
+                    ),
+                    lc_network::decode_league_auth_response(
+                        b"[Response]\r\nStatus=Success\r\nAUID=\r\nAccount=retry-master\r\n",
+                    ),
+                    lc_network::decode_league_auth_response(
+                        b"[Response]\r\nStatus=Success\r\nAUID=registered-token\r\n",
+                    ),
+                ],
+            )
+        });
+        assert_eq!(
+            app.continue_league_player_auth(continuation(pending_request()))
+                .expect("receive Register response"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        poll_league_auth_until(&mut app, "registration form", |app| {
+            app.league_signup_dialog.as_ref().is_some_and(|dialog| {
+                dialog.controller.mode() == LeagueSignupMode::Registration
+            })
+        });
+        let registration = &app
+            .league_signup_dialog
+            .as_ref()
+            .expect("registration dialog")
+            .controller;
+        assert_eq!(registration.mode(), LeagueSignupMode::Registration);
+        assert_eq!(registration.account(), "Forced Player");
+        assert_eq!(
+            registration.focused_control(),
+            Some(LeagueSignupControl::Account)
+        );
+        assert!(!registration.password_enabled());
+        assert!(!registration.field_visible(LeagueSignupField::Password));
+        let submission = {
+            let registration = &mut app
+                .league_signup_dialog
+                .as_mut()
+                .expect("registration dialog")
+                .controller;
+            registration.set_account("New User");
+            registration.submit()
+        };
+        app.process_league_signup_actions(vec![submission])
+            .expect("submit registration form");
+        poll_league_auth_until(&mut app, "registration failure", |app| {
+            matches!(
+                app.message_dialogs.last().map(|dialog| &dialog.continuation),
+                Some(MessageDialogContinuation::LeaguePlayerAuthError)
+            )
+        });
+        assert!(app.league_signup_dialog.is_none());
+        let failure = app
+            .message_dialogs
+            .last()
+            .expect("missing-AUID registration failure");
+        assert_eq!(failure.state.caption(), "League Login Failed");
+        assert_eq!(
+            failure.state.message(),
+            "League server reply: League server reply without authentication-id!"
+        );
+        app.finish_message_dialog_at(
+            app.message_dialogs.len() - 1,
+            lc_frontend::message_dialog::MessageDialogResult::Ok,
+        )
+        .expect("dismiss registration failure");
+        assert!(app
+            .league_auth_session
+            .as_ref()
+            .expect("session credentials")
+            .password
+            .is_empty());
+        let retry_submission = {
+            let registration = &mut app
+                .league_signup_dialog
+                .as_mut()
+                .expect("registration retry")
+                .controller;
+            assert_eq!(registration.mode(), LeagueSignupMode::Registration);
+            assert_eq!(registration.account(), "Forced Player");
+            assert!(!registration.password_enabled());
+            registration.set_account("Retry User");
+            registration.submit()
+        };
+        app.process_league_signup_actions(vec![retry_submission])
+            .expect("submit registration retry");
+        poll_league_auth_until(&mut app, "registration retry completion", |app| {
+            app.pending_league_player_auth.is_none()
+        });
+        let (order, auth_heads, _, requests) = observer.join().expect("registration observer");
+        assert_eq!(order, vec!["auth", "auth", "auth", "player-info"]);
+        assert_eq!(auth_heads[0], old_auth);
+        assert_eq!(auth_heads[1].account.as_bytes(), b"master-account");
+        assert_eq!(auth_heads[1].password.as_bytes(), b"old-password");
+        assert_eq!(auth_heads[1].new_account.as_bytes(), b"New User");
+        assert_eq!(auth_heads[1].new_password.as_bytes(), b"old-password");
+        assert_eq!(auth_heads[2].account.as_bytes(), b"retry-master");
+        assert_eq!(auth_heads[2].password.as_bytes(), b"old-password");
+        assert_eq!(auth_heads[2].new_account.as_bytes(), b"Retry User");
+        assert_eq!(auth_heads[2].new_password.as_bytes(), b"old-password");
+        assert_eq!(
+            requests[0].players[0].auth_id.as_bytes(),
+            b"registered-token"
+        );
+
+        // C4Network2Players::JoinLocalPlayer routes later lobby additions
+        // through the same modal before its CIF_AddPlayers request. Resuming
+        // must not republish the already-materialized player resource.
+        let local_add = || LeaguePlayerAuthContinuation::RuntimePlayer {
+            request: lc_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                players: vec![pending_player()],
+            },
+            index: 0,
+            server_name: "league.example".to_string(),
+            host: false,
+            alternate_resource_id: 41,
+            alternate_color: 0x0012_3456,
+        };
+        let (manager, _event_tx, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.league_auth_session = Some(lc_network::LeagueAuthRequestHead::default());
+        assert_eq!(
+            app.continue_league_player_auth(local_add())
+                .expect("open local-add login"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        assert_eq!(
+            app.league_signup_dialog
+                .as_ref()
+                .expect("local-add login")
+                .controller
+                .mode(),
+            LeagueSignupMode::Login
+        );
+        let observer = thread::spawn(move || {
+            commands.complete_initial_league_client_join(
+                Vec::new(),
+                vec![lc_network::decode_league_auth_response(
+                    b"[Response]\r\nStatus=Success\r\nAUID=local-token\r\n",
+                )],
+            )
+        });
+        let submission = {
+            let login = &mut app
+                .league_signup_dialog
+                .as_mut()
+                .expect("local-add login")
+                .controller;
+            login.set_account("account");
+            login.set_password("password");
+            login.submit()
+        };
+        app.process_league_signup_actions(vec![submission])
+            .expect("submit local-add login");
+        poll_league_auth_until(&mut app, "local-add completion", |app| {
+            app.pending_league_player_auth.is_none()
+        });
+        let (order, _, _, requests) = observer.join().expect("local-add observer");
+        assert_eq!(order, vec!["auth", "player-info"]);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].flags,
+            lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+        );
+        assert_eq!(requests[0].players[0].auth_id.as_bytes(), b"local-token");
+
+        let (manager, _event_tx, mut commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.league_auth_session = Some(lc_network::LeagueAuthRequestHead::default());
+        assert_eq!(
+            app.continue_league_player_auth(local_add())
+                .expect("open cancellable local-add login"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        let abort = app
+            .league_signup_dialog
+            .as_mut()
+            .expect("cancellable local-add login")
+            .controller
+            .abort();
+        app.process_league_signup_actions(vec![abort])
+            .expect("abort local-add login");
+        app.finish_message_dialog_at(
+            app.message_dialogs.len() - 1,
+            lc_frontend::message_dialog::MessageDialogResult::Ok,
+        )
+        .expect("dismiss local-add cancellation notice");
+        assert!(
+            commands.take_player_info_updates().is_empty(),
+            "a cancelled local add must not submit an empty PlayerInfo packet"
+        );
+
+        // The staged host owns its manager inside the continuation while the
+        // modal returns to the event loop. Accepted players are handed back to
+        // startup without rerunning Auth during host finalization.
+        let (manager, _event_tx, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        app.network = None;
+        app.network_mode = None;
+        app.league_auth_session = Some(lc_network::LeagueAuthRequestHead::default());
+        let host_continuation = LeaguePlayerAuthContinuation::StartupHost {
+            mode: NetworkMode::Host(HostSettings {
+                bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                player_name: "Host".to_string(),
+                prepared: None,
+            }),
+            manager,
+            selected_scenario: None,
+            purpose: StartupNetworkPurpose::StagedHost,
+            players: vec![pending_player()],
+            index: 0,
+            server_name: "league.example".to_string(),
+        };
+        assert_eq!(
+            app.continue_league_player_auth(host_continuation)
+                .expect("open staged-host login"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        let observer = thread::spawn(move || {
+            commands.complete_league_player_auths(vec![lc_network::decode_league_auth_response(
+                b"[Response]\r\nStatus=Success\r\nAUID=host-token\r\n",
+            )])
+        });
+        let submission = {
+            let login = &mut app
+                .league_signup_dialog
+                .as_mut()
+                .expect("staged-host login")
+                .controller;
+            login.set_account("host-account");
+            login.set_password("host-password");
+            login.submit()
+        };
+        app.process_league_signup_actions(vec![submission])
+            .expect("submit staged-host login");
+        poll_league_auth_until(&mut app, "staged-host completion", |app| {
+            app.startup_network_connection.is_some()
+        });
+        let (auth_heads, auth_players) = observer.join().expect("staged-host observer");
+        assert_eq!(auth_heads.len(), 1);
+        assert_eq!(auth_players.len(), 1);
+        assert_eq!(auth_heads[0].account.as_bytes(), b"host-account");
+        assert_eq!(auth_players[0].name.as_bytes(), b"Exact Player");
+        assert_eq!(
+            app.startup_network_connection
+                .as_ref()
+                .and_then(|connection| connection.authenticated_league_players.as_ref())
+                .expect("authenticated staged-host players")[0]
+                .auth_id
+                .as_bytes(),
+            b"host-token"
+        );
+        assert!(app.startup_network_connection.is_some());
     }
 
     #[test]

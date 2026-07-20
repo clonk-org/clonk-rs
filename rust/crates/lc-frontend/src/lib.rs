@@ -15,6 +15,7 @@ pub mod game_option_buttons;
 pub mod game_lobby;
 pub mod hud;
 pub mod input_dialog;
+pub mod league_signup;
 pub mod loader_screen;
 pub mod message_dialog;
 pub mod network_start_wait;
