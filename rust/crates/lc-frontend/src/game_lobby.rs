@@ -275,6 +275,101 @@ pub fn core_lobby_option_rows(
     rows
 }
 
+/// Construct the core runtime `C4GameOptionsList` rows in native add order.
+///
+/// Unlike the lobby variant, a control host may change the control mode while
+/// the game is running. Runtime join is owned by the network host and is not
+/// present at all for clients.
+pub fn core_runtime_option_rows(
+    control_host: bool,
+    network_host: bool,
+    league: bool,
+    labels: &LobbyOptionLabels,
+    control_mode: i32,
+    control_rate: i32,
+    runtime_join_allowed: bool,
+) -> Vec<LobbyOptionRow> {
+    let control_mode_value = match control_mode {
+        0 => labels.control_mode_decentral.clone(),
+        1 => labels.control_mode_central.clone(),
+        2 => labels.control_mode_async.clone(),
+        _ => labels.control_mode_none.clone(),
+    };
+    let mut control_mode_choices = vec![
+        LobbyOptionChoice {
+            id: 1,
+            label: labels.control_mode_central.clone(),
+            tooltip: labels.select_tooltip(&labels.control_mode_central),
+        },
+        LobbyOptionChoice {
+            id: 0,
+            label: labels.control_mode_decentral.clone(),
+            tooltip: labels.select_tooltip(&labels.control_mode_decentral),
+        },
+    ];
+    if !league {
+        control_mode_choices.push(LobbyOptionChoice {
+            id: 2,
+            label: labels.control_mode_async.clone(),
+            tooltip: labels.select_tooltip(&labels.control_mode_async),
+        });
+    }
+    let rate_choices = (1..10)
+        .map(|rate| {
+            let label = rate.to_string();
+            LobbyOptionChoice {
+                id: rate,
+                tooltip: labels.select_tooltip(&label),
+                label,
+            }
+        })
+        .collect();
+    let mut rows = vec![
+        LobbyOptionRow {
+            kind: LobbyOptionKind::ControlMode,
+            caption: labels.control_mode.clone(),
+            value: control_mode_value,
+            tooltip: labels.control_mode_tooltip.clone(),
+            editable: control_host,
+            choices: control_mode_choices,
+        },
+        LobbyOptionRow {
+            kind: LobbyOptionKind::ControlRate,
+            caption: labels.control_rate.clone(),
+            value: control_rate.to_string(),
+            tooltip: labels.control_rate_tooltip.clone(),
+            editable: control_host,
+            choices: rate_choices,
+        },
+    ];
+    if network_host {
+        let choices = [
+            (0, labels.runtime_join_barred.clone()),
+            (1, labels.runtime_join_free.clone()),
+        ]
+        .into_iter()
+        .map(|(id, label)| LobbyOptionChoice {
+            id,
+            tooltip: labels.select_tooltip(&label),
+            label,
+        })
+        .collect();
+        rows.push(LobbyOptionRow {
+            kind: LobbyOptionKind::RuntimeJoin,
+            caption: labels.runtime_join.clone(),
+            value: if runtime_join_allowed {
+                labels.runtime_join_free.clone()
+            } else {
+                labels.runtime_join_barred.clone()
+            },
+            tooltip: labels.runtime_join_tooltip.clone(),
+            editable: true,
+            choices,
+        });
+    }
+    rows
+}
+
 impl LobbySheet {
     pub const fn is_roster(self) -> bool {
         matches!(self, Self::Players | Self::Teams)
@@ -6897,6 +6992,64 @@ mod tests {
             .iter()
             .any(|row| row.kind == LobbyOptionKind::RuntimeJoin));
         assert_eq!(client[1].value, "20");
+    }
+
+    #[test]
+    fn l128_runtime_option_rows_follow_control_and_network_host_gates() {
+        let labels = LobbyOptionLabels::default();
+        let host = core_runtime_option_rows(true, true, false, &labels, 1, 4, true);
+        assert_eq!(
+            host.iter().map(|row| row.kind).collect::<Vec<_>>(),
+            [
+                LobbyOptionKind::ControlMode,
+                LobbyOptionKind::ControlRate,
+                LobbyOptionKind::RuntimeJoin,
+            ]
+        );
+        assert!(host.iter().all(|row| row.editable));
+        assert_eq!(
+            host[0]
+                .choices
+                .iter()
+                .map(|choice| choice.id)
+                .collect::<Vec<_>>(),
+            [1, 0, 2]
+        );
+        assert_eq!(
+            host[1]
+                .choices
+                .iter()
+                .map(|choice| choice.id)
+                .collect::<Vec<_>>(),
+            (1..10).collect::<Vec<_>>()
+        );
+        assert_eq!(host[2].value, labels.runtime_join_free);
+
+        let league = core_runtime_option_rows(true, true, true, &labels, 2, 20, false);
+        assert_eq!(
+            league[0]
+                .choices
+                .iter()
+                .map(|choice| choice.id)
+                .collect::<Vec<_>>(),
+            [1, 0]
+        );
+        assert_eq!(league[0].value, labels.control_mode_async);
+        assert_eq!(league[1].value, "20");
+
+        let client = core_runtime_option_rows(false, false, false, &labels, 0, 3, false);
+        assert_eq!(client.len(), 2);
+        assert!(client.iter().all(|row| !row.editable));
+        assert!(!client
+            .iter()
+            .any(|row| row.kind == LobbyOptionKind::RuntimeJoin));
+
+        let control_host_client =
+            core_runtime_option_rows(true, false, false, &labels, 1, 4, false);
+        assert!(control_host_client.iter().all(|row| row.editable));
+        assert!(!control_host_client
+            .iter()
+            .any(|row| row.kind == LobbyOptionKind::RuntimeJoin));
     }
 
     #[test]

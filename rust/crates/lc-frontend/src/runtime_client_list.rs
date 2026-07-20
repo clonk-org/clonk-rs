@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 use crate::classic_gui::{
     draw_3d_frame, draw_clipped_text, draw_engine_box, draw_facet_stretch, ClassicGuiSkin, IntRect,
 };
-use crate::{ClonkFontSet, GuiPoint, ImageData, StartupTooltip};
+use crate::context_menu::{draw_classic_tooltip, ClassicTooltipTracker};
+use crate::game_lobby::{LobbyOptionKind, LobbyOptionRow};
+use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode, StartupTooltip};
 
 const ICON_CELL: u32 = 40;
 const ICON_CLOSE: u32 = 34;
@@ -28,13 +30,23 @@ const ICON_NO_SOUND: u32 = 52;
 const TITLE_LEFT_INDENT: i32 = 5;
 const TITLE_RIGHT_INDENT: i32 = 20;
 const TITLE_SCROLL_DELAY: Duration = Duration::from_millis(3000);
+const CONTEXT_HEIGHT: u32 = 16;
+const SCROLLBAR_EXTENT: i32 = 16;
+const LIST_BOX_MARGIN: i32 = 3;
+const OPTION_ITEM_SPACING: i32 = 1;
+const STANDARD_BACKGROUND_COLOR: u32 = 0x4f3f_1a00;
+const LIST_SELECTION: u32 = 0xafaf_0000;
+const LIST_SELECTION_INACTIVE: u32 = 0xaf7f_7f7f;
 
 #[derive(Clone, Copy)]
 pub struct RuntimeClientListResources<'a> {
     pub skin: ClassicGuiSkin<'a>,
     pub fonts: &'a ClonkFontSet,
+    pub tooltip_font: &'a ClonkFont,
     pub icons: &'a ImageData,
     pub button_highlight: &'a ImageData,
+    pub context: &'a ImageData,
+    pub scroll: &'a ImageData,
 }
 
 impl RuntimeClientListResources<'_> {
@@ -53,6 +65,18 @@ impl RuntimeClientListResources<'_> {
         ensure!(
             self.button_highlight.width() > 0 && self.button_highlight.height() > 0,
             "GUIButtonHighlight.png is empty"
+        );
+        ensure!(
+            self.context.width() >= CONTEXT_HEIGHT * 2 && self.context.height() >= CONTEXT_HEIGHT,
+            "GUIContext.png cannot provide the closed/open ComboBox arrows"
+        );
+        ensure!(
+            self.scroll.width() == 32 && self.scroll.height() == 48,
+            "GUIScroll.png must be 32x48"
+        );
+        ensure!(
+            self.tooltip_font.line_height > 0,
+            "classic tooltip font has no line height"
         );
         Ok(())
     }
@@ -121,15 +145,23 @@ impl std::fmt::Display for RuntimeClientListStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RuntimeClientListAction {
     Close,
     OpenInfo(i32),
     CloseInfo,
+    OptionSelectionRequested {
+        option: LobbyOptionKind,
+        anchor: GuiPoint,
+        minimum_width: i32,
+    },
     ToggleMute(i32),
     ToggleActivate(i32),
     Kick(i32),
-    Disconnect { client_id: i32, connection_id: u32 },
+    Disconnect {
+        client_id: i32,
+        connection_id: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,7 +169,13 @@ enum HitTarget {
     Dialog,
     Close,
     InfoClose,
+    OptionRow(usize),
+    OptionValue(usize),
+    OptionScrollUp,
+    OptionScrollDown,
+    OptionScrollTrack,
     ClientInfo(i32),
+    ConnectionRow(i32, u32),
     Mute(i32),
     Activate(i32),
     Kick(i32),
@@ -179,8 +217,10 @@ pub struct RuntimeClientListLayout {
     pub caption: IntRect,
     pub close_button: IntRect,
     pub options: IntRect,
+    pub option_scrollbar: IntRect,
     pub list: IntRect,
     pub status: IntRect,
+    pub option_rows: Vec<RuntimeClientOptionLayout>,
     pub row_height: i32,
     pub icon_size: i32,
 }
@@ -193,13 +233,43 @@ pub struct RuntimeClientInfoLayout {
     pub text: IntRect,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeClientOptionLayout {
+    pub index: usize,
+    pub rect: IntRect,
+    pub value: IntRect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeClientListFocus {
+    Close,
+    OptionsList,
+    ClientList,
+    Mute(i32),
+    Activate(i32),
+    Kick(i32),
+    Disconnect { client_id: i32, connection_id: u32 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeClientListSelection {
+    Client(i32),
+    Connection { client_id: i32, connection_id: u32 },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeClientListTooltip {
+    pub pointer: GuiPoint,
+    pub text: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeClientListDialog {
     caption: String,
     info_caption: String,
     caption_scroll: Cell<CaptionScrollState>,
     info_caption_scroll: Cell<CaptionScrollState>,
-    options: Vec<String>,
+    options: Vec<LobbyOptionRow>,
     rows: Vec<RuntimeClientRow>,
     status: RuntimeClientListStatus,
     dialog_offset: (i32, i32),
@@ -207,18 +277,31 @@ pub struct RuntimeClientListDialog {
     pointer: Option<GuiPoint>,
     pointer_capture: Option<HitTarget>,
     title_drag: Option<TitleDrag>,
+    focus: Option<RuntimeClientListFocus>,
+    keyboard_press: Option<(KeyCode, RuntimeClientListFocus)>,
+    selected_entry: Option<RuntimeClientListSelection>,
+    open_option: Option<LobbyOptionKind>,
+    tooltip: ClassicTooltipTracker,
     info_client_id: Option<i32>,
     info_only: bool,
+    option_caption_reference: String,
+    option_caption_width: Cell<i32>,
+    option_scroll_row: Cell<usize>,
     scroll_row: Cell<usize>,
 }
 
 impl RuntimeClientListDialog {
     pub fn new(
         caption: impl Into<String>,
-        options: Vec<String>,
+        options: Vec<LobbyOptionRow>,
         rows: Vec<RuntimeClientRow>,
         status: RuntimeClientListStatus,
     ) -> Self {
+        let option_caption_reference = options
+            .iter()
+            .find(|option| option.kind == LobbyOptionKind::RuntimeJoin)
+            .map(|option| option.caption.clone())
+            .unwrap_or_default();
         Self {
             caption: caption.into(),
             info_caption: "Client information".to_string(),
@@ -232,8 +315,16 @@ impl RuntimeClientListDialog {
             pointer: None,
             pointer_capture: None,
             title_drag: None,
+            focus: None,
+            keyboard_press: None,
+            selected_entry: None,
+            open_option: None,
+            tooltip: ClassicTooltipTracker::new(),
             info_client_id: None,
             info_only: false,
+            option_caption_reference,
+            option_caption_width: Cell::new(0),
+            option_scroll_row: Cell::new(0),
             scroll_row: Cell::new(0),
         }
     }
@@ -255,8 +346,16 @@ impl RuntimeClientListDialog {
             pointer: None,
             pointer_capture: None,
             title_drag: None,
+            focus: None,
+            keyboard_press: None,
+            selected_entry: None,
+            open_option: None,
+            tooltip: ClassicTooltipTracker::new(),
             info_client_id: Some(client_id),
             info_only: true,
+            option_caption_reference: String::new(),
+            option_caption_width: Cell::new(0),
+            option_scroll_row: Cell::new(0),
             scroll_row: Cell::new(0),
         }
     }
@@ -266,8 +365,52 @@ impl RuntimeClientListDialog {
         self
     }
 
+    pub fn with_option_caption_reference(mut self, caption: impl Into<String>) -> Self {
+        self.option_caption_reference = caption.into();
+        self.option_caption_width.set(0);
+        self
+    }
+
     pub fn rows(&self) -> &[RuntimeClientRow] {
         &self.rows
+    }
+
+    pub fn option_rows(&self) -> &[LobbyOptionRow] {
+        &self.options
+    }
+
+    pub const fn focused(&self) -> Option<RuntimeClientListFocus> {
+        self.focus
+    }
+
+    pub const fn selected_client_id(&self) -> Option<i32> {
+        match self.selected_entry {
+            Some(
+                RuntimeClientListSelection::Client(client_id)
+                | RuntimeClientListSelection::Connection { client_id, .. },
+            ) => Some(client_id),
+            None => None,
+        }
+    }
+
+    pub const fn selected_entry(&self) -> Option<RuntimeClientListSelection> {
+        self.selected_entry
+    }
+
+    pub const fn open_option(&self) -> Option<LobbyOptionKind> {
+        self.open_option
+    }
+
+    pub fn set_open_option(&mut self, option: Option<LobbyOptionKind>) {
+        self.open_option = option.filter(|kind| {
+            self.options
+                .iter()
+                .any(|row| row.kind == *kind && row.editable && !row.choices.is_empty())
+        });
+    }
+
+    pub fn note_non_pointer_input(&mut self) {
+        self.tooltip.note_non_pointer_input();
     }
 
     pub fn status(&self) -> RuntimeClientListStatus {
@@ -292,7 +435,7 @@ impl RuntimeClientListDialog {
 
     pub fn replace_snapshot(
         &mut self,
-        options: Vec<String>,
+        options: Vec<LobbyOptionRow>,
         rows: Vec<RuntimeClientRow>,
         status: RuntimeClientListStatus,
     ) {
@@ -305,6 +448,20 @@ impl RuntimeClientListDialog {
         {
             self.close_info();
         }
+        if self
+            .selected_entry
+            .is_some_and(|selected| !self.contains_selection(selected))
+        {
+            self.selected_entry = None;
+        }
+        if self
+            .focus
+            .is_some_and(|focus| !self.focus_order().contains(&focus))
+        {
+            self.focus = Some(RuntimeClientListFocus::ClientList);
+            self.keyboard_press = None;
+        }
+        self.set_open_option(self.open_option);
         self.scroll_row.set(
             self.scroll_row
                 .get()
@@ -331,10 +488,75 @@ impl RuntimeClientListDialog {
             w: (bounds.w - 8).max(1),
             h: (bounds.h - caption_height - status_height - 7).max(1),
         };
-        let option_lines = self.options.len().clamp(1, 4) as i32;
-        let option_height = (font_line_height * option_lines + 4)
+        let option_row_height = font_line_height.max(1).saturating_add(6);
+        let option_count = i32::try_from(self.options.len()).unwrap_or(i32::MAX);
+        let option_content_height = option_row_height
+            .saturating_mul(option_count)
+            .saturating_add(
+                OPTION_ITEM_SPACING.saturating_mul(option_count.saturating_sub(1).max(0)),
+            );
+        let option_height = option_content_height
+            .saturating_add(2 * LIST_BOX_MARGIN)
             .min(client.h / 2)
             .max(font_line_height.min(client.h));
+        let options = IntRect {
+            x: client.x,
+            y: client.y,
+            w: client.w,
+            h: option_height,
+        };
+        // ScrollWindow always reserves its 16-pixel scrollbar column. The
+        // auto-scroll decoration only hides the bar when every item fits.
+        let option_scrollbar = IntRect {
+            x: options.x + options.w - LIST_BOX_MARGIN - SCROLLBAR_EXTENT,
+            y: options.y + LIST_BOX_MARGIN,
+            w: SCROLLBAR_EXTENT,
+            h: (options.h - 2 * LIST_BOX_MARGIN).max(1),
+        };
+        let visible_option_rows = usize::try_from(
+            (((options.h - 2 * LIST_BOX_MARGIN).max(1) + OPTION_ITEM_SPACING)
+                / (option_row_height + OPTION_ITEM_SPACING).max(1))
+            .max(1),
+        )
+        .unwrap_or(usize::MAX);
+        let option_scroll_row = self
+            .option_scroll_row
+            .get()
+            .min(self.options.len().saturating_sub(visible_option_rows));
+        self.option_scroll_row.set(option_scroll_row);
+        let option_rows = self
+            .options
+            .iter()
+            .enumerate()
+            .skip(option_scroll_row)
+            .take(visible_option_rows)
+            .enumerate()
+            .map(|(visible_index, (index, _))| {
+                let rect = IntRect {
+                    x: options.x + LIST_BOX_MARGIN,
+                    y: options.y
+                        + LIST_BOX_MARGIN
+                        + i32::try_from(visible_index)
+                            .unwrap_or(i32::MAX)
+                            .saturating_mul(option_row_height + OPTION_ITEM_SPACING),
+                    w: (options.w - 2 * LIST_BOX_MARGIN - SCROLLBAR_EXTENT).max(1),
+                    h: option_row_height,
+                };
+                let caption_width = self
+                    .option_caption_width(font_line_height)
+                    .min((rect.w - 10).max(0));
+                RuntimeClientOptionLayout {
+                    index,
+                    rect,
+                    value: IntRect {
+                        x: rect.x + caption_width + 8,
+                        y: rect.y + 1,
+                        w: (rect.w - caption_width - 9).max(1),
+                        h: font_line_height.max(1) + 4,
+                    },
+                }
+            })
+            .collect();
         let layout = RuntimeClientListLayout {
             bounds,
             caption: IntRect {
@@ -349,12 +571,8 @@ impl RuntimeClientListDialog {
                 w: 16,
                 h: 16,
             },
-            options: IntRect {
-                x: client.x,
-                y: client.y,
-                w: client.w,
-                h: option_height,
-            },
+            options,
+            option_scrollbar,
             list: IntRect {
                 x: client.x,
                 y: client.y + option_height + 2,
@@ -367,6 +585,7 @@ impl RuntimeClientListDialog {
                 w: (bounds.w - 8).max(1),
                 h: status_height,
             },
+            option_rows,
             row_height: (font_line_height + 4).max(18),
             icon_size: font_line_height.max(16),
         };
@@ -426,15 +645,38 @@ impl RuntimeClientListDialog {
         font_line_height: i32,
     ) -> bool {
         self.pointer = Some(point);
+        self.tooltip.note_pointer_wheel();
         let layout = self.layout(preferred, font_line_height);
-        if self.info_client_id.is_some() || !contains(layout.list, point) {
+        if self.info_client_id.is_some() {
+            return false;
+        }
+        if contains(layout.options, point) {
+            if delta != 0 {
+                let row_height = layout
+                    .option_rows
+                    .first()
+                    .map(|row| row.rect.h.max(1) as usize)
+                    .unwrap_or(1);
+                let row_delta =
+                    (delta.unsigned_abs() as usize).saturating_add(row_height - 1) / row_height;
+                let current = self.option_scroll_row.get();
+                let max_scroll = self.options.len().saturating_sub(layout.option_rows.len());
+                let next = if delta > 0 {
+                    current.saturating_sub(row_delta)
+                } else {
+                    current.saturating_add(row_delta).min(max_scroll)
+                };
+                self.option_scroll_row.set(next);
+            }
+            return true;
+        }
+        if !contains(layout.list, point) {
             return false;
         }
         if delta != 0 {
             let row_height = layout.row_height.max(1) as usize;
-            let row_delta = (delta.unsigned_abs() as usize)
-                .saturating_add(row_height - 1)
-                / row_height;
+            let row_delta =
+                (delta.unsigned_abs() as usize).saturating_add(row_height - 1) / row_height;
             let current = self.clamped_scroll_row(&layout);
             let next = if delta > 0 {
                 current.saturating_sub(row_delta)
@@ -454,12 +696,27 @@ impl RuntimeClientListDialog {
         preferred: IntRect,
         font_line_height: i32,
     ) -> bool {
+        self.handle_pointer_move_at(point, preferred, font_line_height, Instant::now())
+    }
+
+    pub fn handle_pointer_move_at(
+        &mut self,
+        point: GuiPoint,
+        preferred: IntRect,
+        font_line_height: i32,
+        now: Instant,
+    ) -> bool {
         self.pointer = Some(point);
-        self.update_title_drag(point)
-            || self.pointer_capture.is_some()
-            || self
-                .hit_target(point, &self.layout(preferred, font_line_height))
-                .is_some()
+        self.tooltip.note_pointer_move_at(point, now);
+        if self.update_title_drag(point) {
+            return true;
+        }
+        let layout = self.layout(preferred, font_line_height);
+        if self.pointer_capture == Some(HitTarget::OptionScrollTrack) {
+            self.set_option_scroll_from_pointer(point, &layout);
+            return true;
+        }
+        self.pointer_capture.is_some() || self.hit_target(point, &layout).is_some()
     }
 
     pub fn handle_pointer_down(
@@ -469,6 +726,8 @@ impl RuntimeClientListDialog {
         font_line_height: i32,
     ) -> bool {
         self.pointer = Some(point);
+        self.tooltip.note_pointer_button();
+        self.keyboard_press = None;
         let layout = self.layout(preferred, font_line_height);
         if let Some(title) = self.title_at(point, &layout) {
             self.pointer_capture = None;
@@ -481,6 +740,50 @@ impl RuntimeClientListDialog {
         }
         self.title_drag = None;
         self.pointer_capture = self.hit_target(point, &layout);
+        match self.pointer_capture {
+            Some(HitTarget::OptionRow(_) | HitTarget::OptionValue(_)) => {
+                self.focus = Some(RuntimeClientListFocus::OptionsList);
+            }
+            Some(HitTarget::OptionScrollUp) => {
+                self.focus = Some(RuntimeClientListFocus::OptionsList);
+                self.scroll_options_by(-1, &layout);
+            }
+            Some(HitTarget::OptionScrollDown) => {
+                self.focus = Some(RuntimeClientListFocus::OptionsList);
+                self.scroll_options_by(1, &layout);
+            }
+            Some(HitTarget::OptionScrollTrack) => {
+                self.focus = Some(RuntimeClientListFocus::OptionsList);
+                self.set_option_scroll_from_pointer(point, &layout);
+            }
+            Some(HitTarget::ClientInfo(client_id)) => {
+                self.focus = Some(RuntimeClientListFocus::ClientList);
+                self.selected_entry = Some(RuntimeClientListSelection::Client(client_id));
+            }
+            Some(HitTarget::ConnectionRow(client_id, connection_id)) => {
+                self.focus = Some(RuntimeClientListFocus::ClientList);
+                self.selected_entry = Some(RuntimeClientListSelection::Connection {
+                    client_id,
+                    connection_id,
+                });
+            }
+            Some(
+                HitTarget::Mute(client_id)
+                | HitTarget::Activate(client_id)
+                | HitTarget::Kick(client_id),
+            ) => {
+                self.focus = Some(RuntimeClientListFocus::ClientList);
+                self.selected_entry = Some(RuntimeClientListSelection::Client(client_id));
+            }
+            Some(HitTarget::Disconnect(client_id, connection_id)) => {
+                self.focus = Some(RuntimeClientListFocus::ClientList);
+                self.selected_entry = Some(RuntimeClientListSelection::Connection {
+                    client_id,
+                    connection_id,
+                });
+            }
+            _ => {}
+        }
         self.pointer_capture.is_some()
     }
 
@@ -491,12 +794,14 @@ impl RuntimeClientListDialog {
         font_line_height: i32,
     ) -> Option<RuntimeClientListAction> {
         self.pointer = Some(point);
+        self.tooltip.note_pointer_button();
         if self.update_title_drag(point) {
             self.title_drag = None;
             return None;
         }
         let pressed = self.pointer_capture.take()?;
-        let released = self.hit_target(point, &self.layout(preferred, font_line_height));
+        let layout = self.layout(preferred, font_line_height);
+        let released = self.hit_target(point, &layout);
         if released != Some(pressed) {
             return None;
         }
@@ -505,6 +810,19 @@ impl RuntimeClientListDialog {
             HitTarget::InfoClose => {
                 self.close_info();
                 RuntimeClientListAction::CloseInfo
+            }
+            HitTarget::OptionValue(index) => {
+                let option = self.options.get(index)?;
+                let value = layout
+                    .option_rows
+                    .iter()
+                    .find(|row| row.index == index)?
+                    .value;
+                RuntimeClientListAction::OptionSelectionRequested {
+                    option: option.kind,
+                    anchor: GuiPoint::new(value.x as f32, (value.y + value.h) as f32),
+                    minimum_width: value.w,
+                }
             }
             HitTarget::ClientInfo(client_id) => {
                 self.reset_info_presentation();
@@ -520,7 +838,14 @@ impl RuntimeClientListDialog {
                     connection_id,
                 }
             }
-            HitTarget::Dialog => return None,
+            HitTarget::Dialog
+            | HitTarget::OptionRow(_)
+            | HitTarget::OptionScrollUp
+            | HitTarget::OptionScrollDown
+            | HitTarget::OptionScrollTrack
+            | HitTarget::ConnectionRow(_, _) => {
+                return None;
+            }
         };
         Some(action)
     }
@@ -529,6 +854,7 @@ impl RuntimeClientListDialog {
         self.pointer = None;
         self.pointer_capture = None;
         self.title_drag = None;
+        self.tooltip.pointer_left();
     }
 
     pub fn handle_escape(&mut self, pressed: bool) -> Option<RuntimeClientListAction> {
@@ -639,6 +965,285 @@ impl RuntimeClientListDialog {
         self.reset_info_presentation();
     }
 
+    pub fn handle_key(
+        &mut self,
+        key: KeyCode,
+        shift: bool,
+        preferred: IntRect,
+        font_line_height: i32,
+    ) -> (bool, Option<RuntimeClientListAction>) {
+        self.tooltip.note_non_pointer_input();
+        if self.info_client_id.is_some() {
+            self.keyboard_press = None;
+            return match key {
+                KeyCode::Escape => (true, self.handle_escape(true)),
+                _ => (true, None),
+            };
+        }
+        if !matches!(key, KeyCode::Enter | KeyCode::Space) {
+            self.keyboard_press = None;
+        }
+        let layout = self.layout(preferred, font_line_height);
+        match key {
+            KeyCode::Escape => (true, self.handle_escape(true)),
+            KeyCode::Tab => {
+                self.advance_focus(shift, &layout);
+                (true, None)
+            }
+            KeyCode::Up if self.focus == Some(RuntimeClientListFocus::ClientList) => {
+                self.move_list_selection(-1, &layout);
+                (true, None)
+            }
+            KeyCode::Down if self.focus == Some(RuntimeClientListFocus::ClientList) => {
+                self.move_list_selection(1, &layout);
+                (true, None)
+            }
+            KeyCode::Home if self.focus == Some(RuntimeClientListFocus::ClientList) => {
+                self.move_list_selection_to_edge(false, &layout);
+                (true, None)
+            }
+            KeyCode::End if self.focus == Some(RuntimeClientListFocus::ClientList) => {
+                self.move_list_selection_to_edge(true, &layout);
+                (true, None)
+            }
+            KeyCode::PageUp if self.focus == Some(RuntimeClientListFocus::ClientList) => {
+                self.move_list_selection_page(-1, &layout);
+                (true, None)
+            }
+            KeyCode::PageDown if self.focus == Some(RuntimeClientListFocus::ClientList) => {
+                self.move_list_selection_page(1, &layout);
+                (true, None)
+            }
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+                if self.focus == Some(RuntimeClientListFocus::OptionsList) =>
+            {
+                // C4Network2ClientListDlg disables C4GameOptionsList row
+                // selection. The shell owns list-navigation keys, but no
+                // ComboBox child can acquire keyboard focus from it.
+                (true, None)
+            }
+            KeyCode::Enter | KeyCode::Space => {
+                let Some(focus) = self.focus else {
+                    return (false, None);
+                };
+                if Self::activation_for_focus(focus).is_some() {
+                    self.keyboard_press = Some((key, focus));
+                    (true, None)
+                } else {
+                    self.keyboard_press = None;
+                    (false, None)
+                }
+            }
+            _ => (false, None),
+        }
+    }
+
+    pub fn handle_key_release(&mut self, key: KeyCode) -> (bool, Option<RuntimeClientListAction>) {
+        self.tooltip.note_non_pointer_input();
+        let Some((pressed_key, pressed_focus)) = self.keyboard_press.take() else {
+            return (false, None);
+        };
+        if pressed_key != key {
+            return (false, None);
+        }
+        if self.focus != Some(pressed_focus) {
+            return (true, None);
+        }
+        (true, Self::activation_for_focus(pressed_focus))
+    }
+
+    fn activation_for_focus(focus: RuntimeClientListFocus) -> Option<RuntimeClientListAction> {
+        match focus {
+            RuntimeClientListFocus::Close => Some(RuntimeClientListAction::Close),
+            RuntimeClientListFocus::Mute(client_id) => {
+                Some(RuntimeClientListAction::ToggleMute(client_id))
+            }
+            RuntimeClientListFocus::Activate(client_id) => {
+                Some(RuntimeClientListAction::ToggleActivate(client_id))
+            }
+            RuntimeClientListFocus::Kick(client_id) => {
+                Some(RuntimeClientListAction::Kick(client_id))
+            }
+            RuntimeClientListFocus::Disconnect {
+                client_id,
+                connection_id,
+            } => Some(RuntimeClientListAction::Disconnect {
+                client_id,
+                connection_id,
+            }),
+            RuntimeClientListFocus::OptionsList | RuntimeClientListFocus::ClientList => None,
+        }
+    }
+
+    fn advance_focus(&mut self, backwards: bool, layout: &RuntimeClientListLayout) {
+        let order = self.focus_order();
+        let next = match self
+            .focus
+            .and_then(|focus| order.iter().position(|candidate| *candidate == focus))
+        {
+            Some(current) if backwards => (current + order.len() - 1) % order.len(),
+            Some(current) => (current + 1) % order.len(),
+            None if backwards => order.len() - 1,
+            None => 0,
+        };
+        self.focus = Some(order[next]);
+        if self.focus == Some(RuntimeClientListFocus::ClientList) && self.selected_entry.is_none() {
+            self.selected_entry = self
+                .rows
+                .first()
+                .map(|row| RuntimeClientListSelection::Client(row.client_id));
+        }
+        self.ensure_selected_entry_visible(layout);
+    }
+
+    fn focus_order(&self) -> Vec<RuntimeClientListFocus> {
+        let mut order = vec![
+            RuntimeClientListFocus::Close,
+            RuntimeClientListFocus::OptionsList,
+            RuntimeClientListFocus::ClientList,
+        ];
+        if let Some(RuntimeClientListSelection::Client(client_id)) = self.selected_entry {
+            let Some(row) = self.rows.iter().find(|row| row.client_id == client_id) else {
+                return order;
+            };
+            if !row.local {
+                order.push(RuntimeClientListFocus::Mute(row.client_id));
+            }
+            if !row.host && row.can_moderate {
+                order.push(RuntimeClientListFocus::Activate(row.client_id));
+                order.push(RuntimeClientListFocus::Kick(row.client_id));
+            }
+        } else if let Some(RuntimeClientListSelection::Connection {
+            client_id,
+            connection_id,
+        }) = self.selected_entry
+        {
+            if self.rows.iter().any(|row| {
+                row.client_id == client_id
+                    && row.connections.iter().any(|connection| {
+                        connection.connection_id == connection_id && connection.can_disconnect
+                    })
+            }) {
+                order.push(RuntimeClientListFocus::Disconnect {
+                    client_id,
+                    connection_id,
+                });
+            }
+        }
+        order
+    }
+
+    fn list_selections(&self) -> Vec<RuntimeClientListSelection> {
+        self.rows
+            .iter()
+            .flat_map(|row| {
+                std::iter::once(RuntimeClientListSelection::Client(row.client_id)).chain(
+                    row.connections.iter().map(|connection| {
+                        RuntimeClientListSelection::Connection {
+                            client_id: row.client_id,
+                            connection_id: connection.connection_id,
+                        }
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    fn contains_selection(&self, selected: RuntimeClientListSelection) -> bool {
+        self.list_selections().contains(&selected)
+    }
+
+    fn move_list_selection(&mut self, direction: i32, layout: &RuntimeClientListLayout) {
+        let entries = self.list_selections();
+        if entries.is_empty() {
+            self.selected_entry = None;
+            return;
+        }
+        let current = self
+            .selected_entry
+            .and_then(|selected| entries.iter().position(|entry| *entry == selected));
+        let next = match current {
+            Some(index) if direction < 0 => index.saturating_sub(1),
+            Some(index) => (index + 1).min(entries.len() - 1),
+            None if direction < 0 => entries.len() - 1,
+            None => 0,
+        };
+        self.selected_entry = Some(entries[next]);
+        self.ensure_selected_entry_visible(layout);
+    }
+
+    fn move_list_selection_to_edge(&mut self, end: bool, layout: &RuntimeClientListLayout) {
+        let entries = self.list_selections();
+        self.selected_entry = if end {
+            entries.last().copied()
+        } else {
+            entries.first().copied()
+        };
+        self.ensure_selected_entry_visible(layout);
+    }
+
+    fn move_list_selection_page(&mut self, direction: i32, layout: &RuntimeClientListLayout) {
+        let entries = self.list_selections();
+        if entries.is_empty() {
+            self.selected_entry = None;
+            return;
+        }
+        let visible = Self::visible_list_row_count(layout).max(1);
+        let scroll = self.clamped_scroll_row(layout);
+        let current = self
+            .selected_entry
+            .and_then(|selected| entries.iter().position(|entry| *entry == selected))
+            .unwrap_or(if direction < 0 { entries.len() - 1 } else { 0 });
+        let next = if direction < 0 {
+            if current > scroll {
+                scroll
+            } else {
+                scroll.saturating_sub(visible)
+            }
+        } else {
+            let last_visible = scroll
+                .saturating_add(visible.saturating_sub(1))
+                .min(entries.len() - 1);
+            if current < last_visible {
+                last_visible
+            } else {
+                scroll
+                    .saturating_add(visible.saturating_mul(2).saturating_sub(1))
+                    .min(entries.len() - 1)
+            }
+        };
+        self.selected_entry = Some(entries[next]);
+        self.ensure_selected_entry_visible(layout);
+    }
+
+    fn ensure_selected_entry_visible(&self, layout: &RuntimeClientListLayout) {
+        let Some(selected) = self.selected_entry else {
+            return;
+        };
+        let Some(selected_index) = self
+            .list_selections()
+            .iter()
+            .position(|entry| *entry == selected)
+        else {
+            return;
+        };
+        let visible = Self::visible_list_row_count(layout).max(1);
+        let current = self.clamped_scroll_row(layout);
+        let next = if selected_index < current {
+            selected_index
+        } else if selected_index >= current.saturating_add(visible) {
+            selected_index.saturating_add(1).saturating_sub(visible)
+        } else {
+            current
+        };
+        self.scroll_row.set(next.min(self.max_scroll_row(layout)));
+    }
+
     fn list_entries(&self) -> impl Iterator<Item = RuntimeListEntry<'_>> {
         self.rows.iter().flat_map(|row| {
             std::iter::once(RuntimeListEntry::Client(row)).chain(row.connections.iter().map(
@@ -685,6 +1290,92 @@ impl RuntimeClientListDialog {
         caption_scroll_offset_at(state, now, font, text, caption.w)
     }
 
+    fn option_max_scroll(&self, layout: &RuntimeClientListLayout) -> usize {
+        self.options.len().saturating_sub(layout.option_rows.len())
+    }
+
+    fn option_caption_width(&self, font_line_height: i32) -> i32 {
+        let measured = self.option_caption_width.get();
+        if measured > 0 {
+            return measured;
+        }
+        let longest = if self.option_caption_reference.is_empty() {
+            self.options
+                .iter()
+                .map(|option| crate::c4_presentation_text(&option.caption).chars().count())
+                .max()
+                .unwrap_or(0)
+        } else {
+            crate::c4_presentation_text(&self.option_caption_reference)
+                .chars()
+                .count()
+        };
+        i32::try_from(longest)
+            .unwrap_or(i32::MAX)
+            .saturating_mul((font_line_height.max(1) + 1) / 2)
+            .saturating_mul(5)
+            / 4
+    }
+
+    fn measure_option_caption_width(&self, font: &ClonkFont) {
+        let reference = if self.option_caption_reference.is_empty() {
+            self.options
+                .iter()
+                .max_by_key(|option| {
+                    font.measure(&crate::c4_presentation_text(&option.caption), true)
+                        .0
+                })
+                .map(|option| option.caption.as_str())
+        } else {
+            Some(self.option_caption_reference.as_str())
+        };
+        let width = reference.map_or(0, |caption| {
+            font.measure(&crate::c4_presentation_text(caption), true)
+                .0
+                .saturating_mul(5)
+                / 4
+        });
+        self.option_caption_width.set(width.max(0));
+    }
+
+    fn scroll_options_by(&self, rows: i32, layout: &RuntimeClientListLayout) {
+        let current = self.option_scroll_row.get();
+        let next = if rows < 0 {
+            current.saturating_sub(rows.unsigned_abs() as usize)
+        } else {
+            current
+                .saturating_add(rows as usize)
+                .min(self.option_max_scroll(layout))
+        };
+        self.option_scroll_row.set(next);
+    }
+
+    fn set_option_scroll_from_pointer(&self, point: GuiPoint, layout: &RuntimeClientListLayout) {
+        let max_scroll = self.option_max_scroll(layout);
+        let max_pin = (layout.option_scrollbar.h - 3 * SCROLLBAR_EXTENT).max(0);
+        if max_scroll == 0 || max_pin == 0 {
+            return;
+        }
+        let pin = (point.y.floor() as i32
+            - layout.option_scrollbar.y
+            - SCROLLBAR_EXTENT
+            - SCROLLBAR_EXTENT / 2)
+            .clamp(0, max_pin);
+        self.option_scroll_row
+            .set(max_scroll.saturating_mul(pin as usize) / max_pin as usize);
+    }
+
+    fn option_scrollbar_pin(&self, layout: &RuntimeClientListLayout) -> i32 {
+        let max_scroll = self.option_max_scroll(layout);
+        let max_pin = (layout.option_scrollbar.h - 3 * SCROLLBAR_EXTENT).max(0);
+        if max_scroll == 0 || max_pin == 0 {
+            0
+        } else {
+            let scroll = self.option_scroll_row.get().min(max_scroll);
+            (max_pin as usize).saturating_mul(scroll) as i32 / max_scroll as i32
+        }
+    }
+
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -706,6 +1397,7 @@ impl RuntimeClientListDialog {
         now: Instant,
     ) -> Result<()> {
         resources.validate()?;
+        self.measure_option_caption_width(&resources.fonts.text);
         let layout = self.layout(preferred, resources.fonts.text.line_height);
         if self.info_only {
             if let (Some(client_id), Some(info)) =
@@ -746,31 +1438,97 @@ impl RuntimeClientListDialog {
             gamma,
         );
 
-        draw_engine_box(
-            surface,
-            layout.options.x,
-            layout.options.y,
-            layout.options.x + layout.options.w - 1,
-            layout.options.y + layout.options.h - 1,
-            0x7f00_0000,
-            gamma,
-        );
-        draw_3d_frame(surface, layout.options, gamma);
-        for (index, option) in self.options.iter().enumerate() {
-            let y = layout.options.y + 2 + index as i32 * resources.fonts.text.line_height;
-            if y >= layout.options.y + layout.options.h {
+        for row_layout in &layout.option_rows {
+            if row_layout.rect.y + row_layout.rect.h > layout.options.y + layout.options.h {
                 break;
+            }
+            let Some(option) = self.options.get(row_layout.index) else {
+                continue;
+            };
+            let caption = format!("{}:", crate::c4_presentation_text(&option.caption));
+            draw_clipped_text(
+                surface,
+                &resources.fonts.text,
+                row_layout.rect.x + 1,
+                row_layout.rect.y + (row_layout.rect.h - resources.fonts.text.line_height) / 2,
+                &caption,
+                [255, 255, 255, 255],
+                TextAlign::Left,
+                gamma,
+                IntRect {
+                    x: row_layout.rect.x + 1,
+                    y: row_layout.rect.y,
+                    w: (row_layout.value.x - row_layout.rect.x - 8).max(1),
+                    h: row_layout.rect.h,
+                },
+            );
+            let arrow_x = row_layout.value.x + row_layout.value.w - CONTEXT_HEIGHT as i32 - 1;
+            if option.editable {
+                draw_engine_box(
+                    surface,
+                    row_layout.value.x,
+                    row_layout.value.y,
+                    row_layout.value.x + row_layout.value.w - 1,
+                    row_layout.value.y + row_layout.value.h - 1,
+                    STANDARD_BACKGROUND_COLOR,
+                    gamma,
+                );
+                draw_3d_frame(surface, row_layout.value, gamma);
+                draw_facet_stretch(
+                    surface,
+                    resources.context,
+                    (
+                        (u32::from(self.open_option == Some(option.kind)) * CONTEXT_HEIGHT) as f32,
+                        0.0,
+                        CONTEXT_HEIGHT as f32,
+                        CONTEXT_HEIGHT as f32,
+                    ),
+                    (
+                        arrow_x as f32,
+                        (row_layout.value.y + (row_layout.value.h - CONTEXT_HEIGHT as i32) / 2)
+                            as f32,
+                        CONTEXT_HEIGHT as f32,
+                        CONTEXT_HEIGHT as f32,
+                    ),
+                    gamma,
+                );
             }
             draw_clipped_text(
                 surface,
                 &resources.fonts.text,
-                layout.options.x + 4,
-                y,
-                option,
-                [200, 200, 200, 255],
+                row_layout.value.x + CONTEXT_HEIGHT as i32 + 2,
+                row_layout.value.y + (row_layout.value.h - resources.fonts.text.line_height) / 2,
+                &crate::c4_presentation_text(&option.value),
+                [255, 255, 255, 255],
                 TextAlign::Left,
                 gamma,
-                layout.options,
+                IntRect {
+                    x: row_layout.value.x,
+                    y: row_layout.value.y,
+                    w: (arrow_x - row_layout.value.x).max(1),
+                    h: row_layout.value.h,
+                },
+            );
+            let hovered = active
+                && self.pointer.is_some_and(|point| {
+                    self.hit_target(point, &layout)
+                        == Some(HitTarget::OptionValue(row_layout.index))
+                });
+            if option.editable && (hovered || self.open_option == Some(option.kind)) {
+                draw_highlight(surface, row_layout.value, resources.button_highlight, gamma);
+            }
+        }
+        let option_max_scroll = self.option_max_scroll(&layout);
+        if option_max_scroll > 0 {
+            draw_scrollbar(
+                surface,
+                layout.option_scrollbar,
+                resources.scroll,
+                self.option_scrollbar_pin(&layout),
+                option_max_scroll,
+                self.pointer_capture == Some(HitTarget::OptionScrollUp),
+                self.pointer_capture == Some(HitTarget::OptionScrollDown),
+                gamma,
             );
         }
 
@@ -803,6 +1561,16 @@ impl RuntimeClientListDialog {
             self.draw_client_info(
                 surface, client_id, &layout, &info, resources, active, gamma, now,
             );
+        } else if active {
+            if let Some(tooltip) = self.tooltip_state_at(now, preferred, &resources.fonts.text) {
+                draw_classic_tooltip(
+                    surface,
+                    resources.tooltip_font,
+                    tooltip.pointer,
+                    &tooltip.text,
+                    gamma,
+                );
+            }
         }
         Ok(())
     }
@@ -823,6 +1591,23 @@ impl RuntimeClientListDialog {
             }
             match entry {
                 RuntimeListEntry::Client(row) => {
+                    if self.selected_entry
+                        == Some(RuntimeClientListSelection::Client(row.client_id))
+                    {
+                        draw_engine_box(
+                            surface,
+                            layout.list.x + 2,
+                            y,
+                            layout.list.x + layout.list.w - 3,
+                            y + layout.row_height - 1,
+                            if active && self.focus == Some(RuntimeClientListFocus::ClientList) {
+                                LIST_SELECTION
+                            } else {
+                                LIST_SELECTION_INACTIVE
+                            },
+                            gamma,
+                        );
+                    }
                     let status_rect = IntRect {
                         x: layout.list.x + 3,
                         y: y + (layout.row_height - layout.icon_size) / 2,
@@ -908,27 +1693,43 @@ impl RuntimeClientListDialog {
                             },
                         );
                     }
+                    let label_rect = client_label_rect(row, layout, y);
                     draw_clipped_text(
                         surface,
                         &resources.fonts.text,
-                        status_rect.x + status_rect.w + 3,
+                        label_rect.x,
                         y + 2,
                         &row.label(),
                         [255, 255, 255, 255],
                         TextAlign::Left,
                         gamma,
-                        IntRect {
-                            x: status_rect.x + status_rect.w + 3,
-                            y,
-                            w: (right - status_rect.x - status_rect.w - 5).max(1),
-                            h: layout.row_height,
-                        },
+                        label_rect,
                     );
                 }
                 RuntimeListEntry::Connection {
                     client_id,
                     connection,
                 } => {
+                    if self.selected_entry
+                        == Some(RuntimeClientListSelection::Connection {
+                            client_id,
+                            connection_id: connection.connection_id,
+                        })
+                    {
+                        draw_engine_box(
+                            surface,
+                            layout.list.x + 2,
+                            y,
+                            layout.list.x + layout.list.w - 3,
+                            y + layout.row_height - 1,
+                            if active && self.focus == Some(RuntimeClientListFocus::ClientList) {
+                                LIST_SELECTION
+                            } else {
+                                LIST_SELECTION_INACTIVE
+                            },
+                            gamma,
+                        );
+                    }
                     let mut connection_right = layout.list.x + layout.list.w - 3;
                     if connection.can_disconnect {
                         connection_right -= layout.icon_size;
@@ -1085,6 +1886,47 @@ impl RuntimeClientListDialog {
         );
     }
 
+    pub fn tooltip_state_at(
+        &self,
+        now: Instant,
+        preferred: IntRect,
+        font: &ClonkFont,
+    ) -> Option<RuntimeClientListTooltip> {
+        let pointer = self.tooltip.eligible_pointer_at(now)?;
+        self.measure_option_caption_width(font);
+        let layout = self.layout(preferred, font.line_height);
+        for row_layout in &layout.option_rows {
+            if row_layout.rect.y + row_layout.rect.h > layout.options.y + layout.options.h {
+                break;
+            }
+            if contains(row_layout.rect, pointer) {
+                let text = self.options.get(row_layout.index)?.tooltip.clone();
+                return (!text.is_empty()).then_some(RuntimeClientListTooltip { pointer, text });
+            }
+        }
+        let mut y = layout.list.y + 2;
+        let scroll_row = self.clamped_scroll_row(&layout);
+        for entry in self.list_entries().skip(scroll_row) {
+            if y + layout.row_height > layout.list.y + layout.list.h {
+                break;
+            }
+            if let RuntimeListEntry::Client(row) = entry {
+                let mut label_rect = client_label_rect(row, &layout, y);
+                label_rect.y += 2;
+                label_rect.h = font.line_height;
+                label_rect.w = label_rect.w.min(font.measure(&row.label(), true).0.max(0));
+                if contains(label_rect, pointer) && !row.player_names.is_empty() {
+                    return Some(RuntimeClientListTooltip {
+                        pointer,
+                        text: row.player_names.join(", "),
+                    });
+                }
+            }
+            y += layout.row_height;
+        }
+        None
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn draw_icon_button(
         &self,
@@ -1097,12 +1939,37 @@ impl RuntimeClientListDialog {
         active: bool,
         gamma: Option<&GammaRamp>,
     ) {
+        let keyboard_focused = match target {
+            HitTarget::Close => self.focus == Some(RuntimeClientListFocus::Close),
+            HitTarget::Mute(client_id) => {
+                self.focus == Some(RuntimeClientListFocus::Mute(client_id))
+            }
+            HitTarget::Activate(client_id) => {
+                self.focus == Some(RuntimeClientListFocus::Activate(client_id))
+            }
+            HitTarget::Kick(client_id) => {
+                self.focus == Some(RuntimeClientListFocus::Kick(client_id))
+            }
+            HitTarget::Disconnect(client_id, connection_id) => {
+                self.focus
+                    == Some(RuntimeClientListFocus::Disconnect {
+                        client_id,
+                        connection_id,
+                    })
+            }
+            _ => false,
+        };
         let hovered = active
-            && self.pointer.is_some_and(|point| {
-                self.hit_target(point, layout)
-                    .is_some_and(|hit| hit == target)
-            });
-        let pressed = hovered && self.pointer_capture == Some(target);
+            && (keyboard_focused
+                || self.pointer.is_some_and(|point| {
+                    self.hit_target(point, layout)
+                        .is_some_and(|hit| hit == target)
+                }));
+        let keyboard_pressed = keyboard_focused
+            && self
+                .keyboard_press
+                .is_some_and(|(_, focus)| self.focus == Some(focus));
+        let pressed = hovered && (self.pointer_capture == Some(target) || keyboard_pressed);
         if hovered && !pressed {
             draw_highlight(surface, rect, resources.button_highlight, gamma);
         }
@@ -1124,6 +1991,31 @@ impl RuntimeClientListDialog {
         }
         if contains(layout.close_button, point) {
             return Some(HitTarget::Close);
+        }
+        if self.option_max_scroll(layout) > 0 && contains(layout.option_scrollbar, point) {
+            if point.y < (layout.option_scrollbar.y + SCROLLBAR_EXTENT) as f32 {
+                return Some(HitTarget::OptionScrollUp);
+            }
+            if point.y
+                >= (layout.option_scrollbar.y + layout.option_scrollbar.h - SCROLLBAR_EXTENT) as f32
+            {
+                return Some(HitTarget::OptionScrollDown);
+            }
+            return Some(HitTarget::OptionScrollTrack);
+        }
+        for row_layout in &layout.option_rows {
+            if row_layout.rect.y + row_layout.rect.h > layout.options.y + layout.options.h {
+                break;
+            }
+            let Some(option) = self.options.get(row_layout.index) else {
+                continue;
+            };
+            if option.editable && contains(row_layout.value, point) {
+                return Some(HitTarget::OptionValue(row_layout.index));
+            }
+            if contains(row_layout.rect, point) {
+                return Some(HitTarget::OptionRow(row_layout.index));
+            }
         }
         let mut y = layout.list.y + 2;
         let scroll_row = self.clamped_scroll_row(layout);
@@ -1177,21 +2069,34 @@ impl RuntimeClientListDialog {
                 RuntimeListEntry::Connection {
                     client_id,
                     connection,
-                } if connection.can_disconnect => {
-                    let disconnect = IntRect {
-                        x: layout.list.x + layout.list.w - 3 - layout.icon_size,
-                        y: y + (layout.row_height - layout.icon_size) / 2,
-                        w: layout.icon_size,
-                        h: layout.icon_size,
+                } => {
+                    if connection.can_disconnect {
+                        let disconnect = IntRect {
+                            x: layout.list.x + layout.list.w - 3 - layout.icon_size,
+                            y: y + (layout.row_height - layout.icon_size) / 2,
+                            w: layout.icon_size,
+                            h: layout.icon_size,
+                        };
+                        if contains(disconnect, point) {
+                            return Some(HitTarget::Disconnect(
+                                client_id,
+                                connection.connection_id,
+                            ));
+                        }
+                    }
+                    let row_rect = IntRect {
+                        x: layout.list.x + 2,
+                        y,
+                        w: (layout.list.w - 4).max(1),
+                        h: layout.row_height,
                     };
-                    if contains(disconnect, point) {
-                        return Some(HitTarget::Disconnect(
+                    if contains(row_rect, point) {
+                        return Some(HitTarget::ConnectionRow(
                             client_id,
                             connection.connection_id,
                         ));
                     }
                 }
-                RuntimeListEntry::Connection { .. } => {}
             }
             y += layout.row_height;
         }
@@ -1235,6 +2140,27 @@ fn caption_scroll_offset_at(
     current.position
 }
 
+fn client_label_rect(row: &RuntimeClientRow, layout: &RuntimeClientListLayout, y: i32) -> IntRect {
+    let status_x = layout.list.x + 3;
+    let mut right = layout.list.x + layout.list.w - 3;
+    if !row.host && row.can_moderate {
+        right -= layout.icon_size * 2 + 4;
+    }
+    if !row.local {
+        right -= layout.icon_size + 2;
+    }
+    if row.wait_ms.is_some() {
+        right -= 54;
+    }
+    let x = status_x + layout.icon_size + 3;
+    IntRect {
+        x,
+        y,
+        w: (right - x - 2).max(1),
+        h: layout.row_height,
+    }
+}
+
 fn status_icon_phase(row: &RuntimeClientRow) -> u32 {
     match row.status {
         RuntimeClientStatusIcon::Loading => ICON_LOADING,
@@ -1249,6 +2175,77 @@ fn wait_color(wait_ms: i32) -> [u8; 4] {
     let green = (255 - wait_ms.saturating_mul(5)).clamp(0, 255) as u8;
     let blue = (255 + wait_ms.saturating_mul(5)).clamp(0, 255) as u8;
     [red, green, blue, 255]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_scrollbar(
+    surface: &mut Surface,
+    rect: IntRect,
+    scroll: &ImageData,
+    pin: i32,
+    max_scroll: usize,
+    top_down: bool,
+    bottom_down: bool,
+    gamma: Option<&GammaRamp>,
+) {
+    if rect.h <= 0 {
+        return;
+    }
+    let top_x = if top_down { 16.0 } else { 0.0 };
+    let bottom_x = if bottom_down { 16.0 } else { 0.0 };
+    draw_facet_stretch(
+        surface,
+        scroll,
+        (top_x, 0.0, 16.0, 16.0),
+        (rect.x as f32, rect.y as f32, 16.0, 16.0),
+        gamma,
+    );
+    let mut y = SCROLLBAR_EXTENT;
+    while y < rect.h - 5 {
+        let height = SCROLLBAR_EXTENT.min(rect.h - 5 - y);
+        if height <= 0 {
+            break;
+        }
+        draw_facet_stretch(
+            surface,
+            scroll,
+            (0.0, 16.0, 16.0, height as f32),
+            (
+                rect.x as f32,
+                (rect.y + y) as f32,
+                SCROLLBAR_EXTENT as f32,
+                height as f32,
+            ),
+            gamma,
+        );
+        y += SCROLLBAR_EXTENT;
+    }
+    draw_facet_stretch(
+        surface,
+        scroll,
+        (bottom_x, 32.0, 16.0, 16.0),
+        (
+            rect.x as f32,
+            (rect.y + rect.h - SCROLLBAR_EXTENT) as f32,
+            SCROLLBAR_EXTENT as f32,
+            SCROLLBAR_EXTENT as f32,
+        ),
+        gamma,
+    );
+    if max_scroll > 0 && rect.h > 3 * SCROLLBAR_EXTENT {
+        draw_facet_stretch(
+            surface,
+            scroll,
+            (16.0, 16.0, 16.0, 16.0),
+            (
+                rect.x as f32,
+                (rect.y + SCROLLBAR_EXTENT + pin) as f32,
+                SCROLLBAR_EXTENT as f32,
+                SCROLLBAR_EXTENT as f32,
+            ),
+            gamma,
+        );
+    }
 }
 
 fn draw_highlight(
@@ -1300,6 +2297,7 @@ fn contains(rect: IntRect, point: GuiPoint) -> bool {
 mod tests {
     use super::*;
     use crate::context_menu::{ClassicTooltipTracker, CLASSIC_TOOLTIP_DELAY};
+    use crate::game_lobby::{core_runtime_option_rows, LobbyOptionLabels};
     use lc_graphics::Color;
 
     fn unit_width_font(characters: &str) -> ClonkFont {
@@ -1311,6 +2309,24 @@ mod tests {
                 lc_graphics::clonk_font::GlyphCell {
                     width: 1,
                     pixels: vec![Color::opaque(255, 255, 255); 4],
+                },
+            );
+        }
+        font
+    }
+
+    fn options(host: bool) -> Vec<LobbyOptionRow> {
+        core_runtime_option_rows(host, host, false, &LobbyOptionLabels::default(), 1, 4, true)
+    }
+
+    fn tooltip_font() -> ClonkFont {
+        let mut font = ClonkFont::new(16);
+        for byte in b' '..=b'~' {
+            font.add_glyph(
+                char::from(byte),
+                lc_graphics::clonk_font::GlyphCell {
+                    width: 6,
+                    pixels: vec![lc_graphics::Color::transparent(); 6 * 17],
                 },
             );
         }
@@ -1356,7 +2372,7 @@ mod tests {
     fn layout_uses_three_quarters_of_the_preferred_rectangle() {
         let dialog = RuntimeClientListDialog::new(
             "Network",
-            vec!["League".to_string()],
+            options(true),
             vec![row()],
             RuntimeClientListStatus::default(),
         );
@@ -1383,7 +2399,7 @@ mod tests {
         };
         let mut dialog = RuntimeClientListDialog::new(
             "Network",
-            vec!["Network game".to_string()],
+            options(true),
             vec![row()],
             RuntimeClientListStatus::default(),
         );
@@ -1396,6 +2412,16 @@ mod tests {
         assert_eq!(
             dialog.handle_pointer_up(point, preferred, 16),
             Some(RuntimeClientListAction::OpenInfo(7))
+        );
+        assert_eq!(dialog.info_client_id(), Some(7));
+        assert_eq!(
+            dialog.handle_key(KeyCode::Tab, false, preferred, 16),
+            (true, None)
+        );
+        assert_eq!(
+            dialog.focused(),
+            Some(RuntimeClientListFocus::ClientList),
+            "opening the modal info child retains the row focus underneath"
         );
         assert_eq!(dialog.info_client_id(), Some(7));
         assert_eq!(
@@ -1419,7 +2445,7 @@ mod tests {
         };
         let mut dialog = RuntimeClientListDialog::new(
             "Network",
-            vec!["Network game".to_string()],
+            options(true),
             vec![row()],
             RuntimeClientListStatus::default(),
         );
@@ -1444,7 +2470,7 @@ mod tests {
         assert_eq!(retained_main.bounds.y, initial.bounds.y - 15);
 
         dialog.replace_snapshot(
-            vec!["Refreshed options".to_string()],
+            options(true),
             vec![row()],
             RuntimeClientListStatus {
                 tick: 1,
@@ -1497,7 +2523,7 @@ mod tests {
         assert_eq!(retained_info.bounds.y, initial_info.bounds.y + 33);
 
         dialog.replace_snapshot(
-            vec!["Refreshed again".to_string()],
+            options(true),
             vec![row()],
             RuntimeClientListStatus::default(),
         );
@@ -1533,7 +2559,7 @@ mod tests {
         };
         let mut dialog = RuntimeClientListDialog::new(
             "W".repeat(158),
-            vec!["Network game".to_string()],
+            options(true),
             vec![row()],
             RuntimeClientListStatus::default(),
         )
@@ -1618,7 +2644,7 @@ mod tests {
         };
         let mut dialog = RuntimeClientListDialog::new(
             "Network",
-            vec!["Network game".to_string()],
+            options(true),
             vec![row()],
             RuntimeClientListStatus::default(),
         )
@@ -1720,7 +2746,7 @@ mod tests {
             .collect();
         let mut dialog = RuntimeClientListDialog::new(
             "Network",
-            vec!["Network game".to_string()],
+            options(true),
             rows,
             RuntimeClientListStatus::default(),
         );
@@ -1730,10 +2756,8 @@ mod tests {
         let hidden_client_id = dialog.rows()[visible_rows].client_id;
         let hidden_point = GuiPoint::new(
             (layout.list.x + layout.list.w - 3 - layout.icon_size / 2) as f32,
-            (layout.list.y
-                + 2
-                + visible_rows as i32 * layout.row_height
-                + layout.row_height / 2) as f32,
+            (layout.list.y + 2 + visible_rows as i32 * layout.row_height + layout.row_height / 2)
+                as f32,
         );
         assert!(dialog.handle_pointer_down(hidden_point, preferred, 16));
         assert_eq!(dialog.handle_pointer_up(hidden_point, preferred, 16), None);
@@ -1755,6 +2779,411 @@ mod tests {
         assert_eq!(
             dialog.handle_pointer_up(first_row_point, preferred, 16),
             Some(RuntimeClientListAction::Kick(100))
+        );
+    }
+
+    #[test]
+    fn l128_runtime_options_emit_mouse_combo_requests() {
+        let preferred = IntRect {
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 480,
+        };
+        let mut dialog = RuntimeClientListDialog::new(
+            "Network",
+            options(true),
+            vec![row()],
+            RuntimeClientListStatus::default(),
+        );
+        let layout = dialog.layout(preferred, 16);
+        for row_layout in &layout.option_rows {
+            let option = dialog.option_rows()[row_layout.index].kind;
+            let value = row_layout.value;
+            let point = GuiPoint::new((value.x + 2) as f32, (value.y + 2) as f32);
+            assert!(dialog.handle_pointer_down(point, preferred, 16));
+            assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::OptionsList));
+            assert_eq!(
+                dialog.handle_pointer_up(point, preferred, 16),
+                Some(RuntimeClientListAction::OptionSelectionRequested {
+                    option,
+                    anchor: GuiPoint::new(value.x as f32, (value.y + value.h) as f32),
+                    minimum_width: value.w,
+                })
+            );
+        }
+        let kick_point = GuiPoint::new(
+            (layout.list.x + layout.list.w - 3 - layout.icon_size / 2) as f32,
+            (layout.list.y + 2 + layout.row_height / 2) as f32,
+        );
+        assert!(dialog.handle_pointer_down(kick_point, preferred, 16));
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::ClientList));
+        assert_eq!(
+            dialog.selected_entry(),
+            Some(RuntimeClientListSelection::Client(7))
+        );
+        dialog.pointer_left();
+
+        let caption_reference = "A deliberately wide runtime-join caption";
+        let mut client = RuntimeClientListDialog::new(
+            "Network",
+            options(false),
+            vec![row()],
+            RuntimeClientListStatus::default(),
+        )
+        .with_option_caption_reference(caption_reference);
+        assert!(client.option_rows().iter().all(|option| !option.editable));
+        assert!(!client
+            .option_rows()
+            .iter()
+            .any(|option| option.kind == LobbyOptionKind::RuntimeJoin));
+        let font = tooltip_font();
+        client.measure_option_caption_width(&font);
+        let client_layout = client.layout(preferred, 16);
+        let first = client_layout.option_rows[0];
+        let expected_caption_width =
+            (font.measure(caption_reference, true).0 * 5 / 4).min((first.rect.w - 10).max(0));
+        assert_eq!(first.value.x, first.rect.x + expected_caption_width + 8);
+        let read_only = client_layout.option_rows[0].value;
+        let point = GuiPoint::new((read_only.x + 2) as f32, (read_only.y + 2) as f32);
+        assert!(client.handle_pointer_down(point, preferred, 16));
+        assert_eq!(client.handle_pointer_up(point, preferred, 16), None);
+    }
+
+    #[test]
+    fn l128_runtime_options_auto_scrollbar_reaches_hidden_rows() {
+        let preferred = IntRect {
+            x: 0,
+            y: 0,
+            w: 320,
+            h: 200,
+        };
+        let mut dialog = RuntimeClientListDialog::new(
+            "Network",
+            options(true),
+            vec![row()],
+            RuntimeClientListStatus::default(),
+        );
+        let initial = dialog.layout(preferred, 16);
+        assert!(initial.option_rows.len() < dialog.option_rows().len());
+        assert_eq!(initial.option_rows[0].rect.h, 22);
+        assert_eq!(
+            initial.option_rows[0].value.y,
+            initial.option_rows[0].rect.y + 1
+        );
+        assert_eq!(
+            initial.option_rows[0].rect.x + initial.option_rows[0].rect.w,
+            initial.option_scrollbar.x
+        );
+        let down = GuiPoint::new(
+            (initial.option_scrollbar.x + initial.option_scrollbar.w / 2) as f32,
+            (initial.option_scrollbar.y + initial.option_scrollbar.h - SCROLLBAR_EXTENT / 2) as f32,
+        );
+        for _ in 0..2 {
+            assert!(dialog.handle_pointer_down(down, preferred, 16));
+            assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::OptionsList));
+            assert_eq!(dialog.handle_pointer_up(down, preferred, 16), None);
+        }
+        let scrolled = dialog.layout(preferred, 16);
+        let runtime_join = scrolled
+            .option_rows
+            .iter()
+            .find(|row| row.index == 2)
+            .expect("runtime join row should be reachable through the scrollbar");
+        let point = GuiPoint::new(
+            (runtime_join.value.x + 2) as f32,
+            (runtime_join.value.y + 2) as f32,
+        );
+        assert!(dialog.handle_pointer_down(point, preferred, 16));
+        assert!(matches!(
+            dialog.handle_pointer_up(point, preferred, 16),
+            Some(RuntimeClientListAction::OptionSelectionRequested {
+                option: LobbyOptionKind::RuntimeJoin,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn l128_tab_focuses_native_order_and_list_keys_select_every_entry() {
+        let preferred = IntRect {
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 480,
+        };
+        let mut first = row();
+        first.connections.push(RuntimeConnectionRow {
+            connection_id: 42,
+            usage: "Data".to_string(),
+            protocol: "UDP".to_string(),
+            peer_address: "127.0.0.1:1111".to_string(),
+            packet_loss: 0,
+            ping_ms: 12,
+            can_disconnect: true,
+        });
+        let mut second = row();
+        second.client_id = 8;
+        second.name = "Second".to_string();
+        let mut dialog = RuntimeClientListDialog::new(
+            "Network",
+            options(true),
+            vec![first, second],
+            RuntimeClientListStatus::default(),
+        );
+
+        assert_eq!(
+            dialog.handle_key(KeyCode::Tab, false, preferred, 16),
+            (true, None)
+        );
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::Close));
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::OptionsList));
+        assert_eq!(
+            dialog.handle_key(KeyCode::Down, false, preferred, 16),
+            (true, None)
+        );
+        assert_eq!(
+            dialog.handle_key(KeyCode::Home, false, preferred, 16),
+            (true, None)
+        );
+        assert_eq!(dialog.selected_client_id(), None);
+
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::ClientList));
+        assert_eq!(dialog.selected_client_id(), Some(7));
+        dialog.handle_key(KeyCode::Down, false, preferred, 16);
+        assert_eq!(
+            dialog.selected_entry(),
+            Some(RuntimeClientListSelection::Connection {
+                client_id: 7,
+                connection_id: 42,
+            })
+        );
+        dialog.handle_key(KeyCode::Down, false, preferred, 16);
+        assert_eq!(dialog.selected_client_id(), Some(8));
+        dialog.handle_key(KeyCode::Down, false, preferred, 16);
+        assert_eq!(dialog.selected_client_id(), Some(8));
+        dialog.handle_key(KeyCode::Up, false, preferred, 16);
+        assert_eq!(
+            dialog.selected_entry(),
+            Some(RuntimeClientListSelection::Connection {
+                client_id: 7,
+                connection_id: 42,
+            })
+        );
+        dialog.handle_key(KeyCode::Tab, true, preferred, 16);
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::OptionsList));
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::ClientList));
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        assert_eq!(
+            dialog.focused(),
+            Some(RuntimeClientListFocus::Disconnect {
+                client_id: 7,
+                connection_id: 42,
+            })
+        );
+        assert_eq!(
+            dialog.handle_key(KeyCode::Enter, false, preferred, 16),
+            (true, None)
+        );
+        assert_eq!(
+            dialog.handle_key_release(KeyCode::Enter),
+            (
+                true,
+                Some(RuntimeClientListAction::Disconnect {
+                    client_id: 7,
+                    connection_id: 42,
+                })
+            )
+        );
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::Close));
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::ClientList));
+        dialog.handle_key(KeyCode::Up, false, preferred, 16);
+        assert_eq!(
+            dialog.selected_entry(),
+            Some(RuntimeClientListSelection::Client(7))
+        );
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::Mute(7)));
+        assert_eq!(
+            dialog.handle_key(KeyCode::Enter, false, preferred, 16),
+            (true, None)
+        );
+        assert_eq!(
+            dialog.handle_key_release(KeyCode::Enter),
+            (true, Some(RuntimeClientListAction::ToggleMute(7)))
+        );
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::Activate(7)));
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::Kick(7)));
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::Close));
+
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        dialog.handle_key(KeyCode::Tab, false, preferred, 16);
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::ClientList));
+        dialog.handle_key(KeyCode::End, false, preferred, 16);
+        assert_eq!(
+            dialog.selected_entry(),
+            Some(RuntimeClientListSelection::Client(8))
+        );
+        dialog.handle_key(KeyCode::Home, false, preferred, 16);
+        assert_eq!(
+            dialog.selected_entry(),
+            Some(RuntimeClientListSelection::Client(7))
+        );
+        dialog.handle_key(KeyCode::PageDown, false, preferred, 16);
+        assert_eq!(
+            dialog.selected_entry(),
+            Some(RuntimeClientListSelection::Client(8))
+        );
+        dialog.handle_key(KeyCode::PageUp, false, preferred, 16);
+        assert_eq!(
+            dialog.selected_entry(),
+            Some(RuntimeClientListSelection::Client(7))
+        );
+    }
+
+    #[test]
+    fn l128_name_tooltip_waits_exactly_and_contains_only_player_names() {
+        let preferred = IntRect {
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 480,
+        };
+        let mut client = row();
+        client.player_names = vec!["Alpha".to_string(), "Beta".to_string()];
+        let mut dialog = RuntimeClientListDialog::new(
+            "Network",
+            options(true),
+            vec![client],
+            RuntimeClientListStatus::default(),
+        );
+        let layout = dialog.layout(preferred, 16);
+        let label = client_label_rect(&dialog.rows()[0], &layout, layout.list.y + 2);
+        let point = GuiPoint::new((label.x + 1) as f32, (label.y + 3) as f32);
+        let font = tooltip_font();
+        let started = Instant::now();
+        dialog.handle_pointer_move_at(point, preferred, 16, started);
+        assert_eq!(
+            dialog.tooltip_state_at(
+                started + CLASSIC_TOOLTIP_DELAY - std::time::Duration::from_millis(1),
+                preferred,
+                &font,
+            ),
+            None
+        );
+        assert_eq!(
+            dialog
+                .tooltip_state_at(started + CLASSIC_TOOLTIP_DELAY, preferred, &font)
+                .map(|tooltip| tooltip.text),
+            Some("Alpha, Beta".to_string())
+        );
+        dialog.note_non_pointer_input();
+        assert_eq!(
+            dialog.tooltip_state_at(started + CLASSIC_TOOLTIP_DELAY, preferred, &font),
+            None
+        );
+
+        let margin_point = GuiPoint::new((label.x + 1) as f32, (label.y + 1) as f32);
+        let margin_started = started + CLASSIC_TOOLTIP_DELAY;
+        dialog.handle_pointer_move_at(margin_point, preferred, 16, margin_started);
+        assert_eq!(
+            dialog.tooltip_state_at(margin_started + CLASSIC_TOOLTIP_DELAY, preferred, &font,),
+            None,
+            "the native Label's two-pixel top margin owns no tooltip"
+        );
+
+        let status_point = GuiPoint::new((layout.list.x + 4) as f32, (label.y + 3) as f32);
+        let moved = margin_started + CLASSIC_TOOLTIP_DELAY;
+        dialog.handle_pointer_move_at(status_point, preferred, 16, moved);
+        assert_eq!(
+            dialog.tooltip_state_at(moved + CLASSIC_TOOLTIP_DELAY, preferred, &font),
+            None
+        );
+
+        let mut short = row();
+        short.name = "<c ff0000>A</c>".to_string();
+        short.nick.clear();
+        short.player_names = vec!["Alpha".to_string()];
+        let mut short_dialog = RuntimeClientListDialog::new(
+            "Network",
+            options(true),
+            vec![short],
+            RuntimeClientListStatus::default(),
+        );
+        let short_layout = short_dialog.layout(preferred, 16);
+        let short_label = client_label_rect(
+            &short_dialog.rows()[0],
+            &short_layout,
+            short_layout.list.y + 2,
+        );
+        let short_text_width = font.measure(&short_dialog.rows()[0].label(), true).0;
+        let blank_point = GuiPoint::new(
+            (short_label.x + short_text_width + 2) as f32,
+            (short_label.y + 3) as f32,
+        );
+        short_dialog.handle_pointer_move_at(blank_point, preferred, 16, started);
+        assert_eq!(
+            short_dialog.tooltip_state_at(started + CLASSIC_TOOLTIP_DELAY, preferred, &font),
+            None,
+            "blank row space to the right of the native Label owns no tooltip"
+        );
+
+        let mut empty = row();
+        empty.player_names.clear();
+        let mut empty_dialog = RuntimeClientListDialog::new(
+            "Network",
+            options(true),
+            vec![empty],
+            RuntimeClientListStatus::default(),
+        );
+        let empty_layout = empty_dialog.layout(preferred, 16);
+        let empty_label = client_label_rect(
+            &empty_dialog.rows()[0],
+            &empty_layout,
+            empty_layout.list.y + 2,
+        );
+        let empty_point = GuiPoint::new((empty_label.x + 1) as f32, (empty_label.y + 3) as f32);
+        empty_dialog.handle_pointer_move_at(empty_point, preferred, 16, started);
+        assert_eq!(
+            empty_dialog.tooltip_state_at(started + CLASSIC_TOOLTIP_DELAY, preferred, &font),
+            None
+        );
+    }
+
+    #[test]
+    fn l128_option_tooltip_uses_the_native_option_row_text() {
+        let preferred = IntRect {
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 480,
+        };
+        let mut dialog = RuntimeClientListDialog::new(
+            "Network",
+            options(true),
+            vec![row()],
+            RuntimeClientListStatus::default(),
+        );
+        let layout = dialog.layout(preferred, 16);
+        let option = dialog.option_rows()[0].tooltip.clone();
+        let row = layout.option_rows[0].rect;
+        let point = GuiPoint::new((row.x + 1) as f32, (row.y + 1) as f32);
+        let started = Instant::now();
+        dialog.handle_pointer_move_at(point, preferred, 16, started);
+        assert_eq!(
+            dialog
+                .tooltip_state_at(started + CLASSIC_TOOLTIP_DELAY, preferred, &tooltip_font(),)
+                .map(|tooltip| tooltip.text),
+            Some(option)
         );
     }
 }

@@ -116,7 +116,7 @@ use lc_frontend::game_lobby::{
     LobbyOptionKind, LobbyOptionLabels, LobbyOptionRow, LobbyPlayerRow, LobbyResourceRow,
     LobbyResources, LobbyRole, LobbyRosterHeader, LobbyRosterIcon, LobbyRosterId, LobbyRosterLayout,
     LobbyRosterRow, LobbyScenarioText, LobbySheet, LobbySound, LobbyTeamValue,
-    core_lobby_option_rows,
+    core_lobby_option_rows, core_runtime_option_rows,
 };
 use lc_frontend::game_option_buttons::{
     FairCrewConstraint, GameOptionAction, GameOptionButton, GameOptionButtons, GameOptionContext,
@@ -5023,8 +5023,11 @@ impl FrontendAssets {
                     Some(button_highlight),
                 ),
                 fonts: self.clonk_fonts.as_deref()?,
+                tooltip_font: self.global_tooltip_font.as_deref()?,
                 icons: self.startup_dialog_images.get("GUIIcons.png")?,
                 button_highlight,
+                context: self.startup_dialog_images.get("GUIContext.png")?,
+                scroll: self.startup_dialog_images.get("GUIScroll.png")?,
             },
         )
     }
@@ -9830,6 +9833,10 @@ enum AppContextMenuCommand {
     LobbyTeam { player_id: i32, team_id: i32 },
     LobbyControlRate(i32),
     LobbyRuntimeJoin(bool),
+    RuntimeClientOption {
+        option: LobbyOptionKind,
+        value: i32,
+    },
     LobbyPlayerTakeOver {
         savegame_player_id: i32,
         player_id: i32,
@@ -11874,6 +11881,10 @@ struct GameApp {
     /// Last authoritative C4Network2Status control mode. Runtime chat can
     /// replace it through the same status barrier as C4Network2::SetCtrlMode.
     runtime_network_control_mode: Option<i32>,
+    /// Control mode applied after the status acknowledgement. The F4 option
+    /// keeps displaying this while a newer status is still pending.
+    runtime_network_committed_control_mode: Option<i32>,
+    runtime_network_join_allowed: Option<bool>,
     network_control_clock: Option<NetworkControlClock>,
     network_max_players: usize,
     network_is_league: bool,
@@ -12093,8 +12104,9 @@ struct GameApp {
     /// Player row whose C4GUI::ComboBox owns the shared context menu. This
     /// keeps the simple combo's arrow/highlight in its open phase.
     context_menu_lobby_team_player: Option<i32>,
-    /// Core option row whose C4GUI::ComboBox owns the shared context menu.
-    /// The frontend retains this identity to render its open arrow phase.
+    /// Core lobby/runtime option row whose C4GUI::ComboBox owns the shared
+    /// context menu. The frontend retains this identity to render its open
+    /// arrow phase.
     context_menu_lobby_option: Option<LobbyOptionKind>,
     /// Client row whose popup owns the shared context menu. A synchronized
     /// removal closes this menu before input can target a row that no longer
@@ -22504,6 +22516,8 @@ impl GameApp {
             runtime_network_status_barrier: None,
             host_reference_paused: false,
             runtime_network_control_mode: None,
+            runtime_network_committed_control_mode: None,
+            runtime_network_join_allowed: None,
             network_control_clock,
             network_max_players,
             network_is_league,
@@ -24827,6 +24841,9 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.startup_tooltip.note_non_pointer_input();
         self.note_classic_host_lobby_non_pointer_input();
+        if let Some(dialog) = self.runtime_client_list.as_mut() {
+            dialog.note_non_pointer_input();
+        }
         if self.mode == AppMode::Menu {
             self.menu_frame_cache = None;
         }
@@ -28250,7 +28267,8 @@ impl GameApp {
         // Dialog::IsExclusiveDialog() == false. In C4's shared running Screen
         // they therefore do not establish KEYSCOPE_Gui; only the game-over
         // dialog among the currently ported layers owns the bare Tab route.
-        self.context_menu.is_none() && self.game_over_dialog.is_some()
+        self.context_menu.is_none()
+            && (self.game_over_dialog.is_some() || self.runtime_client_list.is_some())
     }
 
     fn local_tab_player_control_in_scope(&self) -> bool {
@@ -28355,14 +28373,20 @@ impl GameApp {
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         if !c4_modifiers.is_empty() {
-            if self.game_over_dialog.is_some() || self.context_menu.is_some() {
+            if self.game_over_dialog.is_some()
+                || self.context_menu.is_some()
+                || (self.runtime_client_list.is_some()
+                    && c4_modifiers == ModifiersState::SHIFT)
+            {
                 return Ok(false);
             }
             return Ok(true);
         }
         self.reconcile_initial_scoreboard();
         self.sync_scoreboard_presentation();
-        if self.game_over_dialog.is_some() && self.context_menu.is_some() {
+        if (self.game_over_dialog.is_some() || self.runtime_client_list.is_some())
+            && self.context_menu.is_some()
+        {
             // Context rejects Tab and suppresses the game-over DlgKeyCB. The
             // remaining generic callback reaches DoDlgShow, which consumes the
             // key but may not create a scoreboard during game over. Control
@@ -28427,7 +28451,7 @@ impl GameApp {
     fn runtime_client_list_snapshot(
         &mut self,
     ) -> (
-        Vec<String>,
+        Vec<LobbyOptionRow>,
         Vec<lc_frontend::runtime_client_list::RuntimeClientRow>,
         lc_frontend::runtime_client_list::RuntimeClientListStatus,
     ) {
@@ -28482,17 +28506,34 @@ impl GameApp {
             })
             .unwrap_or_default();
         let can_moderate = matches!(self.network_mode, Some(NetworkMode::Host(_)));
+        let (_, retained_player_infos) = self.control_player_infos.retained_rows_snapshot();
+        let active_player_names = retained_player_infos
+            .into_iter()
+            .map(|(client_id, _, players)| {
+                let names = players
+                    .into_iter()
+                    .filter(|player| {
+                        player.flags
+                            & (lc_engine::PLAYER_INFO_FLAG_REMOVED
+                                | lc_engine::PLAYER_INFO_FLAG_INVISIBLE)
+                            == 0
+                    })
+                    .map(|player| {
+                        legacy_presentation_text(control_player_effective_name(&player))
+                    })
+                    .collect::<Vec<_>>();
+                (client_id, names)
+            })
+            .collect::<BTreeMap<_, _>>();
         let rows = self
             .control_clients
             .snapshot()
             .into_iter()
             .map(|client| {
-                let player_names = self
-                    .engine
-                    .players()
-                    .filter(|player| player.at_client().get() == client.client_id)
-                    .map(|player| c4_presentation_text(player.name()))
-                    .collect::<Vec<_>>();
+                let player_names = active_player_names
+                    .get(&client.client_id)
+                    .cloned()
+                    .unwrap_or_default();
                 let local = local_client_id == Some(client.client_id);
                 let protocol_name = |protocol| match protocol {
                     lc_network::NetworkProtocol::Tcp => "TCP".to_string(),
@@ -28566,14 +28607,35 @@ impl GameApp {
                 }
             })
             .collect::<Vec<_>>();
-        let options = vec![
-            if self.network_is_league {
-                "League game".to_string()
-            } else {
-                "Network game".to_string()
-            },
-            format!("Clients: {}", rows.len()),
-        ];
+        let network_host = matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
+        let runtime_join_allowed = self
+            .runtime_network_join_allowed
+            .or_else(|| match self.network_mode.as_ref() {
+                Some(NetworkMode::Host(HostSettings {
+                    prepared: Some(prepared),
+                    ..
+                })) => Some(prepared.admission().runtime_join_allowed()),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                !native_config_text(
+                    &load_native_config_bytes(self.app_paths.as_ref()),
+                    "Network",
+                    "NoRuntimeJoin",
+                )
+                .as_deref()
+                .map(parse_config_bool)
+                .unwrap_or(true)
+            });
+        let options = core_runtime_option_rows(
+            self.engine.is_control_host(),
+            network_host,
+            self.network_is_league,
+            &self.classic_lobby_option_labels(),
+            self.runtime_client_list_control_mode(),
+            status.rate,
+            runtime_join_allowed,
+        );
         (options, rows, status)
     }
 
@@ -28608,6 +28670,9 @@ impl GameApp {
     fn toggle_runtime_client_list(&mut self) -> Result<(), EngineError> {
         if self.runtime_client_list.take().is_some() {
             self.startup_tooltip.pointer_left();
+            if self.context_menu_lobby_option.is_some() {
+                self.close_context_menu_silently();
+            }
             self.runtime_client_list_consumed_keys.clear();
             self.runtime_client_list_above_game_over = false;
             return Ok(());
@@ -28626,6 +28691,7 @@ impl GameApp {
                 .and_then(|resources| resources.validate()),
         )?;
         let (options, rows, status) = self.runtime_client_list_snapshot();
+        let option_caption_reference = self.classic_lobby_option_labels().runtime_join;
         self.runtime_client_list_consumed_keys.clear();
         self.runtime_client_list_above_game_over = self.game_over_dialog.is_some();
         self.runtime_client_list = Some(
@@ -28635,6 +28701,7 @@ impl GameApp {
                 rows,
                 status,
             )
+            .with_option_caption_reference(option_caption_reference)
             .with_info_caption(self.runtime_resource_string("IDS_NET_CLIENT_INFO")),
         );
         Ok(())
@@ -28655,7 +28722,6 @@ impl GameApp {
             RuntimeClientListAction::Close => {
                 self.startup_tooltip.pointer_left();
                 self.runtime_client_list = None;
-                self.runtime_client_list_consumed_keys.clear();
                 self.runtime_client_list_above_game_over = false;
                 return Ok(());
             }
@@ -28673,6 +28739,14 @@ impl GameApp {
                     self.runtime_client_list = None;
                     self.runtime_client_list_above_game_over = false;
                 }
+                return Ok(());
+            }
+            RuntimeClientListAction::OptionSelectionRequested {
+                option,
+                anchor,
+                minimum_width,
+            } => {
+                self.open_runtime_client_list_option_combo(option, anchor, minimum_width)?;
                 return Ok(());
             }
             RuntimeClientListAction::ToggleMute(client_id) => {
@@ -28810,8 +28884,20 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         if self.runtime_client_list_consumed_keys.contains(&key) {
+            let mut action = None;
             if state == ElementState::Released {
                 self.runtime_client_list_consumed_keys.remove(&key);
+                if let Some(gui_key) =
+                    map_key_code(key).filter(|key| matches!(key, KeyCode::Enter | KeyCode::Space))
+                {
+                    action = self
+                        .runtime_client_list
+                        .as_mut()
+                        .and_then(|dialog| dialog.handle_key_release(gui_key).1);
+                }
+            }
+            if let Some(action) = action {
+                self.handle_runtime_client_list_action(action)?;
             }
             return Ok(true);
         }
@@ -28835,17 +28921,56 @@ impl GameApp {
             }
             return Ok(true);
         }
-        if self.runtime_client_list.is_none() || key != VirtualKeyCode::Escape {
+        if self.runtime_client_list.is_none() || state == ElementState::Released {
             return Ok(false);
         }
-        let action = self
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let valid_modifiers = if key == VirtualKeyCode::Tab {
+            modifiers.is_empty() || modifiers == ModifiersState::SHIFT
+        } else {
+            modifiers.is_empty()
+        };
+        let Some(gui_key) = valid_modifiers.then(|| map_key_code(key)).flatten() else {
+            return Ok(false);
+        };
+        if !matches!(
+            gui_key,
+            KeyCode::Escape
+                | KeyCode::Tab
+                | KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Enter
+                | KeyCode::Space
+        ) {
+            return Ok(false);
+        }
+        let Some((preferred, line_height)) = self.runtime_client_list_input_geometry() else {
+            return Ok(false);
+        };
+        let (captured, action) = self
             .runtime_client_list
             .as_mut()
-            .and_then(|dialog| dialog.handle_escape(state == ElementState::Pressed));
+            .map(|dialog| {
+                dialog.handle_key(
+                    gui_key,
+                    modifiers == ModifiersState::SHIFT,
+                    preferred,
+                    line_height,
+                )
+            })
+            .unwrap_or_default();
+        if captured {
+            self.runtime_client_list_consumed_keys.insert(key);
+        }
         if let Some(action) = action {
             self.handle_runtime_client_list_action(action)?;
         }
-        Ok(true)
+        Ok(captured)
     }
 
     fn handle_runtime_client_list_pointer_move(&mut self, point: GuiPoint) -> bool {
@@ -29187,6 +29312,9 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.startup_tooltip.note_non_pointer_input();
         self.note_classic_host_lobby_non_pointer_input();
+        if let Some(dialog) = self.runtime_client_list.as_mut() {
+            dialog.note_non_pointer_input();
+        }
         if self.mode == AppMode::Menu {
             self.menu_frame_cache = None;
         }
@@ -34045,6 +34173,9 @@ impl GameApp {
             return Ok(());
         };
         self.runtime_network_control_mode = Some(status.control_mode);
+        if status.state == lc_network::NETWORK_STATE_GO {
+            self.runtime_network_committed_control_mode = Some(status.control_mode);
+        }
         if let Some(clock) = self.network_control_clock.as_mut() {
             clock.set_target_tick(None);
         }
@@ -37056,6 +37187,9 @@ impl GameApp {
         if !events.is_empty() {
             self.startup_tooltip.note_non_pointer_input();
             self.note_classic_host_lobby_non_pointer_input();
+            if let Some(dialog) = self.runtime_client_list.as_mut() {
+                dialog.note_non_pointer_input();
+            }
             if self.mode == AppMode::Menu {
                 self.menu_frame_cache = None;
             }
@@ -47850,6 +47984,8 @@ impl GameApp {
         self.advertised_game_reference = None;
         self.host_reference_paused = false;
         self.runtime_network_control_mode = None;
+        self.runtime_network_committed_control_mode = None;
+        self.runtime_network_join_allowed = None;
         self.network = None;
         self.network_mode = None;
         self.host_join_snapshot = None;
@@ -48555,6 +48691,9 @@ impl GameApp {
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
             lobby.controller.set_open_option_combo(option);
         }
+        if let Some(dialog) = self.runtime_client_list.as_mut() {
+            dialog.set_open_option(option);
+        }
     }
 
     fn close_stale_classic_lobby_team_combo(&mut self) {
@@ -48591,10 +48730,15 @@ impl GameApp {
                     })
             });
         let stale_option = self.context_menu_lobby_option.is_some_and(|option| {
-            !self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+            let lobby_owns = self.classic_host_lobby.as_ref().is_some_and(|lobby| {
                 lobby.controller.active_sheet() == LobbySheet::Options
                     && lobby.controller.open_option_combo() == Some(option)
-            })
+            });
+            let runtime_owns = self
+                .runtime_client_list
+                .as_ref()
+                .is_some_and(|dialog| dialog.open_option() == Some(option));
+            !lobby_owns && !runtime_owns
         });
         if stale_team_combo || stale_kick || stale_player || stale_option {
             // ComboBox::SetReadOnly aborts its menu without a DoorClose sound.
@@ -50336,6 +50480,134 @@ impl GameApp {
         Ok(opened)
     }
 
+    fn open_runtime_client_list_option_combo(
+        &mut self,
+        option: LobbyOptionKind,
+        anchor: GuiPoint,
+        minimum_width: i32,
+    ) -> Result<bool, EngineError> {
+        if self.context_menu_pointer_dismissed_lobby_option.take() == Some(option) {
+            return Ok(false);
+        }
+        if self.mode != AppMode::Running || self.context_menu.is_some() {
+            return Ok(false);
+        }
+        let Some(choices) = self.runtime_client_list.as_ref().and_then(|dialog| {
+            (!dialog.is_info_only()).then(|| {
+                dialog
+                    .option_rows()
+                    .iter()
+                    .find(|row| row.kind == option && row.editable && !row.choices.is_empty())
+                    .map(|row| row.choices.clone())
+            })?
+        }) else {
+            return Ok(false);
+        };
+        let entries = choices
+            .into_iter()
+            .map(|choice| {
+                ContextMenuEntry::new(choice.label)
+                    .with_tooltip(choice.tooltip)
+                    .with_icon(ContextMenuIcon::Empty)
+                    .with_action(AppContextMenuCommand::RuntimeClientOption {
+                        option,
+                        value: choice.id,
+                    })
+            })
+            .collect();
+        let opened =
+            self.open_context_menu_at_with_minimum_width(entries, anchor, minimum_width, None)?;
+        if opened {
+            self.set_context_menu_lobby_option(Some(option));
+        }
+        Ok(opened)
+    }
+
+    fn apply_runtime_client_list_option(
+        &mut self,
+        option: LobbyOptionKind,
+        value: i32,
+    ) -> Result<(), EngineError> {
+        let valid_choice = self.runtime_client_list.as_ref().is_some_and(|dialog| {
+            dialog.option_rows().iter().any(|row| {
+                row.kind == option
+                    && row.editable
+                    && row.choices.iter().any(|choice| choice.id == value)
+            })
+        });
+        if !valid_choice {
+            return Ok(());
+        }
+        match option {
+            LobbyOptionKind::ControlMode => {
+                if self.engine.is_control_host()
+                    && matches!(value, 0 | 1 | 2)
+                    && (!self.network_is_league || value != 2)
+                {
+                    self.change_running_network_control_mode(value);
+                }
+            }
+            LobbyOptionKind::ControlRate => {
+                if self.engine.is_control_host()
+                    && (1..=9).contains(&value)
+                {
+                    let current = self
+                        .network_control_clock
+                        .map(NetworkControlClock::control_rate)
+                        .unwrap_or_else(|| self.engine.control_rate());
+                    if value != current {
+                        self.submit_or_execute_running_control_set(0, value - current)?;
+                    }
+                }
+            }
+            LobbyOptionKind::RuntimeJoin => {
+                if matches!(self.runtime_network_role(), RuntimeNetworkRole::Host) {
+                    let allowed = value != 0;
+                    let result = self
+                        .network
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("runtime network is unavailable"))
+                        .and_then(|network| network.set_join_allowed(allowed));
+                    if let Err(error) = result {
+                        tracing::error!(%error, allowed, "failed to change runtime join admission");
+                        return Ok(());
+                    }
+                    self.runtime_network_join_allowed = Some(allowed);
+                    if let Some(NetworkMode::Host(HostSettings {
+                        prepared: Some(prepared),
+                        ..
+                    })) = self.network_mode.as_mut()
+                    {
+                        prepared.set_runtime_join_allowed(allowed);
+                    }
+                    self.persist_game_option_value(
+                        "Network",
+                        "NoRuntimeJoin",
+                        if allowed { "0" } else { "1" }.to_string(),
+                    );
+                    self.publish_running_host_reference();
+                    let labels = self.classic_lobby_option_labels();
+                    let message = if allowed {
+                        labels.runtime_join_free
+                    } else {
+                        labels.runtime_join_barred
+                    };
+                    let charset = load_runtime_language_table(self.app_paths.as_ref())
+                        .map(|table| table.charset)
+                        .unwrap_or(RuntimeHelpCharset::Windows1252);
+                    match self.prepare_runtime_flash_message(&message, charset) {
+                        Ok(message) => self.runtime_flash_message = message,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to prepare runtime-join flash message")
+                        }
+                    }
+                }
+            }
+        }
+        self.refresh_runtime_client_list();
+        Ok(())
+    }
+
     fn submit_classic_lobby_control_rate(&mut self, selected: i32) {
         if !(1..=9).contains(&selected)
             || !self.classic_lobby_option_is_editable(LobbyOptionKind::ControlRate)
@@ -51034,6 +51306,9 @@ impl GameApp {
                     }
                     AppContextMenuCommand::LobbyRuntimeJoin(allowed) => {
                         self.set_classic_lobby_runtime_join(allowed);
+                    }
+                    AppContextMenuCommand::RuntimeClientOption { option, value } => {
+                        self.apply_runtime_client_list_option(option, value)?;
                     }
                     AppContextMenuCommand::LobbyPlayerTakeOver {
                         savegame_player_id,
@@ -58157,6 +58432,8 @@ impl GameApp {
         self.advertised_game_reference = None;
         self.host_reference_paused = false;
         self.runtime_network_control_mode = None;
+        self.runtime_network_committed_control_mode = None;
+        self.runtime_network_join_allowed = None;
         if self.startup_view == StartupView::NetworkLobby {
             self.control_messages.clear_clients();
             self.network_lobby = None;
@@ -58868,6 +59145,8 @@ impl GameApp {
         self.advertised_game_reference = None;
         self.host_reference_paused = false;
         self.runtime_network_control_mode = None;
+        self.runtime_network_committed_control_mode = None;
+        self.runtime_network_join_allowed = None;
         self.host_join_snapshot = None;
         self.network_lobby = None;
         self.network_start_wait = None;
@@ -60133,6 +60412,19 @@ impl GameApp {
 
     fn league_vote_control_mode(&self) -> i32 {
         if let Some(mode) = self.runtime_network_control_mode {
+            return mode;
+        }
+        match self.network_mode.as_ref() {
+            Some(NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            })) => prepared.host_config().initial_status.control_mode,
+            Some(NetworkMode::Host(_)) | Some(NetworkMode::Client(_)) | None => 0,
+        }
+    }
+
+    fn runtime_client_list_control_mode(&self) -> i32 {
+        if let Some(mode) = self.runtime_network_committed_control_mode {
             return mode;
         }
         match self.network_mode.as_ref() {
@@ -165146,6 +165438,363 @@ func ControlDig() { dig_count = 1; return(1); }
                 by_client: 0,
             }]
         );
+    }
+
+    #[test]
+    fn l128_f4_control_rate_dropdown_waits_for_authoritative_echo() {
+        let mut app = new_classic_running_sandbox_app();
+        app.resize(640, 480).expect("resize F4 option fixture");
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open runtime client list");
+        let (preferred, line_height) = app
+            .runtime_client_list_input_geometry()
+            .expect("runtime client-list geometry");
+        let rate = {
+            let dialog = app.runtime_client_list.as_ref().expect("F4 dialog");
+            let layout = dialog.layout(preferred, line_height);
+            let index = dialog
+                .option_rows()
+                .iter()
+                .position(|row| row.kind == LobbyOptionKind::ControlRate)
+                .expect("control-rate row");
+            layout.option_rows[index].value
+        };
+        let point = GuiPoint::new((rate.x + 2) as f32, (rate.y + 2) as f32);
+        app.running_pointer_position = Some(point);
+        assert!(app
+            .handle_runtime_client_list_pointer_button(ElementState::Pressed)
+            .expect("press control-rate combo"));
+        assert!(app
+            .handle_runtime_client_list_pointer_button(ElementState::Released)
+            .expect("open control-rate dropdown"));
+        assert!(app.context_menu.is_some());
+        assert_eq!(
+            app.context_menu_lobby_option,
+            Some(LobbyOptionKind::ControlRate)
+        );
+
+        app.process_context_menu_outcome(ContextMenuOutcome {
+            captured: true,
+            pass_through: false,
+            focus_suppressed: true,
+            events: vec![
+                ContextMenuEvent::Closed,
+                ContextMenuEvent::Activated(AppContextMenuCommand::RuntimeClientOption {
+                    option: LobbyOptionKind::ControlRate,
+                    value: 7,
+                }),
+            ],
+        })
+        .expect("select runtime control rate");
+        assert_eq!(app.engine.control_rate(), 4);
+        assert_eq!(
+            app.network_control_clock
+                .map(NetworkControlClock::control_rate),
+            Some(4)
+        );
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("F4 dialog remains open")
+                .option_rows()
+                .iter()
+                .find(|row| row.kind == LobbyOptionKind::ControlRate)
+                .map(|row| row.value.as_str()),
+            Some("4")
+        );
+        let decided = commands.take_submitted_decided_controls();
+        assert_eq!(decided.len(), 1);
+        let set = lc_network::LegacyControlSet::from_control_packet(&decided[0].1)
+            .expect("control-rate set packet");
+        assert_eq!(
+            set,
+            lc_network::LegacyControlSet {
+                value_type: 0,
+                data: 3,
+                by_client: 0,
+            }
+        );
+
+        app.apply_ready_controls(decided[0].0, vec![NetworkControl::Set(set)])
+            .expect("execute authoritative control-rate echo");
+        assert_eq!(app.engine.control_rate(), 7);
+        assert_eq!(
+            app.network_control_clock
+                .map(NetworkControlClock::control_rate),
+            Some(7)
+        );
+        assert!(app.sec1_timer().expect("refresh runtime options"));
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("F4 dialog remains open")
+                .option_rows()
+                .iter()
+                .find(|row| row.kind == LobbyOptionKind::ControlRate)
+                .map(|row| row.value.as_str()),
+            Some("7")
+        );
+    }
+
+    #[test]
+    fn l128_f4_player_tooltip_names_follow_retained_visibility_and_effective_name() {
+        let mut app = new_classic_running_sandbox_app();
+        let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+        app.control_player_infos.replace_snapshot(
+            3,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 1,
+                        name: lc_engine::LegacyCString::from_bytes(b"Raw".to_vec())
+                            .expect("raw player name"),
+                        league_account: lc_engine::LegacyCString::from_bytes(
+                            b"Visible account".to_vec(),
+                        )
+                        .expect("league account"),
+                        ..Default::default()
+                    },
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 2,
+                        name: lc_engine::LegacyCString::from_bytes(b"Removed".to_vec())
+                            .expect("removed player name"),
+                        flags: lc_engine::PLAYER_INFO_FLAG_REMOVED,
+                        ..Default::default()
+                    },
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 3,
+                        name: lc_engine::LegacyCString::from_bytes(b"Invisible".to_vec())
+                            .expect("invisible player name"),
+                        flags: lc_engine::PLAYER_INFO_FLAG_INVISIBLE,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+        );
+
+        let (_, rows, _) = app.runtime_client_list_snapshot();
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.client_id == 7)
+                .map(|row| row.player_names.clone()),
+            Some(vec!["Visible account".to_string()])
+        );
+    }
+
+    #[test]
+    fn l128_f4_control_mode_waits_for_status_commit() {
+        let mut app = new_classic_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        app.runtime_network_control_mode = Some(0);
+        app.runtime_network_committed_control_mode = Some(0);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host")]);
+        let labels = app.classic_lobby_option_labels();
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open runtime client list");
+
+        app.apply_runtime_client_list_option(LobbyOptionKind::ControlMode, 1)
+            .expect("request central runtime control mode");
+        assert_eq!(app.runtime_network_control_mode, Some(1));
+        assert_eq!(app.runtime_network_committed_control_mode, Some(0));
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("F4 dialog remains open")
+                .option_rows()
+                .iter()
+                .find(|row| row.kind == LobbyOptionKind::ControlMode)
+                .map(|row| row.value.as_str()),
+            Some(labels.control_mode_decentral.as_str())
+        );
+
+        let expected = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 40,
+        };
+        assert!(commands
+            .take_runtime_status_commands()
+            .iter()
+            .any(|command| command == &network::TestRuntimeStatusCommand::Change(expected)));
+        app.handle_status_committed(expected)
+            .expect("commit central runtime control mode");
+        app.refresh_runtime_client_list();
+        assert_eq!(app.runtime_network_committed_control_mode, Some(1));
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("F4 dialog remains open")
+                .option_rows()
+                .iter()
+                .find(|row| row.kind == LobbyOptionKind::ControlMode)
+                .map(|row| row.value.as_str()),
+            Some(labels.control_mode_central.as_str())
+        );
+
+        app.host_reference_paused = true;
+        app.apply_runtime_client_list_option(LobbyOptionKind::ControlMode, 0)
+            .expect("request decentral mode while paused");
+        let paused = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_PAUSE,
+            control_mode: 0,
+            target_tick: 40,
+        };
+        assert!(commands
+            .take_runtime_status_commands()
+            .iter()
+            .any(|command| command == &network::TestRuntimeStatusCommand::Change(paused)));
+        app.handle_status_committed(paused)
+            .expect("commit paused status without applying its control mode");
+        app.refresh_runtime_client_list();
+        assert_eq!(app.runtime_network_committed_control_mode, Some(1));
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("F4 dialog remains open")
+                .option_rows()
+                .iter()
+                .find(|row| row.kind == LobbyOptionKind::ControlMode)
+                .map(|row| row.value.as_str()),
+            Some(labels.control_mode_central.as_str())
+        );
+
+        let resumed = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            ..paused
+        };
+        app.handle_status_committed(resumed)
+            .expect("apply the pending control mode on Go");
+        app.refresh_runtime_client_list();
+        assert_eq!(app.runtime_network_committed_control_mode, Some(0));
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("F4 dialog remains open")
+                .option_rows()
+                .iter()
+                .find(|row| row.kind == LobbyOptionKind::ControlMode)
+                .map(|row| row.value.as_str()),
+            Some(labels.control_mode_decentral.as_str())
+        );
+    }
+
+    #[test]
+    fn l128_f4_runtime_join_waits_for_network_ack_and_flashes_state() {
+        let mut app = new_classic_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host")]);
+        let labels = app.classic_lobby_option_labels();
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open runtime client list");
+
+        let acknowledgement = thread::spawn(move || {
+            let (allowed, completion) = commands.receive_join_allowed();
+            assert!(allowed);
+            completion
+                .send(Ok(()))
+                .expect("acknowledge runtime-join change");
+        });
+        app.apply_runtime_client_list_option(LobbyOptionKind::RuntimeJoin, 1)
+            .expect("apply acknowledged runtime-join option");
+        acknowledgement
+            .join()
+            .expect("runtime-join acknowledgement thread");
+
+        assert_eq!(app.runtime_network_join_allowed, Some(true));
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("F4 dialog remains open")
+                .option_rows()
+                .iter()
+                .find(|row| row.kind == LobbyOptionKind::RuntimeJoin)
+                .map(|row| row.value.as_str()),
+            Some(labels.runtime_join_free.as_str())
+        );
+        assert_eq!(
+            app.runtime_flash_message.as_ref().map(|message| message.text.as_str()),
+            Some(labels.runtime_join_free.as_str())
+        );
+    }
+
+    #[test]
+    fn l128_f4_tab_visits_close_options_then_client_list() {
+        use lc_frontend::runtime_client_list::RuntimeClientListFocus;
+
+        let mut app = new_classic_running_sandbox_app();
+        let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open runtime client list");
+
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("focus close button");
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .and_then(|dialog| dialog.focused()),
+            Some(RuntimeClientListFocus::Close)
+        );
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("consume close-button Tab release");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("focus options-list shell");
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .and_then(|dialog| dialog.focused()),
+            Some(RuntimeClientListFocus::OptionsList)
+        );
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("consume options-list Tab release");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("focus client list");
+        let dialog = app.runtime_client_list.as_ref().expect("F4 dialog");
+        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::ClientList));
+        assert_eq!(dialog.selected_client_id(), Some(0));
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("consume client-list Tab release");
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift for backwards traversal");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("focus options-list shell backwards");
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .and_then(|dialog| dialog.focused()),
+            Some(RuntimeClientListFocus::OptionsList)
+        );
+    }
+
+    #[test]
+    fn l128_f4_keyboard_button_activates_on_release() {
+        let mut app = new_classic_running_sandbox_app();
+        let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host")]);
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open runtime client list");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("focus close button");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("consume Tab release");
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("press focused close button");
+        assert!(app.runtime_client_list.is_some());
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release focused close button");
+        assert!(app.runtime_client_list.is_none());
     }
 
     #[test]
