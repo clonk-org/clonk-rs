@@ -361,7 +361,10 @@ capable “don't show again” checkbox are implemented. Caption drag, the 3 s
 bounce auto-scroll and the title tooltip now ship for `message_dialog.rs`
 (L055), the F4 client list and its independently draggable info child,
 Advanced Options, and the definition selector (L080). Each close button shares
-the same 500ms process-global tooltip clock. Active scenario
+the same 500ms process-global tooltip clock. Startup/menu pointer routing now
+also matches the exclusive C++ screen: movement and retained press–move–release
+stay with the active message dialog, so OK and title-close activate without
+leaking input to the underlying startup dialog. Active scenario
 `Graphics.c4g`/font overrides, localized standard button strings and further
 call sites remain.
 

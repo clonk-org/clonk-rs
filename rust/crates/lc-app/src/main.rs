@@ -45352,12 +45352,18 @@ impl GameApp {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        if self.running_chat_controller().is_none()
-            && !self.message_dialogs.is_empty()
-            && self.handle_scoreboard_message_pointer_move(point)?
-        {
-            self.suspend_ingame_pointer_for_gui();
-            return Ok(());
+        if self.running_chat_controller().is_none() && !self.message_dialogs.is_empty() {
+            // Startup keeps C4GUI::Screen exclusive, so its active message
+            // dialog owns motion without joining the running shared stack.
+            let consumed = if self.mode == AppMode::Running {
+                self.handle_scoreboard_message_pointer_move(point)?
+            } else {
+                self.handle_message_dialog_pointer_move(point)
+            };
+            if consumed {
+                self.suspend_ingame_pointer_for_gui();
+                return Ok(());
+            }
         }
         if self.league_signup_dialog.is_some() && self.context_menu.is_some() {
             self.league_signup_pointer_position = Some(point);
@@ -104365,10 +104371,71 @@ public func Grant(password) { return GainMissionAccess(password); }
         let mut frame = vec![0_u8; 640 * 480 * 4];
         app.render(&mut frame)
             .expect("classic error dialog renders over the scenario browser");
-        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
-            .expect("dismiss scenario start error");
+        let ok = app
+            .top_message_dialog_layout()
+            .expect("scenario error layout")
+            .buttons[0]
+            .rect;
+        let ok_point = PhysicalPosition::new(
+            f64::from(ok.x + ok.w / 2),
+            f64::from(ok.y + ok.h / 2),
+        );
+        app.handle_cursor_moved(ok_point)
+            .expect("hover scenario error OK button");
+        assert!(app.message_dialogs[0].state.has_pointer_hover());
+        assert_eq!(
+            app.menu_state.pointer_position(),
+            None,
+            "the exclusive startup popup owns pointer movement"
+        );
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press scenario error OK button");
+        app.handle_cursor_moved(PhysicalPosition::new(ok_point.x + 1.0, ok_point.y))
+            .expect("retain OK capture across ordinary mouse jitter");
+        assert!(app.message_dialogs[0].state.has_pointer_capture());
+        assert!(app.message_dialogs[0].state.has_pointer_hover());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release scenario error OK button");
         assert!(app.message_dialogs.is_empty());
         assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert!(app.status_text.is_empty());
+
+        app.handle_menu_input(|_| {
+            vec![StartupMenuAction::StartScenario(
+                lc_frontend::ScenarioSummary {
+                    identifier: scenario.identifier.clone(),
+                    title: scenario.title.clone(),
+                    kind: ScenarioKind::Scenario,
+                },
+            )]
+        })
+        .expect("reopen C++ player-count failure");
+        let close = app
+            .top_message_dialog_layout()
+            .expect("reopened scenario error layout")
+            .close_button
+            .expect("scenario error title close");
+        let close_point = PhysicalPosition::new(
+            f64::from(close.x + close.w / 2),
+            f64::from(close.y + close.h / 2),
+        );
+        app.handle_cursor_moved(close_point)
+            .expect("hover scenario error title close");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press scenario error title close");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            close_point.x + 1.0,
+            close_point.y,
+        ))
+        .expect("retain title-close capture across ordinary mouse jitter");
+        assert!(app.message_dialogs[0].state.has_pointer_capture());
+        assert!(app.message_dialogs[0].state.has_pointer_hover());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release scenario error title close");
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert!(app.loading_state.is_none());
+        assert!(app.definition_selector.is_none());
         assert!(app.status_text.is_empty());
         reset_cached_app_paths();
     }
