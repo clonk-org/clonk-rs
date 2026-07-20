@@ -1944,8 +1944,37 @@ fn load_restore_player_infos(
     }
 
     Ok(old_style_game_text
-        .map(|source| load_old_style_restore_player_infos(group, spec, source))
+        .map(|source| {
+            load_old_style_restore_player_infos(group, spec.scenario_path, source)
+        })
         .unwrap_or_else(empty_player_info_list))
+}
+
+/// Loads the savegame restore list used by ordinary offline scenario opens.
+///
+/// `C4GameParameters::Load` first tests for the physical
+/// `SavePlayerInfos.txt` entry. Any present entry owns the result, including
+/// an empty, unreadable or malformed one. Only a genuinely absent entry in a
+/// savegame permits the historical `Game.txt` `[PlayerFiles]` fallback.
+pub(crate) fn load_offline_savegame_restore_player_infos(
+    group: &Group,
+    scenario_path: &Path,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    old_style_game_text: Option<&[u8]>,
+) -> PlayerInfoListSnapshot {
+    match load_save_player_infos_entry(group, languages, language_packs) {
+        Ok(Some(restore_infos)) => restore_infos,
+        Ok(None) => old_style_game_text
+            .map(|source| {
+                load_old_style_restore_player_infos(group, scenario_path, source)
+            })
+            .unwrap_or_else(empty_player_info_list),
+        Err(error) => {
+            tracing::warn!(%error, "ignoring unreadable SavePlayerInfos.txt");
+            empty_player_info_list()
+        }
+    }
 }
 
 /// Loads the restore list that `C4Game::InitPlayers` keeps local while a
@@ -2026,7 +2055,7 @@ fn empty_player_info_list() -> PlayerInfoListSnapshot {
 /// ascending IDs and joined game numbers before Parameters.txt is compiled.
 fn load_old_style_restore_player_infos(
     group: &Group,
-    spec: &PreparedHostBootstrapSpec<'_>,
+    scenario_path: &Path,
     game_text: &[u8],
 ) -> PlayerInfoListSnapshot {
     let effective = &game_text[..game_text
@@ -2097,7 +2126,7 @@ fn load_old_style_restore_player_infos(
             })
             .unwrap_or(-1);
         let color = player.normalized_preferred_color();
-        let full_path = spec.scenario_path.join(&relative);
+        let full_path = scenario_path.join(&relative);
         let id = i32::try_from(players.len())
             .unwrap_or(i32::MAX)
             .saturating_add(1);

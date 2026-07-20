@@ -277,7 +277,10 @@ impl ResourceFileStore {
 
         let mutable_source = mutable_source.as_ref().to_path_buf();
         let metadata = fs::metadata(&mutable_source)?;
-        if !metadata.is_file() {
+        // A persistent C4Group may be an unpacked directory. Its registered
+        // parent already serves a packed standalone, while FinishDerive packs
+        // the rewritten directory and rebinds the anonymous resource.
+        if !metadata.is_file() && !metadata.is_dir() {
             return Err(ResourceFileStoreError::NotRegularFile(mutable_source));
         }
 

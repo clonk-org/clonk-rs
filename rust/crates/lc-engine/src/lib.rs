@@ -120,15 +120,16 @@ pub use landscape::{
     LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC, LANDSCAPE_MODE_UNDEFINED,
 };
 pub use live_c4_player::{
-    LiveC4PlayerError, LiveC4PlayerSaveOptions, serialize_live_c4_player,
-    serialize_live_c4_player_from_state, serialize_live_c4_player_state,
-    serialize_live_c4_player_with_options,
+    LiveC4CrewProfileCleanup, LiveC4PlayerError, LiveC4PlayerSaveOptions,
+    LiveC4SynchronizedPlayerGroup, serialize_live_c4_player,
+    serialize_live_c4_player_for_synchronization, serialize_live_c4_player_from_state,
+    serialize_live_c4_player_state, serialize_live_c4_player_with_options,
     serialize_live_c4_player_with_options_and_enumeration,
 };
 pub use live_c4_save::{
     LiveC4SaveComponentRef, LiveC4SaveComponents, LiveC4SaveEntry, LiveC4SaveEntryKind,
-    LiveC4SaveError, LiveC4SaveNamedComponent, LiveC4SaveSpec, LiveC4ValueEncodeError,
-    LiveC4ValueEnumeration,
+    LiveC4SaveError, LiveC4SaveNamedComponent, LiveC4SavePlayerPolicy, LiveC4SavePolicy,
+    LiveC4SaveSpec, LiveC4ValueEncodeError, LiveC4ValueEnumeration,
 };
 pub use material::{Material, MaterialId, MaterialSet};
 pub use message::{
@@ -23033,6 +23034,12 @@ impl Engine {
         self.frame
     }
 
+    /// `Game.Script.Counter`, displayed by the developer console and used as
+    /// the next `Script%d` section number by `C4GameScriptHost::Execute`.
+    pub fn scenario_script_counter(&self) -> i32 {
+        self.scenario_script_counter
+    }
+
     pub fn is_game_over(&self) -> bool {
         self.game_over_triggered
     }
@@ -31888,6 +31895,15 @@ impl Engine {
             .get(&object.definition_id)
             .map(|definition| definition.action_library());
         Some(object.snapshot(library))
+    }
+
+    /// `C4ObjectList::ObjectCount(C4ID_None, C4D_All)`: count only objects
+    /// whose native `Status` is still set.
+    pub fn active_object_count(&self) -> usize {
+        self.objects
+            .iter()
+            .filter(|object| !object.destroyed)
+            .count()
     }
 
     /// Lowest-ID object with this definition, matching the ordering exposed
@@ -46631,10 +46647,69 @@ impl Engine {
         self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
     }
 
+    /// Apply the mutable half of `C4PlayerList::SynchronizeLocalFiles` before
+    /// the app writes profile groups: checkpoint player and active-crew play
+    /// time, then refresh definition-owned rank fields.
+    fn synchronize_local_player_file_state(&mut self) {
+        let players = self
+            .players
+            .iter()
+            .filter_map(|(&player_id, player)| {
+                (!matches!(
+                    player.status(),
+                    PlayerStatus::Eliminated | PlayerStatus::Surrendered
+                ) && !player.is_script_player())
+                .then_some(player_id)
+            })
+            .collect::<HashSet<_>>();
+        for player_id in &players {
+            if let Some(player) = self.players.get_mut(player_id) {
+                player.synchronize_playing_time(self.game_time);
+            }
+            if let Some(roster) = self.crew_rosters.get_mut(player_id) {
+                for info in roster {
+                    if info.in_action {
+                        info.total_playing_time = info
+                            .total_playing_time
+                            .wrapping_add(self.game_time.wrapping_sub(info.in_action_time));
+                        info.in_action_time = self.game_time;
+                    }
+                }
+            }
+        }
+        let linked = self
+            .crew_info_links
+            .iter()
+            .filter_map(|(&object_id, link)| {
+                if !players.contains(&link.player_id) {
+                    return None;
+                }
+                self.crew_rosters
+                    .get(&link.player_id)
+                    .and_then(|roster| roster.get(link.roster_index))
+                    .map(|info| (object_id, info.total_playing_time, info.in_action_time))
+            })
+            .collect::<Vec<_>>();
+        let live_infos = Rc::make_mut(&mut self.crew_object_infos);
+        for (object_id, total_playing_time, in_action_time) in linked {
+            if let Some(info) = live_infos.get_mut(&object_id) {
+                info.total_playing_time = total_playing_time;
+                info.in_action_time = in_action_time;
+            }
+        }
+        self.refresh_crew_custom_ranks_for_save();
+    }
+
+    /// Checkpoint the mutable player and crew state written by
+    /// `C4PlayerList::SynchronizeLocalFiles`. The application owns the
+    /// physical `.c4p` groups and persists them immediately after this call.
+    #[doc(hidden)]
+    pub fn checkpoint_local_player_files_for_save(&mut self) {
+        self.synchronize_local_player_file_state();
+    }
+
     /// `C4ObjectInfoCore::Save(..., pDefs)` refreshes custom-rank fields
-    /// immediately before every local crew-file write. The app-owned file
-    /// callback is still disconnected, but this synchronous mutation is
-    /// observable through the live info pointer and belongs at the same seam.
+    /// immediately before every local crew-file write.
     fn refresh_crew_custom_ranks_for_save(&mut self) {
         let eligible_players = self
             .players
@@ -46734,15 +46809,10 @@ impl Engine {
         // follow the C++ master list First -> Next; `exec_list` stores that
         // list reversed (C4GameObjects.cpp:254-261,296-311).
         self.synchronize_solid_masks();
-        // C++ persists local player files here when SavePlrs is set and the
-        // control stream is not a replay. Player files are application-owned
-        // in the Rust port, so keep this gap explicit until that callback is
-        // routed through the app layer.
+        // The app owns the physical groups, but this deterministic state
+        // checkpoint must precede its callback just like C4Player::LocalSync.
         if save_player_files && !self.replay_control {
-            self.refresh_crew_custom_ranks_for_save();
-            tracing::warn!(
-                "network synchronization requested local player-file persistence; app callback is not yet connected"
-            );
+            self.synchronize_local_player_file_state();
         }
         Ok(())
     }
@@ -61625,6 +61695,61 @@ mod command_contact_regression {
             .execute_synchronize_control(false, true)
             .expect("synchronization with clearance succeeds");
         assert_eq!(engine.objects[index].fixed_position.x, itofix(10));
+    }
+
+    #[test]
+    fn synchronize_control_checkpoints_live_player_and_crew_time_but_not_replays() {
+        let mut engine = Engine::new();
+        engine.game_time = 10;
+        engine
+            .register_player(
+                PlayerConfig::new(3, "Local")
+                    .with_player_info_id(17)
+                    .with_total_playing_time(40),
+            )
+            .expect("player registers");
+        engine.crew_rosters.insert(
+            3,
+            vec![player_file::CrewInfo {
+                id: "CLNK".to_string(),
+                name: "Crew".to_string(),
+                death_message: String::new(),
+                core: CrewInfoCoreFields::default(),
+                rank: 0,
+                rank_name: "Clonk".to_string(),
+                experience: 0,
+                rounds: 0,
+                physical: PhysicalInfo::default(),
+                death_count: 0,
+                total_playing_time: 7,
+                birthday: 0,
+                age: 0,
+                participation: 1,
+                in_action: true,
+                was_in_action: true,
+                in_action_time: 10,
+                has_died: false,
+                extra_data: Vec::new(),
+                portraits: CrewPortraitState::default(),
+            }],
+        );
+        engine.game_time = 25;
+
+        engine
+            .execute_synchronize_control(true, false)
+            .expect("player-file synchronization succeeds");
+        assert_eq!(engine.player(3).unwrap().total_playing_time(), 55);
+        assert_eq!(engine.player(3).unwrap().game_join_time(), 25);
+        assert_eq!(engine.crew_rosters[&3][0].total_playing_time, 22);
+        assert_eq!(engine.crew_rosters[&3][0].in_action_time, 25);
+
+        engine.set_replay_control(true);
+        engine.game_time = 30;
+        engine
+            .execute_synchronize_control(true, false)
+            .expect("replay synchronization succeeds");
+        assert_eq!(engine.player(3).unwrap().total_playing_time(), 55);
+        assert_eq!(engine.crew_rosters[&3][0].total_playing_time, 22);
     }
 
     #[test]

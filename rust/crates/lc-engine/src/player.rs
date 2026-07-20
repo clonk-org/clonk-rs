@@ -1885,6 +1885,14 @@ impl Player {
         self.game_join_time = game_time;
     }
 
+    /// `C4Player::LocalSync`'s process-local playing-time checkpoint.
+    pub(crate) fn synchronize_playing_time(&mut self, game_time: i32) {
+        self.total_playing_time = self
+            .total_playing_time
+            .wrapping_add(game_time.wrapping_sub(self.game_join_time));
+        self.game_join_time = game_time;
+    }
+
     pub fn set_points(&mut self, points: i32) -> i32 {
         self.points = points.clamp(MIN_SCORE, MAX_SCORE);
         self.points

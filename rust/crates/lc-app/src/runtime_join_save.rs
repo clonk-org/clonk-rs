@@ -9,7 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use lc_engine::{
     ClientCoreControlData, ControlPlayerInfoEntry, LegacyCString, LiveC4SaveComponents,
-    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
+    LiveC4SavePlayerPolicy, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_TYPE_SCRIPT,
+    PLAYER_INFO_TYPE_USER,
 };
 use lc_network::{
     LiveNetworkDynamic, LiveNetworkDynamicComponent, LiveNetworkDynamicSpec, PlayerInfoListSnapshot,
@@ -46,6 +47,20 @@ pub fn set_as_runtime_join_restore_infos(
     live_clients: &[ClientCoreControlData],
     player_infos: &PlayerInfoListSnapshot,
 ) -> RuntimeJoinRestorePlan {
+    set_as_live_save_restore_infos(
+        live_clients,
+        player_infos,
+        lc_engine::LiveC4SavePolicy::RuntimeNetwork.player_policy(),
+    )
+}
+
+/// General `C4PlayerInfoList::SetAsRestoreInfos` projection for scenario,
+/// savegame, and runtime-network saves.
+pub fn set_as_live_save_restore_infos(
+    live_clients: &[ClientCoreControlData],
+    player_infos: &PlayerInfoListSnapshot,
+    policy: LiveC4SavePlayerPolicy,
+) -> RuntimeJoinRestorePlan {
     let mut restore_infos = player_infos.clone();
     let mut player_groups = Vec::new();
 
@@ -62,15 +77,33 @@ pub fn set_as_runtime_join_restore_infos(
                 return false;
             }
 
-            let filename = match player.player_type {
-                PLAYER_INFO_TYPE_USER => runtime_user_player_filename(client_name, player),
-                PLAYER_INFO_TYPE_SCRIPT => runtime_script_player_filename(player.id),
+            let (keep, embed, filename) = match player.player_type {
+                PLAYER_INFO_TYPE_USER => (
+                    policy.save_user_players,
+                    policy.embed_user_player_files,
+                    policy
+                        .embed_user_player_files
+                        .then(|| runtime_user_player_filename(client_name, player))
+                        .unwrap_or_default(),
+                ),
+                PLAYER_INFO_TYPE_SCRIPT => (
+                    policy.save_script_players,
+                    policy.embed_script_player_files,
+                    policy
+                        .embed_script_player_files
+                        .then(|| runtime_script_player_filename(player.id))
+                        .unwrap_or_default(),
+                ),
                 _ => return false,
             };
+            if !keep {
+                return false;
+            }
 
             player.filename = filename.clone();
             player.flags &= !PLAYER_INFO_FLAG_HAS_RESOURCE;
             player.resource = None;
+            if embed {
             player_groups.push(RuntimeJoinPlayerGroupTarget {
                 client_id,
                 player_info_id: player.id,
@@ -78,6 +111,7 @@ pub fn set_as_runtime_join_restore_infos(
                 game_number: player.game_number,
                 filename,
             });
+            }
             true
         });
 

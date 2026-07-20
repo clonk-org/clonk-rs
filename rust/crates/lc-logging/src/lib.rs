@@ -1,14 +1,91 @@
 use std::{
     fs::{self, File},
-    io,
+    io::{self, Write},
     path::Path,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
-use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::fmt::writer::{MakeWriter, MakeWriterExt};
 use tracing_subscriber::{fmt, EnvFilter};
 
 static INITIALIZED: OnceLock<()> = OnceLock::new();
+
+/// Process-local copy of formatted log output consumed by the developer
+/// console. The capture is intentionally independent from the bounded GUI
+/// model: tracing may write from worker threads, while the window drains it
+/// on the application thread.
+#[derive(Clone, Debug, Default)]
+pub struct ConsoleLogCapture {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl ConsoleLogCapture {
+    /// Remove and return every byte written since the previous drain.
+    pub fn take(&self) -> String {
+        let mut bytes = self.bytes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let drained = std::mem::take(&mut *bytes);
+        format_console_log(&String::from_utf8_lossy(&drained))
+    }
+}
+
+pub struct ConsoleLogWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    pending: Vec<u8>,
+}
+
+impl Write for ConsoleLogWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.pending.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for ConsoleLogWriter {
+    fn drop(&mut self) {
+        self.bytes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend_from_slice(&self.pending);
+    }
+}
+
+impl<'a> MakeWriter<'a> for ConsoleLogCapture {
+    type Writer = ConsoleLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        ConsoleLogWriter {
+            bytes: Arc::clone(&self.bytes),
+            pending: Vec::new(),
+        }
+    }
+}
+
+fn format_console_log(raw: &str) -> String {
+    let mut formatted = String::new();
+    for line in raw.lines() {
+        let (prefix, message) = [
+            (" ERROR ", "ERROR: "),
+            (" WARN ", "WARNING: "),
+            (" INFO ", ""),
+            (" DEBUG ", ""),
+            (" TRACE ", ""),
+        ]
+        .into_iter()
+        .find_map(|(marker, prefix)| {
+            line.find(marker)
+                .map(|position| (prefix, &line[position + marker.len()..]))
+        })
+        .unwrap_or(("", line));
+        formatted.push_str(prefix);
+        formatted.push_str(message);
+        formatted.push('\n');
+    }
+    formatted
+}
 
 /// Initialise the global tracing subscriber used across the LegacyClonk binaries.
 ///
@@ -32,6 +109,16 @@ pub fn init_verbose(verbose: bool) {
 /// `LC_LOG` and `RUST_LOG` directives keep the same precedence as [`init`]. Calling this after a
 /// subscriber has already been initialized returns [`io::ErrorKind::AlreadyExists`].
 pub fn init_verbose_with_file(verbose: bool, log_path: &Path) -> io::Result<()> {
+    init_verbose_with_file_and_capture(verbose, log_path, None)
+}
+
+/// Initialise session logging and optionally mirror the formatted stream into
+/// the developer-console log pane.
+pub fn init_verbose_with_file_and_capture(
+    verbose: bool,
+    log_path: &Path,
+    capture: Option<ConsoleLogCapture>,
+) -> io::Result<()> {
     if INITIALIZED.get().is_some() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -44,14 +131,23 @@ pub fn init_verbose_with_file(verbose: bool, log_path: &Path) -> io::Result<()> 
 
     match file {
         Ok(file) => {
-            let writer = io::stderr.and(Mutex::new(file));
-            let init_result = fmt()
+            let init_result = if let Some(capture) = capture {
+                fmt()
                 .with_env_filter(env_filter(default_level))
-                .with_writer(writer)
+                    .with_writer(io::stderr.and(Mutex::new(file)).and(capture))
                 .with_ansi(false)
                 .with_target(false)
                 .with_level(true)
-                .try_init();
+                    .try_init()
+            } else {
+                fmt()
+                    .with_env_filter(env_filter(default_level))
+                    .with_writer(io::stderr.and(Mutex::new(file)))
+                    .with_ansi(false)
+                    .with_target(false)
+                    .with_level(true)
+                    .try_init()
+            };
             let _ = INITIALIZED.set(());
             init_result.map_err(|err| {
                 io::Error::new(
@@ -62,16 +158,40 @@ pub fn init_verbose_with_file(verbose: bool, log_path: &Path) -> io::Result<()> 
         }
         Err(err) => {
             INITIALIZED.get_or_init(|| {
+                if let Some(capture) = capture {
+                    let _ = fmt()
+                        .with_env_filter(env_filter(default_level))
+                        .with_writer(io::stderr.and(capture))
+                        .with_ansi(false)
+                        .with_target(false)
+                        .with_level(true)
+                        .try_init();
+                } else {
                 let _ = fmt()
                     .with_env_filter(env_filter(default_level))
                     .with_writer(io::stderr)
                     .with_target(false)
                     .with_level(true)
                     .try_init();
+                }
             });
             Err(err)
         }
     }
+}
+
+/// Initialise stderr logging and optionally mirror it into the developer
+/// console when no file-backed application paths are available.
+pub fn init_verbose_with_capture(verbose: bool, capture: ConsoleLogCapture) {
+    INITIALIZED.get_or_init(|| {
+        let _ = fmt()
+            .with_env_filter(env_filter(if verbose { "debug" } else { "info" }))
+            .with_writer(io::stderr.and(capture))
+            .with_ansi(false)
+            .with_target(false)
+            .with_level(true)
+            .try_init();
+    });
 }
 
 fn open_session_log(log_path: &Path) -> io::Result<File> {

@@ -9,6 +9,7 @@
 pub mod clonk_fonts;
 pub mod classic_gui;
 pub mod context_menu;
+pub mod developer_console;
 pub mod definition_sel;
 pub mod download_dialog;
 pub mod flash_message;

@@ -15,11 +15,26 @@ struct OfflineStartupPlayer {
 pub(super) struct OfflineStartupPlayers {
     pub(super) player_info: lc_engine::PlayerInfoControlData,
     players: Vec<OfflineStartupPlayer>,
+    max_players: i32,
 }
 
 impl OfflineStartupPlayers {
     pub(super) fn new(configured: ConfiguredClientPlayers, max_players: i32) -> Self {
-        let player_info = build_teamless_offline_initial_player_info(&configured, max_players);
+        Self::new_after_player_id(configured, max_players, 0)
+    }
+
+    /// `C4GameParameters::Load` transfers RestorePlayerInfos' allocation
+    /// counter into PlayerInfos before `InitLocal` admits configured files.
+    pub(super) fn new_after_player_id(
+        configured: ConfiguredClientPlayers,
+        max_players: i32,
+        last_player_id: i32,
+    ) -> Self {
+        let mut player_info = build_teamless_offline_initial_player_info(&configured, max_players);
+        let id_offset = last_player_id.max(0);
+        for info in &mut player_info.players {
+            info.id = info.id.saturating_add(id_offset);
+        }
         let players = player_info
             .players
             .iter()
@@ -32,11 +47,12 @@ impl OfflineStartupPlayers {
         Self {
             player_info,
             players,
+            max_players,
         }
     }
 
     pub(super) fn startup_player_count(&self) -> i32 {
-        i32::try_from(self.players.len()).unwrap_or(i32::MAX)
+        i32::try_from(self.player_info.players.len()).unwrap_or(i32::MAX)
     }
 
     pub(super) fn selected(&self, info_id: i32) -> Option<&SelectedClientPlayer> {
@@ -44,6 +60,18 @@ impl OfflineStartupPlayers {
             .iter()
             .find(|player| player.info_id == info_id)
             .map(|player| &player.selected)
+    }
+
+    pub(super) fn selected_for_row(&self, row: usize) -> Option<&SelectedClientPlayer> {
+        self.players.get(row).map(|player| &player.selected)
+    }
+
+    pub(super) fn replace_player_info(&mut self, player_info: lc_engine::PlayerInfoControlData) {
+        self.player_info = player_info;
+    }
+
+    pub(super) fn max_players(&self) -> i32 {
+        self.max_players
     }
 }
 

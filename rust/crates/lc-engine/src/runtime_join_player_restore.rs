@@ -5,8 +5,8 @@
 //! live in root-level `.c4p` child groups.  SavePlayerInfos supplies the
 //! authoritative recreation order and the current client association.
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use lc_resources::{Group, GroupError};
 use thiserror::Error;
@@ -440,11 +440,50 @@ impl Engine {
         self.restore_runtime_join_players(&group, &game_txt, sources)
     }
 
+    /// Ordinary offline savegames keep user-player files outside the save
+    /// group while embedding script-player files. Reuse the runtime-player
+    /// compiler for both: an entry in `external_player_paths` replaces the
+    /// embedded lookup for that saved player-info ID; all other sources keep
+    /// the native embedded/script fallback.
+    pub fn restore_offline_savegame_players_from_path(
+        &mut self,
+        scenario_path: impl AsRef<Path>,
+        sources: &[RuntimeJoinPlayerSource],
+        external_player_paths: &HashMap<i32, PathBuf>,
+    ) -> Result<Vec<RestoredRuntimeJoinPlayer>, RuntimeJoinPlayerRestoreError> {
+        if sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        let group = Group::open(scenario_path)?;
+        let game_txt = group.read_file("Game.txt")?;
+        self.restore_runtime_join_players_with_external_paths(
+            &group,
+            &game_txt,
+            sources,
+            external_player_paths,
+        )
+    }
+
     pub fn restore_runtime_join_players(
         &mut self,
         scenario_group: &Group,
         game_txt: &[u8],
         sources: &[RuntimeJoinPlayerSource],
+    ) -> Result<Vec<RestoredRuntimeJoinPlayer>, RuntimeJoinPlayerRestoreError> {
+        self.restore_runtime_join_players_with_external_paths(
+            scenario_group,
+            game_txt,
+            sources,
+            &HashMap::new(),
+        )
+    }
+
+    fn restore_runtime_join_players_with_external_paths(
+        &mut self,
+        scenario_group: &Group,
+        game_txt: &[u8],
+        sources: &[RuntimeJoinPlayerSource],
+        external_player_paths: &HashMap<i32, PathBuf>,
     ) -> Result<Vec<RestoredRuntimeJoinPlayer>, RuntimeJoinPlayerRestoreError> {
         if sources.is_empty() {
             return Ok(Vec::new());
@@ -490,7 +529,20 @@ impl Engine {
             }
 
             let filename = legacy_basename(source.info.filename.as_bytes());
-            let player_file = if filename.is_empty() && source.info.is_script_player() {
+            let player_file = if let Some(external_path) =
+                external_player_paths.get(&source.info.id)
+            {
+                let child = Group::open(external_path)?;
+                PlayerFile::load_with_portraits_and_value_resolution(
+                    &child,
+                    true,
+                    &value_resolution,
+                )
+                .map_err(|error| RuntimeJoinPlayerRestoreError::PlayerFile {
+                    filename: external_path.display().to_string(),
+                    source: Box::new(error),
+                })?
+            } else if filename.is_empty() && source.info.is_script_player() {
                 PlayerFile::default()
             } else {
                 let entry = root_entries
@@ -565,6 +617,51 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn offline_savegame_restores_user_profile_from_external_group() {
+        let fixture = tempdir().expect("save tempdir");
+        let save = fixture.path().join("Save.c4s");
+        std::fs::create_dir(&save).expect("create save group");
+        std::fs::write(
+            save.join("Game.txt"),
+            "[Player7]\nStatus=1\nIndex=2\nID=7\nWealth=19\n",
+        )
+        .expect("write Game.txt");
+        let profile = fixture.path().join("Alice.c4p");
+        std::fs::create_dir(&profile).expect("create profile group");
+        std::fs::write(
+            profile.join("Player.txt"),
+            "[Player]\nName=Alice\nScore=31\n",
+        )
+        .expect("write Player.txt");
+        let source = RuntimeJoinPlayerSource {
+            client_id: 0,
+            info: ControlPlayerInfoEntry {
+                name: crate::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                flags: crate::PLAYER_INFO_FLAG_JOINED,
+                id: 7,
+                ..Default::default()
+            },
+            load_unnamed_portraits: true,
+        };
+        let mut engine = Engine::new();
+
+        let restored = engine
+            .restore_offline_savegame_players_from_path(
+                &save,
+                &[source],
+                &HashMap::from([(7, profile)]),
+            )
+            .expect("restore external user profile");
+
+        assert_eq!(restored[0].number, 2);
+        let player = engine.player(2).expect("restored player");
+        assert_eq!(player.name(), "Alice");
+        assert_eq!(player.wealth(), 19);
+        assert_eq!(player.score(), 31);
+    }
 
     #[test]
     fn parser_applies_every_field_emitted_by_live_player_serializer() {

@@ -147,6 +147,10 @@ pub enum ScenarioError {
 pub struct OfflineScenarioStartupPreflight {
     pub max_players: i32,
     pub random_seed: Option<i32>,
+    /// `C4S.Head.SaveGame`: ordinary offline startup still admits the
+    /// configured local player files, but associates them with the saved
+    /// restore rows before recreating the live players.
+    pub save_game: bool,
 }
 
 /// Parameters that must be frozen before a replay's dynamic landscape is
@@ -1772,8 +1776,9 @@ impl Scenario {
     }
 
     /// Reads the ordinary offline player-admission parameters from an already
-    /// opened scenario group. Savegames, replays and restore-player state are
-    /// rejected until their C4PlayerInfo restoration paths are available.
+    /// opened scenario group. Replays retain their separate CtrlRec path;
+    /// modern savegames are admitted so the application can stage their
+    /// SavePlayerInfos/Game.txt restoration before landscape creation.
     pub fn preflight_offline_startup_from_group(
         group: &Group,
     ) -> Result<OfflineScenarioStartupPreflight, ScenarioError> {
@@ -1782,13 +1787,11 @@ impl Scenario {
         }
 
         let manifest = parse_legacy_scenario_manifest(group)?;
-        if manifest.core.head.save_game != 0 {
-            return Err(ScenarioError::OfflineStartupSavegameUnsupported);
-        }
+        let save_game = manifest.core.head.save_game != 0;
         if manifest.core.head.replay != 0 {
             return Err(ScenarioError::OfflineStartupReplayUnsupported);
         }
-        if read_optional_legacy_entry(group, "SavePlayerInfos.txt")?.is_some() {
+        if !save_game && read_optional_legacy_entry(group, "SavePlayerInfos.txt")?.is_some() {
             return Err(ScenarioError::OfflineStartupRestoreInfosUnsupported);
         }
 
@@ -1806,6 +1809,7 @@ impl Scenario {
         Ok(OfflineScenarioStartupPreflight {
             max_players,
             random_seed,
+            save_game,
         })
     }
 
@@ -3197,6 +3201,28 @@ impl Scenario {
             Some(team_configuration),
             None,
             None,
+            true,
+        )
+    }
+
+    /// Applies an ordinary offline savegame after installing its compiled
+    /// `Game.txt` state. This is the non-network counterpart of
+    /// [`Self::apply_before_network_final_init_with_game_data`]: offline
+    /// startup performs its synchronization immediately, before
+    /// `SavePlayerInfos` recreates the live players.
+    #[doc(hidden)]
+    pub fn apply_before_players_with_game_data(
+        &self,
+        engine: &mut Engine,
+        game_data: &InitialNetworkGameData,
+        team_configuration: Option<crate::TeamConfiguration>,
+    ) -> Result<Vec<ObjectId>, ScenarioError> {
+        self.apply_before_players_with_final_synchronize(
+            engine,
+            true,
+            team_configuration,
+            None,
+            Some(game_data),
             true,
         )
     }
@@ -4779,6 +4805,59 @@ impl ScenarioValueStore {
         self.core
             .runtime_network_save(
                 scenario_title,
+                definition_modules,
+                definition_executable_path,
+                definition_path,
+                scenario_origin,
+            )
+            .serialize()
+    }
+
+    /// `C4GameSaveScenario`'s non-initial Scenario.txt rewrite.  Unlike an
+    /// exact save this deliberately keeps the scenario's own title,
+    /// definition list and Origin while clearing only the fields changed by
+    /// the common `C4GameSave::SaveCore` path.
+    pub(crate) fn serialize_runtime_scenario_save(&self) -> Vec<u8> {
+        self.core.runtime_scenario_save().serialize()
+    }
+
+    /// `C4GameSaveSavegame`'s non-initial Scenario.txt rewrite.  The caller
+    /// supplies the already-derived icon because the native specialization
+    /// obtains it from the destination group's trailing slot number.
+    pub(crate) fn serialize_runtime_savegame(
+        &self,
+        scenario_title: &str,
+        definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
+        scenario_origin: &str,
+        icon: i32,
+    ) -> Vec<u8> {
+        self.core
+            .runtime_savegame(
+                scenario_title,
+                definition_modules,
+                definition_executable_path,
+                definition_path,
+                scenario_origin,
+                icon,
+            )
+            .serialize()
+    }
+
+    /// Non-initial `C4GameSaveRecord` uses the synchronized exact-save core,
+    /// then marks the scenario as a replay with the fixed record icon.
+    pub(crate) fn serialize_runtime_record_save(
+        &self,
+        record_title: &str,
+        definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
+        scenario_origin: &str,
+    ) -> Vec<u8> {
+        self.core
+            .runtime_record_save(
+                record_title,
                 definition_modules,
                 definition_executable_path,
                 definition_path,
@@ -6407,17 +6486,84 @@ impl LegacyScenarioCore {
         definition_path: &str,
         scenario_origin: &str,
     ) -> Self {
+        let mut saved = self.runtime_exact_save_core(
+            scenario_title,
+            definition_modules,
+            definition_executable_path,
+            definition_path,
+            scenario_origin,
+        );
+        saved.head.network_game = true;
+        saved.head.network_runtime_join = true;
+        saved
+    }
+
+    fn runtime_scenario_save(&self) -> Self {
         let mut saved = self.clone();
         saved.head.version[..CURRENT_SCENARIO_VERSION.len()]
             .copy_from_slice(&CURRENT_SCENARIO_VERSION);
-        saved.head.title =
-            truncate_legacy_c4_string(scenario_title.to_owned(), C4_MAX_TITLE);
         saved.head.no_initialize = 1;
-        saved.head.save_game = 1;
-        saved.head.network_game = true;
-        saved.head.network_runtime_join = true;
+        saved.head.save_game = 0;
+        // SaveCore clears NetworkGame for every non-initial save, but does
+        // not touch NetworkRuntimeJoin. Preserve that slightly surprising
+        // distinction for scenarios that originated from a runtime dynamic.
+        saved.head.network_game = false;
         saved.head.mission_access.clear();
         saved.head.forced_gfx_mode = 1;
+        saved
+    }
+
+    fn runtime_savegame(
+        &self,
+        scenario_title: &str,
+        definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
+        scenario_origin: &str,
+        icon: i32,
+    ) -> Self {
+        let mut saved = self.runtime_exact_save_core(
+            scenario_title,
+            definition_modules,
+            definition_executable_path,
+            definition_path,
+            scenario_origin,
+        );
+        saved.head.icon = icon;
+        saved
+    }
+
+    fn runtime_record_save(
+        &self,
+        record_title: &str,
+        definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
+        scenario_origin: &str,
+    ) -> Self {
+        let mut saved = self.runtime_exact_save_core(
+            record_title,
+            definition_modules,
+            definition_executable_path,
+            definition_path,
+            scenario_origin,
+        );
+        saved.head.replay = 1;
+        saved.head.icon = 29;
+        saved
+    }
+
+    fn runtime_exact_save_core(
+        &self,
+        scenario_title: &str,
+        definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
+        scenario_origin: &str,
+    ) -> Self {
+        let mut saved = self.runtime_scenario_save();
+        saved.head.title = truncate_legacy_c4_string(scenario_title.to_owned(), C4_MAX_TITLE);
+        saved.head.save_game = 1;
         saved.definitions.definitions = set_legacy_definition_modules(
             definition_modules,
             definition_executable_path,
@@ -16493,6 +16639,7 @@ global func Step(state, frame, random)
         let expected = OfflineScenarioStartupPreflight {
             max_players: 2,
             random_seed: Some(73),
+            save_game: false,
         };
         assert_eq!(
             Scenario::preflight_offline_startup_from_group(&group)
@@ -16511,6 +16658,7 @@ global func Step(state, frame, random)
         let expected = OfflineScenarioStartupPreflight {
             max_players: 4,
             random_seed: None,
+            save_game: false,
         };
         assert_eq!(
             Scenario::preflight_offline_startup_from_group(&group)
@@ -16531,10 +16679,15 @@ global func Step(state, frame, random)
             "[Head]\nSaveGame=1\nMaxPlayer=4\n",
         )
         .expect("write savegame core");
-        assert!(matches!(
-            Scenario::preflight_offline_startup_from_path(&savegame),
-            Err(ScenarioError::OfflineStartupSavegameUnsupported)
-        ));
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_path(&savegame)
+                .expect("offline savegame preflight succeeds"),
+            OfflineScenarioStartupPreflight {
+                max_players: 4,
+                random_seed: None,
+                save_game: true,
+            }
+        );
 
         let replay = dir.path().join("Replay.c4s");
         std::fs::create_dir(&replay).expect("create replay fixture");
@@ -16677,6 +16830,56 @@ global func Step(state, frame, random)
             vec!["Outside.c4d".to_owned()],
             "an absolute DefinitionPath is still checked after ExePath"
         );
+    }
+
+    #[test]
+    fn runtime_scenario_and_savegame_core_adjustments_match_cpp() {
+        let core = parse_legacy_scenario_text(
+            "[Head]\nIcon=7\nTitle=Authored\nVersion=1,2,3,4,359\nSaveGame=1\nNoInitialize=0\nMissionAccess=MISS\nNetworkGame=true\nNetworkRuntimeJoin=true\nOrigin=Retained\\Game.c4s\n\n[Definitions]\nDefinitions=Old.c4d\n",
+        )
+        .expect("legacy core parses")
+        .core;
+
+        let scenario = String::from_utf8(core.runtime_scenario_save().serialize())
+            .expect("Scenario.txt is UTF-8");
+        for expected in [
+            "Title=Authored\r\n",
+            "Version=4,9,11,0,359\r\n",
+            "NoInitialize=1\r\n",
+            "NetworkRuntimeJoin=true\r\n",
+            "Origin=Retained/Game.c4s\r\n",
+            "Definitions=\"Old.c4d\"\r\n",
+        ] {
+            assert!(scenario.contains(expected), "missing {expected:?}");
+        }
+        for absent in ["SaveGame=1\r\n", "NetworkGame=true\r\n", "MissionAccess="] {
+            assert!(!scenario.contains(absent), "retained {absent:?}");
+        }
+
+        let savegame = String::from_utf8(
+            core.runtime_savegame(
+                "Runtime",
+                &["Objects.c4d".to_owned()],
+                "",
+                "",
+                "Fallback.c4s",
+                4,
+            )
+            .serialize(),
+        )
+        .expect("Scenario.txt is UTF-8");
+        for expected in [
+            "Icon=4\r\n",
+            "Title=Runtime\r\n",
+            "SaveGame=1\r\n",
+            "NoInitialize=1\r\n",
+            "NetworkRuntimeJoin=true\r\n",
+            "Origin=Retained/Game.c4s\r\n",
+            "Definitions=\"Objects.c4d\"\r\n",
+        ] {
+            assert!(savegame.contains(expected), "missing {expected:?}");
+        }
+        assert!(!savegame.contains("NetworkGame=true\r\n"));
     }
 
     #[test]

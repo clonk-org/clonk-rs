@@ -318,6 +318,48 @@ fn cpp_derive_can_replace_its_pending_source_and_unmatched_finish_is_rejected() 
     assert!(!standalone.exists());
 }
 
+#[test]
+fn cpp_derive_accepts_an_unpacked_persistent_group_as_the_mutable_source() {
+    // C4Network2Res::Derive retains the already-packed parent standalone while
+    // SetDerived points at the original unpacked group. FinishDerive later
+    // packs that directory through SetByFile/GetStandalone
+    // (src/C4Network2Res.cpp:718-823).
+    let directory = TestDirectory::new();
+    let parent_standalone = directory.path().join("Alice.c4p");
+    let mutable_group = directory.path().join("Alice.c4p.dir");
+    let derived_standalone = directory.path().join("Alice_2.c4p");
+    fs::write(&parent_standalone, b"local").unwrap();
+    fs::create_dir(&mutable_group).unwrap();
+    fs::write(mutable_group.join("Player.txt"), b"[Player]\nName=Alice\n").unwrap();
+    fs::write(&derived_standalone, b"fresh").unwrap();
+
+    {
+        let mut store = ResourceFileStore::new(directory.path()).unwrap();
+        store
+            .register_local_complete(
+                &core_with_crc(40, b"Alice.c4p", 5, 5, 0x8bd6_88e8),
+                &parent_standalone,
+                ResourceFileOwnership::Temporary,
+            )
+            .unwrap();
+        store
+            .begin_derive(40, &mutable_group, ResourceFileOwnership::Persistent)
+            .unwrap();
+        assert_eq!(store.path(40), Some(parent_standalone.as_path()));
+        store
+            .replace_pending_derived_file(40, &derived_standalone, ResourceFileOwnership::Temporary)
+            .unwrap();
+        let derived = NetworkResourceCore {
+            id: 41,
+            derived_id: 40,
+            ..core(41, b"Alice.c4p", 5, 5)
+        };
+        assert_eq!(store.finish_derived(&derived).unwrap(), derived_standalone);
+    }
+
+    assert!(mutable_group.is_dir());
+}
+
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 struct TestDirectory {

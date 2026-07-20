@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use lc_resources::{MutableGroup, MutableGroupError, PhysicalInfo};
+use lc_resources::{Group, MutableGroup, MutableGroupError, PhysicalInfo};
 use thiserror::Error;
 
 use crate::player_file::{CrewInfo, PlayerInfoCoreState};
@@ -37,22 +37,54 @@ pub enum LiveC4PlayerError {
         "crew `{crew}` owns a copied/custom portrait surface without retained pixels or a reconstruction source"
     )]
     UnreconstructablePortrait { crew: String },
+    #[error("failed to inspect the copied local player profile: {0}")]
+    LocalProfile(String),
     #[error(transparent)]
     Group(#[from] MutableGroupError),
 }
 
-/// Process-local C4Config inputs consulted by C4ObjectInfo::Save and the
-/// localized C4PlayerInfoCore compiler default.
+/// Native C4Player::Save flags, process-local C4Config inputs consulted by
+/// C4ObjectInfo::Save, and the localized C4PlayerInfoCore compiler default.
 #[derive(Debug, Clone, Copy)]
 pub struct LiveC4PlayerSaveOptions<'a> {
+    /// Native `C4Player::Save`'s `fSavegame` flag. Regular external player
+    /// files pass false and omit crew whose loaded definition sets
+    /// `TemporaryCrew`; embedded savegame/record/network groups pass true.
+    pub savegame: bool,
     pub add_new_crew_portraits: bool,
     pub save_default_portraits: bool,
     pub player_rank_name_default: &'a str,
 }
 
+/// Existing crew entries that native `C4ObjectInfo::Save` deletes while it
+/// updates a copied local profile. Omission alone is not a C4Group deletion,
+/// so the application applies this plan after overlaying serialized entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveC4CrewProfileCleanup {
+    /// Final filename used by the serialized update.
+    pub filename: Vec<u8>,
+    /// Filename held by C4ObjectInfo before this save. Empty for new crew.
+    pub original_filename: Vec<u8>,
+    /// Index in the player's runtime C4ObjectInfo list.
+    #[doc(hidden)]
+    pub roster_index: usize,
+    pub remove_default_portrait_png: bool,
+    pub remove_rank_png: bool,
+}
+
+/// The external-player synchronization image and its local-profile cleanup.
+/// Remote players are emitted as fresh tiny groups and have an empty cleanup
+/// plan because no original entries are copied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveC4SynchronizedPlayerGroup {
+    pub group: MutableGroup,
+    pub crew_cleanup: Vec<LiveC4CrewProfileCleanup>,
+}
+
 impl<'a> Default for LiveC4PlayerSaveOptions<'a> {
     fn default() -> Self {
         Self {
+            savegame: true,
             add_new_crew_portraits: true,
             save_default_portraits: true,
             player_rank_name_default: "Rank",
@@ -104,6 +136,123 @@ pub fn serialize_live_c4_player_with_options(
     )
 }
 
+/// Serialize the ordinary external `C4Player::Save()` synchronization path.
+///
+/// C++ copies and updates the original group only for `LocalControl`. A
+/// remote player is recreated in a fresh group with `fStoreTiny=true`, after
+/// stripping crew whose definitions are not loaded.
+pub fn serialize_live_c4_player_for_synchronization(
+    engine: &mut Engine,
+    player_number: i32,
+    filename: &[u8],
+    maker: &[u8],
+    local_control: bool,
+    original_profile: Option<&Group>,
+    options: LiveC4PlayerSaveOptions<'_>,
+) -> Result<LiveC4SynchronizedPlayerGroup, LiveC4PlayerError> {
+    let mut profile_entry_names = if local_control {
+        original_profile
+            .ok_or_else(|| {
+                LiveC4PlayerError::LocalProfile(
+                    "local synchronization requires the copied profile".to_string(),
+                )
+            })?
+            .entries()
+            .map_err(|error| LiveC4PlayerError::LocalProfile(error.to_string()))?
+            .into_iter()
+            .map(|entry| entry.name_bytes)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let state = engine.capture_state_for_network_save();
+    let player = state
+        .players
+        .iter()
+        .find(|player| player.id == player_number)
+        .ok_or(LiveC4PlayerError::PlayerNotFound(player_number))?;
+    let enumeration = local_player_value_enumeration(&state, player);
+    let synchronized = serialize_player_group_with_profile_policy(
+        &state,
+        player,
+        filename,
+        maker,
+        options,
+        &enumeration,
+        |info| {
+            let definition = engine.definition(&info.id);
+            // Ordinary external files omit TemporaryCrew. Remote Strip also
+            // removes unresolved definitions, while local files retain them.
+            definition.is_some_and(|definition| definition.temporary_crew == 0)
+                || (local_control && definition.is_none())
+        },
+        !local_control,
+        |info, used| {
+            if local_control {
+                resolve_local_profile_crew_filename(info, &mut profile_entry_names)
+            } else {
+                retained_or_unique_crew_filename(info, used)
+            }
+        },
+        |info| {
+            if local_control {
+                materialize_live_portrait(engine, info, options)?;
+            } else {
+                clear_portrait_payload(info);
+            }
+
+            let mut remove_rank_png = false;
+            if let Some(definition) = engine.definition(&info.id) {
+                crate::update_custom_rank_fields(
+                    &mut info.rank_name,
+                    &mut info.core,
+                    info.rank,
+                    definition.rank_names(),
+                    definition.rank_base(),
+                );
+                if local_control {
+                    remove_rank_png = definition.rank_symbols_image().is_none();
+                    info.core.rank_png =
+                        render_live_rank_symbol(engine, &info.id, info.rank)?.unwrap_or_default();
+                } else {
+                    info.core.rank_png.clear();
+                }
+            } else {
+                info.core.rank_png.clear();
+            }
+
+            Ok(ProfileCrewMutation {
+                track_local_profile: local_control,
+                // C4ObjectInfo.cpp:240-247 only removes the copied PNG pair
+                // when default portraits are disabled and the specification
+                // is not a custom portrait. The overlay applies the further
+                // native `FindEntry(Portrait.png)` gate.
+                remove_default_portrait_png: local_control
+                    && !options.save_default_portraits
+                    && info.core.portrait_file != "custom",
+                // With a loaded def but no pRankSymbols, C++ explicitly
+                // deletes Rank.png. Missing defs and failed draws retain it.
+                remove_rank_png: local_control && remove_rank_png,
+            })
+        },
+    )?;
+
+    // C4ObjectInfo::Save mutates Filename when a local child is first named
+    // or successfully renamed. Retain that mutation so a later sync updates
+    // the same child instead of recreating the obsolete filename.
+    if local_control {
+        if let Some(roster) = engine.crew_rosters.get_mut(&player_number) {
+            for cleanup in &synchronized.crew_cleanup {
+                if let Some(info) = roster.get_mut(cleanup.roster_index) {
+                    info.core.original_filename =
+                        lc_script::c4_string_from_bytes(&cleanup.filename);
+                }
+            }
+        }
+    }
+    Ok(synchronized)
+}
+
 /// Serialize with the C4StringTable enumeration produced by the enclosing
 /// live scenario save. Native C++ enumerates once, then reuses those `S<n>`
 /// IDs while writing every embedded player and crew group.
@@ -128,6 +277,7 @@ pub fn serialize_live_c4_player_with_options_and_enumeration(
         maker,
         options,
         enumeration,
+        |info| should_serialize_crew_definition(engine, &info.id, options.savegame),
         |info| {
             materialize_live_portrait(engine, info, options)?;
             if let Some(definition) = engine.definition(&info.id) {
@@ -181,8 +331,18 @@ pub fn serialize_live_c4_player_state(
         maker,
         LiveC4PlayerSaveOptions::default(),
         &enumeration,
+        |_| true,
         |_| Ok(()),
     )
+}
+
+fn should_serialize_crew_definition(engine: &Engine, id: &str, savegame: bool) -> bool {
+    // C4ObjectInfoList::Save only applies the TemporaryCrew filter to
+    // regular player files. An unresolved definition is retained.
+    savegame
+        || engine
+            .definition(id)
+            .is_none_or(|definition| definition.temporary_crew == 0)
 }
 
 fn local_player_value_enumeration(
@@ -233,8 +393,47 @@ fn serialize_player_group(
     maker: &[u8],
     options: LiveC4PlayerSaveOptions<'_>,
     enumeration: &LiveC4ValueEnumeration,
+    include_crew: impl FnMut(&CrewInfo) -> bool,
     mut refresh_rank: impl FnMut(&mut CrewInfo) -> Result<(), LiveC4PlayerError>,
 ) -> Result<MutableGroup, LiveC4PlayerError> {
+    Ok(serialize_player_group_with_profile_policy(
+        state,
+        player,
+        filename,
+        maker,
+        options,
+        enumeration,
+        include_crew,
+        false,
+        retained_or_unique_crew_filename,
+        |info| {
+            refresh_rank(info)?;
+            Ok(ProfileCrewMutation::default())
+        },
+    )?
+    .group)
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ProfileCrewMutation {
+    track_local_profile: bool,
+    remove_default_portrait_png: bool,
+    remove_rank_png: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serialize_player_group_with_profile_policy(
+    state: &EngineState,
+    player: &PlayerState,
+    filename: &[u8],
+    maker: &[u8],
+    options: LiveC4PlayerSaveOptions<'_>,
+    enumeration: &LiveC4ValueEnumeration,
+    mut include_crew: impl FnMut(&CrewInfo) -> bool,
+    store_tiny: bool,
+    mut resolve_filename: impl FnMut(&CrewInfo, &[Vec<u8>]) -> Vec<u8>,
+    mut refresh_crew: impl FnMut(&mut CrewInfo) -> Result<ProfileCrewMutation, LiveC4PlayerError>,
+) -> Result<LiveC4SynchronizedPlayerGroup, LiveC4PlayerError> {
     let mut group = MutableGroup::new_bytes(filename.to_vec());
     group.set_maker_bytes(maker);
     group.add_file(
@@ -249,25 +448,43 @@ fn serialize_player_group(
         .unwrap_or_default();
     let order = normalized_roster_order(state, player.id, roster.len());
     let mut used_filenames = Vec::<Vec<u8>>::with_capacity(roster.len());
+    let mut crew_cleanup = Vec::with_capacity(roster.len());
 
     // C4ObjectInfoList::Save walks GetLast()/GetPrevious(): the inverse of
     // its First->Next traversal.  This matters before sorting because the
     // first stripped-name collision keeps the unnumbered filename.
     for &index in order.iter().rev() {
+        if !include_crew(&roster[index]) {
+            continue;
+        }
         let mut info = roster[index].clone();
-        refresh_rank(&mut info)?;
-        let child_name = retained_or_unique_crew_filename(&info, &used_filenames);
+        let mutation = refresh_crew(&mut info)?;
+        let child_name = resolve_filename(&info, &used_filenames);
         let mut child = MutableGroup::new_bytes(child_name.clone());
         child.set_maker_bytes(maker);
         child.add_file("ObjectInfo.txt", serialize_object_info(&info, enumeration)?)?;
+        if !store_tiny {
         add_retained_portrait_files(&mut child, &info)?;
+        }
         child.sort(C4FLS_OBJECT);
         group.add_child_bytes(child_name.clone(), child)?;
+        if mutation.track_local_profile {
+            crew_cleanup.push(LiveC4CrewProfileCleanup {
+                filename: child_name.clone(),
+                original_filename: c4_c_string_bytes(&info.core.original_filename, usize::MAX),
+                roster_index: index,
+                remove_default_portrait_png: mutation.remove_default_portrait_png,
+                remove_rank_png: mutation.remove_rank_png,
+            });
+        }
         used_filenames.push(child_name);
     }
 
     group.sort(C4FLS_PLAYER);
-    Ok(group)
+    Ok(LiveC4SynchronizedPlayerGroup {
+        group,
+        crew_cleanup,
+    })
 }
 
 fn normalized_roster_order(state: &EngineState, player: i32, roster_len: usize) -> Vec<usize> {
@@ -295,6 +512,41 @@ fn retained_or_unique_crew_filename(info: &CrewInfo, used: &[Vec<u8>]) -> Vec<u8
     } else {
         unique_crew_filename(&info.name, used)
     }
+}
+
+/// Resolve C4ObjectInfo::Save's local copied-group rename path. `entries`
+/// tracks the group after earlier crew in native reverse-list save order.
+fn resolve_local_profile_crew_filename(info: &CrewInfo, entries: &mut Vec<Vec<u8>>) -> Vec<u8> {
+    let original = c4_c_string_bytes(&info.core.original_filename, usize::MAX);
+    let desired = unique_crew_filename(&info.name, &[]);
+    let mut final_name = original.clone();
+
+    if original.is_empty() {
+        final_name = unique_crew_filename(&info.name, entries);
+    } else if !original.eq_ignore_ascii_case(&desired)
+        && !entries
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(&desired))
+    {
+        // Rename succeeds only if the old entry is present. A fresh group
+        // (remote/embedded save) therefore retains Filename, while the copied
+        // local profile adopts the name-derived filename.
+        if let Some(index) = entries
+            .iter()
+            .position(|entry| entry.eq_ignore_ascii_case(&original))
+        {
+            entries[index] = desired.clone();
+            final_name = desired;
+        }
+    }
+
+    if !entries
+        .iter()
+        .any(|entry| entry.eq_ignore_ascii_case(&final_name))
+    {
+        entries.push(final_name.clone());
+    }
+    final_name
 }
 
 fn add_retained_portrait_files(
@@ -1030,6 +1282,209 @@ fn make_filename_from_title(title: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_savegame_flag_controls_temporary_crew_omission() {
+        let mut engine = Engine::new();
+        let mut temporary = crate::Definition::from_script("TEMP", "Temporary", "")
+            .expect("temporary definition compiles");
+        temporary.temporary_crew = 1;
+        engine
+            .register_definition(temporary)
+            .expect("temporary definition registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("CREW", "Regular", "")
+                    .expect("regular definition compiles"),
+            )
+            .expect("regular definition registers");
+
+        assert!(!should_serialize_crew_definition(&engine, "TEMP", false));
+        assert!(should_serialize_crew_definition(&engine, "TEMP", true));
+        assert!(should_serialize_crew_definition(&engine, "CREW", false));
+        assert!(
+            should_serialize_crew_definition(&engine, "MISS", false),
+            "C++ retains crew when C4Id2Def cannot resolve its definition"
+        );
+    }
+
+    fn synchronized_crew(id: &str, filename: &str) -> CrewInfo {
+        CrewInfo {
+            id: id.to_string(),
+            name: filename.trim_end_matches(".c4i").to_string(),
+            death_message: String::new(),
+            core: crate::CrewInfoCoreFields {
+                original_filename: filename.to_string(),
+                portrait_file: "Portrait1".to_string(),
+                portrait_png: vec![1, 2, 3],
+                portrait_overlay_png: vec![4, 5, 6],
+                rank_png: vec![7, 8, 9],
+                ..crate::CrewInfoCoreFields::default()
+            },
+            rank: 0,
+            rank_name: "Clonk".to_string(),
+            experience: 0,
+            rounds: 0,
+            physical: PhysicalInfo::default(),
+            death_count: 0,
+            total_playing_time: 0,
+            birthday: 0,
+            age: 0,
+            participation: 1,
+            in_action: false,
+            was_in_action: false,
+            in_action_time: 0,
+            has_died: false,
+            extra_data: Vec::new(),
+            portraits: crate::CrewPortraitState::default(),
+        }
+    }
+
+    #[test]
+    fn local_profile_crew_rename_respects_existing_target_and_new_name_numbering() {
+        let mut renamed = synchronized_crew("GOOD", "Old.c4i");
+        renamed.name = "New".to_string();
+        let mut entries = vec![b"Old.c4i".to_vec()];
+        assert_eq!(
+            resolve_local_profile_crew_filename(&renamed, &mut entries),
+            b"New.c4i"
+        );
+        assert_eq!(entries, vec![b"New.c4i".to_vec()]);
+
+        let mut blocked = synchronized_crew("GOOD", "Old.c4i");
+        blocked.name = "New".to_string();
+        let mut entries = vec![b"Old.c4i".to_vec(), b"New.c4i".to_vec()];
+        assert_eq!(
+            resolve_local_profile_crew_filename(&blocked, &mut entries),
+            b"Old.c4i",
+            "an occupied target suppresses C4Group::Rename"
+        );
+
+        let mut fresh = synchronized_crew("GOOD", "");
+        fresh.name = "New".to_string();
+        let mut entries = vec![b"New.c4i".to_vec(), b"New1.c4i".to_vec()];
+        assert_eq!(
+            resolve_local_profile_crew_filename(&fresh, &mut entries),
+            b"New2.c4i"
+        );
+    }
+
+    #[test]
+    fn local_profile_serialization_reports_native_omitted_asset_cleanup() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                crate::Definition::from_script("GOOD", "Crew", "").expect("definition compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_player(crate::PlayerConfig::new(1, "Local").with_player_info_id(7))
+            .expect("player registers");
+        let mut live_crew = synchronized_crew("GOOD", "Old Crew.c4i");
+        live_crew.name = "Renamed Crew".to_string();
+        // C4Portrait_Custom is compared with case-sensitive SEqual. An
+        // uppercase specification is not custom and must allow deletion.
+        live_crew.core.portrait_file = "CUSTOM".to_string();
+        engine.crew_rosters.insert(1, vec![live_crew]);
+        let mut original = MutableGroup::new("Local.c4p");
+        let mut original_crew = MutableGroup::new("Old Crew.c4i");
+        original_crew
+            .add_file("ObjectInfo.txt", b"old core".to_vec())
+            .expect("original crew core");
+        original
+            .add_child("Old Crew.c4i", original_crew)
+            .expect("original crew");
+        let original = Group::from_raw_memory(
+            std::path::PathBuf::from("Local.c4p"),
+            original.pack_raw().expect("original profile packs"),
+        )
+        .expect("original profile opens");
+
+        let synchronized = serialize_live_c4_player_for_synchronization(
+            &mut engine,
+            1,
+            b"Local.c4p",
+            b"Maker",
+            true,
+            Some(&original),
+            LiveC4PlayerSaveOptions {
+                savegame: false,
+                save_default_portraits: false,
+                ..LiveC4PlayerSaveOptions::default()
+            },
+        )
+        .expect("local profile serializes");
+        assert_eq!(
+            synchronized.crew_cleanup,
+            vec![LiveC4CrewProfileCleanup {
+                filename: b"Renamed Crew.c4i".to_vec(),
+                original_filename: b"Old Crew.c4i".to_vec(),
+                roster_index: 0,
+                remove_default_portrait_png: true,
+                remove_rank_png: true,
+            }]
+        );
+        let reopened = lc_resources::Group::from_raw_memory(
+            std::path::PathBuf::from("Local.c4p"),
+            synchronized.group.pack_raw().expect("profile packs"),
+        )
+        .expect("profile opens");
+        let crew = reopened.open_child("Renamed Crew.c4i").expect("crew opens");
+        assert!(!crew.exists("Portrait.png"));
+        assert!(!crew.exists("PortraitOverlay.png"));
+        assert!(!crew.exists("Rank.png"));
+        assert_eq!(
+            engine.crew_rosters[&1][0].core.original_filename,
+            "Renamed Crew.c4i"
+        );
+    }
+
+    #[test]
+    fn remote_profile_serialization_is_fresh_tiny_and_strips_missing_defs() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                crate::Definition::from_script("GOOD", "Crew", "").expect("definition compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_player(crate::PlayerConfig::new(2, "Remote").with_player_info_id(8))
+            .expect("player registers");
+        engine.crew_rosters.insert(
+            2,
+            vec![
+                synchronized_crew("GOOD", "Valid.c4i"),
+                synchronized_crew("MISS", "Missing.c4i"),
+            ],
+        );
+
+        let synchronized = serialize_live_c4_player_for_synchronization(
+            &mut engine,
+            2,
+            b"Remote.c4p",
+            b"Maker",
+            false,
+            None,
+            LiveC4PlayerSaveOptions {
+                savegame: false,
+                ..LiveC4PlayerSaveOptions::default()
+            },
+        )
+        .expect("remote profile serializes");
+        assert!(synchronized.crew_cleanup.is_empty());
+        let reopened = lc_resources::Group::from_raw_memory(
+            std::path::PathBuf::from("Remote.c4p"),
+            synchronized.group.pack_raw().expect("profile packs"),
+        )
+        .expect("profile opens");
+        assert_eq!(reopened.entries().expect("enumerate profile").len(), 2);
+        assert!(reopened.exists("Player.txt"));
+        assert!(reopened.exists("Valid.c4i"));
+        assert!(!reopened.exists("Missing.c4i"));
+        let crew = reopened.open_child("Valid.c4i").expect("crew opens");
+        assert_eq!(crew.entries().expect("enumerate crew").len(), 1);
+        assert!(crew.exists("ObjectInfo.txt"));
+    }
 
     #[test]
     fn player_core_uses_cpp_field_order_and_compile_defaults() {

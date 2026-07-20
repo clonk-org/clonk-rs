@@ -13,6 +13,7 @@ mod clonk_fonts;
 mod control_message;
 mod control_options;
 mod desktop_notification;
+mod developer_console_save;
 mod display_sleep_inhibitor;
 mod draw_commands;
 mod game_message;
@@ -27,6 +28,7 @@ mod network;
 mod network_host_preparation;
 mod network_team_assignment;
 mod object_menu;
+mod offline_savegame;
 mod offline_startup;
 mod prepared_host_bootstrap;
 mod runtime_join_save;
@@ -115,27 +117,33 @@ use lc_frontend::context_menu::{
     ContextMenuEvent, ContextMenuIcon, ContextMenuOutcome, ContextMenuPointerButton,
     ContextMenuSound,
 };
+use lc_frontend::developer_console::{
+    ConsoleClientRow, ConsoleEditMode, ConsolePathRequest, ConsolePlayerRow, ConsoleSaveKind,
+    ConsoleStrings, ConsoleViewModel, DeveloperConsole, DeveloperConsoleAction,
+    DeveloperConsoleKey,
+};
 use lc_frontend::game_lobby::{
+    core_lobby_option_rows, core_runtime_option_rows, team_lobby_option_rows,
     GameLobby as ClassicGameLobby, LobbyAction as ClassicLobbyAction, LobbyChatClipboardShortcut,
     LobbyChatContextCommand, LobbyChatEditKey, LobbyChatEditView, LobbyChatKeyModifiers,
     LobbyChatRequest, LobbyClientRow, LobbyClientStatus, LobbyControl, LobbyGameOptionInput,
     LobbyHeaderRow, LobbyJoinedPlayerOverlay, LobbyLabels, LobbyLayout, LobbyLogLine,
     LobbyOptionKind, LobbyOptionLabels, LobbyOptionRow, LobbyPlayerRow, LobbyResourceRow,
-    LobbyResources, LobbyRole, LobbyRosterHeader, LobbyRosterIcon, LobbyRosterId, LobbyRosterLayout,
-    LobbyRosterRow, LobbyScenarioText, LobbySheet, LobbySound, LobbyTeamValue,
-    LobbyTeamOptionState, core_lobby_option_rows, core_runtime_option_rows, team_lobby_option_rows,
+    LobbyResources, LobbyRole, LobbyRosterHeader, LobbyRosterIcon, LobbyRosterId,
+    LobbyRosterLayout, LobbyRosterRow, LobbyScenarioText, LobbySheet, LobbySound,
+    LobbyTeamOptionState, LobbyTeamValue,
 };
 use lc_frontend::game_option_buttons::{
     FairCrewConstraint, GameOptionAction, GameOptionButton, GameOptionButtons, GameOptionContext,
     GameOptionGamepadDirection, GameOptionInputDialogRequest, GameOptionInputDialogResult,
     GameOptionInputKind, GameOptionSound, GameOptionValues,
 };
+use lc_frontend::hud::MESSAGE_BOARD_MAX_FADING_LINES;
 use lc_frontend::input_dialog::{
     InputDialogAction, InputDialogClipboardShortcut, InputDialogContextCommand,
     InputDialogContextLabels, InputDialogControl, InputDialogController, InputDialogEditKey,
     InputDialogIcon, InputDialogKeyModifiers, InputDialogPlacement, InputDialogSound,
 };
-use lc_frontend::hud::MESSAGE_BOARD_MAX_FADING_LINES;
 use lc_frontend::loader_screen::{
     LoaderRenderConfig, LoaderResources, LoaderScreen, LoaderSelection, LoaderState, LoaderUpdate,
     STARTUP_LOADER_SPECIFICATION,
@@ -148,22 +156,20 @@ use lc_frontend::startup_plrsel::{
     PlrSelControl, PlrSelCrewContextCommand, PlrSelPlayerContextCommand,
 };
 use lc_frontend::{
-    ActiveViewportProjection, ColorByOwnerMask, CrewNameOverlay, CrewOverlay, CursorAtlas,
-    DefinitionDebugGeometry,
+    default_owner_color, viewport_edge_scroll, viewport_edge_scroll_at, ActiveViewportProjection,
+    ColorByOwnerMask, CrewNameOverlay, CrewOverlay, CursorAtlas, DefinitionDebugGeometry,
     DefinitionSprite, GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics,
     ImageData, InputDispatcher, InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction,
     MainMenuItem, MaterialRenderInfo, MessageBoardMode, MessageBoardOverlay, MouseCursorPhase,
-    PlayerOverlay,
-    ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction,
-    StartupTooltip, ViewportEdgeScroll, ViewportInput, ViewportPointer, default_owner_color,
-    viewport_edge_scroll, viewport_edge_scroll_at,
+    PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu,
+    StartupMenuAction, StartupTooltip, ViewportEdgeScroll, ViewportInput, ViewportPointer,
+};
+use lc_graphics::clonk_font::{
+    font_image_lookup_tag, inline_image_token, FontImageProvider, FontImageRef,
 };
 use lc_graphics::{
     BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, RgbaSurfaceViewMut,
     Surface, TextFont, Transform, TrueTypeFont,
-};
-use lc_graphics::clonk_font::{
-    FontImageProvider, FontImageRef, font_image_lookup_tag, inline_image_token,
 };
 use lc_gui::{ButtonTextures, Rect as GuiRect};
 use lc_network::{
@@ -172,11 +178,10 @@ use lc_network::{
 };
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
-    DefCore as ResourceDefCore, DefinitionError as ResourceDefinitionError, FontCatalog, FontRole,
-    GraphicsError, GraphicsImage, GraphicsResource, Group, GroupError, LanguagePacks, MutableGroup,
+    load_endeavour_font, scenario as resource_scenario, DefCore as ResourceDefCore,
+    DefinitionError as ResourceDefinitionError, FontCatalog, FontRole, GraphicsError,
+    GraphicsImage, GraphicsResource, Group, GroupError, LanguagePacks, MutableGroup,
     MutableGroupChildMut, ResolvedFontSpec, ResourceDefinition as ResourceDefinitionData,
-    load_endeavour_font,
-    scenario as resource_scenario,
 };
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
 use menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
@@ -188,20 +193,20 @@ use network::{
 use network_host_preparation::NetworkHostPreparation;
 use network_team_assignment::{NetworkTeamAssignmentState, NetworkTeamControlError};
 use object_menu::{
-    EngineScriptMenuLayout, EngineScriptMenuPointerTarget,
-    EngineScriptMenuPresentationGeometry, MenuMode as AppObjectMenuMode, ObjectMenuAction,
-    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState, apply_definition_owner_color,
-    definition_menu_picture, engine_script_menu_inline_image_specs,
+    apply_definition_owner_color, definition_menu_picture, engine_script_menu_inline_image_specs,
     engine_script_menu_layout_with_free_anchor, engine_script_menu_layout_with_presentation,
     engine_script_menu_pointer_target_with_free_anchor,
     engine_script_menu_pointer_target_with_presentation,
     engine_script_menu_presentation_geometry,
     engine_script_menu_presentation_geometry_with_free_anchor,
-    render_engine_script_menu_with_gamma,
-    resolve_engine_script_menu_footer, validate_menu_decoration_for_area,
+    render_engine_script_menu_with_gamma, resolve_engine_script_menu_footer,
+    validate_menu_decoration_for_area, EngineScriptMenuLayout, EngineScriptMenuPointerTarget,
+    EngineScriptMenuPresentationGeometry, MenuMode as AppObjectMenuMode, ObjectMenuAction,
+    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState,
 };
+use offline_savegame::{prepare_offline_savegame_startup, OfflineSavegameStartup};
 use offline_startup::{
-    OfflineStartupPlayers, offline_player_paths_identical, offline_player_real_path,
+    offline_player_paths_identical, offline_player_real_path, OfflineStartupPlayers,
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
@@ -976,6 +981,7 @@ struct ScenarioLoadingState {
     log: Vec<String>,
     prepared_go: Option<PreparedGoLoadingState>,
     offline_startup_players: Option<OfflineStartupPlayers>,
+    offline_savegame: Option<OfflineSavegameStartup>,
     /// Fresh local-round Parameters.RandomSeed, frozen before the async
     /// loader creates the dynamic landscape and reused for Engine creation.
     offline_random_seed: Option<u64>,
@@ -1001,6 +1007,7 @@ impl ScenarioLoadingState {
             log: Vec::new(),
             prepared_go: None,
             offline_startup_players: None,
+            offline_savegame: None,
             offline_random_seed: None,
         }
     }
@@ -1060,6 +1067,7 @@ impl ScenarioLoadingState {
                 team_registry,
             }),
             offline_startup_players: None,
+            offline_savegame: None,
             offline_random_seed: None,
         }
     }
@@ -4137,7 +4145,11 @@ fn startup_resource_string(paths: Option<&AppPaths>, key: &str, fallback: &str) 
 
 fn format_resource_string(mut template: String, arguments: &[&str]) -> String {
     for argument in arguments {
-        let placeholder = [template.find("%s"), template.find("%d")]
+        let placeholder = [
+            template.find("%s"),
+            template.find("%d"),
+            template.find("%i"),
+        ]
             .into_iter()
             .flatten()
             .min();
@@ -4156,7 +4168,11 @@ fn format_resource_string_with_opaque_arguments(template: String, arguments: &[&
     let mut output = String::with_capacity(template.len());
     let mut remainder = template.as_str();
     for argument in arguments {
-        let placeholder = [remainder.find("%s"), remainder.find("%d")]
+        let placeholder = [
+            remainder.find("%s"),
+            remainder.find("%d"),
+            remainder.find("%i"),
+        ]
             .into_iter()
             .flatten()
             .min();
@@ -5068,6 +5084,48 @@ impl AdmissionResourceStore {
             Some(AdmissionResourceState::Complete { path, .. }) => Some(path),
             _ => None,
         }
+    }
+
+    /// Resolve the newest official resource in a C4Network2Res derivation
+    /// chain rooted at a PlayerInfo resource.
+    fn derivation_target(&self, root_resource_id: i32) -> Option<i32> {
+        if !matches!(
+            self.resources.get(&root_resource_id),
+            Some(AdmissionResourceState::Complete { .. })
+        ) {
+            return None;
+        }
+        let mut current_resource_id = root_resource_id;
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(current_resource_id) {
+                return None;
+            }
+            let Some(next_resource_id) = self
+                .resource_cores
+                .values()
+                .filter(|core| core.derived_id == current_resource_id)
+                .map(|core| core.id)
+                .max()
+            else {
+                return Some(current_resource_id);
+            };
+            current_resource_id = next_resource_id;
+        }
+    }
+
+    fn register_finished_derivation(
+        &mut self,
+        core: &lc_engine::NetworkResourceCore,
+        mutable_path: PathBuf,
+        ownership: lc_network::ResourceFileOwnership,
+    ) {
+        self.register_lobby_resource(core);
+        self.mark_complete_with_locality(
+            core.id,
+            mutable_path,
+            ownership == lc_network::ResourceFileOwnership::Persistent,
+        );
     }
 
     fn mark_complete(&mut self, resource_id: i32, path: PathBuf) {
@@ -7703,6 +7761,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let classic = parse_classic_command_line(&cli.classic_arguments);
     install_classic_language_override(&classic);
+    let console_log_capture = classic.console.then(lc_logging::ConsoleLogCapture::default);
 
     let explicit_config = classic
         .config_file
@@ -7711,7 +7770,11 @@ fn main() -> Result<()> {
     let app_paths = discover_validated_startup_paths(explicit_config)?;
     if let Some(paths) = app_paths.as_ref() {
         let log_path = paths.logs_dir().join("Clonk.log");
-        match lc_logging::init_verbose_with_file(classic.verbose, &log_path) {
+        match lc_logging::init_verbose_with_file_and_capture(
+            classic.verbose,
+            &log_path,
+            console_log_capture.clone(),
+        ) {
             Ok(()) => tracing::info!(
                 path = %log_path.display(),
                 "engine session log initialized"
@@ -7723,7 +7786,11 @@ fn main() -> Result<()> {
             ),
         }
     } else {
+        if let Some(capture) = console_log_capture.clone() {
+            lc_logging::init_verbose_with_capture(classic.verbose, capture);
+    } else {
         lc_logging::init_verbose(classic.verbose);
+    }
     }
     if let Some(paths) = app_paths.as_ref() {
         if let Err(err) = paths.ensure_user_dirs() {
@@ -7775,26 +7842,6 @@ fn main() -> Result<()> {
     }
 
     let audio_options = AudioOptions::load(app_paths.as_deref());
-    if classic.console {
-        let (logical_width, logical_height) = DisplayOptions::default().actual_size();
-        let mut app = GameApp::new(
-            logical_width,
-            logical_height,
-            audio_options,
-            app_paths.as_deref(),
-            runtime,
-        )
-        .context("failed to initialise console app state")?;
-        app.console_mode = true;
-        app.set_display_mode(DisplayMode::Window);
-        app.apply_classic_command_line(&classic)?;
-        app.auto_start_sandbox = cli.sandbox;
-        app.launch_classic_command_line_join()
-            .context("failed to start command-line network join")?;
-        app.launch_classic_command_line_scenario()
-            .context("failed to start command-line scenario")?;
-        return run_console_event_loop(app, spawn_console_stdin_reader()?);
-    }
     if let Some(paths) = app_paths.as_deref() {
         validate_classic_loader_graphics_config(paths).map_err(|error| {
             anyhow::Error::new(report_classic_parity_boundary(
@@ -7806,7 +7853,14 @@ fn main() -> Result<()> {
         })?;
     }
     let mut display_options = DisplayOptions::load(app_paths.as_deref());
-    let (initial_width, initial_height) =
+    let (initial_width, initial_height) = if classic.console {
+        // C4Console's GTK shell uses a 320x320 native-pixel default and never
+        // inherits the fullscreen game window configuration.
+        display_options.mode = DisplayMode::Window;
+        display_options.maximized = false;
+        display_options.position = None;
+        (320, 320)
+    } else {
         display_options
             .checked_loader_actual_size()
             .map_err(|detail| {
@@ -7816,7 +7870,8 @@ fn main() -> Result<()> {
                         detail,
                     },
                 ))
-            })?;
+            })?
+    };
     let desktop_notifier = match DesktopNotifier::initialize() {
         Ok(notifier) => notifier,
         Err(error) => {
@@ -7833,6 +7888,9 @@ fn main() -> Result<()> {
     )
         .build(&event_loop)
         .context("failed to create application window")?;
+    if classic.console {
+        window.set_title("LegacyClonk Console");
+    }
     let mut display_sleep_inhibitor = DisplaySleepInhibitor::acquire();
     if display_options.maximized && matches!(display_options.mode, DisplayMode::Window) {
         window.set_maximized(true);
@@ -7858,8 +7916,15 @@ fn main() -> Result<()> {
     // The app lays out and renders at the GUI resolution; the presenter
     // scales the finished frame to the window like the C++ engine scales
     // its GUI output (C4Gui.cpp:461).
-    let mut presenter =
-        lc_scaling::FramePresenter::new(display_options.scale, size.width, size.height);
+    let mut presenter = lc_scaling::FramePresenter::new(
+        if classic.console {
+            1.0
+        } else {
+            display_options.scale
+        },
+        size.width,
+        size.height,
+    );
     let (logical_width, logical_height) = presenter.logical_size();
 
     let mut app = GameApp::new(
@@ -7870,15 +7935,24 @@ fn main() -> Result<()> {
         runtime,
     )
     .context("failed to initialise app state")?;
+    app.console_mode = classic.console;
+    app.console_log_capture = console_log_capture;
+    if classic.console {
+        arm_configured_engine_debug_mode(&mut app.engine, app_paths.as_deref(), true);
+    }
     app.window_active = window.has_focus();
     app.set_display_mode(display_options.mode);
-    app.configure_native_startup_fonts(display_options.scale, display_options.point_filtering);
+    app.configure_native_startup_fonts(presenter.scale(), display_options.point_filtering);
     app.apply_classic_command_line(&classic)?;
     app.auto_start_sandbox = cli.sandbox;
     app.launch_classic_command_line_join()
         .context("failed to start command-line network join")?;
     app.launch_classic_command_line_scenario()
         .context("failed to start command-line scenario")?;
+    let mut console_commands = classic
+        .console
+        .then(spawn_console_stdin_reader)
+        .transpose()?;
 
     let mut deferred_fullscreen_retry_at = None;
     let mut previous_instant = Instant::now();
@@ -7917,6 +7991,42 @@ fn main() -> Result<()> {
                 }
             }
             Event::MainEventsCleared => {
+                let mut close_console_commands = false;
+                if let Some(commands) = console_commands.as_ref() {
+                    loop {
+                        match commands.try_recv() {
+                            Ok(ConsoleInputEvent::Command(command)) => {
+                                if let Err(error) = app.process_console_command(&command) {
+                                    tracing::error!(%error, command, "console command failed");
+                                }
+                            }
+                            Ok(ConsoleInputEvent::Eof) => {
+                                // The native developer window remains usable
+                                // when its optional terminal input closes.
+                                close_console_commands = true;
+                                break;
+                            }
+                            Ok(ConsoleInputEvent::Error(error)) => {
+                                tracing::warn!(%error, "console stdin reader stopped");
+                                close_console_commands = true;
+                                break;
+                            }
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => {
+                                close_console_commands = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if close_console_commands {
+                    console_commands = None;
+                }
+                app.drain_console_log_capture();
+                if app.sync_developer_console_view() {
+                    window.set_title(&app.developer_console.view_model().caption);
+                    window.request_redraw();
+                }
                 if let Err(err) = app.process_gamepad_events() {
                     tracing::error!(error = ?err, "gamepad input failed");
                     control_flow.set_exit();
@@ -8066,13 +8176,13 @@ fn main() -> Result<()> {
                 let graphics_started = Instant::now();
                 app.graphics.set_presentation_scale(presenter.scale());
                 let ordered_native_text =
-                    app.can_present_ordered_native_text(presenter.scale());
-                let defer_native_main_text = !ordered_native_text
-                    && app.can_defer_native_main_menu_text(presenter.scale());
-                let defer_native_loader_text = !ordered_native_text
-                    && app.can_defer_native_loader_text(presenter.scale());
-                let defer_native_game_messages = !ordered_native_text
-                    && app.can_defer_native_game_messages(presenter.scale());
+                    !app.console_mode && app.can_present_ordered_native_text(presenter.scale());
+                let defer_native_main_text =
+                    !ordered_native_text && app.can_defer_native_main_menu_text(presenter.scale());
+                let defer_native_loader_text =
+                    !ordered_native_text && app.can_defer_native_loader_text(presenter.scale());
+                let defer_native_game_messages =
+                    !ordered_native_text && app.can_defer_native_game_messages(presenter.scale());
                 let native_game_message_gamma = defer_native_game_messages.then(|| {
                     app.graphics
                         .active_gamma_ramp(&app.snapshot.environment.gamma)
@@ -8180,6 +8290,9 @@ fn main() -> Result<()> {
                 }
             }
             Event::LoopDestroyed => {
+                if app.console_mode {
+                    app.finish_console_shutdown();
+                }
                 if let Some(inhibitor) = display_sleep_inhibitor.take() {
                     inhibitor.release();
                 }
@@ -8207,7 +8320,7 @@ fn main() -> Result<()> {
             *control_flow,
             ControlFlow::Exit | ControlFlow::ExitWithCode(_)
         ) {
-            if !app.configuration_reset_requested {
+            if !app.configuration_reset_requested && !app.console_mode {
                 if let Some(paths) = app_paths.as_ref() {
                     display_options.persist_if_dirty(paths.as_ref());
                 }
@@ -8309,6 +8422,204 @@ fn advance_game_clock_from_elapsed(
     Ok(changed)
 }
 
+fn map_developer_console_key(key: VirtualKeyCode) -> Option<DeveloperConsoleKey> {
+    Some(match key {
+        VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => DeveloperConsoleKey::Enter,
+        VirtualKeyCode::Escape => DeveloperConsoleKey::Escape,
+        VirtualKeyCode::Back => DeveloperConsoleKey::Backspace,
+        VirtualKeyCode::Delete => DeveloperConsoleKey::Delete,
+        VirtualKeyCode::Left => DeveloperConsoleKey::Left,
+        VirtualKeyCode::Right => DeveloperConsoleKey::Right,
+        VirtualKeyCode::Home => DeveloperConsoleKey::Home,
+        VirtualKeyCode::End => DeveloperConsoleKey::End,
+        VirtualKeyCode::Up => DeveloperConsoleKey::Up,
+        VirtualKeyCode::Down => DeveloperConsoleKey::Down,
+        VirtualKeyCode::PageUp => DeveloperConsoleKey::PageUp,
+        VirtualKeyCode::PageDown => DeveloperConsoleKey::PageDown,
+        VirtualKeyCode::Tab => DeveloperConsoleKey::Tab,
+        VirtualKeyCode::Pause => DeveloperConsoleKey::Pause,
+        _ => return None,
+    })
+}
+
+fn developer_console_menu_mnemonic(key: VirtualKeyCode) -> Option<char> {
+    Some(match key {
+        VirtualKeyCode::F => 'f',
+        VirtualKeyCode::C => 'c',
+        VirtualKeyCode::P => 'p',
+        VirtualKeyCode::V => 'v',
+        VirtualKeyCode::N => 'n',
+        VirtualKeyCode::H => 'h',
+        _ => return None,
+    })
+}
+
+fn handle_developer_console_window_event(
+    window: &Window,
+    app: &mut GameApp,
+    pixels: &mut Pixels,
+    presenter: &mut lc_scaling::FramePresenter,
+    event: WindowEvent,
+    control_flow: &mut ControlFlow,
+) -> Result<()> {
+    let message_dialog_active = !app.message_dialogs.is_empty();
+    match event {
+        WindowEvent::CloseRequested => {
+            // A native modal C4Console::Message disables its parent window.
+            if !message_dialog_active {
+                app.request_exit();
+            }
+        }
+        WindowEvent::Resized(size)
+        | WindowEvent::ScaleFactorChanged {
+            new_inner_size: &mut size,
+            ..
+        } => {
+            let clamped = enforce_min_size(size);
+            pixels
+                .resize_surface(clamped.width, clamped.height)
+                .context("failed to resize console pixel surface")?;
+            pixels
+                .resize_buffer(clamped.width, clamped.height)
+                .context("failed to resize console pixel buffer")?;
+            presenter.resize(clamped.width, clamped.height);
+            let (width, height) = presenter.logical_size();
+            app.resize(width, height)?;
+            window.request_redraw();
+        }
+        WindowEvent::CursorMoved { position, .. } => {
+            let (x, y) = presenter.position_to_gui(position.x, position.y);
+            if message_dialog_active {
+                app.handle_cursor_moved(PhysicalPosition::new(x, y))?;
+            } else {
+                let point = GuiPoint::new(x as f32, y as f32);
+                app.developer_console_pointer = point;
+                app.developer_console.handle_pointer_move(point);
+                app.pointer_inside_window = true;
+            }
+            window.request_redraw();
+        }
+        WindowEvent::CursorEntered { .. } => {
+            app.pointer_inside_window = true;
+            window.request_redraw();
+        }
+        WindowEvent::CursorLeft { .. } => {
+            if message_dialog_active {
+                app.pointer_left()?;
+            } else {
+                app.pointer_inside_window = false;
+            }
+            window.request_redraw();
+        }
+        WindowEvent::MouseInput {
+            state,
+            button: MouseButton::Left,
+            ..
+        } => {
+            if message_dialog_active {
+                app.handle_mouse_button(state)?;
+            } else {
+                let surface = app.graphics.surface();
+                let (width, height) = (surface.width(), surface.height());
+                let point = app.developer_console_pointer;
+                match state {
+                    ElementState::Pressed => {
+                        app.developer_console
+                            .handle_pointer_down(point, width, height);
+                    }
+                    ElementState::Released => {
+                        let actions = app
+                            .developer_console
+                            .handle_pointer_up(point, width, height);
+                        app.dispatch_developer_console_actions(actions)?;
+                    }
+                }
+            }
+            window.request_redraw();
+        }
+        WindowEvent::MouseWheel { delta, .. } => {
+            if message_dialog_active {
+                app.handle_mouse_wheel(delta, presenter.scale())?;
+            } else {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as i32,
+                    MouseScrollDelta::PixelDelta(position) => (position.y / 15.0).round() as i32,
+                };
+                if lines != 0 {
+                    app.developer_console.scroll_log(lines);
+                    window.request_redraw();
+                }
+            }
+        }
+        WindowEvent::ModifiersChanged(modifiers) => {
+            if message_dialog_active {
+                app.handle_modifiers_changed(modifiers)?;
+            } else {
+                app.keyboard_modifiers = modifiers;
+            }
+        }
+        WindowEvent::KeyboardInput {
+            input:
+                KeyboardInput {
+                    state,
+                    virtual_keycode: Some(key),
+                    ..
+                },
+            ..
+        } => {
+            if message_dialog_active {
+                app.handle_key(key, state)?;
+                window.request_redraw();
+                return Ok(());
+            }
+            let pressed = state == ElementState::Pressed;
+            let alt_only = app.keyboard_modifiers == ModifiersState::ALT
+                || app.keyboard_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
+            if pressed
+                && alt_only
+                && developer_console_menu_mnemonic(key)
+                    .is_some_and(|mnemonic| app.developer_console.handle_menu_mnemonic(mnemonic))
+            {
+                window.request_redraw();
+            } else if let Some(key) = map_developer_console_key(key) {
+                let actions = app.developer_console.handle_key(key, pressed);
+                app.dispatch_developer_console_actions(actions)?;
+                window.request_redraw();
+            }
+        }
+        WindowEvent::ReceivedCharacter(character)
+            if !app
+                .keyboard_modifiers
+                .intersects(ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::LOGO) =>
+        {
+            if message_dialog_active {
+                app.handle_text_input(character)?;
+                window.request_redraw();
+            } else if app.developer_console.handle_character(character) {
+                window.request_redraw();
+            }
+        }
+        WindowEvent::Focused(focused) => {
+            app.window_active = focused;
+            if message_dialog_active {
+                if focused {
+                    app.handle_focus_gained()?;
+                } else {
+                    app.handle_focus_lost()?;
+                }
+            } else if !focused {
+                app.keyboard_modifiers = ModifiersState::empty();
+            }
+            window.request_redraw();
+        }
+        _ => {}
+    }
+    if app.take_exit_request() {
+        control_flow.set_exit();
+    }
+    Ok(())
+}
+
 fn handle_window_event(
     window: &Window,
     app: &mut GameApp,
@@ -8318,6 +8629,16 @@ fn handle_window_event(
     event: WindowEvent,
     control_flow: &mut ControlFlow,
 ) -> Result<()> {
+    if app.console_mode {
+        return handle_developer_console_window_event(
+            window,
+            app,
+            pixels,
+            presenter,
+            event,
+            control_flow,
+        );
+    }
     match event {
         WindowEvent::CloseRequested => app.handle_window_close_requested(),
         WindowEvent::Resized(size)
@@ -10861,6 +11182,9 @@ enum MenuTitleDrag {
 #[derive(Clone)]
 enum MessageDialogContinuation {
     None,
+    /// Native `C4Console::Message` blocks before an optional second status
+    /// dialog (the script-created-object warning precedes a save error).
+    DeveloperConsoleNotice { follow_up: Option<String> },
     StartupNetworkConnectProgress,
     StartupIrcConnectWarning {
         login: lc_frontend::startup_netdlg::NetDlgChatLogin,
@@ -13492,9 +13816,23 @@ struct GameApp {
     /// Process-local compatibility arguments applied after configuration is
     /// loaded. They must never be written back to the selected config file.
     classic_command_line: ClassicCommandLine,
-    /// Persistent non-windowed application policy selected by `/console`.
-    /// Unlike per-round classic arguments, `/open` must not reset this.
+    /// Persistent developer-window policy selected by `/console`. Unlike
+    /// per-round classic arguments, `/open` must not reset this.
     console_mode: bool,
+    developer_console: DeveloperConsole,
+    developer_console_edit_mode: ConsoleEditMode,
+    /// Native `C4Console::Editing` starts true and is irreversibly cleared
+    /// when `EnableControls` observes a no-input playback. Opening another
+    /// game defaults the edit cursor mode, but does not restore this latch.
+    developer_console_editing_enabled: bool,
+    developer_console_pointer: GuiPoint,
+    /// Thread-safe tracing mirror drained by the console window each app
+    /// iteration. It remains `None` for the fullscreen client.
+    console_log_capture: Option<lc_logging::ConsoleLogCapture>,
+    /// C4Game::fScriptCreatedObjects: set only when Scenario Initialize
+    /// changed the live object count and cleared after the scenario-save
+    /// double-object warning.
+    script_created_objects: bool,
     /// Optional targeted crew-definition source for pathless sandbox
     /// fixtures. This is deliberately separate from `app_paths`: it must not
     /// make unrelated app subsystems appear install-initialized, but it does
@@ -13538,6 +13876,9 @@ struct GameApp {
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
     network_sync: NetworkSyncGate,
+    /// `C4GameControl::Input` packets produced outside the simulation in a
+    /// local game. They execute together at the next control-rate frame.
+    offline_control_input: Vec<NetworkControl>,
     /// Offline counterpart of C4Game::HaltCount. Native assigns this as a
     /// boolean from Pause/Unpause and tests it after Control.Prepare, leaving
     /// the outer event and graphics loops alive while simulation is stopped.
@@ -13596,6 +13937,11 @@ struct GameApp {
     network_client_next_control_ticks: HashMap<i32, i32>,
     network_client_activity: NetworkClientActivity,
     control_player_infos: ControlPlayerInfoRegistry,
+    /// Physical profile group retained for each locally admitted PlayerInfo.
+    /// C4Player keeps this as `Filename`; the Rust control packet carries only
+    /// a legacy presentation path, so retain the resolved path separately for
+    /// `C4PlayerList::SynchronizeLocalFiles`.
+    local_player_profile_paths: HashMap<i32, PathBuf>,
     /// Native restart handoff captured at full game initialization and kept
     /// across the next same-scenario lobby only.
     restart_restore_infos: RestartRestoreInfos,
@@ -13641,8 +13987,15 @@ struct GameApp {
     executing_ready_tick: Option<Tick>,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
+    /// Scenario and parameter inputs shared by developer saves and
+    /// non-initial records. This survives consuming `recording_template`.
+    live_save_seed: Option<RuntimeRecordingSeed>,
     recording_template: Option<RecordingTemplate>,
     recording: Option<RecordingSession>,
+    /// `C4GameControl::fRecordNeeded`: set as soon as the developer console
+    /// requests a runtime record and cleared only when its queued
+    /// `CID_Synchronize` starts the record (or submission fails).
+    runtime_record_requested: bool,
     control_playback: Option<ControlRecordPlayback>,
     local_owner: i32,
     player_name: String,
@@ -13978,6 +14331,23 @@ struct RecordingTemplate {
     group: MutableGroup,
     output_path: PathBuf,
     initial_stream_chunk: Vec<u8>,
+    runtime_seed: Option<RuntimeRecordingSeed>,
+}
+
+#[derive(Clone)]
+struct RuntimeRecordingSeed {
+    /// `Game.Parameters.Scenario`: retained across FileSaveAs and used by
+    /// C4Record::Start to derive the record basename.
+    scenario_path: PathBuf,
+    /// `Game.ScenarioFilename`: retargeted by FileSaveAs and copied by the
+    /// non-initial C4GameSaveRecord.
+    scenario_source_path: PathBuf,
+    scenario_identifier: String,
+    scenario_title: LegacyCString,
+    definition_modules: Vec<String>,
+    scenario_origin: String,
+    parameters: lc_network::JoinGameParametersEnvelope,
+    scenario_defaults: lc_network::InitialNetworkScenarioDefaults,
 }
 
 struct RecordingSession {
@@ -21040,6 +21410,159 @@ fn current_unix_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClassicCalendarTime {
+    day: i32,
+    month: i32,
+    year: i32,
+    hour: i32,
+    minute: i32,
+}
+
+fn utc_calendar_time_now() -> ClassicCalendarTime {
+    let now = OffsetDateTime::now_utc();
+    ClassicCalendarTime {
+        day: i32::from(now.day()),
+        month: i32::from(u8::from(now.month())),
+        year: now.year(),
+        hour: i32::from(now.hour()),
+        minute: i32::from(now.minute()),
+    }
+}
+
+/// C4GameSave uses C `localtime` for save descriptions. Use the re-entrant
+/// platform counterpart so the Rust console records the same local calendar
+/// values without introducing another date/time dependency.
+#[cfg(all(unix, target_pointer_width = "64"))]
+fn classic_calendar_time_now() -> ClassicCalendarTime {
+    #[repr(C)]
+    struct Ctm {
+        sec: i32,
+        min: i32,
+        hour: i32,
+        mday: i32,
+        mon: i32,
+        year: i32,
+        wday: i32,
+        yday: i32,
+        isdst: i32,
+        gmtoff: i64,
+        zone: *const std::ffi::c_char,
+    }
+    unsafe extern "C" {
+        fn localtime_r(time: *const i64, result: *mut Ctm) -> *mut Ctm;
+    }
+
+    let timestamp = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+    let mut raw = std::mem::MaybeUninit::<Ctm>::uninit();
+    // SAFETY: `raw` points to writable storage for the platform's 64-bit
+    // POSIX `struct tm`; `timestamp` remains alive for the call.
+    let result = unsafe { localtime_r(&timestamp, raw.as_mut_ptr()) };
+    if result.is_null() {
+        return utc_calendar_time_now();
+    }
+    // SAFETY: a non-null `localtime_r` result initialized the supplied value.
+    let raw = unsafe { raw.assume_init() };
+    ClassicCalendarTime {
+        day: raw.mday,
+        month: raw.mon.saturating_add(1),
+        year: raw.year.saturating_add(1900),
+        hour: raw.hour,
+        minute: raw.min,
+    }
+}
+
+#[cfg(windows)]
+fn classic_calendar_time_now() -> ClassicCalendarTime {
+    #[repr(C)]
+    struct Ctm {
+        sec: i32,
+        min: i32,
+        hour: i32,
+        mday: i32,
+        mon: i32,
+        year: i32,
+        wday: i32,
+        yday: i32,
+        isdst: i32,
+    }
+    unsafe extern "C" {
+        fn _localtime64_s(result: *mut Ctm, time: *const i64) -> i32;
+    }
+
+    let timestamp = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+    let mut raw = std::mem::MaybeUninit::<Ctm>::uninit();
+    // SAFETY: `_localtime64_s` receives valid output and timestamp pointers.
+    if unsafe { _localtime64_s(raw.as_mut_ptr(), &timestamp) } != 0 {
+        return utc_calendar_time_now();
+    }
+    // SAFETY: a zero return initialized the supplied value.
+    let raw = unsafe { raw.assume_init() };
+    ClassicCalendarTime {
+        day: raw.mday,
+        month: raw.mon.saturating_add(1),
+        year: raw.year.saturating_add(1900),
+        hour: raw.hour,
+        minute: raw.min,
+    }
+}
+
+#[cfg(not(any(all(unix, target_pointer_width = "64"), windows)))]
+fn classic_calendar_time_now() -> ClassicCalendarTime {
+    utc_calendar_time_now()
+}
+
+fn classic_rtf_charset_code(charset: &str) -> u8 {
+    match charset.to_ascii_uppercase().as_str() {
+        "SHIFTJIS" => 128,
+        "HANGUL" => 129,
+        "JOHAB" => 130,
+        "CHINESEBIG5" => 136,
+        "GREEK" => 161,
+        "TURKISH" => 162,
+        "VIETNAMESE" => 163,
+        "HEBREW" => 177,
+        "ARABIC" => 178,
+        "BALTIC" => 186,
+        "RUSSIAN" => 204,
+        "THAI" => 222,
+        "EASTEUROPE" => 238,
+        _ => 0,
+    }
+}
+
+fn developer_console_definition_description_path(
+    module: &str,
+    paths: Option<&AppPaths>,
+) -> String {
+    let module_path = Path::new(module);
+    if module_path.is_absolute() {
+        if let Some(paths) = paths {
+            for root in [paths.content_dir(), Some(paths.install_root())]
+                .into_iter()
+                .flatten()
+            {
+                if let Ok(relative) = module_path.strip_prefix(root) {
+                    return relative.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+    module.to_string()
+}
+
+fn append_description_player_names(
+    output: &mut Vec<u8>,
+    players: &[&lc_engine::ControlPlayerInfoEntry],
+) {
+    for (index, player) in players.iter().enumerate() {
+        if index != 0 {
+            output.extend_from_slice(b", ");
+        }
+        output.extend_from_slice(player.name.as_bytes());
+    }
+}
+
 fn normalize_cpp_random_seed(seed: i32) -> u64 {
     u64::from(seed as u32)
 }
@@ -21190,56 +21713,29 @@ fn unique_save_path(dir: &Path, base: &str) -> PathBuf {
 }
 
 fn next_recording_index(dir: &Path) -> io::Result<u32> {
-    let mut max_index = 0u32;
-    if dir.exists() {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            if let Some(name) = entry.file_name().to_str() {
-                if let Some((prefix, _)) = name.split_once('-') {
-                    if prefix.chars().all(|c| c.is_ascii_digit()) {
-                        if let Ok(index) = prefix.parse::<u32>() {
-                            max_index = max_index.max(index);
+    if !dir.exists() {
+        return Ok(1);
                         }
-                    }
-                }
-            }
-        }
-    }
-    Ok(max_index + 1)
+    let count = fs::read_dir(dir)?.try_fold(0_u32, |count, entry| {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let is_scenario = Path::new(&file_name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("c4s"));
+        Ok::<_, io::Error>(count.saturating_add(u32::from(is_scenario)))
+    })?;
+    Ok(count.saturating_add(1))
 }
 
 fn sanitize_record_name(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let without_digits = trimmed.trim_end_matches(|c: char| c.is_ascii_digit());
-    let candidate = if without_digits.is_empty() {
-        trimmed
+    let without_digits = raw.trim_end_matches(|character: char| character.is_ascii_digit());
+    if without_digits.is_empty() && !raw.is_empty() {
+        // C4Record's backwards pointer loop stops at the first byte, so an
+        // all-numeric basename retains its leading character.
+        raw.chars().next().into_iter().collect()
     } else {
-        without_digits
-    };
-    let mut result = String::new();
-    let mut last_was_separator = false;
-    for ch in candidate.chars() {
-        if ch.is_ascii_alphanumeric() {
-            result.push(ch);
-            last_was_separator = false;
-        } else if ch.is_ascii_whitespace() || matches!(ch, '-' | '_') {
-            if !last_was_separator && !result.is_empty() {
-                result.push('_');
-                last_was_separator = true;
-            }
-        } else if !last_was_separator && !result.is_empty() {
-            result.push('_');
-            last_was_separator = true;
-        }
-    }
-    let sanitized = result.trim_matches('_');
-    if sanitized.is_empty() {
-        "scenario".to_string()
-    } else {
-        sanitized.to_string()
+        without_digits.to_string()
     }
 }
 
@@ -22314,20 +22810,29 @@ fn load_native_config_bytes(paths: Option<&AppPaths>) -> Vec<u8> {
 }
 
 /// C4Game's `Application.isFullScreen` distinguishes the graphical client from
-/// `/console`; it is unrelated to the OS window display mode. Rust currently
-/// has only the graphical route, so native initialization reduces to
-/// `Config.General.AlwaysDebug && Parameters.AllowDebug`.
-fn arm_graphical_engine_debug_mode(engine: &mut Engine, config: &[u8]) {
+/// `/console`; it is unrelated to the OS window display mode. Console mode
+/// enables DebugMode by default, while the graphical client requires the
+/// persisted AlwaysDebug switch. Both remain gated by Parameters.AllowDebug.
+fn arm_engine_debug_mode(engine: &mut Engine, config: &[u8], console_mode: bool) {
     let always_debug =
         lc_app::configured_native_boolean(config, "General", "DebugMode").unwrap_or(false);
-    engine.set_debug_mode(always_debug && engine.allow_debug());
+    engine.set_debug_mode((console_mode || always_debug) && engine.allow_debug());
 }
 
-fn arm_configured_graphical_engine_debug_mode(
+fn arm_graphical_engine_debug_mode(engine: &mut Engine, config: &[u8]) {
+    arm_engine_debug_mode(engine, config, false);
+}
+
+fn arm_configured_graphical_engine_debug_mode(engine: &mut Engine, paths: Option<&AppPaths>) {
+    arm_graphical_engine_debug_mode(engine, &load_native_config_bytes(paths));
+}
+
+fn arm_configured_engine_debug_mode(
     engine: &mut Engine,
     paths: Option<&AppPaths>,
+    console_mode: bool,
 ) {
-    arm_graphical_engine_debug_mode(engine, &load_native_config_bytes(paths));
+    arm_engine_debug_mode(engine, &load_native_config_bytes(paths), console_mode);
 }
 
 fn configured_allow_scripting_in_replays(config: &[u8]) -> bool {
@@ -25204,6 +25709,12 @@ impl GameApp {
             app_paths: paths.cloned(),
             classic_command_line: ClassicCommandLine::default(),
             console_mode: false,
+            developer_console: DeveloperConsole::new(),
+            developer_console_edit_mode: ConsoleEditMode::Play,
+            developer_console_editing_enabled: true,
+            developer_console_pointer: GuiPoint::new(0.0, 0.0),
+            console_log_capture: None,
+            script_created_objects: false,
             sandbox_crew_definition_paths: None,
             configured_client_player_selection: None,
             material_library: None,
@@ -25231,6 +25742,7 @@ impl GameApp {
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
             network_sync: NetworkSyncGate::default(),
+            offline_control_input: Vec::new(),
             offline_halt_count: false,
             network_control_running,
             runtime_network_status_barrier: None,
@@ -25257,6 +25769,7 @@ impl GameApp {
             network_client_next_control_ticks,
             network_client_activity: NetworkClientActivity::default(),
             control_player_infos,
+            local_player_profile_paths: HashMap::new(),
             restart_restore_infos: RestartRestoreInfos::default(),
             restart_restore_roster_items: HashSet::new(),
             host_local_alternate_colors_by_resource,
@@ -25279,8 +25792,10 @@ impl GameApp {
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(AppPaths::recordings_dir),
+            live_save_seed: None,
             recording_template: None,
             recording: None,
+            runtime_record_requested: false,
             control_playback: None,
             local_owner: runtime.player_owner,
             player_name: player_name.clone(),
@@ -25559,6 +26074,1067 @@ impl GameApp {
         // C4Network2::StartLobbyCountdown replaces an existing timer.
         self.abort_network_lobby_countdown();
         self.start_console_lobby_countdown_with(countdown_seconds)?;
+        Ok(())
+    }
+
+    fn developer_console_editing(&self) -> bool {
+        self.console_mode && self.developer_console_editing_enabled
+    }
+
+    fn developer_console_strings(&self) -> ConsoleStrings {
+        let mut strings = ConsoleStrings::default();
+        for (target, key, fallback) in [
+            (&mut strings.default_caption, "IDS_CNS_CONSOLE", "Console"),
+            (&mut strings.menu_file, "IDS_MNU_FILE", "File"),
+            (
+                &mut strings.menu_components,
+                "IDS_MNU_COMPONENTS",
+                "Components",
+            ),
+            (&mut strings.menu_player, "IDS_MNU_PLAYER", "Player"),
+            (&mut strings.menu_viewport, "IDS_MNU_VIEWPORT", "Viewport"),
+            (&mut strings.menu_net, "IDS_MNU_NET", "Host"),
+            (&mut strings.file_open, "IDS_MNU_OPEN", "Open..."),
+            (
+                &mut strings.file_open_with_players,
+                "IDS_MNU_OPENWPLRS",
+                "Open with players...",
+            ),
+            (
+                &mut strings.file_save_scenario,
+                "IDS_MNU_SAVESCENARIO",
+                "Save scenario",
+            ),
+            (
+                &mut strings.file_save_scenario_as,
+                "IDS_MNU_SAVESCENARIOAS",
+                "Save scenario as...",
+            ),
+            (&mut strings.file_save_game, "IDS_MNU_SAVEGAME", "Save game"),
+            (
+                &mut strings.file_save_game_as,
+                "IDS_MNU_SAVEGAMEAS",
+                "Save game as...",
+            ),
+            (&mut strings.file_record, "IDS_MNU_RECORD", "Record"),
+            (&mut strings.file_close, "IDS_MNU_CLOSE", "Close"),
+            (&mut strings.file_quit, "IDS_MNU_QUIT", "Quit"),
+            (&mut strings.component_objects, "IDS_BTN_OBJECTS", "Objects"),
+            (&mut strings.component_script, "IDS_MNU_SCRIPT", "Script"),
+            (&mut strings.component_title, "IDS_MNU_TITLE", "Title"),
+            (&mut strings.component_info, "IDS_MNU_INFO", "Info"),
+            (&mut strings.player_join, "IDS_MNU_JOIN", "Join"),
+            (&mut strings.viewport_new, "IDS_MNU_NEW", "New"),
+            (&mut strings.help_about, "IDS_MENU_ABOUT", "About..."),
+        ] {
+            *target = self.runtime_resource_text(key, fallback);
+        }
+        strings
+    }
+
+    fn developer_console_view_model(&self) -> ConsoleViewModel {
+        let strings = self.developer_console_strings();
+        // Native C4Console sets fGameOpen only after Game.Init returns. Keep
+        // save/close/component controls disabled throughout Rust's async load.
+        let game_open = self.mode == AppMode::Running;
+        let network_enabled = self.network.is_some();
+        let network_host =
+            network_enabled && matches!(self.network_mode, Some(NetworkMode::Host(_)));
+        let editing = self.developer_console_editing();
+        let players = self.developer_console_player_menu_entries(editing);
+        let clients = self.developer_console_net_menu_entries();
+        let completions = developer_console_completion_entries(
+            &self.engine.console_script_completion_catalog(),
+            DeveloperConsoleCompletionStyle::Gtk,
+        )
+        .into_iter()
+        .filter_map(|entry| match entry {
+            DeveloperConsoleCompletionEntry::Function(function) => Some(function),
+            DeveloperConsoleCompletionEntry::Separator => None,
+        })
+        .collect();
+        let current_scenario_path = self
+            .active_scenario
+            .as_ref()
+            .and_then(|scenario| scenario.path.clone())
+            .or_else(|| {
+                self.loading_state
+                    .as_ref()
+                    .and_then(|loading| loading.scenario.path.clone())
+            });
+        let caption = current_scenario_path
+            .as_deref()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| strings.default_caption.clone());
+        ConsoleViewModel {
+            strings,
+            caption,
+            current_scenario_path,
+            game_open,
+            lobby_active: self.console_lobby_active(),
+            editing,
+            halted: !matches!(self.mode, AppMode::Running)
+                || if self.network.is_some() {
+                    self.runtime_network_is_paused()
+                } else {
+                    self.runtime_halt_active()
+                },
+            runtime_record_possible: self.developer_console_runtime_record_possible(),
+            network_enabled,
+            network_host,
+            players,
+            clients,
+            completions,
+            edit_mode: self.developer_console_edit_mode,
+            cursor_text: self.status_text.clone(),
+            frame: self.engine.frame(),
+            script_counter: self.engine.scenario_script_counter(),
+            time_seconds: self.engine.game_time(),
+            frames_per_second: self.frames_per_second,
+        }
+    }
+
+    fn sync_developer_console_view(&mut self) -> bool {
+        if !self.console_mode {
+            return false;
+        }
+        if self.control_playback.is_some() {
+            self.developer_console_editing_enabled = false;
+        }
+        let view = self.developer_console_view_model();
+        self.developer_console.set_view_model(view)
+    }
+
+    fn drain_console_log_capture(&mut self) {
+        let Some(capture) = self.console_log_capture.as_ref() else {
+            return;
+        };
+        let output = capture.take();
+        if !output.is_empty() {
+            self.developer_console.out(&output);
+        }
+    }
+
+    fn show_developer_console_message(
+        &mut self,
+        message: String,
+        follow_up: Option<String>,
+    ) -> std::result::Result<(), EngineError> {
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                message,
+                "LegacyClonk",
+                lc_frontend::message_dialog::MessageDialogIcon::Standard(44),
+            ),
+            MessageDialogContinuation::DeveloperConsoleNotice { follow_up },
+        )?;
+        Ok(())
+    }
+
+    fn open_developer_console_game(
+        &mut self,
+        scenario: PathBuf,
+        player_files: Vec<PathBuf>,
+    ) -> Result<()> {
+        // C4Console::OpenGame calls Console::Default before any game
+        // initialization and therefore resets only the edit cursor mode.
+        self.developer_console_edit_mode = ConsoleEditMode::Play;
+        if self.console_game_active() {
+            self.close_console_game();
+        }
+        let mut arguments = Vec::with_capacity(1 + player_files.len());
+        arguments.push(scenario.into_os_string());
+        arguments.extend(player_files.into_iter().map(PathBuf::into_os_string));
+        let mut classic = parse_classic_command_line(&arguments);
+        classic.console = true;
+        self.apply_classic_command_line(&classic)?;
+        self.launch_classic_command_line_join()?;
+        self.launch_classic_command_line_scenario()?;
+        Ok(())
+    }
+
+    fn developer_console_save_maker(&self) -> Vec<u8> {
+        match self.network_mode.as_ref() {
+            Some(NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            })) => prepared.host_config().group_maker.as_bytes().to_vec(),
+            Some(NetworkMode::Client(settings)) => settings.group_maker.as_bytes().to_vec(),
+            Some(NetworkMode::Host(_)) | None => self
+                .configured_client_player_selection
+                .as_ref()
+                .map(|selection| selection.group_maker().as_bytes().to_vec())
+                .unwrap_or_else(|| lc_script::c4_string_bytes(&self.player_name)),
+        }
+    }
+
+    fn developer_console_player_save_options(&self) -> (bool, bool, String) {
+        let graphics = load_options_graphics_state(self.app_paths.as_ref());
+        let rank_name = load_runtime_language_table(self.app_paths.as_ref())
+            .ok()
+            .and_then(|table| {
+                let value = table.entries.get("IDS_MSG_RANK")?;
+                let bytes = match table.charset {
+                    RuntimeHelpCharset::Windows1252 => value
+                        .chars()
+                        .map(runtime_cp1252_byte)
+                        .collect::<Result<Vec<_>>>()
+                        .ok()?,
+                    RuntimeHelpCharset::Utf8 => value.as_bytes().to_vec(),
+                };
+                Some(lc_script::c4_string_from_bytes(&bytes))
+            })
+            .unwrap_or_else(|| "Rank".to_string());
+        (
+            graphics.add_new_crew_portraits,
+            graphics.save_default_portraits,
+            rank_name,
+        )
+    }
+
+    fn synchronized_player_profile_path(
+        &self,
+        info: &lc_engine::ControlPlayerInfoEntry,
+    ) -> Option<PathBuf> {
+        if let Some(path) = self.local_player_profile_paths.get(&info.id) {
+            return Some(path.clone());
+        }
+        if let Some(path) = info.resource.as_ref().and_then(|resource| {
+            self.admission_resources
+                .complete_path(resource.id)
+                .map(Path::to_path_buf)
+        }) {
+            return Some(path);
+        }
+        if let Some(path) = self
+            .startup_player_files
+            .iter()
+            .find(|player| {
+                lc_script::c4_string_bytes(&player.file_name)
+                    .eq_ignore_ascii_case(info.filename.as_bytes())
+            })
+            .map(|player| player.path.clone())
+        {
+            return Some(path);
+        }
+
+        let configured = path_from_group_name_bytes(info.filename.as_bytes());
+        if configured.exists() {
+            return Some(configured);
+        }
+        self.app_paths
+            .as_ref()
+            .map(|paths| paths.install_root().join(configured))
+            .filter(|path| path.exists())
+    }
+
+    /// Persist the application-owned half of
+    /// `C4PlayerList::SynchronizeLocalFiles`. The engine has already applied
+    /// `C4Player::LocalSync`'s time checkpoint at this boundary.
+    fn persist_synchronized_local_player_files(&mut self) -> bool {
+        tracing::info!("synchronizing local player files");
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or_else(|| self.offline_local_client_id());
+        let candidates = self
+            .engine
+            .players()
+            .filter(|player| {
+                !player.is_script_player()
+                    && !matches!(
+                        player.status(),
+                        lc_engine::PlayerStatus::Eliminated
+                            | lc_engine::PlayerStatus::Surrendered
+                    )
+            })
+            .map(|player| {
+                (
+                    player.id(),
+                    player.player_info_id(),
+                    player.at_client().get() == local_client_id,
+                )
+            })
+            .collect::<Vec<_>>();
+        let maker = self.developer_console_save_maker();
+        let (add_new_crew_portraits, save_default_portraits, player_rank_name_default) =
+            self.developer_console_player_save_options();
+        let options = lc_engine::LiveC4PlayerSaveOptions {
+            savegame: false,
+            add_new_crew_portraits,
+            save_default_portraits,
+            player_rank_name_default: &player_rank_name_default,
+        };
+        let mut success = true;
+
+        for (player_number, info_id, local_control) in candidates {
+            if !local_control
+                && (self.network_is_league
+                    || self
+                        .engine
+                        .max_players()
+                        .is_some_and(|max_players| max_players <= 0))
+            {
+                success = false;
+                continue;
+            }
+            let Some(info) = self.control_player_infos.get(info_id).cloned() else {
+                tracing::warn!(player_number, info_id, "cannot save player without PlayerInfo");
+                success = false;
+                continue;
+            };
+            let Some(path) = self.synchronized_player_profile_path(&info) else {
+                tracing::warn!(
+                    player_number,
+                    info_id,
+                    filename = %info.filename.to_string_lossy(),
+                    "cannot resolve synchronized player profile path"
+                );
+                success = false;
+                continue;
+            };
+            let saved = (|| -> Result<()> {
+                let original = local_control
+                    .then(|| {
+                        open_group_path_for_folder_map(&path)
+                            .with_context(|| format!("open player profile {}", path.display()))
+                    })
+                    .transpose()?;
+                let synchronized = lc_engine::serialize_live_c4_player_for_synchronization(
+                    &mut self.engine,
+                    player_number,
+                    info.filename.as_bytes(),
+                    &maker,
+                    local_control,
+                    original.as_ref(),
+                    options,
+                )
+                .with_context(|| format!("serialize player profile {}", path.display()))?;
+                let group = if local_control {
+                    developer_console_save::overlay_live_player_group_with_cleanup(
+                        original
+                            .as_ref()
+                            .expect("local player synchronization opened its profile"),
+                        &synchronized.group,
+                        &synchronized.crew_cleanup,
+                    )?
+                } else {
+                    // C4Player::Save recreates non-local temporary player
+                    // files from scratch with fStoreTiny=true.
+                    synchronized.group
+                };
+                // Native snapshots fOfficial after serializing and before
+                // Derive, then consults that same value after the move.
+                let official_derivation = self.engine.is_control_host();
+                let derivation = self.network.as_ref().and_then(|network| {
+                    let resource = info.resource.as_ref()?;
+                    let resource_id = self.admission_resources.derivation_target(resource.id)?;
+                    let ownership = if local_control {
+                        lc_network::ResourceFileOwnership::Persistent
+                    } else {
+                        lc_network::ResourceFileOwnership::Temporary
+                    };
+                    match network.begin_resource_derive(resource_id, path.clone(), ownership) {
+                        Ok(derivation) => Some((derivation, ownership)),
+                        Err(error) => {
+                            // C4Player::Save proceeds when Derive returns null;
+                            // the failed rescue only makes this update
+                            // unavailable as an official network resource.
+                            tracing::warn!(
+                                player_number,
+                                info_id,
+                                resource_id,
+                                path = %path.display(),
+                                %error,
+                                "failed to protect player resource before synchronization"
+                            );
+                            None
+                        }
+                    }
+                });
+                persist_console_save_group(&group, &path, local_control && path.is_dir())
+                    .with_context(|| format!("persist player profile {}", path.display()))?;
+                if official_derivation {
+                    if let (Some(network), Some((derivation, ownership))) =
+                        (self.network.as_ref(), derivation)
+                    {
+                        match network.finish_resource_derive(derivation) {
+                            Ok(core) => self.admission_resources.register_finished_derivation(
+                                &core,
+                                path.clone(),
+                                ownership,
+                            ),
+                            Err(error) => {
+                                // FinishDerive's result is ignored by
+                                // C4Player::Save; the profile itself has
+                                // already been saved.
+                                tracing::warn!(
+                                    player_number,
+                                    info_id,
+                                    path = %path.display(),
+                                    %error,
+                                    "failed to publish synchronized player resource derivation"
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = saved {
+                tracing::warn!(
+                    player_number,
+                    info_id,
+                    path = %path.display(),
+                    %error,
+                    "failed to synchronize player profile"
+                );
+                success = false;
+            }
+        }
+        success
+    }
+
+    fn developer_console_save_parameters(&self) -> Result<Vec<u8>> {
+        let seed = self
+            .live_save_seed
+            .as_ref()
+            .ok_or_else(|| anyhow!("live save parameter seed is unavailable"))?;
+        let mut parameters = seed.parameters.clone();
+        parameters.random_seed = (self.engine.random_seed() as u32) as i32;
+        parameters.startup_player_count =
+            i32::try_from(self.control_player_infos.player_count()).unwrap_or(i32::MAX);
+        parameters.max_players = self
+            .engine
+            .max_players()
+            .unwrap_or(seed.scenario_defaults.max_players);
+        parameters.use_fair_crew = self.engine.use_fair_crew();
+        parameters.fair_crew_forced = self.engine.fair_crew_forced();
+        parameters.fair_crew_strength = self.engine.fair_crew_strength();
+        parameters.allow_debug = self.engine.allow_debug();
+        parameters.is_network_game = self.network.is_some();
+        parameters.control_rate = self.engine.control_rate();
+        parameters.auto_frame_skip = self.auto_frame_skip;
+        parameters.player_infos = self.recording_player_info_snapshot();
+        parameters.clients =
+            lc_network::JoinClientRegistrySnapshot::new(self.control_clients.snapshot());
+        lc_network::serialize_initial_network_parameters(&parameters, &seed.scenario_defaults)
+            .context("serialize live save Parameters.txt")
+    }
+
+    fn developer_console_savegame_description(
+        &self,
+        title: &str,
+        definition_modules: &[String],
+    ) -> (String, Vec<u8>) {
+        let table = load_runtime_language_table(self.app_paths.as_ref()).ok();
+        let resource_bytes = |key: &str, fallback: &str| {
+            let Some((value, charset)) = table
+                .as_ref()
+                .and_then(|table| table.entries.get(key).map(|value| (value, table.charset)))
+            else {
+                return fallback.as_bytes().to_vec();
+            };
+            match charset {
+                RuntimeHelpCharset::Windows1252 => value
+                    .chars()
+                    .map(runtime_cp1252_byte)
+                    .collect::<Result<Vec<_>>>()
+                    .unwrap_or_else(|_| fallback.as_bytes().to_vec()),
+                RuntimeHelpCharset::Utf8 => value.as_bytes().to_vec(),
+            }
+        };
+
+        let native_config = load_native_config_bytes(self.app_paths.as_ref());
+        let charset_name =
+            lc_app::configured_native_value(&native_config, "General", "LanguageCharset")
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default();
+        let charset_code = classic_rtf_charset_code(&charset_name);
+        let language = lc_app::configured_native_value(&native_config, "General", "Language")
+            .map(|value| {
+                value
+                    .as_bytes()
+                    .iter()
+                    .copied()
+                    .take_while(|byte| *byte != b',')
+                    .take(2)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|language| !language.is_empty())
+            .unwrap_or_else(|| {
+                startup_language_sequence(self.app_paths.as_ref())
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| "US".to_string())
+                    .into_bytes()
+            });
+        let language = String::from_utf8_lossy(&language).into_owned();
+
+        let mut title = title.to_owned();
+        Markup::strip_markup(&mut title);
+        let title = lc_script::c4_string_bytes(&title);
+        let now = classic_calendar_time_now();
+        let date_template = resource_bytes(
+            if self.network.is_some() {
+                "IDS_DESC_DATENET"
+            } else {
+                "IDS_DESC_DATE"
+            },
+            if self.network.is_some() {
+                "Network game from %i.%i.%i %02d:%02d."
+            } else {
+                "Game saved %i.%i.%i %02d:%02d."
+            },
+        );
+        let mut lines = vec![developer_console_save::format_resource_integers(
+            &date_template,
+            &[now.day, now.month, now.year, now.hour, now.minute],
+        )];
+
+        let game_time = self.engine.game_time();
+        if game_time != 0 {
+            let duration = resource_bytes(
+                "IDS_DESC_DURATION",
+                "Playing time: %02d:%02d:%02d.",
+            );
+            lines.push(developer_console_save::format_resource_integers(
+                &duration,
+                &[
+                    game_time / 3_600,
+                    (game_time % 3_600) / 60,
+                    game_time % 60,
+                ],
+            ));
+        }
+
+        if !definition_modules.is_empty() {
+            let mut definitions = resource_bytes("IDS_DESC_DEFSPECS", "Object definitions: ");
+            for (index, module) in definition_modules.iter().enumerate() {
+                if index != 0 {
+                    definitions.extend_from_slice(b", ");
+                }
+                let relative = developer_console_definition_description_path(
+                    module,
+                    self.app_paths.as_ref(),
+                );
+                for byte in lc_script::c4_string_bytes(&relative) {
+                    if byte == b'\\' {
+                        definitions.push(b'\\');
+                    }
+                    definitions.push(byte);
+                }
+            }
+            lines.push(definitions);
+        }
+
+        if self.network.is_some() {
+            let mut clients = resource_bytes("IDS_DESC_CLIENTS", "Clients: ");
+            for (index, client) in self.control_clients.snapshot().iter().enumerate() {
+                if index != 0 {
+                    clients.extend_from_slice(b", ");
+                }
+                clients.extend_from_slice(client.name.as_bytes());
+            }
+            lines.push(clients);
+        }
+
+        let (_, packets) = self.control_player_infos.retained_rows_snapshot();
+        let players = packets
+            .iter()
+            .flat_map(|(_, _, players)| players)
+            .filter(|player| {
+                player.is_joined()
+                    && player.flags & lc_engine::PLAYER_INFO_FLAG_INVISIBLE == 0
+            })
+            .collect::<Vec<_>>();
+        if !players.is_empty() {
+            let label = resource_bytes("IDS_DESC_PLRS", "Players: ");
+            let team_configuration = self.engine.team_configuration();
+            if team_configuration.active && !team_configuration.auto_generate_teams {
+                lines.push(label);
+                let mut known_team_ids = HashSet::new();
+                for team in self.engine.teams() {
+                    known_team_ids.insert(team.id);
+                    let members = players
+                        .iter()
+                        .copied()
+                        .filter(|player| player.team == team.id)
+                        .collect::<Vec<_>>();
+                    if members.is_empty() {
+                        continue;
+                    }
+                    let mut line = lc_script::c4_string_bytes(&team.name);
+                    line.extend_from_slice(b": ");
+                    append_description_player_names(&mut line, &members);
+                    lines.push(line);
+                }
+                let unassigned = players
+                    .iter()
+                    .copied()
+                    .filter(|player| !known_team_ids.contains(&player.team))
+                    .collect::<Vec<_>>();
+                if !unassigned.is_empty() {
+                    let mut line = Vec::new();
+                    append_description_player_names(&mut line, &unassigned);
+                    lines.push(line);
+                }
+            } else {
+                let mut line = label;
+                append_description_player_names(&mut line, &players);
+                lines.push(line);
+            }
+        }
+
+        (
+            format!("Desc{language}.rtf"),
+            developer_console_save::serialize_savegame_description(
+                &title,
+                charset_code,
+                &lines,
+            ),
+        )
+    }
+
+    fn save_developer_console_game(
+        &mut self,
+        kind: ConsoleSaveKind,
+        requested_target: Option<&Path>,
+    ) -> Result<bool> {
+        anyhow::ensure!(
+            self.mode == AppMode::Running,
+            "cannot save while no developer-console game is running"
+        );
+        let active = self
+            .active_scenario
+            .clone()
+            .ok_or_else(|| anyhow!("active scenario metadata is unavailable"))?;
+        let mut source_path = active
+            .path
+            .clone()
+            .ok_or_else(|| anyhow!("active scenario has no filesystem path"))?;
+
+        // FileSave's overwrite guard precedes SaveGame's host/child guards;
+        // FileSaveAs deliberately bypasses it by copying to a fresh target.
+        if kind == ConsoleSaveKind::Savegame && requested_target.is_none() {
+            let source = open_group_path_for_folder_map(&source_path)
+                .with_context(|| format!("open {}", source_path.display()))?;
+            if !ScenarioLoaderHead::load_from_group(&source)?.is_save_game() {
+                self.show_developer_console_message(
+                    self.runtime_resource_text(
+                        "IDS_CNS_NOGAMEOVERSCEN",
+                        "You should not overwrite the original scenario file with a save game.",
+                    ),
+                    None,
+                )?;
+                return Ok(false);
+            }
+        }
+
+        let mut destination = requested_target
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| source_path.clone());
+        if requested_target.is_some() && destination.extension().is_none() {
+            destination.set_extension("c4s");
+        }
+
+        if requested_target.is_some() {
+            // FileSaveAs closes the current group, copies the complete source
+            // with C4Group_CopyItem, changes ScenarioFilename/caption, and
+            // reopens the copy *before* SaveGame applies its host guard.
+            // Preserve unpacked directories just as CopyDirectory does.
+            if let Some(active) = self.active_scenario.as_mut() {
+                active.identifier = destination.to_string_lossy().into_owned();
+                active.path = Some(destination.clone());
+                active.source_paths = vec![destination.clone()];
+            }
+            if let Some(seed) = self.live_save_seed.as_mut() {
+                seed.scenario_source_path = destination.clone();
+                seed.scenario_origin = record_scenario_origin(
+                    &destination,
+                    self.app_paths.as_ref(),
+                    &active.identifier,
+                );
+            }
+            self.classic_command_line.scenario = Some(destination.clone());
+            let copy_result = (|| -> Result<()> {
+                let source = open_group_path_for_folder_map(&source_path).with_context(|| {
+                    format!("open source scenario {}", source_path.display())
+                })?;
+                let copy = MutableGroup::from_group(&source).with_context(|| {
+                    format!("copy source scenario {}", source_path.display())
+                })?;
+                if destination != source_path && destination.exists() {
+                    if destination.is_dir() {
+                        fs::remove_dir_all(&destination)?;
+                    } else {
+                        fs::remove_file(&destination)?;
+                    }
+                }
+                persist_console_save_group(&copy, &destination, source_path.is_dir())
+                    .with_context(|| format!("copy scenario to {}", destination.display()))
+            })();
+            if let Err(error) = copy_result {
+                tracing::error!(%error, target = %destination.display(), "developer-console Save As copy failed");
+                let target = destination.to_string_lossy();
+                let message = format_resource_string(
+                    self.runtime_resource_text(
+                        "IDS_CNS_SAVEASERROR",
+                        "Error while saving the scenario to %s.",
+                    ),
+                    &[&target],
+                );
+                self.show_developer_console_message(message, None)?;
+                return Ok(false);
+            }
+            source_path = destination.clone();
+        }
+
+        if self.network.is_some() && !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            self.show_developer_console_message(
+                self.runtime_resource_text(
+                    "IDS_GAME_NOCLIENTSAVE",
+                    "Network games may be saved by the host only.",
+                ),
+                None,
+            )?;
+            return Ok(false);
+        }
+        if requested_target.is_none() {
+            let (_, children) = scenario_logical_storage(&source_path)?;
+            if !children.is_empty() {
+                let filename = source_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| source_path.to_string_lossy().into_owned());
+                let message = format_resource_string(
+                    self.runtime_resource_text(
+                        "IDS_CNS_NOCHILDSAVE",
+                        "%s is located in a group folder.\nScenarios cannot be saved in closed group folders.",
+                    ),
+                    &[&filename],
+                );
+                self.show_developer_console_message(message, None)?;
+                return Ok(false);
+            }
+        }
+        let source = open_group_path_for_folder_map(&source_path)
+            .with_context(|| format!("open source scenario {}", source_path.display()))?;
+        let mut group = MutableGroup::from_group(&source)
+            .with_context(|| format!("copy source scenario {}", source_path.display()))?;
+
+        if kind == ConsoleSaveKind::Savegame {
+            if let Some(network) = self.network.as_ref() {
+                network
+                    .submit_queued_synchronize(self.local_control_submission_tick(), true, false)
+                    .context("queue savegame player synchronization")?;
+            } else if self.control_playback.is_none() {
+                self.engine.checkpoint_local_player_files_for_save();
+                // Native ignores this aggregate result and proceeds with the
+                // savegame even if one profile could not be synchronized.
+                let _ = self.persist_synchronized_local_player_files();
+            }
+        }
+
+        let definition_modules = match self.active_definition_load.as_ref() {
+            Some(ScenarioDefinitionLoad::Seed { modules, .. })
+            | Some(ScenarioDefinitionLoad::Fixed { modules, .. }) => modules.clone(),
+            None => Vec::new(),
+        };
+        let native_config = load_native_config_bytes(self.app_paths.as_ref());
+        let (definition_executable_path, definition_path) =
+            game_save_definition_paths(self.app_paths.as_ref(), &native_config);
+        let title = self
+            .host_join_snapshot
+            .as_ref()
+            .map(|snapshot| native_bytes_as_legacy_text(snapshot.parameters.title.as_bytes()))
+            .unwrap_or_else(|| active.title.clone());
+        let origin =
+            record_scenario_origin(&destination, self.app_paths.as_ref(), &active.identifier);
+        let destination_name = destination.to_string_lossy().into_owned();
+        let force_exact_landscape = self
+            .engine
+            .landscape()
+            .is_some_and(|landscape| landscape.mode() == lc_engine::LANDSCAPE_MODE_EXACT);
+        let landscape_is_static = self
+            .engine
+            .landscape()
+            .is_some_and(|landscape| landscape.mode() == lc_engine::LANDSCAPE_MODE_STATIC);
+        let policy = match kind {
+            ConsoleSaveKind::Scenario => lc_engine::LiveC4SavePolicy::Scenario {
+                force_exact_landscape,
+            },
+            ConsoleSaveKind::Savegame => lc_engine::LiveC4SavePolicy::Savegame {
+                target_group_name: &destination_name,
+            },
+        };
+        let save = self
+            .engine
+            .serialize_live_c4_save_with_policy(
+                lc_engine::LiveC4SaveSpec {
+                    title: &title,
+                    definition_modules: &definition_modules,
+                    definition_executable_path: &definition_executable_path,
+                    definition_path: &definition_path,
+                    origin: &origin,
+                    music_enabled: self.runtime_music_enabled,
+                    modified_title: None,
+                    modified_info_txt: None,
+                    modified_script_c: None,
+                },
+                policy,
+            )
+            .context("serialize live C4 scenario state")?;
+
+        let clients = self.control_clients.snapshot();
+        let player_infos = self.recording_player_info_snapshot();
+        let restore_plan = runtime_join_save::set_as_live_save_restore_infos(
+            &clients,
+            &player_infos,
+            policy.player_policy(),
+        );
+        let save_player_infos =
+            lc_network::encode_player_info_list_ini(&restore_plan.restore_infos)
+                .context("serialize SavePlayerInfos.txt")?;
+        let maker = self.developer_console_save_maker();
+        let (add_new_crew_portraits, save_default_portraits, player_rank_name_default) =
+            self.developer_console_player_save_options();
+        let player_options = lc_engine::LiveC4PlayerSaveOptions {
+            savegame: true,
+            add_new_crew_portraits,
+            save_default_portraits,
+            player_rank_name_default: &player_rank_name_default,
+        };
+        let runtime_players = self
+            .engine
+            .players()
+            .map(|player| (player.id(), player.player_info_id()))
+            .collect::<Vec<_>>();
+        let mut remaining_targets = restore_plan.player_groups;
+        let mut player_groups = Vec::with_capacity(remaining_targets.len());
+        for (game_number, player_info_id) in runtime_players {
+            let Some(index) = remaining_targets
+                .iter()
+                .position(|target| target.player_info_id == player_info_id)
+            else {
+                continue;
+            };
+            let target = remaining_targets.remove(index);
+            let player_group = lc_engine::serialize_live_c4_player_with_options_and_enumeration(
+                &self.engine,
+                game_number,
+                target.filename.as_bytes(),
+                &maker,
+                player_options,
+                &save.value_enumeration,
+            )
+            .with_context(|| {
+                format!(
+                    "serialize player info {} (game player {})",
+                    target.player_info_id, game_number
+                )
+            })?;
+            player_groups.push(runtime_join_save::SerializedRuntimeJoinPlayerGroup {
+                filename: target.filename,
+                group: player_group,
+            });
+        }
+        anyhow::ensure!(
+            remaining_targets.is_empty(),
+            "{} save-player rows have no live player",
+            remaining_targets.len()
+        );
+        let current_section = format!("Sect{}.c4g", self.engine.debug_current_scenario_section());
+        developer_console_save::apply_live_save_to_group(
+            &mut group,
+            policy,
+            &save,
+            &save_player_infos,
+            player_groups,
+            Some(&current_section),
+            landscape_is_static,
+        )?;
+        if kind == ConsoleSaveKind::Savegame {
+            group
+                .add_file(
+                    "Parameters.txt",
+                    self.developer_console_save_parameters()?,
+                )
+                .context("write live save Parameters.txt")?;
+            let (description_name, description) = self
+                .developer_console_savegame_description(&title, &definition_modules);
+            group
+                .add_file(description_name, description)
+                .context("write live save description")?;
+        }
+        persist_console_save_group(
+            &group,
+            &destination,
+            source_path.is_dir(),
+        )?;
+        let success = match kind {
+            ConsoleSaveKind::Scenario => {
+                self.runtime_resource_text("IDS_CNS_SCENARIOSAVED", "Scenario saved.")
+            }
+            ConsoleSaveKind::Savegame => {
+                self.runtime_resource_text("IDS_CNS_GAMESAVED", "Game saved.")
+            }
+        };
+        self.developer_console.out(&success);
+        Ok(true)
+    }
+
+    fn choose_developer_console_paths(request: &ConsolePathRequest) -> Vec<PathBuf> {
+        let mut dialog = rfd::FileDialog::new().set_title(&request.title);
+        if let Some(path) = request.suggested_path.as_deref() {
+            if let Some(parent) = path.parent() {
+                dialog = dialog.set_directory(parent);
+            }
+            if let Some(name) = path.file_name() {
+                dialog = dialog.set_file_name(name.to_string_lossy());
+            }
+        }
+        if !request.extensions.is_empty() {
+            dialog = dialog.add_filter(request.filter_label.as_str(), &request.extensions);
+        }
+        if request.save {
+            dialog.save_file().into_iter().collect()
+        } else if request.allow_multiple {
+            dialog.pick_files().unwrap_or_default()
+        } else {
+            dialog.pick_file().into_iter().collect()
+        }
+    }
+
+    fn dispatch_developer_console_actions(
+        &mut self,
+        mut actions: Vec<DeveloperConsoleAction>,
+    ) -> Result<()> {
+        while let Some(action) = actions.pop() {
+            match action {
+                DeveloperConsoleAction::RequestPath(request) => {
+                    let paths = Self::choose_developer_console_paths(&request);
+                    let follow_up = self
+                        .developer_console
+                        .respond_path_request(request.token, paths);
+                    actions.extend(follow_up.into_iter().rev());
+                }
+                DeveloperConsoleAction::OpenGame {
+                    scenario,
+                    player_files,
+                } => {
+                    if let Err(error) = self.open_developer_console_game(scenario, player_files) {
+                        tracing::error!(%error, "developer-console game open failed");
+                        // FileOpen intentionally ignores OpenGame(false).
+                        // Clear partial async/bootstrap state and leave the
+                        // persistent developer window alive.
+                        self.close_console_game();
+                    }
+                }
+                DeveloperConsoleAction::Save { kind, target } => {
+                    let result = self.save_developer_console_game(kind, target.as_deref());
+                    let attempted = !matches!(&result, Ok(false));
+                    let save_error = result.err().map(|error| {
+                        tracing::error!(%error, ?kind, target = ?target, "developer-console save failed");
+                        if let Some(target) = target.as_deref() {
+                            let target = target.to_string_lossy();
+                            format_resource_string(
+                                self.runtime_resource_text(
+                                    "IDS_CNS_SAVEASERROR",
+                                    "Error while saving the scenario to %s.",
+                                ),
+                                &[&target],
+                            )
+                        } else {
+                            self.runtime_resource_text(
+                                "IDS_CNS_SAVERROR",
+                                "Error while saving the scenario.",
+                            )
+                        }
+                    });
+                    if kind == ConsoleSaveKind::Scenario
+                        && attempted
+                        && self.script_created_objects
+                    {
+                        let warning = format!(
+                            "{}{}",
+                            self.runtime_resource_text(
+                                "IDS_CNS_SCRIPTCREATEDOBJECTS",
+                                "This scenario's script has created objects on initialization. "
+                            ),
+                            self.runtime_resource_text(
+                                "IDS_CNS_WARNDOUBLE",
+                                "In order to avoid double creation, the script's 'Initialize' function should be modified."
+                            )
+                        );
+                        self.script_created_objects = false;
+                        self.show_developer_console_message(warning, save_error)?;
+                    } else if let Some(message) = save_error {
+                        self.show_developer_console_message(message, None)?;
+                    }
+                }
+                DeveloperConsoleAction::RequestRuntimeRecord => {
+                    if let Err(error) = self.developer_console_request_runtime_record() {
+                        self.developer_console.out(&error);
+                    }
+                }
+                DeveloperConsoleAction::CloseGame => self.close_console_game(),
+                DeveloperConsoleAction::QuitApplication => self.request_exit(),
+                DeveloperConsoleAction::Play => self.set_runtime_pause(false),
+                DeveloperConsoleAction::Halt => self.set_runtime_pause(true),
+                DeveloperConsoleAction::TogglePause => self.toggle_runtime_pause(),
+                DeveloperConsoleAction::SetEditMode(mode) => {
+                    self.developer_console_edit_mode = mode;
+                }
+                DeveloperConsoleAction::SubmitInput(input) => {
+                    let editing = self.developer_console_editing();
+                    self.process_developer_console_input(&input, editing)?;
+                }
+                DeveloperConsoleAction::JoinPlayers(paths) => {
+                    let editing = self.developer_console_editing();
+                    if let Err(error) = self.developer_console_join_players(&paths, editing) {
+                        self.developer_console.out(&error);
+                    }
+                }
+                DeveloperConsoleAction::EliminatePlayer(player) => {
+                    let editing = self.developer_console_editing();
+                    if let Err(error) = self.developer_console_quit_player(player, editing) {
+                        self.developer_console.out(&error);
+                    }
+                }
+                DeveloperConsoleAction::KickClient(client) => {
+                    if let Err(error) = self.developer_console_kick_client(client) {
+                        self.developer_console.out(&error);
+                    }
+                }
+                DeveloperConsoleAction::NewViewport(player) => {
+                    let owner = player.unwrap_or(OWNER_NONE);
+                    let _ = self.create_physical_viewport(
+                        owner,
+                        owner == OWNER_NONE,
+                        self.mode == AppMode::Running,
+                        true,
+                    );
+                }
+                DeveloperConsoleAction::EditObjects => {
+                    self.developer_console.out("Objects component selected");
+                }
+                DeveloperConsoleAction::EditScript => {
+                    self.developer_console.out("Script component selected");
+                }
+                DeveloperConsoleAction::EditTitle => {
+                    self.developer_console.out("Title component selected");
+                }
+                DeveloperConsoleAction::EditInfo => {
+                    self.developer_console.out("Info component selected");
+                }
+                DeveloperConsoleAction::ShowAbout => {
+                    self.developer_console.out("LegacyClonk developer console");
+                }
+            };
+        }
         Ok(())
     }
 
@@ -31967,6 +33543,11 @@ impl GameApp {
     }
 
     fn toggle_runtime_pause(&mut self) {
+        // C4Game::TogglePause refuses while the evaluation dialog owns its
+        // temporary halt. This guard applies to the console Pause key too.
+        if self.game_over_dialog.is_some() {
+            return;
+        }
         let paused = match self.runtime_network_role() {
             RuntimeNetworkRole::Offline => self.offline_halt_count,
             RuntimeNetworkRole::Host | RuntimeNetworkRole::Client => {
@@ -34576,7 +36157,11 @@ impl GameApp {
             key == VirtualKeyCode::F4 && c4_modifiers.is_empty(),
         );
         let pause_binding = self.runtime_keyboard_binding_matches(
-            "FullscreenPauseToggle",
+            if self.console_mode {
+                "ConsolePauseToggle"
+            } else {
+                "FullscreenPauseToggle"
+            },
             key,
             key == VirtualKeyCode::Pause && c4_modifiers.is_empty(),
         );
@@ -40805,6 +42390,12 @@ impl GameApp {
                 .apply_admitted_player_team_update(update.info_id, update.team, update.color)
                 .map_err(|error| error.to_string())?;
         }
+        let resolved_profile = offline_player_real_path(source_path)
+            .unwrap_or_else(|_| source_path.to_path_buf());
+        for player in &admitted.players {
+            self.local_player_profile_paths
+                .insert(player.id, resolved_profile.clone());
+        }
         updated_existing.push(admitted);
         let tick = self.local_control_submission_tick();
         let controls = updated_existing
@@ -42093,6 +43684,10 @@ impl GameApp {
     /// `/sound` is unknown here; `#/sound` reaches `ProcessInput` below and
     /// produces the private message control used by the developer console.
     fn process_developer_console_command(&mut self, text: &str) -> Result<(), EngineError> {
+        if text == "/clear" {
+            self.developer_console.clear_log();
+            return Ok(());
+        }
         if self.process_control_message_local_command(text) {
             return Ok(());
         }
@@ -42101,6 +43696,236 @@ impl GameApp {
             false => self.append_unknown_running_command(text),
         }
         Ok(())
+    }
+
+    /// Dynamic Player-menu rows from `C4Console::UpdatePlayerMenu`. The
+    /// player list itself is already retained in native C4PlayerList order;
+    /// network captions use the player's join-time AtClientName snapshot.
+    fn developer_console_player_menu_entries(&self, editing: bool) -> Vec<ConsolePlayerRow> {
+        let network_enabled = self.network.is_some();
+        let enabled = editing
+            && (!network_enabled || matches!(self.network_mode, Some(NetworkMode::Host(_))));
+        self.engine
+            .players()
+            .map(|player| {
+                let name = c4_presentation_text(player.name());
+                let quit_label = if network_enabled {
+                    let at_client = c4_presentation_text(player.at_client_name());
+                    format_resource_string(
+                        self.runtime_resource_text("IDS_CNS_PLRQUITNET", "Remove %s (%s) "),
+                        &[&name, &at_client],
+                    )
+                } else {
+                    format_resource_string(
+                        self.runtime_resource_text("IDS_CNS_PLRQUIT", "Remove %s"),
+                        &[&name],
+                    )
+                };
+                ConsolePlayerRow {
+                    number: player.id(),
+                    quit_label,
+                    quit_enabled: enabled,
+                    viewport_label: format_resource_string(
+                        self.runtime_resource_text("IDS_CNS_NEWPLRVIEWPORT", "New for %s"),
+                        &[&name],
+                    ),
+                }
+            })
+            .collect()
+    }
+
+    /// File-picker result backend for `C4Console::PlayerJoin`. Every selected
+    /// path is attempted even when an earlier player fails, as in the native
+    /// semicolon-list loop. Legacy path bytes survive the Rust Path boundary.
+    fn developer_console_join_players(
+        &mut self,
+        paths: &[PathBuf],
+        editing: bool,
+    ) -> std::result::Result<usize, String> {
+        if !editing || self.mode != AppMode::Running || self.control_playback.is_some() {
+            return Ok(0);
+        }
+        let network_enabled = self.network.is_some();
+        let mut joined = 0usize;
+        let mut errors = Vec::new();
+        for path in paths {
+            let wire_filename = lc_script::c4_string_from_bytes(&path_to_legacy_bytes(path));
+            let result = if network_enabled {
+                self.submit_runtime_network_player_path(path, &wire_filename)
+            } else {
+                self.submit_runtime_offline_player(&wire_filename)
+            };
+            match result {
+                Ok(()) => joined += 1,
+                Err(error) => errors.push(format!("{}: {error}", path.display())),
+            }
+        }
+        if errors.is_empty() {
+            Ok(joined)
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    /// Queue the Player-menu `CID_EliminatePlayer`. Network games use the
+    /// ordinary authenticated control queue; local games run the same packet
+    /// through the app's complete-control executor instead of removing the
+    /// player directly.
+    fn developer_console_quit_player(
+        &mut self,
+        player: i32,
+        editing: bool,
+    ) -> std::result::Result<bool, String> {
+        if !editing
+            || self.mode != AppMode::Running
+            || self.control_playback.is_some()
+            || self.engine.player(player).is_none()
+        {
+            return Ok(false);
+        }
+        let tick = self.local_control_submission_tick();
+        if let Some(network) = self.network.as_ref() {
+            if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+                return Ok(false);
+            }
+            network
+                .submit_eliminate_player(tick, player)
+                .map_err(|error| error.to_string())?;
+        } else {
+            self.offline_control_input
+                .push(NetworkControl::EliminatePlayer(
+                    lc_engine::EliminatePlayerControlData {
+                        player,
+                        by_client: 0,
+                    },
+                ));
+        }
+        Ok(true)
+    }
+
+    /// Host and remote-client rows from `C4Console::UpdateNetMenu`. The local
+    /// host is always first; remaining synchronized clients keep client-ID
+    /// order and expose their activated/deactivated native captions.
+    fn developer_console_net_menu_entries(&self) -> Vec<ConsoleClientRow> {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return Vec::new();
+        }
+        let Some(network) = self.network.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(local_client_id) = i32::try_from(network.local_client_id()) else {
+            return Vec::new();
+        };
+        let clients = self.control_clients.snapshot();
+        let mut entries = Vec::with_capacity(clients.len());
+        if let Some(host) = clients
+            .iter()
+            .find(|client| client.client_id == local_client_id)
+        {
+            let name = legacy_presentation_text(host.name.as_bytes());
+            let id = host.client_id.to_string();
+            entries.push(ConsoleClientRow {
+                id: host.client_id,
+                menu_label: format_resource_string(
+                    self.runtime_resource_text("IDS_MNU_NETHOST", "Host %s (%i)"),
+                    &[&name, &id],
+                ),
+                // Native leaves every row sensitive and rejects activation
+                // in OnNetClient when this process is not control host.
+                menu_enabled: true,
+            });
+        }
+        entries.extend(
+            clients
+                .into_iter()
+                .filter(|client| client.client_id != local_client_id)
+                .map(|client| {
+                    let name = legacy_presentation_text(client.name.as_bytes());
+                    let id = client.client_id.to_string();
+                    let (key, fallback) = if client.activated {
+                        ("IDS_MNU_NETCLIENT", "Client %s (%i)")
+                    } else {
+                        ("IDS_MNU_NETCLIENTDE", "Client %s (%i) deactivated")
+                    };
+                    ConsoleClientRow {
+                        id: client.client_id,
+                        menu_label: format_resource_string(
+                            self.runtime_resource_text(key, fallback),
+                            &[&name, &id],
+                        ),
+                        menu_enabled: true,
+                    }
+                }),
+        );
+        entries
+    }
+
+    /// `C4ClientList::CtrlRemove` for the developer Net menu. Unlike the
+    /// in-game menu this is not a league-vote shortcut: native submits the
+    /// synchronized ClientRemove directly, but only on the control host.
+    fn developer_console_kick_client(
+        &mut self,
+        client_id: i32,
+    ) -> std::result::Result<bool, String> {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || !self.engine.is_control_host()
+            || !self.control_clients.contains(client_id)
+        {
+            return Ok(false);
+        }
+        let Some(network) = self.network.as_ref() else {
+            return Ok(false);
+        };
+        let reason = self.runtime_resource_text("IDS_MSG_KICKBYMENU", "kicked from host menu");
+        network
+            .submit_client_remove(lc_engine::ClientRemoveControlData {
+                client_id,
+                reason: lc_engine::LegacyCString::from_bytes(lc_script::c4_string_bytes(&reason))
+                    .unwrap_or_default(),
+                by_client: 0,
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(true)
+    }
+
+    fn developer_console_runtime_record_possible(&self) -> bool {
+        self.mode == AppMode::Running
+            && !self.runtime_record_requested
+            && self.control_playback.is_none()
+            && self.recording.is_none()
+    }
+
+    /// `C4GameControl::RequestRuntimeRecord`: disable the item immediately,
+    /// then let the next ordinary queued Synchronize start the recorder with
+    /// that complete executing control list as its first chunk.
+    fn developer_console_request_runtime_record(&mut self) -> std::result::Result<bool, String> {
+        if !self.developer_console_runtime_record_possible() {
+            return Ok(false);
+        }
+        self.runtime_record_requested = true;
+        let tick = self.local_control_submission_tick();
+        let result = if let Some(network) = self.network.as_ref() {
+            network
+                .submit_queued_synchronize(tick, false, true)
+                .map_err(|error| error.to_string())
+        } else {
+            self.apply_ready_controls(
+                tick,
+                vec![NetworkControl::Synchronize(
+                    lc_engine::SynchronizeControlData {
+                        save_player_files: false,
+                        sync_clearance: true,
+                        by_client: 0,
+                    },
+                )],
+            )
+            .map_err(|error| error.to_string())
+        };
+        if let Err(error) = result {
+            self.runtime_record_requested = false;
+            return Err(error);
+        }
+        Ok(true)
     }
 
     /// Backend for `C4Console::In`. This is deliberately separate from the
@@ -43524,6 +45349,25 @@ impl GameApp {
                         path,
                         local,
                     } => {
+                        // The control host registers FinishDerive's returned
+                        // core synchronously so a second save can derive from
+                        // it before this queued event is drained. Retain that
+                        // resource's mutable getFile()-equivalent path and
+                        // ownership instead of replacing them with the
+                        // backend's serving standalone.
+                        let (path, local) = match self
+                            .admission_resources
+                            .status(resource_id)
+                        {
+                            Some(AdmissionResourceState::Complete {
+                                path: mutable_path,
+                                local: mutable_local,
+                                ..
+                            }) if core.derived_id >= 0 => {
+                                (mutable_path.clone(), *mutable_local)
+                            }
+                            _ => (path, local),
+                        };
                         self.admission_resources.register_lobby_resource(&core);
                         self.admission_resources
                             .mark_complete_with_locality(resource_id, path.clone(), local);
@@ -46364,7 +48208,8 @@ impl GameApp {
     }
 
     fn platform_cursor_visible(&self) -> bool {
-        classic_platform_cursor_visible(self.window_active, self.pointer_inside_window)
+        self.console_mode
+            || classic_platform_cursor_visible(self.window_active, self.pointer_inside_window)
     }
 
     fn classic_gui_cursor_request(&self) -> Option<(GuiPoint, bool)> {
@@ -55927,6 +57772,7 @@ impl GameApp {
         self.pending_local_lobby_countdown_echoes.clear();
         self.network_ticks.clear();
         self.network_sync.clear();
+        self.offline_control_input.clear();
         self.sync_checks.clear();
         self.network_control_clock = None;
         self.host_local_alternate_colors_by_resource.clear();
@@ -66755,6 +68601,7 @@ impl GameApp {
             self.pending_runtime_dynamic_request = None;
             self.network_ticks.clear();
             self.network_sync.clear();
+            self.offline_control_input.clear();
             self.sync_checks.clear();
             self.clear_blocking_resource_wait();
             self.admission_resources.clear();
@@ -67484,6 +69331,7 @@ impl GameApp {
         self.network_control_clock = None;
         self.network_ticks.clear();
         self.network_sync.clear();
+        self.offline_control_input.clear();
         self.sync_checks.clear();
         self.offline_halt_count = false;
         self.network_control_running = true;
@@ -67745,6 +69593,7 @@ impl GameApp {
             })
             .unwrap_or_else(|| "Rank".to_string());
         let player_save_options = lc_engine::LiveC4PlayerSaveOptions {
+            savegame: true,
             add_new_crew_portraits: graphics_options.add_new_crew_portraits,
             save_default_portraits: graphics_options.save_default_portraits,
             player_rank_name_default: &player_rank_name_default,
@@ -68422,23 +70271,11 @@ impl GameApp {
             .cloned()
             .filter_map(NetworkControl::into_packet)
             .collect::<Vec<_>>();
-        let requests_runtime_record = queued_runtime_record_request
-            && self.recording.is_none()
-            && controls.iter().any(|control| {
-                matches!(
-                    control,
-                    NetworkControl::Synchronize(control) if control.sync_clearance
-                )
-            });
-        if requests_runtime_record {
-            // RequestRuntimeRecord queues Synchronize(false, true). Native
-            // StartRecord sees the currently executing C4Control and records
-            // that complete list as the first chunk.
-            if let Err(error) = self.start_recording(true) {
-                tracing::warn!(%error, "failed to start runtime control recording");
-            }
-        }
+        let runtime_record_waiting = self.runtime_record_requested && self.recording.is_none();
+        let mut batch_recorded = self.recording.is_some();
+        if batch_recorded {
         self.record_control_batch(&packets);
+        }
         debug_assert!(self.executing_ready_tick.is_none());
         self.executing_ready_tick = Some(tick);
         let stop_if_running_mode_exits = matches!(self.mode, AppMode::Running);
@@ -68649,22 +70486,43 @@ impl GameApp {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
                 NetworkControl::Synchronize(control) => {
-                    if self.pending_runtime_dynamic_request.is_some() {
+                    if runtime_record_waiting && self.runtime_record_requested {
+                        // C4Game::Synchronize calls OnGameSynchronizing before
+                        // mutating synchronized state. Earlier packets in this
+                        // complete control have already executed, so capture
+                        // the non-initial record here rather than at batch
+                        // admission. StartRecord then records the entire
+                        // executing C4Control, including those earlier rows.
+                        self.runtime_record_requested = false;
+                        let started = self
+                            .prepare_runtime_recording_at_synchronize()
+                            .and_then(|()| self.start_recording(true));
+                        match started {
+                            Ok(true) if !batch_recorded => {
+                                self.record_control_batch(&packets);
+                                batch_recorded = true;
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to start runtime control recording");
+                            }
+                        }
+                    }
                         self.engine
                             .execute_synchronize_control_before_network(control.save_player_files)
                             .map_err(map_runtime_flash_producer_engine_error)?;
+                    if control.save_player_files && !replaying {
+                        // C4Game owns the state checkpoint; C4Player owns the
+                        // physical group write. Its aggregate failure is not
+                        // propagated by C4Game::Synchronize.
+                        let _ = self.persist_synchronized_local_player_files();
+                    }
+                    if self.pending_runtime_dynamic_request.is_some() {
                         self.on_runtime_join_synchronized(tick);
+                    }
                         self.engine
                             .execute_synchronize_control_after_network(control.sync_clearance)
                             .map_err(map_runtime_flash_producer_engine_error)?;
-                    } else {
-                        self.engine
-                            .execute_synchronize_control(
-                                control.save_player_files,
-                                control.sync_clearance,
-                            )
-                            .map_err(map_runtime_flash_producer_engine_error)?;
-                    }
                     Ok(())
                 }
                 NetworkControl::SyncCheck(packet) => {
@@ -69581,6 +71439,18 @@ impl GameApp {
                 // PreSend frames before its cadence gate, so the aggregate is
                 // normally complete by the frame that wants to execute it.
                 self.flush_pending_remove_player_controls(true)?;
+                if self.network.is_none() {
+                    let control_rate = u64::try_from(self.engine.control_rate())
+                        .unwrap_or(1)
+                        .max(1);
+                    if self.engine.frame() % control_rate == 0
+                        && !self.offline_control_input.is_empty()
+                    {
+                        let tick = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+                        let controls = std::mem::take(&mut self.offline_control_input);
+                        self.apply_ready_controls(tick, controls)?;
+                    }
+                }
                 if self.network.is_some() {
                     let frame = self.engine.frame();
                     let local_activated = self
@@ -72463,6 +74333,11 @@ impl GameApp {
         self.mark_menu_dirty();
         match pending.continuation {
             MessageDialogContinuation::None => {}
+            MessageDialogContinuation::DeveloperConsoleNotice { follow_up } => {
+                if let Some(message) = follow_up {
+                    self.show_developer_console_message(message, None)?;
+                }
+            }
             MessageDialogContinuation::StartupNetworkConnectProgress => {
                 if self
                     .startup_network_connection
@@ -74839,6 +76714,20 @@ impl GameApp {
         defer_native_loader_text: bool,
         defer_native_game_messages: bool,
     ) -> Result<bool> {
+        if self.console_mode {
+            self.sync_developer_console_view();
+            let font = self.assets.font_arc();
+            self.developer_console
+                .render(self.graphics.surface_mut(), font.as_ref());
+            self.render_message_dialogs(None)?;
+            let surface = self.graphics.surface();
+            if surface.pixels().len() == frame.len() {
+                frame.copy_from_slice(surface.pixels());
+            } else {
+                copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
+            }
+            return Ok(true);
+        }
         match self.mode {
             AppMode::Menu => {
                 let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
@@ -78294,14 +80183,39 @@ impl GameApp {
         scenario: &FrontendScenario,
         scenario_data: &Scenario,
     ) -> std::result::Result<(), String> {
+        self.runtime_record_requested = false;
+        self.live_save_seed = None;
         self.recording_template = None;
+        let Some(scenario_path) = scenario.path.as_deref() else {
+            return if self.recordings_dir.is_none() {
+                Ok(())
+            } else {
+                Err("recording requires a filesystem-backed scenario".to_string())
+            };
+        };
+        let definition_modules = scenario_data
+            .definition_resource_paths()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let scenario_origin =
+            record_scenario_origin(scenario_path, self.app_paths.as_ref(), &scenario.identifier);
+        let (recording_parameters, scenario_defaults) =
+            self.recording_parameters(scenario, scenario_data)?;
+        let runtime_seed = RuntimeRecordingSeed {
+            scenario_path: scenario_path.to_path_buf(),
+            scenario_source_path: scenario_path.to_path_buf(),
+            scenario_identifier: scenario.identifier.clone(),
+            scenario_title: recording_parameters.title.clone(),
+            definition_modules: definition_modules.clone(),
+            scenario_origin: scenario_origin.clone(),
+            parameters: recording_parameters.clone(),
+            scenario_defaults: scenario_defaults.clone(),
+        };
+        self.live_save_seed = Some(runtime_seed.clone());
         let Some(dir) = self.recordings_dir.as_ref() else {
             return Ok(());
         };
-        let scenario_path = scenario
-            .path
-            .as_deref()
-            .ok_or_else(|| "recording requires a filesystem-backed scenario".to_string())?;
         fs::create_dir_all(dir).map_err(|error| error.to_string())?;
         let index = next_recording_index(dir).map_err(|error| error.to_string())?;
         let raw_base_name = scenario_path
@@ -78312,22 +80226,12 @@ impl GameApp {
             "{index:03}-{}.c4s",
             sanitize_record_name(raw_base_name)
         ));
-        let definition_modules = scenario_data
-            .definition_resource_paths()
-            .iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
         let mut record_title = lc_script::c4_string_bytes(&format!(
             "{index:03} {} [{CLASSIC_ENGINE_BUILD}]",
             scenario.title
         ));
         record_title.truncate(512);
         let record_title = lc_script::c4_string_from_bytes(&record_title);
-        let scenario_origin = record_scenario_origin(
-            scenario_path,
-            self.app_paths.as_ref(),
-            &scenario.identifier,
-        );
         let native_config = load_native_config_bytes(self.app_paths.as_ref());
         let (definition_executable_path, definition_path) =
             game_save_definition_paths(self.app_paths.as_ref(), &native_config);
@@ -78340,12 +80244,12 @@ impl GameApp {
                 &scenario_origin,
             )
             .map_err(|error| error.to_string())?;
-        let source = open_group_path_for_folder_map(scenario_path)
-            .map_err(|error| error.to_string())?;
-        let (parameters, scenario_defaults) =
-            self.recording_parameters(scenario, scenario_data)?;
-        let parameters =
-            lc_network::serialize_initial_network_parameters(&parameters, &scenario_defaults)
+        let source =
+            open_group_path_for_folder_map(scenario_path).map_err(|error| error.to_string())?;
+        let parameters = lc_network::serialize_initial_network_parameters(
+            &recording_parameters,
+            &scenario_defaults,
+        )
                 .map_err(|error| error.to_string())?;
         let original_game = source.read_file("Game.txt").ok();
         let game = lc_engine::serialize_initial_network_game(
@@ -78443,6 +80347,175 @@ impl GameApp {
             group,
             output_path,
             initial_stream_chunk,
+            runtime_seed: Some(runtime_seed),
+        });
+        Ok(())
+    }
+
+    /// Build the non-initial `C4GameSaveRecord` image at the exact
+    /// `C4Game::Synchronize` boundary that consumes `fRecordNeeded`.
+    fn prepare_runtime_recording_at_synchronize(&mut self) -> std::result::Result<(), String> {
+        let Some(seed) = self.live_save_seed.clone().or_else(|| {
+            self.recording_template
+                .as_ref()
+                .and_then(|template| template.runtime_seed.clone())
+        }) else {
+            // State-only tests and embedders may install an already-composed
+            // template. Production templates always retain this seed.
+            return Ok(());
+        };
+        let dir = self
+            .recordings_dir
+            .as_ref()
+            .ok_or_else(|| "runtime recording has no record directory".to_string())?;
+        fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+        let index = next_recording_index(dir).map_err(|error| error.to_string())?;
+        let raw_base_name = seed
+            .scenario_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(&seed.scenario_identifier);
+        let output_path = dir.join(format!(
+            "{index:03}-{}.c4s",
+            sanitize_record_name(raw_base_name)
+        ));
+
+        let scenario_title = native_bytes_as_legacy_text(seed.scenario_title.as_bytes());
+        let mut record_title = lc_script::c4_string_bytes(&format!(
+            "{index:03} {scenario_title} [{CLASSIC_ENGINE_BUILD}]"
+        ));
+        record_title.truncate(512);
+        let record_title = lc_script::c4_string_from_bytes(&record_title);
+        let native_config = load_native_config_bytes(self.app_paths.as_ref());
+        let (definition_executable_path, definition_path) =
+            game_save_definition_paths(self.app_paths.as_ref(), &native_config);
+        let save = self
+            .engine
+            .serialize_live_c4_save_with_policy(
+                lc_engine::LiveC4SaveSpec {
+                    title: &record_title,
+                    definition_modules: &seed.definition_modules,
+                    definition_executable_path: &definition_executable_path,
+                    definition_path: &definition_path,
+                    origin: &seed.scenario_origin,
+                    music_enabled: self.runtime_music_enabled,
+                    modified_title: None,
+                    modified_info_txt: None,
+                    modified_script_c: None,
+                },
+                lc_engine::LiveC4SavePolicy::Record,
+            )
+            .map_err(|error| format!("serialize runtime record: {error}"))?;
+
+        let mut parameters = seed.parameters;
+        parameters.random_seed = (self.engine.random_seed() as u32) as i32;
+        parameters.startup_player_count =
+            i32::try_from(self.control_player_infos.player_count()).unwrap_or(i32::MAX);
+        parameters.max_players = self
+            .engine
+            .max_players()
+            .unwrap_or(seed.scenario_defaults.max_players);
+        parameters.use_fair_crew = self.engine.use_fair_crew();
+        parameters.fair_crew_forced = self.engine.fair_crew_forced();
+        parameters.fair_crew_strength = self.engine.fair_crew_strength();
+        parameters.allow_debug = self.engine.allow_debug();
+        parameters.is_network_game = self.network.is_some();
+        parameters.control_rate = self.engine.control_rate();
+        parameters.auto_frame_skip = self.auto_frame_skip;
+        parameters.player_infos = self.recording_player_info_snapshot();
+        parameters.clients =
+            lc_network::JoinClientRegistrySnapshot::new(self.control_clients.snapshot());
+        let restore_plan = runtime_join_save::set_as_live_save_restore_infos(
+            &parameters.clients.clients,
+            &parameters.player_infos,
+            lc_engine::LiveC4SavePolicy::Record.player_policy(),
+        );
+        let parameter_bytes =
+            lc_network::serialize_initial_network_parameters(&parameters, &seed.scenario_defaults)
+                .map_err(|error| error.to_string())?;
+        let restore_info_bytes =
+            lc_network::encode_player_info_list_ini(&restore_plan.restore_infos)
+                .map_err(|error| error.to_string())?;
+
+        let (add_new_crew_portraits, save_default_portraits, player_rank_name_default) =
+            self.developer_console_player_save_options();
+        let player_save_options = lc_engine::LiveC4PlayerSaveOptions {
+            savegame: true,
+            add_new_crew_portraits,
+            save_default_portraits,
+            player_rank_name_default: &player_rank_name_default,
+        };
+        let group_maker = self.developer_console_save_maker();
+        let runtime_players = self
+            .engine
+            .players()
+            .map(|player| (player.id(), player.player_info_id()))
+            .collect::<Vec<_>>();
+        let mut remaining_targets = restore_plan.player_groups;
+        let mut player_groups = Vec::with_capacity(remaining_targets.len());
+        for (game_number, player_info_id) in runtime_players {
+            let Some(target_index) = remaining_targets
+                .iter()
+                .position(|target| target.player_info_id == player_info_id)
+            else {
+                continue;
+            };
+            let target = remaining_targets.remove(target_index);
+            let group = lc_engine::serialize_live_c4_player_with_options_and_enumeration(
+                &self.engine,
+                game_number,
+                target.filename.as_bytes(),
+                &group_maker,
+                player_save_options,
+                &save.value_enumeration,
+            )
+            .map_err(|error| {
+                format!(
+                    "serialize runtime record player info {} (game player {}): {error}",
+                    target.player_info_id, game_number
+                )
+            })?;
+            player_groups.push(runtime_join_save::SerializedRuntimeJoinPlayerGroup {
+                filename: target.filename,
+                group,
+            });
+        }
+        if !remaining_targets.is_empty() {
+            return Err(format!(
+                "{} runtime record player rows have no live player",
+                remaining_targets.len()
+            ));
+        }
+
+        let source = open_group_path_for_folder_map(&seed.scenario_source_path)
+            .map_err(|error| error.to_string())?;
+        let mut group = MutableGroup::from_group(&source).map_err(|error| error.to_string())?;
+        let current_section = format!("Sect{}.c4g", self.engine.debug_current_scenario_section());
+        let landscape_is_static = self
+            .engine
+            .landscape()
+            .is_some_and(|landscape| landscape.mode() == lc_engine::LANDSCAPE_MODE_STATIC);
+        developer_console_save::apply_live_save_to_group(
+            &mut group,
+            lc_engine::LiveC4SavePolicy::Record,
+            &save,
+            &restore_info_bytes,
+            player_groups,
+            Some(&current_section),
+            landscape_is_static,
+        )
+        .map_err(|error| error.to_string())?;
+        group
+            .add_file("Parameters.txt", parameter_bytes)
+            .map_err(|error| error.to_string())?;
+        group.remove_entry("CtrlRec.c4b");
+        group.remove_entry("CtrlRec.txt");
+        group.remove_entry("RecPlayerInfos.txt");
+        self.recording_template = Some(RecordingTemplate {
+            group,
+            output_path,
+            initial_stream_chunk: Vec::new(),
+            runtime_seed: None,
         });
         Ok(())
     }
@@ -78471,7 +80544,11 @@ impl GameApp {
                 template.output_path.display()
             )
         })?;
-        let league_streaming = self
+        // Only initial league records call C4GameControl::StartRecord with
+        // streaming enabled. FileRecord's non-initial StartRecord(false,
+        // false) remains a local record even during a league session.
+        let league_streaming = !template.initial_stream_chunk.is_empty()
+            && self
             .network
             .as_ref()
             .is_some_and(NetworkManager::league_record_stream_available);
@@ -78679,6 +80756,7 @@ impl GameApp {
     }
 
     fn finish_recording(&mut self) -> Option<LeagueEndRecord> {
+        self.runtime_record_requested = false;
         self.engine.set_recording_active(false);
         if self.recording.is_none() {
             return None;
@@ -78824,6 +80902,7 @@ impl GameApp {
         self.host_lobby_countdown = None;
         self.pending_local_lobby_countdown_echoes.clear();
         self.finish_recording();
+        self.live_save_seed = None;
         self.recording_template = None;
         self.control_playback = None;
         self.deferred_network_savegame_recreation.clear();
@@ -78906,18 +80985,21 @@ impl GameApp {
         self.sync_checks.clear();
         self.network_ticks.clear();
         self.network_sync.clear();
+        self.offline_control_input.clear();
         self.offline_halt_count = false;
         self.network_control_running = self.network.is_none();
         self.runtime_network_status_barrier = None;
         self.league_votes.clear();
         self.frames_per_second = 0;
         self.frames_since_second = 0;
+        self.script_created_objects = false;
         self.full_speed = false;
         self.frame_skip = 1;
         self.control_clients =
             initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
         self.network_client_activity.clear();
         self.control_player_infos = ControlPlayerInfoRegistry::default();
+        self.local_player_profile_paths.clear();
         self.network_team_assignment = None;
         self.clear_blocking_resource_wait();
         self.admission_resources.clear();
@@ -79667,13 +81749,26 @@ impl GameApp {
                     snapshot_effective_client_player_selection(paths, &self.classic_command_line)
                         .map_err(|error| error.to_string())?;
                 match preflight_offline_startup(&path) {
-                    Ok(preflight) => Ok(Some((
-                        OfflineStartupPlayers::new(
-                            load_snapshotted_client_players(paths, &selection),
+                    Ok(preflight) => {
+                        let configured = load_snapshotted_client_players(paths, &selection);
+                        if preflight.save_game {
+                            let language_packs = classic_language_packs(paths);
+                            let (startup, savegame) = prepare_offline_savegame_startup(
+                                &path,
+                                configured,
                             preflight.max_players,
-                        ),
+                                &languages,
+                                &language_packs,
+                            )?;
+                            Ok(Some((startup, preflight.random_seed, Some(savegame))))
+                        } else {
+                            Ok(Some((
+                                OfflineStartupPlayers::new(configured, preflight.max_players),
                         preflight.random_seed,
-                    ))),
+                                None,
+                            )))
+                        }
+                    }
                     // Scenario.json is a Rust-only fixture format. Keep its
                     // existing synthetic single-player path isolated from the
                     // legacy C++ startup pipeline.
@@ -79691,18 +81786,19 @@ impl GameApp {
             .as_ref()
             .ok()
             .and_then(Option::as_ref)
-            .map(|(startup, _)| startup.startup_player_count());
+            .map(|(startup, _, _)| startup.startup_player_count());
         let offline_parameter_seed = offline_startup
             .as_ref()
             .ok()
             .and_then(Option::as_ref)
-            .and_then(|(_, seed)| *seed);
+            .and_then(|(_, seed, _)| *seed);
         let offline_startup_error = offline_startup.as_ref().err().cloned();
         let replay_startup_error = replay_startup.as_ref().err().cloned();
-        let offline_startup_players = offline_startup
+        let (offline_startup_players, offline_savegame) = offline_startup
             .ok()
             .flatten()
-            .map(|(startup, _)| startup);
+            .map(|(startup, _, savegame)| (Some(startup), savegame))
+            .unwrap_or((None, None));
         let replay_startup = replay_startup.ok().flatten();
         // C4GameParameters::Load freezes this before InitGameSecondPart calls
         // FixRandom and Landscape.Init. Parameters.txt wins when present;
@@ -79789,6 +81885,7 @@ impl GameApp {
         loading_state.refreshed_tooltip_font = loader_setup.refreshed_tooltip_font;
         loading_state.refreshed_native_font_source = loader_setup.refreshed_native_font_source;
         loading_state.offline_startup_players = offline_startup_players;
+        loading_state.offline_savegame = offline_savegame;
         loading_state.offline_random_seed = offline_random_seed;
         self.loading_state = Some(loading_state);
         self.mode = AppMode::Loading;
@@ -79801,8 +81898,10 @@ impl GameApp {
         scenario_data: &Scenario,
     ) -> std::result::Result<(), ScenarioActivationError> {
         self.finish_recording();
+        self.live_save_seed = None;
         self.recording_template = None;
         self.control_playback = None;
+        self.local_player_profile_paths.clear();
         self.deferred_network_savegame_recreation.clear();
         let prepared_go = self
             .loading_state
@@ -79907,6 +82006,15 @@ impl GameApp {
             .loading_state
             .as_mut()
             .and_then(|loading| loading.offline_startup_players.take());
+        let offline_savegame = self
+            .loading_state
+            .as_mut()
+            .and_then(|loading| loading.offline_savegame.take());
+        let initial_game_data = prepared_initial_game_data.as_ref().or_else(|| {
+            offline_savegame
+                .as_ref()
+                .map(|save| &save.initial_game_data)
+        });
         let network_game = self.network.is_some();
         let replay = scenario_data
             .lobby_metadata()
@@ -80016,6 +82124,11 @@ impl GameApp {
                 );
                 self.network_max_players = usize::try_from(max_players).unwrap_or(0);
             }
+            if let Some(startup) = offline_startup_players.as_ref() {
+                self.network_max_players = self
+                    .network_max_players
+                    .max(usize::try_from(startup.max_players()).unwrap_or(0));
+            }
         }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
         engine.set_smoke_level(self.graphics_smoke_level);
@@ -80054,7 +82167,7 @@ impl GameApp {
         engine.set_fair_crew_strength(fair_crew_strength);
         engine.set_fair_crew_forced(fair_crew_forced);
         engine.set_allow_debug(allow_debug);
-        arm_configured_graphical_engine_debug_mode(&mut engine, self.app_paths.as_ref());
+        arm_configured_engine_debug_mode(&mut engine, self.app_paths.as_ref(), self.console_mode);
         engine.set_local_players([self.local_owner]);
         engine.set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
         if let Some(timing) = self
@@ -80109,7 +82222,7 @@ impl GameApp {
 
         let apply_result = match (
             network_game,
-            prepared_initial_game_data.as_ref(),
+            initial_game_data,
             prepared_team_configuration,
             prepared_team_registry,
         ) {
@@ -80132,6 +82245,8 @@ impl GameApp {
                     configuration,
                 ),
             (true, None, None, _) => scenario_data.apply_before_network_final_init(&mut engine),
+            (false, Some(game_data), configuration, _) => scenario_data
+                .apply_before_players_with_game_data(&mut engine, game_data, configuration),
             (false, _, Some(configuration), _) => scenario_data
                 .apply_before_players_with_team_configuration(&mut engine, configuration),
             (false, _, None, _) => scenario_data.apply_before_players(&mut engine),
@@ -80146,13 +82261,9 @@ impl GameApp {
             );
             return Err(scenario_activation_scenario_error(&scenario.title, err));
         }
-        self.advance_scenario_loader(
-            94,
-            "Definitions, scripts, landscape, and objects activated",
-        );
+        self.advance_scenario_loader(94, "Definitions, scripts, landscape, and objects activated");
 
-        let restored_music_enabled = prepared_initial_game_data
-            .as_ref()
+        let restored_music_enabled = initial_game_data
             .map(|game_data| engine.reconcile_music_after_restore(game_data.music_enabled));
 
         let pending_offline_joins = if !network_game {
@@ -80179,7 +82290,9 @@ impl GameApp {
             )));
         }
 
-        if !network_game {
+        let mut script_created_objects = false;
+        if !network_game && offline_savegame.is_none() {
+            let objects_before_initialize = engine.active_object_count();
             if let Err(err) = engine.initialize_scenario_script() {
                 tracing::error!(
                     scenario = %scenario.title,
@@ -80189,6 +82302,7 @@ impl GameApp {
                 );
                 return Err(scenario_activation_engine_error(&scenario.title, err));
             }
+            script_created_objects = engine.active_object_count() != objects_before_initialize;
         }
 
         if let Some(description) = scenario_data.description() {
@@ -80198,6 +82312,7 @@ impl GameApp {
 
         self.auto_frame_skip = auto_frame_skip;
         self.engine = engine;
+        self.script_created_objects = script_created_objects;
         self.runtime_player_big_icons.clear();
         self.runtime_player_big_icon_misses.clear();
         if !replay {
@@ -80249,9 +82364,15 @@ impl GameApp {
         if !network_game && !replay {
             if let Some(startup) = offline_startup_players.as_ref() {
                 let startup_player_count = startup.startup_player_count();
-                let mut local_players = Vec::new();
+                let (mut local_players, mut joined_player_files) = if let Some(savegame) =
+                    offline_savegame.as_ref()
+                {
+                    self.recreate_offline_savegame_players(&path, savegame)
+                        .map_err(|error| scenario_activation_engine_error(&scenario.title, error))?
+                } else {
+                    (Vec::new(), Vec::new())
+                };
                 let mut team_selection_players = Vec::new();
-                let mut joined_player_files = Vec::<PathBuf>::new();
                 for join in pending_offline_joins {
                     let Some(info) = self.control_player_infos.get(join.info_id).cloned() else {
                         tracing::warn!(info_id = join.info_id, "offline join lost its player info");
@@ -80375,6 +82496,8 @@ impl GameApp {
                             ) {
                                 team_selection_players.push(joined.number());
                             }
+                            self.local_player_profile_paths
+                                .insert(join.info_id, real_path.clone());
                             joined_player_files.push(real_path);
                         }
                         Err(error @ EngineError::RuntimeFlashProducerBoundary { .. }) => {
@@ -80544,7 +82667,7 @@ impl GameApp {
         self.active_definition_load = Some(effective_definition_load);
         self.control_playback = control_playback;
         self.play_scenario_audio(&path);
-        if prepared_initial_game_data.is_some() {
+        if initial_game_data.is_some() {
             let restored_music_level = self.engine.music_level();
             if let Some(audio) = self.audio.as_mut() {
                 audio.set_scenario_music_level(Some(restored_music_level));
@@ -80690,6 +82813,113 @@ impl GameApp {
         Ok(())
     }
 
+    fn recreate_offline_savegame_players(
+        &mut self,
+        scenario_path: &Path,
+        savegame: &OfflineSavegameStartup,
+    ) -> Result<(Vec<i32>, Vec<PathBuf>), EngineError> {
+        if savegame.runtime_players.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let restored = self
+            .engine
+            .restore_offline_savegame_players_from_path(
+                scenario_path,
+                &savegame.runtime_players,
+                &savegame.external_player_paths,
+            )
+            .map_err(EngineError::from)?;
+        let mut local_players = Vec::new();
+
+        for (source, binding) in savegame.runtime_players.iter().zip(restored) {
+            let (
+                saved_mouse_control,
+                preferred_control_set,
+                prefers_mouse,
+                saved_pref_control_style,
+                saved_pref_auto_context_menu,
+                saved_player_name,
+            ) = {
+                let player = self
+                    .engine
+                    .player(binding.number)
+                    .ok_or(EngineError::UnknownPlayer(binding.number))?;
+                let (preferred_control_set, prefers_mouse) = player.control_preferences();
+                let (pref_control_style, pref_auto_context_menu) =
+                    player.control_style_preferences();
+                (
+                    player.mouse_control(),
+                    preferred_control_set,
+                    prefers_mouse,
+                    pref_control_style,
+                    pref_auto_context_menu,
+                    player.name().to_string(),
+                )
+            };
+            let current_info = self
+                .control_player_infos
+                .get(binding.player_info_id)
+                .cloned()
+                .unwrap_or_else(|| source.info.clone());
+            let script_player = current_info.is_script_player();
+            let player_name = if control_player_effective_name(&current_info).is_empty() {
+                saved_player_name
+            } else {
+                lc_script::c4_string_from_bytes(control_player_effective_name(&current_info))
+            };
+            let locally_controlled = !script_player;
+            let control_init = LocalControlInit {
+                owner: binding.number,
+                preferred_set: preferred_control_set,
+                prefers_mouse,
+                gamepads_enabled: self.gamepads_enabled,
+                replay: false,
+                disable_mouse: !self.mouse_control_allowed,
+            };
+            let control = if locally_controlled {
+                let control = self
+                    .local_controls
+                    .initialize_after_restore(control_init, saved_mouse_control != 0);
+                local_players.push(binding.number);
+                control
+            } else {
+                self.local_controls.resolve(control_init)
+            };
+            self.engine.reinitialize_player_after_restore(
+                binding.number,
+                lc_engine::PlayerAtClient::HOST,
+                "Local",
+                player_name,
+                control.runtime_control(),
+                script_player,
+                current_info.no_elimination_check(),
+                saved_pref_control_style,
+                saved_pref_auto_context_menu,
+            )?;
+            if let Some(player_path) = savegame.external_player_paths.get(&binding.player_info_id) {
+                self.local_player_profile_paths
+                    .insert(binding.player_info_id, player_path.clone());
+                let icon = load_local_player_big_icon(player_path);
+                self.cache_joined_player_big_icon(binding.player_info_id, icon.as_ref());
+            }
+        }
+
+        self.local_controls.finalize_restored_mouse_owner(
+            self.engine
+                .players()
+                .map(|player| (player.id(), player.status())),
+        );
+        self.engine.set_local_players(local_players.iter().copied());
+        self.engine.finalize_restored_players()?;
+        self.mouse_control = self.local_controls.mouse_owner().is_some();
+        let joined_player_files = savegame
+            .external_player_paths
+            .values()
+            .filter_map(|path| offline_player_real_path(path).ok())
+            .collect();
+        Ok((local_players, joined_player_files))
+    }
+
     fn finalize_network_loaded_scenario(
         &mut self,
         network_savegame: bool,
@@ -80721,7 +82951,12 @@ impl GameApp {
         // object state, so invoking it again would duplicate mutations
         // (pristine 9ffa0a5d src/C4Game.cpp:2724-2734).
         if !network_savegame {
+            let objects_before_initialize = self.engine.active_object_count();
             self.engine.initialize_scenario_script()?;
+            self.script_created_objects =
+                self.engine.active_object_count() != objects_before_initialize;
+        } else {
+            self.script_created_objects = false;
         }
         self.snapshot = self.engine.snapshot();
         self.rebuild_definition_sprites();
@@ -80770,6 +83005,7 @@ impl GameApp {
         self.runtime_player_big_icon_misses.clear();
         self.active_global_gui_overrides.clear();
         self.finish_recording();
+        self.live_save_seed = None;
         self.recording_template = None;
         self.control_playback = None;
         self.deferred_network_savegame_recreation.clear();
@@ -80811,12 +83047,13 @@ impl GameApp {
         self.active_definition_load = None;
         self.sky = None;
 
-        arm_configured_graphical_engine_debug_mode(&mut self.engine, self.app_paths.as_ref());
-        let spawn_definition = configure_sandbox_engine(
+        arm_configured_engine_debug_mode(
             &mut self.engine,
-            definition_load,
-            self.audio.as_mut(),
-        )?;
+            self.app_paths.as_ref(),
+            self.console_mode,
+        );
+        let spawn_definition =
+            configure_sandbox_engine(&mut self.engine, definition_load, self.audio.as_mut())?;
 
         self.ensure_local_player_registered()?;
 
@@ -81136,6 +83373,7 @@ impl GameApp {
         }
 
         self.finish_recording();
+        self.live_save_seed = None;
         self.recording_template = None;
         self.control_playback = None;
         self.engine = Engine::new();
@@ -81188,12 +83426,12 @@ impl GameApp {
                 (None, Some(paths)) => SandboxDefinitionLoad::InstallCrew(paths),
                 (None, None) => SandboxDefinitionLoad::None,
             };
-            arm_configured_graphical_engine_debug_mode(&mut self.engine, self.app_paths.as_ref());
-            configure_sandbox_engine(
+            arm_configured_engine_debug_mode(
                 &mut self.engine,
-                definition_load,
-                self.audio.as_mut(),
-            )
+                self.app_paths.as_ref(),
+                self.console_mode,
+            );
+            configure_sandbox_engine(&mut self.engine, definition_load, self.audio.as_mut())
             .context("failed to prepare sandbox engine for saved game")?;
         } else {
             let path = frontend.path.as_ref().ok_or_else(|| {
@@ -81255,7 +83493,11 @@ impl GameApp {
                     self.engine.set_control_rate(parameters.control_rate());
                 }
             }
-            arm_configured_graphical_engine_debug_mode(&mut self.engine, self.app_paths.as_ref());
+            arm_configured_engine_debug_mode(
+                &mut self.engine,
+                self.app_paths.as_ref(),
+                self.console_mode,
+            );
             let sound_samples =
                 configure_scenario_sound_samples(self.audio.as_mut(), &scenario_data, path);
             let music_tracks = self
@@ -81305,7 +83547,11 @@ impl GameApp {
         // DebugMode is process-local and deliberately absent from EngineState.
         // C4Game::Init reapplies AlwaysDebug after the restored AllowDebug
         // parameter is known.
-        arm_configured_graphical_engine_debug_mode(&mut self.engine, self.app_paths.as_ref());
+        arm_configured_engine_debug_mode(
+            &mut self.engine,
+            self.app_paths.as_ref(),
+            self.console_mode,
+        );
         if let Some(clock) = self.network_control_clock.as_mut() {
             clock.set_control_rate(self.engine.control_rate());
         }
@@ -81753,6 +83999,7 @@ impl GameApp {
         self.sync_checks.clear();
         self.network_ticks.clear();
         self.network_sync.clear();
+        self.offline_control_input.clear();
         self.offline_halt_count = false;
         self.network_control_running = self.network.is_none();
         self.runtime_network_status_barrier = None;
@@ -86395,6 +88642,39 @@ where
 /// like ordinary joined paths even though they do not exist in the host FS.
 fn scenario_logical_storage(path: &Path) -> Result<(PathBuf, Vec<String>)> {
     if path.exists() {
+        // RegisterParentFolders treats an immediately enclosing `.c4f` as a
+        // true mother group even when both it and the scenario are unpacked
+        // directories. Trace the consecutive c4f chain back to its physical
+        // root so SaveGame sees the same child relationship as C4Group.
+        let is_c4f = |candidate: &Path| {
+            candidate
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f"))
+        };
+        if let Some(parent) = path.parent().filter(|parent| is_c4f(parent)) {
+            let mut physical = parent.to_path_buf();
+            while let Some(parent) = physical.parent().filter(|parent| is_c4f(parent)) {
+                physical = parent.to_path_buf();
+            }
+            let children = path
+                .strip_prefix(&physical)
+                .expect("physical parent was selected from the scenario path")
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(name) => {
+                        Some(name.to_str().map(str::to_owned).ok_or_else(|| {
+                            anyhow!(
+                                "scenario path has no UTF-8 group entry: {}",
+                                path.display()
+                            )
+                        }))
+                    }
+                    _ => None,
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok((physical, children));
+        }
         return Ok((path.to_path_buf(), Vec::new()));
     }
     let mut ancestor = path.to_path_buf();
@@ -86515,6 +88795,114 @@ fn replace_file_from_same_directory(path: &Path, bytes: &[u8]) -> Result<()> {
     Err(last_error
         .unwrap_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "temporary rewrite path"))
         .into())
+}
+
+fn console_save_ignored_directory_entry(name: &[u8]) -> bool {
+    (name.first() == Some(&b'.') && name != b".legacyclonk")
+        || name.eq_ignore_ascii_case(b"cvs")
+        || name.eq_ignore_ascii_case(b"Thumbs.db")
+}
+
+/// Reconcile a folder-backed C4Group with an already-mutated in-memory group.
+/// Hidden/CVS metadata ignored by C4Group remains untouched, while every
+/// visible file and child follows the same case-insensitive replacement and
+/// deletion view that a packed-group rewrite would expose.
+fn sync_console_save_group_directory(source: &Group, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)
+        .with_context(|| format!("create scenario directory {}", destination.display()))?;
+    let desired = source.entries()?;
+    let desired_names = desired
+        .iter()
+        .map(|entry| entry.name_bytes.clone())
+        .collect::<Vec<_>>();
+
+    for existing in fs::read_dir(destination)
+        .with_context(|| format!("read scenario directory {}", destination.display()))?
+    {
+        let existing = existing?;
+        let bytes = path_to_legacy_bytes(Path::new(&existing.file_name()));
+        if console_save_ignored_directory_entry(&bytes)
+            || desired_names
+                .iter()
+                .any(|desired| desired.eq_ignore_ascii_case(&bytes))
+        {
+            continue;
+        }
+        let path = existing.path();
+        if fs::symlink_metadata(&path)?.file_type().is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+
+    for entry in desired {
+        let requested = path_from_group_name_bytes(&entry.name_bytes);
+        let target = destination.join(&requested);
+        let existing = fs::read_dir(destination)?.find_map(|candidate| {
+            let candidate = candidate.ok()?;
+            let bytes = path_to_legacy_bytes(Path::new(&candidate.file_name()));
+            bytes
+                .eq_ignore_ascii_case(&entry.name_bytes)
+                .then_some(candidate.path())
+        });
+        if let Some(existing) = existing.as_ref().filter(|existing| **existing != target) {
+            if fs::symlink_metadata(existing)?.file_type().is_dir() {
+                fs::remove_dir_all(existing)?;
+            } else {
+                fs::remove_file(existing)?;
+            }
+        }
+
+        if entry.is_directory {
+            if target.exists() && !target.is_dir() {
+                fs::remove_file(&target)?;
+            }
+            let child = source.open_child(&entry.relative_path)?;
+            sync_console_save_group_directory(&child, &target)?;
+        } else {
+            if target.is_dir() {
+                fs::remove_dir_all(&target)?;
+            }
+            let payload = source.read_entry_bytes_exact(&entry)?;
+            replace_file_from_same_directory(&target, &payload)?;
+            #[cfg(unix)]
+            if entry.executable {
+                use std::os::unix::fs::PermissionsExt;
+
+                let mut permissions = fs::metadata(&target)?.permissions();
+                permissions.set_mode(permissions.mode() | 0o111);
+                fs::set_permissions(&target, permissions)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn persist_console_save_group(
+    group: &MutableGroup,
+    destination: &Path,
+    preserve_folder_group: bool,
+) -> Result<()> {
+    let packed = group.pack()?;
+    if preserve_folder_group {
+        if destination.exists() && !destination.is_dir() {
+            fs::remove_file(destination)
+                .with_context(|| format!("replace packed save target {}", destination.display()))?;
+        }
+        let source = Group::from_memory(destination.to_path_buf(), packed)?;
+        return sync_console_save_group_directory(&source, destination);
+    }
+    anyhow::ensure!(
+        !destination.is_dir(),
+        "save target is an existing directory: {}",
+        destination.display()
+    );
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create save parent {}", parent.display()))?;
+    }
+    replace_file_from_same_directory(destination, &packed)
 }
 
 fn rewrite_directory_scenario_title(
@@ -140409,6 +142797,7 @@ ScenInfoArea=70,5,25,90
             group,
             output_path,
             initial_stream_chunk: Vec::new(),
+            runtime_seed: None,
         });
     }
 
@@ -140756,6 +143145,22 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn record_index_and_basename_match_cpp_directory_scan() {
+        let directory = tempdir().expect("record directory");
+        fs::write(directory.path().join("001-First.c4s"), b"record").expect("write first record");
+        fs::create_dir(directory.path().join("002-Unpacked.c4s"))
+            .expect("create unpacked record group");
+        fs::write(directory.path().join("mixed.C4S"), b"record").expect("write mixed-case record");
+        fs::write(directory.path().join("999-not-a-record.txt"), b"other")
+            .expect("write unrelated entry");
+
+        assert_eq!(next_recording_index(directory.path()).unwrap(), 4);
+        assert_eq!(sanitize_record_name("Scenario007"), "Scenario");
+        assert_eq!(sanitize_record_name("123"), "1");
+        assert_eq!(sanitize_record_name("Odd name!?"), "Odd name!?");
+    }
+
+    #[test]
     fn forced_recording_rejects_missing_prepared_storage() {
         let mut app = new_state_only_running_sandbox_app();
         assert_eq!(
@@ -140830,6 +143235,7 @@ ScenInfoArea=70,5,25,90
         let mut app = new_state_only_running_sandbox_app();
         app.recording_enabled = false;
         install_test_recording_template(&mut app, output_path.clone());
+        app.runtime_record_requested = true;
         let synchronize = lc_engine::SynchronizeControlData {
             save_player_files: false,
             sync_clearance: true,
@@ -140854,15 +143260,75 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn synchronized_runtime_join_clearance_does_not_request_a_record() {
+    fn any_synchronize_starts_only_an_explicitly_requested_runtime_record() {
         let directory = tempdir().expect("record directory");
         let mut app = new_state_only_running_sandbox_app();
-        install_test_recording_template(
-            &mut app,
-            directory.path().join("001-RuntimeJoin.c4s"),
-        );
+        install_test_recording_template(&mut app, directory.path().join("001-RuntimeJoin.c4s"));
         app.apply_synchronized_controls(
             0,
+            vec![NetworkControl::Synchronize(
+                lc_engine::SynchronizeControlData {
+                    save_player_files: false,
+                    sync_clearance: false,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute unrequested CDT_Sync");
+
+        assert!(app.recording.is_none());
+        assert!(app.recording_template.is_some());
+
+        app.runtime_record_requested = true;
+        app.apply_synchronized_controls(
+            1,
+            vec![NetworkControl::Synchronize(
+                lc_engine::SynchronizeControlData {
+                    save_player_files: false,
+                    sync_clearance: false,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("the next game synchronization starts the request");
+
+        assert!(!app.runtime_record_requested);
+        assert!(app.recording.is_some());
+    }
+
+    #[test]
+    fn developer_console_runtime_record_waits_for_its_queued_synchronize() {
+        let directory = tempdir().expect("record directory");
+        let output_path = directory.path().join("001-ConsoleRuntime.c4s");
+        let mut app = new_state_only_running_sandbox_app();
+        install_test_recording_template(&mut app, output_path);
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
+        let tick = app.local_control_submission_tick();
+
+        assert!(app.developer_console_runtime_record_possible());
+        assert!(app
+            .developer_console_request_runtime_record()
+            .expect("queue console runtime record"));
+        assert!(app.runtime_record_requested);
+        assert!(!app.developer_console_runtime_record_possible());
+        assert!(app.recording.is_none());
+
+        let decided = commands.take_submitted_decided_controls();
+        assert_eq!(
+            decided,
+            vec![(
+                tick,
+                lc_engine::ControlPacket::Synchronize(lc_engine::SynchronizeControlData {
+                    save_player_files: false,
+                    sync_clearance: true,
+                    by_client: 0,
+                },),
+                false,
+            )]
+        );
+
+        app.apply_ready_controls(
+            tick,
             vec![NetworkControl::Synchronize(
                 lc_engine::SynchronizeControlData {
                     save_player_files: false,
@@ -140871,10 +143337,255 @@ ScenInfoArea=70,5,25,90
                 },
             )],
         )
-        .expect("execute CDT_Sync clearance");
+        .expect("execute queued runtime-record synchronization");
+        assert!(!app.runtime_record_requested);
+        assert!(app.recording.is_some());
+    }
 
-        assert!(app.recording.is_none());
-        assert!(app.recording_template.is_some());
+    #[test]
+    fn developer_console_latches_no_input_and_reflects_pending_network_pause() {
+        let mut app = new_state_only_running_sandbox_app();
+        app.console_mode = true;
+        app.control_playback = Some(
+            ControlRecordPlayback::from_bytes(&[0, lc_engine::RCT_END])
+                .expect("open replay marker"),
+        );
+        app.sync_developer_console_view();
+        app.control_playback = None;
+        app.sync_developer_console_view();
+        assert!(!app.developer_console.view_model().editing);
+
+        let (_events, _commands) = install_running_network_stub(&mut app, 0, 0, 1);
+        app.network_control_running = true;
+        app.runtime_network_status_barrier = Some(RuntimeNetworkStatusBarrier {
+            status: lc_network::NetworkStatus {
+                state: lc_network::NETWORK_STATE_PAUSE,
+                control_mode: 0,
+                target_tick: 0,
+            },
+            local_reached: false,
+            actual_control_tick: None,
+        });
+        assert!(
+            app.developer_console_view_model().halted,
+            "IsPaused becomes true as soon as a network status barrier is pending"
+        );
+        app.runtime_network_status_barrier = None;
+        assert!(!app.developer_console_view_model().halted);
+    }
+
+    #[test]
+    fn developer_console_player_and_net_menus_use_native_controls() {
+        let mut app = new_state_only_running_sandbox_app();
+        let player = app.local_owner;
+        app.engine
+            .player_mut(player)
+            .expect("console player exists")
+            .set_at_client_name("Host");
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
+        let mut remote = message_client(7, b"Remote");
+        remote.activated = false;
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), remote]);
+
+        assert_eq!(
+            app.developer_console_player_menu_entries(true),
+            vec![ConsolePlayerRow {
+                number: player,
+                quit_label: format!(
+                    "Remove {} (Host) ",
+                    c4_presentation_text(app.engine.player(player).expect("player remains").name())
+                ),
+                quit_enabled: true,
+                viewport_label: format!(
+                    "New for {}",
+                    c4_presentation_text(app.engine.player(player).expect("player remains").name())
+                ),
+            }]
+        );
+        assert_eq!(
+            app.developer_console_net_menu_entries(),
+            vec![
+                ConsoleClientRow {
+                    id: 0,
+                    menu_label: "Host Host (0)".to_string(),
+                    menu_enabled: true,
+                },
+                ConsoleClientRow {
+                    id: 7,
+                    menu_label: "Client Remote (7) deactivated".to_string(),
+                    menu_enabled: true,
+                },
+            ]
+        );
+
+        app.engine.set_control_host(false);
+        assert!(
+            app.developer_console_net_menu_entries()
+                .iter()
+                .all(|entry| entry.menu_enabled),
+            "native keeps the rows enabled and rejects their callback"
+        );
+        assert!(!app
+            .developer_console_kick_client(7)
+            .expect("non-control host ignores kick"));
+        assert!(commands.take_submitted_client_removes().is_empty());
+        app.engine.set_control_host(true);
+        assert!(app
+            .developer_console_kick_client(7)
+            .expect("control host queues kick"));
+        assert_eq!(
+            commands.take_submitted_client_removes(),
+            vec![lc_engine::ClientRemoveControlData {
+                client_id: 7,
+                reason: lc_engine::LegacyCString::from_bytes(b"kicked from host menu".to_vec())
+                    .expect("fixture reason"),
+                by_client: 0,
+            }]
+        );
+
+        let tick = app.local_control_submission_tick();
+        assert!(app
+            .developer_console_quit_player(player, true)
+            .expect("queue console player quit"));
+        assert_eq!(
+            commands.take_submitted_internal_player_scripts(),
+            vec![(
+                tick,
+                lc_engine::ControlPacket::EliminatePlayer(lc_engine::EliminatePlayerControlData {
+                    player,
+                    by_client: 0,
+                },),
+            )]
+        );
+        assert!(app.engine.player(player).is_some());
+    }
+
+    #[test]
+    fn developer_console_offline_join_and_quit_use_control_cadence() {
+        let player_path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lc-engine/tests/fixtures/embedded_player.c4p"
+        ));
+        let mut app = new_synthetic_running_sandbox_app();
+        let before = app.engine.snapshot().players.len();
+
+        assert_eq!(
+            app.developer_console_join_players(&[player_path.to_path_buf()], true)
+                .expect("join selected offline player"),
+            1
+        );
+        assert_eq!(app.engine.snapshot().players.len(), before + 1);
+
+        let player = app.local_owner;
+        app.engine.set_control_rate(3);
+        app.snapshot = app.engine.tick().expect("advance past cadence frame zero");
+        assert!(app
+            .developer_console_quit_player(player, true)
+            .expect("queue local CID_EliminatePlayer"));
+        assert_ne!(
+            app.engine.player(player).map(lc_engine::Player::status),
+            Some(lc_engine::PlayerStatus::Eliminated),
+            "Game.Control.Input.Add must not execute the callback immediately"
+        );
+        app.update().expect("frame one is before the control cadence");
+        app.update().expect("frame two is before the control cadence");
+        assert_ne!(
+            app.engine.player(player).map(lc_engine::Player::status),
+            Some(lc_engine::PlayerStatus::Eliminated)
+        );
+        app.update().expect("frame three executes the control input");
+        assert_eq!(
+            app.engine.player(player).map(lc_engine::Player::status),
+            Some(lc_engine::PlayerStatus::Eliminated)
+        );
+    }
+
+    #[test]
+    fn developer_console_network_join_uses_join_local_player_route() {
+        let player_path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lc-engine/tests/fixtures/embedded_player.c4p"
+        ));
+        let mut app = new_state_only_running_sandbox_app();
+        let (manager, _events, commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let mut settings =
+            ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client");
+        settings.group_maker =
+            LegacyCString::from_bytes(b"Console maker".to_vec()).expect("valid maker");
+        app.network_mode = Some(NetworkMode::Client(settings));
+        app.control_clients.register(7, true, false);
+        let wire_name = LegacyCString::from_bytes(path_to_legacy_bytes(player_path))
+            .expect("fixture path has no NUL");
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 7 << 16,
+            loadable: true,
+            filename: wire_name.clone(),
+            ..Default::default()
+        };
+        let observer = thread::spawn(move || commands.complete_initial_client_join(vec![resource]));
+
+        assert_eq!(
+            app.developer_console_join_players(&[player_path.to_path_buf()], true)
+                .expect("console network player joins"),
+            1
+        );
+        drop(app.network.take());
+        let (order, publications, updates, acknowledgements) =
+            observer.join().expect("network command observer");
+        assert_eq!(order, vec!["publish", "player-info"]);
+        assert_eq!(publications.len(), 1);
+        assert_eq!(publications[0].source_path.as_path(), player_path);
+        assert_eq!(publications[0].wire_name, wire_name);
+        assert_eq!(publications[0].group_maker.as_bytes(), b"Console maker");
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].client_id, 7);
+        assert_eq!(
+            updates[0].flags,
+            lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+        );
+        assert!(acknowledgements.is_empty());
+    }
+
+    #[test]
+    fn developer_console_unpacked_c4f_child_has_native_mother_group() {
+        let directory = tempdir().expect("scenario root");
+        let outer = directory.path().join("Outer.c4f");
+        let inner_folder = outer.join("Inner.c4f");
+        let scenario = inner_folder.join("Game.c4s");
+        fs::create_dir_all(&scenario).expect("unpacked child scenario");
+
+        let (physical, children) =
+            scenario_logical_storage(&scenario).expect("resolve unpacked child storage");
+        assert_eq!(physical, outer);
+        assert_eq!(children, vec!["Inner.c4f", "Game.c4s"]);
+
+        let standalone = directory.path().join("Standalone.c4s");
+        fs::create_dir(&standalone).expect("unpacked standalone scenario");
+        assert_eq!(
+            scenario_logical_storage(&standalone).unwrap(),
+            (standalone, Vec::new())
+        );
+    }
+
+    #[test]
+    fn developer_console_save_as_preserves_unpacked_group_representation() {
+        let directory = tempdir().expect("save-as root");
+        let destination = directory.path().join("Copy.c4s");
+        let mut group = MutableGroup::new("Source.c4s");
+        group
+            .add_file("Scenario.txt", b"[Head]\nTitle=Copy\n".to_vec())
+            .expect("add scenario head");
+
+        persist_console_save_group(&group, &destination, true)
+            .expect("persist unpacked Save As copy");
+        assert!(destination.is_dir());
+        assert_eq!(
+            fs::read(destination.join("Scenario.txt")).unwrap(),
+            b"[Head]\nTitle=Copy\n"
+        );
     }
 
     #[test]
@@ -149358,6 +152069,83 @@ ScenInfoArea=70,5,25,90
         });
 
         assert!(resources.lobby_ready_available());
+    }
+
+    #[test]
+    fn synchronized_player_derivation_registers_the_latest_core_before_event_drain() {
+        // C4Player::Save looks the resource up by its stable mutable filename,
+        // so every later save derives from the newest official resource. The
+        // mutable path and its ownership remain the derived resource's file
+        // (src/C4Player.cpp:452-461; src/C4Network2Res.cpp:718-823).
+        let mut resources = AdmissionResourceStore::default();
+        let root = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 40,
+            loadable: true,
+            ..Default::default()
+        };
+        let first = lc_engine::NetworkResourceCore {
+            id: 41,
+            derived_id: root.id,
+            ..root.clone()
+        };
+        let second = lc_engine::NetworkResourceCore {
+            id: 42,
+            derived_id: first.id,
+            ..root.clone()
+        };
+        resources.register_lobby_resource(&root);
+        resources.mark_complete_with_locality(root.id, PathBuf::from("Alice.c4p"), true);
+        resources.register_finished_derivation(
+            &first,
+            PathBuf::from("Alice.c4p"),
+            lc_network::ResourceFileOwnership::Persistent,
+        );
+        resources.register_finished_derivation(
+            &second,
+            PathBuf::from("Alice.c4p"),
+            lc_network::ResourceFileOwnership::Persistent,
+        );
+
+        assert_eq!(resources.derivation_target(root.id), Some(second.id));
+        assert_eq!(
+            resources.status(second.id),
+            Some(&AdmissionResourceState::Complete {
+                path: PathBuf::from("Alice.c4p"),
+                removed: false,
+                local: true,
+            })
+        );
+
+        let remote = lc_engine::NetworkResourceCore {
+            id: 50,
+            ..root
+        };
+        resources.register_lobby_resource(&remote);
+        resources.mark_complete_with_locality(
+            remote.id,
+            PathBuf::from("Network/Bob.c4p"),
+            false,
+        );
+        let remote_derived = lc_engine::NetworkResourceCore {
+            id: 51,
+            derived_id: remote.id,
+            ..remote.clone()
+        };
+        resources.register_finished_derivation(
+            &remote_derived,
+            PathBuf::from("Network/Bob.c4p"),
+            lc_network::ResourceFileOwnership::Temporary,
+        );
+        assert_eq!(resources.derivation_target(remote.id), Some(remote_derived.id));
+        assert_eq!(
+            resources.status(remote_derived.id),
+            Some(&AdmissionResourceState::Complete {
+                path: PathBuf::from("Network/Bob.c4p"),
+                removed: false,
+                local: false,
+            })
+        );
     }
 
     #[test]
@@ -159503,6 +162291,7 @@ protected func InputCallback(string answer, int player)
                 ],
             }),
             offline_startup_players: None,
+            offline_savegame: None,
             offline_random_seed: None,
         });
         event_tx
@@ -161995,6 +164784,52 @@ protected func InputCallback(string answer, int player)
         assert_eq!(
             app.admission_resources.complete_path(resource_id),
             Some(path.as_path())
+        );
+    }
+
+    #[test]
+    fn queued_derive_completion_keeps_the_registered_mutable_player_source() {
+        // FinishDerive returns on the main thread before its forwarded
+        // ResourceComplete event is drained. That later event describes the
+        // serving standalone, while C4Network2Res::getFile still resolves the
+        // mutable player file used by the next Save
+        // (src/C4Player.cpp:452-461; src/C4Network2Res.cpp:718-823).
+        let mut app = new_state_only_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        let mutable_path = PathBuf::from("Network/Bob.c4p");
+        let serving_path = PathBuf::from("Network/Bob_2.c4p");
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 62,
+            derived_id: 61,
+            loadable: true,
+            ..Default::default()
+        };
+        app.admission_resources.register_finished_derivation(
+            &core,
+            mutable_path.clone(),
+            lc_network::ResourceFileOwnership::Temporary,
+        );
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: core.id,
+                core: core.clone(),
+                path: serving_path,
+                local: true,
+            })
+            .expect("queue forwarded derive completion");
+
+        app.process_network_events()
+            .expect("apply forwarded derive completion");
+
+        assert_eq!(
+            app.admission_resources.status(core.id),
+            Some(&AdmissionResourceState::Complete {
+                path: mutable_path,
+                removed: false,
+                local: false,
+            })
         );
     }
 
@@ -180593,6 +183428,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 team_registry: Vec::new(),
             }),
             offline_startup_players: None,
+            offline_savegame: None,
             offline_random_seed: None,
         });
 
@@ -180725,6 +183561,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 team_registry: Vec::new(),
             }),
             offline_startup_players: None,
+            offline_savegame: None,
             offline_random_seed: None,
         });
 

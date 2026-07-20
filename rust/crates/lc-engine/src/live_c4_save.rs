@@ -29,8 +29,107 @@ use crate::scenario::ScenarioValueStore;
 use crate::sky::{SkyFrame, SkyParallaxMode};
 use crate::{
     Engine, Object, ObjectId, ObjectStatus, PhysicalInfo, ScoreboardState, TeamConfiguration,
-    TeamInfo, LANDSCAPE_MODE_EXACT,
+    TeamInfo, LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC,
 };
+
+/// The concrete `C4GameSave` specialization whose component policy is being
+/// applied.  The existing [`Engine::serialize_live_c4_save`] entry point is a
+/// compatibility shorthand for [`LiveC4SavePolicy::RuntimeNetwork`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveC4SavePolicy<'a> {
+    /// `C4GameSaveScenario`: keep authoring metadata, omit user-player state,
+    /// and force a diff landscape only when the console requests it.
+    Scenario { force_exact_landscape: bool },
+    /// `C4GameSaveSavegame`: an exact resumable game. The destination name is
+    /// needed for the native trailing-slot icon adjustment.
+    Savegame { target_group_name: &'a str },
+    /// Non-initial `C4GameSaveRecord`. `LiveC4SaveSpec::title` is the already
+    /// formatted `NNN <scenario title> [<build>]` record title.
+    Record,
+    /// Non-initial `C4GameSaveNetwork`, used by runtime join.
+    RuntimeNetwork,
+}
+
+/// The four independent `SetAsRestoreInfos` switches selected by a save
+/// specialization.  The app owns the actual player-info list and child-group
+/// writes, but must use this policy to avoid embedding user files in ordinary
+/// savegames or retaining user players in saved scenarios.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveC4SavePlayerPolicy {
+    pub save_user_players: bool,
+    pub save_script_players: bool,
+    pub embed_user_player_files: bool,
+    pub embed_script_player_files: bool,
+}
+
+impl LiveC4SavePolicy<'_> {
+    pub const fn is_exact(self) -> bool {
+        matches!(
+            self,
+            Self::Savegame { .. } | Self::Record | Self::RuntimeNetwork
+        )
+    }
+
+    pub const fn is_synchronized(self) -> bool {
+        matches!(self, Self::Record | Self::RuntimeNetwork)
+    }
+
+    pub const fn keeps_title_components(self) -> bool {
+        matches!(self, Self::Scenario { .. })
+    }
+
+    pub const fn copies_source_scenario(self) -> bool {
+        !matches!(self, Self::RuntimeNetwork)
+    }
+
+    pub const fn saves_description(self) -> bool {
+        matches!(self, Self::Savegame { .. })
+    }
+
+    pub const fn saves_game_title_image(self) -> bool {
+        matches!(self, Self::Savegame { .. })
+    }
+
+    pub const fn creates_small_player_files(self) -> bool {
+        matches!(self, Self::Record | Self::RuntimeNetwork)
+    }
+
+    pub const fn player_policy(self) -> LiveC4SavePlayerPolicy {
+        match self {
+            Self::Scenario { .. } => LiveC4SavePlayerPolicy {
+                save_user_players: false,
+                save_script_players: true,
+                embed_user_player_files: false,
+                embed_script_player_files: true,
+            },
+            Self::Savegame { .. } => LiveC4SavePlayerPolicy {
+                save_user_players: true,
+                save_script_players: true,
+                embed_user_player_files: false,
+                embed_script_player_files: true,
+            },
+            Self::Record | Self::RuntimeNetwork => LiveC4SavePlayerPolicy {
+                save_user_players: true,
+                save_script_players: true,
+                embed_user_player_files: true,
+                embed_script_player_files: true,
+            },
+        }
+    }
+
+    const fn forces_runtime_landscape(self) -> bool {
+        match self {
+            Self::Scenario {
+                force_exact_landscape,
+            } => force_exact_landscape,
+            Self::Savegame { .. } | Self::Record | Self::RuntimeNetwork => true,
+        }
+    }
+
+    const fn landscape_diff_is_sync_save(self) -> bool {
+        !self.is_synchronized()
+    }
+}
 
 /// Application-owned inputs that are not synchronized engine state.
 #[derive(Debug, Clone, Copy)]
@@ -45,10 +144,8 @@ pub struct LiveC4SaveSpec<'a> {
     /// `Application.MusicSystem::IsMusicEnabled`; the playlist and level are
     /// engine state, while this process-local switch is not.
     pub music_enabled: bool,
-    /// Compatibility input retained while app call sites migrate. Exact
-    /// network saves use `C4GameSaveNetwork::GetKeepTitle() == false`, so
-    /// this value is deliberately ignored.
-    #[doc(hidden)]
+    /// Modified localized title component. `C4GameSaveScenario` keeps it;
+    /// exact savegame and network policies remove localized title files.
     pub modified_title: Option<LiveC4SaveComponentRef<'a>>,
     /// `Game.Info`, only when its C4ComponentHost is marked Modified.
     pub modified_info_txt: Option<&'a [u8]>,
@@ -174,8 +271,13 @@ impl LiveC4SaveComponents {
     /// are absent rather than represented by empty payloads.
     pub fn entries(&self) -> Vec<LiveC4SaveEntry<'_>> {
         let mut entries = vec![file_entry("Scenario.txt", &self.scenario_txt)];
+        if let Some(title) = self.title_txt.as_ref() {
+            entries.push(file_entry(&title.name, &title.payload));
+        }
         push_optional_file(&mut entries, "Info.txt", self.info_txt.as_deref());
+        if !self.game_txt.is_empty() {
         entries.push(file_entry("Game.txt", &self.game_txt));
+        }
         push_optional_file(&mut entries, "Teams.txt", self.teams_txt.as_deref());
         for section in &self.scenario_sections {
             entries.push(LiveC4SaveEntry {
@@ -191,7 +293,9 @@ impl LiveC4SaveComponents {
                 kind: LiveC4SaveEntryKind::ChildGroup,
             });
         }
+        if !self.mat_map_txt.is_empty() {
         entries.push(file_entry("MatMap.txt", &self.mat_map_txt));
+        }
         push_optional_file(&mut entries, "Landscape.bmp", self.landscape_bmp.as_deref());
         push_optional_file(&mut entries, "Landscape.png", self.landscape_png.as_deref());
         push_optional_file(
@@ -281,6 +385,17 @@ impl Engine {
         &self,
         spec: LiveC4SaveSpec<'_>,
     ) -> Result<LiveC4SaveComponents, LiveC4SaveError> {
+        self.serialize_live_c4_save_with_policy(spec, LiveC4SavePolicy::RuntimeNetwork)
+    }
+
+    /// Capture live components using the selected native `C4GameSave`
+    /// specialization. Application-owned copy/delete and player-file work is
+    /// described by [`LiveC4SavePolicy`] and remains outside the simulation.
+    pub fn serialize_live_c4_save_with_policy(
+        &self,
+        spec: LiveC4SaveSpec<'_>,
+        policy: LiveC4SavePolicy<'_>,
+    ) -> Result<LiveC4SaveComponents, LiveC4SaveError> {
         let state = self.capture_state();
         // C4Game::SaveRuntimeData enumerates the process-global C4StringTable
         // before any component is decompiled. Registration order, rather than
@@ -295,35 +410,61 @@ impl Engine {
         // EnumStrings and before Objects.Save performs its second enumeration.
         let value_enumeration = strings.enumeration();
         let strings_txt = strings.encoded();
-        let scenario_txt = serialize_scenario(&self.scenario_values, spec);
+        let scenario_txt = serialize_scenario_for_policy(&self.scenario_values, spec, policy);
 
-        let mut game = InitialNetworkGameData::from_engine_live(self)?;
-        game.music_enabled = spec.music_enabled;
-        game.compiled_sections = InitialNetworkCompiledSections {
-            script_engine: serialize_script_globals(
+        let script_engine = serialize_script_globals(
                 &state.script_globals,
                 &self.script_global_name_order(),
-                game.script_go,
-                game.script_counter,
+            self.scenario_script_go,
+            self.scenario_script_counter,
                 &mut strings,
-            ),
+        );
+        let effects = serialize_effects(&state.global_effects, &mut strings);
+        let game_txt = if policy.is_exact() {
+            let mut game = InitialNetworkGameData::from_engine_live(self)?;
+            game.music_enabled = spec.music_enabled;
+            game.compiled_sections = InitialNetworkCompiledSections {
+                script_engine,
             sky: state.sky.as_ref().and_then(serialize_sky),
-            effects: serialize_effects(&state.global_effects, &mut strings),
+                effects,
             scoreboard: serialize_scoreboard(&state.scoreboard),
         };
         let player_sections = serialize_players(&state.players, &mut strings);
-        let game_txt = append_runtime_player_sections(
+            append_runtime_player_sections(
             serialize_initial_network_game(&game, None)?.unwrap_or_default(),
             &player_sections,
-        );
+            )
+        } else {
+            serialize_non_exact_game(script_engine, effects)
+        };
 
-        let objects_txt = serialize_objects(self, &mut strings);
-        let scenario_sections = serialize_scenario_sections(self, &mut strings)?;
-        let landscape = serialize_landscape(self)?;
+        let objects_txt = serialize_objects_for_save(
+            self,
+            &mut strings,
+            matches!(policy, LiveC4SavePolicy::Scenario { .. }),
+        );
+        let scenario_sections = if policy.is_exact() {
+            serialize_scenario_sections(self, &mut strings)?
+        } else {
+            Vec::new()
+        };
+        let landscape = serialize_landscape_for_policy(self, policy)?;
+        let (pxs_c4b, mass_mover_c4b) = if landscape.saves_auxiliary_systems {
+            (self.pxs_system.to_c4b(), state.mass_movers.to_c4b())
+        } else {
+            (None, None)
+        };
 
         Ok(LiveC4SaveComponents {
             scenario_txt,
-            title_txt: None,
+            title_txt: policy
+                .keeps_title_components()
+                .then_some(spec.modified_title)
+                .flatten()
+                .map(|title| LiveC4SaveNamedComponent {
+                    name: title.name.to_owned(),
+                    payload: title.payload.to_vec(),
+                }),
             game_txt,
             objects_txt,
             strings_txt,
@@ -334,8 +475,8 @@ impl Engine {
             map_bmp: landscape.map_bmp,
             material_group: landscape.material_group,
             mat_map_txt: landscape.mat_map_txt,
-            pxs_c4b: self.pxs_system.to_c4b(),
-            mass_mover_c4b: state.mass_movers.to_c4b(),
+            pxs_c4b,
+            mass_mover_c4b,
             teams_txt: serialize_teams(
                 &state.teams,
                 state.team_configuration.unwrap_or(self.team_configuration),
@@ -344,15 +485,31 @@ impl Engine {
                 &state.team_script_player_names,
                 state.team_random_team_count,
             ),
-            round_results_txt: serialize_round_results(
-                &state.round_results,
-                self.scenario_values.is_melee(),
-            ),
+            round_results_txt: policy
+                .is_exact()
+                .then(|| {
+                    serialize_round_results(&state.round_results, self.scenario_values.is_melee())
+                })
+                .flatten(),
             info_txt: spec.modified_info_txt.map(<[u8]>::to_vec),
             script_c: spec.modified_script_c.map(<[u8]>::to_vec),
             scenario_sections,
         })
     }
+}
+
+fn serialize_non_exact_game(script_engine: Option<Vec<u8>>, effects: Option<Vec<u8>>) -> Vec<u8> {
+    let mut output = script_engine.unwrap_or_default();
+    if let Some(effects) = effects {
+        if !output.is_empty() {
+            if !output.ends_with(b"\r\n") {
+                output.extend_from_slice(b"\r\n");
+            }
+            output.extend_from_slice(b"\r\n");
+        }
+        output.extend_from_slice(&effects);
+    }
+    output
 }
 
 #[derive(Default, Clone)]
@@ -772,13 +929,61 @@ fn encode_effect_value(value: &EffectVarValue, strings: &mut LegacyStringTable) 
 }
 
 fn serialize_scenario(values: &ScenarioValueStore, spec: LiveC4SaveSpec<'_>) -> Vec<u8> {
-    values.serialize_runtime_network_save(
+    serialize_scenario_for_policy(values, spec, LiveC4SavePolicy::RuntimeNetwork)
+}
+
+fn serialize_scenario_for_policy(
+    values: &ScenarioValueStore,
+    spec: LiveC4SaveSpec<'_>,
+    policy: LiveC4SavePolicy<'_>,
+) -> Vec<u8> {
+    match policy {
+        LiveC4SavePolicy::Scenario { .. } => values.serialize_runtime_scenario_save(),
+        LiveC4SavePolicy::Savegame { target_group_name } => values.serialize_runtime_savegame(
         spec.title,
         spec.definition_modules,
         spec.definition_executable_path,
         spec.definition_path,
         spec.origin,
-    )
+            savegame_icon(target_group_name),
+        ),
+        LiveC4SavePolicy::Record => values.serialize_runtime_record_save(
+            spec.title,
+            spec.definition_modules,
+            spec.definition_executable_path,
+            spec.definition_path,
+            spec.origin,
+        ),
+        LiveC4SavePolicy::RuntimeNetwork => values.serialize_runtime_network_save(
+            spec.title,
+            spec.definition_modules,
+            spec.definition_executable_path,
+            spec.definition_path,
+            spec.origin,
+        ),
+    }
+}
+
+fn savegame_icon(target_group_name: &str) -> i32 {
+    let file_name = target_group_name
+        .rsplit(|character| character == '/' || character == '\\')
+        .next()
+        .unwrap_or(target_group_name);
+    let stem = file_name
+        .rfind('.')
+        .map_or(file_name, |extension| &file_name[..extension]);
+    let digits_start = stem
+        .char_indices()
+        .rev()
+        .find_map(|(index, character)| {
+            (!character.is_ascii_digit()).then_some(index + character.len_utf8())
+        })
+        .unwrap_or(0);
+    let slot = stem[digits_start..].parse::<i32>().ok();
+    match slot {
+        Some(slot @ 1..=10) => slot + 1,
+        _ => 29,
+    }
 }
 
 fn serialize_script_globals(
@@ -1232,10 +1437,19 @@ fn serialize_players(players: &[PlayerState], _strings: &mut LegacyStringTable) 
 }
 
 fn serialize_objects(engine: &Engine, strings: &mut LegacyStringTable) -> Vec<u8> {
+    serialize_objects_for_save(engine, strings, false)
+}
+
+fn serialize_objects_for_save(
+    engine: &Engine,
+    strings: &mut LegacyStringTable,
+    skip_user_player_objects: bool,
+) -> Vec<u8> {
     fn serialize_list(
         engine: &Engine,
         ids: impl IntoIterator<Item = ObjectId>,
         strings: &mut LegacyStringTable,
+        skip_user_player_objects: bool,
     ) -> Vec<u8> {
         let mut writer = TextComponentWriter::default();
         for id in ids {
@@ -1244,6 +1458,18 @@ fn serialize_objects(engine: &Engine, strings: &mut LegacyStringTable) -> Vec<u8
             };
             let object = &engine.objects[index];
             if object.destroyed || object.state.status == ObjectStatus::Deleted {
+                continue;
+            }
+            if skip_user_player_objects
+                && engine
+                    .players
+                    .get(&object.state.owner)
+                    .is_some_and(|player| {
+                        !player.is_script_player()
+                            && (object.definition_id.as_str() == "FLAG"
+                                || player.crew().contains(&object.id))
+                    })
+            {
                 continue;
             }
             serialize_object(
@@ -1263,7 +1489,12 @@ fn serialize_objects(engine: &Engine, strings: &mut LegacyStringTable) -> Vec<u8
 
     // C4ObjectList decompiles Last -> Prev. `exec_list` is already that
     // reversed master-list view (index zero executes/saves first).
-    let mut output = serialize_list(engine, engine.exec_list.iter().copied(), strings);
+    let mut output = serialize_list(
+        engine,
+        engine.exec_list.iter().copied(),
+        strings,
+        skip_user_player_objects,
+    );
     // C4GameObjects::Save always decompiles the inactive list for runtime
     // saves and inserts this separator even when that list is empty.
     output.extend_from_slice(b"\r\n");
@@ -1271,6 +1502,7 @@ fn serialize_objects(engine: &Engine, strings: &mut LegacyStringTable) -> Vec<u8
         engine,
         engine.inactive_exec_list.iter().copied(),
         strings,
+        skip_user_player_objects,
     ));
     output
 }
@@ -2469,13 +2701,35 @@ struct SerializedLandscape {
     map_bmp: Option<Vec<u8>>,
     material_group: Option<Vec<u8>>,
     mat_map_txt: Vec<u8>,
+    saves_auxiliary_systems: bool,
 }
 
-fn serialize_landscape(engine: &Engine) -> Result<SerializedLandscape, LiveC4SaveError> {
-    let landscape = engine
-        .landscape_without_solid_masks()
-        .ok_or(LiveC4SaveError::MissingLandscape)?;
+fn serialize_landscape_for_policy(
+    engine: &Engine,
+    policy: LiveC4SavePolicy<'_>,
+) -> Result<SerializedLandscape, LiveC4SaveError> {
+    let Some(landscape) = engine.landscape_without_solid_masks() else {
+        if matches!(
+            policy,
+            LiveC4SavePolicy::Scenario {
+                force_exact_landscape: false
+            }
+        ) {
+            return Ok(SerializedLandscape {
+                landscape_bmp: None,
+                landscape_png: None,
+                diff_landscape_bmp: None,
+                map_bmp: None,
+                material_group: None,
+                mat_map_txt: Vec::new(),
+                saves_auxiliary_systems: false,
+            });
+        }
+        return Err(LiveC4SaveError::MissingLandscape);
+    };
     let mut scratch = MutableGroup::new("Runtime.c4s");
+    let saves_auxiliary_systems =
+        landscape.mode() == LANDSCAPE_MODE_EXACT || policy.forces_runtime_landscape();
 
     if landscape.mode() == LANDSCAPE_MODE_EXACT {
         let grid = landscape
@@ -2494,12 +2748,19 @@ fn serialize_landscape(engine: &Engine) -> Result<SerializedLandscape, LiveC4Sav
         scratch.add_file("Landscape.png", encode_landscape_png(&landscape)?)?;
         engine.save_changed_c4_landscape_map(&mut scratch)?;
         engine.save_c4_landscape_textures(&mut scratch)?;
-    } else {
-        // SyncSynchronized is exact as a game save, but a non-exact source
-        // landscape follows C4Landscape::SaveDiff with fSyncSave=false.
-        engine.save_c4_landscape_diff(&mut scratch, false)?;
+    } else if policy.forces_runtime_landscape() {
+        // Exact savegames and forced scenario saves use a full sync diff;
+        // SyncSynchronized runtime-network saves use the 0xff-masked diff.
+        engine.save_c4_landscape_diff(&mut scratch, policy.landscape_diff_is_sync_save())?;
+    } else if landscape.mode() == LANDSCAPE_MODE_STATIC {
+        // Ordinary C4GameSaveScenario only rewrites authoring components
+        // whose runtime change gates are set. Dynamic landscapes write none.
+        engine.save_changed_c4_landscape_map(&mut scratch)?;
+        engine.save_c4_landscape_textures(&mut scratch)?;
     }
+    if saves_auxiliary_systems {
     engine.materials.save_enumeration(&mut scratch)?;
+    }
 
     let packed = scratch.pack_raw()?;
     let group = Group::from_raw_memory(PathBuf::from("Runtime.c4s"), packed)?;
@@ -2509,7 +2770,8 @@ fn serialize_landscape(engine: &Engine) -> Result<SerializedLandscape, LiveC4Sav
         diff_landscape_bmp: read_optional_group_entry(&group, "DiffLandscape.bmp")?,
         map_bmp: read_optional_group_entry(&group, "Map.bmp")?,
         material_group: read_optional_group_entry_raw(&group, "Material.c4g")?,
-        mat_map_txt: group.read_file("MatMap.txt")?,
+        mat_map_txt: read_optional_group_entry(&group, "MatMap.txt")?.unwrap_or_default(),
+        saves_auxiliary_systems,
     })
 }
 
@@ -2827,6 +3089,26 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_scenario_save_allows_an_absent_dynamic_landscape() {
+        let saved = serialize_landscape_for_policy(
+            &Engine::new(),
+            LiveC4SavePolicy::Scenario {
+                force_exact_landscape: false,
+            },
+        )
+        .expect("a non-forced scenario has no landscape component to save");
+        assert!(saved.landscape_bmp.is_none());
+        assert!(saved.diff_landscape_bmp.is_none());
+        assert!(saved.map_bmp.is_none());
+        assert!(!saved.saves_auxiliary_systems);
+
+        assert!(matches!(
+            serialize_landscape_for_policy(&Engine::new(), LiveC4SavePolicy::RuntimeNetwork),
+            Err(LiveC4SaveError::MissingLandscape)
+        ));
+    }
+
+    #[test]
     fn temporary_physical_changes_preserve_order_and_duplicates() {
         let mut writer = TextComponentWriter::default();
         writer.section(0, "Physical");
@@ -3020,6 +3302,22 @@ mod tests {
             ),
             b"[Game]\r\nTime=1\r\n\r\n[Player1]\r\nStatus=1\r\n"
         );
+    }
+
+    #[test]
+    fn non_exact_game_contains_only_script_and_effect_components() {
+        assert_eq!(
+            serialize_non_exact_game(
+                Some(b"[Script]\r\nCounter=3\r\n".to_vec()),
+                Some(b"[Effects]\r\nGlobalEffects=Fx(1)\r\n".to_vec()),
+            ),
+            b"[Script]\r\nCounter=3\r\n\r\n[Effects]\r\nGlobalEffects=Fx(1)\r\n"
+        );
+        assert_eq!(
+            serialize_non_exact_game(None, Some(b"[Effects]\r\nGlobalEffects=Fx(1)\r\n".to_vec()),),
+            b"[Effects]\r\nGlobalEffects=Fx(1)\r\n"
+        );
+        assert!(serialize_non_exact_game(None, None).is_empty());
     }
 
     #[test]
@@ -3252,6 +3550,182 @@ mod tests {
         assert!(!bytes
             .windows(b"MaxPlayer=12".len())
             .any(|window| window == b"MaxPlayer=12"));
+    }
+
+    #[test]
+    fn save_policies_match_cpp_exactness_and_player_restore_switches() {
+        let scenario = LiveC4SavePolicy::Scenario {
+            force_exact_landscape: false,
+        };
+        let forced_scenario = LiveC4SavePolicy::Scenario {
+            force_exact_landscape: true,
+        };
+        let savegame = LiveC4SavePolicy::Savegame {
+            target_group_name: "Savegame.c4s",
+        };
+        let record = LiveC4SavePolicy::Record;
+        let network = LiveC4SavePolicy::RuntimeNetwork;
+
+        assert!(!scenario.is_exact());
+        assert!(savegame.is_exact());
+        assert!(record.is_exact());
+        assert!(network.is_exact());
+        assert!(!scenario.is_synchronized());
+        assert!(!savegame.is_synchronized());
+        assert!(record.is_synchronized());
+        assert!(network.is_synchronized());
+        assert!(!scenario.forces_runtime_landscape());
+        assert!(forced_scenario.forces_runtime_landscape());
+        assert!(savegame.landscape_diff_is_sync_save());
+        assert!(!record.landscape_diff_is_sync_save());
+        assert!(!network.landscape_diff_is_sync_save());
+        assert_eq!(
+            scenario.player_policy(),
+            LiveC4SavePlayerPolicy {
+                save_user_players: false,
+                save_script_players: true,
+                embed_user_player_files: false,
+                embed_script_player_files: true,
+            }
+        );
+        assert_eq!(
+            savegame.player_policy(),
+            LiveC4SavePlayerPolicy {
+                save_user_players: true,
+                save_script_players: true,
+                embed_user_player_files: false,
+                embed_script_player_files: true,
+            }
+        );
+        assert_eq!(
+            record.player_policy(),
+            LiveC4SavePlayerPolicy {
+                save_user_players: true,
+                save_script_players: true,
+                embed_user_player_files: true,
+                embed_script_player_files: true,
+            }
+        );
+        assert_eq!(
+            network.player_policy(),
+            LiveC4SavePlayerPolicy {
+                save_user_players: true,
+                save_script_players: true,
+                embed_user_player_files: true,
+                embed_script_player_files: true,
+            }
+        );
+    }
+
+    #[test]
+    fn scenario_and_savegame_headers_use_their_cpp_savecore_policies() {
+        let modules = vec!["/opt/game/Definitions/Objects.c4d".to_owned()];
+        let spec = LiveC4SaveSpec {
+            title: "Runtime title",
+            definition_modules: &modules,
+            definition_executable_path: "/opt/game/",
+            definition_path: "Definitions/",
+            origin: "Folder\\Scenario.c4s",
+            music_enabled: true,
+            modified_title: None,
+            modified_info_txt: None,
+            modified_script_c: None,
+        };
+        let scenario = serialize_scenario_for_policy(
+            &ScenarioValueStore::default(),
+            spec,
+            LiveC4SavePolicy::Scenario {
+                force_exact_landscape: false,
+            },
+        );
+        for expected in [
+            b"Version=4,9,11\r\n".as_slice(),
+            b"NoInitialize=1\r\n",
+            b"ForcedGfxMode=1\r\n",
+        ] {
+            assert!(scenario
+                .windows(expected.len())
+                .any(|window| window == expected));
+        }
+        for absent in [
+            b"Title=Runtime title\r\n".as_slice(),
+            b"SaveGame=1\r\n",
+            b"NetworkGame=true\r\n",
+            b"NetworkRuntimeJoin=true\r\n",
+            b"Origin=Folder/Scenario.c4s\r\n",
+            b"Definitions=\"Objects.c4d\"\r\n",
+        ] {
+            assert!(!scenario
+                .windows(absent.len())
+                .any(|window| window == absent));
+        }
+
+        let savegame = serialize_scenario_for_policy(
+            &ScenarioValueStore::default(),
+            spec,
+            LiveC4SavePolicy::Savegame {
+                target_group_name: "/saves/Slot3.c4s",
+            },
+        );
+        for expected in [
+            b"Title=Runtime title\r\n".as_slice(),
+            b"SaveGame=1\r\n",
+            b"NoInitialize=1\r\n",
+            b"Icon=4\r\n",
+            b"Origin=Folder/Scenario.c4s\r\n",
+            b"Definitions=\"Objects.c4d\"\r\n",
+        ] {
+            assert!(savegame
+                .windows(expected.len())
+                .any(|window| window == expected));
+        }
+        assert!(!savegame
+            .windows(b"NetworkGame=true\r\n".len())
+            .any(|window| window == b"NetworkGame=true\r\n"));
+    }
+
+    #[test]
+    fn savegame_icon_follows_cpp_trailing_slot_number() {
+        assert_eq!(savegame_icon("Save1.c4s"), 2);
+        assert_eq!(savegame_icon("C:\\Games\\Save10.c4s"), 11);
+        assert_eq!(savegame_icon("/tmp/Save11.c4s"), 29);
+        assert_eq!(savegame_icon("Save.c4s"), 29);
+    }
+
+    #[test]
+    fn runtime_record_header_uses_cpp_record_adjustments() {
+        let modules = vec!["/opt/game/Definitions/Objects.c4d".to_owned()];
+        let scenario = serialize_scenario_for_policy(
+            &ScenarioValueStore::default(),
+            LiveC4SaveSpec {
+                title: "007 Runtime title [362]",
+                definition_modules: &modules,
+                definition_executable_path: "/opt/game/",
+                definition_path: "Definitions/",
+                origin: "Folder\\Scenario.c4s",
+                music_enabled: true,
+                modified_title: None,
+                modified_info_txt: None,
+                modified_script_c: None,
+            },
+            LiveC4SavePolicy::Record,
+        );
+        for expected in [
+            b"Title=007 Runtime title [362]\r\n".as_slice(),
+            b"Icon=29\r\n",
+            b"SaveGame=1\r\n",
+            b"Replay=1\r\n",
+            b"NoInitialize=1\r\n",
+            b"Origin=Folder/Scenario.c4s\r\n",
+            b"Definitions=\"Objects.c4d\"\r\n",
+        ] {
+            assert!(scenario
+                .windows(expected.len())
+                .any(|window| window == expected));
+        }
+        assert!(!scenario
+            .windows(b"NetworkGame=true\r\n".len())
+            .any(|window| window == b"NetworkGame=true\r\n"));
     }
 
     #[test]
@@ -3773,6 +4247,51 @@ mod tests {
             &state.object_order,
             &mut LegacyStringTable::default(),
         );
+        let user_number = format!("Number={user_object}\r\n");
+        let script_number = format!("Number={script_object}\r\n");
+        assert!(!bytes
+            .windows(user_number.len())
+            .any(|window| window == user_number.as_bytes()));
+        assert!(bytes
+            .windows(script_number.len())
+            .any(|window| window == script_number.as_bytes()));
+    }
+
+    #[test]
+    fn saved_scenario_objects_skip_user_crew_but_keep_script_crew() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                crate::Definition::from_script("CLNK", "Crew", "")
+                    .expect("fixture definition compiles"),
+            )
+            .expect("fixture definition registers");
+        engine
+            .register_player(crate::PlayerConfig::new(1, "User"))
+            .expect("user registers");
+        engine
+            .register_player(crate::PlayerConfig::new(2, "Script"))
+            .expect("script player registers");
+        engine
+            .player_mut(2)
+            .expect("script player")
+            .set_script_player(true);
+        let user_object = engine
+            .spawn_object(crate::SpawnConfig::new("CLNK").with_owner(1))
+            .expect("user crew spawns");
+        let script_object = engine
+            .spawn_object(crate::SpawnConfig::new("CLNK").with_owner(2))
+            .expect("script crew spawns");
+        engine
+            .player_mut(1)
+            .expect("user")
+            .set_crew(vec![user_object]);
+        engine
+            .player_mut(2)
+            .expect("script player")
+            .set_crew(vec![script_object]);
+
+        let bytes = serialize_objects_for_save(&engine, &mut LegacyStringTable::default(), true);
         let user_number = format!("Number={user_object}\r\n");
         let script_number = format!("Number={script_object}\r\n");
         assert!(!bytes

@@ -463,9 +463,15 @@ impl MutableGroup {
     /// Deletes every entry with the same ASCII-case-insensitive name, like
     /// C4Group::DeleteEntry during a scenario rewrite.
     pub fn remove_entry(&mut self, name: &str) -> bool {
+        self.remove_entry_bytes(name.as_bytes())
+    }
+
+    /// Byte-preserving form of [`Self::remove_entry`] for legacy C4Group
+    /// filenames that are not valid UTF-8.
+    pub fn remove_entry_bytes(&mut self, name: &[u8]) -> bool {
         let previous = self.entries.len();
         self.entries
-            .retain(|entry| !entry.name_bytes.eq_ignore_ascii_case(name.as_bytes()));
+            .retain(|entry| !entry.name_bytes.eq_ignore_ascii_case(name));
         self.entries.len() != previous
     }
 
