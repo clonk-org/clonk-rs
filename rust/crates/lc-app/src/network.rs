@@ -1701,6 +1701,23 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_decided_controls(
+        &mut self,
+    ) -> Vec<(Tick, lc_engine::ControlPacket, bool)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitDecidedControl {
+                tick,
+                control,
+                sync,
+            } = command
+            {
+                submitted.push((tick, control, sync));
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn take_submitted_client_removes(
         &mut self,
     ) -> Vec<lc_engine::ClientRemoveControlData> {
@@ -2215,6 +2232,11 @@ enum NetworkCommand {
     SubmitClientUpdate(lc_engine::ClientUpdateControlData),
     SubmitClientRemove(lc_engine::ClientRemoveControlData),
     SubmitControlSet(LegacyControlSet),
+    SubmitDecidedControl {
+        tick: Tick,
+        control: lc_engine::ControlPacket,
+        sync: bool,
+    },
     SubmitInitScenarioPlayer {
         tick: Tick,
         selection: lc_engine::InitScenarioPlayerControlData,
@@ -2635,6 +2657,54 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitScript { tick, script })
             .map_err(|_| anyhow!("network worker is not accepting script controls"))
+    }
+
+    fn submit_decided_control(
+        &self,
+        tick: Tick,
+        control: lc_engine::ControlPacket,
+        sync: bool,
+    ) -> Result<()> {
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitDecidedControl {
+                tick,
+                control,
+                sync: sync && self.role == NetworkRole::Host,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting decided controls"))
+    }
+
+    pub fn submit_decided_control_set(
+        &self,
+        tick: Tick,
+        mut set: LegacyControlSet,
+        sync: bool,
+    ) -> Result<()> {
+        set.by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the control-set wire field"))?;
+        self.submit_decided_control(tick, set.into_control_packet(), sync)
+    }
+
+    pub fn submit_decided_script_control(
+        &self,
+        tick: Tick,
+        mut script: ScriptControlData,
+        sync: bool,
+    ) -> Result<()> {
+        script.by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the script-control wire field"))?;
+        self.submit_decided_control(tick, lc_engine::ControlPacket::Script(script), sync)
+    }
+
+    pub fn submit_custom_command(
+        &self,
+        tick: Tick,
+        mut command: lc_engine::CustomCommandControlData,
+        sync: bool,
+    ) -> Result<()> {
+        command.by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the custom-command wire field"))?;
+        self.submit_decided_control(tick, lc_engine::ControlPacket::CustomCommand(command), sync)
     }
 
     pub fn submit_message_board_answer(
@@ -5166,6 +5236,16 @@ async fn run_host_worker(
                             .await
                             .map_err(|error| anyhow!("host control-set submission failed: {error}"))?;
                     }
+                    NetworkCommand::SubmitDecidedControl { tick, control, sync } => {
+                        if sync {
+                            let data = encode_control_entry_payload(&control)?;
+                            host.submit_packet(ControlDelivery::Sync, data)
+                                .await
+                                .map_err(|error| anyhow!("host decided-control submission failed: {error}"))?;
+                        } else {
+                            frame_builder.record_control(tick, control, current_millis());
+                        }
+                    }
                     NetworkCommand::SubmitInitScenarioPlayer { tick, selection } => {
                         frame_builder.record_control(
                             tick,
@@ -6043,6 +6123,17 @@ async fn run_client_worker(
                         client.submit_packet(ControlDelivery::Sync, data)
                             .await
                             .map_err(|error| anyhow!("client control-set submission failed: {error}"))?;
+                    }
+                    NetworkCommand::SubmitDecidedControl { tick, control, .. } => {
+                        record_client_control(
+                            &client,
+                            &mut client_activation,
+                            &mut frame_builder,
+                            &current_frame_source,
+                            tick,
+                            control,
+                        )
+                        .await?;
                     }
                     NetworkCommand::SubmitInitScenarioPlayer { tick, selection } => {
                         record_client_control(
@@ -8916,6 +9007,49 @@ mod tests {
                 by_client: 7,
                 ..set
             }]
+        );
+    }
+
+    #[test]
+    fn l119_decided_controls_stamp_authors_and_clients_always_queue() {
+        let set = LegacyControlSet {
+            value_type: 1,
+            data: 0,
+            by_client: -1,
+        };
+
+        let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
+        host.submit_decided_control_set(12, set, true)
+            .expect("queue frozen-host decided control");
+        let submitted = host_commands.take_submitted_decided_controls();
+        let [(tick, control, sync)] = submitted.as_slice() else {
+            panic!("expected one host decided control");
+        };
+        assert_eq!((*tick, *sync), (12, true));
+        assert_eq!(
+            LegacyControlSet::from_control_packet(control),
+            Some(LegacyControlSet {
+                by_client: 0,
+                ..set
+            })
+        );
+
+        let (client, _events, mut client_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        client
+            .submit_decided_control_set(13, set, true)
+            .expect("queue client decided control");
+        let submitted = client_commands.take_submitted_decided_controls();
+        let [(tick, control, sync)] = submitted.as_slice() else {
+            panic!("expected one client decided control");
+        };
+        assert_eq!((*tick, *sync), (13, false));
+        assert_eq!(
+            LegacyControlSet::from_control_packet(control),
+            Some(LegacyControlSet {
+                by_client: 7,
+                ..set
+            })
         );
     }
 

@@ -11741,6 +11741,9 @@ struct GameApp {
     /// This is distinct from the control barrier, which may still be waiting
     /// after ChangeGameStatus has already switched Paused/Running.
     host_reference_paused: bool,
+    /// Last authoritative C4Network2Status control mode. Runtime chat can
+    /// replace it through the same status barrier as C4Network2::SetCtrlMode.
+    runtime_network_control_mode: Option<i32>,
     network_control_clock: Option<NetworkControlClock>,
     network_max_players: usize,
     network_is_league: bool,
@@ -12015,6 +12018,9 @@ struct GameApp {
     /// C4MessageBoard's mode, LogBuffer cursor, and per-graphics-frame
     /// Fader/ScreenFader state.
     message_board: ClassicMessageBoardState,
+    /// ProcessCommand's C4ChartDialog toggle. L143 owns the actual dialog and
+    /// live network-statistics presentation.
+    network_chart_open: bool,
     /// Process-global C4ChatInputDialog projection for ordinary game chat.
     running_chat: Option<RunningChatState>,
     /// A paste may close its chat owner on key-down; retain the physical V
@@ -22255,6 +22261,7 @@ impl GameApp {
             network_control_running,
             runtime_network_status_barrier: None,
             host_reference_paused: false,
+            runtime_network_control_mode: None,
             network_control_clock,
             network_max_players,
             network_is_league,
@@ -22374,6 +22381,7 @@ impl GameApp {
             netdlg_last_click: None,
             netdlg_join_edit_last_click: None,
             message_board: ClassicMessageBoardState::default(),
+            network_chart_open: false,
             running_chat: None,
             chat_paste_consumed_keys: HashSet::new(),
             message_input_history: VecDeque::new(),
@@ -29277,6 +29285,14 @@ impl GameApp {
             })
     }
 
+    fn displayed_network_control_tick(&self) -> i32 {
+        self.network_control_clock
+            .map(|clock| clock.display_control_tick_for_frame(self.engine.frame()))
+            .unwrap_or_else(|| {
+                i32::try_from(self.expected_network_control_tick()).unwrap_or(i32::MAX)
+            })
+    }
+
     fn arm_runtime_network_status_barrier(
         &mut self,
         status: lc_network::NetworkStatus,
@@ -29291,6 +29307,7 @@ impl GameApp {
         {
             return false;
         }
+        self.runtime_network_control_mode = Some(status.control_mode);
         if self.runtime_network_status_barrier.is_some_and(|pending| {
             same_runtime_network_status_barrier(pending.status, status)
         }) {
@@ -32652,6 +32669,7 @@ impl GameApp {
             );
             return Ok(());
         };
+        self.runtime_network_control_mode = Some(status.control_mode);
         if let Some(clock) = self.network_control_clock.as_mut() {
             clock.set_target_tick(None);
         }
@@ -33382,6 +33400,525 @@ impl GameApp {
         true
     }
 
+    fn append_running_command_help(&mut self) {
+        let header = self.runtime_resource_text(
+            "IDS_TEXT_COMMANDSAVAILABLEDURINGGA",
+            "Commands available during game:",
+        );
+        self.append_control_message_log(header, CONTROL_LOG_COLOR, None);
+        for (syntax, key, fallback) in [
+            (
+                "/private [player] [message]",
+                "IDS_MSG_SENDAPRIVATEMESSAGETOTHES",
+                "Send a private message to the specified player.",
+            ),
+            (
+                "/team [message]",
+                "IDS_MSG_SENDAPRIVATEMESSAGETOYOUR",
+                "Send a private message to your team.",
+            ),
+            (
+                "/me [action]",
+                "IDS_TEXT_PERFORMANACTIONINYOURNAME",
+                "Perform an action in your name.",
+            ),
+            (
+                "/sound [sound]",
+                "IDS_TEXT_PLAYASOUNDFROMTHEGLOBALSO",
+                "Play a sound from the global sound group.",
+            ),
+            (
+                "/mute [client]",
+                "IDS_TEXT_MUTESOUNDCOMMANDSBYTHESPE",
+                "Mute /sound commands by specified client.",
+            ),
+            (
+                "/unmute [client]",
+                "IDS_TEXT_UNMUTESOUNDCOMMANDSBYTHESP",
+                "Unmute /sound commands by the specified client.",
+            ),
+            (
+                "/kick [client]",
+                "IDS_TEXT_KICKTHESPECIFIEDCLIENT",
+                "Kick the specified client.",
+            ),
+            (
+                "/observer [client]",
+                "IDS_TEXT_SETTHESPECIFIEDCLIENTTOOB",
+                "Set the specified client to observer mode.",
+            ),
+            (
+                "/fast [x]",
+                "IDS_TEXT_SETTOFASTMODESKIPPINGXFRA",
+                "Set to fast mode, skipping x frames.",
+            ),
+            (
+                "/slow",
+                "IDS_TEXT_SETTONORMALSPEEDMODE",
+                "Set to normal speed mode.",
+            ),
+            (
+                "/chart",
+                "IDS_TEXT_DISPLAYNETWORKSTATISTICS",
+                "Display network statistics.",
+            ),
+            (
+                "/nodebug",
+                "IDS_TEXT_PREVENTDEBUGMODEINTHISROU",
+                "Prevent debug mode in this round.",
+            ),
+            (
+                "/set comment [comment]",
+                "IDS_TEXT_SETANEWNETWORKCOMMENT",
+                "Set a new network comment.",
+            ),
+            (
+                "/set password [password]",
+                "IDS_TEXT_SETANEWNETWORKPASSWORD",
+                "Set a new network password.",
+            ),
+            (
+                "/set faircrew [on/off]",
+                "IDS_TEXT_ENABLEORDISABLEFAIRCREW",
+                "Enable or disable fair crew.",
+            ),
+            (
+                "/set maxplayer [4]",
+                "IDS_TEXT_SETANEWMAXIMUMNUMBEROFPLA",
+                "Set a new maximum number of players for this round.",
+            ),
+            (
+                "/script [script]",
+                "IDS_TEXT_EXECUTEASCRIPTCOMMAND",
+                "Execute a script command.",
+            ),
+            (
+                "/clear",
+                "IDS_MSG_CLEARTHEMESSAGEBOARD",
+                "Clear the message board.",
+            ),
+        ] {
+            let description = self.runtime_resource_text(key, fallback);
+            self.append_control_message_log(
+                format!("{syntax} - {description}"),
+                CONTROL_LOG_COLOR,
+                None,
+            );
+        }
+    }
+
+    fn append_unknown_running_command(&mut self, text: &str) {
+        let raw = lc_script::c4_string_bytes(text);
+        let name = raw
+            .get(1..)
+            .unwrap_or_default()
+            .split(|byte| *byte == b' ')
+            .next()
+            .unwrap_or_default();
+        let name = legacy_presentation_text(&name[..name.len().min(30)]);
+        let template = self.runtime_resource_text(
+            "IDS_ERR_UNKNOWNCMD",
+            "Unknown command: \"%s\" - type /help to get a list of valid commands",
+        );
+        self.append_control_message_log(
+            format_resource_string(template, &[&name]),
+            CONTROL_LOG_COLOR,
+            None,
+        );
+    }
+
+    fn append_running_command_resource(&mut self, key: &str, fallback: &str) {
+        let message = self.runtime_resource_text(key, fallback);
+        self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
+    }
+
+    /// `C4GameControlNetwork::DecideControlDelivery`: clients always queue;
+    /// the host uses Sync only while the network is frozen or its local
+    /// client is inactive. Every other running command is tick-stamped.
+    fn running_control_prefers_sync(&self) -> bool {
+        if !matches!(self.runtime_network_role(), RuntimeNetworkRole::Host) {
+            return false;
+        }
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or(0);
+        let frozen = self.host_reference_paused
+            && self.runtime_network_status_barrier.is_none();
+        frozen || !self.control_clients.is_activated(local_client_id)
+    }
+
+    fn submit_or_execute_running_control_set(
+        &mut self,
+        value_type: i32,
+        data: i32,
+    ) -> Result<(), EngineError> {
+        let set = lc_network::LegacyControlSet {
+            value_type,
+            data,
+            by_client: 0,
+        };
+        if let Some(network) = self.network.as_ref() {
+            let tick = self.local_control_submission_tick();
+            let sync = self.running_control_prefers_sync();
+            if let Err(error) = network.submit_decided_control_set(tick, set, sync) {
+                tracing::error!(%error, value_type, data, "failed to submit chat control set");
+            }
+            return Ok(());
+        }
+        self.apply_ready_controls(
+            self.local_control_submission_tick(),
+            vec![NetworkControl::Set(set)],
+        )
+    }
+
+    fn submit_or_execute_running_script(
+        &mut self,
+        script: lc_engine::ScriptControlData,
+    ) -> Result<(), EngineError> {
+        let tick = self.local_control_submission_tick();
+        if let Some(network) = self.network.as_ref() {
+            let sync = self.running_control_prefers_sync();
+            if let Err(error) = network.submit_decided_script_control(tick, script, sync) {
+                tracing::error!(%error, "failed to submit chat script control");
+            }
+            return Ok(());
+        }
+        self.apply_ready_controls(tick, vec![NetworkControl::Script(script)])
+    }
+
+    fn submit_or_execute_running_custom_command(
+        &mut self,
+        command: lc_engine::CustomCommandControlData,
+    ) -> Result<(), EngineError> {
+        let tick = self.local_control_submission_tick();
+        if let Some(network) = self.network.as_ref() {
+            let sync = self.running_control_prefers_sync();
+            if let Err(error) = network.submit_custom_command(tick, command, sync) {
+                tracing::error!(%error, "failed to submit custom chat command");
+            }
+            return Ok(());
+        }
+        self.apply_ready_controls(tick, vec![NetworkControl::CustomCommand(command)])
+    }
+
+    fn running_console_script_strictness(&self) -> lc_engine::ScriptStrictness {
+        match native_config_text(
+            &load_native_config_bytes(self.app_paths.as_ref()),
+            "Developer",
+            "ConsoleScriptStrictness",
+        )
+        .as_deref()
+        .map(str::trim)
+        {
+            Some("NonStrict" | "0") => lc_engine::ScriptStrictness::NonStrict,
+            Some("Strict1" | "1") => lc_engine::ScriptStrictness::Strict1,
+            Some("Strict2" | "2") => lc_engine::ScriptStrictness::Strict2,
+            Some("Strict3" | "MaxStrict" | "3" | "255") | None => {
+                lc_engine::ScriptStrictness::Strict3
+            }
+            Some(_) => lc_engine::ScriptStrictness::Strict3,
+        }
+    }
+
+    fn set_running_network_comment(&mut self, value: &[u8]) {
+        let value = &value[..value
+            .len()
+            .min(lc_frontend::game_option_buttons::COMMENT_MAX_TEXT)];
+        let Some(comment) = lc_engine::LegacyCString::from_bytes(value.to_vec()) else {
+            return;
+        };
+        let projected = lc_script::c4_string_from_bytes(value);
+        self.persist_game_option_value("Network", "Comment", projected);
+        let password_needed = self
+            .advertised_game_reference
+            .as_ref()
+            .is_some_and(|reference| reference.summary().password_needed);
+        self.publish_lobby_game_option_reference(password_needed, comment);
+        let message = self.runtime_resource_text(
+            "IDS_NET_COMMENTCHANGED",
+            lc_frontend::game_option_buttons::COMMENT_CHANGED_LOG,
+        );
+        self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
+    }
+
+    fn set_running_network_password(&mut self, value: &[u8]) {
+        let Some(password) = lc_engine::LegacyCString::from_bytes(value.to_vec()) else {
+            return;
+        };
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        if let Err(error) = network.set_host_password(password) {
+            tracing::error!(%error, "failed to update chat-command host password");
+            return;
+        }
+        let comment = self
+            .advertised_game_reference
+            .as_ref()
+            .map(|reference| reference.metadata().comment.clone())
+            .unwrap_or_default();
+        self.publish_lobby_game_option_reference(!value.is_empty(), comment);
+    }
+
+    fn change_running_network_control_mode(&mut self, mode: i32) {
+        if self.runtime_network_control_mode == Some(mode) {
+            return;
+        }
+        let status = lc_network::NetworkStatus {
+            state: if self.host_reference_paused {
+                lc_network::NETWORK_STATE_PAUSE
+            } else {
+                lc_network::NETWORK_STATE_GO
+            },
+            control_mode: mode,
+            // C4Network2::SetCtrlMode deliberately uses ControlTick rather
+            // than the next tick used by Pause/Sync.
+            target_tick: self.displayed_network_control_tick(),
+        };
+        match self.change_runtime_network_status(status) {
+            Ok(()) => {
+                self.runtime_network_control_mode = Some(mode);
+                self.persist_game_option_value("Network", "ControlMode", mode.to_string());
+                self.publish_running_host_reference();
+            }
+            Err(error) => tracing::error!(%error, mode, "failed to change chat control mode"),
+        }
+    }
+
+    /// Case-sensitive C4MessageInput::ProcessCommand routing. `Ok(true)`
+    /// means the name was recognized even when a native gate rejected its
+    /// action; only `Ok(false)` reaches IDS_ERR_UNKNOWNCMD.
+    fn process_running_chat_command(&mut self, text: &str) -> Result<bool, EngineError> {
+        let raw = lc_script::c4_string_bytes(text);
+        let Some(command) = raw.strip_prefix(b"/") else {
+            return Ok(false);
+        };
+        let (name, parameter) = command
+            .iter()
+            .position(|byte| *byte == b' ')
+            .map_or((command, &[][..]), |space| {
+                (&command[..space], &command[space + 1..])
+            });
+        let name = &name[..name.len().min(30)];
+        let network_host = matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
+
+        match name {
+            b"help" => self.append_running_command_help(),
+            b"clear" => self.clear_message_board_log(),
+            b"kick" => {
+                if network_host {
+                    let target = self
+                        .control_clients
+                        .snapshot()
+                        .into_iter()
+                        .find(|client| client.name.as_bytes() == parameter);
+                    let Some(target) = target else {
+                        let target_name = legacy_presentation_text(parameter);
+                        let template = self.runtime_resource_text(
+                            "IDS_MSG_CMD_NOCLIENT",
+                            "Client %s not found!",
+                        );
+                        self.append_control_message_log(
+                            format_resource_string(template, &[&target_name]),
+                            CONTROL_LOG_COLOR,
+                            None,
+                        );
+                        return Ok(true);
+                    };
+                    if let Some(network) = self.network.as_ref() {
+                        let result = if self.network_is_league
+                            && self.runtime_client_has_players(target.client_id)
+                        {
+                            network.submit_vote(
+                                lc_engine::VOTE_TYPE_KICK,
+                                true,
+                                target.client_id,
+                            )
+                        } else {
+                            let reason = self.runtime_resource_text(
+                                "IDS_MSG_KICKFROMMSGBOARD",
+                                "kicked from messageboard",
+                            );
+                            network.submit_client_remove(lc_engine::ClientRemoveControlData {
+                                client_id: target.client_id,
+                                reason: lc_engine::LegacyCString::from_bytes(
+                                    lc_script::c4_string_bytes(&reason),
+                                )
+                                .unwrap_or_default(),
+                                by_client: 0,
+                            })
+                        };
+                        if let Err(error) = result {
+                            tracing::error!(%error, "failed to submit running kick command");
+                        }
+                    }
+                }
+            }
+            b"nodebug" => self.submit_or_execute_running_control_set(1, 0)?,
+            b"activate" | b"deactivate" | b"observer" => {
+                if !network_host {
+                    self.append_running_command_resource("IDS_MSG_CMD_HOSTONLY", "Host only!");
+                    return Ok(true);
+                }
+                let target = self
+                    .control_clients
+                    .snapshot()
+                    .into_iter()
+                    .find(|client| client.name.as_bytes() == parameter);
+                let Some(target) = target else {
+                    let target_name = legacy_presentation_text(parameter);
+                    let template = self.runtime_resource_text(
+                        "IDS_MSG_CMD_NOCLIENT",
+                        "Client %s not found!",
+                    );
+                    self.append_control_message_log(
+                        format_resource_string(template, &[&target_name]),
+                        CONTROL_LOG_COLOR,
+                        None,
+                    );
+                    return Ok(true);
+                };
+                let update = match name {
+                    b"activate" => Some((lc_engine::CLIENT_UPDATE_ACTIVATE, 1)),
+                    b"deactivate" if !self.network_is_league => {
+                        Some((lc_engine::CLIENT_UPDATE_ACTIVATE, 0))
+                    }
+                    b"observer" if !self.network_is_league => {
+                        Some((lc_engine::CLIENT_UPDATE_SET_OBSERVER, 0))
+                    }
+                    _ => None,
+                };
+                if let Some((update_type, data)) = update {
+                    if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                        network.submit_client_update(lc_engine::ClientUpdateControlData {
+                            update_type,
+                            client_id: target.client_id,
+                            data,
+                            by_client: 0,
+                        })
+                    }) {
+                        tracing::error!(%error, "failed to submit running client update");
+                    }
+                } else {
+                    self.append_running_command_resource(
+                        "IDS_LOG_COMMANDNOTALLOWEDINLEAGUE",
+                        "Command not allowed in league games!",
+                    );
+                }
+            }
+            b"centralctrl" | b"decentralctrl" | b"asyncctrl" => {
+                if !network_host {
+                    self.append_running_command_resource("IDS_MSG_CMD_HOSTONLY", "Host only!");
+                    return Ok(true);
+                }
+                if self.network_is_league && name == b"asyncctrl" {
+                    self.append_running_command_resource(
+                        "IDS_LOG_COMMANDNOTALLOWEDINLEAGUE",
+                        "Command not allowed in league games!",
+                    );
+                    return Ok(true);
+                }
+                self.change_running_network_control_mode(match name {
+                    b"centralctrl" => 1,
+                    b"decentralctrl" => 0,
+                    _ => 2,
+                });
+            }
+            b"set" => {
+                if let Some(value) = parameter.strip_prefix(b"maxplayer ") {
+                    if self.engine.is_control_host() {
+                        let maximum = legacy_sscanf_decimal_prefix(value).unwrap_or(0);
+                        if maximum == 0 && value != b"0" {
+                            self.append_control_message_log(
+                                "Syntax: /set maxplayer count".to_string(),
+                                CONTROL_LOG_COLOR,
+                                None,
+                            );
+                        } else {
+                            self.submit_or_execute_running_control_set(2, maximum)?;
+                        }
+                    }
+                } else if parameter == b"comment" || parameter.starts_with(b"comment ") {
+                    if network_host {
+                        let value = parameter.strip_prefix(b"comment ").unwrap_or_default();
+                        self.set_running_network_comment(value);
+                    }
+                } else if parameter == b"password" || parameter.starts_with(b"password ") {
+                    if network_host {
+                        let value = parameter.strip_prefix(b"password ").unwrap_or_default();
+                        self.set_running_network_password(value);
+                    }
+                } else if let Some(value) = parameter.strip_prefix(b"faircrew ") {
+                    if self.engine.is_control_host() && !self.network_is_league {
+                        let strength = if value == b"on" {
+                            Some(configured_fair_crew_strength(&load_native_config_bytes(
+                                self.app_paths.as_ref(),
+                            )))
+                        } else if value == b"off" {
+                            Some(-1)
+                        } else if value.first().is_some_and(u8::is_ascii_digit) {
+                            Some(legacy_sscanf_decimal_prefix(value).unwrap_or(0))
+                        } else {
+                            None
+                        };
+                        if let Some(strength) = strength {
+                            self.submit_or_execute_running_control_set(5, strength)?;
+                        }
+                    }
+                }
+            }
+            b"script" => {
+                if !self.engine.debug_mode()
+                    || (self.network.is_some() && !network_host)
+                {
+                    return Ok(true);
+                }
+                let Some(script) = lc_engine::LegacyCString::from_bytes(parameter.to_vec()) else {
+                    return Ok(true);
+                };
+                self.submit_or_execute_running_script(lc_engine::ScriptControlData {
+                    target_object: lc_engine::SCRIPT_SCOPE_CONSOLE,
+                    strictness: self.running_console_script_strictness(),
+                    script,
+                    by_client: 0,
+                })?;
+            }
+            b"chart" => self.network_chart_open = !self.network_chart_open,
+            _ => {
+                let registered = self.engine.message_board_commands().iter().any(|command| {
+                    lc_script::c4_string_bytes(&command.name) == name
+                });
+                if !registered {
+                    return Ok(false);
+                }
+                let Some(command) = lc_engine::LegacyCString::from_bytes(name.to_vec()) else {
+                    return Ok(true);
+                };
+                let Some(argument) = lc_engine::LegacyCString::from_bytes(parameter.to_vec()) else {
+                    return Ok(true);
+                };
+                let player = self
+                    .snapshot
+                    .hud
+                    .local_players
+                    .first()
+                    .copied()
+                    .unwrap_or(-1);
+                self.submit_or_execute_running_custom_command(
+                    lc_engine::CustomCommandControlData {
+                        command,
+                        argument,
+                        player,
+                        by_client: 0,
+                    },
+                )?;
+            }
+        }
+        Ok(true)
+    }
+
     fn start_running_chat(&mut self, mode: RunningChatMode) {
         let text = match mode {
             RunningChatMode::All => String::new(),
@@ -33668,13 +34205,19 @@ impl GameApp {
             &self.snapshot,
         ) {
             Ok(control) => control,
+            Err(_error) if lc_script::c4_string_bytes(text).first() == Some(&b'/') => {
+                match self.process_running_chat_command(text) {
+                    Ok(true) => {}
+                    Ok(false) => self.append_unknown_running_command(text),
+                    Err(error) => {
+                        tracing::error!(%error, "failed to process classic game chat command");
+                        self.status_text = format!("Unable to process chat command: {error}");
+                    }
+                }
+                return;
+            }
             Err(error) => {
-                tracing::warn!(%error, "classic game chat command is not implemented");
-                self.append_control_message_log(
-                    "Unknown command.".to_string(),
-                    CONTROL_LOG_COLOR,
-                    None,
-                );
+                tracing::warn!(%error, "classic game chat message is invalid");
                 return;
             }
         };
@@ -34178,7 +34721,13 @@ impl GameApp {
                             .loading_state
                             .as_ref()
                             .is_some_and(|loading| loading.prepared_go.is_some()));
-                if frozen_lobby && matches!(&event, NetworkEvent::ScheduledSync { .. }) {
+                let frozen_runtime = self.mode == AppMode::Running
+                    && self.host_reference_paused
+                    && !self.network_control_running
+                    && self.runtime_network_status_barrier.is_none();
+                if (frozen_lobby || frozen_runtime)
+                    && matches!(&event, NetworkEvent::ScheduledSync { .. })
+                {
                     let NetworkEvent::ScheduledSync { tick, controls } = event else {
                         unreachable!("ScheduledSync was matched above");
                     };
@@ -45338,6 +45887,7 @@ impl GameApp {
         self.network_game_advertiser = None;
         self.advertised_game_reference = None;
         self.host_reference_paused = false;
+        self.runtime_network_control_mode = None;
         self.network = None;
         self.network_mode = None;
         self.host_join_snapshot = None;
@@ -45887,6 +46437,7 @@ impl GameApp {
                 NetworkMode::Host(_) | NetworkMode::Client(_) => None,
             })
             .unwrap_or(template.summary().join_allowed);
+        let control_mode = self.runtime_network_control_mode;
         let updated = match running_host_reference(
             &template,
             parameters,
@@ -45901,7 +46452,11 @@ impl GameApp {
             },
             join_allowed,
             &self.snapshot,
-        ) {
+        )
+        .and_then(|reference| match control_mode {
+            Some(control_mode) => reference.replacing_control_mode(control_mode),
+            None => Ok(reference),
+        }) {
             Ok(reference) => reference,
             Err(error) => {
                 tracing::error!(%error, "failed to rebuild running host reference");
@@ -55566,6 +56121,7 @@ impl GameApp {
         self.network_game_advertiser = None;
         self.advertised_game_reference = None;
         self.host_reference_paused = false;
+        self.runtime_network_control_mode = None;
         if self.startup_view == StartupView::NetworkLobby {
             self.control_messages.clear_clients();
             self.network_lobby = None;
@@ -56275,6 +56831,7 @@ impl GameApp {
         self.network_game_advertiser = None;
         self.advertised_game_reference = None;
         self.host_reference_paused = false;
+        self.runtime_network_control_mode = None;
         self.host_join_snapshot = None;
         self.network_lobby = None;
         self.network_start_wait = None;
@@ -57539,6 +58096,9 @@ impl GameApp {
     }
 
     fn league_vote_control_mode(&self) -> i32 {
+        if let Some(mode) = self.runtime_network_control_mode {
+            return mode;
+        }
         match self.network_mode.as_ref() {
             Some(NetworkMode::Host(HostSettings {
                 prepared: Some(prepared),
@@ -68306,6 +68866,7 @@ impl GameApp {
         self.scoreboard_dialog = None;
         self.scoreboard_initial_reconcile_pending = false;
         self.scoreboard_close_pointer_capture = false;
+        self.network_chart_open = false;
         self.mode = AppMode::Running;
         // Startup hint + join log line for the HUD. Game.Time is owned by the
         // engine and pulsed by the event loop's one-second accumulator.
@@ -122607,6 +123168,421 @@ ScenInfoArea=70,5,25,90
             sound_enabled
         );
         app.keyboard_modifiers = ModifiersState::empty();
+    }
+
+    #[test]
+    fn l119_running_help_clear_and_case_sensitive_unknown() {
+        let mut app = new_state_only_running_sandbox_app();
+        app.enqueue_control_message_board_line("old line".to_string());
+
+        app.process_running_chat_text("/help");
+        assert!(app
+            .message_board
+            .log_history
+            .iter()
+            .any(|line| line.contains("Commands available during game")));
+        assert!(app
+            .message_board
+            .log_history
+            .iter()
+            .any(|line| line.starts_with("/clear - ")));
+        assert!(app
+            .message_board
+            .log_history
+            .iter()
+            .any(|line| line.starts_with("/fast [x] - ")));
+        assert!(app
+            .message_board
+            .log_history
+            .iter()
+            .any(|line| line.starts_with("/slow - ")));
+        assert!(app
+            .message_board
+            .log_history
+            .iter()
+            .all(|line| !line.contains("Unknown command")));
+
+        app.process_running_chat_text("/clear");
+        assert!(app.message_board.log_history.is_empty());
+        assert!(app.message_board.current_line().is_none());
+
+        app.process_running_chat_text("/Clear");
+        assert!(app
+            .message_board
+            .log_history
+            .back()
+            .is_some_and(|line| line.contains("Unknown command") && line.contains("Clear")));
+    }
+
+    #[test]
+    fn l119_running_kick_uses_exact_name_and_live_player_league_gate() {
+        let mut app = new_state_only_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+
+        app.process_running_chat_text("/kick Remote");
+        let removals = commands.take_submitted_client_removes();
+        assert_eq!(removals.len(), 1);
+        assert_eq!(removals[0].client_id, 7);
+        assert_eq!(removals[0].by_client, 0);
+        assert_eq!(removals[0].reason.as_bytes(), b"kicked from messageboard");
+        assert!(commands.take_submitted_votes().is_empty());
+
+        app.network_is_league = true;
+        app.engine
+            .register_player(PlayerConfig::new(17, "Remote Player"))
+            .expect("register remote league player");
+        app.engine
+            .player_mut(17)
+            .expect("remote league player exists")
+            .set_at_client(lc_engine::PlayerAtClient::new(7));
+        app.process_running_chat_text("/kick Remote");
+        assert_eq!(
+            commands.take_submitted_votes(),
+            vec![lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: 7,
+                by_client: 0,
+            }]
+        );
+        assert!(commands.take_submitted_client_removes().is_empty());
+
+        app.process_running_chat_text("/kick remote");
+        assert!(commands.take_submitted_votes().is_empty());
+        assert!(app
+            .message_board
+            .log_history
+            .back()
+            .is_some_and(|line| line.contains("remote") && line.contains("not found")));
+        assert!(app
+            .message_board
+            .log_history
+            .iter()
+            .all(|line| !line.contains("Unknown command")));
+    }
+
+    #[test]
+    fn l119_running_set_comment_is_direct_host_effect() {
+        let _lock = env_lock().lock();
+        let fixture = tempdir().expect("running comment configuration");
+        let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+        let mut app = new_state_only_running_sandbox_app();
+        app.app_paths = Some(paths.clone());
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
+        let (_snapshot, reference) = default_exact_host_reference();
+        app.advertised_game_reference = Some(reference);
+
+        app.process_running_chat_text("/set comment live runtime comment");
+
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("load updated runtime config")
+                .get_in(Some("Network"), "Comment"),
+            Some("live runtime comment")
+        );
+        assert_eq!(
+            app.advertised_game_reference
+                .as_ref()
+                .expect("updated running reference")
+                .metadata()
+                .comment
+                .as_bytes(),
+            b"live runtime comment"
+        );
+        assert_eq!(
+            app.message_board.log_history.back().map(String::as_str),
+            Some(lc_frontend::game_option_buttons::COMMENT_CHANGED_LOG)
+        );
+        assert!(commands.take_submitted_decided_controls().is_empty());
+
+        let mut client = new_state_only_running_sandbox_app();
+        client.app_paths = Some(paths.clone());
+        let (_events, mut client_commands) =
+            install_running_network_stub(&mut client, 7, 0, 2);
+        client.process_running_chat_text("/set comment rejected client comment");
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("load host-only runtime config")
+                .get_in(Some("Network"), "Comment"),
+            Some("live runtime comment")
+        );
+        assert!(client_commands
+            .take_submitted_decided_controls()
+            .is_empty());
+        assert!(client
+            .message_board
+            .log_history
+            .iter()
+            .all(|line| line != lc_frontend::game_option_buttons::COMMENT_CHANGED_LOG));
+    }
+
+    #[test]
+    fn l119_running_dispatches_controls_modes_and_custom_commands() {
+        let mut app = new_state_only_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+
+        app.process_running_chat_text("/nodebug");
+        let decided = commands.take_submitted_decided_controls();
+        assert_eq!(decided.len(), 1);
+        assert_eq!(decided[0].0, app.local_control_submission_tick());
+        assert!(!decided[0].2, "an active running host queues CDT_Decide");
+        assert_eq!(
+            lc_network::LegacyControlSet::from_control_packet(&decided[0].1),
+            Some(lc_network::LegacyControlSet {
+                value_type: 1,
+                data: 0,
+                by_client: 0,
+            })
+        );
+        app.process_running_chat_text("/set maxplayer 9");
+        app.process_running_chat_text("/set faircrew off");
+        let decided = commands.take_submitted_decided_controls();
+        assert_eq!(decided.len(), 2);
+        assert!(decided.iter().all(|(_, _, sync)| !sync));
+        assert_eq!(
+            decided
+                .iter()
+                .filter_map(|(_, control, _)| {
+                    lc_network::LegacyControlSet::from_control_packet(control)
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                lc_network::LegacyControlSet {
+                    value_type: 2,
+                    data: 9,
+                    by_client: 0,
+                },
+                lc_network::LegacyControlSet {
+                    value_type: 5,
+                    data: -1,
+                    by_client: 0,
+                },
+            ]
+        );
+
+        app.process_running_chat_text("/activate Remote");
+        app.process_running_chat_text("/deactivate Remote");
+        app.process_running_chat_text("/observer Remote");
+        assert_eq!(
+            commands.take_submitted_client_updates(),
+            vec![
+                lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                    client_id: 7,
+                    data: 1,
+                    by_client: 0,
+                },
+                lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                    client_id: 7,
+                    data: 0,
+                    by_client: 0,
+                },
+                lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_SET_OBSERVER,
+                    client_id: 7,
+                    data: 0,
+                    by_client: 0,
+                },
+            ]
+        );
+
+        app.engine.set_debug_mode(true);
+        app.process_running_chat_text("/script return 1");
+        let decided = commands.take_submitted_decided_controls();
+        let [(tick, lc_engine::ControlPacket::Script(script), false)] = decided.as_slice() else {
+            panic!("expected one queued script command, got {decided:?}");
+        };
+        assert_eq!(*tick, app.local_control_submission_tick());
+        assert_eq!(script.target_object, lc_engine::SCRIPT_SCOPE_CONSOLE);
+        assert_eq!(script.script.as_bytes(), b"return 1");
+
+        assert!(app.engine.add_message_board_command(
+            lc_engine::InitialNetworkMessageBoardCommand {
+                name: "probe".to_string(),
+                script: "return true".to_string(),
+                restriction: lc_engine::MessageBoardCommandRestriction::Plain,
+            },
+        ));
+        app.process_running_chat_text("/probe  exact tail");
+        let decided = commands.take_submitted_decided_controls();
+        let [(tick, lc_engine::ControlPacket::CustomCommand(custom), false)] = decided.as_slice()
+        else {
+            panic!("expected one queued custom command, got {decided:?}");
+        };
+        assert_eq!(*tick, app.local_control_submission_tick());
+        assert_eq!(custom.command.as_bytes(), b"probe");
+        assert_eq!(custom.argument.as_bytes(), b" exact tail");
+        assert_eq!(custom.player, app.local_owner);
+
+        app.process_running_chat_text("/msgboard 12");
+        assert_eq!(app.message_board.mode, MessageBoardMode::Continuous);
+        assert_eq!(app.message_board.line_count, 12);
+        app.process_running_chat_text("/msgboard 1");
+        assert_eq!(app.message_board.mode, MessageBoardMode::SingleLine);
+        app.process_running_chat_text("/msgboard 0");
+        assert_eq!(app.message_board.mode, MessageBoardMode::Hidden);
+        app.process_running_chat_text("/chart");
+        assert!(app.network_chart_open);
+        app.process_running_chat_text("/chart");
+        assert!(!app.network_chart_open);
+
+        app.runtime_network_control_mode = Some(0);
+        app.process_running_chat_text("/decentralctrl");
+        assert!(commands.take_runtime_status_commands().is_empty());
+        let (_snapshot, reference) = default_exact_host_reference();
+        assert_eq!(reference.summary().control_mode, 0);
+        app.advertised_game_reference = Some(reference);
+        app.process_running_chat_text("/centralctrl");
+        assert_eq!(
+            commands.take_runtime_status_commands(),
+            vec![
+                network::TestRuntimeStatusCommand::Change(lc_network::NetworkStatus {
+                    state: lc_network::NETWORK_STATE_GO,
+                    control_mode: 1,
+                    target_tick: 0,
+                }),
+                network::TestRuntimeStatusCommand::Reached {
+                    status: lc_network::NetworkStatus {
+                        state: lc_network::NETWORK_STATE_GO,
+                        control_mode: 1,
+                        target_tick: 0,
+                    },
+                    actual_control_tick: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            app.advertised_game_reference
+                .as_ref()
+                .expect("running reference survives control-mode publication")
+                .summary()
+                .control_mode,
+            1
+        );
+        app.network_is_league = true;
+        app.process_running_chat_text("/asyncctrl");
+        assert!(commands.take_runtime_status_commands().is_empty());
+        assert!(app
+            .message_board
+            .log_history
+            .back()
+            .is_some_and(|line| line.contains("not allowed in league")));
+    }
+
+    #[test]
+    fn l119_control_mode_targets_native_current_tick_after_cadence_consumption() {
+        let mut app = new_running_sandbox_app();
+        let (events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
+        queue_empty_ready_tick(&app, &events);
+        app.update().expect("consume cadence tick zero");
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (1, 1));
+
+        app.runtime_network_control_mode = Some(0);
+        app.process_running_chat_text("/centralctrl");
+
+        let expected = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 0,
+        };
+        assert_eq!(
+            commands.take_runtime_status_commands(),
+            vec![network::TestRuntimeStatusCommand::Change(expected)]
+        );
+    }
+
+    #[test]
+    fn l119_running_script_uses_symbolic_console_strictness_and_frozen_sync() {
+        let _lock = env_lock().lock();
+        let fixture = tempdir().expect("running script configuration");
+        let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+        let mut config = Config::new();
+        config.set_in(
+            Some("Developer"),
+            "ConsoleScriptStrictness",
+            "Strict1",
+        );
+        config.save(paths.config_file()).expect("save script config");
+
+        let mut app = new_state_only_running_sandbox_app();
+        app.app_paths = Some(paths);
+        app.engine.set_debug_mode(true);
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host")]);
+        app.host_reference_paused = true;
+
+        app.process_running_chat_text("/script return 1");
+
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, lc_engine::ControlPacket::Script(script), true)] = decided.as_slice() else {
+            panic!("expected one synchronized script command, got {decided:?}");
+        };
+        assert_eq!(script.strictness, lc_engine::ScriptStrictness::Strict1);
+    }
+
+    #[test]
+    fn l119_frozen_runtime_sync_executes_immediately_but_pending_barrier_queues() {
+        let disable_debug = || {
+            NetworkControl::Set(lc_network::LegacyControlSet {
+                value_type: 1,
+                data: 0,
+                by_client: 0,
+            })
+        };
+
+        let mut frozen = new_state_only_running_sandbox_app();
+        frozen.engine.set_debug_mode(true);
+        frozen.engine.set_allow_debug(true);
+        let (events, _commands) = install_running_network_stub(&mut frozen, 0, 0, 2);
+        frozen.host_reference_paused = true;
+        frozen.network_control_running = false;
+        events
+            .send(NetworkEvent::ScheduledSync {
+                tick: 0,
+                controls: vec![disable_debug()],
+            })
+            .expect("queue frozen runtime Sync");
+
+        frozen
+            .process_network_events()
+            .expect("execute frozen runtime Sync immediately");
+        assert!(!frozen.engine.debug_mode());
+        assert!(frozen.network_sync.scheduled.is_empty());
+
+        let mut transitioning = new_state_only_running_sandbox_app();
+        transitioning.engine.set_debug_mode(true);
+        transitioning.engine.set_allow_debug(true);
+        let (events, _commands) =
+            install_running_network_stub(&mut transitioning, 0, 0, 2);
+        transitioning.host_reference_paused = true;
+        transitioning.network_control_running = false;
+        transitioning.runtime_network_status_barrier = Some(RuntimeNetworkStatusBarrier {
+            status: lc_network::NetworkStatus {
+                state: lc_network::NETWORK_STATE_GO,
+                control_mode: 0,
+                target_tick: 0,
+            },
+            local_reached: true,
+            actual_control_tick: Some(0),
+        });
+        events
+            .send(NetworkEvent::ScheduledSync {
+                tick: 0,
+                controls: vec![disable_debug()],
+            })
+            .expect("queue transitioning runtime Sync");
+
+        transitioning
+            .process_network_events()
+            .expect("retain Sync for the pending status commit");
+        assert!(transitioning.engine.debug_mode());
+        assert!(transitioning.network_sync.scheduled.contains_key(&0));
     }
 
     #[test]
