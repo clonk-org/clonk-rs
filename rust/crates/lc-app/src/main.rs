@@ -3417,6 +3417,28 @@ fn format_resource_string(mut template: String, arguments: &[&str]) -> String {
     template
 }
 
+/// Substitute template placeholders without rescanning inserted arguments.
+/// Goal names/descriptions are arbitrary definition text, so a literal `%s`
+/// inside either argument must not consume the next template placeholder.
+fn format_resource_string_with_opaque_arguments(template: String, arguments: &[&str]) -> String {
+    let mut output = String::with_capacity(template.len());
+    let mut remainder = template.as_str();
+    for argument in arguments {
+        let placeholder = [remainder.find("%s"), remainder.find("%d")]
+            .into_iter()
+            .flatten()
+            .min();
+        let Some(placeholder) = placeholder else {
+            break;
+        };
+        output.push_str(&remainder[..placeholder]);
+        output.push_str(argument);
+        remainder = &remainder[placeholder + 2..];
+    }
+    output.push_str(remainder);
+    output
+}
+
 fn network_game_version_string(
     game: &str,
     version: [i32; 4],
@@ -5544,28 +5566,65 @@ impl FrontendAssets {
         &self,
         hud: &HudGraphics,
     ) -> std::result::Result<(), ClassicParityBoundary> {
+        self.require_classic_game_over_resources_with_hud_and_evaluation(hud, None)
+    }
+
+    fn require_classic_game_over_resources_with_hud_and_evaluation(
+        &self,
+        hud: &HudGraphics,
+        evaluation: Option<&EvaluationViewModel>,
+    ) -> std::result::Result<(), ClassicParityBoundary> {
         let mut missing = Vec::new();
         if self.clonk_fonts.is_none() {
-            missing.push("CStdFont/Endeavour.ttf");
+            missing.push("CStdFont/Endeavour.ttf".to_string());
         }
         for name in ["GUICaption.png", "GUIButton.png", "GUIButtonDown.png"] {
             if !self.startup_dialog_images.contains_key(name) {
-                missing.push(name);
+                missing.push(name.to_string());
             }
         }
         if self.game_over_button_highlight.is_none() {
-            missing.push("GUIButtonHighlight.png");
+            missing.push("GUIButtonHighlight.png".to_string());
         }
-        for name in ["GUIIcons.png"] {
+        // GUIIcons2/GUIScroll are normally rejected by the earlier
+        // process-global C4GUI gate. Keep them in this recursive inventory as
+        // well so direct presentation validation remains complete.
+        for name in ["GUIIcons.png", "GUIIcons2.png", "GUIScroll.png"] {
             if !self.startup_dialog_images.contains_key(name) {
-                missing.push(name);
+                missing.push(name.to_string());
             }
         }
         if hud.player.is_none() && !self.startup_dialog_images.contains_key("Player.png") {
-            missing.push("Player.png");
+            missing.push("Player.png".to_string());
+        }
+        if hud.crew.is_none() {
+            missing.push("Crew.png".to_string());
         }
         if hud.score.is_none() {
-            missing.push("Score.png");
+            missing.push("Score.png".to_string());
+        }
+        let malformed = |image: &ImageData| {
+            image.width() == 0
+                || image.height() == 0
+                || u64::from(image.width())
+                    .checked_mul(u64::from(image.height()))
+                    .and_then(|pixels| pixels.checked_mul(4))
+                    != Some(image.pixels().len() as u64)
+        };
+        if let Some(evaluation) = evaluation {
+            for goal in evaluation.goals() {
+                if goal.picture.as_ref().is_some_and(|image| malformed(image)) {
+                    missing.push(format!(
+                        "goal definition picture `{}`",
+                        goal.definition_id
+                    ));
+                }
+            }
+            for player in evaluation.players() {
+                if player.big_icon.as_ref().is_some_and(|image| malformed(image)) {
+                    missing.push(format!("player {} BigIcon", player.player_info_id));
+                }
+            }
         }
         if missing.is_empty() {
             Ok(())
@@ -13379,7 +13438,7 @@ enum ClassicParityBoundary {
         detail: String,
     },
     GameOverResources {
-        missing: Vec<&'static str>,
+        missing: Vec<String>,
     },
     GuiOverlayResources {
         overlay: &'static str,
@@ -21924,7 +21983,8 @@ fn build_game_over_dialog(
     screen_width: u32,
     title: String,
     next_mission: &lc_engine::NextMissionState,
-    mut definition_picture: impl FnMut(&str) -> Option<ImageData>,
+    mut goal_presentation: impl FnMut(&str, bool) -> (Option<ImageData>, String),
+    mut player_big_icon: impl FnMut(i32) -> Option<ImageData>,
 ) -> GameOverState {
     // C4GameOverDlg freezes C4RoundResults into presentation state; player
     // results are joined through C4PlayerInfo::ID, not the runtime player
@@ -21934,13 +21994,18 @@ fn build_game_over_dialog(
         .round_results
         .goals
         .iter()
-        .map(|definition_id| EvaluationGoal {
-            definition_id: definition_id.clone(),
-            fulfilled: snapshot
+        .map(|definition_id| {
+            let fulfilled = snapshot
                 .round_results
                 .fulfilled_goals
-                .contains(definition_id),
-            picture: definition_picture(definition_id),
+                .contains(definition_id);
+            let (picture, tooltip) = goal_presentation(definition_id, fulfilled);
+            EvaluationGoal {
+                definition_id: definition_id.clone(),
+                fulfilled,
+                tooltip,
+                picture,
+            }
         })
         .collect();
 
@@ -21991,7 +22056,7 @@ fn build_game_over_dialog(
                 .then_some(result.score_new)
                 .flatten(),
             custom_evaluation_strings: c4_presentation_text(&result.custom_evaluation_strings),
-            big_icon: None,
+            big_icon: player_big_icon(state.player_info_id),
         });
     }
     let separate_team_ids = (teams.len() == 2 && !auto_generate_teams)
@@ -31417,6 +31482,16 @@ impl GameApp {
         if !self.display_flags.portraits {
             return;
         }
+        self.hydrate_runtime_player_big_icons_unconditionally();
+    }
+
+    /// `C4RoundResultsPlayer::EvaluatePlayer` freezes `C4Player::BigIcon`
+    /// independently of the viewport-only ShowPortraits switch.
+    fn hydrate_runtime_player_big_icons_for_evaluation(&mut self) {
+        self.hydrate_runtime_player_big_icons_unconditionally();
+    }
+
+    fn hydrate_runtime_player_big_icons_unconditionally(&mut self) {
         let pending = self
             .engine
             .players()
@@ -62064,6 +62139,11 @@ impl GameApp {
             // ClearPressedComs when game-over closes the player menu.
             self.clear_local_controls()?;
         }
+        self.hydrate_runtime_player_big_icons_for_evaluation();
+        let fulfilled_goal_tooltip =
+            self.runtime_resource_text("IDS_DESC_GOALFULFILLED", "Goal %s fulfilled: %s");
+        let unfulfilled_goal_tooltip =
+            self.runtime_resource_text("IDS_DESC_GOALNOTFULFILLED", "Goal %s not fulfilled: %s");
         let scenario_title = self
             .active_scenario
             .as_ref()
@@ -62078,11 +62158,35 @@ impl GameApp {
             self.graphics.surface().width(),
             scenario_title.clone(),
             next_mission,
-            |definition_id| {
-                self.engine
+            |definition_id, fulfilled| {
+                let picture = self
+                    .engine
                     .definition_picture_image(definition_id)
-                    .map(definition_menu_picture)
+                    .map(definition_menu_picture);
+                let name = self
+                    .engine
+                    .definition_name(definition_id)
+                    .map(c4_presentation_text)
+                    .unwrap_or_default();
+                let description = self
+                    .engine
+                    .definition_description(definition_id)
+                    .map(c4_presentation_text)
+                    .unwrap_or_default();
+                let template = if fulfilled {
+                    fulfilled_goal_tooltip.clone()
+                } else {
+                    unfulfilled_goal_tooltip.clone()
+                };
+                (
+                    picture,
+                    format_resource_string_with_opaque_arguments(
+                        template,
+                        &[&name, &description],
+                    ),
+                )
             },
+            |player_info_id| self.runtime_player_big_icons.get(&player_info_id).cloned(),
         );
         let network_result = self.snapshot.round_results.network_result;
         let network_result_text =
@@ -64857,6 +64961,48 @@ impl GameApp {
         Ok(true)
     }
 
+    fn render_game_over_tooltip(&mut self, gamma: Option<&lc_graphics::GammaRamp>) -> Result<bool> {
+        if !self.game_over_dialog_is_active() {
+            return Ok(false);
+        }
+        let Some(pointer) = self.startup_tooltip.eligible_pointer() else {
+            return Ok(false);
+        };
+        let (surface_width, surface_height) = {
+            let surface = self.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let text = self
+            .game_over_dialog
+            .as_ref()
+            .map(|dialog| {
+                dialog.tooltip_at(
+                    pointer.x,
+                    pointer.y,
+                    surface_width,
+                    surface_height,
+                )
+            })
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned);
+        let Some(text) = text else {
+            return Ok(false);
+        };
+        let font = self
+            .assets
+            .global_tooltip_font
+            .clone()
+            .context("classic shadowless tooltip font is unavailable")?;
+        lc_frontend::context_menu::draw_classic_tooltip(
+            self.graphics.surface_mut(),
+            font.as_ref(),
+            pointer,
+            &text,
+            gamma,
+        );
+        Ok(true)
+    }
+
     fn render_loading_league_signup_dialog(&self, surface: &mut Surface) -> Result<()> {
         let Some(dialog) = self.league_signup_dialog.as_ref() else {
             return Ok(());
@@ -66961,9 +67107,12 @@ impl GameApp {
             .require_classic_hud_resources_with_hud(self.current_hud_graphics_ref())
             .map_err(report_classic_parity_boundary)?;
         self.preflight_visible_gui_overlay_resources()?;
-        if self.game_over_dialog.is_some() {
+        if let Some(dialog) = self.game_over_dialog.as_ref() {
             self.assets
-                .require_classic_game_over_resources_with_hud(self.current_hud_graphics_ref())
+                .require_classic_game_over_resources_with_hud_and_evaluation(
+                    self.current_hud_graphics_ref(),
+                    Some(dialog.evaluation()),
+                )
                 .map_err(report_classic_parity_boundary)?;
         }
         if viewport_overlays_visible
@@ -68113,6 +68262,9 @@ impl GameApp {
             } else if let Some(context_menu) = self.context_menu.as_ref() {
                 context_menu.render(self.graphics.surface_mut(), Some(&frame_gamma))?;
             }
+        }
+        if self.render_game_over_tooltip(Some(&frame_gamma))? && ordered_native {
+            self.next_pending_native_overlay();
         }
         if self.render_classic_dialog_title_tooltip(Some(&frame_gamma))? && ordered_native {
             self.next_pending_native_overlay();
@@ -159149,6 +159301,109 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
+    fn game_over_goal_hover_uses_localized_cpp_tooltips_and_shared_delay() {
+        let mut app = new_classic_running_sandbox_app();
+        for (id, name, description) in [
+            ("GFDN", "Build the %s bridge", "Reach the other side"),
+            ("GOPN", "Find the gold", "Recover the treasure"),
+        ] {
+            let mut definition =
+                Definition::from_script(id, name, "#strict 3\n").expect("goal definition compiles");
+            definition.set_description(Some(description.to_string()));
+            app.engine
+                .register_definition(definition)
+                .expect("goal definition registers");
+        }
+        app.snapshot.round_results.goals = vec!["GFDN".into(), "GOPN".into()];
+        app.snapshot.round_results.fulfilled_goals = vec!["GFDN".into()];
+        app.handle_game_over().expect("show goal evaluation");
+
+        let goal_rects = {
+            let surface = app.graphics.surface();
+            let dialog = app.game_over_dialog.as_ref().expect("evaluation dialog");
+            assert_eq!(
+                dialog
+                    .evaluation()
+                    .goals()
+                    .iter()
+                    .map(|goal| goal.tooltip.as_str())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "Goal Build the %s bridge fulfilled: Reach the other side",
+                    "Goal Find the gold not fulfilled: Recover the treasure",
+                ]
+            );
+            let layout = dialog.classic_evaluation_layout(
+                surface.width(),
+                surface.height(),
+                app.assets.clonk_fonts.as_deref().expect("classic fonts"),
+            );
+            layout
+                .goals
+                .into_iter()
+                .map(|goal| goal.picture)
+                .collect::<Vec<_>>()
+        };
+
+        for (rect, expected) in goal_rects.iter().zip([
+            "Goal Build the %s bridge fulfilled: Reach the other side",
+            "Goal Find the gold not fulfilled: Recover the treasure",
+        ]) {
+            app.handle_cursor_moved(PhysicalPosition::new(
+                f64::from(rect.x + rect.w / 2),
+                f64::from(rect.y + rect.h / 2),
+            ))
+            .expect("hover goal picture");
+            assert_eq!(
+                app.game_over_dialog
+                    .as_ref()
+                    .expect("evaluation dialog")
+                    .hovered_description(),
+                expected
+            );
+        }
+
+        let first = goal_rects[0];
+        let first_center = GuiPoint::new(
+            (first.x + first.w / 2) as f32,
+            (first.y + first.h / 2) as f32,
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(first_center.x),
+            f64::from(first_center.y),
+        ))
+        .expect("restore first goal hover");
+        let started = Instant::now() - lc_frontend::context_menu::CLASSIC_TOOLTIP_DELAY;
+        app.startup_tooltip = ClassicTooltipTracker::new_at(started);
+        app.startup_tooltip
+            .note_pointer_move_at(first_center, started);
+        assert_eq!(app.startup_tooltip.eligible_pointer(), Some(first_center));
+        assert!(app
+            .render_game_over_tooltip(Some(startup_gamma()))
+            .expect("draw classic delayed tooltip"));
+
+        // A newer dialog can consume motion and then close before the shared
+        // delay expires. Re-resolve at the tracker's current pointer instead
+        // of drawing this dialog's stale cached goal hover there.
+        let consumed_pointer = GuiPoint::new(0.0, 0.0);
+        let started = Instant::now() - lc_frontend::context_menu::CLASSIC_TOOLTIP_DELAY;
+        app.startup_tooltip = ClassicTooltipTracker::new_at(started);
+        app.startup_tooltip
+            .note_pointer_move_at(consumed_pointer, started);
+        assert_eq!(
+            app.game_over_dialog
+                .as_ref()
+                .expect("evaluation dialog")
+                .hovered_description(),
+            "Goal Build the %s bridge fulfilled: Reach the other side",
+            "the lower dialog intentionally retains its last routed hover"
+        );
+        assert!(!app
+            .render_game_over_tooltip(Some(startup_gamma()))
+            .expect("ignore stale lower-dialog hover"));
+    }
+
+    #[test]
     fn game_over_custom_text_wheel_uses_app_routing_and_stays_below_newer_dialogs() {
         let mut app = new_classic_running_sandbox_app();
         app.snapshot.round_results.custom_evaluation_strings = (0..40)
@@ -159211,7 +159466,7 @@ func ControlDig() { dig_count = 1; return(1); }
         expected_missing: Vec<&'static str>,
     ) {
         let expected = ClassicParityBoundary::GameOverResources {
-            missing: expected_missing,
+            missing: expected_missing.into_iter().map(str::to_string).collect(),
         };
         assert_eq!(
             error.downcast_ref::<ClassicParityBoundary>(),
@@ -159343,6 +159598,185 @@ func ControlDig() { dig_count = 1; return(1); }
         assert_game_over_resource_boundary(&error, vec!["Player.png", "Score.png"]);
         assert_eq!(frame, sentinel, "preflight must precede every output write");
         assert_eq!(runtime_global_ui_snapshot(&app), before);
+    }
+
+    #[test]
+    fn game_over_recursive_inventory_covers_global_sheets_crew_and_frozen_images() {
+        let mut app = new_game_over_keyboard_app();
+        let (gui_icons2, gui_scroll) = {
+            let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+            let gui_icons2 = assets
+                .startup_dialog_images
+                .remove("GUIIcons2.png")
+                .expect("fixture extended GUI icon sheet");
+            let gui_scroll = assets
+                .startup_dialog_images
+                .remove("GUIScroll.png")
+                .expect("fixture GUI scroll sheet");
+            Arc::make_mut(&mut assets.hud_graphics).crew = None;
+            (gui_icons2, gui_scroll)
+        };
+        let error = app
+            .assets
+            .require_classic_game_over_resources()
+            .expect_err("recursive direct inventory rejects missing child resources");
+        assert_eq!(
+            error,
+            ClassicParityBoundary::GameOverResources {
+                missing: vec![
+                    "GUIIcons2.png".to_string(),
+                    "GUIScroll.png".to_string(),
+                    "Crew.png".to_string(),
+                ],
+            }
+        );
+
+        // In the live app, C4GUI::Resource owns the two GUI sheets and its
+        // process-global boundary deliberately wins before the recursive
+        // game-over check.
+        let mut frame = vec![0x7a; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        let error = app
+            .render(&mut frame)
+            .expect_err("global GUI gate must retain boundary precedence");
+        let boundary = error
+            .downcast_ref::<ClassicParityBoundary>()
+            .expect("typed classic boundary");
+        assert!(matches!(
+            boundary,
+            ClassicParityBoundary::GlobalGuiBootstrapResources { .. }
+        ));
+        assert_eq!(frame, sentinel);
+
+        // Once the process-global sheets are restored, the recursive child
+        // inventory owns Crew and must still fail before any output pixels.
+        {
+            let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+            assets
+                .startup_dialog_images
+                .insert("GUIIcons2.png".to_string(), gui_icons2);
+            assets
+                .startup_dialog_images
+                .insert("GUIScroll.png".to_string(), gui_scroll);
+        }
+        let mut frame = vec![0x29; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        let error = app
+            .render(&mut frame)
+            .expect_err("missing recursive Crew resource must fail before drawing");
+        assert_game_over_resource_boundary(&error, vec!["Crew.png"]);
+        assert_eq!(frame, sentinel);
+
+        let mut app = new_game_over_keyboard_app();
+        let invalid = ImageData::new(1, 1, Vec::new());
+        app.game_over_dialog
+            .as_mut()
+            .expect("evaluation dialog")
+            .set_evaluation(EvaluationViewModel::new(
+                vec![EvaluationGoal {
+                    definition_id: "MISS".into(),
+                    fulfilled: false,
+                    tooltip: "Goal Missing not fulfilled: Missing image".into(),
+                    picture: Some(invalid.clone()),
+                }],
+                vec![EvaluationPlayer {
+                    player_info_id: 41,
+                    team_id: None,
+                    name: "Player".into(),
+                    won: false,
+                    color_dw: 0,
+                    total_playing_time: 0,
+                    score_old: -1,
+                    score_new: None,
+                    custom_evaluation_strings: String::new(),
+                    big_icon: Some(invalid),
+                }],
+            ));
+        let mut frame = vec![0x3d; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        let error = app
+            .render(&mut frame)
+            .expect_err("malformed frozen images fail before a partial render");
+        assert_game_over_resource_boundary(
+            &error,
+            vec!["goal definition picture `MISS`", "player 41 BigIcon"],
+        );
+        assert_eq!(frame, sentinel);
+    }
+
+    #[test]
+    fn game_over_freezes_cached_player_big_icon_when_portraits_are_hidden() {
+        let mut app = new_classic_running_sandbox_app();
+        app.display_flags.portraits = false;
+        let player_info_id = app
+            .snapshot
+            .players
+            .first()
+            .expect("sandbox player")
+            .player_info_id;
+        app.snapshot.round_results.players = vec![lc_engine::RoundResultsPlayerState {
+            player_info_id,
+            ..lc_engine::RoundResultsPlayerState::default()
+        }];
+        let icon = ImageData::new(1, 1, vec![12, 34, 56, 255]);
+        let file_name = "Player.c4p".to_string();
+        app.control_player_infos.replace_snapshot(
+            player_info_id,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: player_info_id,
+                    name: LegacyCString::from_bytes(b"Player".to_vec())
+                        .expect("fixture player name"),
+                    filename: LegacyCString::from_bytes(file_name.as_bytes().to_vec())
+                        .expect("fixture player filename"),
+                    ..Default::default()
+                }],
+                by_client: 0,
+            }],
+        );
+        app.startup_player_files.insert(
+            0,
+            StartupPlayerFile {
+                path: PathBuf::from(&file_name),
+                file_name,
+                player_file: PlayerFile::default(),
+                render_model: lc_frontend::startup_plrsel::PlrSelPlayer {
+                    name: "Player".into(),
+                    activated: true,
+                    big_icon: Some(icon.clone()),
+                    portrait: None,
+                    color_dw: 0,
+                    score: 0,
+                    rounds: 0,
+                    rounds_won: 0,
+                    rounds_lost: 0,
+                    total_playing_time: 0,
+                    comment: String::new(),
+                },
+            },
+        );
+        app.runtime_player_big_icons.clear();
+        app.runtime_player_big_icon_misses.clear();
+
+        app.handle_game_over().expect("show evaluation dialog");
+        assert_eq!(
+            app.runtime_player_big_icons.get(&player_info_id),
+            Some(&icon),
+            "evaluation hydration must ignore the viewport portrait switch"
+        );
+        app.runtime_player_big_icons.remove(&player_info_id);
+        assert_eq!(
+            app.game_over_dialog
+                .as_ref()
+                .expect("evaluation dialog")
+                .evaluation()
+                .player_by_info_id(player_info_id)
+                .and_then(|player| player.big_icon.as_ref()),
+            Some(&icon),
+            "the frozen evaluation dialog owns its copied BigIcon"
+        );
     }
 
     #[test]
@@ -168637,6 +169071,7 @@ func ControlDig() { dig_count = 1; return(1); }
             description: "Continue learning".into(),
         };
         let picture = ImageData::new(1, 1, vec![12, 34, 56, 255]);
+        let player_icon = ImageData::new(1, 1, vec![65, 43, 21, 255]);
 
         let dialog = build_game_over_dialog(
             &snapshot,
@@ -168646,7 +169081,17 @@ func ControlDig() { dig_count = 1; return(1); }
             1024,
             "decoy title".into(),
             &next_mission,
-            |definition_id| (definition_id == "SCRG").then(|| picture.clone()),
+            |definition_id, fulfilled| {
+                (
+                    (definition_id == "SCRG").then(|| picture.clone()),
+                    if fulfilled {
+                        "Goal Scenario goal fulfilled: Complete the scenario".into()
+                    } else {
+                        "Goal Scenario goal not fulfilled: Complete the scenario".into()
+                    },
+                )
+            },
+            |player_info_id| (player_info_id == 41).then(|| player_icon.clone()),
         );
 
         assert_eq!(
@@ -168663,6 +169108,10 @@ func ControlDig() { dig_count = 1; return(1); }
         assert_eq!(goal.definition_id, "SCRG");
         assert!(goal.fulfilled);
         assert_eq!(
+            goal.tooltip,
+            "Goal Scenario goal fulfilled: Complete the scenario"
+        );
+        assert_eq!(
             goal.picture.as_ref().map(|image| image.pixels().to_vec()),
             Some(vec![12, 34, 56, 255])
         );
@@ -168675,6 +169124,7 @@ func ControlDig() { dig_count = 1; return(1); }
         assert_eq!(player.color_dw, 0x00e8_0000);
         assert_eq!(player.total_playing_time, 3_661);
         assert_eq!((player.score_old, player.score_new), (10, Some(110)));
+        assert_eq!(player.big_icon.as_ref(), Some(&player_icon));
         assert_eq!(
             dialog.evaluation().players().count(),
             1,
@@ -168690,6 +169140,7 @@ func ControlDig() { dig_count = 1; return(1); }
             1024,
             "decoy title".into(),
             &next_mission,
+            |_, _| (None, String::new()),
             |_| None,
         );
         let player = hidden
@@ -168758,6 +169209,7 @@ func ControlDig() { dig_count = 1; return(1); }
             1024,
             "Scenario".into(),
             &lc_engine::NextMissionState::default(),
+            |_, _| (None, String::new()),
             |_| None,
         );
 
@@ -168804,6 +169256,7 @@ func ControlDig() { dig_count = 1; return(1); }
             1024,
             "Scenario".into(),
             &lc_engine::NextMissionState::default(),
+            |_, _| (None, String::new()),
             |_| None,
         );
         assert_eq!(generated.evaluation().separate_team_ids(), None);

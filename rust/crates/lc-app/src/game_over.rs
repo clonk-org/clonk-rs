@@ -1,8 +1,8 @@
+use lc_engine::RoundResultsNetworkResult;
 use lc_frontend::classic_gui::{ClassicButtonState, ClassicGuiSkin, IntRect};
 use lc_frontend::{expand_hotkey_markup, ClonkFontSet, ImageData};
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, GammaRamp, Rect, Surface, TextFont};
-use lc_engine::RoundResultsNetworkResult;
 
 const CLASSIC_DIALOG_TITLE: &str = "Evaluation";
 const CLASSIC_MIN_CAPTION_HEIGHT: i32 = 23;
@@ -171,6 +171,9 @@ pub struct NextMissionButton {
 pub struct EvaluationGoal {
     pub definition_id: String,
     pub fulfilled: bool,
+    /// `GoalPicture::SetToolTip`: the localized fulfilled/unfulfilled text
+    /// frozen with the definition name and description.
+    pub tooltip: String,
     pub picture: Option<ImageData>,
 }
 
@@ -380,6 +383,7 @@ pub struct GameOverState {
     entries: Vec<GameOverEntry>,
     evaluation: EvaluationViewModel,
     buttons: Vec<GameOverButton>,
+    hovered_goal: Option<usize>,
     hovered_button: Option<usize>,
     pressed_button: Option<usize>,
     close_pressed: bool,
@@ -468,6 +472,7 @@ impl GameOverState {
             entries,
             evaluation: EvaluationViewModel::default(),
             buttons,
+            hovered_goal: None,
             hovered_button: None,
             pressed_button: None,
             close_pressed: false,
@@ -498,6 +503,7 @@ impl GameOverState {
 
     pub fn set_evaluation(&mut self, evaluation: EvaluationViewModel) {
         self.evaluation = evaluation;
+        self.hovered_goal = None;
         self.custom_evaluation_scroll = 0;
     }
 
@@ -727,7 +733,54 @@ impl GameOverState {
         self.hovered_button
             .and_then(|index| self.buttons.get(index))
             .map(|button| button.description.as_str())
+            .or_else(|| {
+                self.hovered_goal
+                    .and_then(|index| self.evaluation.goals().get(index))
+                    .map(|goal| goal.tooltip.as_str())
+            })
             .unwrap_or("")
+    }
+
+    /// Resolve the tooltip target from the process-global pointer position.
+    ///
+    /// Higher dialogs can consume pointer motion without forwarding it to
+    /// this dialog, so rendering must not trust the cached hover left by the
+    /// last event that did reach the evaluation screen.
+    pub fn tooltip_at(
+        &self,
+        x: f32,
+        y: f32,
+        surface_width: u32,
+        surface_height: u32,
+    ) -> &str {
+        if let Some(index) = self
+            .button_rects(surface_width, surface_height)
+            .iter()
+            .enumerate()
+            .find_map(|(index, rect)| {
+                (self.button_is_visible(index) && point_in_rect(x, y, *rect)).then_some(index)
+            })
+        {
+            return &self.buttons[index].description;
+        }
+        let Some((button_width, text_font)) = self
+            .classic_button_width
+            .zip(self.classic_text_font.as_ref())
+        else {
+            return "";
+        };
+        self.classic_evaluation_layout_with_metrics(
+            surface_width,
+            surface_height,
+            button_width,
+            text_font,
+        )
+        .goals
+        .iter()
+        .position(|goal| point_in_rect(x, y, surface_rect(goal.picture)))
+        .and_then(|index| self.evaluation.goals().get(index))
+        .map(|goal| goal.tooltip.as_str())
+        .unwrap_or("")
     }
 
     pub fn hovered_action(&self) -> Option<GameOverAction> {
@@ -747,6 +800,19 @@ impl GameOverState {
             .find_map(|(index, rect)| {
                 (self.button_is_visible(index) && point_in_rect(x, y, *rect)).then_some(index)
             });
+        self.hovered_goal = match (self.classic_button_width, self.classic_text_font.as_ref()) {
+            (Some(button_width), Some(text_font)) => self
+                .classic_evaluation_layout_with_metrics(
+                    surface_width,
+                    surface_height,
+                    button_width,
+                    text_font,
+                )
+                .goals
+                .iter()
+                .position(|goal| point_in_rect(x, y, surface_rect(goal.picture))),
+            _ => None,
+        };
         if let Some(focus) = pressed {
             if self.pointer_is_over_focus(focus) {
                 self.set_down(focus);
@@ -759,6 +825,7 @@ impl GameOverState {
     pub fn pointer_left(&mut self) {
         let pressed = self.pointer_pressed_focus();
         self.pointer_position = None;
+        self.hovered_goal = None;
         self.hovered_button = None;
         self.pressed_button = None;
         self.close_pressed = false;
@@ -2644,6 +2711,69 @@ mod tests {
     }
 
     #[test]
+    fn goal_hover_reports_exact_fulfilled_and_unfulfilled_tooltips() {
+        let fonts = endeavour_fonts();
+        let mut state = GameOverState::new("A Clonk".into(), Vec::new());
+        state.set_evaluation(EvaluationViewModel::new(
+            vec![
+                EvaluationGoal {
+                    definition_id: "DONE".into(),
+                    fulfilled: true,
+                    tooltip: "Goal Build the bridge fulfilled: Reach the other side".into(),
+                    picture: None,
+                },
+                EvaluationGoal {
+                    definition_id: "OPEN".into(),
+                    fulfilled: false,
+                    tooltip: "Goal Find the gold not fulfilled: Recover the treasure".into(),
+                    picture: None,
+                },
+            ],
+            Vec::new(),
+        ));
+        state.configure_classic_fonts(Some(&fonts));
+        let layout = state.classic_evaluation_layout(1024, 600, &fonts);
+
+        for (index, expected) in [
+            "Goal Build the bridge fulfilled: Reach the other side",
+            "Goal Find the gold not fulfilled: Recover the treasure",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let picture = layout.goals[index].picture;
+            state.handle_pointer_move(
+                (picture.x + picture.w / 2) as f32,
+                (picture.y + picture.h / 2) as f32,
+                1024,
+                600,
+            );
+            assert_eq!(state.hovered_description(), expected);
+        }
+
+        let first = layout.goals[0].picture;
+        state.handle_pointer_move(
+            (first.x + first.w / 2) as f32,
+            (first.y - 1) as f32,
+            1024,
+            600,
+        );
+        assert_eq!(
+            state.hovered_description(),
+            "",
+            "the 4px margin is not a GoalPicture"
+        );
+        state.handle_pointer_move(
+            (first.x + first.w / 2) as f32,
+            (first.y + first.h / 2) as f32,
+            1024,
+            600,
+        );
+        state.pointer_left();
+        assert_eq!(state.hovered_description(), "");
+    }
+
+    #[test]
     fn subtitle_defaults_to_defeat_without_winners() {
         let entries = vec![
             entry(1, "Player", GameOverOutcome::Defeat, false),
@@ -2852,6 +2982,7 @@ mod tests {
             vec![EvaluationGoal {
                 definition_id: "SCRG".to_string(),
                 fulfilled: true,
+                tooltip: "Goal Scenario goal fulfilled: Complete the scenario".to_string(),
                 picture: None,
             }],
             vec![
@@ -3525,6 +3656,7 @@ mod tests {
             vec![EvaluationGoal {
                 definition_id: "SCRG".into(),
                 fulfilled: true,
+                tooltip: "Goal Scenario goal fulfilled: Complete the scenario".into(),
                 picture: Some(goal_picture),
             }],
             vec![EvaluationPlayer {
