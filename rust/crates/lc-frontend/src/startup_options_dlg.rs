@@ -1989,6 +1989,23 @@ impl OptionsDlgState {
         }
     }
 
+    /// Dispatches the digit mnemonics assigned to the visible Keyboard or
+    /// Gamepad control-set buttons (`C4StartupOptionsDlg.cpp:251-278`).
+    pub fn handle_hotkey(&mut self, character: char) -> Option<Vec<OptionsDlgAction>> {
+        let set = "1234567890"
+            .chars()
+            .position(|hotkey| hotkey == character)?;
+        let device = match self.active_sheet {
+            OptionsSheet::Keyboard => ControlDevice::Keyboard,
+            OptionsSheet::Gamepad => ControlDevice::Gamepad,
+            _ => return None,
+        };
+        if set >= self.controls.visible_sets(device) {
+            return None;
+        }
+        Some(self.activate_control_hit(ControlSheetHit::Set(set)))
+    }
+
     pub fn handle_key_up(&mut self, key: KeyCode) -> Vec<OptionsDlgAction> {
         if matches!(key, KeyCode::Enter | KeyCode::Space) {
             if let Some(target) = self.pressed_program_button.take() {
@@ -5233,6 +5250,40 @@ mod tests {
             assert_eq!(state.handle_pointer_up(point), expected);
         }
         assert_eq!(state.controls().selected_set(ControlDevice::Gamepad), 1);
+    }
+
+    #[test]
+    fn l079_control_set_hotkeys_follow_visible_button_order() {
+        let labels = || std::array::from_fn(|_| std::array::from_fn(|_| "Undefined".to_string()));
+        let controls = ControlSheetState::new(labels(), labels(), 3, false);
+        let mut state = OptionsDlgState::with_all(
+            ProgramSheetState::default(),
+            SoundSheetState::default(),
+            GraphicsSheetState::default(),
+            controls,
+            NetworkSheetState::default(),
+        );
+
+        assert_eq!(state.handle_hotkey('1'), None);
+        state.restore_sheet(OptionsSheet::Network);
+        assert_eq!(state.handle_hotkey('1'), None);
+        state.restore_sheet(OptionsSheet::Keyboard);
+        assert_eq!(state.handle_hotkey('4'), Some(Vec::new()));
+        assert_eq!(state.controls().selected_set(ControlDevice::Keyboard), 3);
+        assert_eq!(state.handle_hotkey('4'), Some(Vec::new()));
+        assert_eq!(state.handle_hotkey('5'), None);
+
+        state.restore_sheet(OptionsSheet::Gamepad);
+        assert_eq!(
+            state.handle_hotkey('3'),
+            Some(vec![OptionsDlgAction::GamepadDeviceSelected(2)])
+        );
+        assert_eq!(state.controls().selected_set(ControlDevice::Gamepad), 2);
+        assert_eq!(state.handle_hotkey('3'), Some(Vec::new()));
+        assert_eq!(state.handle_hotkey('4'), None);
+        assert_eq!(state.handle_hotkey('0'), None);
+        assert_eq!(state.handle_hotkey('A'), None);
+        assert_eq!(state.controls().selected_set(ControlDevice::Keyboard), 3);
     }
 
     #[test]

@@ -26024,7 +26024,10 @@ impl GameApp {
             || self.game_over_dialog.is_some()
             || !matches!(
                 self.startup_view,
-                StartupView::MainMenu | StartupView::PlayerSelection | StartupView::About
+                StartupView::MainMenu
+                    | StartupView::PlayerSelection
+                    | StartupView::Options
+                    | StartupView::About
             )
         {
             return Ok(false);
@@ -26065,6 +26068,24 @@ impl GameApp {
                     return Ok(suppress_plain_gui_key);
                 };
                 self.process_player_dialog_actions(actions)?;
+                true
+            }
+            StartupView::Options => {
+                if !self.startup_options_dialog_is_active() {
+                    return Ok(suppress_plain_gui_key);
+                }
+                let Some(actions) = self
+                    .startup_options_dialog
+                    .as_mut()
+                    .and_then(|dialog| dialog.handle_hotkey(character))
+                else {
+                    // Options has its own exact-Alt combo bindings below the
+                    // mnemonic layer. Let an unmatched hotkey reach those;
+                    // options_modified_gui_key_is_inert still suppresses every
+                    // modifier-blind GUI fallback.
+                    return Ok(false);
+                };
+                self.process_options_dialog_actions(actions)?;
                 true
             }
             StartupView::About => {
@@ -116488,6 +116509,174 @@ ScenInfoArea=70,5,25,90
         app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(1)])
             .expect("ignore stale selection after Options closes");
         assert_eq!(app.gamepads.options_open_slot(), None);
+    }
+
+    #[test]
+    fn l079_options_control_set_digit_hotkeys_require_alt_and_respect_visible_sets() {
+        use lc_frontend::startup_options_controls::ControlDevice;
+        use lc_frontend::startup_options_dlg::{OptionsDlgAction, OptionsSheet};
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_options_menu();
+        let controls = load_options_control_state(
+            &app.bindings,
+            &app.gamepad_bindings,
+            3,
+            app.gamepad_gui_control,
+        );
+        let dialog = app
+            .startup_options_dialog
+            .as_mut()
+            .expect("options dialog");
+        *dialog.controls_mut() = controls;
+        dialog.restore_sheet(OptionsSheet::Keyboard);
+
+        app.handle_key(VirtualKeyCode::Key2, ElementState::Pressed)
+            .expect("bare digit is inert");
+        app.handle_key(VirtualKeyCode::Key2, ElementState::Released)
+            .expect("release bare digit");
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .controls()
+                .selected_set(ControlDevice::Keyboard),
+            0
+        );
+
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+        app.handle_key(VirtualKeyCode::Key2, ElementState::Pressed)
+            .expect("select Keyboard 2");
+        app.handle_key(VirtualKeyCode::Key2, ElementState::Released)
+            .expect("release Alt+2");
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .controls()
+                .selected_set(ControlDevice::Keyboard),
+            1
+        );
+        app.handle_key(VirtualKeyCode::Numpad1, ElementState::Pressed)
+            .expect("SDL Keypad mnemonic is not a digit mnemonic");
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .controls()
+                .selected_set(ControlDevice::Keyboard),
+            1
+        );
+
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT)
+            .expect("hold Alt+Shift");
+        app.handle_key(VirtualKeyCode::Key4, ElementState::Pressed)
+            .expect("select Keyboard 4 with shifted mnemonic mask");
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .controls()
+                .selected_set(ControlDevice::Keyboard),
+            3
+        );
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::CTRL)
+            .expect("hold unsupported Ctrl+Alt mask");
+        app.handle_key(VirtualKeyCode::Key1, ElementState::Pressed)
+            .expect("Ctrl+Alt digit is inert");
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .controls()
+                .selected_set(ControlDevice::Keyboard),
+            3
+        );
+
+        app.startup_options_dialog
+            .as_mut()
+            .unwrap()
+            .restore_sheet(OptionsSheet::Gamepad);
+        app.process_options_dialog_actions(vec![OptionsDlgAction::SheetChanged(
+            OptionsSheet::Gamepad,
+        )])
+        .expect("enter Gamepad sheet");
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt on Gamepad sheet");
+        app.handle_key(VirtualKeyCode::Key3, ElementState::Pressed)
+            .expect("select visible Gamepad 3");
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .controls()
+                .selected_set(ControlDevice::Gamepad),
+            2
+        );
+        assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(2)));
+
+        for key in [VirtualKeyCode::Key4, VirtualKeyCode::Key0] {
+            app.handle_key(key, ElementState::Pressed)
+                .expect("disconnected Gamepad mnemonic is inert");
+        }
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .controls()
+                .selected_set(ControlDevice::Gamepad),
+            2
+        );
+        assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(2)));
+    }
+
+    #[test]
+    fn l079_options_control_set_hotkeys_do_not_leak_through_modals() {
+        use lc_frontend::message_dialog::MessageDialogResult;
+        use lc_frontend::startup_options_controls::ControlDevice;
+        use lc_frontend::startup_options_dlg::{OptionsDlgAction, OptionsSheet};
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_options_menu();
+        let dialog = app
+            .startup_options_dialog
+            .as_mut()
+            .expect("options dialog");
+        dialog.restore_sheet(OptionsSheet::Keyboard);
+        assert!(dialog
+            .controls_mut()
+            .select_set(ControlDevice::Keyboard, 3));
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+
+        app.process_options_dialog_actions(vec![OptionsDlgAction::ResetConfiguration])
+            .expect("open reset confirmation above Options");
+        app.handle_key(VirtualKeyCode::Key2, ElementState::Pressed)
+            .expect("message modal owns the unmatched mnemonic");
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .controls()
+                .selected_set(ControlDevice::Keyboard),
+            3
+        );
+        app.finish_message_dialog(MessageDialogResult::No)
+            .expect("dismiss reset confirmation");
+
+        app.process_options_dialog_actions(vec![OptionsDlgAction::OpenGraphicsScaleText])
+            .expect("open input modal above Options");
+        app.handle_key(VirtualKeyCode::Key2, ElementState::Pressed)
+            .expect("input modal owns the unmatched mnemonic");
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .controls()
+                .selected_set(ControlDevice::Keyboard),
+            3
+        );
     }
 
     #[test]
