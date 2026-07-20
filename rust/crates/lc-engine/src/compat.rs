@@ -15744,7 +15744,8 @@ fn log_message(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn debug_log_message(args: &[Value]) -> Result<Value, RuntimeError> {
-    log_internal("DebugLog", args, LogLevel::Debug)
+    log_internal("DebugLog", args, LogLevel::Debug)?;
+    Ok(Value::Nil)
 }
 
 /// `FnFatalError` (C4Script.cpp:5962-5965): throw a user-framed script
@@ -20202,7 +20203,7 @@ fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
 fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
     let name = match args.first().unwrap_or(&Value::Nil) {
         Value::String(value) if !value.is_empty() => value.clone(),
-        Value::Nil => return Ok(Value::Bool(true)),
+        Value::Nil => return Ok(Value::Nil),
         other => {
             return Err(RuntimeError::new(format!(
                 "SoundLevel: expected string for name, got {}",
@@ -20228,7 +20229,7 @@ fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
         let mut borrow = cell.borrow_mut();
         let context = match borrow.as_mut() {
             Some(context) => context,
-            None => return Ok(Value::Bool(true)),
+            None => return Ok(Value::Nil),
         };
 
         let target_id = if let Some(value) = object_arg {
@@ -20239,7 +20240,7 @@ fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let volume = level.clamp(0, 100) as u8;
         context.audio_mut().sound_level(&name, target_id, volume);
-        Ok(Value::Bool(true))
+        Ok(Value::Nil)
     })
 }
 
@@ -27712,7 +27713,7 @@ fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "ShakeFree", "y")?;
     let radius = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "ShakeFree", "radius")?;
     if radius <= 0 {
-        return Ok(Value::Bool(false));
+        return Ok(Value::Nil);
     }
 
     HOST_CONTEXT.with(|cell| {
@@ -27724,7 +27725,7 @@ fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
             center: Vector2::new(x, y),
             radius,
         });
-        Ok(Value::Bool(true))
+        Ok(Value::Nil)
     })
 }
 
@@ -28530,7 +28531,7 @@ fn dig_free(args: &[Value]) -> Result<Value, RuntimeError> {
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "DigFree", "y")?;
     let radius = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "DigFree", "radius")?;
     if radius < 0 {
-        return Ok(Value::Bool(false));
+        return Ok(Value::Nil);
     }
 
     let requested = if let Some(arg) = args.get(3) {
@@ -28551,7 +28552,7 @@ fn dig_free(args: &[Value]) -> Result<Value, RuntimeError> {
             requested,
             by_object,
         });
-        Ok(Value::Bool(true))
+        Ok(Value::Nil)
     })
 }
 
@@ -28571,10 +28572,10 @@ fn script_go(args: &[Value]) -> Result<Value, RuntimeError> {
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(true));
+            return Ok(Value::Nil);
         };
         context.script_go_request = Some(go);
-        Ok(Value::Bool(true))
+        Ok(Value::Nil)
     })
 }
 
@@ -29049,7 +29050,7 @@ fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
     let width = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "DigFreeRect", "width")?;
     let height = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "DigFreeRect", "height")?;
     if width <= 0 || height <= 0 {
-        return Ok(Value::Bool(false));
+        return Ok(Value::Nil);
     }
 
     let requested = if let Some(arg) = args.get(4) {
@@ -29071,7 +29072,7 @@ fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
             requested,
             by_object,
         });
-        Ok(Value::Bool(true))
+        Ok(Value::Nil)
     })
 }
 
@@ -54689,18 +54690,24 @@ func Announce()
         let target = ObjectId::new(1);
         let target_value = object_reference_value(target);
         let (result, outcome) = with_object_host_context(|| {
-            sound_level(&[Value::String("Global".into()), Value::Int(50)])?;
+            assert_eq!(
+                sound_level(&[Value::String("Global".into()), Value::Int(50)])?,
+                Value::Nil
+            );
             sound(&[
                 Value::String("Shot".into()),
                 Value::Bool(false),
                 target_value.clone(),
                 Value::Int(100),
             ])?;
-            sound_level(&[
-                Value::String("Shot".into()),
-                Value::Int(0),
-                target_value,
-            ])?;
+            assert_eq!(
+                sound_level(&[
+                    Value::String("Shot".into()),
+                    Value::Int(0),
+                    target_value,
+                ])?,
+                Value::Nil
+            );
             Ok::<_, RuntimeError>(Value::Nil)
         });
 
@@ -56448,7 +56455,7 @@ public func RejectConstruction(x, y, builder)
         subscriber::with_default(subscriber, || {
             let args = [Value::String("Debug %d".into()), Value::Int(42)];
             let result = debug_log_message(&args).expect("DebugLog succeeds");
-            assert_eq!(result, Value::Bool(true));
+            assert_eq!(result, Value::Nil);
         });
         let records = records.lock().unwrap();
         assert_eq!(records.len(), 1);
@@ -59488,6 +59495,115 @@ public func RejectConstruction(x, y, builder)
     }
 
     #[test]
+    fn void_host_functions_return_nil_while_preserving_side_effects() {
+        // `C4AulEngineFunc<void>::Exec` returns C4VNull after invoking the
+        // native (C4Script.cpp:6136-6166). Exercise the registered script
+        // boundary so both the exposed nil and its falsiness stay pinned.
+        let (result, outcome) = with_object_host_context(|| {
+            let mut script = ScriptEngine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(
+                    r#"
+                    #strict 3
+                    func Probe() {
+                        var debug = DebugLog("void host probe");
+                        var sound = SoundLevel("Wind", 40);
+                        var go = ScriptGo(true);
+                        var shake = ShakeFree(10, 20, 3);
+                        var dig = DigFree(30, 40, 5, true);
+                        var rect = DigFreeRect(50, 60, 7, 8, false);
+                        if (debug) return 1;
+                        if (sound) return 2;
+                        if (go) return 3;
+                        if (shake) return 4;
+                        if (dig) return 5;
+                        if (rect) return 6;
+                        return [debug, sound, go, shake, dig, rect];
+                    }
+                    "#,
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            script
+                .call("Probe", &[])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+
+        assert_eq!(
+            result.expect("void host probes succeed"),
+            Value::Array(vec![Value::Nil; 6])
+        );
+        assert_eq!(outcome.script_go, Some(true));
+        assert_eq!(
+            outcome.audio.events,
+            vec![AudioCommand::SetSoundVolume {
+                name: "Wind".into(),
+                target: None,
+                volume: 40,
+            }]
+        );
+        assert!(matches!(
+            outcome.landscape.as_slice(),
+            [
+                LandscapeOperation::ShakeCircle {
+                    center: Vector2 { x: 10, y: 20 },
+                    radius: 3,
+                },
+                LandscapeOperation::DigCircle {
+                    center: Vector2 { x: 30, y: 40 },
+                    radius: 5,
+                    requested: true,
+                    by_object: Some(dig_object),
+                },
+                LandscapeOperation::DigRect {
+                    origin: Vector2 { x: 50, y: 60 },
+                    width: 7,
+                    height: 8,
+                    requested: false,
+                    by_object: Some(rect_object),
+                },
+            ]
+            if *dig_object == ObjectId::new(1) && *rect_object == ObjectId::new(1)
+        ));
+
+        let (no_op_result, no_op_outcome) = with_object_host_context(|| {
+            let mut script = ScriptEngine::new();
+            register_host_functions(&mut script);
+            script
+                .load_script(
+                    r#"
+                    #strict 3
+                    func Probe() {
+                        var sound = SoundLevel();
+                        var go = ScriptGo();
+                        var shake = ShakeFree();
+                        var dig = DigFree(0, 0, -1);
+                        var rect = DigFreeRect(0, 0, 0, 1);
+                        if (sound) return 1;
+                        if (go) return 2;
+                        if (shake) return 3;
+                        if (dig) return 4;
+                        if (rect) return 5;
+                        return [sound, go, shake, dig, rect];
+                    }
+                    "#,
+                )
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            script
+                .call("Probe", &[])
+                .map_err(|error| RuntimeError::new(error.to_string()))
+        });
+
+        assert_eq!(
+            no_op_result.expect("void host no-op probes succeed"),
+            Value::Array(vec![Value::Nil; 5])
+        );
+        assert_eq!(no_op_outcome.script_go, Some(false));
+        assert!(no_op_outcome.audio.events.is_empty());
+        assert!(no_op_outcome.landscape.is_empty());
+    }
+
+    #[test]
     fn dig_free_registers_landscape_operation() {
         let args = [
             Value::Int(42),
@@ -59496,7 +59612,7 @@ public func RejectConstruction(x, y, builder)
             Value::Bool(true),
         ];
         let (result, outcome) = with_object_host_context(|| dig_free(&args));
-        assert_eq!(result.expect("DigFree succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("DigFree succeeds"), Value::Nil);
         assert_eq!(outcome.landscape.len(), 1);
         match &outcome.landscape[0] {
             LandscapeOperation::DigCircle {
@@ -59518,7 +59634,7 @@ public func RejectConstruction(x, y, builder)
     fn dig_free_rect_requires_positive_dimensions() {
         let args = [Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(4)];
         let (result, outcome) = with_object_host_context(|| dig_free_rect(&args));
-        assert_eq!(result.expect("DigFreeRect succeeds"), Value::Bool(false));
+        assert_eq!(result.expect("DigFreeRect succeeds"), Value::Nil);
         assert!(outcome.landscape.is_empty());
     }
 
@@ -59532,7 +59648,7 @@ public func RejectConstruction(x, y, builder)
             Value::Bool(false),
         ];
         let (result, outcome) = with_object_host_context(|| dig_free_rect(&args));
-        assert_eq!(result.expect("DigFreeRect succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("DigFreeRect succeeds"), Value::Nil);
         assert_eq!(outcome.landscape.len(), 1);
         match &outcome.landscape[0] {
             LandscapeOperation::DigRect {
@@ -59727,7 +59843,7 @@ public func RejectConstruction(x, y, builder)
     fn shake_free_registers_landscape_operation() {
         let args = [Value::Int(30), Value::Int(40), Value::Int(5)];
         let (result, outcome) = with_object_host_context(|| shake_free(&args));
-        assert_eq!(result.expect("ShakeFree succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("ShakeFree succeeds"), Value::Nil);
         assert_eq!(outcome.landscape.len(), 1);
         match &outcome.landscape[0] {
             LandscapeOperation::ShakeCircle { center, radius } => {
@@ -59830,7 +59946,7 @@ public func RejectConstruction(x, y, builder)
             let (result, outcome) = with_object_host_context(|| shake_free(&args));
             assert_eq!(
                 result.expect("ShakeFree handles a missing or zero radius"),
-                Value::Bool(false)
+                Value::Nil
             );
             assert!(outcome.landscape.is_empty());
         }
