@@ -31,6 +31,7 @@ pub struct AppPaths {
     cache_dir: PathBuf,
     logs_dir: PathBuf,
     temp_dir: PathBuf,
+    language_override: Option<String>,
 }
 
 impl AppPaths {
@@ -50,6 +51,7 @@ impl AppPaths {
         let cache_dir = discover_cache_dir(&user_data_dir);
         let logs_dir = discover_logs_dir(&user_data_dir);
         let temp_dir = discover_temp_dir();
+        let language_override = env_string("LC_LANGUAGE_OVERRIDE");
         build_paths(
             install_root,
             user_data_dir,
@@ -57,6 +59,7 @@ impl AppPaths {
             cache_dir,
             logs_dir,
             temp_dir,
+            language_override,
         )
     }
 
@@ -100,6 +103,10 @@ impl AppPaths {
         self.config_file.clone()
     }
 
+    pub fn language_override(&self) -> Option<&str> {
+        self.language_override.as_deref()
+    }
+
     pub fn recordings_dir(&self) -> PathBuf {
         self.user_data_dir.join("Recordings")
     }
@@ -135,6 +142,7 @@ fn build_paths(
     cache_dir: PathBuf,
     logs_dir: PathBuf,
     temp_dir: PathBuf,
+    language_override: Option<String>,
 ) -> Result<AppPaths, PathsError> {
     let planet_dir = install_root.join("planet");
     let system_group = planet_dir.join("System.c4g");
@@ -152,6 +160,7 @@ fn build_paths(
         cache_dir,
         logs_dir,
         temp_dir,
+        language_override,
     })
 }
 
@@ -269,6 +278,10 @@ fn env_path(key: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn env_string(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,7 +365,7 @@ mod tests {
 
     #[test]
     fn config_file_is_nested_under_config_dir() {
-        let _guard = EnvGuard::set(&[("LC_CONFIG_FILE", None)]);
+        let _guard = EnvGuard::set(&[("LC_CONFIG_FILE", None), ("LC_LANGUAGE_OVERRIDE", None)]);
         let paths = AppPaths::discover().unwrap();
         let config_file = paths.config_file();
         let config_dir = paths.config_dir();
@@ -383,6 +396,7 @@ mod tests {
             cache_dir.clone(),
             logs_dir.clone(),
             temp_dir.clone(),
+            None,
         )
         .unwrap();
         assert_eq!(paths.install_root(), install_dir.path());
@@ -391,6 +405,25 @@ mod tests {
         assert_eq!(paths.logs_dir(), logs_dir);
         assert_eq!(paths.temp_dir(), temp_dir);
         assert!(paths.content_dir().is_none());
+        assert_eq!(paths.language_override(), None);
+    }
+
+    #[test]
+    fn discover_captures_language_override() {
+        let install_dir = TempDir::new().unwrap();
+        touch_system_group(&install_dir);
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+            ("LC_CONFIG_FILE", None),
+            ("LC_LANGUAGE_OVERRIDE", Some(Path::new("DE,US"))),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        env::set_var("LC_LANGUAGE_OVERRIDE", "FR");
+
+        assert_eq!(paths.language_override(), Some("DE,US"));
     }
 
     #[test]

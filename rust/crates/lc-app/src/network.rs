@@ -62,6 +62,7 @@ pub struct HostSettings {
 pub struct ClientSettings {
     pub server_addresses: Vec<NetworkAddress>,
     pub player_name: String,
+    pub observer: bool,
     pub group_maker: lc_engine::LegacyCString,
     pub password: lc_engine::LegacyCString,
     pub resource_directory: PathBuf,
@@ -94,6 +95,7 @@ impl ClientSettings {
                 NetworkAddress::new(NetworkProtocol::Udp, server_addr),
             ],
             player_name,
+            observer: false,
             group_maker,
             password: lc_engine::LegacyCString::default(),
             resource_directory: PathBuf::from("Network"),
@@ -6112,7 +6114,12 @@ async fn run_client_worker(
     } else {
         Vec::new()
     };
-    let mut client_config = ClientConfig::new(player_name.clone(), ParticipantKind::Player)
+    let participant_kind = if settings.observer {
+        ParticipantKind::Observer
+    } else {
+        ParticipantKind::Player
+    };
+    let mut client_config = ClientConfig::new(player_name.clone(), participant_kind)
         .with_group_maker(settings.group_maker)
         .with_password(settings.password)
         .with_resource_directory(settings.resource_directory)

@@ -623,7 +623,7 @@ fn normalize_master_server_url(value: &str) -> String {
     }
 }
 
-fn direct_reference_endpoint(
+pub fn direct_reference_endpoint(
     address: &str,
     default_port: u16,
 ) -> Result<ReferenceEndpoint, String> {

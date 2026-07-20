@@ -59,6 +59,36 @@ impl ConfiguredClientPlayerSelection {
     pub fn group_maker(&self) -> &LegacyCString {
         &self.group_maker
     }
+
+    /// Replaces the configured participant modules with command-line modules.
+    ///
+    /// Classic feeds `.c4p` arguments through case-insensitive `SAddModule`,
+    /// preserving the first occurrence in argument order and using the same
+    /// semicolon-separated format as `Config.General.Participants`. The
+    /// configured maker remains the owner of the resulting player info list.
+    pub fn replace_participant_modules(&mut self, modules: &[PathBuf]) {
+        let mut unique_modules: Vec<Vec<u8>> = Vec::new();
+        for module in modules {
+            let module = path_bytes(module);
+            if module.is_empty()
+                || unique_modules
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(&module))
+            {
+                continue;
+            }
+            unique_modules.push(module);
+        }
+
+        let mut participants = Vec::new();
+        for (index, module) in unique_modules.iter().enumerate() {
+            if index != 0 {
+                participants.push(b';');
+            }
+            participants.extend_from_slice(module);
+        }
+        self.participants = participants;
+    }
 }
 
 impl ConfiguredClientPlayers {
@@ -1130,10 +1160,59 @@ fn path_bytes(path: &Path) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use lc_resources::MutableGroup;
     use tempfile::tempdir;
+
+    #[test]
+    fn command_line_participant_modules_replace_config_in_argument_order() {
+        let directory = tempdir().expect("absolute module directory");
+        let modules = vec![
+            PathBuf::from("Players/Bravo.c4p"),
+            directory.path().join("Absolute.c4p"),
+            PathBuf::from("players/BRAVO.C4P"),
+            PathBuf::from("Players/Alpha.c4p"),
+        ];
+        let mut selection = super::ConfiguredClientPlayerSelection {
+            participants: b"Players/Configured.c4p".to_vec(),
+            group_maker: super::legacy_string(b"Configured maker"),
+        };
+
+        selection.replace_participant_modules(&modules);
+
+        let split = super::split_modules(&selection.participants)
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        let expected = [&modules[0], &modules[1], &modules[3]]
+            .into_iter()
+            .map(|path| super::path_bytes(path))
+            .collect::<Vec<_>>();
+        assert_eq!(split, expected);
+        assert_eq!(
+            selection
+                .participants
+                .iter()
+                .filter(|byte| **byte == b';')
+                .count(),
+            expected.len() - 1
+        );
+    }
+
+    #[test]
+    fn command_line_participant_modules_preserve_configured_group_maker() {
+        let mut selection = super::ConfiguredClientPlayerSelection {
+            participants: b"Configured.c4p".to_vec(),
+            group_maker: super::legacy_string(b"Maker\twith raw bytes \x81"),
+        };
+
+        selection.replace_participant_modules(&[PathBuf::from("CommandLine.c4p")]);
+
+        assert_eq!(
+            selection.group_maker().as_bytes(),
+            b"Maker\twith raw bytes \x81"
+        );
+    }
 
     #[test]
     fn configured_modules_load_directly_in_order_without_deduplication() {

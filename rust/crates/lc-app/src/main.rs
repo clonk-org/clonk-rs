@@ -35,6 +35,7 @@ mod system_fonts;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map::DefaultHasher};
 use std::convert::TryFrom;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
@@ -382,6 +383,194 @@ struct Cli {
         help = "Startup view for --dump-menu-frame: main, scenarios, net, plrsel, options, or about."
     )]
     menu_view: String,
+
+    /// Compatibility arguments accepted by C4Application::DoInit and
+    /// C4Game::ParseCommandLine. This is an ordinary variadic positional (not
+    /// a trailing var-arg), so modern `--...` switches may still follow a
+    /// classic file, URL, or slash argument and retain clap's validation.
+    #[arg(value_name = "CLASSIC_ARG", num_args = 0..)]
+    classic_arguments: Vec<OsString>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ClassicCommandLine {
+    scenario: Option<PathBuf>,
+    player_files: Vec<PathBuf>,
+    definition_files: Vec<PathBuf>,
+    incoming_update: Option<PathBuf>,
+    record_stream: Option<PathBuf>,
+    direct_join: Option<String>,
+    network_active: Option<bool>,
+    master_server_signup: Option<bool>,
+    league_server_signup: Option<bool>,
+    lobby_timeout: Option<Option<u32>>,
+    observe: bool,
+    runtime_join: Option<bool>,
+    update_requested: bool,
+    fair_crew: Option<bool>,
+    record_dump: Option<String>,
+    stream_address: Option<String>,
+    startup_screen: Option<String>,
+    tcp_port: Option<u16>,
+    udp_port: Option<u16>,
+    password: Option<String>,
+    comment: Option<String>,
+    console: bool,
+    config_file: Option<PathBuf>,
+    verbose: bool,
+    language: Option<String>,
+}
+
+fn classic_argument_value<'a>(argument: &'a str, prefix: &str) -> Option<&'a str> {
+    let candidate = argument.get(..prefix.len())?;
+    candidate
+        .eq_ignore_ascii_case(prefix)
+        .then(|| &argument[prefix.len()..])
+}
+
+fn classic_port(value: &str) -> u16 {
+    value
+        .trim()
+        .parse::<i64>()
+        .unwrap_or(0)
+        .clamp(0, i64::from(u16::MAX)) as u16
+}
+
+fn parse_classic_command_line(arguments: &[OsString]) -> ClassicCommandLine {
+    let mut parsed = ClassicCommandLine::default();
+
+    for argument in arguments {
+        let path = Path::new(argument);
+        let extension = path.extension().and_then(|extension| extension.to_str());
+        if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("c4s")) {
+            parsed.scenario = Some(path.to_path_buf());
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("Scenario.txt"))
+        {
+            parsed.scenario = Some(
+                path.parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf(),
+            );
+            continue;
+        }
+        if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("c4p")) {
+            parsed.player_files.push(path.to_path_buf());
+            continue;
+        }
+        if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("c4d")) {
+            parsed.definition_files.push(path.to_path_buf());
+            continue;
+        }
+        if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("c4u")) {
+            parsed.incoming_update = Some(path.to_path_buf());
+            continue;
+        }
+        if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("c4r")) {
+            parsed.record_stream = Some(path.to_path_buf());
+            continue;
+        }
+
+        let Some(argument) = argument.to_str() else {
+            // Native command switches are byte strings, but a non-Unicode OS
+            // value can still be an unknown positional argument. Match the
+            // classic parser's permissive fallback instead of rejecting it.
+            continue;
+        };
+        if argument.eq_ignore_ascii_case("/network") {
+            parsed.network_active = Some(true);
+        } else if argument.eq_ignore_ascii_case("/nonetwork") {
+            parsed.network_active = Some(false);
+        } else if argument.eq_ignore_ascii_case("/signup") {
+            parsed.network_active = Some(true);
+            parsed.master_server_signup = Some(true);
+        } else if argument.eq_ignore_ascii_case("/nosignup") {
+            parsed.master_server_signup = Some(false);
+            parsed.league_server_signup = Some(false);
+        } else if argument.eq_ignore_ascii_case("/league") {
+            parsed.network_active = Some(true);
+            parsed.master_server_signup = Some(true);
+            parsed.league_server_signup = Some(true);
+        } else if argument.eq_ignore_ascii_case("/noleague") {
+            parsed.league_server_signup = Some(false);
+        } else if argument.eq_ignore_ascii_case("/lobby") {
+            parsed.network_active = Some(true);
+            parsed.lobby_timeout = Some(None);
+        } else if let Some(value) = classic_argument_value(argument, "/lobby:") {
+            let timeout = value.trim().parse::<i64>().unwrap_or(0).max(0);
+            parsed.network_active = Some(true);
+            parsed.lobby_timeout = Some(Some(timeout.min(i64::from(u32::MAX)) as u32));
+        } else if argument.eq_ignore_ascii_case("/observe") {
+            parsed.network_active = Some(true);
+            parsed.observe = true;
+        } else if argument.eq_ignore_ascii_case("/runtimejoin") {
+            parsed.runtime_join = Some(true);
+        } else if argument.eq_ignore_ascii_case("/noruntimejoin") {
+            parsed.runtime_join = Some(false);
+        } else if argument.eq_ignore_ascii_case("/update") {
+            parsed.update_requested = true;
+        } else if argument.eq_ignore_ascii_case("/faircrew")
+            || argument.eq_ignore_ascii_case("/ncrw")
+        {
+            parsed.fair_crew = Some(true);
+        } else if argument.eq_ignore_ascii_case("/trainedcrew")
+            || argument.eq_ignore_ascii_case("/ucrw")
+        {
+            parsed.fair_crew = Some(false);
+        } else if let Some(value) = classic_argument_value(argument, "/join:") {
+            parsed.direct_join = Some(value.to_string());
+            parsed.network_active = Some(true);
+        } else if let Some(value) = classic_argument_value(argument, "clonk:") {
+            let target = value.trim_matches('/');
+            if target.eq_ignore_ascii_case("update") {
+                parsed.direct_join = None;
+                parsed.update_requested = true;
+            } else {
+                parsed.direct_join = Some(target.to_string());
+                parsed.network_active = Some(true);
+            }
+        } else if let Some(value) = classic_argument_value(argument, "/tcpport:") {
+            parsed.tcp_port = Some(classic_port(value));
+        } else if let Some(value) = classic_argument_value(argument, "/udpport:") {
+            parsed.udp_port = Some(classic_port(value));
+        } else if let Some(value) = classic_argument_value(argument, "/pass:") {
+            parsed.password = Some(value.to_string());
+        } else if let Some(value) = classic_argument_value(argument, "/comment:") {
+            parsed.comment = Some(value.to_string());
+        } else if let Some(value) = classic_argument_value(argument, "/recdump:") {
+            parsed.record_dump = Some(value.to_string());
+        } else if let Some(value) = classic_argument_value(argument, "/stream:") {
+            parsed.stream_address = Some(value.to_string());
+        } else if let Some(value) = classic_argument_value(argument, "/startup:") {
+            parsed.startup_screen = Some(value.to_string());
+        } else if argument.eq_ignore_ascii_case("/console") {
+            parsed.console = true;
+        } else if let Some(value) = classic_argument_value(argument, "/config:") {
+            parsed.config_file = Some(PathBuf::from(value));
+        } else if argument.eq_ignore_ascii_case("/verbose") {
+            parsed.verbose = true;
+        } else if parsed.language.is_none() {
+            if let Some(value) = classic_argument_value(argument, "/Language:") {
+                parsed.language = Some(value.to_string());
+            }
+        }
+    }
+
+    parsed
+}
+
+fn install_classic_language_override(classic: &ClassicCommandLine) {
+    // This runs before logging, path discovery, or worker creation. Capturing
+    // the override in AppPaths also makes fresh discovery inside startup
+    // workers observe the same process-local C4Application switch.
+    if let Some(language) = classic.language.as_deref() {
+        std::env::set_var("LC_LANGUAGE_OVERRIDE", language);
+    }
 }
 
 /// The eager, all-or-nothing `C4StartupGraphics::Init` image sequence
@@ -2719,7 +2908,14 @@ fn classic_loader_system_language() -> Result<&'static str> {
 fn load_classic_loader_config(paths: &AppPaths) -> Result<Option<Config>> {
     let bytes = match fs::read(paths.config_file()) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if let Some(language) = paths.language_override() {
+                let mut config = Config::new();
+                config.set_in(Some("General"), "LanguageEx", language);
+                return Ok(Some(config));
+            }
+            return Ok(None);
+        }
         Err(error) => {
             return Err(error).with_context(|| {
                 format!(
@@ -2741,12 +2937,16 @@ fn load_classic_loader_config(paths: &AppPaths) -> Result<Option<Config>> {
     projected.copy_bytes(&bytes);
     projected.ensure_unicode();
     let mut reader = io::Cursor::new(projected.as_bytes());
-    Config::from_reader(&mut reader).map(Some).with_context(|| {
+    let mut config = Config::from_reader(&mut reader).with_context(|| {
         format!(
             "classic loader cannot parse configuration {}",
             paths.config_file().display()
         )
-    })
+    })?;
+    if let Some(language) = paths.language_override() {
+        config.set_in(Some("General"), "LanguageEx", language);
+    }
+    Ok(Some(config))
 }
 
 fn classic_loader_config_value<'a>(config: &'a Config, key: &str) -> Option<&'a str> {
@@ -6172,6 +6372,17 @@ fn darken_channel(value: u8, amount: f32) -> u8 {
     adjusted.round().clamp(0.0, 255.0) as u8
 }
 
+fn snapshot_effective_client_player_selection(
+    paths: &AppPaths,
+    classic: &ClassicCommandLine,
+) -> Result<ConfiguredClientPlayerSelection> {
+    let mut selection = snapshot_configured_client_player_selection(paths)?;
+    if !classic.player_files.is_empty() {
+        selection.replace_participant_modules(&classic.player_files);
+    }
+    Ok(selection)
+}
+
 fn client_settings_for_paths(
     server_addr: SocketAddr,
     player_name: String,
@@ -6215,6 +6426,52 @@ fn client_settings_for_paths(
     settings
 }
 
+fn apply_classic_client_settings(
+    settings: &mut ClientSettings,
+    classic: &ClassicCommandLine,
+) -> Result<()> {
+    settings.observer = classic.observe;
+    if let Some(password) = classic.password.as_deref() {
+        let password = lc_resources::encode_legacy_script_text(password).ok_or_else(|| {
+            anyhow!("classic network password is not representable as Windows-1252")
+        })?;
+        settings.password = LegacyCString::from_bytes(password)
+            .ok_or_else(|| anyhow!("classic network password contains an interior NUL"))?;
+    }
+    if let Some(port) = classic.tcp_port {
+        settings.mesh_tcp_bind_address =
+            (port != 0).then_some(SocketAddr::from(([0_u16; 8], port)));
+    }
+    if let Some(port) = classic.udp_port {
+        settings.mesh_udp_bind_address =
+            (port != 0).then_some(SocketAddr::from(([0_u16; 8], port)));
+    }
+    Ok(())
+}
+
+fn classic_client_settings_for_reference(
+    reference: &lc_network::NetworkGameReference,
+    player_name: String,
+    paths: Option<&AppPaths>,
+    group_maker: Option<LegacyCString>,
+    classic: &ClassicCommandLine,
+) -> Result<ClientSettings> {
+    let mut settings = client_settings_for_paths(reference.source_address, player_name, paths)
+        .with_join_attempts(reference.join_attempts_for_local_host())
+        .with_netpuncher(
+            reference.netpuncher_address.clone(),
+            lc_network::NetpuncherGameIds {
+                ipv4: reference.netpuncher_ipv4,
+                ipv6: reference.netpuncher_ipv6,
+            },
+        );
+    if let Some(group_maker) = group_maker {
+        settings.group_maker = group_maker;
+    }
+    apply_classic_client_settings(&mut settings, classic)?;
+    Ok(settings)
+}
+
 fn startup_network_connect_targets(settings: &ClientSettings) -> String {
     settings
         .server_addresses
@@ -6232,7 +6489,11 @@ fn startup_network_connect_targets(settings: &ClientSettings) -> String {
         .join(", ")
 }
 
-fn resolve_network_mode(cli: &Cli, paths: Option<&AppPaths>) -> Result<Option<NetworkMode>> {
+fn resolve_network_mode(
+    cli: &Cli,
+    classic: &ClassicCommandLine,
+    paths: Option<&AppPaths>,
+) -> Result<Option<NetworkMode>> {
     if let Some(ref host_addr) = cli.host {
         let bind_addr = parse_socket_addr(host_addr, "host")?;
         return Ok(Some(NetworkMode::Host(HostSettings {
@@ -6243,11 +6504,9 @@ fn resolve_network_mode(cli: &Cli, paths: Option<&AppPaths>) -> Result<Option<Ne
     }
     if let Some(ref join_addr) = cli.join {
         let server_addr = parse_socket_addr(join_addr, "join")?;
-        return Ok(Some(NetworkMode::Client(client_settings_for_paths(
-            server_addr,
-            cli.player_name.clone(),
-            paths,
-        ))));
+        let mut settings = client_settings_for_paths(server_addr, cli.player_name.clone(), paths);
+        apply_classic_client_settings(&mut settings, classic)?;
+        return Ok(Some(NetworkMode::Client(settings)));
     }
     Ok(None)
 }
@@ -6281,6 +6540,38 @@ fn resolve_join_socket(input: &str, default_port: u16) -> Result<SocketAddr> {
         .with_context(|| format!("could not resolve `{input}`"))?
         .next()
         .ok_or_else(|| anyhow!("`{input}` resolved to no socket addresses"))
+}
+
+fn classic_direct_reference_endpoint(
+    input: &str,
+    paths: Option<&AppPaths>,
+) -> Result<lc_network::ReferenceEndpoint> {
+    lc_network::direct_reference_endpoint(input, load_network_reference_port(paths))
+        .map_err(anyhow::Error::msg)
+}
+
+fn query_first_classic_reference(
+    endpoint: lc_network::ReferenceEndpoint,
+    config: &lc_network::ReferenceQueryConfig,
+) -> std::result::Result<lc_network::NetworkGameReference, NetworkStartError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            NetworkStartError::Other(format!("unable to start reference query: {error}"))
+        })?;
+    runtime
+        .block_on(lc_network::fetch_reference_endpoint_with_config(
+            endpoint,
+            lc_network::REFERENCE_QUERY_TIMEOUT,
+            config,
+        ))
+        .map_err(|error| NetworkStartError::Other(format!("reference query failed: {error}")))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            NetworkStartError::Other("reference query returned no network games".to_string())
+        })
 }
 
 fn test_scenario_load(path: &std::path::Path, app_paths: Option<&Arc<AppPaths>>) -> Result<()> {
@@ -6774,10 +7065,16 @@ fn parse_test_input_spec(spec: &str) -> Result<Vec<(u32, ControlEvent)>> {
 }
 
 fn main() -> Result<()> {
-    lc_logging::init();
-
     let cli = Cli::parse();
-    let app_paths = cached_app_paths_with_config_file(cli.config_file.as_deref()).ok();
+    let classic = parse_classic_command_line(&cli.classic_arguments);
+    install_classic_language_override(&classic);
+    lc_logging::init_verbose(classic.verbose);
+
+    let explicit_config = classic
+        .config_file
+        .as_deref()
+        .or(cli.config_file.as_deref());
+    let app_paths = cached_app_paths_with_config_file(explicit_config).ok();
     if let Some(paths) = app_paths.as_ref() {
         if let Err(err) = paths.ensure_user_dirs() {
             tracing::warn!(
@@ -6808,7 +7105,7 @@ fn main() -> Result<()> {
     let runtime = RuntimeConfig {
         player_owner: cli.player_owner,
         player_name: cli.player_name.clone(),
-        network: resolve_network_mode(&cli, app_paths.as_deref())?,
+        network: resolve_network_mode(&cli, &classic, app_paths.as_deref())?,
         record_enabled: load_recording_flag(app_paths.as_deref()),
     };
 
@@ -6900,7 +7197,12 @@ fn main() -> Result<()> {
     .context("failed to initialise app state")?;
     app.set_display_mode(display_options.mode);
     app.configure_native_startup_fonts(display_options.scale, display_options.point_filtering);
+    app.apply_classic_command_line(&classic)?;
     app.auto_start_sandbox = cli.sandbox;
+    app.launch_classic_command_line_join()
+        .context("failed to start command-line network join")?;
+    app.launch_classic_command_line_scenario()
+        .context("failed to start command-line scenario")?;
 
     let mut previous_instant = Instant::now();
     let mut accumulator = Duration::ZERO;
@@ -12337,6 +12639,9 @@ struct GameApp {
     loader_render_error: Option<String>,
     loader_gamma: Option<lc_graphics::GammaRamp>,
     app_paths: Option<AppPaths>,
+    /// Process-local compatibility arguments applied after configuration is
+    /// loaded. They must never be written back to the selected config file.
+    classic_command_line: ClassicCommandLine,
     /// Optional targeted crew-definition source for pathless sandbox
     /// fixtures. This is deliberately separate from `app_paths`: it must not
     /// make unrelated app subsystems appear install-initialized, but it does
@@ -12371,6 +12676,7 @@ struct GameApp {
     control_messages: ControlMessageState,
     league_votes: LeagueVoteState,
     startup_network_connection: Option<StartupNetworkConnection>,
+    classic_direct_reference_query: Option<ClassicDirectReferenceQuery>,
     /// Frozen C++-ordered address attempts retained across password prompts.
     pending_network_join: Option<ClientSettings>,
     staged_network_host_scenario: Option<StagedNetworkHostScenario>,
@@ -12481,6 +12787,13 @@ struct GameApp {
     /// finishes (the `--sandbox` flag), instead of showing the menu. Cleared
     /// after the first auto-start so returning to the menu behaves normally.
     auto_start_sandbox: bool,
+    /// A direct scenario waits for process boot resources before it starts
+    /// either its local loader or prepared host, avoiding a race between the
+    /// independent workers.
+    auto_start_classic_command_line_scenario: bool,
+    /// One-shot launcher/package-manager hand-off for `/update`,
+    /// `clonk:update`, or an incoming `.c4u` package.
+    auto_open_update_dialog: bool,
     /// Raw window position used by C4GUI-style viewport/menu hit-testing.
     /// Gameplay keeps a separate pointer because C4MouseControl clamps raw
     /// positions into its assigned viewport (C4MouseControl.cpp:1216-1227).
@@ -12798,6 +13111,17 @@ struct StartupNetworkConnection {
     selected_scenario: Option<(String, String)>,
     purpose: StartupNetworkPurpose,
     authenticated_league_players: Option<Vec<lc_engine::ControlPlayerInfoEntry>>,
+}
+
+struct ClassicDirectReferenceQueryResult {
+    settings: ClientSettings,
+    password_needed: bool,
+}
+
+struct ClassicDirectReferenceQuery {
+    receiver: Receiver<
+        std::result::Result<ClassicDirectReferenceQueryResult, NetworkStartError>,
+    >,
 }
 
 impl RecordingSession {
@@ -17604,6 +17928,38 @@ struct FrontendScenario {
 }
 
 impl FrontendScenario {
+    fn from_command_line(path: &Path) -> Self {
+        let title = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Command-line scenario")
+            .to_string();
+        Self {
+            identifier: path.to_string_lossy().into_owned(),
+            title,
+            description: None,
+            kind: ScenarioKind::Scenario,
+            is_editable: false,
+            is_playable: true,
+            mission_access: None,
+            path: Some(path.to_path_buf()),
+            source_paths: vec![path.to_path_buf()],
+            root_label: None,
+            preview: None,
+            title_picture: None,
+            children: Vec::new(),
+            folder_index: None,
+            icon_index: None,
+            difficulty: None,
+            author: None,
+            version: None,
+            local_only: None,
+            allow_user_change: None,
+            definition_modules: Vec::new(),
+        }
+    }
+
     fn to_ui_entry(&self) -> ScenarioEntry {
         let preview = self
             .preview
@@ -20387,9 +20743,13 @@ fn load_options_program_state(
         .and_then(|config| config.get_in(Some("General"), "Language"))
         .unwrap_or(&state.language)
         .to_string();
-    let language_ex = config
-        .as_ref()
-        .and_then(|config| config.get_in(Some("General"), "LanguageEx"))
+    let language_ex = paths
+        .and_then(AppPaths::language_override)
+        .or_else(|| {
+            config
+                .as_ref()
+                .and_then(|config| config.get_in(Some("General"), "LanguageEx"))
+        })
         .unwrap_or(&state.language_ex)
         .to_string();
     let language_infos = paths
@@ -20563,6 +20923,27 @@ fn load_native_config_bytes(paths: Option<&AppPaths>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+fn classic_command_line_definition_modules(
+    config: &[u8],
+    definition_files: &[PathBuf],
+) -> Vec<String> {
+    let mut modules = native_config_text(config, "General", "Definitions")
+        .map(|definitions| {
+            definitions
+                .split(';')
+                .filter(|module| !module.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    modules.extend(
+        definition_files
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
+    modules
+}
+
 fn configured_fair_crew_strength(config: &[u8]) -> i32 {
     native_config_text(config, "General", "DefCrewStrength")
         .and_then(|value| value.trim().parse::<i32>().ok())
@@ -20626,7 +21007,10 @@ fn load_prepared_league_host_config(
         endpoint: server.master_server_url,
         transport: lc_network::LeagueHttpTransportConfig {
             language_charset: raw_value("General", "LanguageCharset").unwrap_or_default(),
-            language_sequence: raw_value("General", "LanguageEx")
+            language_sequence: paths
+                .and_then(AppPaths::language_override)
+                .map(str::to_string)
+                .or_else(|| raw_value("General", "LanguageEx"))
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| startup_language_sequence(paths).join(",")),
         },
@@ -20754,7 +21138,10 @@ fn build_network_host_preparation(
     let configured_players = app
         .app_paths
         .as_ref()
-        .map(lc_app::load_configured_client_players)
+        .map(|paths| {
+            snapshot_effective_client_player_selection(paths, &app.classic_command_line)
+                .map(|selection| load_snapshotted_client_players(paths, &selection))
+        })
         .transpose()?;
     let player_sources = if let Some(configured) = configured_players.as_ref() {
         // C4Game copies the configured module string before networking; the
@@ -20794,7 +21181,7 @@ fn build_network_host_preparation(
             })
             .collect::<Result<Vec<_>>>()?
     };
-    let mut network_comment = raw_value("Network", "Comment").unwrap_or_default();
+    let mut network_comment = app.scenario_game_options.values().comment.clone();
     // VAL_Comment preserves whitespace and truncates to C4MaxComment bytes
     // (src/C4InputValidation.cpp:156-158; src/C4Constants.h:28).
     let mut network_comment_bytes = lc_resources::encode_legacy_script_text(&network_comment)
@@ -20838,16 +21225,24 @@ fn build_network_host_preparation(
             fair_crew_strength: integer("General", "DefCrewStrength", 1_000),
             auto_frame_skip: boolean("Graphics", "AutoFrameSkip", true),
             max_load_file_size,
-            no_runtime_join: boolean("Network", "NoRuntimeJoin", true),
+            no_runtime_join: app
+                .classic_command_line
+                .runtime_join
+                .map(|runtime_join| !runtime_join)
+                .unwrap_or_else(|| boolean("Network", "NoRuntimeJoin", true)),
             enable_upnp: boolean("Network", "EnableUPnP", true),
-            network_tcp_port: integer("Network", "PortTCP", 11_112)
-                .try_into()
-                .ok()
-                .unwrap_or(11_112),
-            network_udp_port: integer("Network", "PortUDP", 11_113)
-                .try_into()
-                .ok()
-                .unwrap_or(11_113),
+            network_tcp_port: app.classic_command_line.tcp_port.unwrap_or_else(|| {
+                integer("Network", "PortTCP", 11_112)
+                    .try_into()
+                    .ok()
+                    .unwrap_or(11_112)
+            }),
+            network_udp_port: app.classic_command_line.udp_port.unwrap_or_else(|| {
+                integer("Network", "PortUDP", 11_113)
+                    .try_into()
+                    .ok()
+                    .unwrap_or(11_113)
+            }),
         },
         league,
     })
@@ -20895,7 +21290,10 @@ fn load_reference_query_settings(paths: Option<&AppPaths>) -> lc_network::Refere
     let config = load_native_config_bytes(paths);
     let value = |key| native_config_text(&config, "General", key);
     let language_charset = value("LanguageCharset").unwrap_or_default();
-    let language_sequence = value("LanguageEx")
+    let language_sequence = paths
+        .and_then(AppPaths::language_override)
+        .map(str::to_string)
+        .or_else(|| value("LanguageEx"))
         .filter(|sequence| !sequence.is_empty())
         .unwrap_or_else(|| startup_language_sequence(paths).join(","));
     lc_network::ReferenceQueryConfig {
@@ -21142,7 +21540,7 @@ fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> GameOptionValue
     };
     let string_value = |section: &str, key: &str, default: &str| {
         lc_app::configured_native_value(&config, section, key)
-            .map(|value| lc_resources::decode_legacy_script_text(value.as_bytes()))
+            .map(|value| native_bytes_as_legacy_text(value.as_bytes()))
             .unwrap_or_else(|| default.to_string())
     };
     let fair_crew_strength = configured_fair_crew_strength(&config);
@@ -23183,6 +23581,7 @@ impl GameApp {
             loader_render_error: None,
             loader_gamma: load_classic_loader_gamma(paths),
             app_paths: paths.cloned(),
+            classic_command_line: ClassicCommandLine::default(),
             sandbox_crew_definition_paths: None,
             configured_client_player_selection: None,
             material_library: None,
@@ -23202,6 +23601,7 @@ impl GameApp {
             control_messages,
             league_votes: LeagueVoteState::default(),
             startup_network_connection: None,
+            classic_direct_reference_query: None,
             pending_network_join: None,
             staged_network_host_scenario: None,
             sync_checks: SyncCheckState::new(),
@@ -23262,6 +23662,8 @@ impl GameApp {
             loading_state: None,
             boot_loading,
             auto_start_sandbox: false,
+            auto_start_classic_command_line_scenario: false,
+            auto_open_update_dialog: false,
             ingame_gui_pointer: None,
             ingame_pointer: None,
             ingame_mouse_help: false,
@@ -23373,6 +23775,224 @@ impl GameApp {
         // Don't show menu yet; we're in Loading mode for boot loading
         // show_main_menu() and ensure_menu_music() will be called when boot loading finishes
         Ok(app)
+    }
+
+    fn apply_classic_command_line(&mut self, classic: &ClassicCommandLine) -> Result<()> {
+        self.classic_command_line = classic.clone();
+        if !classic.player_files.is_empty() {
+            self.configured_client_player_selection = self
+                .app_paths
+                .as_ref()
+                .map(|paths| snapshot_effective_client_player_selection(paths, classic))
+                .transpose()?;
+        }
+        self.apply_classic_game_option_overrides();
+        self.auto_open_update_dialog =
+            classic.update_requested || classic.incoming_update.is_some();
+
+        if let Some(record) = classic.record_stream.as_ref() {
+            tracing::warn!(
+                path = %record.display(),
+                "classic record-stream playback is not implemented in lc-app"
+            );
+        }
+        if let Some(path) = classic.record_dump.as_deref() {
+            tracing::warn!(path, "classic /recdump output is not implemented in lc-app");
+        }
+        if let Some(address) = classic.stream_address.as_deref() {
+            tracing::warn!(
+                address,
+                "classic /stream output is not implemented in lc-app"
+            );
+        }
+        if let Some(screen) = classic.startup_screen.as_deref() {
+            tracing::warn!(
+                screen,
+                "classic /startup screen selection is not implemented in lc-app"
+            );
+        }
+        Ok(())
+    }
+
+    fn apply_classic_game_option_overrides(&mut self) {
+        self.scenario_game_options.set_server_signup(
+            self.classic_command_line.master_server_signup,
+            self.classic_command_line.league_server_signup,
+        );
+        if let Some(fair_crew) = self.classic_command_line.fair_crew {
+            self.startup_view_flags.fair_crew = fair_crew;
+            self.scenario_game_options
+                .set_lobby_fair_crew(fair_crew, false);
+        }
+        if let Some(password) = self.classic_command_line.password.as_ref() {
+            self.scenario_game_options.set_password(password.clone());
+        }
+        if let Some(comment) = self.classic_command_line.comment.as_ref() {
+            self.scenario_game_options.set_comment(comment.clone());
+        }
+        if let Some(runtime_join) = self.classic_command_line.runtime_join {
+            self.runtime_network_join_allowed = Some(runtime_join);
+        }
+    }
+
+    fn classic_command_line_definition_load(&self) -> ScenarioDefinitionLoad {
+        let config = load_native_config_bytes(self.app_paths.as_ref());
+        let modules = classic_command_line_definition_modules(
+            &config,
+            &self.classic_command_line.definition_files,
+        );
+        let definition_root =
+            self.app_paths
+                .as_ref()
+                .and_then(|paths| match startup_definition_paths(paths) {
+                    Ok(paths) => paths.active_custom_root,
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            "failed to read General.DefinitionPath for command-line scenario"
+                        );
+                        None
+                    }
+                });
+        ScenarioDefinitionLoad::Seed {
+            modules,
+            definition_root,
+        }
+    }
+
+    fn launch_classic_command_line_join(&mut self) -> Result<(), EngineError> {
+        let Some(address) = self.classic_command_line.direct_join.clone() else {
+            return Ok(());
+        };
+        // Explicit Rust `--host`/`--join` modes keep their existing precedence.
+        if self.network_mode.is_some() {
+            return Ok(());
+        }
+        if self.startup_network_connection.is_some()
+            || self.classic_direct_reference_query.is_some()
+        {
+            self.status_text = "A network connection is already in progress".to_string();
+            return Ok(());
+        }
+        if let Err(error) = self.freeze_configured_client_players_for_game() {
+            self.status_text = format!("Unable to load configured players: {error}");
+            return Ok(());
+        }
+        self.prepare_network_join_game_state();
+        self.startup_game_search = None;
+
+        let (sender, receiver) = mpsc::channel();
+        let player_name = self.player_name.clone();
+        let app_paths = self.app_paths.clone();
+        let group_maker = self
+            .configured_client_player_selection
+            .as_ref()
+            .map(|selection| selection.group_maker().clone());
+        let classic = self.classic_command_line.clone();
+        let reference_config = load_reference_query_settings(app_paths.as_ref());
+        let connect_target = address.clone();
+        let spawn = thread::Builder::new()
+            .name("lc-classic-direct-join".to_string())
+            .spawn(move || {
+                let result = (|| {
+                    let endpoint = classic_direct_reference_endpoint(&address, app_paths.as_ref())
+                        .map_err(|error| {
+                            NetworkStartError::Other(format!(
+                                "invalid reference-server address: {error:#}"
+                            ))
+                        })?;
+                    let reference =
+                        query_first_classic_reference(endpoint, &reference_config)?;
+                    let settings = classic_client_settings_for_reference(
+                        &reference,
+                        player_name,
+                        app_paths.as_ref(),
+                        group_maker,
+                        &classic,
+                    )
+                    .map_err(|error| {
+                        NetworkStartError::Other(format!(
+                            "unable to apply direct-join settings: {error:#}"
+                        ))
+                    })?;
+                    Ok(ClassicDirectReferenceQueryResult {
+                        settings,
+                        password_needed: reference.password_needed,
+                    })
+                })();
+                let _ = sender.send(result);
+            });
+        match spawn {
+            Ok(_) => {
+                self.classic_direct_reference_query =
+                    Some(ClassicDirectReferenceQuery { receiver });
+                self.status_text = format!("Querying network game at {connect_target}...");
+            }
+            Err(error) => {
+                self.status_text = format!("Unable to start reference query: {error}");
+            }
+        }
+        Ok(())
+    }
+
+    fn poll_classic_direct_reference_query(&mut self) -> Result<(), EngineError> {
+        // The query can finish before async boot resources. Keep its result
+        // queued until boot relinquishes `Loading`; opening a password prompt
+        // or an error dialog earlier would strand the boot worker forever.
+        if self.boot_loading.is_some() {
+            return Ok(());
+        }
+        let Some(query) = self.classic_direct_reference_query.as_ref() else {
+            return Ok(());
+        };
+        let result = match query.receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return Ok(()),
+            Err(TryRecvError::Disconnected) => Err(NetworkStartError::Other(
+                "reference query worker disconnected before reporting a game".to_string(),
+            )),
+        };
+        self.classic_direct_reference_query = None;
+        self.status_text.clear();
+        match result {
+            Ok(result) => {
+                self.pending_network_join = Some(result.settings);
+                if result.password_needed && self.classic_command_line.password.is_none() {
+                    self.mode = AppMode::Menu;
+                    self.open_network_join_password_dialog()?;
+                } else {
+                    self.launch_pending_network_join()?;
+                }
+            }
+            Err(error) => {
+                self.finish_startup_network_failure(
+                    StartupNetworkPurpose::Join,
+                    format!("Unable to query network game: {error}"),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn launch_classic_command_line_scenario(&mut self) -> Result<(), EngineError> {
+        if self.classic_command_line.direct_join.is_some() {
+            return Ok(());
+        }
+        let Some(path) = self.classic_command_line.scenario.clone() else {
+            return Ok(());
+        };
+        if self.boot_loading.is_some() {
+            self.auto_start_classic_command_line_scenario = true;
+            return Ok(());
+        }
+        let scenario = FrontendScenario::from_command_line(&path);
+        let definition_load = self.classic_command_line_definition_load();
+        if self.classic_command_line.network_active == Some(true) {
+            self.stage_network_host_scenario(scenario, definition_load);
+            Ok(())
+        } else {
+            self.start_scenario_with_definition_load(scenario, definition_load)
+        }
     }
 
     fn configure_native_startup_fonts(&mut self, scale: f32, point_filtering: bool) {
@@ -37680,7 +38300,9 @@ impl GameApp {
         self.configured_client_player_selection = self
             .app_paths
             .as_ref()
-            .map(snapshot_configured_client_player_selection)
+            .map(|paths| {
+                snapshot_effective_client_player_selection(paths, &self.classic_command_line)
+            })
             .transpose()?;
         Ok(())
     }
@@ -52979,6 +53601,7 @@ impl GameApp {
                             self.status_text.clear();
                             self.menu_frame_cache = None;
                             self.restore_startup_fonts();
+                            self.finish_classic_command_line_host_entry()?;
                             return Ok(());
                         }
                     }
@@ -53033,6 +53656,7 @@ impl GameApp {
                             if let Some(audio) = self.audio.as_mut() {
                                 audio.stop_music();
                             }
+                            self.finish_classic_command_line_host_entry()?;
                             return Ok(());
                         }
                         Err(error) => {
@@ -59207,6 +59831,42 @@ impl GameApp {
         self.start_network_lobby_countdown_with(DEFAULT_LOBBY_COUNTDOWN_SECONDS)
     }
 
+    fn start_classic_command_line_lobby_timeout(&mut self) -> Result<(), EngineError> {
+        let Some(seconds) = self.classic_command_line.lobby_timeout.flatten() else {
+            return Ok(());
+        };
+        if seconds == 0 {
+            return Ok(());
+        }
+        self.start_network_lobby_countdown_with(i32::try_from(seconds).unwrap_or(i32::MAX))
+    }
+
+    fn finish_classic_command_line_host_entry(&mut self) -> Result<(), EngineError> {
+        if self.classic_command_line.scenario.is_some()
+            && self.classic_command_line.network_active == Some(true)
+            && self.classic_command_line.lobby_timeout.is_none()
+        {
+            // C4Game::InitNetworkHost calls Network.Start immediately unless
+            // `/lobby` set fLobby. The prepared Rust host is installed through
+            // its lobby state first, then requests start in this same update.
+            // Preloading may defer the state transition, but never presents a
+            // staging-lobby frame.
+            self.start_network_game_now()?;
+            if self
+                .lobby_preload_task
+                .as_ref()
+                .is_some_and(|task| task.start_host_when_ready)
+                && self.mode == AppMode::Menu
+            {
+                self.replace_startup_view(StartupView::NetworkGame);
+                self.mode = AppMode::Loading;
+            }
+            Ok(())
+        } else {
+            self.start_classic_command_line_lobby_timeout()
+        }
+    }
+
     fn start_network_lobby_countdown_with(
         &mut self,
         countdown_seconds: i32,
@@ -62829,6 +63489,7 @@ impl GameApp {
         self.recording_enabled = values.record && self.recordings_dir.is_some();
         self.scenario_game_options =
             GameOptionButtons::new(selector_mode.game_option_context(), values);
+        self.apply_classic_game_option_overrides();
         self.replace_startup_dialog(
             StartupView::ScenarioBrowser,
             StartupDialog::ScenarioBrowser(selector_mode),
@@ -65688,6 +66349,7 @@ impl GameApp {
         self.poll_startup_game_search()?;
         self.poll_scenario_selector_discovery()?;
         self.poll_startup_irc()?;
+        self.poll_classic_direct_reference_query()?;
         self.poll_startup_network_connection()?;
         self.poll_live_masterserver_signup()?;
         self.poll_league_player_auth()?;
@@ -67065,12 +67727,33 @@ impl GameApp {
                 // logged typed boundary.
                 return;
             }
+            if self.auto_start_classic_command_line_scenario {
+                self.auto_start_classic_command_line_scenario = false;
+                let mut failed = false;
+                if let Err(error) = self.launch_classic_command_line_scenario() {
+                    tracing::error!(?error, "failed to start command-line scenario");
+                    self.status_text = format!("Unable to start command-line scenario: {error}");
+                    failed = true;
+                }
+                if failed
+                    || (self.startup_network_connection.is_none()
+                        && self.loading_state.is_none())
+                {
+                    self.mode = AppMode::Menu;
+                    self.show_main_menu();
+                    self.begin_startup_dialog_fade_in();
+                }
+                return;
+            }
             // A scenario load can be started before boot finishes (mode is
             // already `Loading`). Boot completion must NOT yank the app back to
             // the menu in that case: the `Menu` update arm does not poll scenario
             // loading, so doing so would strand the in-flight load forever. Stay
             // in `Loading` and let `poll_loading` carry the scenario to `Running`.
-            if self.loading_state.is_none() {
+            if self.loading_state.is_none()
+                && self.startup_network_connection.is_none()
+                && self.classic_direct_reference_query.is_none()
+            {
                 self.mode = AppMode::Menu;
                 if self.network_mode.is_some() && self.network_lobby.is_some() {
                     // A command-line host/client has already completed network
@@ -67083,6 +67766,13 @@ impl GameApp {
                     self.begin_startup_dialog_fade_in();
                 }
                 self.begin_frontend_music_entry();
+                if self.auto_open_update_dialog {
+                    self.auto_open_update_dialog = false;
+                    if let Err(err) = self.open_launcher_update_dialog() {
+                        tracing::warn!(error = ?err, "failed to open command-line update hand-off");
+                    }
+                    return;
+                }
                 // `--sandbox`: jump straight into the built-in sandbox once boot
                 // completes, so the in-game scene can be launched/captured without
                 // navigating the menu. One-shot, so return_to_menu works after.
@@ -75284,7 +75974,11 @@ impl GameApp {
         };
         let selected = staged.frontend.clone();
         self.staged_network_host_scenario = Some(staged);
-        let (_, port) = load_network_startup_settings(self.app_paths.as_ref());
+        let (_, configured_port) = load_network_startup_settings(self.app_paths.as_ref());
+        let port = self
+            .classic_command_line
+            .tcp_port
+            .unwrap_or(configured_port);
         self.activate_prepared_network_host(selected, SocketAddr::from(([0, 0, 0, 0], port)));
         if self.startup_network_connection.is_none() {
             self.staged_network_host_scenario = None;
@@ -75525,8 +76219,9 @@ impl GameApp {
         };
         let offline_startup = if self.network.is_none() {
             self.app_paths.as_ref().map_or(Ok(None), |paths| {
-                let selection = snapshot_configured_client_player_selection(paths)
-                    .map_err(|error| error.to_string())?;
+                let selection =
+                    snapshot_effective_client_player_selection(paths, &self.classic_command_line)
+                        .map_err(|error| error.to_string())?;
                 match preflight_offline_startup(&path) {
                     Ok(preflight) => Ok(Some((
                         OfflineStartupPlayers::new(
@@ -81927,8 +82622,21 @@ fn scenario_title_language(paths: Option<&AppPaths>) -> String {
                 .map(str::trim)
                 .filter(|language| !language.is_empty())
                 .map(str::to_string)
+                .or_else(|| {
+                    config
+                        .get_in(Some("General"), "LanguageEx")
+                        .or_else(|| config.get("LanguageEx"))
+                        .and_then(|sequence| sequence.split(',').next())
+                        .map(str::trim)
+                        .filter(|language| !language.is_empty())
+                        .map(|language| language.chars().take(2).collect())
+                })
         })
-        .or_else(|| startup_language_sequence(paths).into_iter().next())
+        // `/Language:` temporarily replaces LanguageEx for resource lookup,
+        // but scenario-title persistence still follows General.Language. If
+        // neither persisted field exists, retain C4Config's system-language
+        // default without reintroducing the command-line override here.
+        .or_else(|| startup_language_sequence(None).into_iter().next())
         .unwrap_or_else(|| "US".to_string())
 }
 
@@ -83309,6 +84017,566 @@ mod tests {
 
     fn tempdir() -> std::io::Result<tempfile::TempDir> {
         tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
+
+    #[test]
+    fn classic_command_line_keeps_rust_option_values_out_of_legacy_scanning() {
+        let cli = Cli::try_parse_from([
+            "lc-app",
+            "--test-load",
+            "Fixture.c4s",
+            "/tmp/Direct.C4S",
+            "/future:value",
+            "unknown.extension",
+            "--player-name",
+            "/network",
+            "--test-frames",
+            "7",
+        ])
+        .expect("classic positionals coexist with modern switches");
+        let classic = parse_classic_command_line(&cli.classic_arguments);
+
+        assert_eq!(cli.test_load, Some(PathBuf::from("Fixture.c4s")));
+        assert_eq!(cli.player_name, "/network");
+        assert_eq!(cli.test_frames, 7);
+        assert_eq!(classic.scenario, Some(PathBuf::from("/tmp/Direct.C4S")));
+        assert_eq!(classic.network_active, None);
+        assert!(Cli::try_parse_from(["lc-app", "--future"]).is_err());
+    }
+
+    #[test]
+    fn classic_command_line_preserves_file_and_definition_order() {
+        let classic = parse_classic_command_line(&[
+            OsString::from("First.c4s"),
+            OsString::from("Players/Alice.C4P"),
+            OsString::from("Defs/ExtraOne.c4d"),
+            OsString::from("Players/Bob.c4p"),
+            OsString::from("Defs/ExtraTwo.C4D"),
+            OsString::from("Missions/Last/Scenario.TXT"),
+            OsString::from("Patch.c4u"),
+            OsString::from("Round.c4r"),
+        ]);
+
+        assert_eq!(classic.scenario, Some(PathBuf::from("Missions/Last")));
+        assert_eq!(
+            classic.player_files,
+            vec![
+                PathBuf::from("Players/Alice.C4P"),
+                PathBuf::from("Players/Bob.c4p")
+            ]
+        );
+        assert_eq!(
+            classic.definition_files,
+            vec![
+                PathBuf::from("Defs/ExtraOne.c4d"),
+                PathBuf::from("Defs/ExtraTwo.C4D")
+            ]
+        );
+        assert_eq!(classic.incoming_update, Some(PathBuf::from("Patch.c4u")));
+        assert_eq!(classic.record_stream, Some(PathBuf::from("Round.c4r")));
+        assert_eq!(
+            classic_command_line_definition_modules(
+                b"[General]\nDefinitions=Base.c4d;Second.c4d\n",
+                &classic.definition_files,
+            ),
+            vec![
+                "Base.c4d",
+                "Second.c4d",
+                "Defs/ExtraOne.c4d",
+                "Defs/ExtraTwo.C4D",
+            ]
+        );
+    }
+
+    #[test]
+    fn classic_command_line_maps_process_local_overrides_in_argument_order() {
+        let classic = parse_classic_command_line(
+            &[
+                "/network",
+                "/nonetwork",
+                "/signup",
+                "/nosignup",
+                "/league",
+                "/noleague",
+                "/lobby:-4",
+                "/observe",
+                "/runtimejoin",
+                "/noruntimejoin",
+                "/tcpport:2222",
+                "/udpport:3333",
+                "/pass:secret",
+                "/comment:launch comment",
+                "/faircrew",
+                "/trainedcrew",
+                "/config:portable.cfg",
+                "/verbose",
+                "/Language:DE,US",
+                "/Language:FR",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>(),
+        );
+
+        assert_eq!(classic.network_active, Some(true));
+        assert_eq!(classic.master_server_signup, Some(true));
+        assert_eq!(classic.league_server_signup, Some(false));
+        assert_eq!(classic.lobby_timeout, Some(Some(0)));
+        assert!(classic.observe);
+        assert_eq!(classic.runtime_join, Some(false));
+        assert_eq!(classic.tcp_port, Some(2222));
+        assert_eq!(classic.udp_port, Some(3333));
+        assert_eq!(classic.password.as_deref(), Some("secret"));
+        assert_eq!(classic.comment.as_deref(), Some("launch comment"));
+        assert_eq!(classic.fair_crew, Some(false));
+        assert_eq!(classic.config_file, Some(PathBuf::from("portable.cfg")));
+        assert!(classic.verbose);
+        assert_eq!(classic.language.as_deref(), Some("DE,US"));
+
+        let mut app = new_state_only_menu_app(320, 200);
+        app.apply_classic_command_line(&classic)
+            .expect("apply process-local network options");
+        assert!(app.scenario_game_options.values().master_server_signup);
+        assert!(!app.scenario_game_options.values().league_server_signup);
+        assert_eq!(app.scenario_game_options.values().password, "secret");
+        assert_eq!(app.scenario_game_options.values().comment, "launch comment");
+        assert!(!app.scenario_game_options.values().fair_crew);
+        assert_eq!(app.runtime_network_join_allowed, Some(false));
+    }
+
+    #[test]
+    fn classic_command_line_join_urls_and_update_stub_are_disjoint() {
+        let join = parse_classic_command_line(&[OsString::from("ClOnK:///host:11112///")]);
+        assert_eq!(join.direct_join.as_deref(), Some("host:11112"));
+        assert_eq!(join.network_active, Some(true));
+        assert!(!join.update_requested);
+
+        let update = parse_classic_command_line(&[OsString::from("CLONK:///UpDaTe///")]);
+        assert_eq!(update.direct_join, None);
+        assert_eq!(update.network_active, None);
+        assert!(update.update_requested);
+        let mut update_app = new_state_only_menu_app(320, 200);
+        update_app
+            .apply_classic_command_line(&update)
+            .expect("queue classic update hand-off");
+        assert!(update_app.auto_open_update_dialog);
+
+        let direct = parse_classic_command_line(
+            &[
+                "/join:127.0.0.1:11112",
+                "/observe",
+                "/tcpport:2222",
+                "/udpport:3333",
+                "/pass:secret",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>(),
+        );
+        let endpoint = classic_direct_reference_endpoint("127.0.0.1", None)
+            .expect("classic direct reference endpoint");
+        assert_eq!(
+            endpoint,
+            lc_network::ReferenceEndpoint::Address(SocketAddr::from((
+                [127, 0, 0, 1],
+                lc_network::DEFAULT_REFERENCE_PORT,
+            )))
+        );
+        assert_eq!(
+            classic_direct_reference_endpoint(
+                direct.direct_join.as_deref().expect("parsed join address"),
+                None,
+            )
+            .expect("explicit reference endpoint"),
+            lc_network::ReferenceEndpoint::Address(SocketAddr::from((
+                [127, 0, 0, 1],
+                11_112,
+            )))
+        );
+        assert_eq!(
+            classic_direct_reference_endpoint("games.example.test", None)
+                .expect("hostname reference endpoint"),
+            lc_network::ReferenceEndpoint::Url(format!(
+                "http://games.example.test:{}/",
+                lc_network::DEFAULT_REFERENCE_PORT,
+            ))
+        );
+        let game_address = SocketAddr::from(([127, 0, 0, 1], 41_234));
+        let reference = lc_network::NetworkGameReference {
+            source_address: SocketAddr::from((
+                [127, 0, 0, 1],
+                lc_network::DEFAULT_REFERENCE_PORT,
+            )),
+            addresses: vec![lc_network::NetworkAddress::new(
+                lc_network::NetworkProtocol::Tcp,
+                game_address,
+            )],
+            ..lc_network::NetworkGameReference::default()
+        };
+        let settings = classic_client_settings_for_reference(
+            &reference,
+            "Player".to_string(),
+            None,
+            None,
+            &direct,
+        )
+        .expect("classic direct client settings");
+        assert_eq!(settings.server_addresses[0].endpoint, game_address);
+        assert!(settings.observer);
+        assert_eq!(
+            settings.mesh_tcp_bind_address.map(|address| address.port()),
+            Some(2222)
+        );
+        assert_eq!(
+            settings.mesh_udp_bind_address.map(|address| address.port()),
+            Some(3333)
+        );
+        assert_eq!(settings.password.as_bytes(), b"secret");
+    }
+
+    #[test]
+    fn classic_command_line_direct_join_queries_the_first_reference() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind direct-reference fixture");
+        let reference_server = listener.local_addr().expect("direct-reference address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept direct-reference query");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("bound direct-reference request read");
+            let mut request = [0_u8; 4096];
+            let size = stream.read(&mut request).expect("read direct-reference query");
+            let request = String::from_utf8_lossy(&request[..size]).to_ascii_lowercase();
+            assert!(request.starts_with("get / http/1.1"));
+            assert!(request.contains("accept-language: de"));
+            let body = "[Reference]\nTitle=Direct fixture\nState=Lobby\nJoinAllowed=1\nAddress=TCP:\"127.0.0.1:41234\"\nGame=LegacyClonk\nVersion=4,9,11,0\nBuild=362\n";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            )
+            .expect("write direct-reference response");
+        });
+        let config = lc_network::ReferenceQueryConfig {
+            language_sequence: "DE".to_string(),
+            ..lc_network::ReferenceQueryConfig::default()
+        };
+
+        let reference = query_first_classic_reference(
+            lc_network::ReferenceEndpoint::Address(reference_server),
+            &config,
+        )
+        .expect("query first direct reference");
+
+        server.join().expect("direct-reference fixture thread");
+        assert_eq!(reference.title, "Direct fixture");
+        assert_eq!(
+            reference.addresses,
+            vec![lc_network::NetworkAddress::new(
+                lc_network::NetworkProtocol::Tcp,
+                SocketAddr::from(([127, 0, 0, 1], 41_234)),
+            )]
+        );
+    }
+
+    #[test]
+    fn classic_command_line_passworded_reference_prompts_before_connecting() {
+        let mut app = new_classic_menu_app(800, 600);
+        app.classic_command_line = ClassicCommandLine {
+            direct_join: Some("games.example.test".to_string()),
+            ..ClassicCommandLine::default()
+        };
+        let attempts = vec![
+            lc_network::NetworkAddress::new(
+                lc_network::NetworkProtocol::Tcp,
+                "127.0.0.1:30111".parse().unwrap(),
+            ),
+            lc_network::NetworkAddress::new(
+                lc_network::NetworkProtocol::Udp,
+                "127.0.0.1:30112".parse().unwrap(),
+            ),
+        ];
+        let settings = ClientSettings::new(attempts[0].endpoint, "Player")
+            .with_join_attempts(attempts.clone());
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(ClassicDirectReferenceQueryResult {
+                settings,
+                password_needed: true,
+            }))
+            .expect("queue passworded direct reference");
+        app.classic_direct_reference_query =
+            Some(ClassicDirectReferenceQuery { receiver });
+        app.mode = AppMode::Loading;
+        let (boot_sender, boot_receiver) = mpsc::channel();
+        app.boot_loading = Some(BootLoadingState::new(boot_receiver));
+
+        app.poll_classic_direct_reference_query()
+            .expect("completed query waits for boot resources");
+        assert!(app.classic_direct_reference_query.is_some());
+        assert!(app.pending_network_join.is_none());
+        assert!(app.game_option_input_dialog.is_none());
+
+        boot_sender
+            .send(BootLoadingEvent::Finished(None))
+            .expect("finish boot resources");
+        app.poll_boot_loading();
+        assert!(app.boot_loading.is_none());
+        assert_eq!(app.mode, AppMode::Loading);
+        assert!(app.classic_direct_reference_query.is_some());
+
+        app.poll_classic_direct_reference_query()
+            .expect("passworded direct reference opens prompt after boot");
+
+        assert!(app.classic_direct_reference_query.is_none());
+        assert!(app.startup_network_connection.is_none());
+        assert_eq!(
+            app.pending_network_join
+                .as_ref()
+                .expect("resolved join remains pending")
+                .server_addresses,
+            attempts
+        );
+        assert_eq!(
+            app.game_option_input_dialog
+                .as_ref()
+                .expect("password prompt")
+                .purpose,
+            PendingInputDialogPurpose::NetworkJoinPassword
+        );
+
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
+            .expect("cancel direct-join password prompt");
+        assert!(app.pending_network_join.is_none());
+    }
+
+    #[test]
+    fn classic_command_line_lobby_timeout_starts_the_host_countdown() {
+        assert_eq!(
+            parse_classic_command_line(&[OsString::from("/network")]).lobby_timeout,
+            None,
+        );
+        assert_eq!(
+            parse_classic_command_line(&[OsString::from("/lobby")]).lobby_timeout,
+            Some(None),
+        );
+        let mut app = new_state_only_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.apply_classic_command_line(&ClassicCommandLine {
+            scenario: Some(PathBuf::from("Fixture.c4s")),
+            network_active: Some(true),
+            lobby_timeout: Some(Some(120)),
+            ..ClassicCommandLine::default()
+        })
+        .expect("apply classic lobby timeout");
+
+        app.finish_classic_command_line_host_entry()
+            .expect("finish classic lobby entry");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(120)]
+        );
+        assert_eq!(
+            app.host_lobby_countdown,
+            Some(HostLobbyCountdown::with_seconds(120))
+        );
+    }
+
+    #[test]
+    fn classic_command_line_network_scenario_skips_unrequested_lobby() {
+        let mut app = new_state_only_menu_app(320, 200);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (_sender, receiver) = mpsc::channel();
+        app.lobby_preload_task = Some(LobbyPreloadTask {
+            state: LobbyPreloadTaskState::Loading(receiver),
+            start_host_when_ready: false,
+            worker: LobbyPreloadWorker::new(thread::spawn(|| {})),
+        });
+        app.classic_command_line = ClassicCommandLine {
+            scenario: Some(PathBuf::from("Fixture.c4s")),
+            network_active: Some(true),
+            lobby_timeout: None,
+            ..ClassicCommandLine::default()
+        };
+
+        app.finish_classic_command_line_host_entry()
+            .expect("request immediate host start");
+
+        assert!(
+            app.lobby_preload_task
+                .as_ref()
+                .expect("preload remains pending")
+                .start_host_when_ready
+        );
+        assert_eq!(app.mode, AppMode::Loading);
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+    }
+
+    #[test]
+    fn classic_command_line_direct_scenario_bypasses_startup_menu() {
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("command-line user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        configure_test_startup_participant(&paths, user_data.path());
+        persist_config_value(
+            &paths,
+            "General",
+            "Participants",
+            "MissingConfigured.c4p",
+        )
+        .expect("make command-line player override observable");
+        let player_path = user_data.path().join("Exact.c4p");
+        let scenario_path = paths.scenario_dir().join("Direct.c4s");
+        let definition_path = scenario_path.join("Defs.c4d");
+        fs::create_dir_all(&definition_path).expect("create direct scenario definition");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Direct command line\nMaxPlayer=1\n",
+        )
+        .expect("write direct scenario core");
+        fs::write(
+            definition_path.join("DefCore.txt"),
+            "[DefCore]\nid=TEST\nName=Test\nCategory=1\n",
+        )
+        .expect("write direct scenario definition core");
+        write_test_definition_graphics(&definition_path);
+
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise direct command-line app");
+        let boot_result = app
+            .boot_loading
+            .take()
+            .expect("real boot worker")
+            .receiver
+            .recv_timeout(Duration::from_secs(30))
+            .expect("finish real boot resources");
+        let (boot_sender, boot_receiver) = mpsc::channel();
+        app.boot_loading = Some(BootLoadingState::new(boot_receiver));
+        let classic = ClassicCommandLine {
+            scenario: Some(scenario_path.clone()),
+            player_files: vec![player_path],
+            definition_files: vec![definition_path],
+            ..ClassicCommandLine::default()
+        };
+        app.apply_classic_command_line(&classic)
+            .expect("apply command-line state");
+        app.launch_classic_command_line_scenario()
+            .expect("launch direct scenario");
+        assert!(app.loading_state.is_none());
+        assert!(app.auto_start_classic_command_line_scenario);
+        boot_sender
+            .send(boot_result)
+            .expect("release held boot resources");
+        app.poll_boot_loading();
+        assert!(!app.auto_start_classic_command_line_scenario);
+        assert!(app.loading_state.is_some());
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if matches!(app.mode, AppMode::Running) {
+                break;
+            }
+            assert_ne!(
+                app.mode,
+                AppMode::Menu,
+                "startup menu must stay suppressed; status={:?}; loader_error={:?}",
+                app.status_text,
+                app.loader_error,
+            );
+            assert!(
+                Instant::now() < deadline,
+                "direct scenario did not finish loading; status={:?}",
+                app.status_text,
+            );
+            app.update().expect("advance direct command-line load");
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            app.active_scenario
+                .as_ref()
+                .and_then(|scenario| scenario.path.as_deref()),
+            Some(scenario_path.as_path())
+        );
+        assert!(app.startup_dialog_fade.is_none());
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn classic_command_line_config_and_language_override_are_process_local() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("command-line config root");
+        let custom_config = user_data.path().join("portable/custom.cfg");
+        fs::create_dir_all(custom_config.parent().unwrap()).expect("custom config parent");
+        let original = b"[General]\nLanguage=US\nLanguageEx=US\nParticipants=Configured.c4p\n\n[Network]\nPortRefServer=23456\n";
+        fs::write(&custom_config, original).expect("write custom config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("LC_CONFIG_FILE", None),
+            ("LC_LANGUAGE_OVERRIDE", None),
+        ]);
+        let classic = ClassicCommandLine {
+            config_file: Some(custom_config.clone()),
+            language: Some("DE,US".to_string()),
+            ..ClassicCommandLine::default()
+        };
+
+        install_classic_language_override(&classic);
+        let paths = AppPaths::discover_with_config_file(classic.config_file.as_deref())
+            .expect("discover overridden paths");
+
+        assert_eq!(paths.config_file(), custom_config);
+        assert_eq!(paths.language_override(), Some("DE,US"));
+        assert_eq!(scenario_title_language(Some(&paths)), "US");
+        assert_eq!(
+            classic_direct_reference_endpoint("127.0.0.1", Some(&paths))
+                .expect("custom reference port"),
+            lc_network::ReferenceEndpoint::Address(SocketAddr::from((
+                [127, 0, 0, 1],
+                23_456,
+            )))
+        );
+        assert_eq!(
+            classic_loader_language_sequence(&paths).expect("command-line language sequence"),
+            vec!["DE", "US"]
+        );
+        assert_eq!(
+            fs::read(paths.config_file()).expect("read unchanged custom config"),
+            original
+        );
     }
 
     #[test]

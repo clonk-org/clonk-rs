@@ -209,7 +209,7 @@ pub use resource_transfer_backend::{
 };
 pub use resync::{ControlBacklog, ResyncRequest, ResyncScheduler};
 pub use search::{
-    fetch_reference_endpoint, fetch_reference_endpoint_with_config,
+    direct_reference_endpoint, fetch_reference_endpoint, fetch_reference_endpoint_with_config,
     fetch_reference_query_endpoint, fetch_reference_query_endpoint_with_config,
     parse_reference_query_response, parse_reference_query_response_with_config,
     parse_reference_response, LanProbeTrigger, MasterserverReplyInfo, MasterserverVersion,

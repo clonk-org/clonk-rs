@@ -625,6 +625,17 @@ impl GameOptionButtons {
         self.cancel_disabled_presses();
     }
 
+    /// Applies process-local command-line signup overrides without emitting
+    /// UI callbacks or persisting them into configuration.
+    pub fn set_server_signup(&mut self, master_server: Option<bool>, league_server: Option<bool>) {
+        if let Some(enabled) = master_server {
+            self.values.master_server_signup = enabled;
+        }
+        if let Some(enabled) = league_server {
+            self.values.league_server_signup = enabled;
+        }
+    }
+
     pub fn set_password(&mut self, password: impl Into<String>) {
         self.values.password = password.into();
     }
