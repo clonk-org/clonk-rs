@@ -21850,6 +21850,103 @@ fn configured_allow_scripting_in_replays(config: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+fn configured_console_script_strictness(config: &[u8]) -> lc_engine::ScriptStrictness {
+    let Some(value) = lc_app::configured_native_scalar(
+        config,
+        "Developer",
+        "ConsoleScriptStrictness",
+    ) else {
+        return lc_engine::ScriptStrictness::Strict3;
+    };
+    let value = value
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))
+        .map_or(&value[value.len()..], |start| &value[start..]);
+
+    if let Some(strictness) = native_console_script_strictness_number(value) {
+        return strictness;
+    }
+
+    let identifier_end = value
+        .iter()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+        .unwrap_or(value.len());
+    match &value[..identifier_end] {
+        b"NonStrict" => lc_engine::ScriptStrictness::NonStrict,
+        b"Strict1" => lc_engine::ScriptStrictness::Strict1,
+        b"Strict2" => lc_engine::ScriptStrictness::Strict2,
+        b"Strict3" | b"MaxStrict" => lc_engine::ScriptStrictness::Strict3,
+        _ => lc_engine::ScriptStrictness::Strict3,
+    }
+}
+
+fn native_console_script_strictness_number(
+    value: &[u8],
+) -> Option<lc_engine::ScriptStrictness> {
+    let hexadecimal = value.starts_with(b"0x") || value.starts_with(b"0X");
+    let (negative, mut cursor, radix) = if hexadecimal {
+        (false, 2, 16)
+    } else {
+        match value.first() {
+            Some(b'+') => (false, 1, 10),
+            Some(b'-') => (true, 1, 10),
+            _ => (false, 0, 10),
+        }
+    };
+    let digits_start = cursor;
+    let c_ulong_max = if std::mem::size_of::<std::os::raw::c_ulong>() == 4 {
+        u128::from(u32::MAX)
+    } else {
+        u128::from(u64::MAX)
+    };
+    let mut magnitude = 0u128;
+    let mut overflow = false;
+    while let Some(digit) = value.get(cursor).and_then(|byte| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' if radix == 16 => Some(byte - b'a' + 10),
+        b'A'..=b'F' if radix == 16 => Some(byte - b'A' + 10),
+        _ => None,
+    }) {
+        if digit >= radix {
+            break;
+        }
+        let digit = u128::from(digit);
+        if !overflow {
+            if magnitude > (c_ulong_max - digit) / u128::from(radix) {
+                magnitude = c_ulong_max;
+                overflow = true;
+            } else {
+                magnitude = magnitude * u128::from(radix) + digit;
+            }
+        }
+        cursor += 1;
+    }
+    if cursor == digits_start {
+        // With base 16, strtoul still consumes the leading zero when `0x` is
+        // not followed by a hexadecimal digit.
+        if hexadecimal {
+            magnitude = 0;
+        } else {
+            return None;
+        }
+    }
+    let unsigned_int = if overflow {
+        c_ulong_max as u32
+    } else if negative {
+        0u32.wrapping_sub(magnitude as u32)
+    } else {
+        magnitude as u32
+    };
+    let native_byte = unsigned_int.min(u32::from(u8::MAX)) as u8;
+    let ordinal = native_byte.min(3);
+    Some(match ordinal {
+        0 => lc_engine::ScriptStrictness::NonStrict,
+        1 => lc_engine::ScriptStrictness::Strict1,
+        2 => lc_engine::ScriptStrictness::Strict2,
+        _ => lc_engine::ScriptStrictness::Strict3,
+    })
+}
+
 fn classic_command_line_definition_modules(
     config: &[u8],
     definition_files: &[PathBuf],
@@ -40687,22 +40784,7 @@ impl GameApp {
     }
 
     fn running_console_script_strictness(&self) -> lc_engine::ScriptStrictness {
-        match native_config_text(
-            &load_native_config_bytes(self.app_paths.as_ref()),
-            "Developer",
-            "ConsoleScriptStrictness",
-        )
-        .as_deref()
-        .map(str::trim)
-        {
-            Some("NonStrict" | "0") => lc_engine::ScriptStrictness::NonStrict,
-            Some("Strict1" | "1") => lc_engine::ScriptStrictness::Strict1,
-            Some("Strict2" | "2") => lc_engine::ScriptStrictness::Strict2,
-            Some("Strict3" | "MaxStrict" | "3" | "255") | None => {
-                lc_engine::ScriptStrictness::Strict3
-            }
-            Some(_) => lc_engine::ScriptStrictness::Strict3,
-        }
+        configured_console_script_strictness(&load_native_config_bytes(self.app_paths.as_ref()))
     }
 
     fn set_running_network_comment(&mut self, value: &[u8]) {
@@ -140706,6 +140788,89 @@ ScenInfoArea=70,5,25,90
             commands.take_runtime_status_commands(),
             vec![network::TestRuntimeStatusCommand::Change(expected)]
         );
+    }
+
+    #[test]
+    fn l036_console_script_strictness_matches_native_tokens_and_reaches_packets() {
+        use lc_engine::ScriptStrictness::{NonStrict, Strict1, Strict2, Strict3};
+
+        for (config, expected) in [
+            ("[Developer]\nConsoleScriptStrictness=NonStrict\n", NonStrict),
+            ("[Developer]\nConsoleScriptStrictness=Strict1\n", Strict1),
+            ("[Developer]\nConsoleScriptStrictness=Strict2\n", Strict2),
+            ("[Developer]\nConsoleScriptStrictness=Strict3\n", Strict3),
+            ("[Developer]\nConsoleScriptStrictness=MaxStrict\n", Strict3),
+            ("[Developer]\n", Strict3),
+            ("[Developer]\nConsoleScriptStrictness=0\n", NonStrict),
+            ("[Developer]\nConsoleScriptStrictness=1\n", Strict1),
+            ("[Developer]\nConsoleScriptStrictness=2\n", Strict2),
+            ("[Developer]\nConsoleScriptStrictness=3\n", Strict3),
+            ("[Developer]\nConsoleScriptStrictness=4\n", Strict3),
+            ("[Developer]\nConsoleScriptStrictness=254\n", Strict3),
+            ("[Developer]\nConsoleScriptStrictness=255\n", Strict3),
+            ("[Developer]\nConsoleScriptStrictness=256\n", Strict3),
+            ("[Developer]\nConsoleScriptStrictness=-1\n", Strict3),
+            ("[Developer]\nConsoleScriptStrictness=+2\n", Strict2),
+            ("[Developer]\nConsoleScriptStrictness=02\n", Strict2),
+            ("[Developer]\nConsoleScriptStrictness=0x2\n", Strict2),
+            ("[Developer]\nConsoleScriptStrictness=2suffix\n", Strict2),
+            ("[Developer]\nConsoleScriptStrictness=-0\n", NonStrict),
+            ("[Developer]\nConsoleScriptStrictness=\"Strict2\"\n", Strict3),
+            ("[Developer]\nConsoleScriptStrictness =Strict2\n", Strict3),
+            ("[Developer]\nConsoleScriptStrictness= Strict2\n", Strict2),
+            (
+                "[Developer]\nConsoleScriptStrictness=Strict2 # comment\n",
+                Strict2,
+            ),
+        ] {
+            assert_eq!(
+                configured_console_script_strictness(config.as_bytes()),
+                expected,
+                "config {config:?}"
+            );
+        }
+        let wide_unsigned_long = std::mem::size_of::<std::os::raw::c_ulong>() > 4;
+        for (value, expected) in [
+            (
+                "4294967296",
+                if wide_unsigned_long { NonStrict } else { Strict3 },
+            ),
+            (
+                "4294967298",
+                if wide_unsigned_long { Strict2 } else { Strict3 },
+            ),
+        ] {
+            let config = format!("[Developer]\nConsoleScriptStrictness={value}\n");
+            assert_eq!(
+                configured_console_script_strictness(config.as_bytes()),
+                expected,
+                "native unsigned-long conversion for {value}"
+            );
+        }
+
+        let _lock = env_lock().lock();
+        let fixture = tempdir().expect("console strictness configuration");
+        let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+        fs::write(
+            paths.config_file(),
+            b"[Developer]\nConsoleScriptStrictness=Strict2\n",
+        )
+        .expect("write exact console strictness config");
+
+        let mut app = new_state_only_running_sandbox_app();
+        app.app_paths = Some(paths);
+        app.engine.set_debug_mode(true);
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host")]);
+
+        app.process_running_chat_text("/script return 1");
+
+        let decided = commands.take_submitted_decided_controls();
+        let [(_, lc_engine::ControlPacket::Script(script), _)] = decided.as_slice() else {
+            panic!("expected one script command, got {decided:?}");
+        };
+        assert_eq!(script.strictness, Strict2);
     }
 
     #[test]
