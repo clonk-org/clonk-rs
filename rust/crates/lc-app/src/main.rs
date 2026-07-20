@@ -47555,6 +47555,11 @@ impl GameApp {
         let default_crew_icon = self.staged_network_host_scenario.as_ref().map(|staged| {
             lc_frontend::classic_gui::blacken_transparent_pixels(&staged.default_crew_icon)
         });
+        let replay = self
+            .staged_network_host_scenario
+            .as_ref()
+            .and_then(|staged| staged.scenario.lobby_metadata())
+            .is_some_and(|metadata| metadata.head().is_replay());
         let (_, retained) = self.control_player_infos.retained_rows_snapshot();
         let retained_players = retained
             .iter()
@@ -47768,6 +47773,42 @@ impl GameApp {
             }
         }
 
+        if replay {
+            rows.push(LobbyRosterRow::Header(LobbyHeaderRow {
+                kind: LobbyRosterHeader::ReplayPlayers,
+                label: self.runtime_resource_text("IDS_MSG_REPLAYPLRS", "Replay players"),
+                icon: LobbyRosterIcon::Standard(21),
+                can_add_player: false,
+            }));
+            // C++ first constructs every visible replay row with client -1.
+            // UpdateScriptPlayers then moves each active script row by its
+            // semantic ID, retaining that client ownership; removed scripts
+            // stay in the replay group.
+            let mut replay_players = retained_players
+                .iter()
+                .filter(|(_, player)| {
+                    player.id > 0
+                        && player.flags & lc_engine::PLAYER_INFO_FLAG_INVISIBLE == 0
+                        && !(player.is_script_player()
+                            && player.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED == 0)
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            replay_players.sort_by_key(|(_, player)| player.id);
+            rows.extend(
+                replay_players
+                    .into_iter()
+                    .map(|(_, player)| {
+                        player_row(
+                            -1,
+                            player,
+                            restore_player(player.savegame_player),
+                            true,
+                        )
+                    }),
+            );
+        }
+
         let script_players = retained_players
             .iter()
             .filter(|(_, player)| player.is_script_player() && is_visible(player))
@@ -47791,7 +47832,7 @@ impl GameApp {
             }));
             rows.extend(script_players.into_iter().map(|(client_id, player)| {
                 player_row(
-                    client_id,
+                    if replay { -1 } else { client_id },
                     player,
                     restore_player(player.savegame_player),
                     true,
@@ -47815,19 +47856,21 @@ impl GameApp {
             resource_progress: None,
             ping_ms: None,
         }));
-        rows.extend(
-            retained_players
-                .into_iter()
-                .filter(|(_, player)| !player.is_script_player() && is_visible(player))
-                .map(|(client_id, player)| {
-                    player_row(
-                        client_id,
-                        player,
-                        restore_player(player.savegame_player),
-                        true,
-                    )
-                }),
-        );
+        if !replay {
+            rows.extend(
+                retained_players
+                    .into_iter()
+                    .filter(|(_, player)| !player.is_script_player() && is_visible(player))
+                    .map(|(client_id, player)| {
+                        player_row(
+                            client_id,
+                            player,
+                            restore_player(player.savegame_player),
+                            true,
+                        )
+                    }),
+            );
+        }
         (rows, active_players)
     }
 
@@ -49094,6 +49137,21 @@ impl GameApp {
             }
             _ => None,
         });
+        let mut rich_replay_rows = Vec::new();
+        let mut collecting_replay_rows = false;
+        for row in &rich_rows {
+            match row {
+                LobbyRosterRow::Header(header)
+                    if matches!(header.kind, LobbyRosterHeader::ReplayPlayers) =>
+                {
+                    collecting_replay_rows = true;
+                    rich_replay_rows.push(row.clone());
+                }
+                LobbyRosterRow::Client(_) if collecting_replay_rows => break,
+                _ if collecting_replay_rows => rich_replay_rows.push(row.clone()),
+                _ => {}
+            }
+        }
         let mut rich_restore_rows = Vec::new();
         let mut collecting_restore_rows = false;
         for row in &rich_rows {
@@ -49145,6 +49203,36 @@ impl GameApp {
                     label.clone_from(&random_team);
                 }
             }
+        }
+        if !rich_replay_rows.is_empty() && active_sheet == LobbySheet::Players {
+            let live_player_teams = rows
+                .iter()
+                .filter_map(|row| match row {
+                    LobbyRosterRow::Player(player) => Some((player.id, player.team.clone())),
+                    _ => None,
+                })
+                .collect::<BTreeMap<_, _>>();
+            for row in &mut rich_replay_rows {
+                let LobbyRosterRow::Player(player) = row else {
+                    continue;
+                };
+                if let Some(team) = live_player_teams.get(&player.id) {
+                    player.team.clone_from(team);
+                }
+            }
+            rows.retain(|row| matches!(row, LobbyRosterRow::Client(_)));
+            rich_replay_rows.extend(rows);
+            rows = rich_replay_rows;
+        } else if !rich_replay_rows.is_empty()
+            && active_sheet == LobbySheet::Teams
+            && teams.is_some_and(|teams| {
+                matches!(
+                    teams.team_distribution,
+                    lc_engine::InitialNetworkTeamDistribution::RandomInvisible
+                )
+            })
+        {
+            rows.clear();
         }
         let active_players = if has_rich_projection {
             rich_active_players
@@ -97104,6 +97192,132 @@ public func Grant(password) { return GainMissionAccess(password); }
             app.admission_resources.complete_path(resource.id).is_some(),
             "activated player resource is installed before lobby admission"
         );
+    }
+
+    #[test]
+    fn replay_staged_scenario_keeps_cpp_player_group_order_through_live_sync() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated replay-roster user data");
+        let content = tempdir().expect("minimal replay-roster content");
+        let frontend = install_minimal_prepared_host_fixture(content.path());
+        let scenario_path = frontend.path.clone().expect("fixture scenario path");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let mut staged = prepare_minimal_host_lobby(&app, frontend);
+
+        let core_path = scenario_path.join("Scenario.txt");
+        let core = fs::read_to_string(&core_path)
+            .expect("read regular staged scenario")
+            .replacen("[Head]\n", "[Head]\nReplay=1\n", 1);
+        fs::write(&core_path, core).expect("turn staged fixture into a replay");
+        let resolver = InstallDefinitionResolver::new(Some(Arc::new(paths.clone())));
+        staged.scenario = load_scenario_with_definition_load(
+            &scenario_path,
+            &resolver,
+            &startup_language_sequence(Some(&paths)),
+            &staged.definition_load,
+        )
+        .expect("reload replay-marked staged scenario");
+        assert!(staged
+            .scenario
+            .lobby_metadata()
+            .expect("reloaded lobby metadata")
+            .head()
+            .is_replay());
+        app.staged_network_host_scenario = Some(staged);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Exact Host".to_string(),
+            prepared: None,
+        }));
+        app.control_clients.replace_snapshot([
+            lc_engine::ClientCoreControlData {
+                client_id: 0,
+                activated: true,
+                name: LegacyCString::from_bytes(b"Exact Host".to_vec()).unwrap(),
+                ..Default::default()
+            },
+            lc_engine::ClientCoreControlData {
+                client_id: 7,
+                activated: true,
+                name: LegacyCString::from_bytes(b"Remote".to_vec()).unwrap(),
+                ..Default::default()
+            },
+        ]);
+        let player = |id, flags, player_type| lc_engine::ControlPlayerInfoEntry {
+            id,
+            flags,
+            player_type,
+            name: LegacyCString::from_bytes(format!("Player {id}").into_bytes()).unwrap(),
+            ..Default::default()
+        };
+        app.control_player_infos.replace_snapshot(
+            1,
+            [
+                lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    players: vec![
+                        player(30, 0, lc_engine::PLAYER_INFO_TYPE_USER),
+                        player(
+                            20,
+                            lc_engine::PLAYER_INFO_FLAG_INVISIBLE,
+                            lc_engine::PLAYER_INFO_TYPE_USER,
+                        ),
+                        player(40, 0, lc_engine::PLAYER_INFO_TYPE_SCRIPT),
+                    ],
+                    ..Default::default()
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    players: vec![
+                        player(10, 0, lc_engine::PLAYER_INFO_TYPE_USER),
+                        player(
+                            5,
+                            lc_engine::PLAYER_INFO_FLAG_REMOVED,
+                            lc_engine::PLAYER_INFO_TYPE_USER,
+                        ),
+                    ],
+                    ..Default::default()
+                },
+            ],
+        );
+        install_test_classic_host_lobby(&mut app);
+
+        app.sync_classic_lobby_roster();
+
+        let rows = app
+            .classic_host_lobby
+            .as_ref()
+            .expect("live classic lobby")
+            .controller
+            .rows();
+        assert_eq!(
+            rows.iter().map(LobbyRosterRow::id).collect::<Vec<_>>(),
+            vec![
+                LobbyRosterId::Header(LobbyRosterHeader::ReplayPlayers),
+                LobbyRosterId::Player(5),
+                LobbyRosterId::Player(10),
+                LobbyRosterId::Player(30),
+                LobbyRosterId::Header(LobbyRosterHeader::ScriptPlayers),
+                LobbyRosterId::Player(40),
+                LobbyRosterId::Client(0),
+                LobbyRosterId::Client(7),
+            ]
+        );
+        let LobbyRosterRow::Header(replay_header) = &rows[0] else {
+            panic!("replay roster starts with its header");
+        };
+        assert_eq!(replay_header.label, "Replay players");
+        assert_eq!(replay_header.icon, LobbyRosterIcon::Standard(21));
+        assert!(!replay_header.can_add_player);
+        assert!(rows.iter().filter_map(|row| match row {
+            LobbyRosterRow::Player(player) => Some(player),
+            _ => None,
+        }).all(|player| player.client_id == -1));
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, LobbyRosterRow::Player(player) if player.id == 20)));
+        reset_cached_app_paths();
     }
 
     #[test]
