@@ -29,7 +29,9 @@ use lc_network::{
 };
 #[cfg(test)]
 use lc_network::start_host;
-pub use lc_network::{RuntimeNetworkClientState, RuntimeNetworkConnection};
+pub use lc_network::{
+    RuntimeLobbyClientTelemetry, RuntimeNetworkClientState, RuntimeNetworkConnection,
+};
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -938,6 +940,8 @@ pub struct NetworkManager {
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
     #[cfg(test)]
     test_runtime_client_states: Arc<Mutex<Vec<RuntimeNetworkClientState>>>,
+    #[cfg(test)]
+    test_lobby_client_telemetry: Arc<Mutex<Option<RuntimeLobbyClientTelemetry>>>,
 }
 
 const MASTERSERVER_SIGNUP_PENDING: u8 = 0;
@@ -2081,6 +2085,10 @@ enum NetworkCommand {
     InspectRuntimeConnections {
         completion: Sender<std::result::Result<Vec<RuntimeNetworkConnection>, String>>,
     },
+    InspectLobbyClientTelemetry {
+        client_ids: Vec<ClientId>,
+        completion: Sender<std::result::Result<RuntimeLobbyClientTelemetry, String>>,
+    },
     InspectRuntimeClientStates {
         tick: Tick,
         probe: Option<ControlTickProbe>,
@@ -2410,6 +2418,8 @@ impl NetworkManager {
             league_record_runtime: ready.league_record_runtime,
             #[cfg(test)]
             test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -2434,6 +2444,49 @@ impl NetworkManager {
             .recv()
             .map_err(|_| anyhow!("network worker ended before returning live connections"))?
             .map_err(|message| anyhow!(message))
+    }
+
+    pub fn lobby_client_telemetry(
+        &self,
+        client_ids: Vec<ClientId>,
+    ) -> Result<RuntimeLobbyClientTelemetry> {
+        #[cfg(test)]
+        if self.worker.is_none() {
+            if let Some(mut telemetry) = self.test_lobby_client_telemetry.lock().clone() {
+                let requested = client_ids.into_iter().collect::<std::collections::HashSet<_>>();
+                telemetry
+                    .connections
+                    .retain(|connection| requested.contains(&connection.client_id));
+                telemetry
+                    .resource_progress
+                    .retain(|(client_id, _)| requested.contains(client_id));
+                return Ok(telemetry);
+            }
+        }
+        if self.worker.is_none() {
+            return Err(anyhow!(
+                "lobby client telemetry is unavailable without a network worker"
+            ));
+        }
+        let (completion, inspected) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::InspectLobbyClientTelemetry {
+                client_ids,
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting lobby telemetry inspection"))?;
+        inspected
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before returning lobby telemetry"))?
+            .map_err(|message| anyhow!(message))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_lobby_client_telemetry(
+        &self,
+        telemetry: RuntimeLobbyClientTelemetry,
+    ) {
+        *self.test_lobby_client_telemetry.lock() = Some(telemetry);
     }
 
     pub fn runtime_client_states(&self, tick: Tick) -> Result<Vec<RuntimeNetworkClientState>> {
@@ -3523,6 +3576,7 @@ impl NetworkManager {
                 league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
+                test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
             },
             event_tx,
         )
@@ -3552,6 +3606,7 @@ impl NetworkManager {
                 league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
+                test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
             },
             event_tx,
         )
@@ -3605,6 +3660,7 @@ impl NetworkManager {
                 league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
+                test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
             },
             event_tx,
             TestNetworkCommands { command_rx },
@@ -4478,6 +4534,23 @@ async fn run_host_worker(
                     NetworkCommand::InspectRuntimeConnections { completion } => {
                         let result = await_host_operation_while_forwarding_events(
                             host.runtime_connections(),
+                            &mut host_events,
+                            local_owner,
+                            &event_tx,
+                            &telemetry_tx,
+                            &mut player_info_echo_provenance,
+                            &netpuncher_state,
+                        )
+                        .await?
+                        .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
+                    NetworkCommand::InspectLobbyClientTelemetry {
+                        client_ids,
+                        completion,
+                    } => {
+                        let result = await_host_operation_while_forwarding_events(
+                            host.lobby_client_telemetry(client_ids),
                             &mut host_events,
                             local_owner,
                             &event_tx,
@@ -5560,6 +5633,9 @@ async fn run_client_worker(
                         NetworkCommand::InspectRuntimeConnections { completion } => {
                             let _ = completion.send(Err(unavailable.clone()));
                         }
+                        NetworkCommand::InspectLobbyClientTelemetry { completion, .. } => {
+                            let _ = completion.send(Err(unavailable.clone()));
+                        }
                         NetworkCommand::InspectRuntimeClientStates { completion, .. } => {
                             let _ = completion.send(Err(unavailable.clone()));
                         }
@@ -5624,6 +5700,26 @@ async fn run_client_worker(
                     NetworkCommand::InspectRuntimeConnections { completion } => {
                         let result = await_client_operation_while_forwarding_events(
                             client.runtime_connections(),
+                            &mut client_events,
+                            &mut client_status,
+                            &mut client_activation,
+                            &mut client_events_open,
+                            local_owner,
+                            client_id,
+                            &event_tx,
+                            &telemetry_tx,
+                            &netpuncher_state,
+                        )
+                        .await?
+                        .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
+                    NetworkCommand::InspectLobbyClientTelemetry {
+                        client_ids: lobby_client_ids,
+                        completion,
+                    } => {
+                        let result = await_client_operation_while_forwarding_events(
+                            client.lobby_client_telemetry(lobby_client_ids),
                             &mut client_events,
                             &mut client_status,
                             &mut client_activation,

@@ -620,6 +620,114 @@ fn cpp_resource_ids_use_client_high_word_and_shift_when_local_id_changes() {
 }
 
 #[test]
+fn cpp_client_progress_is_chunk_weighted_across_reported_nonremoved_resources() {
+    // GetClientProgress sums the peer's exact present/total chunks across all
+    // non-removed resources. Resource ID ownership does not participate, and
+    // resources without a status from this peer do not enter the denominator
+    // (src/C4Network2Res.cpp:1208-1222,1795-1806).
+    let mut catalog = ResourceCatalog::new(0);
+    for (resource_id, chunk_count) in [((2 << 16) | 1, 2), ((9 << 16) | 2, 8), ((7 << 16) | 3, 100)]
+    {
+        assert!(catalog.register(ResourceRegistration {
+            resource_id,
+            chunk_count,
+            binary_compatible: true,
+            loading: false,
+        }));
+    }
+
+    let peer_id = 7;
+    assert_eq!(
+        catalog.record_peer_status(
+            peer_id,
+            &ResourceStatusPacket {
+                resource_id: (2 << 16) | 1,
+                chunks: ResourceChunkAvailability {
+                    chunk_count: 2,
+                    ranges: vec![ResourceChunkRange {
+                        start: 0,
+                        length: 1,
+                    }],
+                },
+            },
+        ),
+        PeerStatusOutcome::Recorded
+    );
+    assert_eq!(
+        catalog.record_peer_status(
+            peer_id,
+            &ResourceStatusPacket {
+                resource_id: (9 << 16) | 2,
+                chunks: ResourceChunkAvailability {
+                    chunk_count: 8,
+                    ranges: vec![ResourceChunkRange {
+                        start: 0,
+                        length: 2,
+                    }],
+                },
+            },
+        ),
+        PeerStatusOutcome::Recorded
+    );
+
+    assert_eq!(catalog.client_progress(peer_id), 30);
+    assert!(catalog.remove_resource((9 << 16) | 2));
+    assert_eq!(catalog.client_progress(peer_id), 50);
+}
+
+#[test]
+fn cpp_client_progress_defaults_to_complete_and_is_isolated_per_peer() {
+    let mut catalog = ResourceCatalog::new(0);
+    assert_eq!(catalog.client_progress(5), 100);
+    assert!(catalog.register(ResourceRegistration {
+        resource_id: 20,
+        chunk_count: 0,
+        binary_compatible: true,
+        loading: false,
+    }));
+    assert_eq!(
+        catalog.record_peer_status(
+            5,
+            &ResourceStatusPacket {
+                resource_id: 20,
+                chunks: ResourceChunkAvailability {
+                    chunk_count: 0,
+                    ranges: Vec::new(),
+                },
+            },
+        ),
+        PeerStatusOutcome::Recorded
+    );
+    assert_eq!(catalog.client_progress(5), 100);
+
+    assert!(catalog.register(ResourceRegistration {
+        resource_id: 21,
+        chunk_count: 4,
+        binary_compatible: true,
+        loading: false,
+    }));
+    for (peer_id, length) in [(5, 4), (9, 1)] {
+        assert_eq!(
+            catalog.record_peer_status(
+                peer_id,
+                &ResourceStatusPacket {
+                    resource_id: 21,
+                    chunks: ResourceChunkAvailability {
+                        chunk_count: 4,
+                        ranges: vec![ResourceChunkRange { start: 0, length }],
+                    },
+                },
+            ),
+            PeerStatusOutcome::Recorded
+        );
+    }
+
+    assert_eq!(catalog.client_progress(5), 100);
+    assert_eq!(catalog.client_progress(9), 25);
+    assert_eq!(catalog.client_progress(11), 100);
+}
+
+#[test]
 fn cpp_timer_broadcasts_discovery_each_second_and_dirty_status_once() {
     // OnTimer emits discovery when at least one non-removed resource exists
     // and >=1 second elapsed. Dirty resources also emit status, and SendStatus

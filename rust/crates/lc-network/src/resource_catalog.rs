@@ -746,6 +746,35 @@ impl ResourceCatalog {
         })
     }
 
+    /// Returns one peer's chunk-weighted progress across every non-removed
+    /// resource for which that peer has reported status. With no reported
+    /// chunks, C++ treats the peer as complete.
+    pub fn client_progress(&self, peer_id: i32) -> u8 {
+        let (present_chunks, total_chunks) = self
+            .resources
+            .iter()
+            .filter(|resource| !resource.removed)
+            .filter_map(|resource| {
+                resource
+                    .peer_chunks
+                    .iter()
+                    .find(|peer| peer.peer_id == peer_id)
+                    .map(|peer| &peer.chunks)
+            })
+            .fold((0_i64, 0_i64), |(present, total), chunks| {
+                (
+                    present + i64::from(chunks.present_chunk_count()),
+                    total + i64::from(chunks.chunk_count()),
+                )
+            });
+
+        if total_chunks == 0 {
+            100
+        } else {
+            (present_chunks * 100 / total_chunks).clamp(0, 100) as u8
+        }
+    }
+
     /// Starts one request using the already-bounded result of C++
     /// `SafeRandom(eligible_chunk_count)` as `random_choice`.
     pub fn schedule_request(

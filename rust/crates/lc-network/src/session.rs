@@ -78,6 +78,14 @@ pub struct RuntimeNetworkConnection {
     pub ping_ms: i32,
 }
 
+/// One atomic lobby snapshot of selected transport routes and each requested
+/// remote client's chunk-weighted resource availability.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeLobbyClientTelemetry {
+    pub connections: Vec<RuntimeNetworkConnection>,
+    pub resource_progress: Vec<(ClientId, u8)>,
+}
+
 /// Receiver-side state used by the in-game network client list.
 ///
 /// `wait_ms` mirrors `C4GameControlClient::getPerfStat`: it is the signed
@@ -769,6 +777,10 @@ pub enum HostCommand {
     InspectRuntimeConnections {
         completion: oneshot::Sender<Vec<RuntimeNetworkConnection>>,
     },
+    InspectLobbyClientTelemetry {
+        client_ids: Vec<ClientId>,
+        completion: oneshot::Sender<RuntimeLobbyClientTelemetry>,
+    },
     DisconnectRuntimeConnection {
         connection_id: u32,
         completion: oneshot::Sender<bool>,
@@ -1077,6 +1089,21 @@ impl HostHandle {
         let (completion, inspected) = oneshot::channel();
         self.command_tx
             .send(HostCommand::InspectRuntimeConnections { completion })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        inspected.await.map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn lobby_client_telemetry(
+        &self,
+        client_ids: Vec<ClientId>,
+    ) -> Result<RuntimeLobbyClientTelemetry, HostError> {
+        let (completion, inspected) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::InspectLobbyClientTelemetry {
+                client_ids,
+                completion,
+            })
             .await
             .map_err(|_| HostError::HostLoopGone)?;
         inspected.await.map_err(|_| HostError::HostLoopGone)
@@ -3217,6 +3244,10 @@ pub enum ClientCommand {
     InspectRuntimeConnections {
         completion: oneshot::Sender<Vec<RuntimeNetworkConnection>>,
     },
+    InspectLobbyClientTelemetry {
+        client_ids: Vec<ClientId>,
+        completion: oneshot::Sender<RuntimeLobbyClientTelemetry>,
+    },
     DisconnectRuntimeConnection {
         connection_id: u32,
         completion: oneshot::Sender<bool>,
@@ -3442,6 +3473,21 @@ impl ClientHandle {
         let (completion, inspected) = oneshot::channel();
         self.command_tx
             .send(ClientCommand::InspectRuntimeConnections { completion })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        inspected.await.map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn lobby_client_telemetry(
+        &self,
+        client_ids: Vec<ClientId>,
+    ) -> Result<RuntimeLobbyClientTelemetry, ClientError> {
+        let (completion, inspected) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::InspectLobbyClientTelemetry {
+                client_ids,
+                completion,
+            })
             .await
             .map_err(|_| ClientError::ClientLoopGone)?;
         inspected.await.map_err(|_| ClientError::ClientLoopGone)
@@ -4595,6 +4641,23 @@ fn host_runtime_connections(state: &HostState) -> Vec<RuntimeNetworkConnection> 
         .collect()
 }
 
+fn runtime_lobby_client_telemetry(
+    connections: Vec<RuntimeNetworkConnection>,
+    catalog: &crate::ResourceCatalog,
+    client_ids: Vec<ClientId>,
+) -> RuntimeLobbyClientTelemetry {
+    RuntimeLobbyClientTelemetry {
+        connections,
+        resource_progress: client_ids
+            .into_iter()
+            .map(|client_id| {
+                let peer_id = i32::try_from(client_id).unwrap_or(i32::MAX);
+                (client_id, catalog.client_progress(peer_id))
+            })
+            .collect(),
+    }
+}
+
 fn host_runtime_client_states(
     state: &HostState,
     tick: Tick,
@@ -5518,6 +5581,22 @@ async fn run_host(
                     }
                     HostCommand::InspectRuntimeConnections { completion } => {
                         let _ = completion.send(host_runtime_connections(&state));
+                    }
+                    HostCommand::InspectLobbyClientTelemetry {
+                        client_ids,
+                        completion,
+                    } => {
+                        let catalog = state
+                            .resource_backend
+                            .as_ref()
+                            .map(crate::ResourceTransferBackend::catalog)
+                            .unwrap_or(&state.resource_catalog);
+                        let telemetry = runtime_lobby_client_telemetry(
+                            host_runtime_connections(&state),
+                            catalog,
+                            client_ids,
+                        );
+                        let _ = completion.send(telemetry);
                     }
                     HostCommand::DisconnectRuntimeConnection {
                         connection_id,
@@ -9769,6 +9848,22 @@ async fn run_client_loop_with_routes(
                     ClientCommand::InspectRuntimeConnections { completion } => {
                         let _ = completion.send(transport.runtime_connections());
                     }
+                    ClientCommand::InspectLobbyClientTelemetry {
+                        client_ids,
+                        completion,
+                    } => {
+                        let catalog = resource_state
+                            .backend
+                            .as_ref()
+                            .map(crate::ResourceTransferBackend::catalog)
+                            .unwrap_or(&resource_state.catalog);
+                        let telemetry = runtime_lobby_client_telemetry(
+                            transport.runtime_connections(),
+                            catalog,
+                            client_ids,
+                        );
+                        let _ = completion.send(telemetry);
+                    }
                     ClientCommand::DisconnectRuntimeConnection {
                         connection_id,
                         completion,
@@ -13008,6 +13103,41 @@ mod tests {
         assert_eq!(client_connections[0].usage, "Data/Msg");
         assert_eq!(client_connections[0].protocol, crate::NetworkProtocol::Tcp);
         assert!(client_connections[0].peer_address.is_some());
+
+        let host_lobby_telemetry = host
+            .lobby_client_telemetry(vec![client.client_id()])
+            .await
+            .unwrap();
+        assert_eq!(
+            host_lobby_telemetry
+                .connections
+                .iter()
+                .map(|connection| (connection.client_id, connection.usage.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(client.client_id(), "Data/Msg")]
+        );
+        assert_eq!(
+            host_lobby_telemetry.resource_progress,
+            vec![(client.client_id(), 100)],
+            "no peer resource status is native-complete"
+        );
+
+        let client_lobby_telemetry = client
+            .lobby_client_telemetry(vec![HOST_CLIENT_ID])
+            .await
+            .unwrap();
+        assert_eq!(
+            client_lobby_telemetry
+                .connections
+                .iter()
+                .map(|connection| (connection.client_id, connection.usage.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(HOST_CLIENT_ID, "Data/Msg")]
+        );
+        assert_eq!(
+            client_lobby_telemetry.resource_progress,
+            vec![(HOST_CLIENT_ID, 100)]
+        );
 
         client
             .disconnect_runtime_connection(client_connections[0].connection_id)

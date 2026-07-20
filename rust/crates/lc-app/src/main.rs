@@ -9285,6 +9285,101 @@ fn lobby_rgba(color: u32) -> [u8; 4] {
     ]
 }
 
+/// Reduce the selected message/data route snapshot to the value displayed by
+/// `C4PlayerInfoListBox::ClientListItem::UpdatePing`.
+///
+/// Native prefers a positive message-connection lag. It consults the data
+/// connection only when the message connection is absent or reports `<= 0`;
+/// this is deliberately not a minimum of both routes. `-1` removes the ping
+/// label, while zero remains a visible `0 ms` value.
+fn classic_lobby_client_ping_ms_by_id(
+    connections: &[lc_network::RuntimeNetworkConnection],
+    local_client_id: ClientId,
+) -> BTreeMap<ClientId, i32> {
+    #[derive(Default)]
+    struct ClientConnections {
+        message: Option<i32>,
+        data: Option<i32>,
+    }
+
+    let mut by_client = BTreeMap::<ClientId, ClientConnections>::new();
+    for connection in connections {
+        if connection.client_id == local_client_id {
+            continue;
+        }
+        let client = by_client.entry(connection.client_id).or_default();
+        match connection.usage.as_str() {
+            "Data/Msg" => {
+                client.message = Some(connection.ping_ms);
+                client.data = Some(connection.ping_ms);
+            }
+            "Msg" => client.message = Some(connection.ping_ms),
+            "Data" => client.data = Some(connection.ping_ms),
+            _ => {}
+        }
+    }
+
+    by_client
+        .into_iter()
+        .filter_map(|(client_id, connections)| {
+            let mut ping_ms = connections.message.unwrap_or(-1);
+            if ping_ms <= 0 {
+                if let Some(data_ping_ms) = connections.data {
+                    ping_ms = data_ping_ms;
+                }
+            }
+            (ping_ms != -1).then_some((client_id, ping_ms))
+        })
+        .collect()
+}
+
+fn apply_classic_lobby_client_telemetry(
+    rows: &mut [LobbyRosterRow],
+    local_client_id: ClientId,
+    telemetry: &lc_network::RuntimeLobbyClientTelemetry,
+) -> bool {
+    let connected_clients = telemetry
+        .connections
+        .iter()
+        .map(|connection| connection.client_id)
+        .collect::<HashSet<_>>();
+    let ping_by_client =
+        classic_lobby_client_ping_ms_by_id(&telemetry.connections, local_client_id);
+    let progress_by_client = telemetry
+        .resource_progress
+        .iter()
+        .copied()
+        .collect::<BTreeMap<_, _>>();
+    let mut changed = false;
+
+    for row in rows {
+        let LobbyRosterRow::Client(client) = row else {
+            continue;
+        };
+        let Ok(client_id) = ClientId::try_from(client.id) else {
+            continue;
+        };
+        let local = client_id == local_client_id;
+        let connected = !local && connected_clients.contains(&client_id);
+        let ping_ms = connected
+            .then(|| ping_by_client.get(&client_id).copied())
+            .flatten();
+        let resource_progress = connected
+            .then(|| progress_by_client.get(&client_id).copied())
+            .flatten();
+        if client.connected != connected
+            || client.ping_ms != ping_ms
+            || client.resource_progress != resource_progress
+        {
+            client.connected = connected;
+            client.ping_ms = ping_ms;
+            client.resource_progress = resource_progress;
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn classic_lobby_roster_projection(
     clients: &ControlClientRegistry,
     player_infos: &ControlPlayerInfoRegistry,
@@ -13328,6 +13423,7 @@ struct NetworkLobbyState {
     /// Authoritative PlayerInfo projection shared with the host's persistent
     /// controller so peer lobbies converge after the same direct control.
     roster_rows: Vec<LobbyRosterRow>,
+    client_telemetry: lc_network::RuntimeLobbyClientTelemetry,
     max_players: i32,
     has_teams: bool,
     /// Construction-time snapshot of C4ChatDlg::IsChatActive(). The native
@@ -13601,6 +13697,7 @@ impl NetworkLobbyState {
         Self {
             participants,
             roster_rows: Vec::new(),
+            client_telemetry: lc_network::RuntimeLobbyClientTelemetry::default(),
             max_players: 1,
             has_teams: false,
             has_external_chat: false,
@@ -13801,6 +13898,20 @@ impl NetworkLobbyState {
         }
     }
 
+    fn set_client_telemetry(
+        &mut self,
+        telemetry: lc_network::RuntimeLobbyClientTelemetry,
+    ) -> bool {
+        let mut changed = self.client_telemetry != telemetry;
+        self.client_telemetry = telemetry;
+        changed |= apply_classic_lobby_client_telemetry(
+            &mut self.roster_rows,
+            self.local_client_id,
+            &self.client_telemetry,
+        );
+        changed
+    }
+
     fn classic_render_state(
         &mut self,
         surface: &Surface,
@@ -13818,7 +13929,8 @@ impl NetworkLobbyState {
             LobbyRole::Client
         };
         let participant_rows = || {
-            self.participants
+            let mut rows = self
+                .participants
                 .iter()
                 .map(|(client_id, participant)| {
                 LobbyRosterRow::Client(LobbyClientRow {
@@ -13847,7 +13959,13 @@ impl NetworkLobbyState {
                     ping_ms: None,
                 })
             })
-            .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            apply_classic_lobby_client_telemetry(
+                &mut rows,
+                self.local_client_id,
+                &self.client_telemetry,
+            );
+            rows
         };
         let rows = if self.roster_rows.is_empty() {
             participant_rows()
@@ -44067,6 +44185,68 @@ impl GameApp {
         }
     }
 
+    fn refresh_classic_lobby_client_telemetry(&mut self) -> bool {
+        if self.classic_host_lobby.is_none() && self.network_lobby.is_none() {
+            return false;
+        }
+        let Some(network) = self.network.as_ref() else {
+            return false;
+        };
+        let local_client_id = network.local_client_id();
+        let mut client_ids = self
+            .classic_host_lobby
+            .as_ref()
+            .into_iter()
+            .flat_map(|lobby| lobby.controller.rows())
+            .chain(
+                self.network_lobby
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|lobby| lobby.roster_rows.iter()),
+            )
+            .filter_map(|row| match row {
+                LobbyRosterRow::Client(client) => ClientId::try_from(client.id).ok(),
+                _ => None,
+            })
+            .chain(
+                self.network_lobby
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|lobby| lobby.participants.keys().copied()),
+            )
+            .filter(|client_id| *client_id != local_client_id)
+            .collect::<Vec<_>>();
+        client_ids.sort_unstable();
+        client_ids.dedup();
+        if client_ids.is_empty() {
+            return false;
+        }
+        let telemetry = match network.lobby_client_telemetry(client_ids) {
+            Ok(telemetry) => telemetry,
+            Err(error) => {
+                tracing::debug!(%error, "classic lobby client telemetry is not available");
+                return false;
+            }
+        };
+
+        let mut changed = false;
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            let mut rows = lobby.controller.rows().to_vec();
+            if apply_classic_lobby_client_telemetry(
+                &mut rows,
+                local_client_id,
+                &telemetry,
+            ) {
+                lobby.controller.set_rows(rows);
+                changed = true;
+            }
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            changed |= lobby.set_client_telemetry(telemetry);
+        }
+        changed
+    }
+
     fn sync_classic_lobby_roster(&mut self) {
         self.submit_restart_restore_team_updates_for_new_roster_items();
         let active_sheet = self
@@ -44237,6 +44417,7 @@ impl GameApp {
             lobby.has_teams = has_teams;
         }
         self.close_stale_classic_lobby_team_combo();
+        self.refresh_classic_lobby_client_telemetry();
     }
 
     fn sync_visible_classic_lobby_resources(&mut self) {
@@ -54729,6 +54910,7 @@ impl GameApp {
         let ready_check_changed = self.tick_lobby_ready_check_prompt();
         let scale_test_changed = self.tick_options_scale_test_prompt();
         let lobby_options_changed = self.refresh_classic_lobby_options(false);
+        let lobby_client_telemetry_changed = self.refresh_classic_lobby_client_telemetry();
         let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
         let vote_timeout_changed = self.tick_host_league_vote_timeout_at(now);
         let before = self.engine.game_time();
@@ -54751,6 +54933,7 @@ impl GameApp {
             || ready_check_changed
             || scale_test_changed
             || lobby_options_changed
+            || lobby_client_telemetry_changed
             || vote_timeout_changed
             || client_list_changed
             || after != before)
@@ -93092,6 +93275,177 @@ public func Grant(password) { return GainMissionAccess(password); }
             .0
             .is_empty(),
             "the Random team header is created lazily only for a visible active-client player"
+        );
+    }
+
+    #[test]
+    fn classic_lobby_ping_prefers_positive_message_connection_over_data() {
+        let connection = |connection_id, client_id, usage: &str, ping_ms| {
+            lc_network::RuntimeNetworkConnection {
+                connection_id,
+                client_id,
+                usage: usage.to_string(),
+                protocol: lc_network::NetworkProtocol::Tcp,
+                peer_address: None,
+                packet_loss: 0,
+                ping_ms,
+            }
+        };
+        let pings = classic_lobby_client_ping_ms_by_id(
+            &[
+                connection(1, 7, "Msg", 70),
+                connection(2, 7, "Data", 20),
+            ],
+            0,
+        );
+
+        assert_eq!(pings.get(&7), Some(&70));
+    }
+
+    #[test]
+    fn classic_lobby_ping_uses_data_fallback_and_hides_only_minus_one_or_local() {
+        let connection = |connection_id, client_id, usage: &str, ping_ms| {
+            lc_network::RuntimeNetworkConnection {
+                connection_id,
+                client_id,
+                usage: usage.to_string(),
+                protocol: lc_network::NetworkProtocol::Tcp,
+                peer_address: None,
+                packet_loss: 0,
+                ping_ms,
+            }
+        };
+        let pings = classic_lobby_client_ping_ms_by_id(
+            &[
+                connection(1, 7, "Msg", 0),
+                connection(2, 7, "Data", 20),
+                connection(3, 8, "Data/Msg", 0),
+                connection(4, 9, "Msg", -1),
+                connection(5, 10, "Data", -1),
+                connection(6, 11, "Msg", 0),
+                connection(7, 11, "Data", -1),
+                connection(8, 12, "Data", 13),
+                connection(9, 42, "Data/Msg", 99),
+            ],
+            42,
+        );
+
+        assert_eq!(pings.get(&7), Some(&20));
+        assert_eq!(pings.get(&8), Some(&0), "zero is a visible ping");
+        assert!(!pings.contains_key(&9));
+        assert!(!pings.contains_key(&10));
+        assert!(
+            !pings.contains_key(&11),
+            "a present data route replaces a nonpositive message value"
+        );
+        assert_eq!(pings.get(&12), Some(&13));
+        assert!(!pings.contains_key(&42), "the local client has no ping label");
+    }
+
+    #[test]
+    fn classic_lobby_client_telemetry_refreshes_on_the_one_second_timer() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        let client_row = |id, name: &str| {
+            LobbyRosterRow::Client(LobbyClientRow {
+                id,
+                name: name.to_string(),
+                nick: String::new(),
+                color: [255, 255, 255, 255],
+                status: LobbyClientStatus::Client,
+                local: false,
+                connected: true,
+                resource_progress: None,
+                ping_ms: None,
+            })
+        };
+        let lobby = app.classic_host_lobby.as_mut().expect("test lobby");
+        let mut rows = lobby.controller.rows().to_vec();
+        rows.push(client_row(7, "Downloading"));
+        rows.push(client_row(8, "Disconnected"));
+        lobby.controller.set_rows(rows);
+
+        let (network, _events, _commands) = NetworkManager::test_stub_with_commands();
+        network.set_test_lobby_client_telemetry(lc_network::RuntimeLobbyClientTelemetry {
+            connections: vec![
+                lc_network::RuntimeNetworkConnection {
+                    connection_id: 1,
+                    client_id: 7,
+                    usage: "Msg".to_string(),
+                    protocol: lc_network::NetworkProtocol::Udp,
+                    peer_address: None,
+                    packet_loss: 0,
+                    ping_ms: 70,
+                },
+                lc_network::RuntimeNetworkConnection {
+                    connection_id: 2,
+                    client_id: 7,
+                    usage: "Data".to_string(),
+                    protocol: lc_network::NetworkProtocol::Tcp,
+                    peer_address: None,
+                    packet_loss: 0,
+                    ping_ms: 20,
+                },
+            ],
+            resource_progress: vec![(7, 30), (8, 25)],
+        });
+        app.network = Some(network);
+
+        assert!(app.sec1_timer().expect("refresh lobby telemetry"));
+        let clients = app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                LobbyRosterRow::Client(client) => Some((client.id, client)),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(clients[&0].ping_ms, None);
+        assert_eq!(clients[&0].resource_progress, None);
+        assert_eq!(clients[&7].ping_ms, Some(70));
+        assert_eq!(clients[&7].resource_progress, Some(30));
+        assert!(clients[&7].connected);
+        assert_eq!(clients[&8].ping_ms, None);
+        assert_eq!(clients[&8].resource_progress, None);
+        assert!(!clients[&8].connected);
+
+        app.network
+            .as_ref()
+            .unwrap()
+            .set_test_lobby_client_telemetry(lc_network::RuntimeLobbyClientTelemetry {
+                connections: vec![lc_network::RuntimeNetworkConnection {
+                    connection_id: 1,
+                    client_id: 7,
+                    usage: "Data/Msg".to_string(),
+                    protocol: lc_network::NetworkProtocol::Tcp,
+                    peer_address: None,
+                    packet_loss: 0,
+                    ping_ms: 15,
+                }],
+                resource_progress: vec![(7, 100)],
+            });
+        assert!(app.sec1_timer().expect("refresh completed resources"));
+        let completed = app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .rows()
+            .iter()
+            .find_map(|row| match row {
+                LobbyRosterRow::Client(client) if client.id == 7 => Some(client),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(completed.ping_ms, Some(15));
+        assert_eq!(
+            completed.resource_progress,
+            Some(100),
+            "native keeps the (100%) prefix while the remote remains connected"
         );
     }
 
