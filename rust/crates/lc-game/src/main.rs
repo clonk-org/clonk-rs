@@ -1907,7 +1907,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_config_honours_override_path() {
+    fn l005_prepare_config_and_app_paths_use_the_same_override_file() {
         let install_dir = TempDir::new().unwrap();
         let planet_dir = install_dir.path().join("planet");
         fs::create_dir_all(&planet_dir).unwrap();
@@ -1933,6 +1933,7 @@ mod tests {
         let config_path =
             prepare_config(&paths, &logger).expect("config preparation should succeed");
 
+        assert_eq!(paths.config_file(), override_path);
         assert_eq!(config_path, override_path);
         assert!(config_path.exists(), "override config file should exist");
         assert!(

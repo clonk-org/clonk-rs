@@ -27,6 +27,7 @@ pub struct AppPaths {
     system_group: PathBuf,
     content_dir: Option<PathBuf>,
     user_data_dir: PathBuf,
+    config_file: PathBuf,
     cache_dir: PathBuf,
     logs_dir: PathBuf,
     temp_dir: PathBuf,
@@ -34,12 +35,29 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn discover() -> Result<Self, PathsError> {
+        Self::discover_with_config_file(None)
+    }
+
+    /// Discovers application paths while accepting the command-line config
+    /// candidate. The process-wide `LC_CONFIG_FILE` override intentionally
+    /// takes precedence, matching `C4Config::Load`.
+    pub fn discover_with_config_file(
+        explicit_config_file: Option<&Path>,
+    ) -> Result<Self, PathsError> {
         let install_root = discover_install_root()?;
         let user_data_dir = discover_user_data_dir(&install_root);
+        let config_file = discover_config_file(&user_data_dir, explicit_config_file);
         let cache_dir = discover_cache_dir(&user_data_dir);
         let logs_dir = discover_logs_dir(&user_data_dir);
         let temp_dir = discover_temp_dir();
-        build_paths(install_root, user_data_dir, cache_dir, logs_dir, temp_dir)
+        build_paths(
+            install_root,
+            user_data_dir,
+            config_file,
+            cache_dir,
+            logs_dir,
+            temp_dir,
+        )
     }
 
     pub fn install_root(&self) -> &Path {
@@ -79,7 +97,7 @@ impl AppPaths {
     }
 
     pub fn config_file(&self) -> PathBuf {
-        self.config_dir().join(CONFIG_FILE_NAME)
+        self.config_file.clone()
     }
 
     pub fn recordings_dir(&self) -> PathBuf {
@@ -97,6 +115,13 @@ impl AppPaths {
     pub fn ensure_user_dirs(&self) -> std::io::Result<()> {
         fs::create_dir_all(&self.user_data_dir)?;
         fs::create_dir_all(self.config_dir())?;
+        if let Some(parent) = self
+            .config_file
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
         fs::create_dir_all(self.cache_dir())?;
         fs::create_dir_all(&self.logs_dir)?;
         Ok(())
@@ -106,6 +131,7 @@ impl AppPaths {
 fn build_paths(
     install_root: PathBuf,
     user_data_dir: PathBuf,
+    config_file: PathBuf,
     cache_dir: PathBuf,
     logs_dir: PathBuf,
     temp_dir: PathBuf,
@@ -122,6 +148,7 @@ fn build_paths(
         system_group,
         content_dir,
         user_data_dir,
+        config_file,
         cache_dir,
         logs_dir,
         temp_dir,
@@ -199,6 +226,12 @@ fn discover_cache_dir(user_data_dir: &Path) -> PathBuf {
         return cache;
     }
     user_data_dir.join("Cache")
+}
+
+fn discover_config_file(user_data_dir: &Path, explicit_config_file: Option<&Path>) -> PathBuf {
+    env_path("LC_CONFIG_FILE")
+        .or_else(|| explicit_config_file.map(Path::to_path_buf))
+        .unwrap_or_else(|| user_data_dir.join("Config").join(CONFIG_FILE_NAME))
 }
 
 fn discover_logs_dir(user_data_dir: &Path) -> PathBuf {
@@ -319,6 +352,7 @@ mod tests {
 
     #[test]
     fn config_file_is_nested_under_config_dir() {
+        let _guard = EnvGuard::set(&[("LC_CONFIG_FILE", None)]);
         let paths = AppPaths::discover().unwrap();
         let config_file = paths.config_file();
         let config_dir = paths.config_dir();
@@ -345,6 +379,7 @@ mod tests {
         let paths = super::build_paths(
             install_dir.path().to_path_buf(),
             user_dir.clone(),
+            user_dir.join("Config").join(CONFIG_FILE_NAME),
             cache_dir.clone(),
             logs_dir.clone(),
             temp_dir.clone(),
@@ -356,6 +391,44 @@ mod tests {
         assert_eq!(paths.logs_dir(), logs_dir);
         assert_eq!(paths.temp_dir(), temp_dir);
         assert!(paths.content_dir().is_none());
+    }
+
+    #[test]
+    fn l005_environment_config_file_precedes_explicit_candidate() {
+        let install_dir = TempDir::new().unwrap();
+        touch_system_group(&install_dir);
+        let user_dir = TempDir::new().unwrap();
+        let override_dir = TempDir::new().unwrap();
+        let environment_file = override_dir.path().join("environment.config");
+        let explicit_file = override_dir.path().join("explicit.config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+            ("LC_CONFIG_FILE", Some(environment_file.as_path())),
+        ]);
+
+        let paths = AppPaths::discover_with_config_file(Some(&explicit_file)).unwrap();
+
+        assert_eq!(paths.config_file(), environment_file);
+    }
+
+    #[test]
+    fn l005_explicit_config_file_precedes_default_and_creates_its_parent() {
+        let install_dir = TempDir::new().unwrap();
+        touch_system_group(&install_dir);
+        let user_dir = TempDir::new().unwrap();
+        let explicit_file = user_dir.path().join("nested/custom.config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+            ("LC_CONFIG_FILE", None),
+        ]);
+
+        let paths = AppPaths::discover_with_config_file(Some(&explicit_file)).unwrap();
+        paths.ensure_user_dirs().unwrap();
+
+        assert_eq!(paths.config_file(), explicit_file);
+        assert!(explicit_file.parent().unwrap().is_dir());
     }
 
     #[test]

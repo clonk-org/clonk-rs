@@ -314,6 +314,13 @@ fn sprite_map_key(definition_id: &str, graphics_name: Option<&str>) -> String {
 #[command(name = "lc-app", about = "LegacyClonk Rust runtime", version)]
 struct Cli {
     #[arg(
+        long = "config",
+        value_name = "PATH",
+        help = "Use PATH for all configuration reads and writes"
+    )]
+    config_file: Option<std::path::PathBuf>,
+
+    #[arg(
         long = "test-load",
         value_name = "PATH",
         help = "Test scenario loading without starting the UI"
@@ -6468,7 +6475,7 @@ fn main() -> Result<()> {
     lc_logging::init();
 
     let cli = Cli::parse();
-    let app_paths = cached_app_paths().ok();
+    let app_paths = cached_app_paths_with_config_file(cli.config_file.as_deref()).ok();
     if let Some(paths) = app_paths.as_ref() {
         if let Err(err) = paths.ensure_user_dirs() {
             tracing::warn!(
@@ -18333,6 +18340,12 @@ fn apply_save_migrations(mut save: SavedGameFile) -> Result<SavedGameFile> {
 }
 
 fn cached_app_paths() -> std::result::Result<Arc<AppPaths>, PathsError> {
+    cached_app_paths_with_config_file(None)
+}
+
+fn cached_app_paths_with_config_file(
+    explicit_config_file: Option<&Path>,
+) -> std::result::Result<Arc<AppPaths>, PathsError> {
     #[cfg(test)]
     let _env_guard = crate::tests::env_lock().lock();
     let mut cache = APP_PATH_CACHE.lock().unwrap();
@@ -18340,7 +18353,8 @@ fn cached_app_paths() -> std::result::Result<Arc<AppPaths>, PathsError> {
         return result.clone();
     }
 
-    let discovered = AppPaths::discover().map(Arc::new);
+    let discovered =
+        AppPaths::discover_with_config_file(explicit_config_file).map(Arc::new);
     *cache = Some(discovered.clone());
     discovered
 }
@@ -89426,6 +89440,79 @@ func Award()
     pub(super) fn env_lock() -> &'static ReentrantMutex<()> {
         static LOCK: OnceLock<ReentrantMutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| ReentrantMutex::new(()))
+    }
+
+    #[test]
+    fn l005_cli_config_flag_selects_the_explicit_file() {
+        let install = tempdir().expect("install root");
+        let user_data = tempdir().expect("user data");
+        let custom = tempdir().expect("custom config root");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub")
+            .expect("system group stub");
+        let config_file = custom.path().join("command-line.config");
+        let cli = Cli::try_parse_from([
+            OsString::from("lc-app"),
+            OsString::from("--config"),
+            config_file.as_os_str().to_os_string(),
+        ])
+        .expect("parse --config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("LC_CONFIG_FILE", None),
+        ]);
+
+        let paths = cached_app_paths_with_config_file(cli.config_file.as_deref())
+            .expect("discover explicit config paths");
+
+        assert_eq!(paths.config_file(), config_file);
+    }
+
+    #[test]
+    fn l005_environment_config_file_routes_app_reads_and_writes() {
+        let install = tempdir().expect("install root");
+        let user_data = tempdir().expect("user data");
+        let custom = tempdir().expect("custom config root");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub")
+            .expect("system group stub");
+        let environment_file = custom.path().join("environment.config");
+        let command_line_file = custom.path().join("command-line.config");
+        let command_line_sentinel = b"[Graphics]\nResolutionX=321\nResolutionY=234\n";
+        fs::write(
+            &environment_file,
+            "[Graphics]\nResolutionX=777\nResolutionY=555\nScale=100\n",
+        )
+        .expect("environment config");
+        fs::write(&command_line_file, command_line_sentinel).expect("command-line sentinel");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("LC_CONFIG_FILE", Some(environment_file.as_path())),
+        ]);
+
+        let paths = cached_app_paths_with_config_file(Some(&command_line_file))
+            .expect("discover environment config paths");
+        paths.ensure_user_dirs().expect("prepare config parent");
+        let mut display = DisplayOptions::load(Some(&paths));
+        assert_eq!(display.actual_size(), (777, 555));
+        display.record_actual_size(888, 666);
+        display.persist_if_dirty(&paths);
+
+        let persisted = Config::load(&environment_file).expect("reload environment config");
+        assert_eq!(
+            persisted.get_in(Some("Graphics"), "ResolutionX"),
+            Some("888")
+        );
+        assert_eq!(
+            persisted.get_in(Some("Graphics"), "ResolutionY"),
+            Some("666")
+        );
+        assert_eq!(
+            fs::read(&command_line_file).expect("read untouched command-line config"),
+            command_line_sentinel
+        );
     }
 
     #[test]
