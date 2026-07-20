@@ -7,7 +7,7 @@ use crate::ast::{Function, Script as AstScript, VarDecl};
 use crate::debugger::DebuggerHooks;
 use crate::error::{ParseError, RuntimeError, ScriptError};
 use crate::parser::Parser;
-use crate::value::Value;
+use crate::value::{C4VType, Value};
 use crate::vm::{HostCallArg, ValueReference, Vm};
 
 pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync>;
@@ -563,6 +563,10 @@ pub struct Engine {
     owner_strict_level: Option<Option<u8>>,
     host_functions: HashMap<String, RegisteredHostFunction>,
     host_reference_functions: HashMap<String, HostReferenceFunction>,
+    /// Exact C++ `GetParType()` vectors for native registrations. An absent
+    /// entry keeps the public embedding API variadic; game natives always
+    /// install a vector, whose length is also their declared arity.
+    host_function_parameter_types: HashMap<String, Arc<[C4VType]>>,
     debugger_hooks: Option<DebuggerHooks>,
     var_decls: Vec<VarDecl>, // Script-level variable declarations (local variables)
     /// Engine script constants (RegisterGlobalConstant, C4Script.cpp:6581),
@@ -632,6 +636,7 @@ impl Engine {
             owner_strict_level: None,
             host_functions: HashMap::new(),
             host_reference_functions: HashMap::new(),
+            host_function_parameter_types: HashMap::new(),
             debugger_hooks: None,
             var_decls: Vec::new(),
             constants: HashMap::new(),
@@ -931,6 +936,7 @@ impl Engine {
         parameter_count: Option<usize>,
     ) {
         self.host_reference_functions.remove(&name);
+        self.host_function_parameter_types.remove(&name);
         let function = match parameter_count {
             Some(parameter_count) => RegisteredHostFunction::declared(func, parameter_count),
             None => RegisteredHostFunction::variadic(func),
@@ -938,11 +944,11 @@ impl Engine {
         self.host_functions.insert(name, function);
     }
 
-    /// Register a native function whose listed zero-based parameters receive
-    /// live script lvalues when the call expression supplies one. A declared
-    /// reference parameter passed a non-lvalue remains a readable value
-    /// argument with [`HostCallArg::is_reference`] false, matching C4Aul's
-    /// nullable `C4Value *` native parameters.
+    /// Register a host function whose listed zero-based parameters receive
+    /// live script lvalues when the call expression supplies one. Untyped
+    /// embedding callbacks may still inspect a non-lvalue through
+    /// [`HostCallArg::read`]; once a matching [`C4VType::Ref`] signature is
+    /// attached, native conversion rejects that non-reference before entry.
     pub fn register_host_reference_function<F, I>(
         &mut self,
         name: impl Into<String>,
@@ -954,6 +960,7 @@ impl Engine {
     {
         let name = name.into();
         self.host_functions.remove(&name);
+        self.host_function_parameter_types.remove(&name);
         self.host_reference_functions.insert(
             name,
             HostReferenceFunction::new(reference_parameters, None, func),
@@ -985,6 +992,7 @@ impl Engine {
         );
         let name = name.into();
         self.host_functions.remove(&name);
+        self.host_function_parameter_types.remove(&name);
         self.host_reference_functions.insert(
             name,
             HostReferenceFunction::new(reference_parameters, Some(parameter_count), func),
@@ -1004,6 +1012,53 @@ impl Engine {
             })
     }
 
+    /// Attach the complete C4V parameter signature to an already-registered
+    /// native function. The signature length is the native arity; each slot
+    /// is converted before the debugger or callback can observe the call.
+    ///
+    /// Returns `false` when `name` has no host registration.
+    pub fn set_host_function_parameter_types<I>(&mut self, name: &str, parameter_types: I) -> bool
+    where
+        I: IntoIterator<Item = C4VType>,
+    {
+        if !self.host_functions.contains_key(name)
+            && !self.host_reference_functions.contains_key(name)
+        {
+            return false;
+        }
+        let parameter_types = parameter_types.into_iter().collect::<Vec<_>>();
+        assert!(
+            parameter_types.len() <= 10,
+            "C4Aul native functions cannot declare more than 10 parameters"
+        );
+        if let Some(parameter_count) = self.host_function_parameter_count(name) {
+            assert_eq!(
+                parameter_types.len(),
+                parameter_count,
+                "native C4V signature length must match its declared parameter count"
+            );
+        }
+        let declared_references = parameter_types
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value_type)| (*value_type == C4VType::Ref).then_some(index))
+            .collect::<Vec<_>>();
+        if self.host_functions.contains_key(name) {
+            assert!(
+                declared_references.is_empty(),
+                "native Ref slots require a reference-aware host callback"
+            );
+        } else if let Some(function) = self.host_reference_functions.get(name) {
+            assert_eq!(
+                declared_references, function.reference_parameters,
+                "native C4V Ref slots must match the reference-aware registration"
+            );
+        }
+        self.host_function_parameter_types
+            .insert(name.to_string(), Arc::from(parameter_types));
+        true
+    }
+
     pub fn host_function_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .host_functions
@@ -1019,6 +1074,7 @@ impl Engine {
     pub fn clear_host_functions(&mut self) {
         self.host_functions.clear();
         self.host_reference_functions.clear();
+        self.host_function_parameter_types.clear();
     }
 
     /// Remove either native-host registration kind under `name`. The return
@@ -1026,6 +1082,7 @@ impl Engine {
     /// removing a reference-aware registration succeeds with `None`.
     pub fn remove_host_function(&mut self, name: &str) -> Option<HostFunction> {
         self.host_reference_functions.remove(name);
+        self.host_function_parameter_types.remove(name);
         self.host_functions
             .remove(name)
             .map(|function| function.callback)
@@ -1106,6 +1163,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
@@ -1139,6 +1197,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
@@ -1178,6 +1237,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
@@ -1222,6 +1282,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
@@ -1273,6 +1334,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
@@ -1310,6 +1372,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
@@ -1346,6 +1409,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
@@ -1382,6 +1446,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
@@ -1416,6 +1481,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
@@ -1450,6 +1516,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
@@ -1481,6 +1548,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
@@ -1534,6 +1602,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
@@ -1588,6 +1657,7 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())

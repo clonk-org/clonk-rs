@@ -50,6 +50,7 @@ mod test_method_dispatch;
 mod test_method_slot_assignment;
 mod test_multi_var_decl;
 mod test_native_host_arity;
+mod test_native_host_parameter_conversion;
 mod test_nil_coalescing;
 mod test_old_style_functions;
 mod test_param_type_annotation;

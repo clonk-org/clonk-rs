@@ -232,7 +232,12 @@ impl Default for EffectState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectCommand {
-    Add(EffectState),
+    Add {
+        effect: EffectState,
+        /// AddEffect's rVal1..4 constructor arguments. C++ forwards these to
+        /// Check/Start/Add but never stores them in EffectVars.
+        constructor_values: Option<[Value; 4]>,
+    },
     /// Number-keyed in-place update (EffectVar writes). Folding an
     /// Update whose number no longer exists is a NO-OP — a var write
     /// must never resurrect an effect the timer killed in the same
@@ -262,7 +267,20 @@ pub enum EffectCommand {
 
 impl EffectCommand {
     pub fn add(effect: EffectState) -> Self {
-        Self::Add(effect)
+        Self::Add {
+            effect,
+            constructor_values: None,
+        }
+    }
+
+    pub fn add_with_constructor_values(
+        effect: EffectState,
+        constructor_values: [Value; 4],
+    ) -> Self {
+        Self::Add {
+            effect,
+            constructor_values: Some(constructor_values),
+        }
     }
 
     pub fn update(effect: EffectState) -> Self {
@@ -343,13 +361,17 @@ pub enum EffectEventKind {
 pub struct EffectEvent {
     pub effect: EffectState,
     pub kind: EffectEventKind,
+    /// AddEffect's transient rVal1..4 payload. It follows the pending effect
+    /// through Check/Start/Add and never enters persistent EffectVars.
+    pub constructor_values: [Value; 4],
 }
 
 impl EffectEvent {
-    pub fn started(effect: EffectState) -> Self {
+    pub fn started(effect: EffectState, constructor_values: [Value; 4]) -> Self {
         Self {
             effect,
             kind: EffectEventKind::Started,
+            constructor_values,
         }
     }
 
@@ -357,20 +379,31 @@ impl EffectEvent {
         Self {
             effect,
             kind: EffectEventKind::Timer,
+            constructor_values: std::array::from_fn(|_| Value::Nil),
         }
     }
 
-    pub fn check(checker: EffectState, pending: EffectState) -> Self {
+    pub fn check(
+        checker: EffectState,
+        pending: EffectState,
+        constructor_values: [Value; 4],
+    ) -> Self {
         Self {
             effect: checker,
             kind: EffectEventKind::Check { pending },
+            constructor_values,
         }
     }
 
-    pub fn add_to(acceptor: EffectState, pending: EffectState) -> Self {
+    pub fn add_to(
+        acceptor: EffectState,
+        pending: EffectState,
+        constructor_values: [Value; 4],
+    ) -> Self {
         Self {
             effect: acceptor,
             kind: EffectEventKind::AddTo { pending },
+            constructor_values,
         }
     }
 
@@ -378,6 +411,7 @@ impl EffectEvent {
         Self {
             effect,
             kind: EffectEventKind::TempRemoved,
+            constructor_values: std::array::from_fn(|_| Value::Nil),
         }
     }
 
@@ -385,6 +419,7 @@ impl EffectEvent {
         Self {
             effect,
             kind: EffectEventKind::TempReadded,
+            constructor_values: std::array::from_fn(|_| Value::Nil),
         }
     }
 
@@ -392,6 +427,7 @@ impl EffectEvent {
         Self {
             effect,
             kind: EffectEventKind::Stopped(reason),
+            constructor_values: std::array::from_fn(|_| Value::Nil),
         }
     }
 }

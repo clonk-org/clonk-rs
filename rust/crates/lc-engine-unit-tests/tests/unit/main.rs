@@ -4465,13 +4465,15 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
             "incinerating object stored"
         );
 
-        // a ~FireMode script answer wins (C4Effect.cpp:611); an
-        // out-of-range answer falls back to Object mode (C4Effect.cpp:622-626).
+        // a ~FireMode script answer is read through C4Value::getInt
+        // (C4Effect.cpp:611). A raw Bool retains its full Data.Int payload;
+        // this out-of-range seven therefore falls back to Object mode
+        // (C4Effect.cpp:622-626), rather than being canonicalized to one.
         let hot_def = Definition::from_script(
             "Torch",
             "Torch",
             r#"
-            func FireMode() { return 3; }
+            func FireMode() { return CastBool(7); }
             "#,
         )
         .expect("script compiles");
@@ -4483,7 +4485,7 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
         assert_eq!(
             engine.objects[torch_idx].state.effects[0].vars()[0],
             EffectVarValue::Int(3),
-            "FireMode callback answer"
+            "out-of-range raw-Bool FireMode callback answer"
         );
 
         // refused incinerations leave no entry: a repeat is denied by the
@@ -4942,14 +4944,14 @@ func FxFireTimer(object target, int number, int time)
         // local same-name function is invisible there (C4Effect.cpp:31-56).
         // The burn only runs when the global overload chains via inherited.
         let mut engine = Engine::with_seed(43);
-        engine.register_definition(
-            Definition::from_script(
-                "BARN",
-                "Barn",
-                "#strict\nglobal func FxFireTimer(pObj, iNumber, iTime) { if (GetID(pObj) == BARN) return inherited(pObj, iNumber, iTime); return 0; }\n",
-            )
-            .expect("barn compiles"),
-        )?;
+        let mut barn_definition = Definition::from_script(
+            "BARN",
+            "Barn",
+            "#strict\nglobal func FxFireTimer(pObj, iNumber, iTime) { if (GetID(pObj) == BARN) return inherited(pObj, iNumber, iTime); return 0; }\n",
+        )
+        .expect("barn compiles");
+        barn_definition.set_c4_callback_convention(true);
+        engine.register_definition(barn_definition)?;
         engine.register_definition(
             Definition::from_script("SHED", "Shed", "").expect("shed compiles"),
         )?;
@@ -8890,7 +8892,7 @@ global func Step(state, frame, random)
     const EFFECT_HOST_SCRIPT: &str = r#"
     global func Initialize(state, random)
     {
-        if (!GetEffect("Glow", state))
+        if (!GetEffect("Glow", this()))
         {
             return { effects = [ { op = "add", name = "Glow", priority = 150, interval = 4 } ] };
         }
@@ -8905,12 +8907,12 @@ global func Step(state, frame, random)
         }
         if (frame == 2)
         {
-            var glow_number = GetEffect("Glow", state);
-            var glow_priority = GetEffect("Glow", state, 0, 2);
-            var spark_priority = GetEffect("Spark", state, 0, 2);
-            var interval = GetEffect("Glow", state, 0, 3);
-            var filtered = GetEffect("Glow", state, 0, 2, 100);
-            var allowed = GetEffect("Glow", state, 0, 2, 200);
+            var glow_number = GetEffect("Glow", this());
+            var glow_priority = GetEffect("Glow", this(), 0, 2);
+            var spark_priority = GetEffect("Spark", this(), 0, 2);
+            var interval = GetEffect("Glow", this(), 0, 3);
+            var filtered = GetEffect("Glow", this(), 0, 2, 100);
+            var allowed = GetEffect("Glow", this(), 0, 2, 200);
             if (filtered)
             {
                 return { energy = -1 };
@@ -8924,8 +8926,8 @@ global func Step(state, frame, random)
     const EFFECT_HOST_ADD_REMOVE_SCRIPT: &str = r#"
     global func Initialize(state, random)
     {
-        AddEffect("Glow", state, 120, 3);
-        AddEffect("Spark", state, 100);
+        AddEffect("Glow", this(), 120, 3);
+        AddEffect("Spark", this(), 100);
         return nil;
     }
 
@@ -8933,14 +8935,14 @@ global func Step(state, frame, random)
     {
         if (frame == 1)
         {
-            RemoveEffect("Glow", state);
+            RemoveEffect("Glow", this());
         }
         if (frame == 2)
         {
-            var spark_id = GetEffect("Spark", state);
+            var spark_id = GetEffect("Spark", this());
             if (spark_id)
             {
-                RemoveEffect(nil, state, spark_id);
+                RemoveEffect(nil, this(), spark_id);
             }
         }
         return nil;
@@ -10129,14 +10131,14 @@ func ProbeSilent()
         let script = r#"#strict 3
 global func Initialize(state, random)
 {
-  AddEffect("Twin", state, 100, 0);
-  AddEffect("Twin", state, 200, 0);
+  AddEffect("Twin", this(), 100, 0);
+  AddEffect("Twin", this(), 200, 0);
   return nil;
 }
 
 global func Step(state, frame, random)
 {
-  if (frame == 1) RemoveEffect("Twin", state, 1);
+  if (frame == 1) RemoveEffect("Twin", this(), 1);
   return nil;
 }
 
@@ -10207,7 +10209,11 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
             .collect::<Vec<_>>();
         assert_eq!(stop_calls.len(), 1);
         assert_eq!(stop_calls[0].1.get(1), Some(&Value::Int(second_number)));
-        assert_eq!(stop_calls[0].1.get(2), Some(&Value::Int(0)));
+        assert_eq!(
+            stop_calls[0].1.get(2),
+            None,
+            "C4Effect::Kill supplies only target and number; the typed script parameter nil-fills internally"
+        );
 
         engine.tick_without_snapshot().expect("next Execute cleans selected Twin");
         assert_eq!(
@@ -28451,7 +28457,9 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
         }
 
         global func FxArmorDamage(state, effect, damage, damage_type, cause_plr) {
-            return damage / 2;
+            // C4Effect::DoDamage reads the callback through getInt(); keep
+            // the noncanonical raw Bool payload instead of folding to one.
+            return CastBool(damage / 2);
         }
 
         global func Step(state, frame, random) {
@@ -41083,7 +41091,7 @@ protected func Completion() {
     iCompletionCon = GetCon();
     iCompletionY = GetY();
     iCompletionR = GetR();
-    iCompletionRDir = GetRDir(100);
+    iCompletionRDir = GetRDir(nil, 100);
     iCompleted = Random(100);
     SetAction("Sparkle");
     return(1);
@@ -51404,7 +51412,8 @@ local iSeen, iCauseSeen, iDamageCalls;
 func FxShieldDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
     iSeen = iChange;
     iCauseSeen = iCause;
-    return(iChange / 2);
+    // C4Effect::DoDamage consumes the complete Bool Data.Int payload.
+    return CastBool(7);
 }
 func Damage(int iChange, int iCausedBy) { iDamageCalls = iDamageCalls + 1; return(1); }
 "#;
@@ -51447,7 +51456,7 @@ func Damage(int iChange, int iCausedBy) { iDamageCalls = iDamageCalls + 1; retur
             "the damage type threads through (FnDoDamage iDmgType)"
         );
         assert_eq!(
-            engine.objects[victim_idx].state.damage, 5,
+            engine.objects[victim_idx].state.damage, 7,
             "the chained hook result is written (C4Object.cpp:1288)"
         );
         assert_eq!(
@@ -52772,7 +52781,7 @@ func FxNegativeTimer(pThis, iNumber, iTime)
 
         global func FxDoomedTimer(state, effect, timer) {
             if (timer >= 4) {
-                return -1;
+                return CastBool(-1);
             }
             return nil;
         }
@@ -54105,7 +54114,7 @@ func Probe(target) {
         }
 
         global func FxDoomedTimer(target, number, time) {
-            if (time >= 4) { return -1; }
+            if (time >= 4) { return CastBool(-1); }
             return 0;
         }
 
@@ -54407,12 +54416,12 @@ func Probe(target) {
         }
 
         global func FxStubbornTimer(target, number, time) {
-            if (time >= 2) { return -1; }
+            if (time >= 2) { return CastBool(-1); }
             return 0;
         }
 
         global func FxStubbornStop(target, number, reason, temp) {
-            return -1;
+            return CastBool(-1);
         }
 
         global func Step(state, frame, random) { return nil; }
@@ -54526,21 +54535,24 @@ func Probe(target) {
         // (:128-131 + Execute :328-336).
         let script = r#"
         global func Initialize(state, random) {
-            AddEffect("Flash", nil, 200, 5, nil, nil, nil, 42);
+            AddEffect("Flash", nil, 200, 5, nil, nil, 42, 77);
             AddEffect("Vetoed", nil, 200, 5);
             return nil;
         }
 
-        global func FxFlashStart(target, number, temp, var1) {
+        global func FxFlashStart(target, number, temp, var1, var2) {
             // pForObj is nil for global effects (C4Effect.cpp:129).
             if (target) { return 0; }
             if (temp) { return 0; }
+            if (var2 != 77) { return -1; }
             EffectVar(0, nil, number) = var1 + 1;
             return 0;
         }
 
         global func FxVetoedStart(target, number, temp) {
-            return -1;
+            // C4Effect reads the callback result through getInt(); a raw Bool
+            // retains -1 in Data.Int and must still mean Start_Deny.
+            return CastBool(-1);
         }
 
         global func FxVetoedStop(target, number, reason, temp) {
@@ -54574,8 +54586,13 @@ func Probe(target) {
         assert_eq!(
             flash.var(0),
             EffectVarValue::Int(43),
-            "Fx*Start(nil, iNumber, 0, rVal1) ran synchronously inside \
-             AddEffect and saw rVal1"
+            "Fx*Start(nil, iNumber, 0, rVal1, rVal2) ran synchronously \
+             inside AddEffect and saw both constructor values"
+        );
+        assert_eq!(
+            flash.vars(),
+            &[EffectVarValue::Int(43)],
+            "constructor rVals are transient; only the explicit EffectVar write persists"
         );
         engine.tick_without_snapshot().expect("global Execute cleans the dead node");
         assert_eq!(
@@ -54637,7 +54654,7 @@ func Probe(target) {
         // spell def's FxBuffTimer drains the host object's energy.
         let host_script = r#"
         global func Initialize(state, random) {
-            AddEffect("Buff", state, 100, 2, 0, SPEL);
+            AddEffect("Buff", this(), 100, 2, 0, SPEL);
             return nil;
         }
 
@@ -55406,7 +55423,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
         }
 
-        global func FxShieldEffect(state, effect, new_name) {
+        global func FxShieldEffect(new_name, state, effect, unused) {
             if (new_name == "Fire") {
                 return -2;
             }
@@ -55427,7 +55444,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
 
         global func Step(state, frame, random) {
             if (frame == 2) {
-                AddEffect("Fire", state, 100, 7, nil, nil, nil, 42);
+                AddEffect("Fire", this(), 100, 7, nil, nil, 42);
             }
             return nil;
         }
@@ -55463,6 +55480,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         let names: Vec<&str> = object
             .effects
             .iter()
+            .filter(|effect| effect.priority != 0)
             .map(|effect| effect.name.as_str())
             .collect();
         assert_eq!(
@@ -55470,6 +55488,10 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             vec!["Shield"],
             "the annulled Fire merges into Shield instead of registering"
         );
+        assert!(object
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Fire" && effect.priority == 0));
 
         let calls = call_log.lock().unwrap().clone();
         let add_calls: Vec<&Vec<Value>> = calls
@@ -55514,19 +55536,27 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
         }
 
-        global func FxShieldEffect(state, effect, new_name, strength) {
+        // C4Effect::Check's historical ABI is unlike the other Fx calls:
+        // [new name, target, checker number, nil, rVal1..4].
+        global func FxShieldEffect(new_name, state, effect, unused, strength) {
             if (strength == 42) {
-                return -1;
+                return CastBool(-1);
             }
             return nil;
         }
 
         global func Step(state, frame, random) {
             if (frame == 2) {
-                AddEffect("Fire", state, 100, 0, nil, nil, nil, 42);
+                AddEffect("Fire", this(), 100, 0, nil, nil, 42);
             }
             if (frame == 3) {
-                AddEffect("Frost", state, 100, 0, nil, nil, nil, 5);
+                AddEffect("Frost", this(), 100, 0, nil, nil, 5);
+            }
+            if (frame == 4) {
+                // With no script FxFireStart override, the native AddFunc
+                // fallback consumes the same transient constructor payload
+                // after Check succeeds.
+                AddEffect("Fire", this(), 100, 0, nil, nil, 5);
             }
             return nil;
         }
@@ -55557,6 +55587,143 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             "the checker saw strength 42 on Fire (denied) and 5 on Frost \
              (passed) — C4Effect.cpp:282 forwards rVal1-4"
         );
+        let frost = object
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Frost")
+            .expect("Frost survives the check chain");
+        assert!(
+            frost.vars().is_empty(),
+            "the rVal strength reaches Fx*Effect without becoming an EffectVar"
+        );
+
+        let fourth = engine.tick().expect("native Fire Start tick succeeds");
+        let object = fourth.object(id).expect("object remains present");
+        assert!(object.on_fire, "native FxFireStart ignites the carrier");
+        let fire = object
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Fire")
+            .expect("passing Fire effect survives");
+        assert_eq!(
+            fire.vars(),
+            &[
+                EffectVarValue::Int(2),
+                EffectVarValue::Int(5),
+                EffectVarValue::Bool(false),
+                EffectVarValue::Nil,
+            ],
+            "native Start translates rVals into Fire's explicit variables exactly once"
+        );
+    }
+
+    #[test]
+    fn deferred_fire_effect_command_runs_native_start_before_its_first_timer() {
+        // Rust's initial-effect command is folded through the same Started
+        // event used by a deferred AddEffect outcome. C4Effect constructs
+        // Fire by calling its AddFunc-registered native Start immediately;
+        // it must not wait for the first timer and reinterpret persistent
+        // Fire vars as constructor arguments.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [
+                { op = "add", name = "Fire", priority = 100, interval = 1 }
+            ] };
+        }
+
+        global func Step(state, frame, random) { return nil; }
+        "#;
+
+        let definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut engine = Engine::with_seed(19);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("object spawns");
+        let object = engine.object_snapshot(id).expect("object remains present");
+        assert!(object.on_fire, "native Start ran during command folding");
+        let fire = object
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Fire")
+            .expect("Fire effect survives");
+        assert_eq!(fire.timer, 0, "no timer frame has elapsed yet");
+        assert!(fire.start_dispatched, "Start is complete before the first timer");
+        assert_eq!(
+            fire.vars(),
+            &[
+                EffectVarValue::Int(2),
+                EffectVarValue::Int(0),
+                EffectVarValue::Bool(false),
+                EffectVarValue::Nil,
+            ]
+        );
+    }
+
+    #[test]
+    fn queued_effect_constructor_values_reach_start_callback() {
+        let script = r#"#strict 3
+        global func FxProbeStart(state, effect, temp, first, second, third, fourth) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) { return nil; }
+        "#;
+        let calls: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            hooks.set_on_call(move |name, args| {
+                if name == "FxProbeStart" {
+                    calls.lock().unwrap().push(args.to_vec());
+                }
+            });
+        }
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("object spawns");
+        let constructor_values = [
+            Value::Int(21),
+            Value::Bool(true),
+            Value::String("payload".into()),
+            Value::Array(vec![Value::Int(24)]),
+        ];
+        let effect = EffectState::new("Probe")
+            .with_command_target(Some(id.as_u64() as i32));
+        let command = QueuedCommand::immediate(ObjectUpdate::default()).with_effects(vec![
+            EffectCommand::add_with_constructor_values(effect, constructor_values.clone()),
+        ]);
+        engine
+            .queue_object_command(id, command)
+            .expect("effect command queues");
+
+        let snapshot = engine.tick().expect("queued effect executes");
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "FxProbeStart runs exactly once");
+        assert_eq!(calls[0].get(2), Some(&Value::Int(0)), "iTemp is false");
+        assert_eq!(calls[0].get(3..7), Some(constructor_values.as_slice()));
+        let effect = snapshot
+            .object(id)
+            .expect("object remains present")
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Probe")
+            .expect("Probe effect survives");
+        assert!(effect.start_dispatched);
+        assert!(
+            effect.vars().is_empty(),
+            "constructor rVals never become persistent EffectVars"
+        );
     }
 
     #[test]
@@ -55570,7 +55737,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
         }
 
-        global func FxShieldEffect(state, effect, new_name) {
+        global func FxShieldEffect(new_name, state, effect, unused) {
             if (new_name == "Fire") {
                 return -3;
             }
@@ -55594,7 +55761,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
                 return { effects = [ { op = "add", name = "Upper", priority = 300, interval = 0 } ] };
             }
             if (frame == 3) {
-                AddEffect("Fire", state, 100, 0);
+                AddEffect("Fire", this(), 100, 0);
             }
             return nil;
         }
@@ -55633,6 +55800,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         let names: Vec<&str> = object
             .effects
             .iter()
+            .filter(|effect| effect.priority != 0)
             .map(|effect| effect.name.as_str())
             .collect();
         assert_eq!(
@@ -55640,6 +55808,10 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             vec!["Shield", "Upper"],
             "Fire merges into Shield; Upper is only temp-cycled"
         );
+        assert!(object
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Fire" && effect.priority == 0));
 
         let calls: Vec<(String, Vec<Value>)> = call_log
             .lock()
@@ -55674,7 +55846,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
         }
 
-        global func FxShieldEffect(state, effect, new_name) {
+        global func FxShieldEffect(new_name, state, effect, unused) {
             if (new_name == "Fire") {
                 return -2;
             }
@@ -55682,7 +55854,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         }
 
         global func FxShieldAdd(state, effect, new_name, new_interval) {
-            return -1;
+            return CastBool(-1);
         }
 
         global func FxShieldStop(state, effect, reason) {
@@ -55695,7 +55867,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
 
         global func Step(state, frame, random) {
             if (frame == 2) {
-                AddEffect("Fire", state, 100, 7);
+                AddEffect("Fire", this(), 100, 7);
             }
             return nil;
         }
@@ -55726,9 +55898,17 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         let second = engine.tick().expect("tick succeeds");
         let object = second.object(id).expect("object present");
         assert!(
-            object.effects.is_empty(),
-            "the Fire is annulled and Shield killed itself in its Add call \
-             (C4Effect.cpp:306-309)"
+            object.effects.iter().all(|effect| effect.priority == 0),
+            "the Fire is annulled and Shield killed itself in its Add call; \
+             both dead nodes remain linked until Execute (C4Effect.cpp:306-309,328-336)"
+        );
+        assert_eq!(
+            object
+                .effects
+                .iter()
+                .map(|effect| effect.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Fire", "Shield"]
         );
 
         let calls = call_log.lock().unwrap().clone();
@@ -55757,7 +55937,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         }
 
         global func FxStickyStop(state, effect, reason) {
-            return -1;
+            return CastBool(-1);
         }
 
         global func Step(state, frame, random) {
@@ -55822,19 +56002,19 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // node: EffectVar writes and its position among equal-priority
         // peers therefore both survive (C4Effect.cpp:389-402).
         let script = r#"
-        global func Initialize(state, random) {
+        func Initialize(state, random) {
             return { effects = [
                 { op = "add", name = "Older", priority = 100, interval = 0 },
                 { op = "add", name = "Peer", priority = 100, interval = 0 }
             ] };
         }
 
-        global func FxOlderStop(state, number, reason) {
-            EffectVar(0, state, number) = 77;
+        global func FxOlderStop(object target, int number, int reason) {
+            EffectVar(0, target, number) = 77;
             return -1;
         }
 
-        global func Step(state, frame, random) {
+        func Step(state, frame, random) {
             if (frame == 2) {
                 return { effects = [ { op = "remove", name = "Older" } ] };
             }
@@ -55842,8 +56022,9 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         }
         "#;
 
-        let definition =
+        let mut definition =
             Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_c4_callback_convention(true);
         let mut engine = Engine::with_seed(7);
         engine
             .register_definition(definition)
@@ -55892,32 +56073,32 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
     #[test]
     fn remove_effect_no_calls_skips_stop_callback() {
         let script = r#"
-        global func Initialize(state, random)
+        func Initialize(state, random)
         {
-            AddEffect("Pulse", state, 100, 1);
+            AddEffect("Pulse", this(), 100, 1);
             return nil;
         }
 
-        global func FxPulseStart(state, effect)
+        global func FxPulseStart(object target, int effect)
         {
             return nil;
         }
 
-        global func FxPulseTimer(state, effect, timer)
+        global func FxPulseTimer(object target, int effect, int timer)
         {
-            if (GetEffect("Pulse", state))
+            if (GetEffect("Pulse", target))
             {
-                RemoveEffect("Pulse", state, 0, true);
+                RemoveEffect("Pulse", target, 0, true);
             }
             return nil;
         }
 
-        global func FxPulseStop(state, effect, reason)
+        global func FxPulseStop(object target, int effect, int reason)
         {
             return nil;
         }
 
-        global func Step(state, frame, random)
+        func Step(state, frame, random)
         {
             return nil;
         }
@@ -55935,6 +56116,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         let mut definition =
             Definition::from_script("Actor", "Actor", script).expect("script compiles");
         definition.set_debugger_hooks(hooks);
+        definition.set_c4_callback_convention(true);
 
         let mut engine = Engine::with_seed(11);
         engine
@@ -72580,9 +72762,9 @@ public func RecordExecBaseEjection()
   ejection_x = GetX();
   ejection_y = GetY();
   ejection_r = GetR();
-  ejection_xdir = GetXDir(100);
-  ejection_ydir = GetYDir(100);
-  ejection_rdir = GetRDir(100);
+  ejection_xdir = GetXDir(nil, 100);
+  ejection_ydir = GetYDir(nil, 100);
+  ejection_rdir = GetRDir(nil, 100);
   ejection_container = Contained();
   ejection_action = GetAction();
   return(1);
@@ -72594,9 +72776,9 @@ protected func Departure(object old_container)
   departure_x = GetX();
   departure_y = GetY();
   departure_r = GetR();
-  departure_xdir = GetXDir(100);
-  departure_ydir = GetYDir(100);
-  departure_rdir = GetRDir(100);
+  departure_xdir = GetXDir(nil, 100);
+  departure_ydir = GetYDir(nil, 100);
+  departure_rdir = GetRDir(nil, 100);
   departure_container = Contained();
   departure_action = GetAction();
   return(1);

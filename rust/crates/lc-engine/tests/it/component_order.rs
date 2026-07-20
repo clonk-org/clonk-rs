@@ -513,9 +513,9 @@ fn get_needed_mat_str_without_explicit_or_current_object_is_nil() {
     let error = script
         .call("Probe", &[Value::Proplist(Default::default())])
         .expect_err("a map cannot convert to C4Object");
-    assert!(error
-        .to_string()
-        .contains("GetNeededMatStr: expected object, nil, or 0 for target, got proplist"));
+    assert!(error.to_string().contains(
+        "call to \"GetNeededMatStr\" parameter 1: got \"map\", but expected \"object\"!"
+    ));
 }
 
 #[test]

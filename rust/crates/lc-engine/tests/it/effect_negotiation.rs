@@ -76,6 +76,8 @@ local iChecks;
 local iDenyExact;
 local iPassExact;
 local iStarts;
+local iStartExact;
+local iStartVarsClean;
 local iStartInline;
 local iStartOrder;
 local iDeniedStops;
@@ -83,7 +85,7 @@ local iNested;
 
 func Install()
 {
-  iChecks = iDenyExact = iPassExact = iStarts = iStartInline = iStartOrder = iDeniedStops = 0;
+  iChecks = iDenyExact = iPassExact = iStarts = iStartExact = iStartVarsClean = iStartInline = iStartOrder = iDeniedStops = 0;
   iChecker = AddEffect("Guard", this(), 200, 0, this());
   iUpper = AddEffect("Upper", this(), 300, 0, this());
   return(iChecker);
@@ -156,9 +158,15 @@ func FxUpperStart(object pTarget, int iNumber, int iTemp)
   if(iTemp == 1) iStartOrder = iStartOrder * 10 + 3;
 }
 
-func FxAllowedStart()
+func FxAllowedStart(object pTarget, int iNumber, int iTemp,
+                    int iVal1, int iVal2, int iVal3, int iVal4)
 {
   iStartOrder = iStartOrder * 10 + 2;
+  if(!iTemp && iVal1 == 21 && iVal2 == 22 && iVal3 == 23 && iVal4 == 24)
+    ++iStartExact;
+  if(!EffectVar(0, pTarget, iNumber) && !EffectVar(1, pTarget, iNumber))
+    ++iStartVarsClean;
+  EffectVar(2, pTarget, iNumber) = 77;
   ++iStarts;
 }
 
@@ -235,6 +243,12 @@ func FxStartDeniedStop() { ++iDeniedStops; }
         "the deferred Started event must not repeat the synchronous check"
     );
     assert_eq!(allowed.local_vars.get("iPassExact"), Some(&Value::Int(1)));
+    assert_eq!(allowed.local_vars.get("iStartExact"), Some(&Value::Int(1)));
+    assert_eq!(
+        allowed.local_vars.get("iStartVarsClean"),
+        Some(&Value::Int(1)),
+        "constructor rVals reach Start but do not prepopulate EffectVars"
+    );
     assert_eq!(
         allowed.local_vars.get("iStartInline"),
         Some(&Value::Int(1)),
@@ -244,6 +258,20 @@ func FxStartDeniedStop() { ++iDeniedStops; }
         allowed.local_vars.get("iStarts"),
         Some(&Value::Int(1)),
         "the passing effect still receives exactly one Start callback"
+    );
+    let allowed_effect = allowed
+        .effects
+        .iter()
+        .find(|effect| effect.name == "Allowed")
+        .expect("Allowed effect survives");
+    assert_eq!(
+        allowed_effect.vars(),
+        &[
+            lc_engine::EffectVarValue::Nil,
+            lc_engine::EffectVarValue::Nil,
+            lc_engine::EffectVarValue::Int(77),
+        ],
+        "only the explicit EffectVar write persists"
     );
 
     let reentrant = engine

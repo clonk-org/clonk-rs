@@ -49,7 +49,7 @@ use crate::{
 use crate::{LiquidSegment, PlayerViewport};
 use chrono::{Datelike, Local, Timelike};
 use lc_resources::PhysicalInfo;
-use lc_script::{Engine as ScriptEngine, HostCallArg, RuntimeError, Value, ValueMap};
+use lc_script::{C4VType, Engine as ScriptEngine, HostCallArg, RuntimeError, Value, ValueMap};
 use std::mem;
 use std::sync::Arc;
 use tracing::{debug, error, info};
@@ -13164,24 +13164,16 @@ fn parse_optional_i32(
     }
 }
 
-/// Parse a native `std::optional<C4ValueInt>` parameter. Before `#strict 3`,
-/// C++ eagerly resets every falsy native-call argument to nil, which the
-/// optional wrapper observes as absence rather than an explicit integer zero.
+/// Parse a VM-prepared native `std::optional<C4ValueInt>` parameter. The call
+/// boundary has already applied legacy eager-nil conversion. At this point an
+/// `Any` nil is absent, while every remaining Int/Bool payload is present --
+/// including a zero extracted from a non-nil raw Bool value.
 fn parse_native_optional_i32(
     value: Option<&Value>,
     function: &str,
     parameter: &str,
 ) -> Result<Option<i32>, RuntimeError> {
-    let parsed = parse_optional_i32(value, function, parameter)?;
-    let has_strict_nil = matches!(
-        lc_script::caller_strictness(),
-        lc_script::HostCallerStrictness::Strict(level) if level >= 3
-    );
-    if parsed == Some(0) && !has_strict_nil {
-        Ok(None)
-    } else {
-        Ok(parsed)
-    }
+    parse_optional_i32(value, function, parameter)
 }
 
 fn parse_optional_u32(
@@ -14745,6 +14737,192 @@ const NON_PUBLIC_CONSOLE_HOST_FUNCTIONS: &[&str] = &[
     "FatalError",
 ];
 
+/// C++ registrations whose callback receives the converted `C4Value` array
+/// itself instead of passing through `C4ValueConv<Par>::_FromC4V`.
+const RAW_CPP_NATIVE_FUNCTIONS: &[&str] = &[
+    "CastAny",
+    "CastBool",
+    "CastC4ID",
+    "CastInt",
+    "FindObject2",
+    "FindObjects",
+    "ObjectCount2",
+    "ScoreboardCol",
+];
+
+/// AddFunc registrations backed by Rust's reference-aware callback surface.
+/// Removing one of these as though it were an ordinary callback would discard
+/// its `HostCallArg` provenance before signatures are attached below.
+const REFERENCE_AWARE_CPP_NATIVE_FUNCTIONS: &[&str] = &[
+    "Dec",
+    "Equal",
+    "GetIndexOf",
+    "Inc",
+    "PathFree2",
+    "Set",
+    "SetLength",
+    "SimFlight",
+];
+
+/// `C4ValueConv<std::optional<T>>` retains C4V_Any as `nullopt` even though
+/// its declared native type is indistinguishable from `T` in the signature.
+const OPTIONAL_CPP_NATIVE_PARAMETER_SLOTS: &[(&str, usize)] =
+    &[("CustomMessage", 5), ("ModulateColor", 0)];
+
+fn is_optional_cpp_native_parameter(name: &str, index: usize) -> bool {
+    OPTIONAL_CPP_NATIVE_PARAMETER_SLOTS.contains(&(name, index))
+}
+
+/// Mirror `C4ValueConv<bool>::_FromC4V`: unlike script truthiness this reads
+/// the low `Data.Int` word. Rust models live pointer values semantically, so
+/// every non-null string/array/map/object pointer is truthy.
+fn extract_cpp_native_bool(value: &Value) -> bool {
+    match value {
+        Value::Int(value) => *value != 0,
+        Value::Bool(value) => *value,
+        Value::RawBool(value) => (*value as u32 as i32) != 0,
+        Value::C4Id(value) => (lc_script::c4_id_raw(value) as u32 as i32) != 0,
+        Value::Object(value) => *value != 0,
+        Value::String(_) | Value::Array(_) | Value::Proplist(_) => true,
+        Value::Nil => false,
+    }
+}
+
+fn cpp_native_extraction_error(
+    name: &str,
+    index: usize,
+    expected: C4VType,
+    value: &Value,
+) -> RuntimeError {
+    RuntimeError::new(format!(
+        "{name}: VM admitted {} for native parameter {index}, expected {expected:?}",
+        value.type_name()
+    ))
+}
+
+/// Canonicalize one VM-checked AddFunc argument exactly as the corresponding
+/// `C4ValueConv<Par>::_FromC4V` extraction followed by a Rust `Value` bridge.
+fn extract_cpp_native_argument(
+    name: &str,
+    index: usize,
+    expected: C4VType,
+    value: &Value,
+) -> Result<Value, RuntimeError> {
+    if value == &Value::Nil && is_optional_cpp_native_parameter(name, index) {
+        return Ok(Value::Nil);
+    }
+
+    match expected {
+        C4VType::Any => Ok(value.clone()),
+        C4VType::Int => value
+            .as_c4_int()
+            .map(Value::Int)
+            .ok_or_else(|| cpp_native_extraction_error(name, index, expected, value)),
+        C4VType::Bool => Ok(Value::Bool(extract_cpp_native_bool(value))),
+        C4VType::C4Id => match value {
+            Value::Nil => Ok(Value::Nil),
+            Value::C4Id(value) => {
+                let raw = lc_script::c4_id_raw(value);
+                Ok(if raw == 0 {
+                    Value::Nil
+                } else {
+                    Value::C4Id(lc_script::c4_id_from_raw(raw))
+                })
+            }
+            _ => Err(cpp_native_extraction_error(name, index, expected, value)),
+        },
+        C4VType::C4Object => match value {
+            Value::Nil | Value::Object(0) => Ok(Value::Nil),
+            Value::Object(value) => Ok(Value::Object(*value)),
+            _ => Err(cpp_native_extraction_error(name, index, expected, value)),
+        },
+        C4VType::String => match value {
+            Value::Nil => Ok(Value::Nil),
+            Value::String(value) => Ok(Value::String(value.clone())),
+            _ => Err(cpp_native_extraction_error(name, index, expected, value)),
+        },
+        C4VType::Array => match value {
+            Value::Nil => Ok(Value::Nil),
+            Value::Array(value) => Ok(Value::Array(value.clone())),
+            _ => Err(cpp_native_extraction_error(name, index, expected, value)),
+        },
+        C4VType::Map => match value {
+            Value::Nil => Ok(Value::Nil),
+            Value::Proplist(value) => Ok(Value::Proplist(value.clone())),
+            _ => Err(cpp_native_extraction_error(name, index, expected, value)),
+        },
+        C4VType::Ref => Err(cpp_native_extraction_error(name, index, expected, value)),
+    }
+}
+
+fn extract_cpp_native_arguments(
+    name: &str,
+    parameter_types: &[C4VType],
+    args: &[Value],
+) -> Result<Vec<Value>, RuntimeError> {
+    args.iter()
+        .enumerate()
+        .map(|(index, value)| match parameter_types.get(index) {
+            Some(expected) => extract_cpp_native_argument(name, index, *expected, value),
+            // EffectVar carries a private fourth setter value beyond its
+            // three public C++ parameters. Preserve all such private tails.
+            None => Ok(value.clone()),
+        })
+        .collect()
+}
+
+fn wrap_cpp_add_func_host_function(
+    script: &mut ScriptEngine,
+    name: &'static str,
+    parameter_types: &'static [C4VType],
+) {
+    let parameter_count = script
+        .host_function_parameter_count(name)
+        .unwrap_or(parameter_types.len());
+    assert_eq!(
+        parameter_count,
+        parameter_types.len(),
+        "native extractor signature must match the registered arity for {name}"
+    );
+    let callback = script
+        .remove_host_function(name)
+        .unwrap_or_else(|| panic!("ordinary AddFunc callback is not registered: {name}"));
+    script.register_host_function_with_arity(name, parameter_count, move |args| {
+        let extracted = extract_cpp_native_arguments(name, parameter_types, args)?;
+        callback(&extracted)
+    });
+}
+
+fn install_cpp_add_func_argument_extractors(script: &mut ScriptEngine) {
+    let mut add_func_count = 0;
+    let mut wrapped_count = 0;
+
+    for (name, parameter_types) in
+        crate::native_function_parameters::native_function_parameter_entries()
+    {
+        if crate::native_function_parameters::RUST_STANDIN_NATIVE_FUNCTIONS.contains(&name)
+            || RAW_CPP_NATIVE_FUNCTIONS.contains(&name)
+        {
+            continue;
+        }
+        add_func_count += 1;
+        if REFERENCE_AWARE_CPP_NATIVE_FUNCTIONS.contains(&name) {
+            continue;
+        }
+        wrap_cpp_add_func_host_function(script, name, parameter_types);
+        wrapped_count += 1;
+    }
+
+    let expected_add_func_count =
+        crate::native_function_parameters::CPP_BACKED_NATIVE_FUNCTION_COUNT
+            - RAW_CPP_NATIVE_FUNCTIONS.len();
+    assert_eq!(add_func_count, expected_add_func_count);
+    assert_eq!(
+        wrapped_count + REFERENCE_AWARE_CPP_NATIVE_FUNCTIONS.len(),
+        expected_add_func_count
+    );
+}
+
 pub(crate) fn public_console_host_function_names(script: &ScriptEngine) -> Vec<String> {
     script
         .host_function_names()
@@ -15743,6 +15921,25 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPlayList", set_play_list);
     script.register_host_function("Sound", sound);
     script.register_host_function("SoundLevel", sound_level);
+
+    // CheckConvertFunctionParameters runs in the VM before debugger hooks.
+    // Wrap only ordinary C++ AddFunc callbacks here so their bodies receive
+    // the later native primitive extraction performed by C4AulEngineFunc.
+    install_cpp_add_func_argument_extractors(script.engine);
+
+    // C4AulEngineFunc retains `C4ValueConv<Par>::Type()` for every native
+    // slot. Keep this separate declarative table authoritative for both the
+    // boundary conversion and exact arity of the Rust registrations above.
+    for (name, parameter_types) in
+        crate::native_function_parameters::native_function_parameter_entries()
+    {
+        assert!(
+            script
+                .engine
+                .set_host_function_parameter_types(name, parameter_types.iter().copied()),
+            "native signature exists without a registered callback: {name}"
+        );
+    }
 }
 
 /// One synced draw through the active random context (host-side engine
@@ -19629,7 +19826,7 @@ fn kill_effect_inline(
             with_context_mut(scope, |ctx| {
                 // Fx*Stop already ran above. Re-fold this exact dead node so
                 // callback EffectVar writes survive; Execute unlinks it.
-                ctx.remove_effect(None, stopped.number.max(0) as usize, true);
+                ctx.remove_effect(None, stopped.number.max(0), true);
             })?;
         }
     }
@@ -19838,7 +20035,7 @@ fn check_effect_with_policy(
                     // The Stop callback already ran synchronously above.
                     // Persist the exact dead acceptor; the next Execute
                     // unlinks it without another Stop dispatch.
-                    ctx.remove_effect(None, acceptor.number as usize, true);
+                    ctx.remove_effect(None, acceptor.number, true);
                 })?;
             }
         }
@@ -19926,17 +20123,14 @@ fn add_effect_constructor(
     }
 
     // `if (... || !iPrio) return 0` (C4Script.cpp:5449) — an unfilled
-    // priority nil-fills to 0 like C4AulExec, creating NOTHING.
-    let priority = match args.get(2) {
-        Some(Value::Int(value)) => *value,
-        Some(Value::Nil) | None => 0,
-        Some(other) => {
-            return Err(RuntimeError::new(format!(
-                "AddEffect: expected int for priority, got {}",
-                other.type_name()
-            )));
-        }
-    };
+    // priority nil-fills to 0 like C4AulExec, creating NOTHING. The native
+    // receives a C4ValueInt, so a C4V_Bool keeps its tag through the CnvOK
+    // conversion but `_getInt()` still extracts its shared Data.Int payload.
+    let priority = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "AddEffect",
+        "priority",
+    )?;
 
     if priority == 0 {
         return Ok(Value::Int(0));
@@ -19944,23 +20138,18 @@ fn add_effect_constructor(
 
     // C++ FnAddEffect: unpassed iTimerIntervall is 0 - no timer callbacks
     // (C4Effect.cpp:342).
-    let interval = match args.get(3) {
-        Some(Value::Int(value)) => *value,
-        Some(Value::Nil) | None => 0,
-        Some(other) => {
-            return Err(RuntimeError::new(format!(
-                "AddEffect: expected int for interval, got {}",
-                other.type_name()
-            )));
-        }
-    };
+    let interval = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "AddEffect",
+        "interval",
+    )?;
 
     let len = args.len();
     let mut idx = 4;
     let mut command_target: Option<i32> = None;
     let mut command_target_id: Option<String> = None;
     let mut timer: Option<i32> = None;
-    let mut vars: Vec<EffectVarValue> = Vec::new();
+    let mut constructor_values: [Value; 4] = std::array::from_fn(|_| Value::Nil);
 
     if idx < len {
         match &args[idx] {
@@ -19997,24 +20186,15 @@ fn add_effect_constructor(
         idx += 1;
     }
 
-    // The fixture-DSL keeps an explicit-nil timer slot here; any VALUE is
-    // rVal1 — C++ FnAddEffect's vars begin at this position
-    // (C4Script.cpp:5444), and `AddEffect("Fire", obj, 100, 1, 0, 0,
-    // iCausedBy)` must land the cause in var 0.
-    if idx < len && matches!(&args[idx], Value::Nil) {
+    // Slot six is always rVal1 in the C++ native ABI, including an explicit
+    // nil before a later non-nil rVal. The legacy direct-fixture timer is
+    // encoded in slot five and only exists when this frame ends there.
+    for slot in &mut constructor_values {
+        if idx >= len {
+            break;
+        }
+        *slot = args[idx].clone();
         idx += 1;
-    }
-
-    while idx < len {
-        let value = &args[idx];
-        vars.push(value_to_effect_var(value));
-        idx += 1;
-    }
-    // The native frame always carries all four rVal slots. EffectState uses
-    // a variable-length vector, so collapse only its indistinguishable nil
-    // suffix while retaining interior nils and every evaluated expression.
-    while matches!(vars.last(), Some(EffectVarValue::Nil)) {
-        vars.pop();
     }
 
     // C4Effect::AssignCallbackFunctions immediately resolves an object
@@ -20060,11 +20240,8 @@ fn add_effect_constructor(
         )
         && (live_object_scope || (!synchronous_start && !has_checkers));
     let effect_name = name.clone();
-    let call_vars: Vec<Value> = vars.iter().take(4).map(effect_var_to_value).collect();
-    let for_object = match args.get(1) {
-        Some(value @ Value::Object(_)) => value.clone(),
-        _ => Value::Nil,
-    };
+    let call_vars = constructor_values.to_vec();
+    let for_object = effect_callback_target_value(scope, target_state);
     let command_id_for_start = command_target_id.clone();
     let identifier = with_context_mut(scope, move |ctx| {
         let mut effect = EffectState::new(name)
@@ -20075,11 +20252,8 @@ fn add_effect_constructor(
         }
         effect = effect.with_command_target(command_target);
         effect = effect.with_command_id(command_target_id);
-        if !vars.is_empty() {
-            effect = effect.with_vars(vars);
-        }
         effect.start_dispatched = synchronous_start || engine_fire_start;
-        ctx.reserve_effect(effect)
+        ctx.reserve_effect(effect, constructor_values)
     })?;
 
     if (global_scope || live_object_scope) && priority != 1 {
@@ -20150,12 +20324,11 @@ fn add_effect_constructor(
         // fBlasted, rVal3 = pIncineratingObject (C4Effect.cpp:560 +
         // pFnStart->Exec args, :129).
         let target = object_id_from_value(&for_object);
-        let caused_by = match call_vars.first() {
-            Some(Value::Int(value)) => *value,
-            Some(Value::Bool(flag)) => i32::from(*flag),
-            _ => 0,
-        };
-        let blasted = call_vars.get(1).map(Value::as_bool).unwrap_or(false);
+        let caused_by = call_vars.first().and_then(Value::as_c4_int).unwrap_or(0);
+        let blasted = call_vars
+            .get(1)
+            .map(extract_cpp_native_bool)
+            .unwrap_or(false);
         let incinerating = call_vars.get(2).and_then(object_id_from_value);
         if let Some(target) = target {
             match fire_effect_start_core(target, identifier, caused_by, blasted, incinerating) {
@@ -20180,7 +20353,7 @@ fn add_effect_constructor(
             &call_args,
         ) {
             match result {
-                Ok(Value::Int(-1)) => start_denied = true,
+                Ok(value) if value_as_i32(&value) == -1 => start_denied = true,
                 Ok(_) => {}
                 Err(error) => start_error = Some(error),
             }
@@ -20231,39 +20404,20 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
-    let index = match args.get(2) {
-        Some(Value::Int(value)) if *value >= 0 => *value as usize,
-        Some(Value::Int(_)) => {
-            return Err(RuntimeError::new(
-                "RemoveEffect: index must be >= 0 when provided",
-            ));
-        }
-        Some(Value::Nil) | None => 0,
-        Some(other) => {
-            return Err(RuntimeError::new(format!(
-                "RemoveEffect: expected int for index, got {}",
-                other.type_name()
-            )));
-        }
-    };
+    let index = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "RemoveEffect",
+        "index",
+    )?;
 
     // `bool fDoNoCalls` (FnRemoveEffect, C4Script.cpp:5493): C4Value
     // converts ints freely - CR content passes 1 (the Talker's movie
     // timer).
-    let mut no_callbacks = false;
-    if let Some(flag) = args.get(3) {
-        match flag {
-            Value::Bool(value) => no_callbacks = *value,
-            Value::Int(value) => no_callbacks = *value != 0,
-            Value::Nil => {}
-            other => {
-                return Err(RuntimeError::new(format!(
-                    "RemoveEffect: expected bool or nil for no-call flag, got {}",
-                    other.type_name()
-                )));
-            }
-        }
-    }
+    let no_callbacks = value_to_bool(
+        args.get(3).unwrap_or(&Value::Nil),
+        "RemoveEffect",
+        "no-call flag",
+    )?;
 
     // Real object and global effect lists execute C4Effect::Kill inside the
     // host call. Synthetic proplist fixtures retain the deferred command
@@ -20474,30 +20628,28 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
     // materialized object scope; no script redispatch may intercept this
     // already-resolved native.
     // Unfilled iVarIndex is nil -> 0 (FnEffectVar, C4Script.cpp:5577).
-    let var_index = match args.first().unwrap_or(&Value::Nil) {
-        Value::Int(value) if *value >= 0 => *value as usize,
-        Value::Nil => 0,
-        Value::Int(_) => return Ok(Value::Nil),
-        other => {
-            return Err(RuntimeError::new(format!(
-                "EffectVar: expected int for index, got {}",
-                other.type_name()
-            )));
-        }
+    let var_index = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "EffectVar",
+        "index",
+    )?;
+    let Ok(var_index) = usize::try_from(var_index) else {
+        return Ok(Value::Nil);
     };
 
     let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
 
-    let effect_number = match args.get(2).unwrap_or(&Value::Nil) {
-        Value::Int(value) if *value > 0 => *value as usize,
-        Value::Int(_) | Value::Nil => return Ok(Value::Nil),
-        other => {
-            return Err(RuntimeError::new(format!(
-                "EffectVar: expected positive int for number, got {}",
-                other.type_name()
-            )));
-        }
+    let effect_number = value_to_i32(
+        args.get(2).unwrap_or(&Value::Nil),
+        "EffectVar",
+        "number",
+    )?;
+    let Ok(effect_number) = usize::try_from(effect_number) else {
+        return Ok(Value::Nil);
     };
+    if effect_number == 0 {
+        return Ok(Value::Nil);
+    }
 
     let new_value = args.get(3).map(value_to_effect_var);
 
@@ -20582,17 +20734,11 @@ fn effect_call(args: &[Value]) -> Result<Value, RuntimeError> {
         None => return Ok(Value::Nil),
     };
 
-    let number = match args.get(1).unwrap_or(&Value::Nil) {
-        Value::Int(value) => *value,
-        Value::Nil => 0,
-        Value::Bool(flag) => i32::from(*flag),
-        other => {
-            return Err(RuntimeError::new(format!(
-                "EffectCall: expected int for effect number, got {}",
-                other.type_name()
-            )));
-        }
-    };
+    let number = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "EffectCall",
+        "effect number",
+    )?;
 
     let scope = determine_scope_from_state(target)?;
     let effects = match snapshot_effects_from_context(scope) {
@@ -24316,14 +24462,8 @@ fn dispatch_effects_do_damage(
                 // No such hook anywhere: the chained value stays
                 // (pFnDamage existence gate, C4Effect.cpp:433).
                 None => {}
-                // getInt() conversion (bools 0/1, pointer types 0).
-                Some(Ok(value)) => {
-                    change = match value {
-                        Value::Int(next) => next,
-                        Value::Bool(flag) => i32::from(flag),
-                        _ => 0,
-                    }
-                }
+                // C4Value::getInt() reads non-canonical Bool payloads too.
+                Some(Ok(value)) => change = value_as_i32(&value),
                 Some(Err(error)) => {
                     tracing::warn!(
                         %error,
@@ -25149,8 +25289,7 @@ fn fire_effect_start_core(
     // script answer wins; zero falls back to the category default; an
     // out-of-range answer degrades to Object mode.
     let mode_answer = match call_world_object_own_function(target, "FireMode", &[]) {
-        Some(Ok(Value::Int(mode))) => mode,
-        Some(Ok(Value::Bool(flag))) => i32::from(flag),
+        Some(Ok(value)) => value_as_i32(&value),
         Some(Err(error)) => {
             tracing::warn!(
                 %error,
@@ -25229,7 +25368,7 @@ fn fire_effect_start_core(
 /// engine-internal fire start, reachable from a script FxFireStart
 /// overload's inherited(...) chain. A temp readd only re-arms the flag
 /// (:563-565).
-fn fx_fire_start(args: &[Value]) -> Result<Value, RuntimeError> {
+pub(crate) fn fx_fire_start(args: &[Value]) -> Result<Value, RuntimeError> {
     let target = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
         "FxFireStart",
@@ -25240,7 +25379,7 @@ fn fx_fire_start(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(-1));
     };
     let fire_number = parse_optional_i32(args.get(1), "FxFireStart", "number")?.unwrap_or(0);
-    let temp = args.get(2).map(Value::as_bool).unwrap_or(false);
+    let temp = args.get(2).is_some_and(|value| value_as_i32(value) != 0);
     if temp {
         // temp readd: SetOnFire(true), return 1 (C4Effect.cpp:565)
         HOST_CONTEXT.with(|cell| {
@@ -25255,7 +25394,7 @@ fn fx_fire_start(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(1));
     }
     let caused_by = parse_optional_i32(args.get(3), "FxFireStart", "caused by")?.unwrap_or(0);
-    let blasted = args.get(4).map(Value::as_bool).unwrap_or(false);
+    let blasted = args.get(4).map(extract_cpp_native_bool).unwrap_or(false);
     let incinerating = args
         .get(5)
         .map(|arg| parse_object_reference_argument(arg, "FxFireStart", "incinerating object"))
@@ -25590,7 +25729,7 @@ fn extinguish_effect_target(target: ObjectId, fire_number: i32) -> Result<bool, 
             let Some(removed) =
                 scope
                     .effects
-                    .remove_live_effect(None, number.max(0) as usize, false)
+                    .remove_live_effect(None, number.max(0), false)
             else {
                 break;
             };
@@ -30439,10 +30578,14 @@ fn value_as_object_id(value: &Value) -> Option<ObjectId> {
     }
 }
 
-fn value_as_i32(value: &Value) -> i32 {
+/// `C4Value::getInt()` reads the shared low `Data.Int` word for Int and Bool
+/// values. `RawBool` preserves the non-canonical Bool payload that script
+/// casts can produce; every other C4V type yields zero.
+pub(crate) fn value_as_i32(value: &Value) -> i32 {
     match value {
         Value::Int(value) => *value,
         Value::Bool(value) => i32::from(*value),
+        Value::RawBool(value) => *value as u32 as i32,
         _ => 0,
     }
 }
@@ -34991,7 +35134,13 @@ fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     if let Some(target) = leading_target {
         if active_object_id() != Some(target) {
-            return match call_world_object_function(target, "AddCommand", args) {
+            // Re-enter the target VM with the real FnAddCommand frame. The
+            // object slot is part of the C++ native signature even though we
+            // consumed it above to select the Rust world scope.
+            let mut forwarded = Vec::with_capacity(args.len() + 1);
+            forwarded.push(object_reference_value(target));
+            forwarded.extend_from_slice(args);
+            return match call_world_object_function(target, "AddCommand", &forwarded) {
                 Some(result) => result,
                 None => Ok(Value::Bool(false)),
             };
@@ -35053,7 +35202,14 @@ fn append_command(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     if let Some(target) = leading_target {
         if active_object_id() != Some(target) {
-            return match call_world_object_function(target, "AppendCommand", args) {
+            // Keep the explicit pObj slot when the compatibility layer must
+            // re-enter another VM. Native parameter conversion sees the same
+            // frame as C++ FnAppendCommand rather than the post-slot parser
+            // view used below.
+            let mut forwarded = Vec::with_capacity(args.len() + 1);
+            forwarded.push(object_reference_value(target));
+            forwarded.extend_from_slice(args);
+            return match call_world_object_function(target, "AppendCommand", &forwarded) {
                 Some(result) => result,
                 None => Ok(Value::Bool(false)),
             };
@@ -43340,8 +43496,23 @@ fn snapshot_effects_from_context(scope: EffectScope) -> Option<Vec<EffectState>>
     HOST_CONTEXT.with(|cell| cell.borrow().as_ref().and_then(|ctx| ctx.snapshot(scope)))
 }
 
+/// The `C4VObj(pForObj)` first argument sent to Fx callbacks. A typed null
+/// object extracts to `pForObj == nullptr`, and constructing the callback value
+/// canonicalizes that pointer to C4V_Any nil rather than preserving its source
+/// C4V_C4Object tag.
+fn effect_callback_target_value(scope: EffectScope, target: &Value) -> Value {
+    match (scope, target) {
+        (EffectScope::Object(_), value @ Value::Object(_)) => value.clone(),
+        _ => Value::Nil,
+    }
+}
+
 fn determine_scope_from_state(value: &Value) -> Result<EffectScope, RuntimeError> {
     match value {
+        // A zero C4Object payload is a null pointer. Every C++ effect native
+        // selects Game.pGlobalEffects for nullptr; Object(None) is reserved for
+        // the synthetic proplist fixture that means the active object's list.
+        Value::Object(0) => Ok(EffectScope::Global),
         Value::Object(_) => Ok(EffectScope::Object(object_id_from_value(value))),
         Value::Proplist(_) => Ok(EffectScope::Object(None)),
         Value::Nil => Ok(EffectScope::Global),
@@ -48409,7 +48580,11 @@ impl EffectScopeContext {
     /// The host copy sees priority zero while callbacks run, but the queued
     /// Add carries the requested priority so the final fold preserves the
     /// C++ insertion position. A later Update validates or removes it.
-    fn reserve_effect(&mut self, mut effect: EffectState) -> i32 {
+    fn reserve_effect(
+        &mut self,
+        mut effect: EffectState,
+        constructor_values: [Value; 4],
+    ) -> i32 {
         if effect.timer < 0 {
             effect.timer = 0;
         }
@@ -48434,7 +48609,11 @@ impl EffectScopeContext {
         pending.priority = 0;
         self.effects.insert(insert_pos, pending);
         self.had_list_head = true;
-        self.commands.push(EffectCommand::add(effect.clone()));
+        self.commands
+            .push(EffectCommand::add_with_constructor_values(
+                effect.clone(),
+                constructor_values,
+            ));
         effect.number
     }
 
@@ -48550,7 +48729,7 @@ impl EffectScopeContext {
     fn remove_effect(
         &mut self,
         name_filter: Option<&str>,
-        index: usize,
+        index: i32,
         no_callbacks: bool,
     ) -> Option<EffectState> {
         self.remove_effect_with_dead(name_filter, index, no_callbacks, true)
@@ -48559,13 +48738,13 @@ impl EffectScopeContext {
     fn remove_live_effect(
         &mut self,
         name_filter: Option<&str>,
-        index: usize,
+        index: i32,
         no_callbacks: bool,
     ) -> Option<EffectState> {
         self.remove_effect_with_dead(name_filter, index, no_callbacks, false)
     }
 
-    fn find_live_effect(&self, name_filter: Option<&str>, index: usize) -> Option<EffectState> {
+    fn find_live_effect(&self, name_filter: Option<&str>, index: i32) -> Option<EffectState> {
         self.effect_position(name_filter, index, false)
             .map(|position| self.effects[position].clone())
     }
@@ -48573,10 +48752,13 @@ impl EffectScopeContext {
     fn effect_position(
         &self,
         name_filter: Option<&str>,
-        index: usize,
+        index: i32,
         include_dead: bool,
     ) -> Option<usize> {
         if let Some(name) = name_filter {
+            if index < 0 {
+                return None;
+            }
             let mut remaining = index;
             self.effects.iter().position(|effect| {
                 // FnRemoveEffect resolves named removals through the
@@ -48598,11 +48780,10 @@ impl EffectScopeContext {
             // C4Script.cpp:5502-5507 -> C4Effect::Get(iNumber, false),
             // C4Effect.cpp:240-256). Numbers start at 1, so 0 matches
             // nothing.
-            let number = i32::try_from(index).unwrap_or(i32::MAX);
-            (number > 0)
+            (index > 0)
                 .then(|| {
                     self.effects.iter().position(|effect| {
-                        effect.number == number && (include_dead || effect.priority != 0)
+                        effect.number == index && (include_dead || effect.priority != 0)
                     })
                 })
                 .flatten()
@@ -48612,7 +48793,7 @@ impl EffectScopeContext {
     fn remove_effect_with_dead(
         &mut self,
         name_filter: Option<&str>,
-        index: usize,
+        index: i32,
         no_callbacks: bool,
         include_dead: bool,
     ) -> Option<EffectState> {
@@ -50354,6 +50535,295 @@ mod tests {
     use tracing::{Level, subscriber};
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use tracing_subscriber::registry::Registry;
+
+    #[test]
+    fn cpp_add_func_argument_extraction_canonicalizes_scalar_and_pointer_slots() {
+        let raw_bool = Value::from_c4_bool_raw(2);
+        let high_word_bool = Value::from_c4_bool_data_raw(
+            1usize.checked_shl(32).unwrap_or(2),
+        );
+
+        assert_eq!(
+            extract_cpp_native_argument("Probe", 0, C4VType::Int, &Value::Nil)
+                .expect("nil extracts through Data.Int"),
+            Value::Int(0)
+        );
+        assert_eq!(
+            extract_cpp_native_argument("Probe", 0, C4VType::Int, &Value::Bool(true))
+                .expect("Bool shares Data.Int"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            extract_cpp_native_argument("Probe", 0, C4VType::Int, &raw_bool)
+                .expect("raw Bool shares Data.Int"),
+            Value::Int(2)
+        );
+        assert_eq!(
+            extract_cpp_native_argument("Probe", 0, C4VType::Bool, &Value::Nil)
+                .expect("nil extracts as false"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            extract_cpp_native_argument("Probe", 0, C4VType::Bool, &raw_bool)
+                .expect("raw Bool extracts from its low word"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            extract_cpp_native_argument("Probe", 0, C4VType::Bool, &high_word_bool)
+                .expect("Bool extraction reads only Data.Int"),
+            Value::Bool(usize::BITS <= 32)
+        );
+
+        for pointer in [
+            Value::Object(7),
+            Value::String(String::new()),
+            Value::Array(Vec::new()),
+            Value::Proplist(ValueMap::new()),
+        ] {
+            assert_eq!(
+                extract_cpp_native_argument("Probe", 0, C4VType::Bool, &pointer)
+                    .expect("nonnull pointer tags extract as true"),
+                Value::Bool(true)
+            );
+        }
+        assert_eq!(
+            extract_cpp_native_argument("Probe", 0, C4VType::Bool, &Value::Object(0))
+                .expect("null object extracts as false"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            extract_cpp_native_argument(
+                "Probe",
+                0,
+                C4VType::C4Id,
+                &Value::C4Id("NONE".into()),
+            )
+            .expect("zero C4ID extracts as null"),
+            Value::Nil
+        );
+        assert_eq!(
+            extract_cpp_native_argument("Probe", 0, C4VType::C4Object, &Value::Object(0))
+                .expect("null object pointer extracts as null"),
+            Value::Nil
+        );
+    }
+
+    #[test]
+    fn cpp_add_func_argument_extraction_preserves_optional_nil_and_private_tail() {
+        assert_eq!(
+            extract_cpp_native_argument("ModulateColor", 0, C4VType::Int, &Value::Nil)
+                .expect("optional color remains nullopt"),
+            Value::Nil
+        );
+        assert_eq!(
+            extract_cpp_native_argument("CustomMessage", 5, C4VType::Int, &Value::Nil)
+                .expect("optional custom-message color remains nullopt"),
+            Value::Nil
+        );
+        assert_eq!(
+            extract_cpp_native_argument("CustomMessage", 4, C4VType::Int, &Value::Nil)
+                .expect("ordinary nil integer extracts as zero"),
+            Value::Int(0)
+        );
+        assert_eq!(
+            extract_cpp_native_arguments(
+                "EffectVar",
+                &[C4VType::Int, C4VType::C4Object, C4VType::Int],
+                &[
+                    Value::Bool(true),
+                    Value::Nil,
+                    Value::from_c4_bool_raw(2),
+                    Value::String("private setter".into()),
+                ],
+            )
+            .expect("EffectVar extraction succeeds"),
+            vec![
+                Value::Int(1),
+                Value::Nil,
+                Value::Int(2),
+                Value::String("private setter".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn cpp_add_func_adapter_runs_after_debugger_without_changing_generic_hosts() {
+        const PROBE_TYPES: &[C4VType] = &[
+            C4VType::Int,
+            C4VType::Int,
+            C4VType::Bool,
+            C4VType::C4Id,
+            C4VType::C4Object,
+            C4VType::String,
+            C4VType::Array,
+            C4VType::Map,
+        ];
+
+        fn run_probe(wrapped: bool, values: &[Value]) -> (Value, Vec<Value>) {
+            let mut engine = ScriptEngine::new();
+            engine.register_host_function("Probe", |args| Ok(Value::Array(args.to_vec())));
+            if wrapped {
+                wrap_cpp_add_func_host_function(&mut engine, "Probe", PROBE_TYPES);
+            }
+            assert!(engine.set_host_function_parameter_types(
+                "Probe",
+                PROBE_TYPES.iter().copied(),
+            ));
+            engine
+                .load_script(
+                    "#strict 3\n\
+                     func Run(a, b, c, d, e, f, g, h) {\n\
+                         return Probe(a, b, c, d, e, f, g, h);\n\
+                     }",
+                )
+                .expect("probe script compiles");
+
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let observed_by_hook = Arc::clone(&observed);
+            engine.set_debugger_hooks(lc_script::DebuggerHooks::new().with_on_call(
+                move |name, args| {
+                    if name == "Probe" {
+                        *observed_by_hook.lock().expect("debugger capture lock") = args.to_vec();
+                    }
+                },
+            ));
+            let result = engine.call("Run", values).expect("probe succeeds");
+            let debugger_args = observed.lock().expect("debugger capture lock").clone();
+            (result, debugger_args)
+        }
+
+        let high_word_bool = Value::from_c4_bool_data_raw(
+            1usize.checked_shl(32).unwrap_or(2),
+        );
+        let vm_prepared = vec![
+            Value::Nil,
+            Value::from_c4_bool_raw(2),
+            high_word_bool.clone(),
+            Value::C4Id("NONE".into()),
+            Value::Object(0),
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+        ];
+
+        let (wrapped_result, wrapped_debugger_args) = run_probe(true, &vm_prepared);
+        assert_eq!(wrapped_debugger_args, vm_prepared);
+        assert_eq!(
+            wrapped_result,
+            Value::Array(vec![
+                Value::Int(0),
+                Value::Int(2),
+                Value::Bool(usize::BITS <= 32),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
+
+        let (generic_result, generic_debugger_args) = run_probe(false, &vm_prepared);
+        assert_eq!(generic_debugger_args, vm_prepared);
+        assert_eq!(generic_result, Value::Array(vm_prepared));
+    }
+
+    #[test]
+    fn cpp_add_func_extractors_are_installed_on_production_callbacks() {
+        let mut engine = ScriptEngine::new();
+        register_host_functions(&mut engine);
+
+        assert_eq!(
+            engine
+                .call("Abs", &[Value::Bool(true)])
+                .expect("Bool extracts through the native Int parameter"),
+            Value::Int(1)
+        );
+
+        let high_word_bool = Value::from_c4_bool_data_raw(
+            1usize.checked_shl(32).unwrap_or(2),
+        );
+        assert_eq!(
+            engine
+                .call("Not", &[high_word_bool])
+                .expect("native Bool extraction reads the low Data.Int word"),
+            Value::Bool(usize::BITS > 32)
+        );
+    }
+
+    #[test]
+    fn cpp_native_registration_kinds_are_exhaustively_partitioned() {
+        let cpp_backed =
+            crate::native_function_parameters::native_function_parameter_entries()
+                .filter(|(name, _)| {
+                    !crate::native_function_parameters::RUST_STANDIN_NATIVE_FUNCTIONS
+                        .contains(name)
+                })
+                .count();
+        assert_eq!(
+            cpp_backed,
+            crate::native_function_parameters::CPP_BACKED_NATIVE_FUNCTION_COUNT
+        );
+
+        let add_func =
+            crate::native_function_parameters::native_function_parameter_entries()
+                .filter(|(name, _)| {
+                    !crate::native_function_parameters::RUST_STANDIN_NATIVE_FUNCTIONS
+                        .contains(name)
+                        && !RAW_CPP_NATIVE_FUNCTIONS.contains(name)
+                })
+                .count();
+        assert_eq!(add_func, 441);
+        assert_eq!(
+            add_func - REFERENCE_AWARE_CPP_NATIVE_FUNCTIONS.len(),
+            433
+        );
+    }
+
+    #[test]
+    fn native_host_parameter_conversion_respects_caller_strictness_and_rejects_maps_as_objects() {
+        let mut legacy = ScriptEngine::new();
+        register_host_functions(&mut legacy);
+        legacy
+            .load_script(
+                "#strict 2\n\
+                 func MapArgument() { return GetX({ id = 1 }); }\n\
+                 func ZeroArgument() { return GetX(0); }",
+            )
+            .expect("legacy native conversion probe compiles");
+
+        let map_error = legacy
+            .call("MapArgument", &[])
+            .expect_err("a map never converts to C4Object");
+        assert!(map_error.to_string().contains(
+            "call to \"GetX\" parameter 1: got \"map\", but expected \"object\"!"
+        ));
+        assert_eq!(
+            legacy
+                .call("ZeroArgument", &[])
+                .expect("legacy zero eagerly becomes a null object"),
+            Value::Nil
+        );
+
+        let mut strict3 = ScriptEngine::new();
+        register_host_functions(&mut strict3);
+        strict3
+            .load_script(
+                "#strict 3\n\
+                 func MapArgument() { return GetX({ id = 1 }); }\n\
+                 func ZeroArgument() { return GetX(0); }",
+            )
+            .expect("strict-3 native conversion probe compiles");
+        assert!(strict3
+            .call("MapArgument", &[])
+            .expect_err("strict-3 map remains a map")
+            .to_string()
+            .contains("got \"map\", but expected \"object\""));
+        assert!(strict3
+            .call("ZeroArgument", &[])
+            .expect_err("strict-3 typed zero remains an int")
+            .to_string()
+            .contains("got \"int\", but expected \"object\""));
+    }
 
     #[test]
     fn queued_object_order_functions_remain_send_and_sync() {
@@ -55228,10 +55698,44 @@ func Trigger(object pOther)
                 .expect("nil uses the C++ default first color"),
             Value::Int(0x000f_1f2f)
         );
+        let mut engine = ScriptEngine::new();
+        register_host_functions(&mut engine);
         assert_eq!(
-            modulate_color(&[Value::Int(0), Value::Int(0x0010_2030), Value::Int(99)])
-                .expect("pre-strict-3 zero defaults and excess arguments are discarded"),
+            engine
+                .call(
+                    "ModulateColor",
+                    &[Value::Int(0), Value::Int(0x0010_2030), Value::Int(99)],
+                )
+                .expect("the native boundary eagerly nils a callerless zero"),
             Value::Int(0x000f_1f2f)
+        );
+    }
+
+    #[test]
+    fn optional_native_int_keeps_non_nil_raw_bool_zero_present() {
+        let high_word_bool =
+            Value::from_c4_bool_data_raw(1usize.checked_shl(32).unwrap_or(2));
+        assert_eq!(
+            parse_native_optional_i32(
+                Some(&high_word_bool),
+                "Probe",
+                "optional integer",
+            )
+            .expect("raw Bool payload extracts"),
+            Some(if usize::BITS > 32 { 0 } else { 2 })
+        );
+
+        let mut engine = ScriptEngine::new();
+        register_host_functions(&mut engine);
+        assert_eq!(
+            engine
+                .call("ModulateColor", &[high_word_bool, Value::Int(-1)])
+                .expect("a non-nil optional zero remains present"),
+            Value::Int(if usize::BITS > 32 {
+                -16_777_216
+            } else {
+                -16_777_215
+            })
         );
     }
 
@@ -57950,11 +58454,12 @@ public func RejectConstruction(x, y, builder)
                 .to_string()
                 .contains("expected \"array\"")
         );
-        assert_eq!(
+        assert!(
             strict3
                 .call("Passed", &[Value::C4Id("0000".into())])
-                .expect("strict3 zero-payload ID array is nil"),
-            Value::Int(-1)
+                .expect_err("strict3 retains the zero-payload ID tag")
+                .to_string()
+                .contains("expected \"array\"")
         );
     }
 
@@ -58638,11 +59143,11 @@ public func RejectConstruction(x, y, builder)
                 assert!(call("WrongName", &[Value::Object(1)])
                     .expect_err("strict-3 bool must not convert to string")
                     .to_string()
-                    .contains("expected string for function, got bool"));
+                    .contains("got \"bool\", but expected \"string\""));
                 assert!(call("WrongObject", &[])
                     .expect_err("strict-3 integer zero must not convert to object")
                     .to_string()
-                    .contains("expected object for object, got int"));
+                    .contains("got \"int\", but expected \"object\""));
                 assert_eq!(
                     locate_func(&[Value::String("Anything".into())])?,
                     Value::Bool(false)
@@ -64519,14 +65024,14 @@ func ProbeBadIndex(id) {
                 .call("FalseID", &[])
                 .expect_err("strict 3 retains bool false")
                 .to_string()
-                .contains("expected C4ID")
+                .contains("expected \"id\"")
         );
         assert!(
             strict3
                 .call("PassedID", &[Value::Object(0)])
                 .expect_err("strict 3 retains a null object")
                 .to_string()
-                .contains("expected C4ID")
+                .contains("expected \"id\"")
         );
     }
 
@@ -66653,7 +67158,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
         assert_eq!(value, Value::Int(1));
         assert_eq!(outcome.object.len(), 1);
         match &outcome.object[0] {
-            EffectCommand::Add(effect) => {
+            EffectCommand::Add { effect, .. } => {
                 assert_eq!(effect.name, "Glow");
                 assert_eq!(effect.priority, 150);
                 assert_eq!(effect.interval, 3);
@@ -66686,7 +67191,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
         assert_eq!(value, Value::Int(1));
         assert_eq!(outcome.object.len(), 1);
         match &outcome.object[0] {
-            EffectCommand::Add(effect) => {
+            EffectCommand::Add { effect, .. } => {
                 assert_eq!(effect.command_target, Some(42));
                 assert_eq!(effect.command_id.as_deref(), Some("FOOB"));
             }
@@ -67031,7 +67536,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
     }
 
     #[test]
-    fn add_effect_captures_initial_vars() {
+    fn add_effect_keeps_constructor_values_out_of_effect_vars() {
         let state = empty_state();
         let (result, outcome) = with_object_host_context(|| {
             add_effect(&[
@@ -67039,7 +67544,6 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 state.clone(),
                 Value::Int(120),
                 Value::Int(2),
-                Value::Nil,
                 Value::Nil,
                 Value::Nil,
                 Value::Int(7),
@@ -67051,13 +67555,55 @@ func Missing() { return ComponentAll(nil, WOOD); }
         assert_eq!(value, Value::Int(1));
         assert_eq!(outcome.object.len(), 1);
         match &outcome.object[0] {
-            EffectCommand::Add(effect) => {
-                assert_eq!(effect.vars().len(), 2);
-                assert_eq!(effect.vars()[0], EffectVarValue::Int(7));
-                assert_eq!(effect.vars()[1], EffectVarValue::Bool(true));
+            EffectCommand::Add {
+                effect,
+                constructor_values,
+            } => {
+                assert!(effect.vars().is_empty());
+                assert_eq!(
+                    constructor_values.as_ref(),
+                    Some(&[
+                        Value::Int(7),
+                        Value::Bool(true),
+                        Value::Nil,
+                        Value::Nil,
+                    ])
+                );
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn add_effect_preserves_interior_nil_rvals_without_shifting() {
+        let state = empty_state();
+        let (result, outcome) = with_object_host_context(|| {
+            add_effect(&[
+                Value::String("Glow".into()),
+                state,
+                Value::Int(120),
+                Value::Int(2),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Int(42),
+            ])
+        });
+
+        assert_eq!(result.expect("AddEffect succeeds"), Value::Int(1));
+        let EffectCommand::Add {
+            effect,
+            constructor_values,
+        } = &outcome.object[0]
+        else {
+            panic!("expected an Add command");
+        };
+        assert!(effect.vars().is_empty());
+        assert_eq!(
+            constructor_values.as_ref(),
+            Some(&[Value::Nil, Value::Int(42), Value::Nil, Value::Nil]),
+            "slot six is rVal1 even when nil; rVal2 cannot slide left"
+        );
     }
 
     #[test]
@@ -67080,7 +67626,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
         let value = result.expect("calls succeed");
         assert_eq!(value, Value::Bool(true));
         assert_eq!(outcome.object.len(), 2);
-        assert!(matches!(outcome.object[0], EffectCommand::Add(_)));
+        assert!(matches!(outcome.object[0], EffectCommand::Add { .. }));
         assert!(matches!(
             outcome.object[1],
             EffectCommand::RemoveNumber {
@@ -67106,7 +67652,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
         let value = result.expect("calls succeed");
         assert_eq!(value, Value::Bool(true));
         assert_eq!(outcome.object.len(), 2);
-        assert!(matches!(outcome.object[0], EffectCommand::Add(_)));
+        assert!(matches!(outcome.object[0], EffectCommand::Add { .. }));
         assert!(matches!(
             outcome.object[1],
             EffectCommand::RemoveNumber {
@@ -67146,31 +67692,31 @@ func Missing() { return ComponentAll(nil, WOOD); }
             .load_script(
                 r#"#strict 2
 func Probe(state) {
-  var renamed = ChangeEffect("Int*", state, 0, "IntFadeOut", 10);
-  var preserved = ChangeEffect("Keep", state, 0, "KeepOut", -1);
-  var empty_rejected = ChangeEffect("KeepOut", state, 0, "", 1);
-  var nil_rejected = ChangeEffect("KeepOut", state, 0, nil, 1);
-  var missing_rejected = ChangeEffect("Missing", state, 0, "StillMissing", 1);
-  var by_number = ChangeEffect(nil, state, 12, "ByNumber", -7);
-  var omitted_timer = ChangeEffect("Omitted", state, 0, "Reset");
-  var clamped = ChangeEffect(nil, state, 14, "abcdefghijklmnopqrstuvwxyz1234567890", -1);
+  var renamed = ChangeEffect("Int*", this(), 0, "IntFadeOut", 10);
+  var preserved = ChangeEffect("Keep", this(), 0, "KeepOut", -1);
+  var empty_rejected = ChangeEffect("KeepOut", this(), 0, "", 1);
+  var nil_rejected = ChangeEffect("KeepOut", this(), 0, nil, 1);
+  var missing_rejected = ChangeEffect("Missing", this(), 0, "StillMissing", 1);
+  var by_number = ChangeEffect(nil, this(), 12, "ByNumber", -7);
+  var omitted_timer = ChangeEffect("Omitted", this(), 0, "Reset");
+  var clamped = ChangeEffect(nil, this(), 14, "abcdefghijklmnopqrstuvwxyz1234567890", -1);
   return [
     renamed,
-    GetEffect("IntFadeOut", state, 0, 3),
-    GetEffect("IntFadeOut", state, 0, 6),
+    GetEffect("IntFadeOut", this(), 0, 3),
+    GetEffect("IntFadeOut", this(), 0, 6),
     preserved,
     empty_rejected,
     nil_rejected,
     missing_rejected,
     by_number,
-    GetEffect(nil, state, 12, 1),
-    GetEffect(nil, state, 12, 3),
-    GetEffect(nil, state, 12, 6),
+    GetEffect(nil, this(), 12, 1),
+    GetEffect(nil, this(), 12, 3),
+    GetEffect(nil, this(), 12, 6),
     omitted_timer,
-    GetEffect(nil, state, 13, 3),
-    GetEffect(nil, state, 13, 6),
+    GetEffect(nil, this(), 13, 3),
+    GetEffect(nil, this(), 13, 6),
     clamped,
-    GetEffect(nil, state, 14, 1)
+    GetEffect(nil, this(), 14, 1)
   ];
 }
 "#,
@@ -67205,7 +67751,13 @@ func Probe(state) {
             1,
             || {
                 script
-                    .call("Probe", &[state])
+                    .call_with_locals_and_this(
+                        "Probe",
+                        &[state],
+                        &HashMap::new(),
+                        object_reference_value(ObjectId::new(1)),
+                    )
+                    .map(|(value, _)| value)
                     .map_err(|error| RuntimeError::new(error.to_string()))
             },
         );
@@ -71650,7 +72202,7 @@ func Probe(state) {
 func Probe(object other)
 {
     return [GetXDir(other, 100), GetYDir(other),
-            other->GetXDir(100), other->GetYDir()];
+            other->GetXDir(nil, 100), other->GetYDir()];
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
@@ -72689,16 +73241,28 @@ public func Probe(object carrier)
                 Value::Int(1),
                 Value::Nil,
                 Value::Nil,
-                Value::Nil,
                 Value::Int(3),
                 object_reference_value(ObjectId::new(44)),
             ])?;
 
             let initial = effect_var(&[Value::Int(0), state.clone(), Value::Int(1)])?;
-            assert_eq!(initial, Value::Int(3));
+            assert_eq!(initial, Value::Nil);
 
             let object = effect_var(&[Value::Int(1), state.clone(), Value::Int(1)])?;
-            assert_eq!(object, object_reference_value(ObjectId::new(44)));
+            assert_eq!(object, Value::Nil);
+
+            effect_var(&[
+                Value::Int(0),
+                state.clone(),
+                Value::Int(1),
+                Value::Int(3),
+            ])?;
+            effect_var(&[
+                Value::Int(1),
+                state.clone(),
+                Value::Int(1),
+                object_reference_value(ObjectId::new(44)),
+            ])?;
 
             let unset = effect_var(&[Value::Int(2), state.clone(), Value::Int(1)])?;
             assert_eq!(unset, Value::Nil);
@@ -72718,8 +73282,8 @@ public func Probe(object carrier)
         });
 
         result.expect("EffectVar interactions succeed");
-        assert_eq!(outcome.object.len(), 2);
-        match &outcome.object[1] {
+        assert_eq!(outcome.object.len(), 4);
+        match &outcome.object[3] {
             // EffectVar writes fold as number-keyed UPDATEs — an Add
             // would resurrect an effect killed earlier the same frame.
             EffectCommand::Update(effect) => {
@@ -81029,7 +81593,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         assert!(outcome.object.is_empty());
         assert_eq!(outcome.global.len(), 1);
         match &outcome.global[0] {
-            EffectCommand::Add(effect) => {
+            EffectCommand::Add { effect, .. } => {
                 assert_eq!(effect.name, "Glow");
                 assert_eq!(effect.priority, 120);
             }
@@ -81067,5 +81631,299 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
 
         let value = result.expect("RemoveEffect succeeds");
         assert_eq!(value, Value::Bool(false));
+    }
+
+    #[test]
+    fn effect_natives_extract_bool_payloads_from_every_c4valueint_slot() {
+        // CheckConvertFunctionParameters accepts C4V_Bool for C4V_Int without
+        // retagging it (C4Value.cpp:514-518). C4AulEngineFunc then extracts the
+        // shared low Data.Int through C4ValueConv<C4ValueInt>::_FromC4V
+        // (C4Value.h:317-322; C4Script.cpp:6170-6174).
+        let raw_bool = Value::from_c4_bool_raw;
+        let (result, _) = with_effect_context(
+            None,
+            &[],
+            HostWorldContext::default(),
+            1,
+            || -> Result<Value, RuntimeError> {
+                assert_eq!(
+                    add_effect(&[
+                        Value::String("Probe".into()),
+                        Value::Nil,
+                        Value::Bool(true),
+                        raw_bool(2),
+                    ])?,
+                    Value::Int(1),
+                    "Bool priority and raw-Bool interval extract as integers"
+                );
+                assert_eq!(
+                    add_effect(&[
+                        Value::String("Aux".into()),
+                        Value::Nil,
+                        Value::Bool(true),
+                        raw_bool(3),
+                    ])?,
+                    Value::Int(2)
+                );
+
+                assert_eq!(
+                    check_effect(&[
+                        Value::String("Candidate".into()),
+                        Value::Nil,
+                        raw_bool(2),
+                        raw_bool(3),
+                    ])?,
+                    Value::Int(0),
+                    "CheckEffect extracts both integer slots"
+                );
+                assert_eq!(
+                    get_effect_count(&[Value::Nil, Value::Nil, Value::Bool(true)])?,
+                    Value::Int(2)
+                );
+                assert_eq!(
+                    get_effect(&[
+                        Value::String("Probe".into()),
+                        Value::Nil,
+                        Value::Bool(false),
+                        raw_bool(3),
+                        Value::Bool(true),
+                    ])?,
+                    Value::Int(2),
+                    "Bool index/max-priority and raw-Bool query retain Data.Int"
+                );
+
+                assert_eq!(
+                    change_effect(&[
+                        Value::String("Probe".into()),
+                        Value::Nil,
+                        Value::Bool(false),
+                        Value::String("Changed".into()),
+                        raw_bool(4),
+                    ])?,
+                    Value::Bool(true)
+                );
+                assert_eq!(
+                    get_effect(&[
+                        Value::String("Changed".into()),
+                        Value::Nil,
+                        Value::Bool(false),
+                        raw_bool(3),
+                    ])?,
+                    Value::Int(4),
+                    "ChangeEffect extracts its Bool index and raw-Bool timer"
+                );
+
+                effect_var(&[raw_bool(2), Value::Nil, raw_bool(2), Value::Int(77)])?;
+                assert_eq!(
+                    effect_var(&[raw_bool(2), Value::Nil, raw_bool(2)])?,
+                    Value::Int(77),
+                    "EffectVar extracts both raw-Bool integer address slots"
+                );
+                assert_eq!(
+                    effect_call(&[
+                        Value::Nil,
+                        raw_bool(2),
+                        Value::String("Missing".into()),
+                    ])?,
+                    Value::Nil,
+                    "EffectCall accepts a raw-Bool effect number"
+                );
+
+                for name in [Value::String("Changed".into()), Value::Nil] {
+                    assert_eq!(
+                        remove_effect(&[
+                            name,
+                            Value::Nil,
+                            Value::Int(-1),
+                            Value::Bool(true),
+                        ])?,
+                        Value::Bool(false),
+                        "a negative named index or effect number is a miss, not an error"
+                    );
+                }
+
+                assert_eq!(
+                    remove_effect(&[
+                        Value::String("Changed".into()),
+                        Value::Nil,
+                        Value::Bool(false),
+                        raw_bool(2),
+                    ])?,
+                    Value::Bool(true),
+                    "RemoveEffect extracts its Bool index and raw-Bool flag"
+                );
+                get_effect_count(&[Value::Nil, Value::Nil])
+            },
+        );
+
+        assert_eq!(
+            result.expect("all typed effect arguments extract like C++"),
+            Value::Int(1),
+            "only Aux remains after removing Changed"
+        );
+    }
+
+    #[test]
+    fn fire_constructor_extracts_raw_bool_start_parameters_from_data_int() {
+        let high_word_bool =
+            Value::from_c4_bool_data_raw(1usize.checked_shl(32).unwrap_or(2));
+        let (result, outcome) = with_object_host_context(|| {
+            let random = enter_random_context(LcgRng::new(9));
+            let result = add_effect(&[
+                Value::String(crate::C4FX_FIRE.to_string()),
+                Value::Object(1),
+                Value::Int(crate::C4FX_FIRE_PRIORITY),
+                Value::Int(crate::C4FX_FIRE_TIMER_INTERVAL),
+                Value::Nil,
+                Value::Nil,
+                Value::from_c4_bool_raw(2),
+                high_word_bool,
+            ]);
+            let _ = random.finish();
+            result
+        });
+
+        assert!(matches!(result, Ok(Value::Int(number)) if number > 0));
+        let effect = outcome
+            .object
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                EffectCommand::Update(effect) if effect.name == crate::C4FX_FIRE => Some(effect),
+                _ => None,
+            })
+            .expect("FxFireStart writes the live Fire effect vars");
+        assert_eq!(effect.var(1), EffectVarValue::Int(2));
+        assert_eq!(
+            effect.var(2),
+            EffectVarValue::Bool(usize::BITS <= 32),
+            "native bool extraction reads the low Data.Int word, not full-union truthiness"
+        );
+    }
+
+    #[test]
+    fn typed_null_object_targets_the_global_effect_list() {
+        // A strict caller can retain a transient C4V_C4Object tag with a zero
+        // payload. C4ValueConv<C4Object *>::_FromC4V extracts nullptr, and all
+        // effect natives consequently select Game.pGlobalEffects.
+        let null_object = Value::Object(0);
+        let (result, outcome) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            let null_scope = determine_scope_from_state(&null_object)?;
+            assert_eq!(null_scope, EffectScope::Global);
+            assert_eq!(
+                effect_callback_target_value(null_scope, &null_object),
+                Value::Nil,
+                "C4VObj(nullptr) canonicalizes the Fx callback target to nil"
+            );
+            let number = add_effect(&[
+                Value::String("Global".into()),
+                null_object.clone(),
+                Value::Int(100),
+                Value::Int(2),
+            ])?;
+            assert_eq!(number, Value::Int(1));
+            assert_eq!(
+                get_effect_count(&[Value::Nil, null_object.clone()])?,
+                Value::Int(1)
+            );
+            assert_eq!(
+                get_effect(&[
+                    Value::String("Global".into()),
+                    null_object.clone(),
+                    Value::Int(0),
+                    Value::Int(1),
+                ])?,
+                Value::String("Global".into())
+            );
+            assert_eq!(
+                get_effect(&[
+                    Value::String("Global".into()),
+                    Value::Object(1),
+                ])?,
+                Value::Nil,
+                "the active object's list remains untouched"
+            );
+            assert_eq!(
+                check_effect(&[
+                    Value::String("Candidate".into()),
+                    null_object.clone(),
+                    Value::Int(50),
+                    Value::Int(1),
+                ])?,
+                Value::Int(0)
+            );
+            assert_eq!(
+                change_effect(&[
+                    Value::String("Global".into()),
+                    null_object.clone(),
+                    Value::Int(0),
+                    Value::String("Renamed".into()),
+                    Value::Int(-1),
+                ])?,
+                Value::Bool(true)
+            );
+
+            effect_var(&[
+                Value::Int(0),
+                null_object.clone(),
+                number.clone(),
+                Value::Int(55),
+            ])?;
+            assert_eq!(
+                effect_var(&[Value::Int(0), null_object.clone(), number.clone()])?,
+                Value::Int(55)
+            );
+            assert_eq!(
+                effect_call(&[
+                    null_object.clone(),
+                    number,
+                    Value::String("Missing".into()),
+                ])?,
+                Value::Nil
+            );
+            assert_eq!(
+                remove_effect(&[
+                    Value::String("Renamed".into()),
+                    null_object.clone(),
+                    Value::Int(0),
+                    Value::Bool(true),
+                ])?,
+                Value::Bool(true)
+            );
+            get_effect_count(&[Value::Nil, null_object])
+        });
+
+        assert_eq!(
+            result.expect("typed null object consistently selects globals"),
+            Value::Int(0)
+        );
+        assert!(outcome.object.is_empty());
+        assert!(
+            !outcome.global.is_empty(),
+            "all mutations were recorded against the global list"
+        );
+    }
+
+    #[test]
+    fn synthetic_proplist_effect_target_still_selects_the_active_object() {
+        let state = empty_state();
+        let (result, outcome) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[
+                Value::String("Synthetic".into()),
+                state.clone(),
+                Value::Int(100),
+            ])?;
+            Ok(Value::Array(vec![
+                get_effect_count(&[Value::Nil, state])?,
+                get_effect_count(&[Value::Nil, Value::Object(0)])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("synthetic target remains object-scoped"),
+            Value::Array(vec![Value::Int(1), Value::Int(0)])
+        );
+        assert!(!outcome.object.is_empty());
+        assert!(outcome.global.is_empty());
     }
 }

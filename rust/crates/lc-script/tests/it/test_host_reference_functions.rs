@@ -1,8 +1,11 @@
-//! Native `C4Value *` parameters retain caller lvalues while non-lvalues
-//! arrive as null references (FnSimFlight, C4Script.cpp:5309-5312). This file
-//! freezes that VM/host boundary without implementing SimFlight itself.
+//! Native `C4Value *` parameters retain caller lvalues. A non-lvalue cannot
+//! convert to C4V_pC4Value, so typed native dispatch rejects it before the
+//! callback runs (C4AulExec.cpp:1364-1396; C4Value.cpp:586-597).
 
-use lc_script::{Engine, RuntimeError, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use lc_script::{C4VType, Engine, RuntimeError, ScriptError, Value};
 
 #[test]
 fn reference_aware_host_writes_through_a_local_lvalue() {
@@ -87,18 +90,15 @@ fn ordinary_host_arguments_remain_copied_values() {
 }
 
 #[test]
-fn declared_reference_non_lvalue_is_observable_without_forced_writeback() {
+fn declared_reference_non_lvalue_is_rejected_before_the_native_body() {
     let mut engine = Engine::new();
-    engine.register_host_reference_function("RequireRefs", [0, 1], |args| {
-        assert!(args[0].is_reference());
-        assert!(!args[1].is_reference());
-        assert_eq!(args[1].read()?, Value::Int(3));
-        assert!(!args[1].write(Value::Int(7))?);
-        // FnSimFlight validates every pointer before simulation and therefore
-        // leaves even valid earlier refs untouched when one is null
-        // (C4Script.cpp:5311-5312).
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&calls);
+    engine.register_host_reference_function("RequireRefs", [0, 1], move |_| {
+        observed_calls.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Nil)
     });
+    assert!(engine.set_host_function_parameter_types("RequireRefs", [C4VType::Ref, C4VType::Ref]));
     engine
         .load_script(
             r#"
@@ -112,10 +112,17 @@ fn declared_reference_non_lvalue_is_observable_without_forced_writeback() {
         )
         .expect("script loads");
 
+    let error = engine
+        .call("Test", &[])
+        .expect_err("the second argument is an rvalue");
+    let ScriptError::Runtime(error) = error else {
+        panic!("expected runtime error, got {error}");
+    };
     assert_eq!(
-        engine.call("Test", &[]).unwrap(),
-        Value::Array(vec![Value::Int(5), Value::Nil])
+        error.message(),
+        r#"call to "RequireRefs" parameter 2: got "int", but expected "&"!"#
     );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

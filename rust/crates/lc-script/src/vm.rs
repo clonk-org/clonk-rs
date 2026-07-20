@@ -1280,11 +1280,11 @@ impl CallArg {
 
 /// Opaque argument supplied to a reference-aware native host function.
 ///
-/// A parameter declared reference-aware still arrives here when the script
-/// expression is not an lvalue; in that case it remains readable but
-/// [`HostCallArg::is_reference`] is false and [`HostCallArg::write`] returns
-/// `Ok(false)`. This models nullable native `C4Value *` parameters without
-/// exposing the VM's lvalue representation.
+/// For an untyped embedding callback, a reference-aware parameter still
+/// arrives here when the script expression is not an lvalue; it remains
+/// readable but [`HostCallArg::is_reference`] is false and
+/// [`HostCallArg::write`] returns `Ok(false)`. A typed native `C4V_pC4Value`
+/// slot rejects that value before constructing `HostCallArg`.
 #[derive(Clone)]
 pub struct HostCallArg(CallArg);
 
@@ -1542,6 +1542,7 @@ pub struct Vm<'a> {
     owner_strict_level: Option<Option<u8>>,
     host_functions: &'a HashMap<String, RegisteredHostFunction>,
     host_reference_functions: Option<&'a HashMap<String, HostReferenceFunction>>,
+    host_function_parameter_types: Option<&'a HashMap<String, Arc<[C4VType]>>>,
     var_decls: &'a [VarDecl], // Script-level variable declarations
     debugger: Option<DebuggerHooks>,
     /// Engine-registered script constants (`RegisterGlobalConstant`,
@@ -1602,6 +1603,7 @@ impl<'a> Vm<'a> {
             owner_strict_level: None,
             host_functions,
             host_reference_functions: None,
+            host_function_parameter_types: None,
             var_decls,
             debugger,
             constants: None,
@@ -1627,6 +1629,14 @@ impl<'a> Vm<'a> {
         functions: &'a HashMap<String, HostReferenceFunction>,
     ) -> Self {
         self.host_reference_functions = Some(functions);
+        self
+    }
+
+    pub(crate) fn with_host_function_parameter_types(
+        mut self,
+        parameter_types: &'a HashMap<String, Arc<[C4VType]>>,
+    ) -> Self {
+        self.host_function_parameter_types = Some(parameter_types);
         self
     }
 
@@ -2324,6 +2334,7 @@ impl<'a> Vm<'a> {
             owner_strict_level: self.owner_strict_level,
             host_functions: self.host_functions,
             host_reference_functions: self.host_reference_functions,
+            host_function_parameter_types: self.host_function_parameter_types,
             var_decls: self.var_decls,
             debugger: self.debugger.clone(),
             constants: self.constants,
@@ -2678,12 +2689,88 @@ impl<'a> Vm<'a> {
         self.host_functions.contains_key(name) || self.host_reference_function(name).is_some()
     }
 
-    fn invoke_host_function(
+    /// C++ `CheckConvertFunctionParameters` for engine/native functions.
+    /// Native callees never enable the script-only nil-to-int/bool bridge:
+    /// legacy callers only collapse falsy non-reference values to `Any` nil,
+    /// and every subsequent table conversion remains strict.
+    fn prepare_native_host_call_args(
+        &self,
+        name: &str,
+        args: &[CallArg],
+    ) -> Result<Vec<CallArg>, RuntimeError> {
+        let Some(parameter_types) = self
+            .host_function_parameter_types
+            .and_then(|functions| functions.get(name))
+        else {
+            return Ok(args.to_vec());
+        };
+
+        // Argument expressions have already run left-to-right. Only now does
+        // C4Aul balance the native frame to the declared signature.
+        let mut args = args.to_vec();
+        args.truncate(parameter_types.len());
+        args.resize_with(parameter_types.len(), || CallArg::runtime(Value::Nil));
+
+        let convert_to_any_eagerly = !matches!(
+            caller_origin_strictness(),
+            HostCallerStrictness::Strict(level) if level >= 3
+        );
+
+        for (index, (arg, expected)) in args
+            .iter_mut()
+            .zip(parameter_types.iter().copied())
+            .enumerate()
+        {
+            if expected == C4VType::Ref {
+                if matches!(arg, CallArg::Reference(_)) {
+                    continue;
+                }
+                let got = Self::c4v_type_name(arg.read()?.c4v_type());
+                return Err(RuntimeError::new(format!(
+                    "call to \"{name}\" parameter {}: got \"{got}\", but expected \"&\"!",
+                    index + 1
+                )));
+            }
+
+            // A native's non-reference C++ parameter receives a dereferenced
+            // copy. Conversions therefore never mutate the caller's lvalue.
+            let mut tracked = arg.read_tracked()?;
+            if convert_to_any_eagerly && !tracked.value.as_bool() {
+                tracked = TrackedValue::runtime(Value::Nil);
+            }
+            if !tracked.value.convert_to_in_place(expected, true) {
+                return Err(RuntimeError::new(format!(
+                    "call to \"{name}\" parameter {}: got \"{}\", but expected \"{}\"!",
+                    index + 1,
+                    Self::c4v_type_name(tracked.value.c4v_type()),
+                    Self::c4v_type_name(expected)
+                )));
+            }
+            *arg = CallArg::Value(tracked);
+        }
+        Ok(args)
+    }
+
+    fn prepare_native_host_values(
+        &self,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Vec<Value>, RuntimeError> {
+        let args = args
+            .iter()
+            .cloned()
+            .map(CallArg::runtime)
+            .collect::<Vec<_>>();
+        let args = self.prepare_native_host_call_args(name, &args)?;
+        self.call_args_to_values(&args)
+    }
+
+    fn prepare_registered_host_values(
         &self,
         name: &str,
         function: &RegisteredHostFunction,
         args: &[Value],
-    ) -> Result<Value, RuntimeError> {
+    ) -> Result<Vec<Value>, RuntimeError> {
         let normalized;
         let args = match function.parameter_count() {
             Some(parameter_count) if args.len() != parameter_count => {
@@ -2692,15 +2779,15 @@ impl<'a> Vm<'a> {
             }
             _ => args,
         };
-        self.invoke_host_function_raw(name, function, args)
+        self.prepare_native_host_values(name, args)
     }
 
-    fn invoke_host_function_call_args(
+    fn prepare_registered_host_call_args(
         &self,
         name: &str,
         function: &RegisteredHostFunction,
         args: &[CallArg],
-    ) -> Result<Value, RuntimeError> {
+    ) -> Result<Vec<CallArg>, RuntimeError> {
         let normalized;
         let args = match function.parameter_count() {
             Some(parameter_count) if args.len() != parameter_count => {
@@ -2709,8 +2796,28 @@ impl<'a> Vm<'a> {
             }
             _ => args,
         };
-        let values = self.call_args_to_values(args)?;
-        self.invoke_host_function(name, function, &values)
+        self.prepare_native_host_call_args(name, args)
+    }
+
+    fn invoke_host_function(
+        &self,
+        name: &str,
+        function: &RegisteredHostFunction,
+        args: &[Value],
+    ) -> Result<Value, RuntimeError> {
+        let args = self.prepare_registered_host_values(name, function, args)?;
+        self.invoke_host_function_raw(name, function, &args)
+    }
+
+    fn invoke_host_function_call_args(
+        &self,
+        name: &str,
+        function: &RegisteredHostFunction,
+        args: &[CallArg],
+    ) -> Result<Value, RuntimeError> {
+        let args = self.prepare_registered_host_call_args(name, function, args)?;
+        let values = self.call_args_to_values(&args)?;
+        self.invoke_host_function_raw(name, function, &values)
     }
 
     /// Invoke the callback without applying its public script signature.
@@ -2754,6 +2861,7 @@ impl<'a> Vm<'a> {
             }
             _ => args,
         };
+        let args = self.prepare_native_host_call_args(name, args)?;
         let args = args
             .iter()
             .cloned()
@@ -4189,13 +4297,19 @@ impl<'a> Vm<'a> {
         // pair rather than a retained ValueReference. Evaluate its addressing
         // arguments once and reuse those values for both halves.
         if let AssignmentTarget::EffectSlot(args) = &target {
-            let arg_values = args
+            let raw_arg_values = args
                 .iter()
                 .map(|arg| self.evaluate(arg, env, 0))
                 .collect::<Result<Vec<_>, _>>()?;
-            let old_value = if let Some(host) = self.host_functions.get("EffectVar") {
-                let _guard = CallerContextGuard::enter(Some(env.caller_context()));
-                self.invoke_host_function("EffectVar", host, &arg_values)?
+            let _guard = CallerContextGuard::enter(Some(env.caller_context()));
+            let host = self.host_functions.get("EffectVar");
+            let arg_values = if let Some(host) = host {
+                self.prepare_registered_host_values("EffectVar", host, &raw_arg_values)?
+            } else {
+                raw_arg_values
+            };
+            let old_value = if let Some(host) = host {
+                self.invoke_host_function_raw("EffectVar", host, &arg_values)?
             } else {
                 env.get(&format!(
                     "__effect_{}",
@@ -4213,16 +4327,13 @@ impl<'a> Vm<'a> {
             };
             let old_value = Self::counter_operand(old_value, operation)?;
             let new_value = old_value.wrapping_add(delta);
-            if let Some(host) = self.host_functions.get("EffectVar") {
-                let mut write_args = match host.parameter_count() {
-                    Some(parameter_count) => {
-                        Self::normalize_host_values(&arg_values, parameter_count)
-                    }
-                    None => arg_values,
-                };
+            if let Some(host) = host {
+                let mut write_args = arg_values;
                 write_args.push(Value::Int(new_value));
-                let _guard = CallerContextGuard::enter(Some(env.caller_context()));
-                self.invoke_host_function_raw("EffectVar", host, &write_args)?;
+                // The fourth argument is Rust's internal write-through seam
+                // for the C4Value reference returned by the three-parameter
+                // native. It is not another native call boundary.
+                (host.callback())(&write_args)?;
             } else {
                 let slot_name = format!(
                     "__effect_{}",
@@ -5137,20 +5248,18 @@ impl<'a> Vm<'a> {
         }
         if function.is_none() && name == "EffectVar" {
             if let Some(host) = global_vm.host_functions.get(name) {
-                let normalized_args;
-                let evaluated_args = match host.parameter_count() {
-                    Some(parameter_count) if evaluated_args.len() != parameter_count => {
-                        normalized_args =
-                            Self::normalize_host_call_args(&evaluated_args, parameter_count);
-                        normalized_args.as_slice()
-                    }
-                    _ => evaluated_args.as_slice(),
-                };
-                let args = global_vm.call_args_to_values(evaluated_args)?;
+                let caller = env.caller_context();
+                let _guard = CallerContextGuard::enter(Some(caller.clone()));
+                let args = global_vm.prepare_registered_host_call_args(
+                    name,
+                    host,
+                    &evaluated_args,
+                )?;
+                let args = global_vm.call_args_to_values(&args)?;
                 return Ok(ReturnValue::Reference(LValueRef::HostPath {
                     function: host.callback().clone(),
                     args,
-                    caller: env.caller_context(),
+                    caller,
                     global_call_context_hook: global_vm.global_call_context_hook.cloned(),
                     segments: Vec::new(),
                 }));
@@ -5878,21 +5987,22 @@ impl<'a> Vm<'a> {
                 Ok(self.tracked_cell(slot_cell(&env.var_slots, index)))
             }
             AssignmentTarget::EffectSlot(args) => {
-                let arg_values = args
+                let raw_arg_values = args
                     .iter()
                     .map(|arg| self.evaluate(arg, env, depth + 1))
                     .collect::<Result<Vec<_>, _>>()?;
                 if let Some(function) = self.host_functions.get("EffectVar") {
-                    let arg_values = match function.parameter_count() {
-                        Some(parameter_count) => {
-                            Self::normalize_host_values(&arg_values, parameter_count)
-                        }
-                        None => arg_values,
-                    };
+                    let caller = env.caller_context();
+                    let _guard = CallerContextGuard::enter(Some(caller.clone()));
+                    let arg_values = self.prepare_registered_host_values(
+                        "EffectVar",
+                        function,
+                        &raw_arg_values,
+                    )?;
                     return Ok(LValueRef::HostPath {
                         function: function.callback().clone(),
                         args: arg_values,
-                        caller: env.caller_context(),
+                        caller,
                         global_call_context_hook: self
                             .retain_global_call_context_for_host_paths
                             .then(|| self.global_call_context_hook.cloned())
@@ -5906,7 +6016,7 @@ impl<'a> Vm<'a> {
                 // reference/path behavior as the engine-backed variant.
                 let slot_name = format!(
                     "__effect_{}",
-                    arg_values
+                    raw_arg_values
                         .iter()
                         .map(|value| match value {
                             Value::Int(value) => value.to_string(),

@@ -9071,6 +9071,12 @@ func ArmThreaded(object b)
     return true;
 }
 
+func FxFirstStart(object target, int number, int temp, object b)
+{
+    if (!temp) EffectVar(0, target, number) = b;
+    return 0;
+}
+
 func FxFirstTimer(object target, int number, int time)
 {
     DoCon(100);
@@ -9178,9 +9184,21 @@ func ArmForeignState(object other)
     return true;
 }
 
+func FxDisableForeignStart(object target, int number, int temp, object other)
+{
+    if (!temp) EffectVar(0, target, number) = other;
+    return 0;
+}
+
 func FxDisableForeignTimer(object target, int number, int time)
 {
     SetSolidMask(0, 0, 0, 0, 0, 0, EffectVar(0, target, number));
+    return 0;
+}
+
+func FxMoveForeignStart(object target, int number, int temp, object other)
+{
+    if (!temp) EffectVar(0, target, number) = other;
     return 0;
 }
 
@@ -9254,6 +9272,12 @@ func ArmOwnership(object b)
     AddEffect("RecreateForeign", this(), 1, 1, this(), nil, b);
     AddEffect("DisableOuter", this(), 1, 1, this());
     return true;
+}
+
+func FxRecreateForeignStart(object target, int number, int temp, object b)
+{
+    if (!temp) EffectVar(0, target, number) = b;
+    return 0;
 }
 
 func FxRecreateForeignTimer(object target, int number, int time)

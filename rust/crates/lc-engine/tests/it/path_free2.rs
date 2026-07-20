@@ -165,6 +165,6 @@ global func Probe()
 "#;
     let error = script_engine(strict_three)
         .call("Probe", &[])
-        .expect_err("strict-three C4ID NONE does not convert to int");
-    assert!(error.to_string().contains("expected integer"), "{error}");
+        .expect_err("strict-three retains the transient C4ID tag");
+    assert!(error.to_string().contains("expected \"int\""), "{error}");
 }

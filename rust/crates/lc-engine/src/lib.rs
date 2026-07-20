@@ -37,6 +37,7 @@ mod mass_mover;
 #[doc(hidden)] pub use lc_engine_core::math;
 mod message;
 mod network_game_data;
+mod native_function_parameters;
 pub mod ocf;
 #[cfg(test)]
 mod parity_differential;
@@ -7922,7 +7923,10 @@ impl Object {
         let mut events = Vec::new();
         for command in commands {
             match command {
-                EffectCommand::Add(effect) => {
+                EffectCommand::Add {
+                    effect,
+                    constructor_values,
+                } => {
                     let is_update = effect.number > 0
                         && self
                             .state
@@ -7931,7 +7935,12 @@ impl Object {
                             .any(|existing| existing.number == effect.number);
                     let (inserted, _) = self.insert_effect(effect.clone());
                     if !is_update {
-                        events.push(EffectEvent::started(inserted));
+                        events.push(EffectEvent::started(
+                            inserted,
+                            constructor_values
+                                .clone()
+                                .unwrap_or_else(|| std::array::from_fn(|_| Value::Nil)),
+                        ));
                     }
                 }
                 EffectCommand::Update(effect) => {
@@ -15464,6 +15473,7 @@ impl Definition {
         &self,
         carrier: Option<(&ObjectState, ObjectId)>,
         effect: &EffectState,
+        constructor_values: &[Value; 4],
         rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
@@ -15478,15 +15488,7 @@ impl Definition {
         // (C4Effect.cpp:118-129). Deferred object starts must retain the
         // same argument list as the synchronous priority-one/global path.
         let mut extras = vec![Value::Int(0)];
-        for index in 0..4 {
-            extras.push(
-                effect
-                    .vars()
-                    .get(index)
-                    .map(compat::effect_var_to_value)
-                    .unwrap_or(Value::Nil),
-            );
-        }
+        extras.extend(constructor_values.iter().cloned());
         self.dispatch_effect_callback(
             carrier,
             effect,
@@ -15580,6 +15582,7 @@ impl Definition {
         carrier: Option<(&ObjectState, ObjectId)>,
         checker: &EffectState,
         pending: &EffectState,
+        constructor_values: &[Value; 4],
         rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
@@ -15591,15 +15594,7 @@ impl Definition {
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
         let mut extras = vec![Value::String(pending.name.clone())];
         // rVal1-4 (C4Effect.cpp:282): always four slots, missing = nil.
-        for index in 0..4 {
-            extras.push(
-                pending
-                    .vars()
-                    .get(index)
-                    .map(compat::effect_var_to_value)
-                    .unwrap_or(Value::Nil),
-            );
-        }
+        extras.extend(constructor_values.iter().cloned());
         self.dispatch_effect_callback(
             carrier,
             checker,
@@ -15626,6 +15621,7 @@ impl Definition {
         carrier: Option<(&ObjectState, ObjectId)>,
         acceptor: &EffectState,
         pending: &EffectState,
+        constructor_values: &[Value; 4],
         rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
@@ -15640,15 +15636,7 @@ impl Definition {
             Value::Int(pending.interval),
         ];
         // rVal1-4 (C4Effect.cpp:301): always four slots, missing = nil.
-        for index in 0..4 {
-            extras.push(
-                pending
-                    .vars()
-                    .get(index)
-                    .map(compat::effect_var_to_value)
-                    .unwrap_or(Value::Nil),
-            );
-        }
+        extras.extend(constructor_values.iter().cloned());
         self.dispatch_effect_callback(
             carrier,
             acceptor,
@@ -15754,14 +15742,20 @@ impl Definition {
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
         let next_object_id = world.next_object_id();
         let callback_name = format!("Fx{}{}", effect.name, event);
-        let Some(callback) = resolve_effect_script_callback(effect, &callback_name, &world) else {
+        let callback = resolve_effect_script_callback(effect, &callback_name, &world);
+        // AddFunc registers the engine's FxFireStart below script functions.
+        // C4Effect therefore calls the native body only when script lookup did
+        // not find an override; inherited() from an override already reaches
+        // the registered host through the ordinary VM path.
+        let native_fire_start = callback.is_none() && effect.name == C4FX_FIRE && event == "Start";
+        if callback.is_none() && !native_fire_start {
             return Ok((
                 EffectContextOutcome::empty(next_object_id, audio.clone()),
                 audio,
                 rng,
                 None,
             ));
-        };
+        }
         // Fx callbacks resolve CODE on the effect command target/id, but
         // pForObj remains the affected object's real C4Object. Its ActMap,
         // physicals, OCF metadata and definition id therefore come from the
@@ -15808,7 +15802,15 @@ impl Definition {
         // The affected carrier and command target may be different objects,
         // so copy locals from the command target's world snapshot unless it
         // is the carrier whose threaded event snapshot is newer.
-        let context_object = callback.command_object;
+        let context_object = callback
+            .as_ref()
+            .and_then(|callback| callback.command_object)
+            .or_else(|| {
+                native_fire_start
+                    .then(|| effect.command_target.map(|target| ObjectId::new(target as u64)))
+                    .flatten()
+                    .filter(|target| world.get(*target).is_some())
+            });
         let context_is_self =
             carrier.is_some_and(|(_, object_id)| context_object == Some(object_id));
         let context_this = context_object
@@ -15833,7 +15835,20 @@ impl Definition {
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let audio_guard = enter_audio_context(audio);
-        let callback_definition_context = callback.definition_context.clone();
+        let callback_definition_context = callback
+            .as_ref()
+            .and_then(|callback| callback.definition_context.clone())
+            .or_else(|| {
+                native_fire_start
+                    .then(|| {
+                        context_object.and_then(|object| {
+                            world
+                                .get(object)
+                                .map(|object| DefinitionId::from(object.definition_id()))
+                        })
+                    })
+                    .flatten()
+            });
         let (result, mut commands) = compat::with_effect_context_with_state_and_definition(
             carrier.map(|(state, object_id)| {
                 let carrier_walk_rotation = carrier_metadata
@@ -15924,6 +15939,14 @@ impl Definition {
                 if let Some(session_id) = context_object {
                     compat::register_session_local_cells(session_id, context_cells.clone());
                 }
+                if native_fire_start {
+                    return compat::fx_fire_start(&args)
+                        .map(|value| Some((value, context_cells.snapshot())))
+                        .map_err(ScriptError::from);
+                }
+                let callback = callback
+                    .as_ref()
+                    .expect("script callback exists when native fallback is inactive");
                 if callback.engine_global_entry {
                     if context_object.is_some() {
                         return callback
@@ -31259,28 +31282,10 @@ impl Engine {
 
                 let entry = event.effect;
                 if !entry.start_dispatched {
-                    // A check-chain survivor gets its engine FnFxFireStart
-                    // at first execution. The AddEffect rVals still occupy
-                    // vars [causedBy, blasted, incObj].
-                    let caused_by = match entry.vars().first() {
-                        Some(EffectVarValue::Int(value)) => *value,
-                        Some(EffectVarValue::Bool(flag)) => i32::from(*flag),
-                        Some(EffectVarValue::RawBool(value)) => *value as u32 as i32,
-                        _ => 0,
-                    };
-                    let blasted = matches!(entry.vars().get(1), Some(EffectVarValue::Bool(true)))
-                        || matches!(
-                            entry.vars().get(1),
-                            Some(EffectVarValue::RawBool(value)) if (*value as u32 as i32) != 0
-                        )
-                        || matches!(
-                            entry.vars().get(1),
-                            Some(EffectVarValue::Int(value)) if *value != 0
-                        );
-                    let incinerating = match entry.vars().get(2) {
-                        Some(EffectVarValue::Object(id)) => Some(ObjectId::new(*id)),
-                        _ => None,
-                    };
+                    // Runtime constructors dispatch native FxFireStart in
+                    // their Started event. Loaded effects also mark Start as
+                    // complete. Never reinterpret persistent Fire EffectVars
+                    // (Mode/CausedBy/Blasted/Incinerating) as constructor rVals.
                     if let Some(pending) = self.objects[idx]
                         .state
                         .effects
@@ -31288,19 +31293,6 @@ impl Engine {
                         .find(|effect| effect.number == entry.number)
                     {
                         pending.start_dispatched = true;
-                    }
-                    let started = self.fire_effect_start_engine(
-                        idx,
-                        entry.number,
-                        caused_by,
-                        blasted,
-                        incinerating,
-                    )?;
-                    self.refresh_object_ocf(idx);
-                    if !started {
-                        // A denied Start dies without a Stop callback.
-                        self.objects[idx].remove_effect_by_number(entry.number);
-                        continue;
                     }
                 }
                 let stop_events = self.exec_object_fire(idx, frame, entry.number);
@@ -35483,9 +35475,14 @@ impl Engine {
                         .collect();
                     if !checkers.is_empty() {
                         let pending = event.effect.clone();
+                        let constructor_values = event.constructor_values.clone();
                         queue.push_front(event);
                         for checker in checkers.into_iter().rev() {
-                            queue.push_front(EffectEvent::check(checker, pending.clone()));
+                            queue.push_front(EffectEvent::check(
+                                checker,
+                                pending.clone(),
+                                constructor_values.clone(),
+                            ));
                         }
                         continue;
                     }
@@ -35518,7 +35515,11 @@ impl Engine {
                             .cloned()
                             .map(EffectEvent::temp_removed)
                             .collect();
-                        sequence.push(EffectEvent::add_to(acceptor, event.effect.clone()));
+                        sequence.push(EffectEvent::add_to(
+                            acceptor,
+                            event.effect.clone(),
+                            event.constructor_values.clone(),
+                        ));
                         sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
                         for queued in sequence.into_iter().rev() {
                             queue.push_front(queued);
@@ -35537,8 +35538,8 @@ impl Engine {
                     && !temp_wrapped_started.contains(&event.effect.number)
                 {
                     let callback_name = format!("Fx{}Start", event.effect.name);
-                    let has_start =
-                        resolve_effect_script_callback(&event.effect, &callback_name, &world)
+                    let has_start = event.effect.name == C4FX_FIRE
+                        || resolve_effect_script_callback(&event.effect, &callback_name, &world)
                             .is_some();
                     if has_start {
                         let uppers = upper_effects_of(&object.state.effects, &event.effect);
@@ -35560,6 +35561,20 @@ impl Engine {
                         }
                     }
                 }
+                // The constructor has survived Check/annul negotiation and
+                // is about to execute its one Start call. Mark the live node
+                // before the callback so EffectVar updates cloned from its
+                // host snapshot retain the completed-constructor state.
+                event.effect.start_dispatched = true;
+                if let Some(effect) = object
+                    .state
+                    .effects
+                    .iter_mut()
+                    .find(|effect| effect.number == event.effect.number)
+                {
+                    effect.start_dispatched = true;
+                }
+                state_snapshot.effects = object.state.effects.clone();
             }
             // C4Effect::Kill (C4Effect.cpp:365-405): the real removal is
             // bracketed by temp-deactivating all upper effects
@@ -35721,6 +35736,7 @@ impl Engine {
                     .call_effect_start(
                         Some((&snapshot_for_call, object_id)),
                         &event.effect,
+                        &event.constructor_values,
                         rng,
                         &global_view,
                         current_physics,
@@ -35735,7 +35751,9 @@ impl Engine {
                         // is marked dead before validating
                         // (C4Effect.cpp:128-131) and deleted without a
                         // Stop callback.
-                        start_denied = matches!(start_result, Some(Value::Int(-1)));
+                        start_denied = start_result
+                            .as_ref()
+                            .is_some_and(|value| compat::value_as_i32(value) == -1);
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::Timer => dispatch_definition
@@ -35759,7 +35777,9 @@ impl Engine {
                         // mark dead after time elapsed" — the else arm at
                         // :358-360; the intro's Divinity markers die on
                         // their first exec in C++ as well).
-                        timer_kill = matches!(timer_result, None | Some(Value::Int(-1)));
+                        timer_kill = timer_result
+                            .as_ref()
+                            .is_none_or(|value| compat::value_as_i32(value) == -1);
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::Stopped(reason) => dispatch_definition
@@ -35789,7 +35809,9 @@ impl Engine {
                                 | EffectStopReason::Death
                                 | EffectStopReason::Destroyed
                         )
-                            && matches!(stop_result, Some(Value::Int(-1)));
+                            && stop_result
+                                .as_ref()
+                                .is_some_and(|value| compat::value_as_i32(value) == -1);
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::Check { ref pending } => dispatch_definition
@@ -35797,6 +35819,7 @@ impl Engine {
                         Some((&snapshot_for_call, object_id)),
                         &event.effect,
                         pending,
+                        &event.constructor_values,
                         rng,
                         &global_view,
                         current_physics,
@@ -35807,10 +35830,10 @@ impl Engine {
                         current_audio,
                     )
                     .map(|(outcome, audio_state, new_rng, check_result)| {
-                        match check_result {
+                        match check_result.as_ref().map(compat::value_as_i32) {
                             // C4Fx_Effect_Deny (-1, C4Effects.h:36) blocks
                             // the new effect entirely.
-                            Some(Value::Int(-1)) => {
+                            Some(-1) => {
                                 denied_started.insert(pending.number);
                                 annulled_started.remove(&pending.number);
                                 object.remove_effect_by_number(pending.number);
@@ -35830,11 +35853,11 @@ impl Engine {
                             // C4Effects.h:37-38): this checker accepts the
                             // new effect; the walk continues and the LAST
                             // acceptor wins (C4Effect.cpp:287-291).
-                            Some(Value::Int(-2)) => {
+                            Some(-2) => {
                                 annulled_started
                                     .insert(pending.number, (event.effect.number, false));
                             }
-                            Some(Value::Int(-3)) => {
+                            Some(-3) => {
                                 annulled_started
                                     .insert(pending.number, (event.effect.number, true));
                             }
@@ -35847,6 +35870,7 @@ impl Engine {
                         Some((&snapshot_for_call, object_id)),
                         &event.effect,
                         pending,
+                        &event.constructor_values,
                         rng,
                         &global_view,
                         current_physics,
@@ -35859,7 +35883,9 @@ impl Engine {
                     .map(|(outcome, audio_state, new_rng, add_result)| {
                         // C4Fx_Start_Deny from Fx*Add kills the ACCEPTOR
                         // (C4Effect.cpp:306-309).
-                        add_denied = matches!(add_result, Some(Value::Int(-1)));
+                        add_denied = add_result
+                            .as_ref()
+                            .is_some_and(|value| compat::value_as_i32(value) == -1);
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::TempRemoved => dispatch_definition
@@ -44181,241 +44207,6 @@ impl Engine {
         Ok(incinerated)
     }
 
-    /// The engine FnFxFireStart body (C4Effect.cpp:560-641) against an
-    /// EXISTING fire effect entry: extinguisher gate, BurnTurnTo, contents
-    /// ejection, the ~FireMode determination, effect-var writes, ONE
-    /// FirePhase draw and the Incineration/IncinerationEx callback — in
-    /// C++ ledger order. False = C4Fx_Start_Deny (the caller removes the
-    /// entry).
-    fn fire_effect_start_engine(
-        &mut self,
-        idx: usize,
-        fire_number: i32,
-        caused_by: i32,
-        blasted: bool,
-        incinerating: Option<ObjectId>,
-    ) -> Result<bool, EngineError> {
-        // fail if already on fire (C4Effect.cpp:567)
-        if self.objects[idx].state.on_fire {
-            return Ok(false);
-        }
-        let target_id = self.objects[idx].id;
-        // In extinguishing material: no fire caused (C4Effect.cpp:574-583)
-        let position = self.objects[idx].state.position;
-        let in_extinguisher = self
-            .landscape
-            .as_ref()
-            .and_then(|landscape| landscape.material_at(position.x, position.y))
-            .and_then(|material_id| self.materials.get_by_id(material_id))
-            .map(|material| material.extinguisher() > 0)
-            .unwrap_or(false);
-        let fire_caused = !in_extinguisher;
-        let burn_turn_to = self
-            .definitions
-            .get(&self.objects[idx].definition_id)
-            .and_then(|definition| definition.burn_turn_to().map(str::to_string));
-        // BurnTurnTo: blasts changedef in water too (C4Effect.cpp:579-585)
-        if let Some(target) = burn_turn_to.filter(|_| fire_caused || blasted) {
-            let _ = self.change_object_def_live(idx, &target)?;
-        }
-        // ChangeDef is live before both guarded blocks. Eject through real
-        // Enter/Exit so the controller assignment and callbacks occur in
-        // C++ order.
-        let eject_contents = self
-            .find_object_index(target_id)
-            .and_then(|index| self.definitions.get(&self.objects[index].definition_id))
-            .map(|definition| !definition.incomplete_activity() && !definition.no_burn_decay())
-            .unwrap_or(true);
-        if eject_contents {
-            let contents = self
-                .find_object_index(target_id)
-                .map(|index| self.objects[index].state.contents.clone())
-                .unwrap_or_default();
-            for content_id in contents {
-                let Some(content_index) = self.find_object_index(content_id) else {
-                    continue;
-                };
-                if self.objects[content_index].destroyed
-                    || !self.objects[content_index].state.status.is_active()
-                    || self.objects[content_index].state.container != Some(target_id)
-                {
-                    continue;
-                }
-                self.objects[content_index].state.controller = caused_by;
-                let container = self
-                    .find_object_index(target_id)
-                    .and_then(|index| self.objects[index].state.container);
-                match container {
-                    Some(parent) => {
-                        let _ = self.try_object_enter(content_id, parent)?;
-                    }
-                    None => {
-                        let _ = self.exit_object_at_current_position(content_id)?;
-                    }
-                }
-            }
-        }
-
-        // Re-read the definition after ejection callbacks, then detach every
-        // live DFA_ATTACH action whose Target or Target2 is the burned object.
-        let detach_attached = self
-            .find_object_index(target_id)
-            .and_then(|index| self.definitions.get(&self.objects[index].definition_id))
-            .map(|definition| !definition.incomplete_activity() && !definition.no_burn_decay())
-            .unwrap_or(true);
-        if detach_attached {
-            // C++ repeats Game.FindObject(..., pFindNext) against the live
-            // forward master list. Rebuild that view after every AbortCall:
-            // callbacks may remove or reorder the cursor, and a removed
-            // pFindNext makes the following search terminate.
-            let mut previous = None;
-            loop {
-                let master_ids = self
-                    .exec_list
-                    .iter()
-                    .rev()
-                    .copied()
-                    .filter(|candidate| {
-                        self.find_object_index(*candidate).is_some_and(|index| {
-                            self.objects[index].state.status != ObjectStatus::Inactive
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let start = match previous {
-                    Some(previous) => {
-                        let Some(position) = master_ids
-                            .iter()
-                            .position(|candidate| *candidate == previous)
-                        else {
-                            break;
-                        };
-                        position + 1
-                    }
-                    None => 0,
-                };
-                let candidate = master_ids.into_iter().skip(start).find(|candidate| {
-                    let Some(index) = self.find_object_index(*candidate) else {
-                        return false;
-                    };
-                    let object = &self.objects[index];
-                    if object.destroyed
-                        || !object.state.status.is_active()
-                        || (object.state.action.target != Some(target_id)
-                            && object.state.action.target2 != Some(target_id))
-                    {
-                        return false;
-                    }
-                    self.definitions
-                        .get(&object.definition_id)
-                        .is_some_and(|definition| {
-                            !definition
-                                .action_library()
-                                .is_idle_state(&object.state.action)
-                        })
-                });
-                let Some(candidate) = candidate else {
-                    break;
-                };
-                previous = Some(candidate);
-                let Some(candidate_index) = self.find_object_index(candidate) else {
-                    continue;
-                };
-                let object = &self.objects[candidate_index];
-                let definition_id = object.definition_id.clone();
-                let attached = self.definitions.get(&definition_id).is_some_and(|definition| {
-                    definition
-                        .action_library()
-                        .procedure_for_entry(
-                            &object.state.action.name,
-                            object.state.action.act_map_index,
-                        )
-                        == ActionProcedure::Attach
-                });
-                if attached {
-                    let _ = tolerate_script_error(self.action_with_calls(
-                        candidate_index,
-                        &definition_id,
-                        "Idle",
-                    ))?;
-                }
-            }
-        }
-        if !fire_caused {
-            // blasted but not incinerated: IncinerationEx (C4Effect.cpp:602-607)
-            if blasted {
-                if let Some(index) = self.find_object_index(target_id) {
-                    let _ = self.call_object_function(
-                        index,
-                        "IncinerationEx",
-                        vec![Value::Int(caused_by)],
-                    )?;
-                }
-            }
-            return Ok(false);
-        }
-        // determine fire appearance (C4Effect.cpp:609-626): the ~FireMode
-        // script answer wins; zero falls back to the category default; an
-        // out-of-range answer degrades to Object mode.
-        let Some(idx) = self.find_object_index(target_id) else {
-            return Ok(false);
-        };
-        let mode_answer = match self.call_object_function(idx, "FireMode", Vec::new())? {
-            Value::Int(mode) => mode,
-            Value::Bool(flag) => i32::from(flag),
-            _ => 0,
-        };
-        let Some(idx) = self.find_object_index(target_id) else {
-            return Ok(false);
-        };
-        let fire_mode = if mode_answer == 0 {
-            let category = self.objects[idx].state.category;
-            if category & (CATEGORY_LIVING | CATEGORY_STATIC_BACK) != 0 {
-                C4FX_FIRE_MODE_LIVING_VEG
-            } else if category & (CATEGORY_STRUCTURE | CATEGORY_VEHICLE) != 0 {
-                C4FX_FIRE_MODE_STRUCT_VEH
-            } else {
-                C4FX_FIRE_MODE_OBJECT
-            }
-        } else if !(1..=C4FX_FIRE_MODE_OBJECT).contains(&mode_answer) {
-            tracing::warn!(
-                mode = mode_answer,
-                object = self.objects[idx].id.as_u64(),
-                "FireMode is invalid; using Object mode like C++"
-            );
-            C4FX_FIRE_MODE_OBJECT
-        } else {
-            mode_answer
-        };
-        // store causes in effect vars (C4Effect.cpp:628-631)
-        if let Some(entry) = self.objects[idx]
-            .state
-            .effects
-            .iter_mut()
-            .find(|effect| effect.number == fire_number)
-        {
-            entry.set_var(0, EffectVarValue::Int(fire_mode));
-            entry.set_var(1, EffectVarValue::Int(caused_by));
-            entry.set_var(2, EffectVarValue::Bool(blasted));
-            entry.set_var(
-                3,
-                incinerating
-                    .map(|id| EffectVarValue::Object(id.as_u64()))
-                    .unwrap_or(EffectVarValue::Nil),
-            );
-        }
-        // Set values (C4Effect.cpp:632-634)
-        {
-            let object = &mut self.objects[idx];
-            object.state.on_fire = true;
-            object.state.fire_caused_by = caused_by;
-        }
-        // Random(MaxFirePhase) — one synced draw (C4Effect.cpp:634)
-        self.objects[idx].state.fire_phase = self.rng.random(MAX_FIRE_PHASE);
-        // Engine script call (C4Effect.cpp:638)
-        let _ = self.call_object_function(idx, "Incineration", vec![Value::Int(caused_by)])?;
-        Ok(true)
-    }
-
     /// `C4Object::ExecFire` (C4Object.cpp:766-810), run by the fire
     /// effect's timer (FnFxFireTimer, C4Effect.cpp:643-658). Returns the
     /// deferred Fx*Stop events of effects an extinguish killed. Still open:
@@ -45562,11 +45353,9 @@ impl Engine {
                 object_id,
                 &host_definition_id,
             )?;
-            change = match result {
-                Some(Value::Int(new_change)) => new_change,
-                Some(_) => 0,
-                None => change,
-            };
+            if let Some(value) = result.as_ref() {
+                change = compat::value_as_i32(value);
+            }
         }
         Ok(change)
     }
@@ -55590,7 +55379,9 @@ impl Engine {
                         // returning C4Fx_Execute_Kill (-1, C4Effects.h:40)
                         // kills the effect; an elapsed interval with NO
                         // timer function kills too (:355-357).
-                        timer_kill = matches!(timer_result, None | Some(Value::Int(-1)));
+                        timer_kill = timer_result
+                            .as_ref()
+                            .is_none_or(|value| compat::value_as_i32(value) == -1);
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::Stopped(reason) => dispatch_global_effect_callback(
@@ -55612,7 +55403,9 @@ impl Engine {
                         // refuses its removal and recovers
                         // (C4Effect.cpp:389-396).
                         stop_denied = matches!(reason, EffectStopReason::Removed)
-                            && matches!(stop_result, Some(Value::Int(-1)));
+                            && stop_result
+                                .as_ref()
+                                .is_some_and(|value| compat::value_as_i32(value) == -1);
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::TempRemoved => dispatch_global_effect_callback(
@@ -56417,7 +56210,7 @@ impl Engine {
                 object.state.effects.push(fire);
             }
         } else if !effects.is_empty() {
-            let commands: Vec<_> = effects.into_iter().map(EffectCommand::Add).collect();
+            let commands: Vec<_> = effects.into_iter().map(EffectCommand::add).collect();
             let mut initial_events = object.apply_effect_commands(&commands);
             effect_events.append(&mut initial_events);
         }
@@ -58249,7 +58042,9 @@ fn remove_effect_from_stack(stack: &mut Vec<EffectState>, number: i32) -> Option
 fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[EffectCommand]) {
     for command in commands {
         match command {
-            EffectCommand::Add(effect) => insert_effect_into_stack(target, effect.clone()),
+            EffectCommand::Add { effect, .. } => {
+                insert_effect_into_stack(target, effect.clone())
+            }
             EffectCommand::Update(effect) => {
                 if let Some(existing) = target
                     .iter_mut()
