@@ -62877,9 +62877,11 @@ impl GameApp {
                     })
                     .collect::<Vec<_>>();
                 for (index, (item, image)) in menu.items.iter().zip(&item_icons).enumerate() {
-                    let requested_text_spec =
-                        matches!(item.image, lc_engine::ObjectMenuImage::TextSpec { .. });
-                    if (menu.style == 3 || requested_text_spec)
+                    // Native Buy/Sell/Exit/etc. rows retain Definition as the
+                    // serde default while their non-definition symbol still
+                    // supplies a valid icon. AddMenuItem picture recipes use
+                    // the Definition symbol and would otherwise render blank.
+                    if item.symbol == lc_engine::ObjectMenuSymbol::Definition
                         && item.image != lc_engine::ObjectMenuImage::None
                         && image.is_none()
                     {
@@ -149545,6 +149547,48 @@ func ControlDig() { dig_count = 1; return(1); }
                 .expect("menu stays open")
                 .selection,
             1
+        );
+    }
+
+    #[test]
+    fn normal_menu_render_rejects_an_unresolved_non_textspec_item_picture() {
+        let mut app = new_classic_running_sandbox_app();
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        let mut menu = two_item_script_menu(cursor);
+        menu.style = 0;
+        menu.items[0].item_id = "MISS".to_string();
+        menu.items[0].image = lc_engine::ObjectMenuImage::Definition;
+        menu.items[0].presentation_definition_id = Some("MISS".to_string());
+        assert!(
+            object_menu_item_picture(
+                &app.engine,
+                &app.snapshot,
+                &menu.items[0],
+                0,
+                &HudGraphics::default(),
+                menu.style,
+            )
+            .is_none(),
+            "fixture must exercise the unresolved non-TextSpec branch"
+        );
+        install_test_cursor_menu(&mut app, cursor, menu);
+
+        let mut frame = vec![0_u8; app.graphics.surface().pixels().len()];
+        let error = app
+            .render(&mut frame)
+            .expect_err("Normal menu must fail closed on an unresolved definition image");
+        assert!(
+            error
+                .to_string()
+                .contains("unresolved classic menu image at item 0"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            error.to_string().contains("Definition"),
+            "unexpected recipe: {error:#}"
         );
     }
 
