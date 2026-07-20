@@ -12743,6 +12743,9 @@ struct GameApp {
     /// Process-local Config.Graphics.ShowCommands enable requests shared
     /// across fresh engines.
     show_commands_requests: ShowCommandsRequestStore,
+    /// Process-local `Config.General.AllowScriptingInReplays`; native reads
+    /// this from its already-loaded configuration while replay controls run.
+    allow_scripting_in_replays: bool,
     input: InputDispatcher,
     bindings: KeyboardBindings,
     gamepad_bindings: GamepadBindings,
@@ -21403,6 +21406,28 @@ fn load_native_config_bytes(paths: Option<&AppPaths>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// C4Game's `Application.isFullScreen` distinguishes the graphical client from
+/// `/console`; it is unrelated to the OS window display mode. Rust currently
+/// has only the graphical route, so native initialization reduces to
+/// `Config.General.AlwaysDebug && Parameters.AllowDebug`.
+fn arm_graphical_engine_debug_mode(engine: &mut Engine, config: &[u8]) {
+    let always_debug =
+        lc_app::configured_native_boolean(config, "General", "DebugMode").unwrap_or(false);
+    engine.set_debug_mode(always_debug && engine.allow_debug());
+}
+
+fn arm_configured_graphical_engine_debug_mode(
+    engine: &mut Engine,
+    paths: Option<&AppPaths>,
+) {
+    arm_graphical_engine_debug_mode(engine, &load_native_config_bytes(paths));
+}
+
+fn configured_allow_scripting_in_replays(config: &[u8]) -> bool {
+    lc_app::configured_native_boolean(config, "General", "AllowScriptingInReplays")
+        .unwrap_or(false)
+}
+
 fn classic_command_line_definition_modules(
     config: &[u8],
     definition_files: &[PathBuf],
@@ -23696,6 +23721,8 @@ impl GameApp {
         // other UTF-8 convenience writer can rewrite the config projection.
         // The native gamepad subsystem is likewise fixed before startup UI.
         let gamepads_enabled = load_gamepads_enabled(paths);
+        let allow_scripting_in_replays =
+            configured_allow_scripting_in_replays(&load_native_config_bytes(paths));
         // A real installation must establish C4GUI's process-global bundle
         // before any controller, discovery worker, renderer, or app-owned UI
         // state is constructed. Asset-less test apps install their explicit
@@ -23994,6 +24021,7 @@ impl GameApp {
             mission_access,
             show_folder_maps,
             show_commands_requests,
+            allow_scripting_in_replays,
             input: InputDispatcher::new(),
             bindings,
             gamepad_bindings: GamepadBindings::load(paths),
@@ -40366,7 +40394,11 @@ impl GameApp {
                     target_object: lc_engine::SCRIPT_SCOPE_CONSOLE,
                     strictness: self.running_console_script_strictness(),
                     script,
-                    by_client: 0,
+                    by_client: if self.control_playback.is_some() {
+                        -1
+                    } else {
+                        0
+                    },
                 })?;
             }
             b"chart" => {
@@ -60276,6 +60308,8 @@ impl GameApp {
         self.show_log_timestamps = load_show_log_timestamps(paths);
         self.show_folder_maps = load_show_folder_maps(paths);
         self.ready_check_toasts_enabled = load_ready_check_toasts_enabled(paths);
+        self.allow_scripting_in_replays =
+            configured_allow_scripting_in_replays(&load_native_config_bytes(paths));
         let record = load_recording_flag(paths);
         self.startup_view_flags.record = record;
         self.recording_enabled = record && self.recordings_dir.is_some();
@@ -66517,6 +66551,7 @@ impl GameApp {
         let stop_if_running_mode_exits = matches!(self.mode, AppMode::Running);
         let require_live_network = self.network.is_some();
         let replaying = self.control_playback.is_some();
+        let allow_scripting_in_replays = replaying && self.allow_scripting_in_replays;
         let mut result = Ok(());
         for control in controls {
             result = match control {
@@ -66645,7 +66680,7 @@ impl GameApp {
                     .execute_em_move_object_control(
                         &control,
                         if replaying {
-                            ScriptControlPolicy::replay(false)
+                            ScriptControlPolicy::replay(allow_scripting_in_replays)
                         } else {
                             ScriptControlPolicy::live(false)
                         },
@@ -66696,7 +66731,7 @@ impl GameApp {
                     .execute_script_control(
                         &data,
                         if replaying {
-                            ScriptControlPolicy::replay(false)
+                            ScriptControlPolicy::replay(allow_scripting_in_replays)
                         } else {
                             ScriptControlPolicy::live(false)
                         },
@@ -78060,6 +78095,7 @@ impl GameApp {
         engine.set_fair_crew_strength(fair_crew_strength);
         engine.set_fair_crew_forced(fair_crew_forced);
         engine.set_allow_debug(allow_debug);
+        arm_configured_graphical_engine_debug_mode(&mut engine, self.app_paths.as_ref());
         engine.set_local_players([self.local_owner]);
         engine.set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
         if let Some(timing) = self
@@ -78663,6 +78699,7 @@ impl GameApp {
         self.active_definition_load = None;
         self.sky = None;
 
+        arm_configured_graphical_engine_debug_mode(&mut self.engine, self.app_paths.as_ref());
         let spawn_definition = configure_sandbox_engine(
             &mut self.engine,
             definition_load,
@@ -78981,6 +79018,7 @@ impl GameApp {
             self.engine.allow_debug(),
             self.engine.control_rate(),
         );
+        let saved_allow_debug = save.engine_state.allow_debug;
         if let Some(league_name) = save.engine_state.league_name.as_ref() {
             self.network_league_name = league_name.clone();
         }
@@ -79008,7 +79046,8 @@ impl GameApp {
         self.engine
             .set_recording_active(self.recording_enabled);
         self.engine.set_fair_crew_forced(parameter_bootstrap.0);
-        self.engine.set_allow_debug(parameter_bootstrap.1);
+        self.engine
+            .set_allow_debug(saved_allow_debug.unwrap_or(parameter_bootstrap.1));
         self.engine.set_control_rate(parameter_bootstrap.2);
         self.apply_material_library();
         self.input = InputDispatcher::new();
@@ -79037,6 +79076,7 @@ impl GameApp {
                 (None, Some(paths)) => SandboxDefinitionLoad::InstallCrew(paths),
                 (None, None) => SandboxDefinitionLoad::None,
             };
+            arm_configured_graphical_engine_debug_mode(&mut self.engine, self.app_paths.as_ref());
             configure_sandbox_engine(
                 &mut self.engine,
                 definition_load,
@@ -79097,10 +79137,13 @@ impl GameApp {
                         .unwrap_or_else(|| metadata.game_parameter_defaults());
                     self.engine
                         .set_fair_crew_forced(parameters.fair_crew_forced());
-                    self.engine.set_allow_debug(parameters.allow_debug());
+                    self.engine.set_allow_debug(
+                        saved_allow_debug.unwrap_or_else(|| parameters.allow_debug()),
+                    );
                     self.engine.set_control_rate(parameters.control_rate());
                 }
             }
+            arm_configured_graphical_engine_debug_mode(&mut self.engine, self.app_paths.as_ref());
             let sound_samples =
                 configure_scenario_sound_samples(self.audio.as_mut(), &scenario_data, path);
             let music_tracks = self
@@ -79147,6 +79190,7 @@ impl GameApp {
         self.engine
             .restore_state(&save.engine_state)
             .context("failed to restore saved engine state")?;
+        arm_configured_graphical_engine_debug_mode(&mut self.engine, self.app_paths.as_ref());
         if let Some(clock) = self.network_control_clock.as_mut() {
             clock.set_control_rate(self.engine.control_rate());
         }
@@ -121935,6 +121979,132 @@ public func Grant(password) { return GainMissionAccess(password); }
         let mut sentinel = vec![0xa9; 640 * 480 * 4];
         assert!(app.render(&mut sentinel).expect("render Graphics sheet"));
         assert!(sentinel.iter().any(|byte| *byte != 0xa9));
+    }
+
+    #[test]
+    fn l033_graphical_debug_mode_reads_native_config_and_obeys_allow_debug() {
+        let install = tempdir().expect("install root");
+        let user_data = tempdir().expect("user data");
+        let custom = tempdir().expect("custom config root");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub")
+            .expect("system group stub");
+        let config_file = custom.path().join("debug.config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("LC_CONFIG_FILE", None),
+        ]);
+        let paths = AppPaths::discover_with_config_file(Some(&config_file))
+            .expect("discover explicit debug config");
+        let mut engine = Engine::new();
+
+        fs::write(&config_file, b"[General]\n").expect("write missing debug flag");
+        arm_configured_graphical_engine_debug_mode(&mut engine, Some(&paths));
+        assert!(!engine.debug_mode(), "missing DebugMode defaults off");
+
+        fs::write(&config_file, b"[General]\nDebugMode=true\n").expect("enable debug mode");
+        arm_configured_graphical_engine_debug_mode(&mut engine, Some(&paths));
+        assert!(
+            engine.debug_mode(),
+            "DebugMode=true arms a graphical game"
+        );
+
+        engine.set_allow_debug(false);
+        arm_configured_graphical_engine_debug_mode(&mut engine, Some(&paths));
+        assert!(
+            !engine.debug_mode(),
+            "Parameters.AllowDebug=false is authoritative"
+        );
+
+        engine.set_allow_debug(true);
+        fs::write(&config_file, b"[General]\nDebugMode= true\n")
+            .expect("write malformed debug flag");
+        arm_configured_graphical_engine_debug_mode(&mut engine, Some(&paths));
+        assert!(
+            !engine.debug_mode(),
+            "native Boolean grammar does not skip whitespace after '='"
+        );
+    }
+
+    #[test]
+    fn l033_replay_script_injection_obeys_native_config() {
+        assert!(!configured_allow_scripting_in_replays(b"[General]\n"));
+        assert!(!configured_allow_scripting_in_replays(
+            b"[General]\nAllowScriptingInReplays= true\n"
+        ));
+        assert!(configured_allow_scripting_in_replays(
+            b"[General]\nAllowScriptingInReplays=true\n"
+        ));
+
+        let _lock = env_lock().lock();
+        let fixture = tempdir().expect("replay scripting configuration");
+        let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+        fs::write(
+            paths.config_file(),
+            b"[General]\nAllowScriptingInReplays=false\n",
+        )
+        .expect("disable replay scripting");
+
+        let mut app = new_state_only_running_sandbox_app();
+        app.app_paths = Some(paths.clone());
+        app.synchronize_advanced_options_runtime();
+        app.control_playback = Some(
+            ControlRecordPlayback::from_bytes(&[0, lc_engine::RCT_END])
+                .expect("open replay marker"),
+        );
+        app.engine.set_debug_mode(true);
+        let initial_gravity = app.engine.physics().gravity;
+
+        app.process_running_chat_text("/script SetGravity(77)");
+        assert_eq!(
+            app.engine.physics().gravity,
+            initial_gravity,
+            "replay scripting defaults to the configured denial"
+        );
+        app.apply_ready_controls(
+            1,
+            vec![NetworkControl::EmMoveObject(
+                lc_engine::EmMoveObjectControlData {
+                    action: lc_engine::EMMO_SCRIPT,
+                    objects: vec![999_999],
+                    script: LegacyCString::from_bytes(b"SetGravity(78)".to_vec())
+                        .expect("editor script is NUL-free"),
+                    by_client: -1,
+                    ..Default::default()
+                },
+            )],
+        )
+        .expect("deny replay editor script without aborting the batch");
+        assert_eq!(app.engine.physics().gravity, initial_gravity);
+
+        fs::write(
+            paths.config_file(),
+            b"[General]\nAllowScriptingInReplays=true\n",
+        )
+        .expect("enable replay scripting");
+        app.synchronize_advanced_options_runtime();
+        app.process_running_chat_text("/script SetGravity(88)");
+        assert_eq!(
+            app.engine.physics().gravity,
+            88,
+            "the native config flag admits a non-host replay script"
+        );
+        app.apply_ready_controls(
+            2,
+            vec![NetworkControl::EmMoveObject(
+                lc_engine::EmMoveObjectControlData {
+                    action: lc_engine::EMMO_SCRIPT,
+                    objects: vec![999_999],
+                    script: LegacyCString::from_bytes(b"SetGravity(99)".to_vec())
+                        .expect("editor script is NUL-free"),
+                    by_client: -1,
+                    ..Default::default()
+                },
+            )],
+        )
+        .expect("execute allowed replay editor script");
+        assert_eq!(app.engine.physics().gravity, 99);
     }
 
     #[test]
