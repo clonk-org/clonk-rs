@@ -7576,6 +7576,26 @@ fn discover_validated_startup_paths(
     Ok(app_paths)
 }
 
+fn startup_window_builder(
+    display_options: &DisplayOptions,
+    initial_size: PhysicalSize<u32>,
+) -> WindowBuilder {
+    let mut window_builder = WindowBuilder::new()
+        .with_title("Clonk Rust")
+        .with_inner_size(initial_size);
+    if matches!(display_options.mode, DisplayMode::Window) && !display_options.maximized {
+        if let Some((x, y)) = display_options.position {
+            window_builder = window_builder.with_position(PhysicalPosition::new(x, y));
+        }
+    }
+    if matches!(display_options.mode, DisplayMode::Fullscreen) {
+        // On macOS, winit only retries a failed launch-time fullscreen
+        // transition when fullscreen was requested through WindowBuilder.
+        window_builder = window_builder.with_fullscreen(Some(Fullscreen::Borderless(None)));
+    }
+    window_builder
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let classic = parse_classic_command_line(&cli.classic_arguments);
@@ -7702,25 +7722,17 @@ fn main() -> Result<()> {
         }
     };
     let event_loop = EventLoop::new();
-    let mut window_builder = WindowBuilder::new().with_title("Clonk Rust");
-    if matches!(display_options.mode, DisplayMode::Window) && !display_options.maximized {
-        if let Some((x, y)) = display_options.position {
-            window_builder = window_builder.with_position(PhysicalPosition::new(x, y));
-        }
-    }
     // The stored resolution is in output pixels (ResX*Scale), like the C++
     // window setup (C4Application.cpp:183).
-    window_builder =
-        window_builder.with_inner_size(PhysicalSize::new(initial_width, initial_height));
-    let window = window_builder
+    let window = startup_window_builder(
+        &display_options,
+        PhysicalSize::new(initial_width, initial_height),
+    )
         .build(&event_loop)
         .context("failed to create application window")?;
     let mut display_sleep_inhibitor = DisplaySleepInhibitor::acquire();
     if display_options.maximized && matches!(display_options.mode, DisplayMode::Window) {
         window.set_maximized(true);
-    }
-    if matches!(display_options.mode, DisplayMode::Fullscreen) {
-        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
     }
 
     let size = enforce_min_size(window.inner_size());
@@ -98380,6 +98392,45 @@ func Award()
             persisted.get_in(Some("Graphics"), "DisplayMode"),
             Some("0")
         );
+    }
+
+    #[test]
+    fn configured_fullscreen_reaches_startup_window_builder() {
+        let install = tempdir().expect("install root");
+        let user_data = tempdir().expect("user data");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub")
+            .expect("system group stub");
+        let config_file = user_data.path().join("fullscreen.config");
+        fs::write(&config_file, "[Graphics]\nDisplayMode=Window\n")
+            .expect("seed windowed config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("LC_CONFIG_FILE", None),
+        ]);
+        let paths = AppPaths::discover_with_config_file(Some(&config_file))
+            .expect("discover fullscreen config paths");
+        let windowed = DisplayOptions::load(Some(&paths));
+        assert_eq!(windowed.mode, DisplayMode::Window);
+        assert!(
+            startup_window_builder(&windowed, PhysicalSize::new(800, 600))
+                .window_attributes()
+                .fullscreen
+                .is_none()
+        );
+
+        fs::write(&config_file, "[Graphics]\nDisplayMode=Fullscreen\n")
+            .expect("select fullscreen mode");
+        let display = DisplayOptions::load(Some(&paths));
+        assert_eq!(display.mode, DisplayMode::Fullscreen);
+
+        let builder = startup_window_builder(&display, PhysicalSize::new(800, 600));
+
+        assert!(matches!(
+            builder.window_attributes().fullscreen.as_ref(),
+            Some(Fullscreen::Borderless(None))
+        ));
     }
 
     #[test]
