@@ -40,7 +40,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::ops::ControlFlow as OpsControlFlow;
 use std::path::{Component, Path, PathBuf};
@@ -48,7 +48,7 @@ use std::ptr::NonNull;
 use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
-    mpsc::{self, Receiver, TryRecvError},
+    mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -564,6 +564,173 @@ fn parse_classic_command_line(arguments: &[OsString]) -> ClassicCommandLine {
     }
 
     parsed
+}
+
+/// Split the parameter tail accepted by `C4Application::OnCommand("/open …")`.
+/// `SGetParameter` treats a leading double quote as a spaced argument and
+/// otherwise skips empty space-delimited fields. It does not implement shell
+/// escaping, so keep this deliberately smaller than a shell-word parser.
+fn parse_classic_console_parameters(command_line: &str) -> Vec<OsString> {
+    let mut remaining = command_line;
+    let mut parameters = Vec::new();
+    while !remaining.is_empty() {
+        if let Some(quoted) = remaining.strip_prefix('"') {
+            let end = quoted.find('"').unwrap_or(quoted.len());
+            let parameter = &quoted[..end];
+            if !parameter.is_empty() {
+                parameters.push(OsString::from(parameter));
+            }
+            let closing_quote = usize::from(end < quoted.len());
+            remaining = &quoted[end + closing_quote..];
+            continue;
+        }
+
+        let space = remaining.find(' ');
+        let quote = remaining.find('"');
+        let end = match (space, quote) {
+            (Some(space), Some(quote)) if quote < space => quote,
+            (Some(space), _) => space,
+            (None, _) => remaining.len(),
+        };
+        if end > 0 {
+            parameters.push(OsString::from(&remaining[..end]));
+            remaining = &remaining[end..];
+        } else {
+            // SGetParameter advances over empty fields one byte at a time.
+            remaining = &remaining[1..];
+        }
+    }
+    parameters
+}
+
+#[derive(Debug)]
+enum ConsoleInputEvent {
+    Command(String),
+    Eof,
+    Error(io::Error),
+}
+
+fn forward_console_input<R: BufRead>(
+    mut input: R,
+    sender: mpsc::Sender<ConsoleInputEvent>,
+) -> io::Result<()> {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if input.read_until(b'\n', &mut line)? == 0 {
+            let _ = sender.send(ConsoleInputEvent::Eof);
+            return Ok(());
+        }
+        let terminated = line.last() == Some(&b'\n')
+            || (cfg!(windows) && line.last() == Some(&b'\r'));
+        if !terminated {
+            // Native buffers bytes until Return/LF. EOF does not dispatch a
+            // final unterminated fragment.
+            let _ = sender.send(ConsoleInputEvent::Eof);
+            return Ok(());
+        }
+        // StdAppUnix/Win32 append printable input bytes and dispatch only a
+        // non-empty line. Filtering ASCII controls also normalizes CRLF while
+        // retaining spaces exactly for OnCommand's matching rules.
+        let command = line
+            .iter()
+            .copied()
+            .filter(|byte| !byte.is_ascii_control())
+            .collect::<Vec<_>>();
+        let command = native_bytes_as_legacy_text(&command);
+        if !command.is_empty()
+            && sender
+                .send(ConsoleInputEvent::Command(command))
+                .is_err()
+        {
+            return Ok(());
+        }
+    }
+}
+
+fn spawn_console_stdin_reader() -> Result<Receiver<ConsoleInputEvent>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::Builder::new()
+        .name("lc-console-stdin".to_string())
+        .spawn(move || {
+            let stdin = io::stdin();
+            let error_sender = sender.clone();
+            if let Err(error) = forward_console_input(stdin.lock(), sender) {
+                tracing::warn!(%error, "console stdin reader stopped");
+                let _ = error_sender.send(ConsoleInputEvent::Error(error));
+            }
+        })
+        .context("failed to start console stdin reader")?;
+    Ok(receiver)
+}
+
+fn run_console_event_loop(mut app: GameApp, commands: Receiver<ConsoleInputEvent>) -> Result<()> {
+    let mut previous_instant = Instant::now();
+    let mut accumulator = Duration::ZERO;
+    let mut game_clock_accumulator = Duration::ZERO;
+    let mut frame_schedule = frame_schedule_for_mode(
+        app.mode,
+        app.engine.game_tick_delay_ms(),
+        app.engine.game_tick_delay_revision(),
+    );
+
+    let outcome = (|| -> Result<()> {
+        loop {
+            if app.take_exit_request() {
+                return Ok(());
+            }
+
+            let now = Instant::now();
+            let frame_time = now.saturating_duration_since(previous_instant);
+            previous_instant = now;
+            advance_game_clock_from_elapsed(
+                &mut app,
+                &mut game_clock_accumulator,
+                frame_time,
+            )?;
+            accumulate_frame_time_for_mode(
+                app.mode,
+                app.engine.game_tick_delay_ms(),
+                app.engine.game_tick_delay_revision(),
+                &mut frame_schedule,
+                &mut accumulator,
+                frame_time,
+            );
+            if app.mode == AppMode::Running && app.full_speed {
+                accumulator = Duration::ZERO;
+            }
+            advance_simulation_pass(&mut app, &mut frame_schedule, &mut accumulator)?;
+
+            if app.take_exit_request() {
+                return Ok(());
+            }
+
+            let wait_duration = if app.mode == AppMode::Running && app.full_speed {
+                Duration::ZERO
+            } else {
+                frame_schedule.refresh_interval.min(
+                    frame_schedule
+                        .simulation_interval
+                        .saturating_sub(accumulator),
+                )
+            };
+            match commands.recv_timeout(wait_duration) {
+                Ok(ConsoleInputEvent::Command(command)) => {
+                    if let Err(error) = app.process_console_command(&command) {
+                        tracing::error!(%error, command, "console command failed");
+                    }
+                }
+                Ok(ConsoleInputEvent::Eof) => return Ok(()),
+                Ok(ConsoleInputEvent::Error(error)) => return Err(error.into()),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow!("console stdin reader disconnected unexpectedly"));
+                }
+            }
+        }
+    })();
+    app.finish_console_shutdown();
+    outcome
 }
 
 fn install_classic_language_override(classic: &ClassicCommandLine) {
@@ -7196,6 +7363,27 @@ fn main() -> Result<()> {
         return run_menu_dump(dump_path, &cli.menu_view, app_paths.as_ref(), runtime);
     }
 
+    let audio_options = AudioOptions::load(app_paths.as_deref());
+    if classic.console {
+        let (logical_width, logical_height) = DisplayOptions::default().actual_size();
+        let mut app = GameApp::new(
+            logical_width,
+            logical_height,
+            audio_options,
+            app_paths.as_deref(),
+            runtime,
+        )
+        .context("failed to initialise console app state")?;
+        app.console_mode = true;
+        app.set_display_mode(DisplayMode::Window);
+        app.apply_classic_command_line(&classic)?;
+        app.auto_start_sandbox = cli.sandbox;
+        app.launch_classic_command_line_join()
+            .context("failed to start command-line network join")?;
+        app.launch_classic_command_line_scenario()
+            .context("failed to start command-line scenario")?;
+        return run_console_event_loop(app, spawn_console_stdin_reader()?);
+    }
     if let Some(paths) = app_paths.as_deref() {
         validate_classic_loader_graphics_config(paths).map_err(|error| {
             anyhow::Error::new(report_classic_parity_boundary(
@@ -7207,7 +7395,6 @@ fn main() -> Result<()> {
         })?;
     }
     let mut display_options = DisplayOptions::load(app_paths.as_deref());
-    let audio_options = AudioOptions::load(app_paths.as_deref());
     let (initial_width, initial_height) =
         display_options
             .checked_loader_actual_size()
@@ -12769,6 +12956,9 @@ struct GameApp {
     /// Process-local compatibility arguments applied after configuration is
     /// loaded. They must never be written back to the selected config file.
     classic_command_line: ClassicCommandLine,
+    /// Persistent non-windowed application policy selected by `/console`.
+    /// Unlike per-round classic arguments, `/open` must not reset this.
+    console_mode: bool,
     /// Optional targeted crew-definition source for pathless sandbox
     /// fixtures. This is deliberately separate from `app_paths`: it must not
     /// make unrelated app subsystems appear install-initialized, but it does
@@ -23924,6 +24114,7 @@ impl GameApp {
             loader_gamma: load_classic_loader_gamma(paths),
             app_paths: paths.cloned(),
             classic_command_line: ClassicCommandLine::default(),
+            console_mode: false,
             sandbox_crew_definition_paths: None,
             configured_client_player_selection: None,
             material_library: None,
@@ -24162,6 +24353,158 @@ impl GameApp {
                 screen,
                 "classic /startup screen selection is not implemented in lc-app"
             );
+        }
+        Ok(())
+    }
+
+    fn console_lobby_active(&self) -> bool {
+        self.league_player_auth_lobby_active()
+    }
+
+    fn console_game_initialization_active(&self) -> bool {
+        self.loading_state.is_some()
+            || self.auto_start_classic_command_line_scenario
+            || self.classic_direct_reference_query.is_some()
+            || self.startup_network_connection.is_some()
+            || self.pending_network_join.is_some()
+            || self.staged_network_host_scenario.is_some()
+            || self.lobby_preload_task.is_some()
+            || self.lobby_preload_artifact.is_some()
+            || self.network_start_wait.is_some()
+            || self.pending_network_join_data.is_some()
+            || self.pending_client_start_status.is_some()
+    }
+
+    fn console_game_active(&self) -> bool {
+        self.mode == AppMode::Running
+            || self.console_lobby_active()
+            || self.console_game_initialization_active()
+            || (self.boot_loading.is_none()
+                && (self.network.is_some()
+                    || self.network_mode.is_some()
+                    || self.network_lobby.is_some()
+                    || self.classic_host_lobby.is_some()))
+    }
+
+    fn console_startup_active(&self) -> bool {
+        matches!(self.mode, AppMode::Menu | AppMode::Loading) && !self.console_game_active()
+    }
+
+    fn close_console_game(&mut self) {
+        let boot_still_loading = self.boot_loading.is_some();
+        let network_game_active = self.network.is_some()
+            || self.network_mode.is_some()
+            || self.network_lobby.is_some()
+            || self.classic_host_lobby.is_some()
+            || self.startup_network_connection.is_some()
+            || self.classic_direct_reference_query.is_some()
+            || self.pending_network_join.is_some()
+            || self.staged_network_host_scenario.is_some()
+            || self.lobby_preload_task.is_some()
+            || self.lobby_preload_artifact.is_some()
+            || self.network_start_wait.is_some()
+            || self.pending_network_join_data.is_some()
+            || self.pending_client_start_status.is_some();
+        self.auto_start_sandbox = false;
+        self.auto_start_classic_command_line_scenario = false;
+        self.classic_direct_reference_query = None;
+        if network_game_active {
+            // `show_main_menu` owns the complete native network teardown for
+            // a lobby. Async console startup can be between lobby views, so
+            // select that teardown path before clearing the round.
+            self.startup_view = StartupView::NetworkLobby;
+        }
+        self.return_to_menu();
+        if boot_still_loading {
+            self.mode = AppMode::Loading;
+        }
+    }
+
+    fn configured_console_lobby_countdown(&self) -> i32 {
+        self.staged_network_host_scenario
+            .as_ref()
+            .map(|staged| staged.lobby.countdown_seconds)
+            .or_else(|| {
+                native_config_text(
+                    &load_native_config_bytes(self.app_paths.as_ref()),
+                    "Lobby",
+                    "CountdownTime",
+                )
+                .and_then(|value| value.trim().parse::<i32>().ok())
+            })
+            .unwrap_or(DEFAULT_LOBBY_COUNTDOWN_SECONDS)
+    }
+
+    fn process_console_lobby_start(&mut self, line: &str) -> Result<()> {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            let message = self.classic_lobby_resource_text("IDS_MSG_CMD_HOSTONLY", "Host only!");
+            tracing::warn!(%message, command = line, "console lobby command rejected");
+            self.append_lobby_command_error(message);
+            return Ok(());
+        }
+
+        let countdown_seconds = match line.find(' ') {
+            None => self.configured_console_lobby_countdown(),
+            Some(space) => {
+                let parameter = line[space..].trim_start_matches(' ');
+                match legacy_sscanf_decimal_prefix(&lc_script::c4_string_bytes(parameter))
+                    .filter(|seconds| *seconds >= 0)
+                {
+                    Some(seconds) => seconds,
+                    None => {
+                        let message = self.classic_lobby_resource_text(
+                            "IDS_MSG_CMD_START_USAGE",
+                            "Usage: /start [timer]",
+                        );
+                        tracing::warn!(%message, command = line, "console lobby command rejected");
+                        self.append_lobby_command_error(message);
+                        return Ok(());
+                    }
+                }
+            }
+        };
+
+        // C4Network2::StartLobbyCountdown replaces an existing timer.
+        self.abort_network_lobby_countdown();
+        self.start_console_lobby_countdown_with(countdown_seconds)?;
+        Ok(())
+    }
+
+    fn finish_console_shutdown(&mut self) {
+        self.finish_recording();
+        self.finalize_pending_league_end_for_teardown();
+    }
+
+    fn process_console_command(&mut self, line: &str) -> Result<()> {
+        if line == "/quit" {
+            self.request_exit();
+            return Ok(());
+        }
+
+        let lobby_active = self.console_lobby_active();
+        if line == "/close" && self.console_game_active() {
+            self.close_console_game();
+            return Ok(());
+        }
+
+        if lobby_active && line.starts_with("/start") {
+            return self.process_console_lobby_start(line);
+        }
+
+        if self.console_startup_active() {
+            if let Some(parameters) = line.strip_prefix("/open ") {
+                let classic = parse_classic_command_line(&parse_classic_console_parameters(
+                    parameters,
+                ));
+                self.apply_classic_command_line(&classic)?;
+                self.launch_classic_command_line_join()?;
+                self.launch_classic_command_line_scenario()?;
+            }
+            return Ok(());
+        }
+
+        if self.console_game_active() {
+            self.process_console_message_input(line);
         }
         Ok(())
     }
@@ -39619,11 +39962,12 @@ impl GameApp {
             "IDS_ERR_UNKNOWNCMD",
             "Unknown command: \"%s\" - type /help to get a list of valid commands",
         );
-        self.append_control_message_log(
-            format_resource_string(template, &[&name]),
-            CONTROL_LOG_COLOR,
-            None,
-        );
+        let message = format_resource_string(template, &[&name]);
+        if self.control_message_has_lobby() {
+            self.append_lobby_command_error(message);
+        } else {
+            self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
+        }
     }
 
     fn append_running_command_resource(&mut self, key: &str, fallback: &str) {
@@ -39799,14 +40143,24 @@ impl GameApp {
             .position(|byte| *byte == b' ')
             .map_or((command, &[][..]), |space| {
                 (&command[..space], &command[space + 1..])
-            });
+        });
         let name = &name[..name.len().min(30)];
         let network_host = matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
+        let game_running = self.mode == AppMode::Running;
 
         match name {
             b"help" => self.append_running_command_help(),
-            b"clear" => self.clear_message_board_log(),
+            b"clear" => {
+                if self.control_message_has_lobby() {
+                    self.clear_lobby_log();
+                } else {
+                    self.clear_message_board_log();
+                }
+            }
             b"fast" => {
+                if !game_running {
+                    return Ok(false);
+                }
                 if self.network_is_league {
                     self.append_running_command_resource(
                         "IDS_LOG_COMMANDNOTALLOWEDINLEAGUE",
@@ -39822,6 +40176,9 @@ impl GameApp {
                 }
             }
             b"slow" => {
+                if !game_running {
+                    return Ok(false);
+                }
                 self.full_speed = false;
                 self.frame_skip = 1;
             }
@@ -39875,7 +40232,12 @@ impl GameApp {
                     }
                 }
             }
-            b"nodebug" => self.submit_or_execute_running_control_set(1, 0)?,
+            b"nodebug" => {
+                if !game_running {
+                    return Ok(false);
+                }
+                self.submit_or_execute_running_control_set(1, 0)?;
+            }
             b"activate" | b"deactivate" | b"observer" => {
                 if !network_host {
                     self.append_running_command_resource("IDS_MSG_CMD_HOSTONLY", "Host only!");
@@ -39989,6 +40351,9 @@ impl GameApp {
                 }
             }
             b"script" => {
+                if !game_running {
+                    return Ok(false);
+                }
                 if !self.engine.debug_mode()
                     || (self.network.is_some() && !network_host)
                 {
@@ -40004,8 +40369,16 @@ impl GameApp {
                     by_client: 0,
                 })?;
             }
-            b"chart" => self.toggle_network_chart(),
+            b"chart" => {
+                if !game_running {
+                    return Ok(false);
+                }
+                self.toggle_network_chart();
+            }
             _ => {
+                if !game_running {
+                    return Ok(false);
+                }
                 let registered = self.engine.message_board_commands().iter().any(|command| {
                     lc_script::c4_string_bytes(&command.name) == name
                 });
@@ -40344,23 +40717,46 @@ impl GameApp {
     }
 
     fn process_running_chat_text(&mut self, text: &str) {
-        self.store_message_input_history(text);
+        self.process_message_input_text(text, true);
+    }
+
+    fn process_console_message_input(&mut self, text: &str) {
+        self.process_message_input_text(text, false);
+    }
+
+    fn process_message_input_text(&mut self, text: &str, store_history: bool) {
+        if store_history {
+            self.store_message_input_history(text);
+        }
         if self.process_control_message_local_command(text) {
             return;
         }
-        let player = self
-            .snapshot
-            .hud
-            .local_players
-            .first()
-            .copied()
-            .unwrap_or(-1);
-        let control = match parse_running_message_control(
-            text,
-            player,
-            self.engine.cinematic_film(),
-            &self.snapshot,
-        ) {
+        if is_team_message_syntax(text) && self.engine.team_distribution() == 4 {
+            self.append_control_message_log(
+                "Can't send team message: Teams not known.".to_string(),
+                CONTROL_LOG_COLOR,
+                None,
+            );
+            return;
+        }
+        let parsed_control = if self.mode == AppMode::Running {
+            let player = self
+                .snapshot
+                .hud
+                .local_players
+                .first()
+                .copied()
+                .unwrap_or(-1);
+            parse_running_message_control(
+                text,
+                player,
+                self.engine.cinematic_film(),
+                &self.snapshot,
+            )
+        } else {
+            parse_lobby_message_control(text)
+        };
+        let control = match parsed_control {
             Ok(control) => control,
             Err(_error) if lc_script::c4_string_bytes(text).first() == Some(&b'/') => {
                 match self.process_running_chat_command(text) {
@@ -60651,10 +61047,7 @@ impl GameApp {
         }
     }
 
-    fn start_network_lobby_countdown_with(
-        &mut self,
-        countdown_seconds: i32,
-    ) -> Result<(), EngineError> {
+    fn prepare_network_lobby_countdown(&mut self) -> Result<bool, EngineError> {
         if self.classic_host_lobby.is_some() {
             if let Some(overrides) = self
                 .staged_network_host_scenario
@@ -60676,12 +61069,22 @@ impl GameApp {
         }
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             self.network_game_start_guard_passes();
-            return Ok(());
+            return Ok(false);
         }
         if self.abort_network_lobby_countdown() {
-            return Ok(());
+            return Ok(false);
         }
         if !self.network_game_start_guard_passes() {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn start_network_lobby_countdown_with(
+        &mut self,
+        countdown_seconds: i32,
+    ) -> Result<(), EngineError> {
+        if !self.prepare_network_lobby_countdown()? {
             return Ok(());
         }
         if countdown_seconds <= 0 || self.network.is_none() {
@@ -60690,6 +61093,24 @@ impl GameApp {
         self.host_lobby_countdown = Some(HostLobbyCountdown::with_seconds(countdown_seconds));
         let packet = lc_network::LobbyCountdownPacket::new(countdown_seconds);
         self.submit_and_apply_lobby_countdown(packet);
+        Ok(())
+    }
+
+    fn start_console_lobby_countdown_with(
+        &mut self,
+        countdown_seconds: i32,
+    ) -> Result<(), EngineError> {
+        if countdown_seconds != 0 {
+            return self.start_network_lobby_countdown_with(countdown_seconds);
+        }
+        if !self.prepare_network_lobby_countdown()? {
+            return Ok(());
+        }
+        if self.network.is_none() {
+            return self.start_network_game_now();
+        }
+        self.host_lobby_countdown = Some(HostLobbyCountdown::with_seconds(0));
+        self.submit_and_apply_lobby_countdown(lc_network::LobbyCountdownPacket::new(0));
         Ok(())
     }
 
@@ -68558,7 +68979,10 @@ impl GameApp {
             self.boot_loading = None;
             self.material_library = library;
             self.apply_material_library();
-            if self.loading_state.is_none() && !self.classic_loader_render_preconditions_ready() {
+            if !self.console_mode
+                && self.loading_state.is_none()
+                && !self.classic_loader_render_preconditions_ready()
+            {
                 // A fast boot worker must not bypass a failed loader before
                 // the first redraw. Stay in Loading so render reports the
                 // logged typed boundary.
@@ -85088,6 +85512,303 @@ mod tests {
     }
 
     #[test]
+    fn l028_console_input_and_open_parameters_follow_native_framing() {
+        assert_eq!(
+            parse_classic_console_parameters(
+                "\"Missions/My Round/Scenario.txt\" /network /lobby:17 \"/comment:console game\"",
+            ),
+            [
+                OsString::from("Missions/My Round/Scenario.txt"),
+                OsString::from("/network"),
+                OsString::from("/lobby:17"),
+                OsString::from("/comment:console game"),
+            ]
+        );
+
+        let (sender, receiver) = mpsc::channel();
+        forward_console_input(
+            std::io::Cursor::new(b"\n   \r\n/quit\r\nhello\tworld\nunterminated"),
+            sender,
+        )
+        .expect("read redirected console input");
+        let mut events = receiver.into_iter();
+        assert!(matches!(
+            events.next(),
+            Some(ConsoleInputEvent::Command(command)) if command == "   "
+        ));
+        assert!(matches!(
+            events.next(),
+            Some(ConsoleInputEvent::Command(command)) if command == "/quit"
+        ));
+        assert!(matches!(
+            events.next(),
+            Some(ConsoleInputEvent::Command(command)) if command == "helloworld"
+        ));
+        assert!(matches!(events.next(), Some(ConsoleInputEvent::Eof)));
+        assert!(events.next().is_none());
+    }
+
+    #[test]
+    fn l028_console_quit_is_global_and_headless_loop_exits_cleanly() {
+        let mut app = new_state_only_menu_app(320, 200);
+        for mode in [AppMode::Menu, AppMode::Loading, AppMode::Running] {
+            app.mode = mode;
+            app.process_console_command("/quit")
+                .expect("dispatch global console quit");
+            assert!(app.take_exit_request(), "quit must exit from {mode:?}");
+        }
+
+        let app = new_menu_app(320, 200);
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(ConsoleInputEvent::Command("/quit".to_string()))
+            .expect("queue console quit");
+        run_console_event_loop(app, receiver).expect("headless scheduler exits on /quit");
+
+        let app = new_menu_app(320, 200);
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(ConsoleInputEvent::Error(io::Error::new(
+                io::ErrorKind::Other,
+                "fixture stdin failure",
+            )))
+            .expect("queue console reader failure");
+        let error = run_console_event_loop(app, receiver)
+            .expect_err("stdin read errors must fail the console process");
+        assert!(error.to_string().contains("fixture stdin failure"));
+
+        let mut boot = new_state_only_menu_app(320, 200);
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(BootLoadingEvent::Finished(None))
+            .expect("finish console boot worker");
+        boot.boot_loading = Some(BootLoadingState::new(receiver));
+        boot.mode = AppMode::Loading;
+        boot.console_mode = true;
+        boot.loader_screen = None;
+        boot.poll_boot_loading();
+        assert_eq!(boot.mode, AppMode::Menu);
+        assert!(boot.boot_loading.is_none());
+    }
+
+    #[test]
+    fn l028_console_open_close_and_message_fallback_follow_app_state() {
+        let mut startup = new_state_only_menu_app(320, 200);
+        startup.console_mode = true;
+        let (boot_sender, boot_receiver) = mpsc::channel();
+        startup.boot_loading = Some(BootLoadingState::new(boot_receiver));
+        startup.mode = AppMode::Loading;
+        startup
+            .process_console_command(
+                "/open \"Missions/My Round/Scenario.txt\" /network /lobby:17 \"/comment:console game\"",
+            )
+            .expect("queue console scenario during startup loading");
+        assert_eq!(
+            startup.classic_command_line.scenario,
+            Some(PathBuf::from("Missions/My Round"))
+        );
+        assert_eq!(startup.classic_command_line.network_active, Some(true));
+        assert_eq!(startup.classic_command_line.lobby_timeout, Some(Some(17)));
+        assert_eq!(
+            startup.classic_command_line.comment.as_deref(),
+            Some("console game")
+        );
+        assert!(startup.auto_start_classic_command_line_scenario);
+        startup
+            .process_console_command("/close")
+            .expect("cancel console scenario while process boot is pending");
+        assert_eq!(startup.mode, AppMode::Loading);
+        assert!(startup.boot_loading.is_some());
+        assert!(!startup.auto_start_classic_command_line_scenario);
+        boot_sender
+            .send(BootLoadingEvent::Finished(None))
+            .expect("finish retained boot worker");
+        startup.poll_boot_loading();
+        assert_eq!(startup.mode, AppMode::Menu);
+        assert!(startup.boot_loading.is_none());
+        assert!(startup.console_startup_active());
+
+        let (_query_sender, query_receiver) = mpsc::channel::<
+            std::result::Result<ClassicDirectReferenceQueryResult, NetworkStartError>,
+        >();
+        startup.classic_direct_reference_query =
+            Some(ClassicDirectReferenceQuery { receiver: query_receiver });
+        let pending_join_arguments = startup.classic_command_line.clone();
+        startup
+            .process_console_command("/open Replacement.c4s")
+            .expect("ignore a second open while game initialization is pending");
+        assert_eq!(startup.classic_command_line, pending_join_arguments);
+        startup
+            .process_console_command("/close")
+            .expect("close an asynchronously initializing console round");
+        assert_eq!(startup.mode, AppMode::Menu);
+        assert!(startup.classic_direct_reference_query.is_none());
+        assert!(startup.console_startup_active());
+        startup
+            .process_console_command("/open /comment:replacement")
+            .expect("open a replacement after closing pending initialization");
+        assert_eq!(
+            startup.classic_command_line.comment.as_deref(),
+            Some("replacement")
+        );
+
+        let mut running = new_state_only_lightweight_running_sandbox_app();
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        running.network = Some(network);
+        running
+            .process_console_command("administrator message")
+            .expect("route ordinary console input to message input");
+        assert_eq!(
+            commands.take_submitted_messages(),
+            vec![MessageControlData {
+                message_type: MESSAGE_TYPE_NORMAL,
+                player: running.local_owner,
+                to_player: -1,
+                message: LegacyCString::from_bytes(b"administrator message".to_vec())
+                    .expect("fixture message is NUL-free"),
+                by_client: 0,
+            }]
+        );
+        running.full_speed = true;
+        running.frame_skip = 9;
+        running
+            .process_console_command("/close")
+            .expect("close running console round");
+        assert_eq!(running.mode, AppMode::Menu);
+        assert!(running.active_scenario.is_none());
+        assert!(!running.full_speed);
+        assert_eq!(running.frame_skip, 1);
+    }
+
+    #[test]
+    fn l028_console_lobby_start_is_host_only_and_restarts_countdown() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated console lobby config");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "Lobby", "CountdownTime", "7")
+            .expect("configure console lobby countdown");
+        let mut host = new_menu_app(640, 480);
+        host.app_paths = Some(paths);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut host);
+        host.process_console_command("/start")
+            .expect("start configured-default countdown");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(7)]
+        );
+        host.process_console_command("/abort")
+            .expect("non-start lobby input routes through MessageInput");
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert_eq!(
+            host.host_lobby_countdown,
+            Some(HostLobbyCountdown::with_seconds(7))
+        );
+        assert!(host
+            .classic_host_lobby
+            .as_ref()
+            .expect("classic host lobby")
+            .controller
+            .logs()
+            .last()
+            .is_some_and(|line| line.text.contains("Unknown command: \"abort\"")));
+        host.process_console_command("/starter 12junk")
+            .expect("native prefix command replaces countdown");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![
+                lc_network::LobbyCountdownPacket::new(-1),
+                lc_network::LobbyCountdownPacket::new(12),
+            ]
+        );
+        host.process_console_command("/start ")
+            .expect("invalid explicit timeout is consumed");
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert_eq!(
+            host.classic_host_lobby
+                .as_ref()
+                .expect("classic host lobby")
+                .controller
+                .logs()
+                .last()
+                .map(|line| line.text.as_str()),
+            Some("Usage: /start [timer]")
+        );
+        host.process_console_command("/start 0")
+            .expect("zero remains a one-second console countdown");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![
+                lc_network::LobbyCountdownPacket::new(-1),
+                lc_network::LobbyCountdownPacket::new(0),
+            ]
+        );
+        assert_eq!(
+            host.host_lobby_countdown,
+            Some(HostLobbyCountdown::with_seconds(0))
+        );
+        assert_eq!(host.mode, AppMode::Menu);
+
+        install_message_fixture(&mut host);
+        host.snapshot = host.engine.snapshot();
+        host.process_console_command("/private Sender secret")
+            .expect("running-only private syntax is rejected in the lobby");
+        assert!(commands.take_submitted_messages().is_empty());
+        assert!(host
+            .classic_host_lobby
+            .as_ref()
+            .expect("classic host lobby")
+            .controller
+            .logs()
+            .last()
+            .is_some_and(|line| line.text.contains("Unknown command: \"private\"")));
+        host.process_console_command("\"hello")
+            .expect("leading quote remains an ordinary lobby message");
+        assert_eq!(
+            commands.take_submitted_messages(),
+            vec![MessageControlData {
+                message_type: MESSAGE_TYPE_NORMAL,
+                player: -1,
+                to_player: -1,
+                message: LegacyCString::from_bytes(b"\"hello".to_vec())
+                    .expect("fixture message is NUL-free"),
+                by_client: 0,
+            }]
+        );
+        assert!(host.engine.set_team_distribution(4));
+        host.process_console_command("^hidden")
+            .expect("hidden teams reject lobby team messages");
+        assert!(commands.take_submitted_messages().is_empty());
+        assert_eq!(
+            host.classic_host_lobby
+                .as_ref()
+                .expect("classic host lobby")
+                .controller
+                .logs()
+                .last()
+                .map(|line| line.text.as_str()),
+            Some("Can't send team message: Teams not known.")
+        );
+
+        let mut client = new_menu_app(640, 480);
+        client.startup_view = StartupView::NetworkLobby;
+        client.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        client
+            .process_console_command("/start 3")
+            .expect("client start is consumed");
+        assert_eq!(
+            client
+                .network_lobby
+                .as_ref()
+                .expect("generic client lobby")
+                .logs
+                .last()
+                .map(|line| line.text.as_str()),
+            Some("Host only!")
+        );
+    }
+
+    #[test]
     fn classic_command_line_keeps_rust_option_values_out_of_legacy_scanning() {
         let cli = Cli::try_parse_from([
             "lc-app",
@@ -85498,7 +86219,7 @@ mod tests {
     }
 
     #[test]
-    fn classic_command_line_direct_scenario_bypasses_startup_menu() {
+    fn l028_console_open_real_scenario_reaches_running() {
         let _env_lock = crate::tests::env_lock().lock();
         reset_cached_app_paths();
         let user_data = tempdir().expect("command-line user data");
@@ -85549,16 +86270,15 @@ mod tests {
             .expect("finish real boot resources");
         let (boot_sender, boot_receiver) = mpsc::channel();
         app.boot_loading = Some(BootLoadingState::new(boot_receiver));
-        let classic = ClassicCommandLine {
-            scenario: Some(scenario_path.clone()),
-            player_files: vec![player_path],
-            definition_files: vec![definition_path],
-            ..ClassicCommandLine::default()
-        };
-        app.apply_classic_command_line(&classic)
-            .expect("apply command-line state");
-        app.launch_classic_command_line_scenario()
-            .expect("launch direct scenario");
+        app.console_mode = true;
+        let command = format!(
+            "/open \"{}\" \"{}\" \"{}\"",
+            scenario_path.display(),
+            player_path.display(),
+            definition_path.display(),
+        );
+        app.process_console_command(&command)
+            .expect("open real scenario from console startup");
         assert!(app.loading_state.is_none());
         assert!(app.auto_start_classic_command_line_scenario);
         boot_sender
