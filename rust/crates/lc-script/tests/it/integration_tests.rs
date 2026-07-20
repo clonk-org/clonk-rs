@@ -196,6 +196,38 @@ fn supports_arrays_and_indexing() {
 }
 
 #[test]
+fn array_literal_empty_slots_match_cpp() {
+    let mut engine = Engine::new();
+    load_script(
+        &mut engine,
+        r#"
+        #strict 1
+        global func EmptySlots() {
+            return [[], [,], [,,], [1,], [1,,2], [,1,,], [[,],[2,]], [3,4]];
+        }
+        "#,
+    );
+
+    let result = engine.call("EmptySlots", &[]).expect("call succeeds");
+    assert_eq!(
+        result,
+        Value::Array(vec![
+            Value::Array(vec![]),
+            Value::Array(vec![Value::Nil, Value::Nil]),
+            Value::Array(vec![Value::Nil, Value::Nil, Value::Nil]),
+            Value::Array(vec![Value::Int(1), Value::Nil]),
+            Value::Array(vec![Value::Int(1), Value::Nil, Value::Int(2)]),
+            Value::Array(vec![Value::Nil, Value::Int(1), Value::Nil, Value::Nil]),
+            Value::Array(vec![
+                Value::Array(vec![Value::Nil, Value::Nil]),
+                Value::Array(vec![Value::Int(2), Value::Nil]),
+            ]),
+            Value::Array(vec![Value::Int(3), Value::Int(4)]),
+        ])
+    );
+}
+
+#[test]
 fn supports_proplists_and_nested_access() {
     let mut engine = Engine::new();
     load_script(

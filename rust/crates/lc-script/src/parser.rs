@@ -2163,12 +2163,16 @@ impl<'a> Parser<'a> {
         }
         let mut elements = Vec::new();
         loop {
-            // Commas in arrays separate elements.
-            elements.push(self.parse_assignment()?);
+            // C4Aul emits an ordinary nil value for every empty slot. The
+            // initial `]` was handled above so only a non-empty literal can
+            // reach the closing-bracket case here (for example, `[1,]`).
+            if self.check_symbol(Symbol::Comma)? || self.check_symbol(Symbol::RBracket)? {
+                elements.push(Expr::Literal(Literal::Nil));
+            } else {
+                // Commas in arrays separate elements.
+                elements.push(self.parse_assignment()?);
+            }
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {
-                if self.consume_if_symbol(Symbol::RBracket)?.is_some() {
-                    break;
-                }
                 continue;
             }
             self.expect_symbol(Symbol::RBracket, "expected ']' after array literal")?;
