@@ -33,6 +33,11 @@ const LEGACY_LOG_PREFIX: &str = "Clonk";
 const LEGACY_LOG_SUFFIX: &str = ".log";
 const CRASH_ARTIFACT_MARKER: &str = "-crash-";
 const OFFICIAL_LEAGUE_SERVER: &str = "https://league.clonkspot.org";
+const OFFICIAL_UPDATE_SERVER: &str = "https://update.clonkspot.org/lc/update";
+const OFFICIAL_PUNCHER_SERVER: &str = "netpuncher.openclonk.org:11115";
+const CLASSIC_CONFIG_VERSION: u32 = 362;
+const CLASSIC_CONFIG_VERSION_VALUE: &str = "362";
+const CLASSIC_UNVERSIONED_CONFIG_VERSION: u32 = 347;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -607,6 +612,8 @@ fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> 
                 override_path.display()
             ))
             .context("failed to log config override usage")?;
+        adapt_config_to_current_version(&override_path, logger)
+            .context("failed to adapt classic configuration")?;
         apply_headless_display_mode_override(&override_path, logger)
             .context("failed to apply headless display mode override")?;
         return Ok(override_path);
@@ -619,8 +626,8 @@ fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> 
     }
 
     if config_path.exists() {
-        repair_truncated_masterserver_urls(&config_path, logger)
-            .context("failed to repair legacy Rust masterserver configuration")?;
+        adapt_config_to_current_version(&config_path, logger)
+            .context("failed to adapt classic configuration")?;
         return Ok(config_path);
     }
 
@@ -650,8 +657,8 @@ fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> 
             .context("failed to log config creation")?;
     }
 
-    repair_truncated_masterserver_urls(&config_path, logger)
-        .context("failed to repair legacy Rust masterserver configuration")?;
+    adapt_config_to_current_version(&config_path, logger)
+        .context("failed to adapt classic configuration")?;
 
     apply_headless_display_mode_override(&config_path, logger)
         .context("failed to apply headless display mode override")?;
@@ -659,36 +666,617 @@ fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> 
     Ok(config_path)
 }
 
-fn repair_truncated_masterserver_urls(
-    config_path: &Path,
-    logger: &LauncherLogger,
-) -> Result<()> {
-    let mut config = Config::load(config_path)
-        .with_context(|| format!("failed to load {}", config_path.display()))?;
+fn adapt_config_to_current_version(config_path: &Path, logger: &LauncherLogger) -> Result<()> {
+    let original = fs::read(config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let source_version = classic_config_exact_assignment_value(&original, "General", "Version")
+        .and_then(parse_cpp_config_u32)
+        .unwrap_or(CLASSIC_UNVERSIONED_CONFIG_VERSION);
+    let mut config = original.clone();
     let mut repaired = Vec::new();
     for key in ["ServerAddress", "AlternateServerAddress"] {
-        let was_truncated = config
-            .get_in(Some("Network"), key)
-            .is_some_and(|value| matches!(value.trim(), "http:" | "https:"));
+        let was_truncated = classic_config_string_value(&config, "Network", key)
+            .is_some_and(|value| matches!(value.as_slice(), b"http:" | b"https:"));
         if was_truncated {
-            config.set_in(Some("Network"), key, OFFICIAL_LEAGUE_SERVER);
-            repaired.push(key);
+            apply_classic_config_update(
+                &mut config,
+                "Network",
+                key,
+                ClassicConfigWriteValue::Escaped(OFFICIAL_LEAGUE_SERVER),
+                key,
+                &mut repaired,
+            );
         }
     }
-    if repaired.is_empty() {
+
+    let mut adapted = Vec::new();
+    apply_classic_config_update(
+        &mut config,
+        "General",
+        "Version",
+        ClassicConfigWriteValue::Raw(CLASSIC_CONFIG_VERSION_VALUE),
+        "General.Version",
+        &mut adapted,
+    );
+
+    #[cfg(target_os = "macos")]
+    if source_version == 349 {
+        apply_classic_config_update(
+            &mut config,
+            "General",
+            "Preloading",
+            ClassicConfigWriteValue::Raw("false"),
+            "General.Preloading",
+            &mut adapted,
+        );
+    }
+
+    if source_version == 347 {
+        apply_classic_config_update(
+            &mut config,
+            "Sound",
+            "MaxChannels",
+            ClassicConfigWriteValue::Raw("1024"),
+            "Sound.MaxChannels",
+            &mut adapted,
+        );
+    }
+    if matches!(source_version, 346 | 347) {
+        apply_classic_config_update(
+            &mut config,
+            "Sound",
+            "Music",
+            ClassicConfigWriteValue::Raw("true"),
+            "Sound.Music",
+            &mut adapted,
+        );
+    }
+
+    if source_version <= 359 {
+        migrate_classic_config_string(
+            &mut config,
+            "Network",
+            "ServerAddress",
+            "league.clonkspot.org:80",
+            OFFICIAL_LEAGUE_SERVER,
+            &mut adapted,
+        );
+        migrate_classic_config_string(
+            &mut config,
+            "Network",
+            "AlternateServerAddress",
+            "league.clonkspot.org:80",
+            OFFICIAL_LEAGUE_SERVER,
+            &mut adapted,
+        );
+        migrate_classic_config_string(
+            &mut config,
+            "Network",
+            "UpdateServerAddress",
+            "update.clonkspot.org/lc/update",
+            OFFICIAL_UPDATE_SERVER,
+            &mut adapted,
+        );
+        migrate_classic_config_string(
+            &mut config,
+            "Network",
+            "PuncherAddress",
+            "clonk.de:11115",
+            OFFICIAL_PUNCHER_SERVER,
+            &mut adapted,
+        );
+        apply_classic_config_update(
+            &mut config,
+            "Graphics",
+            "Shader",
+            ClassicConfigWriteValue::Raw("true"),
+            "Graphics.Shader",
+            &mut adapted,
+        );
+        apply_classic_config_update(
+            &mut config,
+            "Graphics",
+            "DisableGamma",
+            ClassicConfigWriteValue::Raw("false"),
+            "Graphics.DisableGamma",
+            &mut adapted,
+        );
+    }
+
+    if config == original {
         return Ok(());
     }
 
-    config
-        .save(config_path)
+    fs::write(config_path, config)
         .with_context(|| format!("failed to save {}", config_path.display()))?;
-    logger
-        .log_line(&format!(
-            "repaired Rust-truncated network URL field(s): {}",
-            repaired.join(", ")
-        ))
-        .context("failed to log masterserver configuration repair")?;
+    if !repaired.is_empty() {
+        logger
+            .log_line(&format!(
+                "repaired Rust-truncated network URL field(s): {}",
+                repaired.join(", ")
+            ))
+            .context("failed to log masterserver configuration repair")?;
+    }
+    if !adapted.is_empty() {
+        logger
+            .log_line(&format!(
+                "adapted classic configuration from version {source_version} to {CLASSIC_CONFIG_VERSION}: {}",
+                adapted.join(", ")
+            ))
+            .context("failed to log classic configuration adaptation")?;
+    }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ClassicConfigWriteValue<'a> {
+    Raw(&'a str),
+    Escaped(&'a str),
+}
+
+#[derive(Clone, Copy)]
+struct ClassicConfigLine {
+    start: usize,
+    content_end: usize,
+    end: usize,
+}
+
+fn apply_classic_config_update(
+    config: &mut Vec<u8>,
+    section: &str,
+    key: &str,
+    value: ClassicConfigWriteValue<'_>,
+    label: &'static str,
+    changed: &mut Vec<&'static str>,
+) {
+    let updated = update_classic_config_value(config, section, key, value);
+    if updated != *config {
+        *config = updated;
+        changed.push(label);
+    }
+}
+
+fn migrate_classic_config_string(
+    config: &mut Vec<u8>,
+    section: &str,
+    key: &str,
+    old_value: &str,
+    new_value: &str,
+    adapted: &mut Vec<&'static str>,
+) {
+    if !classic_config_string_value(config, section, key)
+        .is_some_and(|value| value == old_value.as_bytes())
+    {
+        return;
+    }
+    let label = match key {
+        "ServerAddress" => "Network.ServerAddress",
+        "AlternateServerAddress" => "Network.AlternateServerAddress",
+        "UpdateServerAddress" => "Network.UpdateServerAddress",
+        "PuncherAddress" => "Network.PuncherAddress",
+        _ => unreachable!("unexpected classic network migration key: {key}"),
+    };
+    apply_classic_config_update(
+        config,
+        section,
+        key,
+        ClassicConfigWriteValue::Escaped(new_value),
+        label,
+        adapted,
+    );
+}
+
+fn update_classic_config_value(
+    config: &[u8],
+    section: &str,
+    key: &str,
+    value: ClassicConfigWriteValue<'_>,
+) -> Vec<u8> {
+    let lines = classic_config_lines(config);
+    let mut section_line = None;
+    let mut section_end = lines.len();
+    for (index, line) in lines.iter().enumerate() {
+        let Some(name) = classic_config_section_name(&config[line.start..line.content_end]) else {
+            continue;
+        };
+        if let Some(selected) = section_line {
+            if index > selected {
+                section_end = index;
+                break;
+            }
+        } else if name == section.as_bytes() {
+            section_line = Some(index);
+        }
+    }
+
+    let line_ending = section_line
+        .and_then(|index| classic_config_line_ending(config, lines[index]))
+        .or_else(|| {
+            lines
+                .iter()
+                .find_map(|line| classic_config_line_ending(config, *line))
+        })
+        .unwrap_or(b"\n");
+    let assignment = encode_classic_config_assignment(key, value);
+
+    if let Some(section_line) = section_line {
+        for line in &lines[section_line + 1..section_end] {
+            let content = &config[line.start..line.content_end];
+            if classic_config_assignment_key(content) == Some(key.as_bytes()) {
+                let indent_end = content
+                    .iter()
+                    .position(|byte| !matches!(byte, b' ' | b'\t'))
+                    .unwrap_or(content.len());
+                let suffix = classic_config_assignment_suffix(content);
+                let mut output = Vec::with_capacity(config.len() + assignment.len());
+                output.extend_from_slice(&config[..line.start]);
+                output.extend_from_slice(&content[..indent_end]);
+                output.extend_from_slice(&assignment);
+                output.extend_from_slice(suffix);
+                output.extend_from_slice(&config[line.content_end..]);
+                return output;
+            }
+        }
+
+        let insert_at = lines
+            .get(section_end)
+            .map_or(config.len(), |line| line.start);
+        let mut output = config[..insert_at].to_vec();
+        ensure_classic_config_line_break(&mut output, line_ending);
+        output.extend_from_slice(&assignment);
+        output.extend_from_slice(line_ending);
+        output.extend_from_slice(&config[insert_at..]);
+        return output;
+    }
+
+    let mut output = config.to_vec();
+    ensure_classic_config_line_break(&mut output, line_ending);
+    output.push(b'[');
+    output.extend_from_slice(section.as_bytes());
+    output.push(b']');
+    output.extend_from_slice(line_ending);
+    output.extend_from_slice(&assignment);
+    output.extend_from_slice(line_ending);
+    output
+}
+
+fn encode_classic_config_assignment(key: &str, value: ClassicConfigWriteValue<'_>) -> Vec<u8> {
+    let mut output = Vec::with_capacity(key.len() + 2 + 64);
+    output.extend_from_slice(key.as_bytes());
+    output.push(b'=');
+    match value {
+        ClassicConfigWriteValue::Raw(value) => output.extend_from_slice(value.as_bytes()),
+        ClassicConfigWriteValue::Escaped(value) => {
+            output.push(b'"');
+            for byte in value.bytes() {
+                if matches!(byte, b'"' | b'\\') {
+                    output.push(b'\\');
+                }
+                output.push(byte);
+            }
+            output.push(b'"');
+        }
+    }
+    output
+}
+
+fn classic_config_assignment_value<'a>(
+    config: &'a [u8],
+    section: &str,
+    key: &str,
+) -> Option<&'a [u8]> {
+    let mut in_section = false;
+    let mut selected_section = false;
+    for line in classic_config_lines(config) {
+        let content = &config[line.start..line.content_end];
+        if let Some(name) = classic_config_section_name(content) {
+            if in_section {
+                break;
+            }
+            let matches = name == section.as_bytes();
+            in_section = matches && !selected_section;
+            selected_section |= matches;
+            continue;
+        }
+        if !in_section || classic_config_assignment_key(content) != Some(key.as_bytes()) {
+            continue;
+        }
+        let equals = content.iter().position(|byte| *byte == b'=')?;
+        return Some(&content[equals + 1..]);
+    }
+    None
+}
+
+fn classic_config_exact_assignment_value<'a>(
+    config: &'a [u8],
+    section: &str,
+    key: &str,
+) -> Option<&'a [u8]> {
+    let mut in_section = false;
+    let mut selected_section = false;
+    for line in classic_config_lines(config) {
+        let content = &config[line.start..line.content_end];
+        if let Some(name) = classic_config_section_name(content) {
+            if in_section {
+                break;
+            }
+            let matches = name == section.as_bytes();
+            in_section = matches && !selected_section;
+            selected_section |= matches;
+            continue;
+        }
+        if !in_section || classic_config_exact_assignment_key(content) != Some(key.as_bytes()) {
+            continue;
+        }
+        let equals = content.iter().position(|byte| *byte == b'=')?;
+        return Some(&content[equals + 1..]);
+    }
+    None
+}
+
+fn classic_config_string_value(config: &[u8], section: &str, key: &str) -> Option<Vec<u8>> {
+    let value = trim_classic_config_start(classic_config_assignment_value(config, section, key)?);
+    if value.first() == Some(&b'"') {
+        return decode_classic_config_string(value);
+    }
+
+    let comment = value
+        .iter()
+        .enumerate()
+        .find_map(|(index, byte)| {
+            (*byte == b'#' && index > 0 && value[index - 1].is_ascii_whitespace()).then_some(index)
+        })
+        .unwrap_or(value.len());
+    Some(trim_classic_config_end(&value[..comment]).to_vec())
+}
+
+fn decode_classic_config_string(value: &[u8]) -> Option<Vec<u8>> {
+    let mut output = Vec::new();
+    let mut cursor = 1;
+    while cursor < value.len() {
+        match value[cursor] {
+            b'"' => return Some(output),
+            b'\\' => {
+                cursor += 1;
+                let escaped = *value.get(cursor)?;
+                match escaped {
+                    b'a' | b'b' | b'f' | b'n' | b'r' | b't' | b'v' => {
+                        output.push(match escaped {
+                            b'a' => b'\x07',
+                            b'b' => b'\x08',
+                            b'f' => b'\x0c',
+                            b'n' => b'\n',
+                            b'r' => b'\r',
+                            b't' => b'\t',
+                            _ => b'\x0b',
+                        });
+                        cursor += 1;
+                    }
+                    b'x' => {
+                        cursor += 1;
+                        let start = cursor;
+                        let mut decoded = 0u8;
+                        while let Some(digit) = value
+                            .get(cursor)
+                            .and_then(|byte| (*byte as char).to_digit(16).map(|digit| digit as u8))
+                        {
+                            decoded = decoded.wrapping_mul(16).wrapping_add(digit);
+                            cursor += 1;
+                        }
+                        if cursor == start {
+                            output.push(b'x');
+                        } else {
+                            output.push(decoded);
+                        }
+                    }
+                    b'0'..=b'7' => {
+                        let mut decoded = 0u8;
+                        while let Some(byte @ b'0'..=b'7') = value.get(cursor).copied() {
+                            decoded = decoded.wrapping_mul(8).wrapping_add(byte - b'0');
+                            cursor += 1;
+                        }
+                        output.push(decoded);
+                    }
+                    other => {
+                        output.push(other);
+                        cursor += 1;
+                    }
+                }
+            }
+            byte => {
+                output.push(byte);
+                cursor += 1;
+            }
+        }
+    }
+    None
+}
+
+fn parse_cpp_config_u32(value: &[u8]) -> Option<u32> {
+    let value = trim_classic_config_start(value);
+    let base = if value.starts_with(b"0x") || value.starts_with(b"0X") {
+        16u64
+    } else {
+        10u64
+    };
+    let mut cursor = 0;
+    let negative = match value.first() {
+        Some(b'+') => {
+            cursor = 1;
+            false
+        }
+        Some(b'-') => {
+            cursor = 1;
+            true
+        }
+        _ => false,
+    };
+    if base == 16
+        && value
+            .get(cursor..cursor + 2)
+            .is_some_and(|prefix| prefix == b"0x" || prefix == b"0X")
+    {
+        cursor += 2;
+    }
+
+    let start = cursor;
+    let mut parsed = 0u64;
+    while let Some(digit) = value.get(cursor).and_then(|byte| {
+        (*byte as char)
+            .to_digit(base as u32)
+            .map(|digit| digit as u64)
+    }) {
+        parsed = parsed.saturating_mul(base).saturating_add(digit);
+        cursor += 1;
+    }
+    if cursor == start {
+        return None;
+    }
+    if negative {
+        parsed = 0u64.wrapping_sub(parsed);
+    }
+    Some(parsed as u32)
+}
+
+fn classic_config_lines(config: &[u8]) -> Vec<ClassicConfigLine> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while start < config.len() {
+        let content_end = config[start..]
+            .iter()
+            .position(|byte| matches!(byte, b'\r' | b'\n'))
+            .map_or(config.len(), |offset| start + offset);
+        let end = if content_end == config.len() {
+            content_end
+        } else if config[content_end] == b'\r' && config.get(content_end + 1) == Some(&b'\n') {
+            content_end + 2
+        } else {
+            content_end + 1
+        };
+        lines.push(ClassicConfigLine {
+            start,
+            content_end,
+            end,
+        });
+        start = end;
+    }
+    lines
+}
+
+fn classic_config_section_name(line: &[u8]) -> Option<&[u8]> {
+    let line = trim_classic_config_indent(line);
+    let mut cursor = 1;
+    if line.first() != Some(&b'[') || !line.get(cursor).is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    while line
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_'))
+    {
+        cursor += 1;
+    }
+    let name_end = cursor;
+    while matches!(line.get(cursor), Some(b' ' | b'\t')) {
+        cursor += 1;
+    }
+    (line.get(cursor) == Some(&b']')).then_some(&line[1..name_end])
+}
+
+fn classic_config_assignment_key(line: &[u8]) -> Option<&[u8]> {
+    let line = trim_classic_config_start(line);
+    if matches!(line.first(), None | Some(b'#' | b';')) {
+        return None;
+    }
+    let equals = line.iter().position(|byte| *byte == b'=')?;
+    let key = trim_classic_config(&line[..equals]);
+    (!key.is_empty() && key[0].is_ascii_alphabetic()).then_some(key)
+}
+
+fn classic_config_exact_assignment_key(line: &[u8]) -> Option<&[u8]> {
+    let line = trim_classic_config_indent(line);
+    if !line.first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let mut cursor = 1;
+    while line
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_'))
+    {
+        cursor += 1;
+    }
+    let name_end = cursor;
+    while matches!(line.get(cursor), Some(b' ' | b'\t')) {
+        cursor += 1;
+    }
+    (line.get(cursor) == Some(&b'=')).then_some(&line[..name_end])
+}
+
+fn classic_config_assignment_suffix(line: &[u8]) -> &[u8] {
+    let Some(equals) = line.iter().position(|byte| *byte == b'=') else {
+        return &line[line.len()..];
+    };
+    let value = &line[equals + 1..];
+    let value_start = value
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))
+        .unwrap_or(value.len());
+    if value.get(value_start) == Some(&b'"') {
+        let mut cursor = value_start + 1;
+        while cursor < value.len() {
+            match value[cursor] {
+                b'\\' if cursor + 1 < value.len() => cursor += 2,
+                b'"' => return &value[cursor + 1..],
+                _ => cursor += 1,
+            }
+        }
+        return &value[value.len()..];
+    }
+
+    if let Some(comment) = (value_start..value.len()).find(|index| {
+        *index > 0 && value[*index] == b'#' && value[*index - 1].is_ascii_whitespace()
+    }) {
+        let mut suffix_start = comment;
+        while suffix_start > value_start && matches!(value[suffix_start - 1], b' ' | b'\t') {
+            suffix_start -= 1;
+        }
+        return &value[suffix_start..];
+    }
+    &value[value.len()..]
+}
+
+fn classic_config_line_ending(config: &[u8], line: ClassicConfigLine) -> Option<&[u8]> {
+    (line.content_end < line.end).then(|| &config[line.content_end..line.end])
+}
+
+fn ensure_classic_config_line_break(output: &mut Vec<u8>, line_ending: &[u8]) {
+    if !output.is_empty() && !output.ends_with(b"\n") && !output.ends_with(b"\r") {
+        output.extend_from_slice(line_ending);
+    }
+}
+
+fn trim_classic_config(value: &[u8]) -> &[u8] {
+    trim_classic_config_end(trim_classic_config_start(value))
+}
+
+fn trim_classic_config_indent(mut value: &[u8]) -> &[u8] {
+    while matches!(value.first(), Some(b' ' | b'\t')) {
+        value = &value[1..];
+    }
+    value
+}
+
+fn trim_classic_config_start(mut value: &[u8]) -> &[u8] {
+    while value.first().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[1..];
+    }
+    value
+}
+
+fn trim_classic_config_end(mut value: &[u8]) -> &[u8] {
+    while value.last().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[..value.len() - 1];
+    }
+    value
 }
 
 fn config_override_path() -> Option<PathBuf> {
@@ -735,7 +1323,7 @@ fn apply_headless_display_mode_override(config_path: &Path, logger: &LauncherLog
         return Ok(());
     };
 
-    let mut config = match Config::load(config_path) {
+    let config = match Config::load(config_path) {
         Ok(config) => config,
         Err(err) if err.kind() == io::ErrorKind::NotFound => Config::new(),
         Err(err) => {
@@ -771,9 +1359,27 @@ fn apply_headless_display_mode_override(config_path: &Path, logger: &LauncherLog
     }
 
     let previous = current_value.as_deref().unwrap_or("unset");
-    config.set_in(Some("Graphics"), "DisplayMode", "1");
+    let native_config = match fs::read(config_path) {
+        Ok(config) => config,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => {
+            logger
+                .log_line(&format!(
+                    "headless display guard failed to read {}: {err}",
+                    config_path.display()
+                ))
+                .ok();
+            return Ok(());
+        }
+    };
+    let native_config = update_classic_config_value(
+        &native_config,
+        "Graphics",
+        "DisplayMode",
+        ClassicConfigWriteValue::Raw("1"),
+    );
 
-    if let Err(err) = config.save(config_path) {
+    if let Err(err) = fs::write(config_path, native_config) {
         logger
             .log_line(&format!(
                 "headless display guard failed to persist override for {}: {err}",
@@ -948,7 +1554,7 @@ mod headless_tests {
     }
 
     #[test]
-    fn apply_override_updates_config_to_window() {
+    fn l014_headless_override_preserves_native_adaptation() {
         let _guard = EnvGuard::set(&[
             (FORCE_WINDOW_ENV, Some("1")),
             (FORCE_FULLSCREEN_ENV, None),
@@ -958,11 +1564,21 @@ mod headless_tests {
         ]);
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join("config.cfg");
-        std::fs::write(&config_path, "[Graphics]\nDisplayMode=0\n").unwrap();
+        std::fs::write(
+            &config_path,
+            "[General]\nVersion=347 # keep version note\n[Graphics]\nDisplayMode=0\n",
+        )
+        .unwrap();
         let logger = test_logger(&temp);
+        adapt_config_to_current_version(&config_path, &logger).unwrap();
         apply_headless_display_mode_override(&config_path, &logger).unwrap();
         let cfg = Config::load(&config_path).unwrap();
+        assert_eq!(cfg.get_in(Some("General"), "Version"), Some("362"));
         assert_eq!(cfg.get_in(Some("Graphics"), "DisplayMode"), Some("1"));
+        let native = std::fs::read_to_string(&config_path).unwrap();
+        assert!(native.contains("Version=362 # keep version note\n"));
+        assert!(native.contains("DisplayMode=1\n"));
+        assert!(!native.contains("Version ="));
     }
 
     #[test]
@@ -1986,7 +2602,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_config_migrates_from_legacy_env_path() {
+    fn l014_prepare_config_applies_classic_version_347_migrations() {
         let install_dir = TempDir::new().unwrap();
         let planet_dir = install_dir.path().join("planet");
         fs::create_dir_all(&planet_dir).unwrap();
@@ -1995,7 +2611,8 @@ mod tests {
         let user_dir = TempDir::new().unwrap();
         let legacy_dir = TempDir::new().unwrap();
         let legacy_path = legacy_dir.path().join("Legacy.cfg");
-        fs::write(&legacy_path, b"[Game]\nFullscreen=1\n").unwrap();
+        let legacy = b"# preserve this comment\r\n[General]\r\nVersion=347\r\nName=Sentinel\r\n[Network]\r\nServerAddress=league.clonkspot.org:80\r\nAlternateServerAddress=league.clonkspot.org:80\r\nUpdateServerAddress=update.clonkspot.org/lc/update\r\nPuncherAddress=clonk.de:11115\r\n[Graphics]\r\n  Shader=false # keep shader note\r\nDisableGamma=true\r\n[Sound]\r\nMaxChannels=7\r\nMusic=false\r\n";
+        fs::write(&legacy_path, legacy).unwrap();
         let log_dir = TempDir::new().unwrap();
 
         let _guard = EnvGuard::set(&[
@@ -2018,12 +2635,135 @@ mod tests {
             config_path.exists(),
             "default config path should be materialised"
         );
-        let migrated = fs::read(&config_path).expect("migrated config should be readable");
-        let original = fs::read(&legacy_path).expect("legacy config should be readable");
+        let config = Config::load(&config_path).expect("migrated config should be readable");
+        assert_eq!(config.get_in(Some("General"), "Version"), Some("362"));
+        assert_eq!(config.get_in(Some("General"), "Name"), Some("Sentinel"));
         assert_eq!(
-            migrated, original,
-            "launcher should copy contents from LC_LEGACY_CONFIG_FILE"
+            config.get_in(Some("Network"), "ServerAddress"),
+            Some(OFFICIAL_LEAGUE_SERVER)
         );
+        assert_eq!(
+            config.get_in(Some("Network"), "AlternateServerAddress"),
+            Some(OFFICIAL_LEAGUE_SERVER)
+        );
+        assert_eq!(
+            config.get_in(Some("Network"), "UpdateServerAddress"),
+            Some(OFFICIAL_UPDATE_SERVER)
+        );
+        assert_eq!(
+            config.get_in(Some("Network"), "PuncherAddress"),
+            Some(OFFICIAL_PUNCHER_SERVER)
+        );
+        assert_eq!(config.get_in(Some("Graphics"), "Shader"), Some("true"));
+        assert_eq!(
+            config.get_in(Some("Graphics"), "DisableGamma"),
+            Some("false")
+        );
+        assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("1024"));
+        assert_eq!(config.get_in(Some("Sound"), "Music"), Some("true"));
+        assert_eq!(fs::read(&legacy_path).unwrap(), legacy);
+
+        let first_adaptation = fs::read(&config_path).unwrap();
+        let first_adaptation_text = String::from_utf8(first_adaptation.clone()).unwrap();
+        assert!(first_adaptation_text.contains("Version=362\r\n"));
+        assert!(!first_adaptation_text.contains("Version ="));
+        assert!(
+            first_adaptation_text.contains("ServerAddress=\"https://league.clonkspot.org\"\r\n")
+        );
+        assert!(first_adaptation_text.contains("  Shader=true # keep shader note\r\n"));
+        assert!(first_adaptation_text.contains("DisableGamma=false\r\n"));
+        assert!(first_adaptation_text.contains("Name=Sentinel\r\n"));
+        assert!(first_adaptation_text.starts_with("# preserve this comment\r\n"));
+        prepare_config(&paths, &logger).expect("current config should remain valid");
+        assert_eq!(
+            fs::read(&config_path).unwrap(),
+            first_adaptation,
+            "Version=362 should make adaptation byte-stable"
+        );
+    }
+
+    #[test]
+    fn l014_config_migrations_keep_cpp_exact_version_gates() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.cfg");
+        let logger = test_logger(&temp);
+
+        fs::write(
+            &config_path,
+            "[General]\nVersion=0x168junk\n[Network]\nServerAddress=league.clonkspot.org:80\nPuncherAddress=clonk.de:11115\n[Graphics]\nShader=false\nDisableGamma=true\n[Sound]\nMaxChannels=7\nMusic=false\n",
+        )
+        .unwrap();
+        adapt_config_to_current_version(&config_path, &logger).unwrap();
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.get_in(Some("General"), "Version"), Some("362"));
+        assert_eq!(
+            config.get_in(Some("Network"), "ServerAddress"),
+            Some("league.clonkspot.org:80")
+        );
+        assert_eq!(
+            config.get_in(Some("Network"), "PuncherAddress"),
+            Some("clonk.de:11115")
+        );
+        assert_eq!(config.get_in(Some("Graphics"), "Shader"), Some("false"));
+        assert_eq!(
+            config.get_in(Some("Graphics"), "DisableGamma"),
+            Some("true")
+        );
+        assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("7"));
+        assert_eq!(config.get_in(Some("Sound"), "Music"), Some("false"));
+
+        fs::write(
+            &config_path,
+            "[General]\nVersion =360\n[Sound]\nMaxChannels=7\nMusic=false\n",
+        )
+        .unwrap();
+        adapt_config_to_current_version(&config_path, &logger).unwrap();
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.get_in(Some("General"), "Version"), Some("362"));
+        assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("1024"));
+        assert_eq!(config.get_in(Some("Sound"), "Music"), Some("true"));
+        assert!(fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("Version=362\n"));
+
+        fs::write(
+            &config_path,
+            "[General]\nVersion=346\n[Sound]\nMaxChannels=7\nMusic=false\n",
+        )
+        .unwrap();
+        adapt_config_to_current_version(&config_path, &logger).unwrap();
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("7"));
+        assert_eq!(config.get_in(Some("Sound"), "Music"), Some("true"));
+
+        fs::write(
+            &config_path,
+            "[General]\nVersion=999\n[Graphics]\nShader=false\nDisableGamma=true\n",
+        )
+        .unwrap();
+        adapt_config_to_current_version(&config_path, &logger).unwrap();
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.get_in(Some("General"), "Version"), Some("362"));
+        assert_eq!(config.get_in(Some("Graphics"), "Shader"), Some("false"));
+        assert_eq!(
+            config.get_in(Some("Graphics"), "DisableGamma"),
+            Some("true")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn l014_macos_version_349_disables_preloading() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.cfg");
+        fs::write(&config_path, "[General]\nVersion=349\nPreloading=true\n").unwrap();
+        let logger = test_logger(&temp);
+
+        adapt_config_to_current_version(&config_path, &logger).unwrap();
+
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.get_in(Some("General"), "Version"), Some("362"));
+        assert_eq!(config.get_in(Some("General"), "Preloading"), Some("false"));
     }
 
     #[test]
