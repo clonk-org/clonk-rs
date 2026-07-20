@@ -679,14 +679,45 @@ fn cpp_default_raw_keyboard_keys(
     keys
 }
 
-fn is_german_system() -> bool {
-    // The C++ branches use the OS language (C4Config.cpp:46-58). Without an
-    // additional native dependency, the Rust launcher can reproduce the Unix
-    // locale branch and common Windows/macOS launcher environments.
+#[cfg(target_os = "macos")]
+fn macos_apple_language() -> Option<String> {
+    use objc2_foundation::{NSUserDefaults, ns_string};
+
+    NSUserDefaults::standardUserDefaults()
+        .stringArrayForKey(ns_string!("AppleLanguages"))?
+        .firstObject()
+        .map(|language| language.to_string())
+}
+
+fn environment_locale() -> Option<String> {
     ["LC_ALL", "LC_MESSAGES", "LANG"]
         .into_iter()
         .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
-        .is_some_and(|value| value.to_ascii_lowercase().contains("de"))
+}
+
+fn german_system_from_sources(
+    apple_language: Option<&str>,
+    environment_locale: Option<&str>,
+) -> bool {
+    apple_language.map_or_else(
+        || {
+            environment_locale
+                .is_some_and(|value| value.to_ascii_lowercase().contains("de"))
+        },
+        |language| language == "de",
+    )
+}
+
+fn is_german_system() -> bool {
+    #[cfg(target_os = "macos")]
+    let apple_language = macos_apple_language();
+    #[cfg(not(target_os = "macos"))]
+    let apple_language: Option<String> = None;
+    let environment_locale = environment_locale();
+    german_system_from_sources(
+        apple_language.as_deref(),
+        environment_locale.as_deref(),
+    )
 }
 
 /// Raw defaults traversed by the advanced-config compiler before per-key INI
@@ -1371,6 +1402,35 @@ mod tests {
         ] {
             assert_eq!(bindings.event_for_key(key, ElementState::Pressed), None);
         }
+    }
+
+    #[test]
+    fn l027_apple_languages_german_selects_iso_player_menu_without_locale_environment() {
+        let german_system = german_system_from_sources(Some("de"), None);
+        assert!(german_system);
+        assert_eq!(
+            cpp_default_keyboard_keys(german_system)[0]
+                [ControlBindingId::PlayerMenu.spec().index],
+            VirtualKeyCode::OEM102
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            cpp_default_raw_keyboard_keys(german_system)[0]
+                [ControlBindingId::PlayerMenu.spec().index],
+            100,
+            "SDL_SCANCODE_NONUSBACKSLASH"
+        );
+        assert!(
+            !german_system_from_sources(Some("en"), Some("de_DE.UTF-8")),
+            "a valid AppleLanguages value is authoritative on macOS"
+        );
+    }
+
+    #[test]
+    fn l027_environment_locale_remains_german_system_fallback() {
+        assert!(german_system_from_sources(None, Some("de_DE.UTF-8")));
+        assert!(!german_system_from_sources(None, Some("en_US.UTF-8")));
+        assert!(!german_system_from_sources(None, None));
     }
 
     #[test]

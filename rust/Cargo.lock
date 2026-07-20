@@ -2031,6 +2031,7 @@ dependencies = [
  "lc-resources",
  "lc-scaling",
  "lc-script",
+ "objc2-foundation",
  "parking_lot",
  "pixels",
  "png",
