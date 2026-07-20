@@ -5,6 +5,8 @@ use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs, GilrsBuilder};
 use lc_engine::ControlButton;
 use winit::event::ElementState;
 
+use crate::input::{GamepadAxisCalibration, GamepadAxisCalibrations};
+
 /// Normalized equivalent of the strict +/-13337 comparison in
 /// `C4GamePadControl::FeedEvent`; gilrs exposes device axes in `[-1, 1]`.
 const LEGACY_AXIS_DEAD_ZONE: f32 = 13_337.0 / i16::MAX as f32;
@@ -12,6 +14,8 @@ const LEGACY_AXIS_COUNT: usize = 8;
 const LEGACY_HAT_X_AXIS: u8 = 6;
 const LEGACY_HAT_Y_AXIS: u8 = 7;
 const GAMEPAD_SLOT_COUNT: u8 = 4;
+const WINDOWS_CALIBRATED_AXIS_COUNT: u8 = 6;
+const WINDOWS_AXIS_RAW_MAX: f32 = u16::MAX as f32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct GamepadSlot(u8);
@@ -92,6 +96,9 @@ impl LegacyGamepadAxis {
 pub(crate) struct GamepadManager {
     gilrs: Option<Gilrs>,
     states: HashMap<GamepadSlot, GamepadState>,
+    axis_calibrations: GamepadAxisCalibrations,
+    axis_calibration_dirty: bool,
+    use_windows_axis_calibration: bool,
     /// Logical equivalent of the Options `C4GamePadOpener`. Gilrs owns its
     /// platform handles as one context and cannot physically close one pad,
     /// so this claim controls which device is live for the Options consumer.
@@ -100,7 +107,7 @@ pub(crate) struct GamepadManager {
 }
 
 impl GamepadManager {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(axis_calibrations: GamepadAxisCalibrations) -> Self {
         // C++ owns the only gamepad dead zone. Gilrs' defaults would first
         // apply a device-specific radial dead zone, jitter suppression, and
         // axis-to-D-pad conversion, changing both the threshold and raw hat
@@ -115,6 +122,9 @@ impl GamepadManager {
         Self {
             gilrs,
             states: HashMap::new(),
+            axis_calibrations,
+            axis_calibration_dirty: false,
+            use_windows_axis_calibration: cfg!(windows),
             options_open_slot: None,
             next_cluster: 0,
         }
@@ -124,9 +134,36 @@ impl GamepadManager {
         Self {
             gilrs: None,
             states: HashMap::new(),
+            axis_calibrations: [[GamepadAxisCalibration::default();
+                WINDOWS_CALIBRATED_AXIS_COUNT as usize];
+                GAMEPAD_SLOT_COUNT as usize],
+            axis_calibration_dirty: false,
+            use_windows_axis_calibration: false,
             options_open_slot: None,
             next_cluster: 0,
         }
+    }
+
+    #[cfg(test)]
+    fn disabled_with_windows_axis_calibration(axis_calibrations: GamepadAxisCalibrations) -> Self {
+        Self {
+            axis_calibrations,
+            use_windows_axis_calibration: true,
+            ..Self::disabled()
+        }
+    }
+
+    pub(crate) fn set_axis_calibrations(&mut self, axis_calibrations: GamepadAxisCalibrations) {
+        self.axis_calibrations = axis_calibrations;
+        self.axis_calibration_dirty = false;
+    }
+
+    pub(crate) fn take_axis_calibration_update(&mut self) -> Option<GamepadAxisCalibrations> {
+        if !self.axis_calibration_dirty {
+            return None;
+        }
+        self.axis_calibration_dirty = false;
+        Some(self.axis_calibrations)
     }
 
     /// Close the old Options claim before opening the replacement, matching
@@ -348,12 +385,28 @@ impl GamepadManager {
         value: f32,
         output: &mut Vec<GamepadEvent>,
     ) {
-        let pad_state = self.states.entry(slot).or_default();
-        if usize::from(index) >= pad_state.axes.len() {
+        if usize::from(index) >= LEGACY_AXIS_COUNT {
             return;
         }
-        let desired_min = value < -LEGACY_AXIS_DEAD_ZONE;
-        let desired_max = value > LEGACY_AXIS_DEAD_ZONE;
+        let (desired_min, desired_max) =
+            if self.use_windows_axis_calibration && index < WINDOWS_CALIBRATED_AXIS_COUNT {
+                let raw = normalized_windows_axis_value(value);
+                let calibration =
+                    &mut self.axis_calibrations[usize::from(slot.index())][usize::from(index)];
+                let before = *calibration;
+                let position = calibrated_axis_position(calibration, raw);
+                self.axis_calibration_dirty |= *calibration != before;
+                (
+                    position == LegacyAxisPosition::Low,
+                    position == LegacyAxisPosition::High,
+                )
+            } else {
+                (
+                    value < -LEGACY_AXIS_DEAD_ZONE,
+                    value > LEGACY_AXIS_DEAD_ZONE,
+                )
+            };
+        let pad_state = self.states.entry(slot).or_default();
         for (high, desired) in [(false, desired_min), (true, desired_max)] {
             let axis = LegacyGamepadAxis::new(index, high);
             let direction = axis.direction();
@@ -381,6 +434,51 @@ impl GamepadManager {
                 });
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyAxisPosition {
+    Low,
+    Mid,
+    High,
+}
+
+fn normalized_windows_axis_value(value: f32) -> u32 {
+    // Gilrs does not expose the WinMM JOYINFOEX values persisted by C++. Use
+    // the conventional unsigned 16-bit joystick range as the stable bridge
+    // from its normalized Windows values to the legacy calibration domain.
+    let value = if value.is_finite() {
+        value.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    (((value + 1.0) * 0.5) * WINDOWS_AXIS_RAW_MAX).round() as u32
+}
+
+fn calibrated_axis_position(
+    calibration: &mut GamepadAxisCalibration,
+    position: u32,
+) -> LegacyAxisPosition {
+    if !calibration.calibrated {
+        calibration.min = position;
+        calibration.max = position;
+        calibration.calibrated = true;
+        return LegacyAxisPosition::Mid;
+    }
+
+    calibration.min = calibration.min.min(position);
+    calibration.max = calibration.max.max(position);
+    // Preserve C++ uint32_t arithmetic, including wraparound for handwritten
+    // out-of-range calibration extrema.
+    let center = calibration.min.wrapping_add(calibration.max) / 2;
+    let range = calibration.max.wrapping_sub(center) / 3;
+    if position < center.wrapping_sub(range) {
+        LegacyAxisPosition::Low
+    } else if position > center.wrapping_add(range) {
+        LegacyAxisPosition::High
+    } else {
+        LegacyAxisPosition::Mid
     }
 }
 
@@ -715,6 +813,112 @@ mod tests {
     }
 
     #[test]
+    fn l034_cpp_axis_calibration_uses_strict_integer_boundaries_and_first_sample() {
+        let mut calibration = GamepadAxisCalibration::new(0, 600, true);
+        assert_eq!(
+            calibrated_axis_position(&mut calibration, 199),
+            LegacyAxisPosition::Low
+        );
+        assert_eq!(
+            calibrated_axis_position(&mut calibration, 200),
+            LegacyAxisPosition::Mid
+        );
+        assert_eq!(
+            calibrated_axis_position(&mut calibration, 400),
+            LegacyAxisPosition::Mid
+        );
+        assert_eq!(
+            calibrated_axis_position(&mut calibration, 401),
+            LegacyAxisPosition::High
+        );
+
+        let mut uncalibrated = GamepadAxisCalibration::default();
+        assert_eq!(
+            calibrated_axis_position(&mut uncalibrated, 123),
+            LegacyAxisPosition::Mid
+        );
+        assert_eq!(uncalibrated, GamepadAxisCalibration::new(123, 123, true));
+
+        let mut wrapping = GamepadAxisCalibration::new(3_000_000_000, 4_000_000_000, true);
+        assert_eq!(
+            calibrated_axis_position(&mut wrapping, 3_500_000_000),
+            LegacyAxisPosition::High,
+            "the C++ uint32_t center calculation wraps on overflow"
+        );
+    }
+
+    #[test]
+    fn l034_loaded_calibration_changes_windows_axis_threshold_but_not_hat_threshold() {
+        use lc_core::std_config::Config;
+
+        use crate::input::GamepadBindings;
+
+        let mut config = Config::new();
+        config.set_in(Some("Gamepad0"), "Axis0Min", "0");
+        config.set_in(Some("Gamepad0"), "Axis0Max", "65535");
+        config.set_in(Some("Gamepad0"), "Axis0Calibrated", "1");
+        let bindings = GamepadBindings::from_config(&config);
+        let slot = GamepadSlot::new(0);
+        let mut manager =
+            GamepadManager::disabled_with_windows_axis_calibration(bindings.axis_calibrations());
+        let mut output = Vec::new();
+
+        manager.handle_axis_for_slot(slot, Axis::LeftStickX, 0.34, &mut output);
+        assert_eq!(
+            output,
+            [
+                GamepadEvent::Axis {
+                    slot,
+                    axis: LegacyGamepadAxis::new(0, true),
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Direction {
+                    slot,
+                    button: ControlButton::Right,
+                    state: ElementState::Pressed,
+                },
+            ],
+            "loaded 0..65535 extrema trigger above one-third while the SDL dead zone would not"
+        );
+        assert!(manager.take_axis_calibration_update().is_none());
+
+        output.clear();
+        manager.handle_axis_for_slot(slot, Axis::DPadX, 0.34, &mut output);
+        assert!(output.is_empty(), "POV/hat axes retain the fixed threshold");
+    }
+
+    #[test]
+    fn l034_runtime_extrema_copy_back_to_cpp_config_keys() {
+        use lc_core::std_config::Config;
+
+        use crate::input::GamepadBindings;
+
+        let mut config = Config::new();
+        config.set_in(Some("Gamepad2"), "Axis4Min", "10000");
+        config.set_in(Some("Gamepad2"), "Axis4Max", "50000");
+        config.set_in(Some("Gamepad2"), "Axis4Calibrated", "true");
+        let mut bindings = GamepadBindings::from_config(&config);
+        let slot = GamepadSlot::new(2);
+        let mut manager =
+            GamepadManager::disabled_with_windows_axis_calibration(bindings.axis_calibrations());
+        let mut output = Vec::new();
+
+        manager.handle_axis_for_slot(slot, Axis::LeftZ, -1.0, &mut output);
+        let calibrations = manager
+            .take_axis_calibration_update()
+            .expect("new minimum marks calibration dirty");
+        bindings.replace_axis_calibrations(calibrations);
+        bindings.write_to_config(&mut config);
+
+        assert_eq!(config.get_in(Some("Gamepad2"), "Axis4Min"), Some("0"));
+        assert_eq!(config.get_in(Some("Gamepad2"), "Axis4Max"), Some("50000"));
+        assert_eq!(
+            config.get_in(Some("Gamepad2"), "Axis4Calibrated"),
+            Some("true")
+        );
+    }
+
+    #[test]
     fn l026_gilrs_axes_map_to_cpp_axis_zero_through_hat_zero() {
         let slot = GamepadSlot::new(0);
         let mut manager = GamepadManager::disabled();
@@ -880,12 +1084,7 @@ mod tests {
         // C4Game::InitKeyboard registers each pad independently
         // (pristine 9ffa0a5d src/C4KeyboardInput.h:77-95;
         // src/C4Game.cpp:3439-3452).
-        let mut manager = GamepadManager {
-            gilrs: None,
-            states: HashMap::new(),
-            options_open_slot: None,
-            next_cluster: 0,
-        };
+        let mut manager = GamepadManager::disabled();
         let mut output = Vec::new();
         let mut starts = Vec::new();
         for slot in [GamepadSlot::new(0), GamepadSlot::new(1)] {
@@ -961,12 +1160,7 @@ mod tests {
         // commands are chosen later by Config.Gamepads; C++ has no semantic
         // Start=>PlayerMenu (pristine 9ffa0a5d src/C4GamePadCon.cpp:424-432;
         // src/C4Game.cpp:3439-3452).
-        let mut manager = GamepadManager {
-            gilrs: None,
-            states: HashMap::new(),
-            options_open_slot: None,
-            next_cluster: 0,
-        };
+        let mut manager = GamepadManager::disabled();
         for button in [
             Button::South,
             Button::East,

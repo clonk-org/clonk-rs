@@ -1,4 +1,4 @@
-use std::io::ErrorKind;
+use std::{fs, io::ErrorKind};
 
 use lc_core::std_config::Config;
 use lc_engine::{CommandKind, ControlButton, ControlCommand, ControlEvent};
@@ -62,15 +62,13 @@ pub struct KeyboardBindings {
 #[derive(Debug, Clone)]
 pub struct GamepadBindings {
     keys: [[Option<i32>; CONTROL_BINDING_COUNT]; GAMEPAD_SET_COUNT],
-    /// `C4ConfigGamepad::Reset` clears the six persisted calibration triples
-    /// together with all twelve button entries. The runtime does not consume
-    /// those calibration values yet, so retain just the one bit needed to
-    /// reproduce Reset without rewriting calibration on an ordinary save.
-    reset_axis_calibration_on_write: bool,
+    axis_calibrations: GamepadAxisCalibrations,
+    axis_calibration_dirty: bool,
 }
 
 const KEYBOARD_SET_COUNT: usize = 4;
 const GAMEPAD_SET_COUNT: usize = 4;
+const GAMEPAD_CALIBRATED_AXIS_COUNT: usize = 6;
 const GAMEPAD_CONTROL_SET_OFFSET: usize = KEYBOARD_SET_COUNT;
 const CONTROL_BINDING_COUNT: usize = 12;
 const LEGACY_GAMEPAD_KEY_PREFIX: i32 = 0x0042_0000;
@@ -80,6 +78,26 @@ const LEGACY_GAMEPAD_BUTTON_MAX: u8 =
     LEGACY_GAMEPAD_BUTTON_OFFSET + LEGACY_GAMEPAD_BUTTON_COUNT - 1;
 const LEGACY_GAMEPAD_AXIS_OFFSET: u8 = 0x30;
 const LEGACY_GAMEPAD_AXIS_MAX: u8 = 0x50;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct GamepadAxisCalibration {
+    pub(crate) min: u32,
+    pub(crate) max: u32,
+    pub(crate) calibrated: bool,
+}
+
+impl GamepadAxisCalibration {
+    pub(crate) const fn new(min: u32, max: u32, calibrated: bool) -> Self {
+        Self {
+            min,
+            max,
+            calibrated,
+        }
+    }
+}
+
+pub(crate) type GamepadAxisCalibrations =
+    [[GamepadAxisCalibration; GAMEPAD_CALIBRATED_AXIS_COUNT]; GAMEPAD_SET_COUNT];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Binding {
@@ -387,8 +405,8 @@ impl GamepadBindings {
             return Self::default();
         };
         let config_path = paths.config_file();
-        match Config::load(&config_path) {
-            Ok(config) => Self::from_config(&config),
+        let config_bytes = match fs::read(&config_path) {
+            Ok(config) => config,
             Err(err) => {
                 if err.kind() != ErrorKind::NotFound {
                     tracing::warn!(
@@ -397,7 +415,44 @@ impl GamepadBindings {
                         "failed to load gamepad controls config"
                     );
                 }
+                return Self::default();
+            }
+        };
+        let mut reader = config_bytes.as_slice();
+        let mut bindings = match Config::from_reader(&mut reader) {
+            Ok(config) => Self::from_config(&config),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %config_path.display(),
+                    "failed to load gamepad controls config"
+                );
                 Self::default()
+            }
+        };
+        // C++ configuration strings may contain native non-UTF-8 bytes. Axis
+        // fields are ASCII scalars, so recover them independently even when
+        // the convenience parser could not load an unrelated string field.
+        bindings.load_axis_calibrations_from_native_config(&config_bytes);
+        bindings
+    }
+
+    fn load_axis_calibrations_from_native_config(&mut self, config: &[u8]) {
+        for gamepad_index in 0..GAMEPAD_SET_COUNT {
+            let section = format!("Gamepad{gamepad_index}");
+            for axis in 0..GAMEPAD_CALIBRATED_AXIS_COUNT {
+                let min = configured_native_u32(config, &section, &format!("Axis{axis}Min"))
+                    .unwrap_or_default();
+                let max = configured_native_u32(config, &section, &format!("Axis{axis}Max"))
+                    .unwrap_or_default();
+                let calibrated = lc_app::configured_native_boolean(
+                    config,
+                    &section,
+                    &format!("Axis{axis}Calibrated"),
+                )
+                .unwrap_or_default();
+                self.axis_calibrations[gamepad_index][axis] =
+                    GamepadAxisCalibration::new(min, max, calibrated);
             }
         }
     }
@@ -406,6 +461,22 @@ impl GamepadBindings {
         let mut bindings = Self::default();
         for gamepad_index in 0..GAMEPAD_SET_COUNT {
             let section = format!("Gamepad{gamepad_index}");
+            for axis in 0..GAMEPAD_CALIBRATED_AXIS_COUNT {
+                let min = config
+                    .get_in(Some(&section), &format!("Axis{axis}Min"))
+                    .and_then(parse_u32_config_value)
+                    .unwrap_or_default();
+                let max = config
+                    .get_in(Some(&section), &format!("Axis{axis}Max"))
+                    .and_then(parse_u32_config_value)
+                    .unwrap_or_default();
+                let calibrated = config
+                    .get_in(Some(&section), &format!("Axis{axis}Calibrated"))
+                    .and_then(parse_cpp_boolean_value)
+                    .unwrap_or_default();
+                bindings.axis_calibrations[gamepad_index][axis] =
+                    GamepadAxisCalibration::new(min, max, calibrated);
+            }
             for control_index in 0..CONTROL_BINDING_COUNT {
                 let key = format!("Button{}", control_index + 1);
                 bindings.keys[gamepad_index][control_index] = config
@@ -457,7 +528,9 @@ impl GamepadBindings {
     /// and all persisted axis-calibration values return to C++ defaults.
     pub fn reset_all(&mut self) {
         self.keys = [[None; CONTROL_BINDING_COUNT]; GAMEPAD_SET_COUNT];
-        self.reset_axis_calibration_on_write = true;
+        self.axis_calibrations =
+            [[GamepadAxisCalibration::default(); GAMEPAD_CALIBRATED_AXIS_COUNT]; GAMEPAD_SET_COUNT];
+        self.axis_calibration_dirty = true;
     }
 
     pub fn write_to_config(&self, config: &mut Config) {
@@ -470,12 +543,50 @@ impl GamepadBindings {
                     raw_key.unwrap_or(-1).to_string(),
                 );
             }
-            if self.reset_axis_calibration_on_write {
-                for axis in 0..6 {
-                    config.set_in(Some(&section), format!("Axis{axis}Min"), "0");
-                    config.set_in(Some(&section), format!("Axis{axis}Max"), "0");
-                    config.set_in(Some(&section), format!("Axis{axis}Calibrated"), "false");
-                }
+        }
+        if self.axis_calibration_dirty {
+            self.write_axis_calibration_to_config(config);
+        }
+    }
+
+    pub(crate) const fn axis_calibrations(&self) -> GamepadAxisCalibrations {
+        self.axis_calibrations
+    }
+
+    pub(crate) fn replace_axis_calibrations(&mut self, calibrations: GamepadAxisCalibrations) {
+        if self.axis_calibrations != calibrations {
+            self.axis_calibrations = calibrations;
+            self.axis_calibration_dirty = true;
+        }
+    }
+
+    pub(crate) const fn axis_calibration_dirty(&self) -> bool {
+        self.axis_calibration_dirty
+    }
+
+    pub(crate) fn mark_axis_calibration_persisted(&mut self) {
+        self.axis_calibration_dirty = false;
+    }
+
+    pub(crate) fn write_axis_calibration_to_config(&self, config: &mut Config) {
+        for (gamepad_index, calibrations) in self.axis_calibrations.iter().enumerate() {
+            let section = format!("Gamepad{gamepad_index}");
+            for (axis, calibration) in calibrations.iter().enumerate() {
+                config.set_in(
+                    Some(&section),
+                    format!("Axis{axis}Min"),
+                    calibration.min.to_string(),
+                );
+                config.set_in(
+                    Some(&section),
+                    format!("Axis{axis}Max"),
+                    calibration.max.to_string(),
+                );
+                config.set_in(
+                    Some(&section),
+                    format!("Axis{axis}Calibrated"),
+                    calibration.calibrated.to_string(),
+                );
             }
         }
     }
@@ -571,7 +682,9 @@ impl Default for GamepadBindings {
     fn default() -> Self {
         Self {
             keys: [[None; CONTROL_BINDING_COUNT]; GAMEPAD_SET_COUNT],
-            reset_axis_calibration_on_write: false,
+            axis_calibrations: [[GamepadAxisCalibration::default(); GAMEPAD_CALIBRATED_AXIS_COUNT];
+                GAMEPAD_SET_COUNT],
+            axis_calibration_dirty: false,
         }
     }
 }
@@ -785,6 +898,38 @@ fn parse_raw_key_code_value(raw: &str) -> Option<i32> {
         i32::from_str_radix(hex, 16).ok()
     } else {
         trimmed.parse::<i32>().ok()
+    }
+}
+
+fn parse_u32_config_value(raw: &str) -> Option<u32> {
+    let trimmed = raw.trim();
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        trimmed.parse::<u32>().ok()
+    }
+}
+
+fn configured_native_u32(config: &[u8], section: &str, key: &str) -> Option<u32> {
+    let value = lc_app::configured_native_value(config, section, key)?;
+    parse_u32_config_value(std::str::from_utf8(value.as_bytes()).ok()?)
+}
+
+fn parse_cpp_boolean_value(raw: &str) -> Option<bool> {
+    let value = raw.trim().as_bytes();
+    if value.first() == Some(&b'1') && !value.get(1).is_some_and(u8::is_ascii_digit) {
+        Some(true)
+    } else if value.first() == Some(&b'0') && !value.get(1).is_some_and(u8::is_ascii_digit) {
+        Some(false)
+    } else if value.starts_with(b"true") {
+        Some(true)
+    } else if value.starts_with(b"false") {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -1873,6 +2018,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn l034_native_byte_config_loads_axis_calibration_without_utf8() {
+        let config = b"[General]\nName=Andr\xe9\n[Gamepad1]\nAxis2Min=0x10\nAxis2Max=4294967295\nAxis2Calibrated=1\n";
+        let mut bindings = GamepadBindings::default();
+        bindings.load_axis_calibrations_from_native_config(config);
+
+        assert_eq!(
+            bindings.axis_calibrations()[1][2],
+            GamepadAxisCalibration::new(16, u32::MAX, true)
+        );
+        assert!(!bindings.axis_calibration_dirty());
     }
 
     #[test]

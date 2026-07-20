@@ -7691,7 +7691,22 @@ fn main() -> Result<()> {
                     control_flow.set_exit();
                 }
             }
-            Event::LoopDestroyed => {}
+            Event::LoopDestroyed => {
+                if !app.configuration_reset_requested {
+                    if let Some(paths) = app_paths.as_ref() {
+                        if let Err(error) = persist_dirty_gamepad_axis_calibration(
+                            paths.as_ref(),
+                            &mut app.gamepad_bindings,
+                        ) {
+                            tracing::warn!(
+                                %error,
+                                path = %paths.config_file().display(),
+                                "failed to persist gamepad axis calibration"
+                            );
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         // SDL hides the platform pointer throughout the game client area;
@@ -20949,6 +20964,64 @@ fn save_config_preserving_native_gamepads_enabled(
     Ok(())
 }
 
+fn persist_dirty_gamepad_axis_calibration(
+    paths: &AppPaths,
+    bindings: &mut GamepadBindings,
+) -> io::Result<()> {
+    if !bindings.axis_calibration_dirty() {
+        return Ok(());
+    }
+    let path = paths.config_file();
+    let config = match fs::read(&path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    let config = update_dirty_gamepad_axis_calibration_config(&config, bindings)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, config)?;
+    bindings.mark_axis_calibration_persisted();
+    Ok(())
+}
+
+fn update_dirty_gamepad_axis_calibration_config(
+    config: &[u8],
+    bindings: &GamepadBindings,
+) -> io::Result<Vec<u8>> {
+    if !bindings.axis_calibration_dirty() {
+        return Ok(config.to_vec());
+    }
+    let mut config = config.to_vec();
+    for (gamepad, calibrations) in bindings.axis_calibrations().iter().enumerate() {
+        let mut fields = Vec::with_capacity(calibrations.len() * 3);
+        for (axis, calibration) in calibrations.iter().enumerate() {
+            fields.push((format!("Axis{axis}Min"), calibration.min.to_string()));
+            fields.push((format!("Axis{axis}Max"), calibration.max.to_string()));
+            fields.push((
+                format!("Axis{axis}Calibrated"),
+                calibration.calibrated.to_string(),
+            ));
+        }
+        let updates = fields
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.as_str(),
+                    lc_app::NativeConfigValue::RawAscii(value.as_str()),
+                )
+            })
+            .collect::<Vec<_>>();
+        config = lc_app::update_configured_native_values(
+            &config,
+            &format!("Gamepad{gamepad}"),
+            &updates,
+        )?;
+    }
+    Ok(config)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StartupDefinitionPaths {
     selector_root: PathBuf,
@@ -23872,6 +23945,16 @@ impl GameApp {
             .unwrap_or_default();
         let show_folder_maps = load_show_folder_maps(paths);
         let bindings = KeyboardBindings::load(paths);
+        let gamepad_bindings = GamepadBindings::load(paths);
+        let gamepads = if cfg!(test) || !gamepads_enabled {
+            // Global disable mirrors native's null C4GamePadControl. Synthetic
+            // app tests also inject normalized events directly; starting the
+            // macOS gilrs backend for every nextest process would otherwise leave
+            // hundreds of unused threads contending during the workspace gate.
+            GamepadManager::disabled()
+        } else {
+            GamepadManager::new(gamepad_bindings.axis_calibrations())
+        };
         let show_commands_requests = ShowCommandsRequestStore::default();
         let mut engine = Engine::new();
         engine.set_mission_access_store(mission_access.clone());
@@ -24024,7 +24107,7 @@ impl GameApp {
             allow_scripting_in_replays,
             input: InputDispatcher::new(),
             bindings,
-            gamepad_bindings: GamepadBindings::load(paths),
+            gamepad_bindings,
             local_controls: LocalControlRegistry::default(),
             pressed_engine_keys: HashSet::new(),
             scoreboard_tab_raw_pressed: false,
@@ -24033,15 +24116,7 @@ impl GameApp {
             pending_options_display_requests: VecDeque::new(),
             gamepads_enabled,
             gamepad_input_enabled: gamepads_enabled,
-            gamepads: if cfg!(test) || !gamepads_enabled {
-                // Global disable mirrors native's null C4GamePadControl. Synthetic
-                // app tests also inject normalized events directly; starting the
-                // macOS gilrs backend for every nextest process would otherwise leave
-                // hundreds of unused threads contending during the workspace gate.
-                GamepadManager::disabled()
-            } else {
-                GamepadManager::new()
-            },
+            gamepads,
             #[cfg(test)]
             gamepad_poll_count: 0,
             gamepad_gui_control: load_gamepad_gui_control(paths),
@@ -42231,6 +42306,10 @@ impl GameApp {
             self.gamepad_poll_count += 1;
         }
         let events = self.gamepads.poll();
+        if let Some(calibrations) = self.gamepads.take_axis_calibration_update() {
+            self.gamepad_bindings
+                .replace_axis_calibrations(calibrations);
+        }
         let gamepad_gui_control = self.gamepad_gui_control;
         self.process_sourced_gamepad_event_batch(events, gamepad_gui_control)
     }
@@ -60329,6 +60408,8 @@ impl GameApp {
             .set_mission_access_store(self.mission_access.clone());
         self.bindings = KeyboardBindings::load(paths);
         self.gamepad_bindings = GamepadBindings::load(paths);
+        self.gamepads
+            .set_axis_calibrations(self.gamepad_bindings.axis_calibrations());
         self.gamepads_enabled = load_gamepads_enabled(paths);
         self.gamepad_gui_control = load_gamepad_gui_control(paths);
         self.engine
@@ -60490,6 +60571,8 @@ impl GameApp {
             }
             lc_frontend::startup_options_controls::ControlDevice::Gamepad => {
                 self.gamepad_bindings.reset_all();
+                self.gamepads
+                    .set_axis_calibrations(self.gamepad_bindings.axis_calibrations());
             }
         }
         self.refresh_options_control_labels(device);
@@ -135736,6 +135819,50 @@ ScenInfoArea=70,5,25,90
         assert!(!configured_gamepads_enabled(
             b"[General]\nGamepadEnabled=0\n"
         ));
+    }
+
+    #[test]
+    fn l034_dirty_axis_calibration_updates_cpp_keys_without_rewriting_other_bytes() {
+        let source = b"[Vendor]\nOpaque=\x80\xff\n[Gamepad2]\nVendorKey=keep\nAxis4Min=7\n";
+        assert_eq!(
+            update_dirty_gamepad_axis_calibration_config(
+                source,
+                &GamepadBindings::default()
+            )
+            .expect("clean calibration leaves config untouched"),
+            source
+        );
+
+        let mut bindings = GamepadBindings::default();
+        let mut calibrations = bindings.axis_calibrations();
+        calibrations[2][4] = input::GamepadAxisCalibration::new(12, u32::MAX, true);
+        bindings.replace_axis_calibrations(calibrations);
+        let updated = update_dirty_gamepad_axis_calibration_config(source, &bindings)
+            .expect("write native calibration triplets");
+
+        assert!(updated.windows(2).any(|bytes| bytes == b"\x80\xff"));
+        assert_eq!(
+            lc_app::configured_native_value(&updated, "Gamepad2", "VendorKey")
+                .expect("unrelated gamepad value survives")
+                .as_bytes(),
+            b"keep"
+        );
+        assert_eq!(
+            lc_app::configured_native_value(&updated, "Gamepad2", "Axis4Min")
+                .expect("minimum persisted")
+                .as_bytes(),
+            b"12"
+        );
+        assert_eq!(
+            lc_app::configured_native_value(&updated, "Gamepad2", "Axis4Max")
+                .expect("full u32 maximum persisted")
+                .as_bytes(),
+            b"4294967295"
+        );
+        assert_eq!(
+            lc_app::configured_native_boolean(&updated, "Gamepad2", "Axis4Calibrated"),
+            Some(true)
+        );
     }
 
     #[test]
