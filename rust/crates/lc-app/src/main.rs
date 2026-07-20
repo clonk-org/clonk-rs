@@ -20540,6 +20540,9 @@ fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
         .unwrap_or(false)
 }
 
+/// Native `C4Application::DoInit` constructs `C4GamePadControl` only when
+/// `Config.General.GamepadEnabled` is true. `C4ConfigGeneral` defaults the
+/// field on, so a missing or malformed serialized value retains that default.
 fn configured_gamepads_enabled(config: &[u8]) -> bool {
     lc_app::configured_native_boolean(config, "General", "GamepadEnabled").unwrap_or(true)
 }
@@ -23246,6 +23249,10 @@ impl GameApp {
         runtime: RuntimeConfig,
         frontend_scenarios: Option<Vec<FrontendScenario>>,
     ) -> Result<Self> {
+        // Capture native Boolean grammar before participant validation or any
+        // other UTF-8 convenience writer can rewrite the config projection.
+        // The native gamepad subsystem is likewise fixed before startup UI.
+        let gamepads_enabled = load_gamepads_enabled(paths);
         // A real installation must establish C4GUI's process-global bundle
         // before any controller, discovery worker, renderer, or app-owned UI
         // state is constructed. Asset-less test apps install their explicit
@@ -23394,7 +23401,6 @@ impl GameApp {
             })
             .unwrap_or_default();
         let show_folder_maps = load_show_folder_maps(paths);
-        let gamepads_enabled = load_gamepads_enabled(paths);
         let bindings = KeyboardBindings::load(paths);
         let show_commands_requests = ShowCommandsRequestStore::default();
         let mut engine = Engine::new();
@@ -23557,10 +23563,10 @@ impl GameApp {
             gamepads_enabled,
             gamepad_input_enabled: gamepads_enabled,
             gamepads: if cfg!(test) || !gamepads_enabled {
-                // Synthetic app tests inject normalized events directly. Starting the
-                // macOS gilrs backend for every nextest process creates two unused
-                // threads per fixture and can leave hundreds contending during the
-                // workspace gate.
+                // Global disable mirrors native's null C4GamePadControl. Synthetic
+                // app tests also inject normalized events directly; starting the
+                // macOS gilrs backend for every nextest process would otherwise leave
+                // hundreds of unused threads contending during the workspace gate.
                 GamepadManager::disabled()
             } else {
                 GamepadManager::new()
@@ -119819,6 +119825,83 @@ public func Grant(password) { return GainMissionAccess(password); }
         let mut sentinel = vec![0xa9; 640 * 480 * 4];
         assert!(app.render(&mut sentinel).expect("render Graphics sheet"));
         assert!(sentinel.iter().any(|byte| *byte != 0xa9));
+    }
+
+    #[test]
+    fn l020_gamepad_enabled_defaults_true_and_captures_false_before_config_writes() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated gamepad config");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+
+        assert!(
+            load_gamepads_enabled(Some(&paths)),
+            "the omitted native key retains C4ConfigGeneral's true default"
+        );
+        persist_native_config_values(
+            &paths,
+            "General",
+            &[(
+                "GamepadEnabled",
+                lc_app::NativeConfigValue::RawAscii("false"),
+            )],
+        )
+        .expect("disable native gamepad input");
+        let app = GameApp::new_with_frontend_scenarios(
+            320,
+            200,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+            Some(Vec::new()),
+        )
+        .expect("initialise app from disabled gamepad config");
+        assert!(
+            !app.gamepads_enabled,
+            "startup config writes must not change the process snapshot"
+        );
+        assert!(!app.gamepad_input_enabled);
+        drop(app);
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn l020_global_gamepad_disable_drops_events_before_dispatch() {
+        let mut app = new_real_classic_menu_app(640, 480);
+        let mut frame = vec![0_u8; 640 * 480 * 4];
+        app.render(&mut frame).expect("cache supported main menu");
+        let initial_version = app.menu_render_version;
+        let down = || GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
+            button: ControlButton::Down,
+            state: ElementState::Pressed,
+        };
+
+        app.gamepads_enabled = false;
+        app.gamepad_input_enabled = false;
+        app.process_gamepad_event_batch([down()])
+            .expect("globally disabled input is discarded");
+        assert_eq!(
+            app.menu_render_version, initial_version,
+            "disabled events must not reach startup input dispatch"
+        );
+
+        app.gamepads_enabled = true;
+        app.gamepad_input_enabled = true;
+        app.process_gamepad_event_batch([down()])
+            .expect("globally enabled input reaches dispatch");
+        assert_eq!(app.menu_render_version, initial_version.wrapping_add(1));
     }
 
     #[test]
