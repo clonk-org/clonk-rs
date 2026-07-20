@@ -220,6 +220,37 @@ four batches in 7.936s (11.53s command wall time); batch durations ranged from
 5.844s to 7.935s. Earlier 17-test and single-batch runs were contended, so they
 are retained only as diagnostics rather than claimed as a formal elapsed A/B.
 
+The rebased workspace gate for that pass compiled in 51.09s, passed 7,437
+tests (20 skipped) in 64.997s, and took 118.98s wall time. This is the
+pre-follow-up reference for the next scenario-batching pass, not a portable
+threshold.
+
+Five app-level Alchemy mouse tests also repeated the same catalog discovery
+and scenario parse. Two nextest-visible batches now prepare that immutable
+input once apiece and create a fresh temporary user-data tree, `GameApp`, and
+`Engine` for each unchanged assertion body. The focused result passed both
+batches in 6.974s after a 31.80s app-harness compile; the individual batches
+took 6.719s and 6.965s. The five earlier same-profile testcase samples totaled
+41.723s and had a 10.707s slowest case, but they were collected inside a full
+app run, so the reduction is directional evidence rather than a strict
+same-command A/B.
+
+Drachenfels and Goldrush also repeated scenario parsing across 17 standalone
+integration tests. Three Drachenfels batches and two Goldrush batches provide
+five-way process parallelism, share only immutable preparation, and instantiate
+a fresh seeded engine for every subcase. An uncontended focused run compiled
+the integration wrapper in 3.48s and passed all five batches in 5.411s (9.89s
+command wall time); batch durations ranged from 3.048s to 5.410s. No comparable
+17-process timing was retained, so this records the new reference without
+claiming an elapsed speedup.
+
+A same-source directional compile probe also set the app package's test-profile
+codegen units from 256 to 128. The app test harness compiled in 36.07s, versus
+31.80s for the preceding 256-unit build (`n = 1` each; cache states were not
+controlled). The probe showed no benefit, so the override was removed;
+preserving 256 units keeps more LLVM parallelism and finer-grained incremental
+reuse for this unusually large test target.
+
 The first local reference baseline was recorded on 2026-07-12 from
 `dd32e5d3` with content `67a54d0`, Rust 1.87.0, macOS/Darwin arm64, and an
 Apple M4 Max. The representative command was:

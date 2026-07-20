@@ -884,20 +884,28 @@ fn alchemy_real_scenario_subcases_batch_4() {
 }
 
 fn run_alchemy_batch(subcases: &[(&'static str, fn(&PreparedInstalledScenario))]) {
-    let prepared = prepare_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    run_prepared_scenario_batch("Alchemy", "Fantasy.c4f/Alchemy.c4s", subcases);
+}
+
+fn run_prepared_scenario_batch(
+    scenario_name: &str,
+    relative_path: &str,
+    subcases: &[(&'static str, fn(&PreparedInstalledScenario))],
+) {
+    let prepared = prepare_installed_scenario(relative_path, 0);
     let mut failures = Vec::new();
 
     for &(name, subcase) in subcases {
-        eprintln!("running Alchemy subcase `{name}`");
+        eprintln!("running {scenario_name} subcase `{name}`");
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subcase(&prepared))).is_err() {
-            eprintln!("Alchemy subcase `{name}` failed; continuing batch");
+            eprintln!("{scenario_name} subcase `{name}` failed; continuing batch");
             failures.push(name);
         }
     }
 
     if !failures.is_empty() {
         panic!(
-            "{} Alchemy subcase(s) failed: {}",
+            "{} {scenario_name} subcase(s) failed: {}",
             failures.len(),
             failures.join(", ")
         );
@@ -3400,8 +3408,71 @@ fn alchemy_firelump_collects_its_same_call_fireball_into_the_mage(
 }
 
 #[test]
-fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+fn drachenfels_real_scenario_subcases_batch_1() {
+    run_drachenfels_batch(&[
+        (
+            "script25_casts_cpp_sparks_and_completes_intro_step",
+            dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step,
+        ),
+        (
+            "objects_keep_their_multidirectional_action_rows",
+            dragon_rock_objects_keep_their_multidirectional_action_rows,
+        ),
+        (
+            "scroll_transfer_zone_callbacks_persist_cpp_names",
+            dragon_rock_scroll_transfer_zone_callbacks_persist_cpp_names,
+        ),
+    ]);
+}
+
+#[test]
+fn drachenfels_real_scenario_subcases_batch_2() {
+    run_drachenfels_batch(&[
+        (
+            "object_lookup_carries_script1_state_into_script3",
+            dragon_rock_object_lookup_carries_script1_state_into_script3,
+        ),
+        (
+            "mage_choice_redefines_the_real_knight_and_transfers_its_flag",
+            dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag,
+        ),
+        (
+            "objects_restore_serialized_c4id_named_locals",
+            dragon_rock_objects_restore_serialized_c4id_named_locals,
+        ),
+    ]);
+}
+
+#[test]
+fn drachenfels_real_scenario_subcases_batch_3() {
+    run_drachenfels_batch(&[
+        (
+            "endboss_death_kills_the_shipped_dragon",
+            dragon_rock_endboss_death_kills_the_shipped_dragon,
+        ),
+        (
+            "walk_up_enters_the_shipped_tent",
+            dragon_rock_walk_up_enters_the_shipped_tent,
+        ),
+        (
+            "initialize_player_grants_both_plan_knowledge_sets",
+            dragon_rock_initialize_player_grants_both_plan_knowledge_sets,
+        ),
+        (
+            "real_schedule_enables_and_forces_player_fog_of_war",
+            dragon_rock_real_schedule_enables_and_forces_player_fog_of_war,
+        ),
+    ]);
+}
+
+fn run_drachenfels_batch(subcases: &[(&'static str, fn(&PreparedInstalledScenario))]) {
+    run_prepared_scenario_batch("Drachenfels", "Fantasy.c4f/Drachenfels.c4s", subcases);
+}
+
+fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player_on_team(&mut engine, "Dragon Rock character parity", 1);
     let knight = engine
         .crew_cursor(owner)
@@ -3485,9 +3556,8 @@ fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag() {
     );
 }
 
-#[test]
-fn dragon_rock_walk_up_enters_the_shipped_tent() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+fn dragon_rock_walk_up_enters_the_shipped_tent(prepared: &PreparedInstalledScenario) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player_on_team(&mut engine, "Dragon Rock tent-entry parity", 1);
 
     // Choose normal difficulty and the initially selected KNIG. Both choices
@@ -3562,9 +3632,10 @@ fn dragon_rock_walk_up_enters_the_shipped_tent() {
     );
 }
 
-#[test]
-fn dragon_rock_initialize_player_grants_both_plan_knowledge_sets() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+fn dragon_rock_initialize_player_grants_both_plan_knowledge_sets(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player_on_team(&mut engine, "Dragon Rock knowledge parity", 1);
 
     // Dragon Rock calls WPPL->SetKnowledge(iPlr) and
@@ -3617,9 +3688,10 @@ fn dragon_rock_initialize_player_grants_both_plan_knowledge_sets() {
     );
 }
 
-#[test]
-fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player_on_team(&mut engine, "Dragon Rock fog parity", 1);
     let player = engine.player(owner).expect("joined player remains live");
     assert!(!player.fog_of_war());
@@ -3667,9 +3739,10 @@ fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war() {
     assert!(persisted.force_fog_of_war);
 }
 
-#[test]
-fn dragon_rock_objects_keep_their_multidirectional_action_rows() {
-    let engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+fn dragon_rock_objects_keep_their_multidirectional_action_rows(
+    prepared: &PreparedInstalledScenario,
+) {
+    let engine = prepared.instantiate();
 
     // C4Action::CompileFunc reads Dir as an unrestricted int32
     // (C4Action.cpp:45-54). Loading resolves the action name without replacing
@@ -3716,9 +3789,8 @@ fn dragon_rock_objects_keep_their_multidirectional_action_rows() {
     }
 }
 
-#[test]
-fn dragon_rock_objects_restore_serialized_c4id_named_locals() {
-    let engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+fn dragon_rock_objects_restore_serialized_c4id_named_locals(prepared: &PreparedInstalledScenario) {
+    let engine = prepared.instantiate();
 
     // GetC4VID assigns uppercase `I` to C4V_C4ID (C4Value.cpp:368-410).
     // C4Value::CompileFunc persists the ID's signed 32-bit payload verbatim
@@ -3804,9 +3876,10 @@ fn dragon_rock_objects_restore_serialized_c4id_named_locals() {
     }
 }
 
-#[test]
-fn dragon_rock_scroll_transfer_zone_callbacks_persist_cpp_names() {
-    let engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+fn dragon_rock_scroll_transfer_zone_callbacks_persist_cpp_names(
+    prepared: &PreparedInstalledScenario,
+) {
+    let engine = prepared.instantiate();
 
     // C4Game::Synchronize reaches UpdateTransferZone through
     // TransferZones::Synchronize and Game.Objects.UpdateTransferZones
@@ -3854,9 +3927,10 @@ fn dragon_rock_scroll_transfer_zone_callbacks_persist_cpp_names() {
     }
 }
 
-#[test]
-fn dragon_rock_object_lookup_carries_script1_state_into_script3() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+fn dragon_rock_object_lookup_carries_script1_state_into_script3(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     join_local_player_on_team(&mut engine, "Dragon Rock intro object parity", 1);
 
     // InitializePlayer starts the ordinary C4GameScriptHost counter. Its
@@ -3911,9 +3985,8 @@ fn dragon_rock_object_lookup_carries_script1_state_into_script3() {
     ));
 }
 
-#[test]
-fn dragon_rock_endboss_death_kills_the_shipped_dragon() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+fn dragon_rock_endboss_death_kills_the_shipped_dragon(prepared: &PreparedInstalledScenario) {
+    let mut engine = prepared.instantiate();
     join_local_player_on_team(&mut engine, "Dragon Rock Kill parity", 1);
 
     // Script1 binds the shipped object numbers to g_pEndboss/g_pDragon.
@@ -3946,9 +4019,10 @@ fn dragon_rock_endboss_death_kills_the_shipped_dragon() {
     );
 }
 
-#[test]
-fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     join_local_player_on_team(&mut engine, "Dragon Rock CastObjects parity", 1);
 
     // Let the shipped counter reach Script15's pause, then resume it through
@@ -4293,8 +4367,51 @@ public func Paint(int x, int y)
 }
 
 #[test]
-fn gold_rush_trap_arm_check_uses_the_live_cpp_shape_offset() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+fn goldrush_real_scenario_subcases_batch_1() {
+    run_goldrush_batch(&[
+        (
+            "sheriff_watch_energy_stop_removes_crew_and_completes",
+            gold_rush_sheriff_watch_energy_stop_removes_crew_and_completes,
+        ),
+        (
+            "trap_arm_check_uses_the_live_cpp_shape_offset",
+            gold_rush_trap_arm_check_uses_the_live_cpp_shape_offset,
+        ),
+        (
+            "incomplete_dynamite_box_ignition_errors_before_exploding",
+            gold_rush_incomplete_dynamite_box_ignition_errors_before_exploding,
+        ),
+    ]);
+}
+
+#[test]
+fn goldrush_real_scenario_subcases_batch_2() {
+    run_goldrush_batch(&[
+        (
+            "scorching_timer_returns_kill_before_playing_sound",
+            gold_rush_scorching_timer_returns_kill_before_playing_sound,
+        ),
+        (
+            "fade_out_retimes_its_existing_effect_through_change_effect",
+            gold_rush_fade_out_retimes_its_existing_effect_through_change_effect,
+        ),
+        (
+            "real_anvil_forges_a_wire_roll_from_its_metal_contents",
+            gold_rush_real_anvil_forges_a_wire_roll_from_its_metal_contents,
+        ),
+        (
+            "stalactite_hit_spins_same_call_created_fragments",
+            gold_rush_stalactite_hit_spins_same_call_created_fragments,
+        ),
+    ]);
+}
+
+fn run_goldrush_batch(subcases: &[(&'static str, fn(&PreparedInstalledScenario))]) {
+    run_prepared_scenario_batch("Goldrush", "Western.c4f/Goldrush.c4s", subcases);
+}
+
+fn gold_rush_trap_arm_check_uses_the_live_cpp_shape_offset(prepared: &PreparedInstalledScenario) {
+    let mut engine = prepared.instantiate();
     let base_x = engine
         .snapshot()
         .objects
@@ -4342,9 +4459,10 @@ fn gold_rush_trap_arm_check_uses_the_live_cpp_shape_offset() {
     );
 }
 
-#[test]
-fn gold_rush_stalactite_hit_spins_same_call_created_fragments() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+fn gold_rush_stalactite_hit_spins_same_call_created_fragments(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let stalactite = ObjectId::new(450);
     let old_fragments = engine
         .snapshot()
@@ -4397,9 +4515,10 @@ fn gold_rush_stalactite_hit_spins_same_call_created_fragments() {
     );
 }
 
-#[test]
-fn gold_rush_fade_out_retimes_its_existing_effect_through_change_effect() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+fn gold_rush_fade_out_retimes_its_existing_effect_through_change_effect(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     assert!(
         engine.debug_global_has_function("FadeOut"),
         "GoldRush Helpers.c supplies FadeOut to the global script layer"
@@ -4460,9 +4579,10 @@ func RetargetFade() { return FadeOut(10, 5, this()); }
     );
 }
 
-#[test]
-fn gold_rush_scorching_timer_returns_kill_before_playing_sound() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+fn gold_rush_scorching_timer_returns_kill_before_playing_sound(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     assert!(engine.debug_global_has_function("SetScorching"));
     assert!(engine.debug_global_has_function("FxIntScorchingTimer"));
     let mut driver = Definition::from_script(
@@ -4506,9 +4626,10 @@ fn gold_rush_scorching_timer_returns_kill_before_playing_sound() {
     );
 }
 
-#[test]
-fn gold_rush_incomplete_dynamite_box_ignition_errors_before_exploding() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+fn gold_rush_incomplete_dynamite_box_ignition_errors_before_exploding(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let dynamite_box = engine
         .spawn_object(
             SpawnConfig::new("DYNB")
@@ -4538,9 +4659,10 @@ fn gold_rush_incomplete_dynamite_box_ignition_errors_before_exploding() {
     assert_eq!(box_after.construction, FULL_CON / 2);
 }
 
-#[test]
-fn gold_rush_sheriff_watch_energy_stop_removes_crew_and_completes() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+fn gold_rush_sheriff_watch_energy_stop_removes_crew_and_completes(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     assert_eq!(
         engine.debug_definition_has_function("_TLK", "FxWatchEnergyStop"),
         Some(true),
@@ -4600,9 +4722,10 @@ fn gold_rush_sheriff_watch_energy_stop_removes_crew_and_completes() {
     assert_eq!(stay_there.interval, 35);
 }
 
-#[test]
-fn gold_rush_real_anvil_forges_a_wire_roll_from_its_metal_contents() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+fn gold_rush_real_anvil_forges_a_wire_roll_from_its_metal_contents(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let mut forge_action = ActionState::new("Forge");
     forge_action.time = 150;
     let anvil = engine

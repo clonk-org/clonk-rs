@@ -60481,7 +60481,7 @@ impl GameApp {
         if let Some((scenario, result, prepared_go)) = completion {
             match result {
                 Ok(data) => {
-                    if let Err(error) = self.activate_loaded_scenario(scenario.clone(), data) {
+                    if let Err(error) = self.activate_loaded_scenario(scenario.clone(), &data) {
                         let message = match error {
                             ScenarioActivationError::Fatal(error) => return Err(error),
                             ScenarioActivationError::Recoverable(message) => message,
@@ -68330,7 +68330,7 @@ impl GameApp {
     fn activate_loaded_scenario(
         &mut self,
         scenario: FrontendScenario,
-        scenario_data: Scenario,
+        scenario_data: &Scenario,
     ) -> std::result::Result<(), ScenarioActivationError> {
         self.finish_recording();
         self.recording_template = None;
@@ -82957,124 +82957,166 @@ mod tests {
         panic!("{scenario_key} is present in the real scenario catalog");
     }
 
+    struct PreparedRealInstalledScenario {
+        scenario_key: String,
+        scenario: FrontendScenario,
+        scenarios: Vec<FrontendScenario>,
+        scenario_data: Scenario,
+    }
+
+    impl PreparedRealInstalledScenario {
+        fn new(scenario_key: &str) -> Self {
+            let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .expect("repository root");
+            let user_data = tempdir().expect("isolated prepared-scenario user data");
+            let _env_guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(repository)),
+                ("LC_USER_DATA_DIR", Some(user_data.path())),
+                ("LC_LANGUAGE", Some(Path::new("US"))),
+            ]);
+            let paths = AppPaths::discover().expect("discover repository install");
+            let (scenario, scenarios) =
+                load_frontend_scenarios_for_test(&paths, scenario_key);
+            let scenario_path = scenario
+                .path
+                .clone()
+                .unwrap_or_else(|| panic!("{scenario_key} path"));
+            let scenario_data = Scenario::load_from_path_with_languages(
+                &scenario_path,
+                &InstallDefinitionResolver::new(Some(Arc::new(paths.clone()))),
+                &startup_language_sequence(Some(&paths)),
+            )
+            .unwrap_or_else(|error| panic!("load real {scenario_key}: {error}"));
+
+            Self {
+                scenario_key: scenario_key.to_string(),
+                scenario,
+                scenarios,
+                scenario_data,
+            }
+        }
+
+        fn instantiate(
+            &self,
+            player_name: &str,
+            preexisting_clonk: bool,
+        ) -> RealTutorialApp {
+            let scenario_key = &self.scenario_key;
+            let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .expect("repository root");
+            let user_data = tempdir().expect("isolated user data");
+            let env_guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(repository)),
+                ("LC_USER_DATA_DIR", Some(user_data.path())),
+                // The virtual-player milestones intentionally assert the shipped
+                // US tutorial copy. Isolate them from the developer machine's
+                // locale just like the user-data/config roots.
+                ("LC_LANGUAGE", Some(Path::new("US"))),
+            ]);
+            let paths = AppPaths::discover().expect("discover repository install");
+            let audio_options = AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            };
+            let mut app = GameApp::new_with_frontend_scenarios(
+                320,
+                200,
+                audio_options,
+                Some(&paths),
+                RuntimeConfig {
+                    player_owner: 1,
+                    player_name: player_name.to_string(),
+                    network: None,
+                    record_enabled: false,
+                },
+                Some(self.scenarios.clone()),
+            )
+            .expect("initialise app");
+            if preexisting_clonk {
+                // These long physical-route fixtures exercise the ordinary C++
+                // persistent-player path: GetIdle recruits the existing CLNK and
+                // therefore does not create/name a new crew info. Fresh-crew
+                // System-name RNG is pinned separately by Tutorial09 below.
+                app.selected_player_file = Some(PlayerFile {
+                    name: player_name.to_string(),
+                    score: 0,
+                    rounds: 0,
+                    rounds_won: 0,
+                    rounds_lost: 0,
+                    total_playing_time: 0,
+                    pref_color: 0,
+                    pref_color_dw: 0xff,
+                    pref_color2_dw: 0,
+                    pref_position: 0,
+                    pref_control: 0,
+                    pref_mouse: true,
+                    pref_control_style: true,
+                    pref_auto_context_menu: true,
+                    crew: vec![lc_engine::player_file::CrewInfo {
+                        core: Default::default(),
+                        id: "CLNK".to_string(),
+                        name: "Clonk".to_string(),
+                        death_message: String::new(),
+                        rank: 0,
+                        rank_name: "Clonk".to_string(),
+                        experience: 0,
+                        rounds: 0,
+                        physical: lc_engine::PhysicalInfo::default(),
+                        death_count: 0,
+                        total_playing_time: 0,
+                        birthday: 0,
+                        age: 0,
+                        participation: 1,
+                        in_action: false,
+                        was_in_action: false,
+                        in_action_time: 0,
+                        has_died: false,
+                        extra_data: Vec::new(),
+                        portraits: Default::default(),
+                    }],
+                });
+                // Their movement timings predate live Game.Parameters and were
+                // recorded against the former engine-wide fair-crew default.
+                // Pin that round option explicitly; normal-crew activation and
+                // player-file physicals have dedicated L061 regressions.
+                let mut options = app.scenario_game_options.values().clone();
+                options.fair_crew = true;
+                options.fair_crew_strength = 1_000;
+                app.scenario_game_options =
+                    GameOptionButtons::new(GameOptionContext::LocalSelector, options);
+            }
+            wait_for_menu(&mut app);
+
+            app.activate_loaded_scenario(self.scenario.clone(), &self.scenario_data)
+                .unwrap_or_else(|error| panic!("activate real {scenario_key}: {error}"));
+            // Physical-route scenario tests start after the native event loop has
+            // already delivered C4MouseControl's one-time centered move.
+            app.ingame_mouse_init_centered = true;
+
+            RealTutorialApp {
+                app,
+                _env_guard: env_guard,
+                _user_data: user_data,
+            }
+        }
+    }
+
     fn real_installed_scenario_app_with_roster(
         scenario_key: &str,
         player_name: &str,
         preexisting_clonk: bool,
     ) -> RealTutorialApp {
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .expect("repository root");
-        let user_data = tempdir().expect("isolated user data");
-        let env_guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(repository)),
-            ("LC_USER_DATA_DIR", Some(user_data.path())),
-            // The virtual-player milestones intentionally assert the shipped
-            // US tutorial copy. Isolate them from the developer machine's
-            // locale just like the user-data/config roots.
-            ("LC_LANGUAGE", Some(Path::new("US"))),
-        ]);
-        let paths = AppPaths::discover().expect("discover repository install");
-        let audio_options = AudioOptions {
-            sound_enabled: false,
-            music_enabled: false,
-            menu_music_enabled: false,
-            menu_sound_enabled: false,
-            ..AudioOptions::default()
-        };
-        let (scenario, scenarios) = load_frontend_scenarios_for_test(&paths, scenario_key);
-        let mut app = GameApp::new_with_frontend_scenarios(
-            320,
-            200,
-            audio_options,
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: player_name.to_string(),
-                network: None,
-                record_enabled: false,
-            },
-            Some(scenarios),
-        )
-        .expect("initialise app");
-        if preexisting_clonk {
-            // These long physical-route fixtures exercise the ordinary C++
-            // persistent-player path: GetIdle recruits the existing CLNK and
-            // therefore does not create/name a new crew info. Fresh-crew
-            // System-name RNG is pinned separately by Tutorial09 below.
-            app.selected_player_file = Some(PlayerFile {
-                name: player_name.to_string(),
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                pref_color: 0,
-                pref_color_dw: 0xff,
-                pref_color2_dw: 0,
-                pref_position: 0,
-                pref_control: 0,
-                pref_mouse: true,
-                pref_control_style: true,
-                pref_auto_context_menu: true,
-                crew: vec![lc_engine::player_file::CrewInfo {
-                    core: Default::default(),
-                    id: "CLNK".to_string(),
-                    name: "Clonk".to_string(),
-                    death_message: String::new(),
-                    rank: 0,
-                    rank_name: "Clonk".to_string(),
-                    experience: 0,
-                    rounds: 0,
-                    physical: lc_engine::PhysicalInfo::default(),
-                    death_count: 0,
-                    total_playing_time: 0,
-                    birthday: 0,
-                    age: 0,
-                    participation: 1,
-                    in_action: false,
-                    was_in_action: false,
-                    in_action_time: 0,
-                    has_died: false,
-                    extra_data: Vec::new(),
-                    portraits: Default::default(),
-                }],
-            });
-            // Their movement timings predate live Game.Parameters and were
-            // recorded against the former engine-wide fair-crew default.
-            // Pin that round option explicitly; normal-crew activation and
-            // player-file physicals have dedicated L061 regressions.
-            let mut options = app.scenario_game_options.values().clone();
-            options.fair_crew = true;
-            options.fair_crew_strength = 1_000;
-            app.scenario_game_options =
-                GameOptionButtons::new(GameOptionContext::LocalSelector, options);
-        }
-        wait_for_menu(&mut app);
-
-        let scenario_path = scenario
-            .path
-            .clone()
-            .unwrap_or_else(|| panic!("{scenario_key} path"));
-        let scenario_data = Scenario::load_from_path_with_languages(
-            &scenario_path,
-            &InstallDefinitionResolver::new(Some(Arc::new(paths.clone()))),
-            &startup_language_sequence(Some(&paths)),
-        )
-        .unwrap_or_else(|error| panic!("load real {scenario_key}: {error}"));
-        app.activate_loaded_scenario(scenario, scenario_data)
-            .unwrap_or_else(|error| panic!("activate real {scenario_key}: {error}"));
-        // Physical-route scenario tests start after the native event loop has
-        // already delivered C4MouseControl's one-time centered move.
-        app.ingame_mouse_init_centered = true;
-
-        RealTutorialApp {
-            app,
-            _env_guard: env_guard,
-            _user_data: user_data,
-        }
+        PreparedRealInstalledScenario::new(scenario_key)
+            .instantiate(player_name, preexisting_clonk)
     }
 
     #[test]
@@ -83301,14 +83343,75 @@ mod tests {
     }
 
     #[test]
-    fn l068_real_alchemy_right_click_positions_classic_context_magic_menu() {
+    fn real_alchemy_mouse_subcases_batch_1() {
+        let prepared =
+            PreparedRealInstalledScenario::new("Fantasy.c4f/Alchemy.c4s");
+        let mut failures = Vec::new();
+        run_real_alchemy_app_subcase(
+            "right_click_positions_classic_context_magic_menu",
+            &mut failures,
+            || l068_real_alchemy_right_click_positions_classic_context_magic_menu(&prepared),
+        );
+        run_real_alchemy_app_subcase(
+            "right_drag_frame_drops_all_selected_carryables",
+            &mut failures,
+            || real_alchemy_right_drag_frame_drops_all_selected_carryables(&prepared),
+        );
+        assert_no_real_alchemy_app_subcase_failures(failures);
+    }
+
+    #[test]
+    fn real_alchemy_mouse_subcases_batch_2() {
+        let prepared =
+            PreparedRealInstalledScenario::new("Fantasy.c4f/Alchemy.c4s");
+        let mut failures = Vec::new();
+        run_real_alchemy_app_subcase(
+            "control_right_drag_puts_carryable_into_hut",
+            &mut failures,
+            || real_alchemy_control_right_drag_puts_carryable_into_hut(&prepared),
+        );
+        run_real_alchemy_app_subcase(
+            "right_drag_rectangle_replaces_crew_selection",
+            &mut failures,
+            || real_alchemy_right_drag_rectangle_replaces_crew_selection(&prepared),
+        );
+        run_real_alchemy_app_subcase(
+            "left_double_click_gets_carryable_like_cpp_mouse_control",
+            &mut failures,
+            || real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control(&prepared),
+        );
+        assert_no_real_alchemy_app_subcase_failures(failures);
+    }
+
+    fn run_real_alchemy_app_subcase(
+        name: &'static str,
+        failures: &mut Vec<&'static str>,
+        subcase: impl FnOnce(),
+    ) {
+        eprintln!("running Alchemy app subcase `{name}`");
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(subcase)).is_err() {
+            eprintln!("Alchemy app subcase `{name}` failed; continuing batch");
+            failures.push(name);
+        }
+    }
+
+    fn assert_no_real_alchemy_app_subcase_failures(failures: Vec<&str>) {
+        assert!(
+            failures.is_empty(),
+            "Alchemy app subcase(s) failed: {}",
+            failures.join(", ")
+        );
+    }
+
+    fn l068_real_alchemy_right_click_positions_classic_context_magic_menu(
+        prepared: &PreparedRealInstalledScenario,
+    ) {
         // C4MouseControl issues C4CMD_Context on right-up with the clicked
         // MCLK as Target2. The command installs classic style-1 context on
         // the selected mage; entering ContextMagic opens the shipped spell
         // menu (C4MouseControl.cpp:1230-1263; C4Command.cpp:1076-1090;
         // MagiClonk.c4d/Script.c:190-199).
-        let mut app =
-            real_installed_scenario_app("Fantasy.c4f/Alchemy.c4s", "Alchemy mouse context parity");
+        let mut app = prepared.instantiate("Alchemy mouse context parity", false);
         let owner = app.local_owner;
         let mage = app
             .engine
@@ -83577,16 +83680,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn real_alchemy_right_drag_rectangle_replaces_crew_selection() {
+    fn real_alchemy_right_drag_rectangle_replaces_crew_selection(
+        prepared: &PreparedRealInstalledScenario,
+    ) {
         // A right-down on ordinary landscape stores the down position. Once
         // motion exceeds C4MC_DragSensitivity, C4MouseControl enters
         // C4MC_Drag_Selecting; right-up sends CID_PlrSelect rather than a
         // context click (C4MouseControl.cpp:910-930,1009-1037,795-817,
         // 1160-1171). Exercise the actual app pointer/button path so the
         // platform event split cannot collapse the drag back into RightUp.
-        let mut app =
-            real_installed_scenario_app("Fantasy.c4f/Alchemy.c4s", "Alchemy right drag parity");
+        let mut app = prepared.instantiate("Alchemy right drag parity", false);
         let owner = app.local_owner;
         let original = app
             .engine
@@ -83715,16 +83818,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn real_alchemy_right_drag_frame_drops_all_selected_carryables() {
+    fn real_alchemy_right_drag_frame_drops_all_selected_carryables(
+        prepared: &PreparedRealInstalledScenario,
+    ) {
         // An object-only landscape frame remains in C4MouseControl::Selection
         // after right-up. Dragging either selected object then sends one Set
         // command followed by Append commands for the remaining objects
         // (C4MouseControl.cpp:626-645,795-817,909-968,1160-1201;
         // C4Player.cpp:1397-1450). Exercise the physical app events twice so
         // neither selection nor moving can collapse into a context click.
-        let mut app =
-            real_installed_scenario_app("Fantasy.c4f/Alchemy.c4s", "Alchemy object drag parity");
+        let mut app = prepared.instantiate("Alchemy object drag parity", false);
         let owner = app.local_owner;
         let mage = app
             .engine
@@ -83937,17 +84040,15 @@ mod tests {
         assert!(app.engine.cursor_object_menu(owner).is_none());
     }
 
-    #[test]
-    fn real_alchemy_control_right_drag_puts_carryable_into_hut() {
+    fn real_alchemy_control_right_drag_puts_carryable_into_hut(
+        prepared: &PreparedRealInstalledScenario,
+    ) {
         // With Control held, C4MouseControl::DragMoving replaces the ordinary
         // Drop/Throw cursor with Put over an OCF_Container. Right-up sends a
         // C4CMD_Put whose Target is that container and whose Target2 is the
         // dragged object (C4MouseControl.cpp:833-850,1171-1201). Exercise the
         // physical pointer/modifier/button route with shipped ALC_/AHUT defs.
-        let mut app = real_installed_scenario_app(
-            "Fantasy.c4f/Alchemy.c4s",
-            "Alchemy control-drag Put parity",
-        );
+        let mut app = prepared.instantiate("Alchemy control-drag Put parity", false);
         let owner = app.local_owner;
         let mage = app
             .engine
@@ -84075,16 +84176,16 @@ mod tests {
         assert!(app.engine.cursor_object_menu(owner).is_none());
     }
 
-    #[test]
-    fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control() {
+    fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control(
+        prepared: &PreparedRealInstalledScenario,
+    ) {
         // C4MouseControl's first ordinary left-up replaces the selected crew's
         // stack with MoveTo. A second left-down inside the platform's 400 ms
         // double-click window is delivered as LeftDouble instead: an Object
         // cursor replaces that command with C4CMD_Get and the following left-up
         // is ignored (C4FullScreen.cpp:327-350; C4MouseControl.cpp:817-830,
         // 982-1004,1101-1155).
-        let mut app =
-            real_installed_scenario_app("Fantasy.c4f/Alchemy.c4s", "Alchemy mouse pickup parity");
+        let mut app = prepared.instantiate("Alchemy mouse pickup parity", false);
         let owner = app.local_owner;
         let mage = app
             .engine
@@ -85605,7 +85706,7 @@ func Award()
             allow_user_change: None,
             definition_modules: Vec::new(),
         };
-        app.activate_loaded_scenario(frontend.clone(), scenario_data)
+        app.activate_loaded_scenario(frontend.clone(), &scenario_data)
             .expect("scenario activates");
         assert!(app.engine.use_fair_crew());
         assert_eq!(app.engine.fair_crew_strength(), 4_321);
@@ -131164,7 +131265,7 @@ ScenInfoArea=70,5,25,90
             .staged_network_host_scenario
             .take()
             .expect("same staged scenario");
-        app.activate_loaded_scenario(staged.frontend, staged.scenario)
+        app.activate_loaded_scenario(staged.frontend, &staged.scenario)
             .expect("activate preloaded scenario");
         assert!(Arc::ptr_eq(
             &expected_hud,
