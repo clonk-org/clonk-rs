@@ -22,6 +22,7 @@ pub const DEFAULT_DISCOVERY_PORT: u16 = 11_114;
 pub const MAX_LAN_DISCOVERS: usize = 64;
 pub const REFERENCE_QUERY_TIMEOUT: Duration = Duration::from_secs(12);
 pub const GAME_SEARCH_INTERVAL: Duration = Duration::from_secs(30);
+const MASTERSERVER_FAST_RETRIES: u8 = 2;
 const REFERENCE_LIFETIME: Duration = Duration::from_secs(42);
 const EMPTY_REFERENCE_LIFETIME: Duration = Duration::from_secs(10);
 
@@ -542,16 +543,20 @@ impl NetworkGameSearch {
     }
 
     pub fn periodic_commands(&mut self) -> Vec<SearchCommand> {
-        self.lan_discover_count = 0;
-        let mut commands = vec![SearchCommand::SendLanProbe {
-            target: SocketAddrV6::new(DISCOVERY_MULTICAST, self.config.discovery_port, 0, 0),
-            payload: vec![DISCOVERY_PROBE],
-            trigger: LanProbeTrigger::Periodic,
-        }];
+        let mut commands = vec![self.periodic_lan_command()];
         if self.config.internet_enabled {
             commands.push(self.masterserver_query());
         }
         commands
+    }
+
+    fn periodic_lan_command(&mut self) -> SearchCommand {
+        self.lan_discover_count = 0;
+        SearchCommand::SendLanProbe {
+            target: SocketAddrV6::new(DISCOVERY_MULTICAST, self.config.discovery_port, 0, 0),
+            payload: vec![DISCOVERY_PROBE],
+            trigger: LanProbeTrigger::Periodic,
+        }
     }
 
     fn masterserver_query(&self) -> SearchCommand {
@@ -730,6 +735,11 @@ fn lan_probe_error_event(
     })
 }
 
+fn masterserver_failure_allows_fast_retry(failures: &mut u8) -> bool {
+    *failures = failures.saturating_add(1);
+    *failures <= MASTERSERVER_FAST_RETRIES
+}
+
 #[derive(Clone, Debug)]
 enum StartupGameSearchCommand {
     InitialRefresh,
@@ -884,12 +894,14 @@ async fn run_game_search(
     let (query_tx, mut query_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut generation = 0_u64;
     let mut masterserver_generation = 0_u64;
+    let mut masterserver_failures = 0_u8;
     let mut masterserver_query: Option<tokio::task::JoinHandle<()>> = None;
     let mut active_discovery_queries = HashSet::new();
     let mut empty_discovery_query_expirations = HashMap::new();
     let mut stopped = false;
     let mut datagram = [0_u8; 512];
-    let mut next_periodic_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+    let mut next_periodic_lan_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+    let mut next_masterserver_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
 
     while !stopped {
         while let Ok(command) = commands.try_recv() {
@@ -900,9 +912,11 @@ async fn run_game_search(
                         query.abort();
                     }
                     generation = generation.wrapping_add(1);
+                    masterserver_failures = 0;
                     active_discovery_queries.clear();
                     empty_discovery_query_expirations.clear();
-                    next_periodic_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+                    next_periodic_lan_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+                    next_masterserver_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
                     let _ = events.send(StartupGameSearchEvent::Cleared);
                     let commands = match command {
                         StartupGameSearchCommand::InitialRefresh => search.initial_commands(),
@@ -924,6 +938,11 @@ async fn run_game_search(
                 }
                 StartupGameSearchCommand::SetInternetEnabled(enabled) => {
                     let changed = search.config.internet_enabled != enabled;
+                    if changed {
+                        masterserver_failures = 0;
+                        next_masterserver_search =
+                            tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+                    }
                     if let Some(command) = search.set_internet_enabled(enabled) {
                         masterserver_generation = masterserver_generation.wrapping_add(1);
                         execute_search_command(
@@ -999,6 +1018,10 @@ async fn run_game_search(
             } else {
                 None
             };
+            if query.source == ReferenceQuerySource::Masterserver {
+                masterserver_query.take();
+                next_masterserver_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
+            }
             if let Some(address) = discovery_address {
                 active_discovery_queries.remove(&address);
             }
@@ -1065,6 +1088,9 @@ async fn run_game_search(
                     }
                 }
                 Err(error) => {
+                    let retry_masterserver = query.direct_request_id.is_none()
+                        && query.source == ReferenceQuerySource::Masterserver
+                        && masterserver_failure_allows_fast_retry(&mut masterserver_failures);
                     if let Some(address) = discovery_address {
                         empty_discovery_query_expirations.remove(&address);
                     }
@@ -1079,11 +1105,24 @@ async fn run_game_search(
                             address,
                             message,
                         });
-                    } else {
+                    } else if !retry_masterserver {
                         let _ = events.send(StartupGameSearchEvent::SearchError {
                             source: Some(query.source),
                             message,
                         });
+                    }
+                    if retry_masterserver {
+                        execute_search_command(
+                            search.masterserver_query(),
+                            (generation, masterserver_generation),
+                            None,
+                            &mut masterserver_query,
+                            discovery.as_ref(),
+                            &query_tx,
+                            &events,
+                            &reference_config,
+                        )
+                        .await;
                     }
                 }
             }
@@ -1096,21 +1135,37 @@ async fn run_game_search(
         if stopped {
             break;
         }
-        if tokio::time::Instant::now() >= next_periodic_search {
-            next_periodic_search += GAME_SEARCH_INTERVAL;
-            for command in search.periodic_commands() {
-                execute_search_command(
-                    command,
-                    (generation, masterserver_generation),
-                    None,
-                    &mut masterserver_query,
-                    discovery.as_ref(),
-                    &query_tx,
-                    &events,
-                    &reference_config,
-                )
-                .await;
-            }
+        let now = tokio::time::Instant::now();
+        if now >= next_periodic_lan_search {
+            next_periodic_lan_search += GAME_SEARCH_INTERVAL;
+            execute_search_command(
+                search.periodic_lan_command(),
+                (generation, masterserver_generation),
+                None,
+                &mut masterserver_query,
+                discovery.as_ref(),
+                &query_tx,
+                &events,
+                &reference_config,
+            )
+            .await;
+        }
+        if search.config.internet_enabled
+            && masterserver_query.is_none()
+            && now >= next_masterserver_search
+        {
+            next_masterserver_search = now + GAME_SEARCH_INTERVAL;
+            execute_search_command(
+                search.masterserver_query(),
+                (generation, masterserver_generation),
+                None,
+                &mut masterserver_query,
+                discovery.as_ref(),
+                &query_tx,
+                &events,
+                &reference_config,
+            )
+            .await;
         }
         if let Ok(socket) = discovery.as_ref() {
             if let Ok(Ok((size, source))) =
@@ -1901,21 +1956,32 @@ mod tests {
     use super::*;
 
     fn spawn_reference_server(responses: Vec<Vec<u8>>) -> (SocketAddr, thread::JoinHandle<()>) {
+        spawn_reference_status_server(responses.into_iter().map(|body| (200, body)).collect())
+    }
+
+    fn spawn_reference_status_server(
+        responses: Vec<(u16, Vec<u8>)>,
+    ) -> (SocketAddr, thread::JoinHandle<()>) {
         use std::io::{Read as _, Write as _};
 
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let worker = thread::spawn(move || {
-            for body in responses {
+            for (status, body) in responses {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
                 let mut request = [0_u8; 4096];
                 let _ = stream.read(&mut request).unwrap();
+                let reason = if status == 200 {
+                    "OK"
+                } else {
+                    "Service Unavailable"
+                };
                 write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 )
                 .unwrap();
@@ -1924,6 +1990,71 @@ mod tests {
             }
         });
         (address, worker)
+    }
+
+    #[test]
+    fn masterserver_failures_retry_twice_before_periodic_interval() {
+        // C4StartupNetListEntry::OnRequestFailed immediately replaces the
+        // failed masterserver query while iNumFails <= 2; only the third
+        // entry-lifetime failure falls through to the periodic timer
+        // (C4StartupNetDlg.cpp:186-238).
+        let body = b"[LegacyClonk]\n\
+MOTD=Recovered\n\
+[Reference]\n\
+Title=Recovered game\n"
+            .to_vec();
+        let (address, server) =
+            spawn_reference_status_server(vec![(503, Vec::new()), (503, Vec::new()), (200, body)]);
+        let search = StartupGameSearch::start(NetworkGameSearchConfig {
+            master_server_url: format!("http://{address}/"),
+            discovery_port: 0,
+            ..NetworkGameSearchConfig::default()
+        })
+        .unwrap();
+        let started = Instant::now();
+        search.initial_refresh().unwrap();
+
+        let deadline = started + Duration::from_secs(5);
+        let mut terminal_failure_count = 0;
+        let mut recovered_references = false;
+        let reply = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = search
+                .events()
+                .recv_timeout(remaining)
+                .expect("fast masterserver retries recover before the periodic interval");
+            match event {
+                StartupGameSearchEvent::SearchError {
+                    source: Some(ReferenceQuerySource::Masterserver),
+                    ..
+                } => terminal_failure_count += 1,
+                StartupGameSearchEvent::ReferencesUpdated(references) => {
+                    recovered_references = references
+                        .iter()
+                        .any(|reference| reference.title == "Recovered game");
+                }
+                StartupGameSearchEvent::MasterserverReply(reply) => break reply,
+                _ => {}
+            }
+        };
+
+        assert_eq!(terminal_failure_count, 0);
+        assert!(recovered_references);
+        assert_eq!(reply.motd, "Recovered");
+        assert!(started.elapsed() < GAME_SEARCH_INTERVAL);
+        drop(search);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn masterserver_fast_retry_budget_is_bounded_to_two_entry_lifetime_failures() {
+        let mut failures = 0;
+
+        assert!(masterserver_failure_allows_fast_retry(&mut failures));
+        assert!(masterserver_failure_allows_fast_retry(&mut failures));
+        assert!(!masterserver_failure_allows_fast_retry(&mut failures));
+        assert!(!masterserver_failure_allows_fast_retry(&mut failures));
+        assert_eq!(failures, 4);
     }
 
     #[test]

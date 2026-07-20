@@ -11560,6 +11560,9 @@ struct GameApp {
     /// C4StartupNetDlg::tLastRefresh. OnShown seeds the one-second guard,
     /// and accepted Reload/F5 requests advance it before restarting search.
     startup_network_last_refresh: Option<Instant>,
+    /// C4StartupNetListEntry::iTimeout for the masterserver row. Unlike
+    /// tLastRefresh, this response-relative deadline must not throttle F5.
+    startup_masterserver_next_query_at: Option<Instant>,
     /// Reject pre-refresh events until the worker acknowledges the new
     /// generation with Cleared, so deleted rows cannot flash back into view.
     startup_network_refresh_waiting_for_clear: bool,
@@ -22179,6 +22182,7 @@ impl GameApp {
             #[cfg(test)]
             startup_game_search_test_events: VecDeque::new(),
             startup_network_last_refresh: None,
+            startup_masterserver_next_query_at: None,
             startup_network_refresh_waiting_for_clear: false,
             startup_network_ignore_redirect: false,
             startup_game_references: Vec::new(),
@@ -43735,6 +43739,8 @@ impl GameApp {
     }
 
     fn set_startup_masterserver_error(&mut self, message: String) {
+        self.startup_masterserver_next_query_at =
+            Instant::now().checked_add(lc_network::GAME_SEARCH_INTERVAL);
         let settings = load_network_search_settings(self.app_paths.as_ref());
         let mut entry = Self::startup_masterserver_query_entry(
             self.app_paths.as_ref(),
@@ -43751,6 +43757,8 @@ impl GameApp {
         &mut self,
         reply: lc_network::MasterserverReplyInfo,
     ) -> Result<(), EngineError> {
+        self.startup_masterserver_next_query_at =
+            Instant::now().checked_add(lc_network::GAME_SEARCH_INTERVAL);
         let settings = load_network_search_settings(self.app_paths.as_ref());
         let entry = Self::startup_masterserver_reply_entry(
             self.app_paths.as_ref(),
@@ -44202,12 +44210,11 @@ impl GameApp {
             .as_ref()
             .is_some_and(|dialog| dialog.config().masterserver_signup);
         if masterserver_enabled
-            && self.startup_network_last_refresh.is_some_and(|last_refresh| {
-                now.saturating_duration_since(last_refresh)
-                    >= lc_network::GAME_SEARCH_INTERVAL
-            })
+            && self
+                .startup_masterserver_next_query_at
+                .is_some_and(|next_query_at| now >= next_query_at)
         {
-            self.startup_network_last_refresh = Some(now);
+            self.startup_masterserver_next_query_at = None;
             self.reset_startup_masterserver_entry();
             self.mark_menu_dirty();
         }
@@ -44323,6 +44330,15 @@ impl GameApp {
         }
 
         self.startup_network_last_refresh = Some(now);
+        let masterserver_enabled = self
+            .startup_network_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.config().masterserver_signup);
+        self.startup_masterserver_next_query_at = if masterserver_enabled {
+            now.checked_add(lc_network::GAME_SEARCH_INTERVAL)
+        } else {
+            None
+        };
         self.startup_game_references.clear();
         self.startup_discovery_reference_queries.clear();
         self.startup_direct_reference_queries.clear();
@@ -44912,8 +44928,13 @@ impl GameApp {
                         let _ = search.set_internet_enabled(enabled);
                     }
                     if enabled {
-                        self.startup_network_last_refresh = Some(Instant::now());
+                        let now = Instant::now();
+                        self.startup_network_last_refresh = Some(now);
+                        self.startup_masterserver_next_query_at =
+                            now.checked_add(lc_network::GAME_SEARCH_INTERVAL);
                         self.reset_startup_masterserver_entry();
+                    } else {
+                        self.startup_masterserver_next_query_at = None;
                     }
                     if let Some(paths) = self.app_paths.as_ref() {
                         if let Err(error) = persist_config_value(
@@ -45962,6 +45983,7 @@ impl GameApp {
             StartupNetworkPurpose::StagedHost => {
                 self.startup_game_search = None;
                 self.startup_network_last_refresh = None;
+                self.startup_masterserver_next_query_at = None;
                 self.startup_network_dialog = None;
                 self.restore_startup_dialog(StartupDialog::ScenarioBrowser(
                     ScenarioSelectorMode::NetworkHost,
@@ -49206,6 +49228,15 @@ impl GameApp {
                 self.startup_game_references.clear();
                 self.sync_startup_network_game_rows();
                 self.reset_startup_masterserver_entry();
+                let masterserver_enabled = self
+                    .startup_network_dialog
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.config().masterserver_signup);
+                self.startup_masterserver_next_query_at = if masterserver_enabled {
+                    Instant::now().checked_add(lc_network::GAME_SEARCH_INTERVAL)
+                } else {
+                    None
+                };
                 if let Some(id) = selected_query {
                     self.focus_startup_direct_reference_query(id);
                 } else if let Some(id) = selected_discovery_query {
@@ -55854,6 +55885,7 @@ impl GameApp {
         self.pending_network_join = None;
         let mut dialog = self.new_network_dialog_controller();
         let search_config = load_network_search_settings(self.app_paths.as_ref());
+        let masterserver_enabled = search_config.internet_enabled;
         dialog.set_masterserver_entry(Self::startup_masterserver_query_entry(
             self.app_paths.as_ref(),
             &search_config.master_server_url,
@@ -55877,7 +55909,13 @@ impl GameApp {
         self.startup_network_dialog = Some(dialog);
         self.replace_startup_dialog(StartupView::NetworkGame, StartupDialog::NetworkGame);
         self.sync_startup_irc_snapshot();
-        self.startup_network_last_refresh = Some(Instant::now());
+        let now = Instant::now();
+        self.startup_network_last_refresh = Some(now);
+        self.startup_masterserver_next_query_at = if masterserver_enabled {
+            now.checked_add(lc_network::GAME_SEARCH_INTERVAL)
+        } else {
+            None
+        };
     }
 
     /// C4StartupNetDlg::OnShown refreshes the Internet icon and query-row
@@ -55893,8 +55931,14 @@ impl GameApp {
         if let Some(search) = self.startup_game_search.as_ref() {
             let _ = search.set_internet_enabled(masterserver_signup);
         }
+        if !masterserver_signup {
+            self.startup_masterserver_next_query_at = None;
+        }
         if recreate_masterserver {
-            self.startup_network_last_refresh = Some(Instant::now());
+            let now = Instant::now();
+            self.startup_network_last_refresh = Some(now);
+            self.startup_masterserver_next_query_at =
+                now.checked_add(lc_network::GAME_SEARCH_INTERVAL);
             self.reset_startup_masterserver_entry();
         }
     }
@@ -56141,6 +56185,7 @@ impl GameApp {
         self.startup_network_connection = None;
         self.startup_game_search = None;
         self.startup_network_last_refresh = None;
+        self.startup_masterserver_next_query_at = None;
         self.startup_network_refresh_waiting_for_clear = false;
         self.startup_game_references.clear();
         self.startup_discovery_reference_queries.clear();
@@ -118502,10 +118547,33 @@ ScenInfoArea=70,5,25,90
         assert_eq!(master.row_icon, NetDlgRowIcon::Error);
         assert!(master.extra_lines.is_empty());
 
-        let last_refresh = Instant::now();
-        app.startup_network_last_refresh = Some(last_refresh);
+        app.apply_startup_game_search_event(
+            lc_network::StartupGameSearchEvent::MasterserverReply(
+                lc_network::MasterserverReplyInfo {
+                    game_count: 1,
+                    player_count: 2,
+                    ..Default::default()
+                },
+            ),
+        )
+        .expect("a successful retry recovers the masterserver row");
+        let master = app
+            .startup_network_dialog
+            .as_ref()
+            .unwrap()
+            .masterserver_entry();
+        assert_eq!(master.details, "1 game(s) found.");
+        assert_eq!(master.row_icon, NetDlgRowIcon::QueryStatic);
+        assert!(app.status_text.is_empty());
+        assert!(app.message_dialogs.is_empty());
+
+        app.set_startup_masterserver_error("masterserver timed out".to_string());
+
+        let next_query_at = app
+            .startup_masterserver_next_query_at
+            .expect("terminal failure arms a response-relative retry");
         app.tick_startup_network_query_rows_at(
-            last_refresh + lc_network::GAME_SEARCH_INTERVAL - Duration::from_millis(1),
+            next_query_at - Duration::from_millis(1),
         );
         assert_eq!(
             app.startup_network_dialog
@@ -118515,9 +118583,7 @@ ScenInfoArea=70,5,25,90
                 .row_icon,
             NetDlgRowIcon::Error
         );
-        app.tick_startup_network_query_rows_at(
-            last_refresh + lc_network::GAME_SEARCH_INTERVAL,
-        );
+        app.tick_startup_network_query_rows_at(next_query_at);
         let master = app
             .startup_network_dialog
             .as_ref()
@@ -118525,6 +118591,7 @@ ScenInfoArea=70,5,25,90
             .masterserver_entry();
         assert_eq!(master.details, "Querying game infos...");
         assert_eq!(master.row_icon, NetDlgRowIcon::Query);
+        assert!(app.startup_masterserver_next_query_at.is_none());
 
         app.set_startup_masterserver_error("stale disabled error".to_string());
         if let Some(dialog) = app.startup_network_dialog.as_mut() {
@@ -118570,6 +118637,35 @@ ScenInfoArea=70,5,25,90
             .masterserver_entry();
         assert_eq!(master.details, "Querying game infos...");
         assert_eq!(master.row_icon, NetDlgRowIcon::Query);
+    }
+
+    #[test]
+    fn masterserver_results_do_not_throttle_manual_reload() {
+        for event in [
+            lc_network::StartupGameSearchEvent::MasterserverReply(
+                lc_network::MasterserverReplyInfo::default(),
+            ),
+            lc_network::StartupGameSearchEvent::SearchError {
+                source: Some(lc_network::ReferenceQuerySource::Masterserver),
+                message: "terminal failure".to_string(),
+            },
+        ] {
+            let mut app = new_classic_menu_app(800, 600);
+            attach_l040_network_dialog(&mut app);
+            let reload_at = Instant::now();
+            let prior_reload = reload_at
+                .checked_sub(STARTUP_NETWORK_MIN_REFRESH_INTERVAL + Duration::from_secs(1))
+                .unwrap();
+            app.startup_network_last_refresh = Some(prior_reload);
+
+            app.apply_startup_game_search_event(event)
+                .expect("project a terminal masterserver result");
+            assert_eq!(app.startup_network_last_refresh, Some(prior_reload));
+
+            app.request_startup_network_refresh_at(reload_at)
+                .expect("the independent manual reload remains eligible");
+            assert_eq!(app.startup_network_last_refresh, Some(reload_at));
+        }
     }
 
     #[test]
@@ -119092,7 +119188,11 @@ ScenInfoArea=70,5,25,90
         let overdue_refresh = Instant::now()
             .checked_sub(lc_network::GAME_SEARCH_INTERVAL + Duration::from_secs(1))
             .expect("represent an overdue refresh");
+        let overdue_masterserver_query = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("represent an overdue masterserver query");
         app.startup_network_last_refresh = Some(overdue_refresh);
+        app.startup_masterserver_next_query_at = Some(overdue_masterserver_query);
         app.request_network_reference_join(lc_network::NetworkGameReference {
             game: "LegacyClonk".to_string(),
             version: lc_network::CURRENT_GAME_VERSION,
@@ -119121,6 +119221,10 @@ ScenInfoArea=70,5,25,90
         );
         assert_eq!(app.startup_network_last_refresh, Some(overdue_refresh));
         assert_eq!(
+            app.startup_masterserver_next_query_at,
+            Some(overdue_masterserver_query)
+        );
+        assert_eq!(
             app.startup_network_dialog
                 .as_ref()
                 .expect("network dialog")
@@ -119145,9 +119249,8 @@ ScenInfoArea=70,5,25,90
             .startup_direct_reference_queries
             .iter()
             .any(|query| query.id == expired_query_id));
-        assert!(app
-            .startup_network_last_refresh
-            .is_some_and(|refresh| refresh > overdue_refresh));
+        assert_eq!(app.startup_network_last_refresh, Some(overdue_refresh));
+        assert!(app.startup_masterserver_next_query_at.is_none());
         assert_eq!(
             app.startup_network_dialog
                 .as_ref()
