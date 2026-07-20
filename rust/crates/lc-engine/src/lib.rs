@@ -25945,21 +25945,35 @@ impl Engine {
         // script runs after. Object-call errors log-and-continue
         // (fPassError defaults false).
         const BROADCAST_MASK: i32 = (1 << 5) | (1 << 6) | (1 << 19);
-        let broadcast_targets: Vec<usize> = self
-            .objects
+        // Game.Objects is the active master list and GRBroadcast walks it
+        // First -> Next. `exec_list` stores that list reversed. Snapshot
+        // identities, not storage indices: callbacks may append objects or
+        // otherwise mutate the list, while later snapshotted objects must be
+        // resolved and tested against their live state at their turn.
+        let broadcast_targets: Vec<ObjectId> = self
+            .exec_list
             .iter()
-            .enumerate()
-            .filter(|(_, object)| {
-                !object.destroyed
-                    && object.state.status.is_active()
-                    && object.state.category & BROADCAST_MASK != 0
+            .rev()
+            .copied()
+            // Rust retains an inactive object's old exec-list ledger slot;
+            // C++ has already moved that link to InactiveObjects.
+            .filter(|&id| {
+                self.find_object_index(id).is_some_and(|index| {
+                    self.objects[index].state.status != ObjectStatus::Inactive
+                })
             })
-            .map(|(index, _)| index)
             .collect();
-        for index in broadcast_targets {
-            // The C++ loop re-checks Status against the live list — an
-            // earlier broadcast call may have removed the object.
-            if self.objects[index].destroyed || !self.objects[index].state.status.is_active() {
+        for object_id in broadcast_targets {
+            let Some(index) = self.find_object_index(object_id) else {
+                continue;
+            };
+            // C++ reads both fields at the current link. An earlier callback
+            // may remove this object, demote it, or promote a previously
+            // ineligible later object into the broadcast mask.
+            if self.objects[index].destroyed
+                || !self.objects[index].state.status.is_active()
+                || self.objects[index].state.category & BROADCAST_MASK == 0
+            {
                 continue;
             }
             let definition_id = self.objects[index].definition_id.clone();

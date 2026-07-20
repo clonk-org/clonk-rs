@@ -20885,6 +20885,157 @@ func Trigger() {
     }
 
     #[test]
+    fn engine_grbroadcast_uses_master_order_and_rechecks_later_category() {
+        // C4GameScriptHost::GRBroadcast walks Game.Objects First -> Next and
+        // reads Category and Status at each link (C4ScriptHost.cpp:234-247).
+        // The mutator is last in storage but first in master order: it admits
+        // a later plain object, deactivates a later environment object, and
+        // creates a marker (mutating the object list during the walk).
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("MARK", "Marker", "").expect("marker compiles"),
+            )
+            .expect("marker registers");
+
+        let mut promoted = Definition::from_script(
+            "PROM",
+            "Promoted",
+            r#"
+            func PreInitializePlayer(int player) {
+                CreateObject(MARK, 20, 0, -1);
+            }
+            "#,
+        )
+        .expect("promoted listener compiles");
+        // C4D_Parallax is outside the GRBroadcast mask and, like the three
+        // broadcast-only bits, has no low category-sort bit.
+        promoted.set_category(CATEGORY_PARALLAX);
+        engine
+            .register_definition(promoted)
+            .expect("promoted listener registers");
+
+        let mut tail = Definition::from_script(
+            "TAIL",
+            "Tail",
+            r#"
+            func PreInitializePlayer(int player) {
+                CreateObject(MARK, 30, 0, -1);
+            }
+            "#,
+        )
+        .expect("tail listener compiles");
+        tail.set_category(1 << 5); // C4D_Goal
+        engine
+            .register_definition(tail)
+            .expect("tail listener registers");
+
+        let mut skipped = Definition::from_script(
+            "SKIP",
+            "Skipped",
+            r#"
+            func PreInitializePlayer(int player) {
+                CreateObject(MARK, 99, 0, -1);
+            }
+            "#,
+        )
+        .expect("skipped listener compiles");
+        skipped.set_category(1 << 6); // C4D_Environment
+        engine
+            .register_definition(skipped)
+            .expect("skipped listener registers");
+
+        let mut mutator = Definition::from_script(
+            "MUTR",
+            "Mutator",
+            r#"
+            local promote, deactivate;
+            func Configure(object later, object skipped) {
+                promote = later;
+                deactivate = skipped;
+            }
+            func PreInitializePlayer(int player) {
+                CreateObject(MARK, 10, 0, -1);
+                SetCategory(524288, promote);
+                SetObjectStatus(2, deactivate, false);
+            }
+            "#,
+        )
+        .expect("mutator compiles");
+        mutator.set_category(1 << 19); // C4D_Rule
+        engine
+            .register_definition(mutator)
+            .expect("mutator registers");
+
+        // Deliberately oppose storage and C++ category-sorted master order.
+        let promoted = engine
+            .spawn_object(SpawnConfig::new("PROM"))
+            .expect("promoted listener spawns");
+        let tail = engine
+            .spawn_object(SpawnConfig::new("TAIL"))
+            .expect("tail listener spawns");
+        let skipped = engine
+            .spawn_object(SpawnConfig::new("SKIP"))
+            .expect("skipped listener spawns");
+        let mutator = engine
+            .spawn_object(SpawnConfig::new("MUTR"))
+            .expect("mutator spawns");
+        assert_eq!(
+            engine.exec_list.iter().rev().copied().collect::<Vec<_>>(),
+            vec![mutator, skipped, tail, promoted],
+            "fixture must distinguish forward master order from storage order"
+        );
+
+        let mutator_index = engine
+            .find_object_index(mutator)
+            .expect("mutator exists");
+        engine
+            .call_object_function(
+                mutator_index,
+                "Configure",
+                vec![
+                    Value::Object(promoted.as_u64()),
+                    Value::Object(skipped.as_u64()),
+                ],
+            )
+            .expect("mutator configures");
+        engine
+            .install_scenario_script_with_convention(
+                "Scenario",
+                r#"
+                global func PreInitializePlayer(int player) {
+                    CreateObject(MARK, 40, 0, -1);
+                }
+                "#,
+                true,
+            )
+            .expect("scenario installs");
+
+        engine
+            .register_player(PlayerConfig::new(0, "Player"))
+            .expect("player registers");
+
+        assert_eq!(
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .filter(|object| object.definition_id.as_str() == "MARK")
+                .map(|object| object.position.x)
+                .collect::<Vec<_>>(),
+            vec![10, 30, 20, 40],
+            "master-order listeners run first, live status/category decide later nodes, and the scenario runs last"
+        );
+        let skipped_index = engine
+            .find_object_index(skipped)
+            .expect("deactivated listener remains addressable");
+        assert_eq!(
+            engine.objects[skipped_index].state.status,
+            ObjectStatus::Inactive
+        );
+    }
+
+    #[test]
     fn set_hostility_runs_reject_and_change_broadcasts_like_cpp() {
         // FnSetHostility performs a rejecting GRBroadcast before the write,
         // then broadcasts OnHostilityChange after the live declaration is
