@@ -1243,33 +1243,17 @@ pub enum OptionsProgramFocusTarget {
 }
 
 impl OptionsProgramFocusTarget {
-    fn next(self) -> Option<Self> {
-        Some(match self {
-            Self::LanguageCombo => Self::FontFaceCombo,
-            Self::FontFaceCombo => Self::FontSizeCombo,
-            Self::FontSizeCombo => Self::WhiteChatIngame,
-            Self::WhiteChatIngame => Self::WhiteChatLobby,
-            Self::WhiteChatLobby => Self::ShowLogTimestamps,
-            Self::ShowLogTimestamps => Self::Preloading,
-            Self::Preloading => Self::ResetButton,
-            Self::ResetButton => Self::AdvancedButton,
-            Self::AdvancedButton => return None,
-        })
-    }
-
-    fn previous(self) -> Option<Self> {
-        Some(match self {
-            Self::LanguageCombo => return None,
-            Self::FontFaceCombo => Self::LanguageCombo,
-            Self::FontSizeCombo => Self::FontFaceCombo,
-            Self::WhiteChatIngame => Self::FontSizeCombo,
-            Self::WhiteChatLobby => Self::WhiteChatIngame,
-            Self::ShowLogTimestamps => Self::WhiteChatLobby,
-            Self::Preloading => Self::ShowLogTimestamps,
-            Self::ResetButton => Self::Preloading,
-            Self::AdvancedButton => Self::ResetButton,
-        })
-    }
+    const ALL: [Self; 9] = [
+        Self::LanguageCombo,
+        Self::FontFaceCombo,
+        Self::FontSizeCombo,
+        Self::WhiteChatIngame,
+        Self::WhiteChatLobby,
+        Self::ShowLogTimestamps,
+        Self::Preloading,
+        Self::ResetButton,
+        Self::AdvancedButton,
+    ];
 
     const fn is_combo(self) -> bool {
         matches!(
@@ -1293,13 +1277,27 @@ impl OptionsProgramFocusTarget {
     }
 }
 
+/// Focusable Graphics-sheet controls in exact nested construction order.
+/// The scale and smoke scrollbars inherit `Element`, not `Control`, and the
+/// spinbox arrows are part of the single edit control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionsGraphicsFocusTarget {
+    DisplayModeCombo,
+    ApplyScale,
+    ScaleEdit,
+    Checkbox(GraphicsCheckboxId),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OptionsFocus {
     None,
     Back,
     Tabular,
     Program(OptionsProgramFocusTarget),
+    Graphics(OptionsGraphicsFocusTarget),
     SoundCheckbox(SoundCheckboxId),
+    Control(ControlSheetHit),
+    Network(NetworkSheetHit),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1567,6 +1565,27 @@ impl OptionsDlgState {
     pub const fn focused_program_control(&self) -> Option<OptionsProgramFocusTarget> {
         match self.focus {
             OptionsFocus::Program(target) => Some(target),
+            _ => None,
+        }
+    }
+
+    pub const fn focused_graphics_control(&self) -> Option<OptionsGraphicsFocusTarget> {
+        match self.focus {
+            OptionsFocus::Graphics(target) => Some(target),
+            _ => None,
+        }
+    }
+
+    pub const fn focused_control_sheet_control(&self) -> Option<ControlSheetHit> {
+        match self.focus {
+            OptionsFocus::Control(target) => Some(target),
+            _ => None,
+        }
+    }
+
+    pub const fn focused_network_control(&self) -> Option<NetworkSheetHit> {
+        match self.focus {
+            OptionsFocus::Network(target) => Some(target),
             _ => None,
         }
     }
@@ -2024,86 +2043,145 @@ impl OptionsDlgState {
         Vec::new()
     }
 
+    /// The generic `Dialog::AdvanceFocus` preorder flattened for the active
+    /// Options sheet. Conditionally hidden controls remain in this raw order
+    /// so a control hidden while focused is still the traversal anchor.
+    fn focus_order(&self) -> Vec<OptionsFocus> {
+        let mut order = vec![OptionsFocus::Back, OptionsFocus::Tabular];
+        match self.active_sheet {
+            OptionsSheet::Program => order.extend(
+                OptionsProgramFocusTarget::ALL
+                    .into_iter()
+                    .map(OptionsFocus::Program),
+            ),
+            OptionsSheet::Graphics => {
+                order.extend([
+                    OptionsFocus::Graphics(OptionsGraphicsFocusTarget::DisplayModeCombo),
+                    OptionsFocus::Graphics(OptionsGraphicsFocusTarget::ApplyScale),
+                    OptionsFocus::Graphics(OptionsGraphicsFocusTarget::ScaleEdit),
+                ]);
+                order.extend(GraphicsCheckboxId::ALL.into_iter().map(|id| {
+                    OptionsFocus::Graphics(OptionsGraphicsFocusTarget::Checkbox(id))
+                }));
+            }
+            OptionsSheet::Sound => order.extend(
+                SoundCheckboxId::ALL
+                    .into_iter()
+                    .map(OptionsFocus::SoundCheckbox),
+            ),
+            OptionsSheet::Keyboard | OptionsSheet::Gamepad => {
+                let device = if self.active_sheet == OptionsSheet::Keyboard {
+                    ControlDevice::Keyboard
+                } else {
+                    ControlDevice::Gamepad
+                };
+                order.extend(
+                    (0..self.controls.visible_sets(device))
+                        .map(|set| OptionsFocus::Control(ControlSheetHit::Set(set))),
+                );
+                order.extend(
+                    (0..CONTROL_KEY_COUNT)
+                        .map(|control| OptionsFocus::Control(ControlSheetHit::Key(control))),
+                );
+                if device == ControlDevice::Gamepad {
+                    order.push(OptionsFocus::Control(ControlSheetHit::GamepadGui));
+                }
+                order.push(OptionsFocus::Control(ControlSheetHit::Reset));
+            }
+            OptionsSheet::Network => {
+                for id in NetworkPortId::ALL {
+                    order.push(OptionsFocus::Network(NetworkSheetHit::PortCheck(id)));
+                    order.push(OptionsFocus::Network(NetworkSheetHit::Text(
+                        NetworkTextField::Port(id),
+                    )));
+                }
+                order.extend([
+                    OptionsFocus::Network(NetworkSheetHit::Checkbox(
+                        NetworkCheckboxId::UseAlternateServer,
+                    )),
+                    OptionsFocus::Network(NetworkSheetHit::Text(
+                        NetworkTextField::AlternateServerAddress,
+                    )),
+                    OptionsFocus::Network(NetworkSheetHit::Checkbox(
+                        NetworkCheckboxId::AutomaticUpdate,
+                    )),
+                    OptionsFocus::Network(NetworkSheetHit::Checkbox(
+                        NetworkCheckboxId::EnableUpnp,
+                    )),
+                    OptionsFocus::Network(NetworkSheetHit::Text(NetworkTextField::LocalName)),
+                    OptionsFocus::Network(NetworkSheetHit::Text(NetworkTextField::Nick)),
+                ]);
+            }
+        }
+        order
+    }
+
+    fn focus_is_visible(&self, focus: OptionsFocus) -> bool {
+        match focus {
+            OptionsFocus::None => false,
+            OptionsFocus::Back | OptionsFocus::Tabular => true,
+            OptionsFocus::Program(_) => self.active_sheet == OptionsSheet::Program,
+            OptionsFocus::Graphics(_) => self.active_sheet == OptionsSheet::Graphics,
+            OptionsFocus::SoundCheckbox(_) => self.active_sheet == OptionsSheet::Sound,
+            OptionsFocus::Control(target) => {
+                let device = match self.active_sheet {
+                    OptionsSheet::Keyboard => ControlDevice::Keyboard,
+                    OptionsSheet::Gamepad => ControlDevice::Gamepad,
+                    _ => return false,
+                };
+                match target {
+                    ControlSheetHit::Set(set) => set < self.controls.visible_sets(device),
+                    ControlSheetHit::Key(control) => control < CONTROL_KEY_COUNT,
+                    ControlSheetHit::Reset => true,
+                    ControlSheetHit::GamepadGui => {
+                        device == ControlDevice::Gamepad
+                            && self.controls.gamepad_gui_checkbox_visible()
+                    }
+                }
+            }
+            OptionsFocus::Network(target) => {
+                if self.active_sheet != OptionsSheet::Network {
+                    return false;
+                }
+                match target {
+                    NetworkSheetHit::PortCheck(_) | NetworkSheetHit::Checkbox(_) => true,
+                    NetworkSheetHit::Text(NetworkTextField::Port(id)) => {
+                        self.network.port(id).enabled
+                    }
+                    NetworkSheetHit::Text(NetworkTextField::AlternateServerAddress) => {
+                        self.network.use_alternate_server
+                    }
+                    NetworkSheetHit::Text(NetworkTextField::LocalName | NetworkTextField::Nick) => {
+                        true
+                    }
+                }
+            }
+        }
+    }
+
     /// Modifier-aware `Dialog::AdvanceFocus`: `backwards=true` is Shift+Tab
     /// (or gamepad Left), while false is Tab (or gamepad Right).
     pub fn handle_tab(&mut self, backwards: bool) -> Vec<OptionsDlgAction> {
         self.pressed_back = false;
         self.pressed_program_button = None;
-        match self.active_sheet {
-            OptionsSheet::Sound => {
-                self.focus = match (self.focus, backwards) {
-                    (OptionsFocus::None, false) => OptionsFocus::Back,
-                    (OptionsFocus::None, true) => {
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects)
-                    }
-                    (OptionsFocus::Back, false) => OptionsFocus::Tabular,
-                    (OptionsFocus::Back, true) => {
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects)
-                    }
-                    (OptionsFocus::Tabular, false) => {
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendMusic)
-                    }
-                    (OptionsFocus::Tabular, true) => OptionsFocus::Back,
-                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendMusic), false) => {
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects)
-                    }
-                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendMusic), true) => {
-                        OptionsFocus::Tabular
-                    }
-                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects), false) => {
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic)
-                    }
-                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects), true) => {
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendMusic)
-                    }
-                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic), false) => {
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects)
-                    }
-                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic), true) => {
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects)
-                    }
-                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects), false) => {
-                        OptionsFocus::Back
-                    }
-                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects), true) => {
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic)
-                    }
-                    (OptionsFocus::Program(_), _) => unreachable!(),
-                };
-                Vec::new()
-            }
-            OptionsSheet::Program => {
-                self.focus = match (self.focus, backwards) {
-                    (OptionsFocus::Tabular | OptionsFocus::None, false) => {
-                        OptionsFocus::Program(OptionsProgramFocusTarget::LanguageCombo)
-                    }
-                    (OptionsFocus::Back | OptionsFocus::None, true) => {
-                        OptionsFocus::Program(OptionsProgramFocusTarget::AdvancedButton)
-                    }
-                    (OptionsFocus::Tabular, true) => OptionsFocus::Back,
-                    (OptionsFocus::Back, false) => OptionsFocus::Tabular,
-                    (OptionsFocus::Program(target), false) => target
-                        .next()
-                        .map(OptionsFocus::Program)
-                        .unwrap_or(OptionsFocus::Back),
-                    (OptionsFocus::Program(target), true) => target
-                        .previous()
-                        .map(OptionsFocus::Program)
-                        .unwrap_or(OptionsFocus::Tabular),
-                    (OptionsFocus::SoundCheckbox(_), _) => unreachable!(),
-                };
-                Vec::new()
-            }
-            _ => {
-                self.focus = match self.focus {
-                    OptionsFocus::None | OptionsFocus::Tabular => OptionsFocus::Back,
-                    OptionsFocus::Back => OptionsFocus::Tabular,
-                    OptionsFocus::Program(_) => OptionsFocus::None,
-                    OptionsFocus::SoundCheckbox(_) => OptionsFocus::None,
-                };
-                Vec::new()
+        let order = self.focus_order();
+        let len = order.len();
+        let mut index = order
+            .iter()
+            .position(|candidate| *candidate == self.focus)
+            .unwrap_or(if backwards { 0 } else { len - 1 });
+        for _ in 0..len {
+            index = if backwards {
+                (index + len - 1) % len
+            } else {
+                (index + 1) % len
+            };
+            if self.focus_is_visible(order[index]) {
+                self.focus = order[index];
+                break;
             }
         }
+        Vec::new()
     }
 
     /// `Ctrl+Tab`/`Ctrl+Shift+Tab` changes sheets at control priority and is
@@ -2137,7 +2215,11 @@ impl OptionsDlgState {
                 self.pressed_back = true;
                 Vec::new()
             }
-            OptionsFocus::None | OptionsFocus::Tabular => Vec::new(),
+            OptionsFocus::None
+            | OptionsFocus::Tabular
+            | OptionsFocus::Graphics(_)
+            | OptionsFocus::Control(_)
+            | OptionsFocus::Network(_) => Vec::new(),
         }
     }
 
@@ -2228,9 +2310,14 @@ impl OptionsDlgState {
         if self.active_sheet == sheet {
             return Vec::new();
         }
-        if (matches!(self.focus, OptionsFocus::SoundCheckbox(_)) && sheet != OptionsSheet::Sound)
-            || (matches!(self.focus, OptionsFocus::Program(_)) && sheet != OptionsSheet::Program)
-        {
+        if matches!(
+            self.focus,
+            OptionsFocus::Program(_)
+                | OptionsFocus::Graphics(_)
+                | OptionsFocus::SoundCheckbox(_)
+                | OptionsFocus::Control(_)
+                | OptionsFocus::Network(_)
+        ) {
             self.focus = OptionsFocus::None;
         }
         self.captured_fair_crew_slider = false;
@@ -2258,6 +2345,41 @@ impl OptionsDlgState {
     fn program_control_highlighted(&self, target: OptionsProgramFocusTarget) -> bool {
         matches!(self.focus, OptionsFocus::Program(focused) if focused == target)
             || matches!(self.hovered, Some(OptionsHit::Program(hovered)) if hovered == target)
+    }
+
+    fn graphics_control_highlighted(&self, target: OptionsGraphicsFocusTarget) -> bool {
+        matches!(self.focus, OptionsFocus::Graphics(focused) if focused == target)
+            || match (target, self.hovered) {
+                (
+                    OptionsGraphicsFocusTarget::DisplayModeCombo,
+                    Some(OptionsHit::Graphics(GraphicsHitTarget::DisplayModeCombo)),
+                )
+                | (
+                    OptionsGraphicsFocusTarget::ApplyScale,
+                    Some(OptionsHit::Graphics(GraphicsHitTarget::ApplyScale)),
+                )
+                | (
+                    OptionsGraphicsFocusTarget::ScaleEdit,
+                    Some(OptionsHit::Graphics(
+                        GraphicsHitTarget::ScaleEdit | GraphicsHitTarget::ScaleSpinbox(_),
+                    )),
+                ) => true,
+                (
+                    OptionsGraphicsFocusTarget::Checkbox(focused),
+                    Some(OptionsHit::Graphics(GraphicsHitTarget::Checkbox(hovered))),
+                ) => focused == hovered,
+                _ => false,
+            }
+    }
+
+    fn control_sheet_control_highlighted(&self, target: ControlSheetHit) -> bool {
+        matches!(self.focus, OptionsFocus::Control(focused) if focused == target)
+            || matches!(self.hovered, Some(OptionsHit::Control(hovered)) if hovered == target)
+    }
+
+    fn network_control_highlighted(&self, target: NetworkSheetHit) -> bool {
+        matches!(self.focus, OptionsFocus::Network(focused) if focused == target)
+            || matches!(self.hovered, Some(OptionsHit::Network(hovered)) if hovered == target)
     }
 
     fn program_button_pressed(&self, target: OptionsProgramFocusTarget) -> bool {
@@ -3703,7 +3825,15 @@ impl OptionsDlgScreen {
                 return;
             }
             OptionsSheet::Graphics => {
-                Self::draw_graphics_sheet(surface, assets, book, &layout.graphics, state, gamma);
+                Self::draw_graphics_sheet(
+                    surface,
+                    assets,
+                    book,
+                    &layout.graphics,
+                    state,
+                    gamma,
+                    draw_focus,
+                );
                 return;
             }
             OptionsSheet::Keyboard => {
@@ -3715,6 +3845,7 @@ impl OptionsDlgScreen {
                     state,
                     ControlDevice::Keyboard,
                     gamma,
+                    draw_focus,
                 );
                 return;
             }
@@ -3727,11 +3858,20 @@ impl OptionsDlgScreen {
                     state,
                     ControlDevice::Gamepad,
                     gamma,
+                    draw_focus,
                 );
                 return;
             }
             OptionsSheet::Network => {
-                Self::draw_network_sheet(surface, assets, book, &layout.network, state, gamma);
+                Self::draw_network_sheet(
+                    surface,
+                    assets,
+                    book,
+                    &layout.network,
+                    state,
+                    gamma,
+                    draw_focus,
+                );
                 return;
             }
             OptionsSheet::Program => {}
@@ -4053,6 +4193,7 @@ impl OptionsDlgScreen {
         layout: &GraphicsSheetLayout,
         state: &OptionsDlgState,
         gamma: Option<&GammaRamp>,
+        draw_focus: bool,
     ) {
         let graphics = state.graphics();
         Self::draw_group_box(surface, book, &layout.display_group, "Display", gamma);
@@ -4082,7 +4223,10 @@ impl OptionsDlgScreen {
             book,
             &layout.display_mode_combo,
             graphics.display_mode.label(),
-            false,
+            draw_focus
+                && state.graphics_control_highlighted(
+                    OptionsGraphicsFocusTarget::DisplayModeCombo,
+                ),
             gamma,
         );
         Self::draw_edit(
@@ -4090,6 +4234,11 @@ impl OptionsDlgScreen {
             book,
             &layout.scale_edit,
             &graphics.proposed_scale_percent.to_string(),
+            draw_focus
+                && matches!(
+                    state.focus,
+                    OptionsFocus::Graphics(OptionsGraphicsFocusTarget::ScaleEdit)
+                ),
             gamma,
         );
         Self::draw_small_button(
@@ -4098,7 +4247,9 @@ impl OptionsDlgScreen {
             book,
             &layout.apply_button,
             "Apply",
-            false,
+            draw_focus
+                && state
+                    .graphics_control_highlighted(OptionsGraphicsFocusTarget::ApplyScale),
             false,
             gamma,
         );
@@ -4125,7 +4276,10 @@ impl OptionsDlgScreen {
                 &layout.checkbox(id),
                 id.label(),
                 graphics.checkbox(id),
-                false,
+                draw_focus
+                    && state.graphics_control_highlighted(
+                        OptionsGraphicsFocusTarget::Checkbox(id),
+                    ),
                 gamma,
             );
         }
@@ -4154,6 +4308,7 @@ impl OptionsDlgScreen {
         state: &OptionsDlgState,
         device: ControlDevice,
         gamma: Option<&GammaRamp>,
+        draw_focus: bool,
     ) {
         for set in 0..state.controls().visible_sets(device) {
             let label = match device {
@@ -4166,7 +4321,8 @@ impl OptionsDlgScreen {
                 book,
                 &layout.set_buttons[set],
                 &label,
-                false,
+                draw_focus
+                    && state.control_sheet_control_highlighted(ControlSheetHit::Set(set)),
                 false,
                 gamma,
             );
@@ -4177,7 +4333,17 @@ impl OptionsDlgScreen {
                 .controls()
                 .visible_label(device, control)
                 .unwrap_or("Undefined");
-            Self::draw_small_button(surface, assets, book, &rect, binding, false, false, gamma);
+            Self::draw_small_button(
+                surface,
+                assets,
+                book,
+                &rect,
+                binding,
+                draw_focus
+                    && state.control_sheet_control_highlighted(ControlSheetHit::Key(control)),
+                false,
+                gamma,
+            );
             book.book_small.draw_with_gamma(
                 surface,
                 rect.x + rect.w / 2,
@@ -4195,7 +4361,7 @@ impl OptionsDlgScreen {
             book,
             &layout.reset_button,
             "Reset",
-            false,
+            draw_focus && state.control_sheet_control_highlighted(ControlSheetHit::Reset),
             false,
             gamma,
         );
@@ -4207,7 +4373,8 @@ impl OptionsDlgScreen {
                 &layout.gamepad_gui_check,
                 "GUI control",
                 state.controls().gamepad_gui_control(),
-                false,
+                draw_focus
+                    && state.control_sheet_control_highlighted(ControlSheetHit::GamepadGui),
                 gamma,
             );
         }
@@ -4220,6 +4387,7 @@ impl OptionsDlgScreen {
         layout: &NetworkSheetLayout,
         state: &OptionsDlgState,
         gamma: Option<&GammaRamp>,
+        draw_focus: bool,
     ) {
         let network = state.network();
         for id in NetworkPortId::ALL {
@@ -4238,7 +4406,8 @@ impl OptionsDlgScreen {
                 &layout.port_check(id),
                 "Enabled",
                 network.port(id).enabled,
-                false,
+                draw_focus
+                    && state.network_control_highlighted(NetworkSheetHit::PortCheck(id)),
                 gamma,
             );
             if network.port(id).enabled {
@@ -4247,6 +4416,13 @@ impl OptionsDlgScreen {
                     book,
                     &layout.port_edit(id),
                     &network.port(id).port.to_string(),
+                    draw_focus
+                        && matches!(
+                            state.focus,
+                            OptionsFocus::Network(NetworkSheetHit::Text(
+                                NetworkTextField::Port(focused),
+                            )) if focused == id
+                        ),
                     gamma,
                 );
             }
@@ -4258,7 +4434,10 @@ impl OptionsDlgScreen {
             &layout.alternate_check,
             "Use alternate server",
             network.use_alternate_server,
-            false,
+            draw_focus
+                && state.network_control_highlighted(NetworkSheetHit::Checkbox(
+                    NetworkCheckboxId::UseAlternateServer,
+                )),
             gamma,
         );
         if network.use_alternate_server {
@@ -4267,6 +4446,13 @@ impl OptionsDlgScreen {
                 book,
                 &layout.alternate_edit,
                 &network.alternate_server_address,
+                draw_focus
+                    && matches!(
+                        state.focus,
+                        OptionsFocus::Network(NetworkSheetHit::Text(
+                            NetworkTextField::AlternateServerAddress,
+                        ))
+                    ),
                 gamma,
             );
         }
@@ -4277,7 +4463,10 @@ impl OptionsDlgScreen {
             &layout.automatic_update_check,
             "Automatic update",
             network.automatic_update,
-            false,
+            draw_focus
+                && state.network_control_highlighted(NetworkSheetHit::Checkbox(
+                    NetworkCheckboxId::AutomaticUpdate,
+                )),
             gamma,
         );
         Self::draw_checkbox(
@@ -4287,16 +4476,25 @@ impl OptionsDlgScreen {
             &layout.upnp_check,
             "Enable UPnP",
             network.enable_upnp,
-            false,
+            draw_focus
+                && state.network_control_highlighted(NetworkSheetHit::Checkbox(
+                    NetworkCheckboxId::EnableUpnp,
+                )),
             gamma,
         );
-        for (label, rect, value) in [
+        for (label, rect, value, field) in [
             (
                 "Local name",
                 &layout.local_name_edit,
                 network.local_name.as_str(),
+                NetworkTextField::LocalName,
             ),
-            ("Nick", &layout.nick_edit, network.nick.as_str()),
+            (
+                "Nick",
+                &layout.nick_edit,
+                network.nick.as_str(),
+                NetworkTextField::Nick,
+            ),
         ] {
             book.book_small.draw_with_gamma(
                 surface,
@@ -4308,7 +4506,19 @@ impl OptionsDlgScreen {
                 true,
                 gamma,
             );
-            Self::draw_edit(surface, book, rect, value, gamma);
+            Self::draw_edit(
+                surface,
+                book,
+                rect,
+                value,
+                draw_focus
+                    && matches!(
+                        state.focus,
+                        OptionsFocus::Network(NetworkSheetHit::Text(focused))
+                            if focused == field
+                    ),
+                gamma,
+            );
         }
     }
 
@@ -4317,6 +4527,7 @@ impl OptionsDlgScreen {
         book: &BookFonts,
         rect: &IntRect,
         text: &str,
+        focused: bool,
         gamma: Option<&GammaRamp>,
     ) {
         draw_frame_dw(
@@ -4328,10 +4539,23 @@ impl OptionsDlgScreen {
             EDIT_BORDER_COLOR,
             gamma,
         );
+        let text_y = rect.y + (rect.h - book.book.line_height).max(0) / 2;
+        if focused && !text.is_empty() {
+            let text_width = book.book.measure(text, true).0;
+            fill_box_dw(
+                surface,
+                rect.x + 4,
+                text_y + 1,
+                (rect.x + 3 + text_width).min(rect.x + rect.w - 2),
+                text_y + book.book.line_height - 2,
+                0x7f7f_7f00,
+                gamma,
+            );
+        }
         book.book.draw_with_gamma(
             surface,
             rect.x + 4,
-            rect.y + (rect.h - book.book.line_height).max(0) / 2,
+            text_y,
             text,
             STARTUP_FONT_RGBA,
             TextAlign::Left,
@@ -4546,6 +4770,7 @@ impl OptionsDlgScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::startup_options_controls::CONTROL_SET_COUNT;
     use crate::test_support::{endeavour_font_set, load_graphics_png, repo_root, standard_gamma, write_ppm};
     use lc_graphics::PixelFormat;
 
@@ -5335,6 +5560,148 @@ mod tests {
         assert_eq!(sound.slider(SoundVolumeId::SoundEffects).h, 16);
     }
 
+    fn assert_options_focus_cycle(state: &mut OptionsDlgState, controls: &[OptionsFocus]) {
+        assert_eq!(state.focus, OptionsFocus::Tabular);
+        for &expected in controls {
+            assert!(state.handle_tab(false).is_empty());
+            assert_eq!(state.focus, expected);
+        }
+        assert!(state.handle_tab(false).is_empty());
+        assert_eq!(state.focus, OptionsFocus::Back);
+        assert!(state.handle_tab(false).is_empty());
+        assert_eq!(state.focus, OptionsFocus::Tabular);
+
+        assert!(state.handle_tab(true).is_empty());
+        assert_eq!(state.focus, OptionsFocus::Back);
+        for &expected in controls.iter().rev() {
+            assert!(state.handle_tab(true).is_empty());
+            assert_eq!(state.focus, expected);
+        }
+        assert!(state.handle_tab(true).is_empty());
+        assert_eq!(state.focus, OptionsFocus::Tabular);
+    }
+
+    #[test]
+    fn l131_graphics_tab_and_shift_tab_cover_native_controls() {
+        let mut state = OptionsDlgState::default();
+        state.restore_sheet(OptionsSheet::Graphics);
+        let mut controls = vec![
+            OptionsFocus::Graphics(OptionsGraphicsFocusTarget::DisplayModeCombo),
+            OptionsFocus::Graphics(OptionsGraphicsFocusTarget::ApplyScale),
+            OptionsFocus::Graphics(OptionsGraphicsFocusTarget::ScaleEdit),
+        ];
+        controls.extend(GraphicsCheckboxId::ALL.into_iter().map(|id| {
+            OptionsFocus::Graphics(OptionsGraphicsFocusTarget::Checkbox(id))
+        }));
+
+        assert_options_focus_cycle(&mut state, &controls);
+        assert_eq!(state.focused_graphics_control(), None);
+    }
+
+    #[test]
+    fn l131_keyboard_tab_and_shift_tab_cover_native_controls() {
+        let mut state = OptionsDlgState::default();
+        state.restore_sheet(OptionsSheet::Keyboard);
+        let mut controls: Vec<_> = (0..CONTROL_SET_COUNT)
+            .map(|set| OptionsFocus::Control(ControlSheetHit::Set(set)))
+            .collect();
+        controls.extend(
+            (0..CONTROL_KEY_COUNT)
+                .map(|control| OptionsFocus::Control(ControlSheetHit::Key(control))),
+        );
+        controls.push(OptionsFocus::Control(ControlSheetHit::Reset));
+
+        assert_options_focus_cycle(&mut state, &controls);
+        assert_eq!(state.focused_control_sheet_control(), None);
+    }
+
+    #[test]
+    fn l131_gamepad_tab_and_shift_tab_follow_visible_controls() {
+        let labels = || std::array::from_fn(|_| std::array::from_fn(|_| "Undefined".to_string()));
+        let controls_state = ControlSheetState::new(labels(), labels(), 3, false);
+        let mut state = OptionsDlgState::with_all(
+            ProgramSheetState::default(),
+            SoundSheetState::default(),
+            GraphicsSheetState::default(),
+            controls_state,
+            NetworkSheetState::default(),
+        );
+        state.restore_sheet(OptionsSheet::Gamepad);
+        let mut controls: Vec<_> = (0..3)
+            .map(|set| OptionsFocus::Control(ControlSheetHit::Set(set)))
+            .collect();
+        controls.extend(
+            (0..CONTROL_KEY_COUNT)
+                .map(|control| OptionsFocus::Control(ControlSheetHit::Key(control))),
+        );
+        controls.push(OptionsFocus::Control(ControlSheetHit::GamepadGui));
+        controls.push(OptionsFocus::Control(ControlSheetHit::Reset));
+
+        assert_options_focus_cycle(&mut state, &controls);
+    }
+
+    #[test]
+    fn l131_network_tab_and_shift_tab_follow_dynamic_visibility() {
+        let network = NetworkSheetState::new(
+            [11_112, 11_113, 11_111, 11_114],
+            true,
+            "league.openclonk.org".to_string(),
+            true,
+            true,
+            "Local".to_string(),
+            "Nick".to_string(),
+            false,
+        );
+        let mut state = OptionsDlgState::with_all(
+            ProgramSheetState::default(),
+            SoundSheetState::default(),
+            GraphicsSheetState::default(),
+            ControlSheetState::default(),
+            network,
+        );
+        state.restore_sheet(OptionsSheet::Network);
+        let mut controls = Vec::new();
+        for id in NetworkPortId::ALL {
+            controls.push(OptionsFocus::Network(NetworkSheetHit::PortCheck(id)));
+            controls.push(OptionsFocus::Network(NetworkSheetHit::Text(
+                NetworkTextField::Port(id),
+            )));
+        }
+        controls.extend([
+            OptionsFocus::Network(NetworkSheetHit::Checkbox(
+                NetworkCheckboxId::UseAlternateServer,
+            )),
+            OptionsFocus::Network(NetworkSheetHit::Text(
+                NetworkTextField::AlternateServerAddress,
+            )),
+            OptionsFocus::Network(NetworkSheetHit::Checkbox(
+                NetworkCheckboxId::AutomaticUpdate,
+            )),
+            OptionsFocus::Network(NetworkSheetHit::Checkbox(
+                NetworkCheckboxId::EnableUpnp,
+            )),
+            OptionsFocus::Network(NetworkSheetHit::Text(NetworkTextField::LocalName)),
+            OptionsFocus::Network(NetworkSheetHit::Text(NetworkTextField::Nick)),
+        ]);
+        assert_options_focus_cycle(&mut state, &controls);
+
+        assert!(state.handle_tab(false).is_empty());
+        assert!(state.handle_tab(false).is_empty());
+        assert_eq!(
+            state.focused_network_control(),
+            Some(NetworkSheetHit::Text(NetworkTextField::Port(
+                NetworkPortId::Tcp,
+            )))
+        );
+        state.network_mut().port_mut(NetworkPortId::Tcp).enabled = false;
+        assert!(state.handle_tab(false).is_empty());
+        assert_eq!(
+            state.focused_network_control(),
+            Some(NetworkSheetHit::PortCheck(NetworkPortId::Udp)),
+            "a newly hidden edit remains the traversal anchor"
+        );
+    }
+
     #[test]
     fn sound_focus_cycle_and_raw_low_button_match_control_priority() {
         let (mut state, _) = live_sound_state(SoundSheetState::default());
@@ -5942,7 +6309,8 @@ mod tests {
         assert!(state.handle_pointer_down(gap).is_empty());
         assert_eq!(state.active_sheet(), OptionsSheet::Graphics);
 
-        assert!(state.handle_key_down(crate::KeyCode::Tab).is_empty());
+        assert!(state.handle_tab(true).is_empty());
+        assert_eq!(state.focus, OptionsFocus::Back);
         let third_tab = crate::GuiPoint::new(
             layout.tabular.x as f32,
             (layout.tabular.y + 164) as f32,
