@@ -21200,6 +21200,8 @@ fn parse_running_message_control(
 
 fn build_game_over_dialog(
     snapshot: &SimulationSnapshot,
+    teams: &[lc_engine::TeamInfo],
+    auto_generate_teams: bool,
     local_owner: i32,
     screen_width: u32,
     title: String,
@@ -21224,47 +21226,62 @@ fn build_game_over_dialog(
         })
         .collect();
 
-    // C++ presents winners before losers while retaining player-info order
-    // inside each group (C4PlayerInfoListBox.cpp:1529-1592).
+    // Preserve player-info order in the frozen model. The layout performs the
+    // winner/loser grouping for the unified list; fixed-team lists filter this
+    // source order independently (C4PlayerInfoListBox.cpp:1529-1592).
     let mut players = Vec::new();
-    for won in [true, false] {
-        for state in snapshot.players.iter().filter(|state| state.won == won) {
-            let Some(result) = snapshot
-                .round_results
-                .players
-                .iter()
-                .find(|result| result.player_info_id == state.player_info_id)
-            else {
-                continue;
-            };
-            let color = state
-                .color
-                .map(|RgbColor { r, g, b }| Color::opaque(r, g, b))
-                .unwrap_or_else(|| default_owner_color(state.id));
-            players.push(EvaluationPlayer {
-                player_info_id: state.player_info_id,
-                name: if state.name.trim().is_empty() {
-                    format!("Player {}", state.id)
-                } else {
-                    c4_presentation_text(&state.name)
-                },
-                won: state.won,
-                color_dw: u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b),
-                total_playing_time: result.total_playing_time,
-                score_old: if snapshot.round_results.hide_settlement_score {
-                    -1
-                } else {
-                    result.score_old
-                },
-                score_new: (!snapshot.round_results.hide_settlement_score)
-                    .then_some(result.score_new)
-                    .flatten(),
-                custom_evaluation_strings: c4_presentation_text(&result.custom_evaluation_strings),
-                big_icon: None,
-            });
-        }
+    for state in &snapshot.players {
+        let Some(result) = snapshot
+            .round_results
+            .players
+            .iter()
+            .find(|result| result.player_info_id == state.player_info_id)
+        else {
+            continue;
+        };
+        let color = state
+            .color
+            .map(|RgbColor { r, g, b }| Color::opaque(r, g, b))
+            .unwrap_or_else(|| default_owner_color(state.id));
+        let won = state.team.map_or(state.won, |team_id| {
+            if teams.iter().any(|team| team.id == team_id) {
+                snapshot
+                    .players
+                    .iter()
+                    .any(|candidate| candidate.team == Some(team_id) && candidate.won)
+            } else {
+                state.won
+            }
+        });
+        players.push(EvaluationPlayer {
+            player_info_id: state.player_info_id,
+            team_id: state.team,
+            name: if state.name.trim().is_empty() {
+                format!("Player {}", state.id)
+            } else {
+                c4_presentation_text(&state.name)
+            },
+            won,
+            color_dw: u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b),
+            total_playing_time: result.total_playing_time,
+            score_old: if snapshot.round_results.hide_settlement_score {
+                -1
+            } else {
+                result.score_old
+            },
+            score_new: (!snapshot.round_results.hide_settlement_score)
+                .then_some(result.score_new)
+                .flatten(),
+            custom_evaluation_strings: c4_presentation_text(&result.custom_evaluation_strings),
+            big_icon: None,
+        });
     }
-    let evaluation = EvaluationViewModel::new(goals, players);
+    let separate_team_ids = (teams.len() == 2 && !auto_generate_teams)
+        .then(|| [teams[0].id, teams[1].id]);
+    let evaluation = EvaluationViewModel::new(goals, players).with_dialog_context(
+        c4_presentation_text(&snapshot.round_results.custom_evaluation_strings),
+        separate_team_ids,
+    );
 
     // Keep the asset-less fallback usable, but derive it from the same frozen
     // evaluation instead of treating every still-Active player as a winner or
@@ -24375,6 +24392,24 @@ impl GameApp {
             }
         }
         if self.mode == AppMode::Running && self.game_over_dialog.is_some() {
+            if !self.game_over_dialog_is_mouse_active() {
+                return Ok(());
+            }
+            let native_delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            let width = self.graphics.surface().width();
+            let height = self.graphics.surface().height();
+            let changed = self
+                .game_over_dialog
+                .as_mut()
+                .is_some_and(|dialog| dialog.handle_wheel(native_delta, width, height));
+            if changed {
+                self.mark_menu_dirty();
+            }
             return Ok(());
         }
         if self.mode == AppMode::Running {
@@ -58084,6 +58119,8 @@ impl GameApp {
         let next_mission = self.engine.next_mission();
         let mut dialog = build_game_over_dialog(
             &self.snapshot,
+            self.engine.teams(),
+            self.engine.auto_generate_teams(),
             self.local_owner,
             self.graphics.surface().width(),
             scenario_title.clone(),
@@ -150482,6 +150519,64 @@ func ControlDig() { dig_count = 1; return(1); }
         app
     }
 
+    #[test]
+    fn game_over_custom_text_wheel_uses_app_routing_and_stays_below_newer_dialogs() {
+        let mut app = new_classic_running_sandbox_app();
+        app.snapshot.round_results.custom_evaluation_strings = (0..40)
+            .map(|index| format!("Line {index}"))
+            .collect::<Vec<_>>()
+            .join("|");
+        app.handle_game_over().expect("show scrollable evaluation");
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let custom = app
+            .game_over_dialog
+            .as_ref()
+            .expect("evaluation dialog")
+            .classic_evaluation_layout(
+                width,
+                height,
+                app.assets.clonk_fonts.as_deref().expect("classic fonts"),
+            )
+            .custom_evaluation
+            .expect("custom text layout");
+        assert!(custom.scrollable);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(custom.viewport.x + 1),
+            f64::from(custom.viewport.y + 1),
+        ))
+        .expect("hover custom evaluation viewport");
+
+        let render_version = app.menu_render_version;
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("route wheel into evaluation");
+        assert_eq!(
+            app.game_over_dialog
+                .as_ref()
+                .expect("evaluation dialog")
+                .custom_evaluation_scroll(),
+            60
+        );
+        assert_ne!(app.menu_render_version, render_version);
+
+        configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open client list above evaluation");
+        assert!(app.runtime_client_list_owns_game_over());
+        app.running_pointer_position = Some(GuiPoint::new(0.0, 0.0));
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("newer client list keeps underlying evaluation inactive");
+        assert_eq!(
+            app.game_over_dialog
+                .as_ref()
+                .expect("evaluation dialog")
+                .custom_evaluation_scroll(),
+            60
+        );
+    }
+
     fn assert_game_over_resource_boundary(
         error: &anyhow::Error,
         expected_missing: Vec<&'static str>,
@@ -158881,6 +158976,8 @@ func ControlDig() { dig_count = 1; return(1); }
 
         let dialog = build_game_over_dialog(
             &snapshot,
+            &[],
+            false,
             99,
             1024,
             "decoy title".into(),
@@ -158923,6 +159020,8 @@ func ControlDig() { dig_count = 1; return(1); }
         snapshot.round_results.hide_settlement_score = true;
         let hidden = build_game_over_dialog(
             &snapshot,
+            &[],
+            false,
             99,
             1024,
             "decoy title".into(),
@@ -158937,6 +159036,119 @@ func ControlDig() { dig_count = 1; return(1); }
             (player.score_old, player.score_new),
             (-1, None),
             "HideSettlementScoreInEvaluation suppresses the score line"
+        );
+    }
+
+    #[test]
+    fn evaluation_dialog_sources_global_text_and_fixed_team_context() {
+        let mut snapshot = make_snapshot(Vec::new(), Vec::new());
+        snapshot.players = vec![
+            PlayerState {
+                id: 20,
+                player_info_id: 200,
+                name: "Blue".into(),
+                team: Some(2),
+                won: false,
+                ..PlayerState::default()
+            },
+            PlayerState {
+                id: 10,
+                player_info_id: 100,
+                name: "Red winner".into(),
+                team: Some(1),
+                won: true,
+                ..PlayerState::default()
+            },
+            PlayerState {
+                id: 11,
+                player_info_id: 101,
+                name: "Red teammate".into(),
+                team: Some(1),
+                won: false,
+                ..PlayerState::default()
+            },
+        ];
+        snapshot.round_results = lc_engine::RoundResultsState {
+            custom_evaluation_strings: "Global summary|Second line".into(),
+            players: [200, 100, 101]
+                .into_iter()
+                .map(|player_info_id| lc_engine::RoundResultsPlayerState {
+                    player_info_id,
+                    custom_evaluation_strings: (player_info_id == 101)
+                        .then_some("Personal note".to_string())
+                        .unwrap_or_default(),
+                    ..lc_engine::RoundResultsPlayerState::default()
+                })
+                .collect(),
+            ..lc_engine::RoundResultsState::default()
+        };
+        let teams = [
+            lc_engine::TeamInfo::new(1, "Red", 0x00f4_0000),
+            lc_engine::TeamInfo::new(2, "Blue", 0x0000_00f4),
+        ];
+        let dialog = build_game_over_dialog(
+            &snapshot,
+            &teams,
+            false,
+            10,
+            1024,
+            "Scenario".into(),
+            &lc_engine::NextMissionState::default(),
+            |_| None,
+        );
+
+        assert_eq!(
+            dialog.evaluation().custom_evaluation_strings(),
+            "Global summary|Second line"
+        );
+        assert_eq!(dialog.evaluation().separate_team_ids(), Some([1, 2]));
+        let players = dialog.evaluation().players().collect::<Vec<_>>();
+        assert_eq!(
+            players
+                .iter()
+                .map(|player| (player.player_info_id, player.team_id, player.won))
+                .collect::<Vec<_>>(),
+            vec![
+                (200, Some(2), false),
+                (100, Some(1), true),
+                (101, Some(1), true),
+            ],
+            "fixed-team context retains source order and applies team-level victory"
+        );
+        assert_eq!(players[2].custom_evaluation_strings, "Personal note");
+        let fonts = new_classic_running_sandbox_app()
+            .assets
+            .clonk_fonts
+            .clone()
+            .expect("classic fonts");
+        let split_layout = dialog.classic_evaluation_layout(1024, 600, &fonts);
+        assert_eq!(split_layout.player_lists.len(), 2);
+        assert_eq!(
+            split_layout
+                .players
+                .iter()
+                .map(|player| (player.player_list_index, player.player_index))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (0, 2), (1, 0)]
+        );
+
+        let generated = build_game_over_dialog(
+            &snapshot,
+            &teams,
+            true,
+            10,
+            1024,
+            "Scenario".into(),
+            &lc_engine::NextMissionState::default(),
+            |_| None,
+        );
+        assert_eq!(generated.evaluation().separate_team_ids(), None);
+        assert_eq!(
+            generated
+                .classic_evaluation_layout(1024, 600, &fonts)
+                .player_lists
+                .len(),
+            1
         );
     }
 

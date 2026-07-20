@@ -181,6 +181,7 @@ pub struct EvaluationGoal {
 #[derive(Clone, Debug, PartialEq)]
 pub struct EvaluationPlayer {
     pub player_info_id: i32,
+    pub team_id: Option<i32>,
     pub name: String,
     pub won: bool,
     pub color_dw: u32,
@@ -200,11 +201,28 @@ pub struct EvaluationPlayer {
 pub struct EvaluationViewModel {
     goals: Vec<EvaluationGoal>,
     players: Vec<EvaluationPlayer>,
+    custom_evaluation_strings: String,
+    separate_team_ids: Option<[i32; 2]>,
 }
 
 impl EvaluationViewModel {
     pub fn new(goals: Vec<EvaluationGoal>, players: Vec<EvaluationPlayer>) -> Self {
-        Self { goals, players }
+        Self {
+            goals,
+            players,
+            custom_evaluation_strings: String::new(),
+            separate_team_ids: None,
+        }
+    }
+
+    pub fn with_dialog_context(
+        mut self,
+        custom_evaluation_strings: String,
+        separate_team_ids: Option<[i32; 2]>,
+    ) -> Self {
+        self.custom_evaluation_strings = custom_evaluation_strings;
+        self.separate_team_ids = separate_team_ids;
+        self
     }
 
     pub fn goals(&self) -> &[EvaluationGoal] {
@@ -213,6 +231,22 @@ impl EvaluationViewModel {
 
     pub fn players(&self) -> impl ExactSizeIterator<Item = &EvaluationPlayer> {
         self.players.iter()
+    }
+
+    pub fn custom_evaluation_strings(&self) -> &str {
+        &self.custom_evaluation_strings
+    }
+
+    pub fn separate_team_ids(&self) -> Option<[i32; 2]> {
+        self.separate_team_ids
+    }
+
+    fn player(&self, index: usize) -> Option<&EvaluationPlayer> {
+        self.players.get(index)
+    }
+
+    fn player_list_count(&self) -> usize {
+        usize::from(self.separate_team_ids.is_some()) + 1
     }
 
     pub fn player_by_info_id(&self, player_info_id: i32) -> Option<&EvaluationPlayer> {
@@ -269,18 +303,30 @@ pub struct ClassicEvaluationGoalLayout {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClassicEvaluationPlayerLayout {
+    pub player_index: usize,
+    pub player_list_index: usize,
     pub row: IntRect,
     pub icon: IntRect,
     pub name_anchor: (i32, i32),
     pub score_anchor: (i32, i32),
     pub time_anchor: (i32, i32),
+    pub custom_evaluation_anchor: Option<(i32, i32)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassicEvaluationTextLayout {
+    pub area: IntRect,
+    pub viewport: IntRect,
+    pub content_height: i32,
+    pub scrollable: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClassicEvaluationLayout {
     pub goal_display: Option<IntRect>,
     pub goals: Vec<ClassicEvaluationGoalLayout>,
-    pub player_list: IntRect,
+    pub custom_evaluation: Option<ClassicEvaluationTextLayout>,
+    pub player_lists: Vec<IntRect>,
     pub players: Vec<ClassicEvaluationPlayerLayout>,
 }
 
@@ -305,6 +351,8 @@ pub struct GameOverState {
     down_controls: Vec<GameOverFocus>,
     sounds: Vec<GameOverSound>,
     classic_button_width: Option<i32>,
+    classic_text_font: Option<lc_graphics::clonk_font::ClonkFont>,
+    custom_evaluation_scroll: i32,
     pointer_position: Option<(f32, f32)>,
     pointer_surface_size: Option<(u32, u32)>,
 }
@@ -386,6 +434,8 @@ impl GameOverState {
             down_controls: Vec::new(),
             sounds: Vec::new(),
             classic_button_width: None,
+            classic_text_font: None,
+            custom_evaluation_scroll: 0,
             pointer_position: None,
             pointer_surface_size: None,
         }
@@ -393,6 +443,7 @@ impl GameOverState {
 
     pub fn configure_classic_fonts(&mut self, fonts: Option<&ClonkFontSet>) {
         self.classic_button_width = fonts.map(classic_button_width);
+        self.classic_text_font = fonts.map(|fonts| fonts.text.clone());
     }
 
     pub fn subtitle(&self) -> &str {
@@ -401,10 +452,16 @@ impl GameOverState {
 
     pub fn set_evaluation(&mut self, evaluation: EvaluationViewModel) {
         self.evaluation = evaluation;
+        self.custom_evaluation_scroll = 0;
     }
 
     pub fn evaluation(&self) -> &EvaluationViewModel {
         &self.evaluation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn custom_evaluation_scroll(&self) -> i32 {
+        self.custom_evaluation_scroll
     }
 
     #[allow(dead_code)]
@@ -441,14 +498,15 @@ impl GameOverState {
     }
 
     pub fn advance_focus(&mut self, backwards: bool) -> GameOverFocus {
-        // The currently modeled presentation owns one PlayerInfo list. L116
-        // extends this sequence with the optional second team list.
-        let focus_count = self.buttons.len() + 2;
+        let player_list_count = self.evaluation.player_list_count();
+        let focus_count = self.buttons.len() + player_list_count + 1;
         let current = self.focused.and_then(|focus| match focus {
             GameOverFocus::Close => Some(0),
-            GameOverFocus::PlayerList(0) => Some(1),
+            GameOverFocus::PlayerList(index) if index < player_list_count => Some(index + 1),
             GameOverFocus::PlayerList(_) => None,
-            GameOverFocus::Button(index) if index < self.buttons.len() => Some(index + 2),
+            GameOverFocus::Button(index) if index < self.buttons.len() => {
+                Some(index + player_list_count + 1)
+            }
             GameOverFocus::Button(_) => None,
         });
         let index = match current {
@@ -460,8 +518,8 @@ impl GameOverState {
         };
         let focus = match index {
             0 => GameOverFocus::Close,
-            1 => GameOverFocus::PlayerList(0),
-            index => GameOverFocus::Button(index - 2),
+            index if index <= player_list_count => GameOverFocus::PlayerList(index - 1),
+            index => GameOverFocus::Button(index - player_list_count - 1),
         };
         self.focused = Some(focus);
         focus
@@ -548,11 +606,12 @@ impl GameOverState {
 
     pub fn handle_pointer_down(&mut self, surface_width: u32, surface_height: u32) {
         self.pointer_surface_size = Some((surface_width, surface_height));
-        if self.pointer_position.is_some_and(|(x, y)| {
-            self.classic_player_list_rect(surface_width, surface_height)
-                .is_some_and(|rect| point_in_rect(x, y, rect))
+        if let Some(index) = self.pointer_position.and_then(|(x, y)| {
+            self.classic_player_list_rects(surface_width, surface_height)
+                .iter()
+                .position(|rect| point_in_rect(x, y, *rect))
         }) {
-            self.focused = Some(GameOverFocus::PlayerList(0));
+            self.focused = Some(GameOverFocus::PlayerList(index));
         }
         self.close_pressed = self.pointer_position.is_some_and(|(x, y)| {
             self.classic_close_button_rect(surface_width, surface_height)
@@ -684,31 +743,54 @@ impl GameOverState {
         })
     }
 
-    fn classic_player_list_rect(&self, surface_width: u32, surface_height: u32) -> Option<Rect> {
-        self.classic_button_width.map(|button_width| {
-            let chrome =
-                self.classic_layout_with_button_width(surface_width, surface_height, button_width);
-            let goal_area_height = CLASSIC_GOAL_SIZE + 2 * CLASSIC_GOAL_MARGIN;
-            let goal_count = self.evaluation.goals().len() as i32;
-            let goals_per_row = (chrome.dialog.w / goal_area_height).max(1);
-            let goal_rows = if goal_count == 0 {
-                0
-            } else {
-                (goal_count - 1) / goals_per_row + 1
-            };
-            let post_goal_inset = if goal_rows > 0 {
-                CLASSIC_PLAYER_LIST_TOP_INSET
-            } else {
-                0
-            };
-            let y = chrome.player_area.y + goal_rows * goal_area_height + post_goal_inset;
-            surface_rect(IntRect {
-                x: chrome.player_area.x,
-                y,
-                w: chrome.player_area.w,
-                h: (chrome.player_area.y + chrome.player_area.h - y).max(0),
-            })
-        })
+    fn classic_player_list_rects(&self, surface_width: u32, surface_height: u32) -> Vec<Rect> {
+        let (Some(button_width), Some(text_font)) =
+            (self.classic_button_width, self.classic_text_font.as_ref())
+        else {
+            return Vec::new();
+        };
+        self.classic_evaluation_layout_with_metrics(
+            surface_width,
+            surface_height,
+            button_width,
+            text_font,
+        )
+        .player_lists
+        .into_iter()
+        .map(surface_rect)
+        .collect()
+    }
+
+    pub fn handle_wheel(&mut self, delta: i32, surface_width: u32, surface_height: u32) -> bool {
+        if delta == 0 {
+            return false;
+        }
+        let (Some(button_width), Some(text_font), Some((x, y))) = (
+            self.classic_button_width,
+            self.classic_text_font.as_ref(),
+            self.pointer_position,
+        ) else {
+            return false;
+        };
+        let layout = self.classic_evaluation_layout_with_metrics(
+            surface_width,
+            surface_height,
+            button_width,
+            text_font,
+        );
+        let Some(text) = layout
+            .custom_evaluation
+            .filter(|text| text.scrollable && point_in_rect(x, y, surface_rect(text.viewport)))
+        else {
+            return false;
+        };
+        let maximum = (text.content_height - text.viewport.h).max(0);
+        let before = self.custom_evaluation_scroll;
+        self.custom_evaluation_scroll = self
+            .custom_evaluation_scroll
+            .saturating_sub(delta)
+            .clamp(0, maximum);
+        self.custom_evaluation_scroll != before
     }
 
     fn panel_rect(&self, surface_width: u32, surface_height: u32) -> Rect {
@@ -868,13 +950,29 @@ impl GameOverState {
         }
     }
 
-    fn classic_evaluation_layout(
+    pub(crate) fn classic_evaluation_layout(
         &self,
         surface_width: u32,
         surface_height: u32,
         fonts: &ClonkFontSet,
     ) -> ClassicEvaluationLayout {
-        let chrome = self.classic_layout(surface_width, surface_height, fonts);
+        self.classic_evaluation_layout_with_metrics(
+            surface_width,
+            surface_height,
+            classic_button_width(fonts),
+            &fonts.text,
+        )
+    }
+
+    fn classic_evaluation_layout_with_metrics(
+        &self,
+        surface_width: u32,
+        surface_height: u32,
+        button_width: i32,
+        text_font: &lc_graphics::clonk_font::ClonkFont,
+    ) -> ClassicEvaluationLayout {
+        let chrome =
+            self.classic_layout_with_button_width(surface_width, surface_height, button_width);
         let goal_area_height = CLASSIC_GOAL_SIZE + 2 * CLASSIC_GOAL_MARGIN;
         let goal_count = self.evaluation.goals().len() as i32;
         let goals_per_row = (chrome.dialog.w / goal_area_height).max(1);
@@ -925,30 +1023,137 @@ impl GameOverState {
         } else {
             0
         };
-        let player_list_y = chrome.player_area.y + goal_rows * goal_area_height + post_goal_inset;
-        let player_list = IntRect {
-            x: chrome.player_area.x,
-            y: player_list_y,
-            w: chrome.player_area.w,
-            h: (chrome.player_area.y + chrome.player_area.h - player_list_y).max(0),
+        let mut player_list_y =
+            chrome.player_area.y + goal_rows * goal_area_height + post_goal_inset;
+        let player_area_bottom = chrome.player_area.y + chrome.player_area.h;
+        let custom_evaluation =
+            (!self.evaluation.custom_evaluation_strings().is_empty()).then(|| {
+                let width = (chrome.dialog.w - 6 * CLASSIC_INDENT_X).max(0);
+                let area_x = chrome.dialog.x + (chrome.dialog.w - width) / 2;
+                let measured_lines = classic_multiline_label_lines(
+                    text_font,
+                    self.evaluation.custom_evaluation_strings(),
+                    width.max(1),
+                );
+                let measured_height = classic_multiline_label_height(&measured_lines, text_font);
+                let maximum_height = (player_area_bottom - player_list_y).max(0) / 3;
+                let scrollable = measured_height > maximum_height;
+                let area = IntRect {
+                    x: area_x,
+                    y: player_list_y,
+                    w: width,
+                    h: if scrollable {
+                        maximum_height
+                    } else {
+                        measured_height
+                    },
+                };
+                if scrollable {
+                    // TextWindow keeps its 10/5px horizontal and 8px vertical
+                    // client margins and always reserves the 16px ScrollBar.
+                    let viewport = IntRect {
+                        x: area.x + 10,
+                        y: area.y + 8,
+                        w: (area.w - 10 - 5 - 16).max(0),
+                        h: (area.h - 16).max(0),
+                    };
+                    let lines = classic_multiline_label_lines(
+                        text_font,
+                        self.evaluation.custom_evaluation_strings(),
+                        viewport.w.max(1),
+                    );
+                    ClassicEvaluationTextLayout {
+                        area,
+                        viewport,
+                        content_height: classic_multiline_label_height(&lines, text_font),
+                        scrollable: true,
+                    }
+                } else {
+                    ClassicEvaluationTextLayout {
+                        area,
+                        viewport: area,
+                        content_height: measured_height,
+                        scrollable: false,
+                    }
+                }
+            });
+        if let Some(custom_evaluation) = custom_evaluation {
+            // GetFromTop(0, width) consumes caMain's 6px margins above and
+            // below before ExpandTop reserves the label's measured height.
+            player_list_y += custom_evaluation.area.h + 2 * CLASSIC_INDENT_Y;
+        }
+
+        let player_list_height = (player_area_bottom - player_list_y).max(0);
+        let player_lists = if self.evaluation.separate_team_ids.is_some() {
+            let cell_width = ((chrome.dialog.w - CLASSIC_INDENT_X) / 2 - CLASSIC_INDENT_X).max(0);
+            (0..2)
+                .map(|index| IntRect {
+                    x: chrome.dialog.x + CLASSIC_INDENT_X + index * (cell_width + CLASSIC_INDENT_X),
+                    y: player_list_y,
+                    w: cell_width,
+                    h: player_list_height,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![IntRect {
+                x: chrome.player_area.x,
+                y: player_list_y,
+                w: chrome.player_area.w,
+                h: player_list_height,
+            }]
         };
-        let row_width =
-            (player_list.w - CLASSIC_PLAYER_ROW_LEFT_INSET - CLASSIC_PLAYER_ROW_RIGHT_INSET).max(0);
-        let players = self
-            .evaluation
-            .players()
-            .enumerate()
-            .map(|(index, _)| {
+
+        let split = self.evaluation.separate_team_ids;
+        let mut players = Vec::new();
+        for (player_list_index, player_list) in player_lists.iter().copied().enumerate() {
+            let player_indices = if let Some(team_ids) = split {
+                self.evaluation
+                    .players()
+                    .enumerate()
+                    .filter_map(|(index, player)| {
+                        (player.team_id == Some(team_ids[player_list_index])).then_some(index)
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                [true, false]
+                    .into_iter()
+                    .flat_map(|won| {
+                        self.evaluation
+                            .players()
+                            .enumerate()
+                            .filter_map(move |(index, player)| (player.won == won).then_some(index))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let row_width =
+                (player_list.w - CLASSIC_PLAYER_ROW_LEFT_INSET - CLASSIC_PLAYER_ROW_RIGHT_INSET)
+                    .max(0);
+            let mut row_y = player_list.y + CLASSIC_PLAYER_ROW_TOP_INSET;
+            for player_index in player_indices {
+                let player = self
+                    .evaluation
+                    .player(player_index)
+                    .expect("evaluation layout index remains valid");
+                let has_custom_evaluation = !player.custom_evaluation_strings.is_empty();
+                let row_height = CLASSIC_PLAYER_ROW_HEIGHT
+                    + i32::from(has_custom_evaluation) * text_font.line_height;
                 let row = IntRect {
                     x: player_list.x + CLASSIC_PLAYER_ROW_LEFT_INSET,
-                    y: player_list.y
-                        + CLASSIC_PLAYER_ROW_TOP_INSET
-                        + index as i32 * CLASSIC_PLAYER_ROW_STEP,
+                    y: row_y,
                     w: row_width,
-                    h: CLASSIC_PLAYER_ROW_HEIGHT,
+                    h: row_height,
                 };
                 let right_anchor = row.x + row.w - CLASSIC_PLAYER_LABEL_SPACING;
-                ClassicEvaluationPlayerLayout {
+                let score_y = if split.is_some() {
+                    row.y + row.h
+                        - (text_font.line_height + 4) * (1 + i32::from(has_custom_evaluation))
+                        - CLASSIC_PLAYER_LABEL_SPACING
+                } else {
+                    row.y + CLASSIC_PLAYER_LABEL_SPACING
+                };
+                players.push(ClassicEvaluationPlayerLayout {
+                    player_index,
+                    player_list_index,
                     row,
                     icon: IntRect {
                         w: CLASSIC_PLAYER_ROW_HEIGHT,
@@ -956,19 +1161,28 @@ impl GameOverState {
                         ..row
                     },
                     name_anchor: (
-                        row.x + CLASSIC_PLAYER_ROW_HEIGHT + CLASSIC_PLAYER_LABEL_SPACING,
+                        row.x + row.h + CLASSIC_PLAYER_LABEL_SPACING,
                         row.y + CLASSIC_PLAYER_LABEL_SPACING,
                     ),
-                    score_anchor: (right_anchor, row.y + CLASSIC_PLAYER_LABEL_SPACING),
-                    time_anchor: (right_anchor, row.y + 26),
-                }
-            })
-            .collect();
+                    score_anchor: (right_anchor, score_y),
+                    time_anchor: (
+                        right_anchor,
+                        row.y + text_font.line_height + if has_custom_evaluation { 0 } else { 4 },
+                    ),
+                    custom_evaluation_anchor: has_custom_evaluation.then_some((
+                        right_anchor,
+                        row.y + row.h - text_font.line_height - CLASSIC_PLAYER_LABEL_SPACING,
+                    )),
+                });
+                row_y += row_height + (CLASSIC_PLAYER_ROW_STEP - CLASSIC_PLAYER_ROW_HEIGHT);
+            }
+        }
 
         ClassicEvaluationLayout {
             goal_display,
             goals,
-            player_list,
+            custom_evaluation,
+            player_lists,
             players,
         }
     }
@@ -1314,7 +1528,59 @@ impl GameOverState {
             }
         }
 
-        for (player, player_layout) in self.evaluation.players().zip(&layout.players) {
+        if let Some(text_layout) = layout.custom_evaluation {
+            let lines = classic_multiline_label_lines(
+                &resources.fonts.text,
+                self.evaluation.custom_evaluation_strings(),
+                text_layout.viewport.w.max(1),
+            );
+            let maximum_scroll = (text_layout.content_height - text_layout.viewport.h).max(0);
+            let scroll = if text_layout.scrollable {
+                self.custom_evaluation_scroll.min(maximum_scroll)
+            } else {
+                0
+            };
+            let previous_clip = surface.clip();
+            let viewport = surface_rect(text_layout.viewport);
+            let active_clip = previous_clip
+                .and_then(|clip| clip.intersection(viewport))
+                .unwrap_or_else(|| {
+                    if previous_clip.is_some() {
+                        Rect::new(viewport.x, viewport.y, 0, 0)
+                    } else {
+                        viewport
+                    }
+                });
+            surface.set_clip(active_clip);
+            let mut y = text_layout.viewport.y - scroll;
+            for (index, line) in lines.iter().enumerate() {
+                if index > 0 && line.starts_paragraph {
+                    y += resources.fonts.text.line_height / 3;
+                }
+                draw_clonk_text(
+                    surface,
+                    &resources.fonts.text,
+                    text_layout.viewport.x,
+                    y,
+                    &line.text,
+                    Color::opaque(0xff, 0xff, 0xff),
+                    TextAlign::Left,
+                    gamma,
+                );
+                y += resources.fonts.text.line_height;
+            }
+            match previous_clip {
+                Some(clip) => surface.set_clip(clip),
+                None => surface.clear_clip(),
+            }
+        }
+
+        let split_player_lists = layout.player_lists.len() == 2;
+        for player_layout in &layout.players {
+            let player = self
+                .evaluation
+                .player(player_layout.player_index)
+                .expect("evaluation render index remains valid");
             lc_frontend::classic_gui::draw_engine_box(
                 surface,
                 player_layout.row.x,
@@ -1367,24 +1633,107 @@ impl GameOverState {
                     gamma,
                 );
             }
-            let total = player.total_playing_time;
-            draw_clonk_text(
-                surface,
-                &resources.fonts.text,
-                player_layout.time_anchor.0,
-                player_layout.time_anchor.1,
-                &format!(
-                    "Total playing time: {:02}:{:02}:{:02}",
-                    total / 3_600,
-                    (total / 60) % 60,
-                    total % 60
-                ),
-                Color::opaque(0xff, 0xff, 0xff),
-                TextAlign::Right,
-                gamma,
-            );
+            if !split_player_lists {
+                let total = player.total_playing_time;
+                draw_clonk_text(
+                    surface,
+                    &resources.fonts.text,
+                    player_layout.time_anchor.0,
+                    player_layout.time_anchor.1,
+                    &format!(
+                        "Total playing time: {:02}:{:02}:{:02}",
+                        total / 3_600,
+                        (total / 60) % 60,
+                        total % 60
+                    ),
+                    Color::opaque(0xff, 0xff, 0xff),
+                    TextAlign::Right,
+                    gamma,
+                );
+            }
+            if let Some(anchor) = player_layout.custom_evaluation_anchor {
+                draw_clonk_text(
+                    surface,
+                    &resources.fonts.text,
+                    anchor.0,
+                    anchor.1,
+                    &player.custom_evaluation_strings,
+                    Color::opaque(0xff, 0xff, 0xff),
+                    TextAlign::Right,
+                    gamma,
+                );
+            }
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClassicMultilineLabelLine {
+    text: String,
+    starts_paragraph: bool,
+}
+
+fn classic_multiline_label_lines(
+    font: &lc_graphics::clonk_font::ClonkFont,
+    text: &str,
+    width: i32,
+) -> Vec<ClassicMultilineLabelLine> {
+    const INDENT: &str = "    ";
+
+    let indent_width = font.measure(INDENT, true).0;
+    let mut lines = Vec::new();
+    for paragraph in text.split(|character| matches!(character, '\r' | '\n' | '|')) {
+        if paragraph.is_empty() {
+            continue;
+        }
+        let first = lc_frontend::message_dialog::break_message_with_options(
+            font,
+            paragraph,
+            width,
+            lc_frontend::message_dialog::BreakMessageOptions {
+                max_lines: 1,
+                ..lc_frontend::message_dialog::BreakMessageOptions::default()
+            },
+        );
+        let (first_line, remainder) = first
+            .split_once('\n')
+            .map_or((first.as_str(), None), |(line, rest)| (line, Some(rest)));
+        lines.push(ClassicMultilineLabelLine {
+            text: first_line.to_string(),
+            starts_paragraph: true,
+        });
+        let Some(remainder) = remainder.filter(|remainder| !remainder.is_empty()) else {
+            continue;
+        };
+        let continuation = lc_frontend::message_dialog::break_message(
+            font,
+            remainder,
+            width.saturating_sub(indent_width),
+        );
+        lines.extend(
+            continuation
+                .split('\n')
+                .map(|line| ClassicMultilineLabelLine {
+                    text: format!("{INDENT}{line}"),
+                    starts_paragraph: false,
+                }),
+        );
+    }
+    lines
+}
+
+fn classic_multiline_label_height(
+    lines: &[ClassicMultilineLabelLine],
+    font: &lc_graphics::clonk_font::ClonkFont,
+) -> i32 {
+    let mut height = 0_i32;
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 && line.starts_paragraph {
+            height = height.saturating_add(font.line_height / 3);
+        }
+        height = height.saturating_add(font.line_height);
+    }
+    height.max(5)
 }
 
 fn classic_button_width(fonts: &ClonkFontSet) -> i32 {
@@ -1782,7 +2131,9 @@ mod tests {
         let mut state = GameOverState::new("Evaluation".to_string(), Vec::new());
         state.configure_classic_fonts(Some(&fonts));
         let list = state
-            .classic_player_list_rect(1024, 600)
+            .classic_player_list_rects(1024, 600)
+            .into_iter()
+            .next()
             .expect("classic player list");
         state.handle_pointer_move((list.x + 1) as f32, (list.y + 1) as f32, 1024, 600);
         state.handle_pointer_down(1024, 600);
@@ -2060,6 +2411,7 @@ mod tests {
     fn evaluation_player(player_info_id: i32, name: &str) -> EvaluationPlayer {
         EvaluationPlayer {
             player_info_id,
+            team_id: None,
             name: name.to_string(),
             won: true,
             color_dw: 0x00f4_0000,
@@ -2123,6 +2475,264 @@ mod tests {
     }
 
     #[test]
+    fn fixed_two_team_evaluation_uses_distinct_lists_and_team_local_order() {
+        // C4GameOverDlg creates exactly two grid cells for two predefined
+        // teams. Each filtered C4PlayerInfoListBox retains player-info order
+        // inside its own team instead of interleaving the columns by outcome
+        // (C4GameOverDlg.cpp:214-229; C4PlayerInfoListBox.cpp:1529-1589).
+        let fonts = endeavour_fonts();
+        let mut players = vec![
+            evaluation_player(20, "Blue first"),
+            evaluation_player(10, "Red first"),
+            evaluation_player(11, "Red second"),
+            evaluation_player(21, "Blue second"),
+        ];
+        players[0].team_id = Some(2);
+        players[0].won = false;
+        players[1].team_id = Some(1);
+        players[1].custom_evaluation_strings = "Red note".into();
+        players[2].team_id = Some(1);
+        players[3].team_id = Some(2);
+        players[3].won = false;
+        let evaluation = EvaluationViewModel::new(Vec::new(), players)
+            .with_dialog_context(String::new(), Some([1, 2]));
+        let mut state = GameOverState::new("Evaluation".into(), Vec::new());
+        state.set_evaluation(evaluation);
+        state.configure_classic_fonts(Some(&fonts));
+
+        let layout = state.classic_evaluation_layout(1024, 600, &fonts);
+        assert_eq!(
+            layout.player_lists,
+            vec![
+                IntRect {
+                    x: 15,
+                    y: 34,
+                    w: 492,
+                    h: 487,
+                },
+                IntRect {
+                    x: 517,
+                    y: 34,
+                    w: 492,
+                    h: 487,
+                },
+            ]
+        );
+        assert_eq!(
+            layout
+                .players
+                .iter()
+                .map(|player| (player.player_list_index, player.player_index))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (0, 2), (1, 0), (1, 3)]
+        );
+        assert_eq!(layout.players[0].row.h, 54 + fonts.text.line_height);
+        assert_eq!(
+            layout.players[1].row.y,
+            layout.players[0].row.y + layout.players[0].row.h + 1,
+            "the custom row reserves one text line before its team peer"
+        );
+
+        for expected in [
+            GameOverFocus::Close,
+            GameOverFocus::PlayerList(0),
+            GameOverFocus::PlayerList(1),
+            GameOverFocus::Button(0),
+        ] {
+            assert_eq!(state.advance_focus(false), expected);
+        }
+        assert_eq!(
+            state.advance_focus(true),
+            GameOverFocus::PlayerList(1),
+            "backward traversal returns through the second team list"
+        );
+        let first_custom_anchor = layout.players[0]
+            .custom_evaluation_anchor
+            .expect("first red player custom line");
+        assert!(layout.players[0].score_anchor.1 + fonts.text.line_height <= first_custom_anchor.1);
+        let second = surface_rect(layout.player_lists[1]);
+        state.handle_pointer_move((second.x + 1) as f32, (second.y + 1) as f32, 1024, 600);
+        state.handle_pointer_down(1024, 600);
+        assert_eq!(state.focused(), Some(GameOverFocus::PlayerList(1)));
+
+        let caption = solid_image(192, 23, [20, 30, 40, 255]);
+        let button = solid_image(128, 32, [0, 120, 0, 255]);
+        let button_down = solid_image(128, 32, [0, 0, 180, 255]);
+        let skin = ClassicGuiSkin::new(&caption, &button, &button_down, None);
+        let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        state.render(
+            &mut surface,
+            &lc_graphics::BitmapFont::new(),
+            Some(GameOverClassicResources::new(
+                skin, &fonts, None, None, None, None,
+            )),
+        );
+        let commands = surface.take_clonk_text_capture();
+        for player_layout in &layout.players {
+            let player = state
+                .evaluation()
+                .player(player_layout.player_index)
+                .expect("rendered split player");
+            let label = format!(
+                "{} ({})",
+                player.name,
+                if player.won { "won" } else { "lost" }
+            );
+            let command = commands
+                .iter()
+                .find(|command| command.text == label)
+                .expect("split player name draw");
+            assert_eq!((command.x, command.y), player_layout.name_anchor);
+            assert!(player_layout.row.x >= layout.player_lists[player_layout.player_list_index].x);
+            assert!(
+                player_layout.row.x + player_layout.row.w
+                    <= layout.player_lists[player_layout.player_list_index].x
+                        + layout.player_lists[player_layout.player_list_index].w
+            );
+        }
+    }
+
+    #[test]
+    fn custom_evaluation_long_paragraph_uses_cpp_continuation_indent() {
+        let fonts = endeavour_fonts();
+        let lines = classic_multiline_label_lines(
+            &fonts.text,
+            "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron",
+            120,
+        );
+
+        assert!(lines.len() > 2, "fixture must wrap automatically");
+        assert!(lines[0].starts_paragraph);
+        assert!(lines[1..]
+            .iter()
+            .all(|line| !line.starts_paragraph && line.text.starts_with("    ")));
+        assert_eq!(
+            classic_multiline_label_height(&lines, &fonts.text),
+            i32::try_from(lines.len()).expect("line count") * fonts.text.line_height
+        );
+    }
+
+    #[test]
+    fn custom_evaluation_text_and_player_note_reserve_and_render_regions() {
+        let fonts = endeavour_fonts();
+        let mut player = evaluation_player(41, "Player");
+        player.custom_evaluation_strings = "Personal note".into();
+        let evaluation = EvaluationViewModel::new(Vec::new(), vec![player])
+            .with_dialog_context("Global one|Global two".into(), None);
+        let mut state = GameOverState::new("Evaluation".into(), Vec::new());
+        state.set_evaluation(evaluation);
+        let layout = state.classic_evaluation_layout(1024, 600, &fonts);
+        let custom = layout.custom_evaluation.expect("global custom text layout");
+        assert!(!custom.scrollable);
+        assert_eq!(
+            custom.area.h,
+            fonts.text.line_height * 2 + fonts.text.line_height / 3
+        );
+        assert_eq!(layout.players[0].row.h, 54 + fonts.text.line_height);
+        assert_eq!(
+            layout.players[0].time_anchor.1,
+            layout.players[0].row.y + fonts.text.line_height,
+            "the extra line shifts the unified-list time row four pixels upward"
+        );
+        assert_eq!(
+            layout.player_lists[0].y,
+            custom.area.y + custom.area.h + 2 * CLASSIC_INDENT_Y,
+            "the custom block consumes caMain's vertical margins before the player list"
+        );
+        assert_eq!(
+            layout.players[0].custom_evaluation_anchor,
+            Some((
+                layout.players[0].row.x + layout.players[0].row.w - 2,
+                layout.players[0].row.y + layout.players[0].row.h - fonts.text.line_height - 2,
+            ))
+        );
+
+        let caption = solid_image(192, 23, [20, 30, 40, 255]);
+        let button = solid_image(128, 32, [0, 120, 0, 255]);
+        let button_down = solid_image(128, 32, [0, 0, 180, 255]);
+        let skin = ClassicGuiSkin::new(&caption, &button, &button_down, None);
+        let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        state.render(
+            &mut surface,
+            &lc_graphics::BitmapFont::new(),
+            Some(GameOverClassicResources::new(
+                skin, &fonts, None, None, None, None,
+            )),
+        );
+        let commands = surface.take_clonk_text_capture();
+        let global = commands
+            .iter()
+            .filter(|command| matches!(command.text.as_str(), "Global one" | "Global two"))
+            .collect::<Vec<_>>();
+        assert_eq!(global.len(), 2);
+        assert!(global
+            .iter()
+            .all(|command| command.clip == Some(surface_rect(custom.viewport))));
+        let personal = commands
+            .iter()
+            .find(|command| command.text == "Personal note")
+            .expect("per-player custom evaluation draw");
+        assert_eq!(personal.align, TextAlign::Right);
+        assert_eq!(
+            (personal.x, personal.y),
+            layout.players[0]
+                .custom_evaluation_anchor
+                .expect("custom row anchor")
+        );
+    }
+
+    #[test]
+    fn oversized_custom_evaluation_is_clipped_to_one_third_and_wheel_scrolls() {
+        let fonts = endeavour_fonts();
+        let text = (0..40)
+            .map(|index| format!("Line {index}"))
+            .collect::<Vec<_>>()
+            .join("|");
+        let evaluation =
+            EvaluationViewModel::new(Vec::new(), Vec::new()).with_dialog_context(text, None);
+        let mut state = GameOverState::new("Evaluation".into(), Vec::new());
+        state.set_evaluation(evaluation);
+        state.configure_classic_fonts(Some(&fonts));
+        let layout = state.classic_evaluation_layout(1024, 600, &fonts);
+        let custom = layout.custom_evaluation.expect("overflow layout");
+        assert!(custom.scrollable);
+        assert_eq!(custom.area.h, 487 / 3);
+        assert!(custom.content_height > custom.viewport.h);
+
+        state.handle_pointer_move(
+            (custom.viewport.x + 1) as f32,
+            (custom.viewport.y + 1) as f32,
+            1024,
+            600,
+        );
+        assert!(state.handle_wheel(-60, 1024, 600));
+        assert_eq!(state.custom_evaluation_scroll, 60);
+
+        let caption = solid_image(192, 23, [20, 30, 40, 255]);
+        let button = solid_image(128, 32, [0, 120, 0, 255]);
+        let button_down = solid_image(128, 32, [0, 0, 180, 255]);
+        let skin = ClassicGuiSkin::new(&caption, &button, &button_down, None);
+        let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        state.render(
+            &mut surface,
+            &lc_graphics::BitmapFont::new(),
+            Some(GameOverClassicResources::new(
+                skin, &fonts, None, None, None, None,
+            )),
+        );
+        let first = surface
+            .take_clonk_text_capture()
+            .into_iter()
+            .find(|command| command.text == "Line 0")
+            .expect("first overflow line draw");
+        assert_eq!(first.y, custom.viewport.y - 60);
+        assert_eq!(first.clip, Some(surface_rect(custom.viewport)));
+    }
+
+    #[test]
     fn classic_evaluation_content_layout_matches_cpp_at_audited_resolutions() {
         // C4GameOverDlg takes a 64px goal strip, C4GoalDisplay adds 4px
         // margins around each goal, and C4PlayerInfoListBox reserves its
@@ -2166,7 +2776,7 @@ mod tests {
             }
         );
         assert_eq!(
-            content.player_list,
+            content.player_lists[0],
             IntRect {
                 x: 15,
                 y: 118,
@@ -2223,7 +2833,7 @@ mod tests {
             }
         );
         assert_eq!(
-            content.player_list,
+            content.player_lists[0],
             IntRect {
                 x: 85,
                 y: 188,
@@ -2268,7 +2878,7 @@ mod tests {
             }
         );
         assert_eq!(
-            content.player_list,
+            content.player_lists[0],
             IntRect {
                 x: 330,
                 y: 293,
@@ -2312,7 +2922,7 @@ mod tests {
         let layout = state.classic_evaluation_layout(1024, 600, &fonts);
         assert_eq!(layout.goal_display, None);
         assert_eq!(
-            layout.player_list,
+            layout.player_lists[0],
             IntRect {
                 x: 15,
                 y: 34,
@@ -2495,6 +3105,7 @@ mod tests {
             }],
             vec![EvaluationPlayer {
                 player_info_id: 41,
+                team_id: None,
                 name: "Player".into(),
                 won: true,
                 color_dw: 0x00e8_0000,
