@@ -127,8 +127,8 @@ use lc_frontend::game_option_buttons::{
 };
 use lc_frontend::input_dialog::{
     InputDialogAction, InputDialogClipboardShortcut, InputDialogContextCommand,
-    InputDialogContextLabels, InputDialogController, InputDialogEditKey, InputDialogIcon,
-    InputDialogKeyModifiers, InputDialogPlacement, InputDialogSound,
+    InputDialogContextLabels, InputDialogControl, InputDialogController, InputDialogEditKey,
+    InputDialogIcon, InputDialogKeyModifiers, InputDialogPlacement, InputDialogSound,
 };
 use lc_frontend::hud::MESSAGE_BOARD_MAX_FADING_LINES;
 use lc_frontend::loader_screen::{
@@ -4354,6 +4354,9 @@ fn build_runtime_flash_resources(table: &RuntimeLanguageTable) -> RuntimeFlashRe
         charset: table.charset,
         music: text("IDS_CTL_MUSIC"),
         speed: text("IDS_MSG_SPEED"),
+        debug_mode: text("IDS_CTL_DEBUGMODE"),
+        debug_mode_not_allowed: text("IDS_MSG_DEBUGMODENOTALLOWED"),
+        no_debug_mode: text("IDS_MSG_NODEBUGMODE"),
         on: text("IDS_CTL_ON"),
         off: text("IDS_CTL_OFF"),
     }
@@ -12324,8 +12327,12 @@ fn extract_default_startup_portraits_once(paths: &AppPaths) {
             return;
         }
     }
-    if let Err(error) =
-        save_config_preserving_native_gamepads_enabled(&config, &config_path, None)
+    if let Err(error) = save_config_preserving_native_general_booleans(
+        &config,
+        &config_path,
+        None,
+        None,
+    )
     {
         tracing::warn!(%error, path = %config_path.display(), "failed to persist portrait extraction flag");
     }
@@ -14411,17 +14418,38 @@ struct RuntimeFlashResources {
     charset: RuntimeHelpCharset,
     music: String,
     speed: String,
+    debug_mode: String,
+    debug_mode_not_allowed: String,
+    no_debug_mode: String,
     on: String,
     off: String,
 }
 
 impl RuntimeFlashResources {
+    fn undefined() -> Self {
+        let text = |key: &str| format!("[Undefined: {key}]");
+        Self {
+            charset: RuntimeHelpCharset::Windows1252,
+            music: text("IDS_CTL_MUSIC"),
+            speed: text("IDS_MSG_SPEED"),
+            debug_mode: text("IDS_CTL_DEBUGMODE"),
+            debug_mode_not_allowed: text("IDS_MSG_DEBUGMODENOTALLOWED"),
+            no_debug_mode: text("IDS_MSG_NODEBUGMODE"),
+            on: text("IDS_CTL_ON"),
+            off: text("IDS_CTL_OFF"),
+        }
+    }
+
+    fn on_off(&self, label: &str, enabled: bool) -> String {
+        format!("{label}: {}", if enabled { &self.on } else { &self.off })
+    }
+
     fn music_on_off(&self, enabled: bool) -> String {
-        format!(
-            "{}: {}",
-            self.music,
-            if enabled { &self.on } else { &self.off }
-        )
+        self.on_off(&self.music, enabled)
+    }
+
+    fn debug_mode_on_off(&self, enabled: bool) -> String {
+        self.on_off(&self.debug_mode, enabled)
     }
 
     fn speed(&self, frame_skip: i32) -> String {
@@ -14536,8 +14564,17 @@ impl RuntimeKeyConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeGlobalKeyOutcome {
     Unhandled,
+    UnhandledAfterDeniedDebug,
     Handled,
     DownstreamWithoutEngineDispatch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeDebugKey {
+    Mode,
+    Vertices,
+    ActionCycle,
+    SolidMask,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14556,10 +14593,6 @@ enum RuntimeCustomGamepadAction {
 enum RuntimeFlashProducerBoundary {
     ObserverPrompt,
     ObserverClear,
-    DebugMode,
-    DebugVertices,
-    DebugActionCycle,
-    DebugSolidMask,
     RuntimeJoin,
     ControlRate,
     FairCrew,
@@ -14568,13 +14601,9 @@ enum RuntimeFlashProducerBoundary {
 }
 
 impl RuntimeFlashProducerBoundary {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 7] = [
         Self::ObserverPrompt,
         Self::ObserverClear,
-        Self::DebugMode,
-        Self::DebugVertices,
-        Self::DebugActionCycle,
-        Self::DebugSolidMask,
         Self::RuntimeJoin,
         Self::ControlRate,
         Self::FairCrew,
@@ -20779,7 +20808,7 @@ fn repair_rust_truncated_masterserver_urls(config_path: &Path) -> io::Result<boo
         }
     }
     if repaired {
-        save_config_preserving_native_gamepads_enabled(&config, config_path, None)?;
+        save_config_preserving_native_general_booleans(&config, config_path, None, None)?;
     }
     Ok(repaired)
 }
@@ -20941,35 +20970,51 @@ fn load_gamepads_enabled(paths: Option<&AppPaths>) -> bool {
     configured_gamepads_enabled(&load_native_config_bytes(paths))
 }
 
-fn save_config_preserving_native_gamepads_enabled(
+fn save_config_preserving_native_general_booleans(
     config: &Config,
     path: &Path,
     updated_gamepads_enabled: Option<bool>,
+    updated_always_debug: Option<bool>,
 ) -> io::Result<()> {
     // The UTF-8 convenience writer emits `Key = value`, but native Boolean
     // values must begin immediately after `=`. Preserve or explicitly replace
-    // this flag whenever a Rust-owned save rewrites the complete file.
-    let gamepads_enabled = match updated_gamepads_enabled {
-        Some(enabled) => Some(enabled),
-        None => match fs::read(path) {
-            Ok(config) => {
-                lc_app::configured_native_boolean(&config, "General", "GamepadEnabled")
-            }
+    // these process-start flags whenever Rust rewrites the complete file.
+    let existing = if updated_gamepads_enabled.is_none() || updated_always_debug.is_none() {
+        match fs::read(path) {
+            Ok(config) => Some(config),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
-        },
+        }
+    } else {
+        None
     };
+    let gamepads_enabled = updated_gamepads_enabled.or_else(|| {
+        existing.as_deref().and_then(|config| {
+            lc_app::configured_native_boolean(config, "General", "GamepadEnabled")
+        })
+    });
+    let always_debug = updated_always_debug.or_else(|| {
+        existing
+            .as_deref()
+            .and_then(|config| lc_app::configured_native_boolean(config, "General", "DebugMode"))
+    });
     config.save(path)?;
+    let mut updates = Vec::new();
     if let Some(enabled) = gamepads_enabled {
-        let config = fs::read(path)?;
-        let updated = lc_app::update_configured_native_values(
-            &config,
-            "General",
-            &[(
-                "GamepadEnabled",
-                lc_app::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
-            )],
-        )?;
+        updates.push((
+            "GamepadEnabled",
+            lc_app::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
+        ));
+    }
+    if let Some(enabled) = always_debug {
+        updates.push((
+            "DebugMode",
+            lc_app::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
+        ));
+    }
+    if !updates.is_empty() {
+        let saved = fs::read(path)?;
+        let updated = lc_app::update_configured_native_values(&saved, "General", &updates)?;
         fs::write(path, updated)?;
     }
     Ok(())
@@ -22229,7 +22274,7 @@ fn persist_config_value(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    save_config_preserving_native_gamepads_enabled(&config, &path, None)
+    save_config_preserving_native_general_booleans(&config, &path, None, None)
 }
 
 fn persist_irc_login_settings(
@@ -22459,7 +22504,7 @@ fn persist_startup_options_config(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    save_config_preserving_native_gamepads_enabled(&config, &path, None)
+    save_config_preserving_native_general_booleans(&config, &path, None, None)
 }
 
 fn load_participants_label(paths: Option<&AppPaths>) -> String {
@@ -22629,7 +22674,7 @@ fn save_validated_startup_participant_config(
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    save_config_preserving_native_gamepads_enabled(&config, &config_path, None)
+    save_config_preserving_native_general_booleans(&config, &config_path, None, None)
 }
 
 fn remove_startup_participant_config(
@@ -23815,10 +23860,10 @@ impl GameApp {
     ) -> Result<Self> {
         // Capture native Boolean grammar before participant validation or any
         // other UTF-8 convenience writer can rewrite the config projection.
-        // The native gamepad subsystem is likewise fixed before startup UI.
-        let gamepads_enabled = load_gamepads_enabled(paths);
-        let allow_scripting_in_replays =
-            configured_allow_scripting_in_replays(&load_native_config_bytes(paths));
+        // Both values are process-local in C++ and fixed before startup UI.
+        let native_config = load_native_config_bytes(paths);
+        let gamepads_enabled = configured_gamepads_enabled(&native_config);
+        let allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
         // A real installation must establish C4GUI's process-global bundle
         // before any controller, discovery worker, renderer, or app-owned UI
         // state is constructed. Asset-less test apps install their explicit
@@ -31169,6 +31214,22 @@ impl GameApp {
     /// Individual unknown or malformed entries are warning-only like
     /// `CompileFromBuf_LogWarn` and therefore never reach this boundary.
     fn guard_runtime_key_dispatch(&self, key: VirtualKeyCode) -> Result<(), EngineError> {
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if c4_modifiers == ModifiersState::CTRL
+            && matches!(
+                key,
+                VirtualKeyCode::F5
+                    | VirtualKeyCode::F6
+                    | VirtualKeyCode::F7
+                    | VirtualKeyCode::F8
+            )
+        {
+            // Native retains these registered defaults when no custom list
+            // can be loaded. More importantly, a resource failure must not
+            // turn the four diagnostic keys into process-fatal input.
+            return Ok(());
+        }
         self.runtime_key_config().map(|_| ()).map_err(|error| {
             let boundary = match key {
                 VirtualKeyCode::F1 => ClassicParityBoundary::RuntimeHelpResources {
@@ -33513,44 +33574,6 @@ impl GameApp {
             }
             return Ok(RuntimeGlobalKeyOutcome::Handled);
         }
-        let unavailable_flash_producer = [
-            (
-                "DbgModeToggle",
-                RuntimeFlashProducerBoundary::DebugMode,
-                key == VirtualKeyCode::F5 && c4_modifiers == ModifiersState::CTRL,
-            ),
-            (
-                "DbgShowVtxToggle",
-                RuntimeFlashProducerBoundary::DebugVertices,
-                key == VirtualKeyCode::F6 && c4_modifiers == ModifiersState::CTRL,
-            ),
-            (
-                "DbgShowActionToggle",
-                RuntimeFlashProducerBoundary::DebugActionCycle,
-                key == VirtualKeyCode::F7 && c4_modifiers == ModifiersState::CTRL,
-            ),
-            (
-                "DbgShowSolidMaskToggle",
-                RuntimeFlashProducerBoundary::DebugSolidMask,
-                key == VirtualKeyCode::F8 && c4_modifiers == ModifiersState::CTRL,
-            ),
-        ]
-        .into_iter()
-        .find_map(|(name, producer, default_matches)| {
-            self.runtime_keyboard_binding_matches(name, key, default_matches)
-                .then_some(producer)
-        });
-        if let Some(producer) = unavailable_flash_producer {
-            if state == ElementState::Pressed {
-                return Err(classic_parity_engine_error(report_classic_parity_boundary(
-                    ClassicParityBoundary::RuntimeFlashProducer(producer),
-                )));
-            }
-            // C4's producer has no Up callback, but its exact modified
-            // physical release must not leak into modifier-blind Rust player
-            // controls after the refused Down action.
-            return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
-        }
         let sound_binding = self.runtime_keyboard_binding_matches(
             "SoundToggle",
             key,
@@ -33629,6 +33652,89 @@ impl GameApp {
             self.toggle_runtime_client_list()?;
             return Ok(RuntimeGlobalKeyOutcome::Handled);
         }
+        let debug_keys = [
+            (
+                "DbgModeToggle",
+                RuntimeDebugKey::Mode,
+                key == VirtualKeyCode::F5 && c4_modifiers == ModifiersState::CTRL,
+            ),
+            (
+                "DbgShowVtxToggle",
+                RuntimeDebugKey::Vertices,
+                key == VirtualKeyCode::F6 && c4_modifiers == ModifiersState::CTRL,
+            ),
+            (
+                "DbgShowActionToggle",
+                RuntimeDebugKey::ActionCycle,
+                key == VirtualKeyCode::F7 && c4_modifiers == ModifiersState::CTRL,
+            ),
+            (
+                "DbgShowSolidMaskToggle",
+                RuntimeDebugKey::SolidMask,
+                key == VirtualKeyCode::F8 && c4_modifiers == ModifiersState::CTRL,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(name, action, default_matches)| {
+            self.runtime_keyboard_binding_matches(name, key, default_matches)
+                .then_some(action)
+        })
+        .collect::<Vec<_>>();
+        let mut denied_debug = false;
+        if !debug_keys.is_empty() {
+            // Player controls have PRIO_PlrControl and therefore own an exact
+            // remapped collision before the PRIO_Base debug callbacks.
+            if self.local_player_key_binding_owner_in_scope(key).is_some() {
+                self.handle_engine_key(key, state)?;
+                return Ok(RuntimeGlobalKeyOutcome::Handled);
+            }
+            // Context callbacks have PRIO_Context above these PRIO_Base
+            // registrations. Let an owned navigation key or mnemonic reach
+            // the menu before considering a remapped debug action.
+            let active_context_key = c4_modifiers.is_empty()
+                && self.context_menu.as_ref().is_some_and(|menu| {
+                    context_menu_key_code(key).is_some_and(|key| menu.owns_key(key))
+                        || context_menu_hotkey(key)
+                            .is_some_and(|hotkey| menu.owns_hotkey(hotkey))
+                });
+            if active_context_key {
+                return Ok(RuntimeGlobalKeyOutcome::Unhandled);
+            }
+            let stronger_dialog_key = (self.running_chat_keyboard_active()
+                && self.context_menu.is_none()
+                && self.running_chat_key_has_higher_priority_route(key))
+                || self.message_dialog_key_has_higher_priority_route(key)
+                || self.game_over_key_has_higher_priority_route(key);
+            if stronger_dialog_key {
+                return Ok(RuntimeGlobalKeyOutcome::Unhandled);
+            }
+            // ToggleChat was registered before every debug callback but is
+            // routed later so active GUI owners can refuse it first.
+            let earlier_toggle_chat = self.runtime_keyboard_binding_matches(
+                "ToggleChat",
+                key,
+                key == VirtualKeyCode::C && c4_modifiers == ModifiersState::ALT,
+            );
+            if earlier_toggle_chat {
+                return Ok(RuntimeGlobalKeyOutcome::Unhandled);
+            }
+            if state == ElementState::Pressed {
+                for action in debug_keys {
+                    if self.handle_runtime_debug_key(action)? {
+                        return Ok(RuntimeGlobalKeyOutcome::Handled);
+                    }
+                    denied_debug = true;
+                }
+                // Native callbacks return false for a denied toggle. Keep
+                // walking the registration list, including later debug keys.
+            }
+            if state == ElementState::Released {
+                // The callbacks have no Up handler. Suppress a modified
+                // physical release from leaking into modifier-blind fallback
+                // controls.
+                return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
+            }
+        }
         if speed_up_binding || speed_down_binding {
             // Native player controls have PRIO_PlrControl and therefore own
             // an exact custom collision before these PRIO_Base callbacks.
@@ -33670,9 +33776,17 @@ impl GameApp {
             if matches!(key, VirtualKeyCode::F1 | VirtualKeyCode::F3) {
                 return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
             }
-            return Ok(RuntimeGlobalKeyOutcome::Unhandled);
+            return Ok(if denied_debug {
+                RuntimeGlobalKeyOutcome::UnhandledAfterDeniedDebug
+            } else {
+                RuntimeGlobalKeyOutcome::Unhandled
+            });
         }
-        Ok(RuntimeGlobalKeyOutcome::Unhandled)
+        Ok(if denied_debug {
+            RuntimeGlobalKeyOutcome::UnhandledAfterDeniedDebug
+        } else {
+            RuntimeGlobalKeyOutcome::Unhandled
+        })
     }
 
     /// Runs the default-unbound PRIO_Base ChartToggle after the modeled
@@ -34192,11 +34306,13 @@ impl GameApp {
         if self.handle_network_chart_key(key, state) {
             return Ok(());
         }
-        let runtime_engine_dispatch_suppressed = match self.handle_runtime_global_key(key, state)? {
-            RuntimeGlobalKeyOutcome::Handled => return Ok(()),
-            RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch => true,
-            RuntimeGlobalKeyOutcome::Unhandled => false,
-        };
+        let (runtime_engine_dispatch_suppressed, denied_debug_callback) =
+            match self.handle_runtime_global_key(key, state)? {
+                RuntimeGlobalKeyOutcome::Handled => return Ok(()),
+                RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch => (true, false),
+                RuntimeGlobalKeyOutcome::Unhandled => (false, false),
+                RuntimeGlobalKeyOutcome::UnhandledAfterDeniedDebug => (false, true),
+            };
         if self.handle_scoreboard_key(key, state)? {
             return Ok(());
         }
@@ -35140,7 +35256,9 @@ impl GameApp {
                 }
                 let viewport_scope_excludes_player_control =
                     self.viewport_scope_excludes_player_control();
-                let unsupported_running_shortcut = if state == ElementState::Pressed {
+                let unsupported_running_shortcut = if state == ElementState::Pressed
+                    && c4_modifiers.is_empty()
+                {
                     match key {
                         VirtualKeyCode::F5 => Some("F5"),
                         VirtualKeyCode::F6 => Some("F6"),
@@ -35153,7 +35271,7 @@ impl GameApp {
                 if self.handle_viewport_player_cycle_key(key, state) {
                     return Ok(());
                 }
-                if let Some(key) = unsupported_running_shortcut {
+                if let Some(key) = unsupported_running_shortcut.filter(|_| !denied_debug_callback) {
                     return Err(classic_parity_engine_error(report_classic_parity_boundary(
                         ClassicParityBoundary::RunningShortcut { key },
                     )));
@@ -37615,6 +37733,109 @@ impl GameApp {
             &self.savegame_slot_base(),
             slot,
         )
+    }
+
+    fn prepare_runtime_debug_flash(
+        &self,
+        message: impl Fn(&RuntimeFlashResources) -> String,
+    ) -> Option<RuntimeFlashMessage> {
+        let fallback = RuntimeFlashResources::undefined();
+        let resources = match self.runtime_flash_resources() {
+            Ok(resources) => resources,
+            Err(error) => {
+                tracing::warn!(%error, "debug flash resources unavailable; using C++ undefined labels");
+                &fallback
+            }
+        };
+        let message_text = message(resources);
+        match self.prepare_runtime_flash_message(&message_text, resources.charset) {
+            Ok(flash) => flash,
+            Err(error) => {
+                tracing::warn!(%error, "debug flash text is not renderable; using C++ undefined labels");
+                self.prepare_runtime_flash_message(&message(&fallback), fallback.charset)
+                    .ok()
+                    .flatten()
+            }
+        }
+    }
+
+    /// Exact `ToggleDebugMode` / `C4GraphicsSystem::ToggleShow*` callbacks.
+    /// The existing frontend flags drive the native-shaped overlay renderers;
+    /// every flash is prepared before the corresponding state mutation.
+    fn handle_runtime_debug_key(&mut self, key: RuntimeDebugKey) -> Result<bool, EngineError> {
+        if key != RuntimeDebugKey::Mode && !self.engine.debug_mode() {
+            let flash =
+                self.prepare_runtime_debug_flash(|resources| resources.no_debug_mode.clone());
+            self.runtime_flash_message = flash;
+            return Ok(false);
+        }
+
+        match key {
+            RuntimeDebugKey::Mode => {
+                let enabled = self.engine.debug_mode();
+                if !self.engine.allow_debug() && !enabled {
+                    let flash = self.prepare_runtime_debug_flash(|resources| {
+                        resources.debug_mode_not_allowed.clone()
+                    });
+                    self.runtime_flash_message = flash;
+                    return Ok(false);
+                }
+                let enabled = !enabled;
+                let flash = self.prepare_runtime_debug_flash(|resources| {
+                    resources.debug_mode_on_off(enabled)
+                });
+                self.engine.set_debug_mode(enabled);
+                if !enabled {
+                    self.graphics
+                        .set_debug_draw_flags(lc_frontend::DebugDrawFlags::default());
+                }
+                self.runtime_flash_message = flash;
+            }
+            RuntimeDebugKey::Vertices => {
+                let mut flags = self.graphics.debug_draw_flags();
+                flags.show_vertices = !flags.show_vertices;
+                flags.show_entrance = !flags.show_entrance;
+                let enabled = flags.show_vertices || flags.show_entrance;
+                let flash = self.prepare_runtime_debug_flash(|resources| {
+                    resources.on_off("Entrance+Vertices", enabled)
+                });
+                self.graphics.set_debug_draw_flags(flags);
+                self.runtime_flash_message = flash;
+            }
+            RuntimeDebugKey::ActionCycle => {
+                let mut flags = self.graphics.debug_draw_flags();
+                let flash = if !(flags.show_action || flags.show_command || flags.show_pathfinder) {
+                    flags.show_action = true;
+                    self.prepare_runtime_debug_flash(|_| "Actions".to_string())
+                } else if flags.show_action {
+                    flags.show_action = false;
+                    flags.show_command = true;
+                    self.prepare_runtime_debug_flash(|_| "Commands".to_string())
+                } else if flags.show_command {
+                    flags.show_command = false;
+                    flags.show_pathfinder = true;
+                    self.prepare_runtime_debug_flash(|_| "Pathfinder".to_string())
+                } else {
+                    flags.show_pathfinder = false;
+                    self.prepare_runtime_debug_flash(|resources| {
+                        resources.on_off("Actions/Commands/Pathfinder", false)
+                    })
+                };
+                self.graphics.set_debug_draw_flags(flags);
+                self.runtime_flash_message = flash;
+            }
+            RuntimeDebugKey::SolidMask => {
+                let mut flags = self.graphics.debug_draw_flags();
+                flags.show_solid_mask = !flags.show_solid_mask;
+                let enabled = flags.show_solid_mask;
+                let flash = self.prepare_runtime_debug_flash(|resources| {
+                    resources.on_off("SolidMasks", enabled)
+                });
+                self.graphics.set_debug_draw_flags(flags);
+                self.runtime_flash_message = flash;
+            }
+        }
+        Ok(true)
     }
 
     /// `Game.QuickSave(strFilename, strTitle)` for a menu slot
@@ -41020,16 +41241,45 @@ impl GameApp {
     }
 
     fn running_chat_key_has_higher_priority_route(&self, key: VirtualKeyCode) -> bool {
+        let Some(controller) = self.running_chat_controller() else {
+            return false;
+        };
         let modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        if modifiers.contains(ModifiersState::CTRL) {
-            return true;
-        }
         if modifiers.contains(ModifiersState::ALT) {
             return false;
         }
-        if key == VirtualKeyCode::Return && modifiers == ModifiersState::SHIFT {
+        if modifiers == ModifiersState::CTRL {
+            return true;
+        }
+        let edit_focused = controller.focused_control() == InputDialogControl::Edit;
+        let edit_key = matches!(
+            key,
+            VirtualKeyCode::Back
+                | VirtualKeyCode::Delete
+                | VirtualKeyCode::Left
+                | VirtualKeyCode::Right
+                | VirtualKeyCode::Home
+                | VirtualKeyCode::End
+        );
+        if modifiers == (ModifiersState::CTRL | ModifiersState::SHIFT) {
+            return edit_focused && edit_key;
+        }
+        if modifiers == ModifiersState::SHIFT {
+            return key == VirtualKeyCode::Tab || (edit_focused && edit_key);
+        }
+        if !modifiers.is_empty() {
             return false;
+        }
+        if edit_key {
+            return edit_focused
+                || (key == VirtualKeyCode::Back && controller.text().is_empty());
+        }
+        if key == VirtualKeyCode::Space {
+            return !edit_focused;
+        }
+        if key == VirtualKeyCode::Apps {
+            return edit_focused;
         }
         matches!(
             key,
@@ -41040,13 +41290,74 @@ impl GameApp {
                 | VirtualKeyCode::Tab
                 | VirtualKeyCode::Up
                 | VirtualKeyCode::Down
-                | VirtualKeyCode::Back
-                | VirtualKeyCode::Delete
-                | VirtualKeyCode::Left
-                | VirtualKeyCode::Right
-                | VirtualKeyCode::Home
-                | VirtualKeyCode::End
         )
+    }
+
+    fn message_dialog_key_has_higher_priority_route(&self, key: VirtualKeyCode) -> bool {
+        let Some(active_index) = self.active_message_dialog_index() else {
+            return false;
+        };
+        if !self.running_shared_gui_has_keyboard_focus() {
+            return false;
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if modifiers.is_empty() {
+            return matches!(
+                key,
+                VirtualKeyCode::Tab
+                    | VirtualKeyCode::Escape
+                    | VirtualKeyCode::Return
+                    | VirtualKeyCode::Space
+            );
+        }
+        if modifiers == ModifiersState::SHIFT {
+            return key == VirtualKeyCode::Tab;
+        }
+        if modifiers == ModifiersState::ALT
+            || modifiers == (ModifiersState::ALT | ModifiersState::SHIFT)
+        {
+            return message_dialog_hotkey(key).is_some_and(|hotkey| {
+                self.message_dialogs
+                    .get(active_index)
+                    .is_some_and(|dialog| dialog.state.has_hotkey(hotkey))
+            });
+        }
+        false
+    }
+
+    fn game_over_key_has_higher_priority_route(&self, key: VirtualKeyCode) -> bool {
+        if !self.game_over_dialog_is_active() {
+            return false;
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let Some(dialog) = self.game_over_dialog.as_ref() else {
+            return false;
+        };
+        if modifiers == ModifiersState::ALT
+            || modifiers == (ModifiersState::ALT | ModifiersState::SHIFT)
+        {
+            return startup_dialog_hotkey(key)
+                .and_then(|hotkey| dialog.hotkey_action(hotkey))
+                .is_some();
+        }
+        match (key, modifiers) {
+            (VirtualKeyCode::Tab, modifiers)
+                if modifiers.is_empty() || modifiers == ModifiersState::SHIFT => true,
+            (VirtualKeyCode::Return, modifiers) if modifiers.is_empty() => true,
+            (VirtualKeyCode::Space, modifiers) if modifiers.is_empty() => matches!(
+                dialog.focused(),
+                Some(GameOverFocus::Close | GameOverFocus::Button(_))
+            ),
+            (VirtualKeyCode::Escape, modifiers) if modifiers.is_empty() => {
+                dialog.allows_escape_close()
+            }
+            (VirtualKeyCode::Up | VirtualKeyCode::Down, modifiers) if modifiers.is_empty() => {
+                matches!(dialog.focused(), Some(GameOverFocus::PlayerList(_)))
+            }
+            _ => false,
+        }
     }
 
     fn handle_game_over_enter_chat(&mut self, state: ElementState) {
@@ -60391,13 +60702,23 @@ impl GameApp {
             .rev()
             .find(|change| change.section == "General" && change.key == "NoCrew")
             .map(|change| parse_config_bool(&change.value));
+        let always_debug = changes
+            .iter()
+            .rev()
+            .find(|change| change.section == "General" && change.key == "DebugMode")
+            .map(|change| parse_config_bool(&change.value));
         let gamepads_enabled = config
             .get_in(Some("General"), "GamepadEnabled")
             .map(parse_config_bool);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        save_config_preserving_native_gamepads_enabled(&config, &path, gamepads_enabled)?;
+        save_config_preserving_native_general_booleans(
+            &config,
+            &path,
+            gamepads_enabled,
+            always_debug,
+        )?;
         if let Some(enabled) = fair_crew {
             persist_native_config_values(
                 paths,
@@ -66354,7 +66675,12 @@ impl GameApp {
             }
             // C4CVT_DisableDebug has no HostControl gate.
             1 => {
+                let debug_was_enabled = self.engine.debug_mode();
                 self.engine.disable_debug();
+                if debug_was_enabled {
+                    self.graphics
+                        .set_debug_draw_flags(lc_frontend::DebugDrawFlags::default());
+                }
                 if let Some(prepared) = self
                     .loading_state
                     .as_mut()
@@ -79329,6 +79655,9 @@ impl GameApp {
         self.engine
             .restore_state(&save.engine_state)
             .context("failed to restore saved engine state")?;
+        // DebugMode is process-local and deliberately absent from EngineState.
+        // C4Game::Init reapplies AlwaysDebug after the restored AllowDebug
+        // parameter is known.
         arm_configured_graphical_engine_debug_mode(&mut self.engine, self.app_paths.as_ref());
         if let Some(clock) = self.network_control_clock.as_mut() {
             clock.set_control_rate(self.engine.control_rate());
@@ -144891,16 +145220,12 @@ ScenInfoArea=70,5,25,90
 
             assert!(app.set_physical_film_view(OWNER_NONE));
             app.keyboard_modifiers = ModifiersState::CTRL;
-            let error = app
-                .handle_key(key, ElementState::Pressed)
-                .expect_err("the earlier generic debug chord retains priority");
-            assert!(
-                error.to_string().contains("timed flash producer"),
-                "unexpected {error}"
-            );
+            app.handle_key(key, ElementState::Pressed)
+                .expect("the earlier generic debug chord retains priority");
             assert_eq!(app.film_view_player, Some(OWNER_NONE));
             app.keyboard_modifiers = ModifiersState::empty();
         }
+        assert_eq!(runtime_flash_text(&app), Some("Actions"));
         assert!(app.set_physical_film_view(OWNER_NONE));
 
         app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
@@ -156425,6 +156750,16 @@ protected func InputCallback(string answer, int player)
             app.network = Some(manager);
             app.engine.set_debug_mode(true);
             app.engine.set_allow_debug(true);
+            app.graphics
+                .set_debug_draw_flags(lc_frontend::DebugDrawFlags {
+                    show_vertices: true,
+                    show_entrance: true,
+                    show_action: true,
+                    show_command: true,
+                    show_pathfinder: true,
+                    show_solid_mask: true,
+                    show_net_status: true,
+                });
             let initial_pressed = app
                 .engine
                 .player(app.local_owner)
@@ -156456,6 +156791,10 @@ protected func InputCallback(string answer, int player)
             );
             assert!(!app.engine.debug_mode());
             assert!(!app.engine.allow_debug());
+            assert_eq!(
+                app.graphics.debug_draw_flags(),
+                lc_frontend::DebugDrawFlags::default()
+            );
             assert_eq!(app.executing_ready_tick, None);
         }
     }
@@ -177381,99 +177720,479 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("player binding owns collision release");
     }
 
+    fn runtime_flash_text(app: &GameApp) -> Option<&str> {
+        app.runtime_flash_message
+            .as_ref()
+            .map(|message| message.text.as_str())
+    }
+
     #[test]
-    fn runtime_flash_producer_inventory_and_unwired_chords_fail_typed() {
+    fn l031_debug_keys_toggle_render_flags_and_exact_flashes() {
         let names = RuntimeFlashProducerBoundary::ALL.map(|producer| match producer {
             RuntimeFlashProducerBoundary::ObserverPrompt => "ObserverPrompt",
             RuntimeFlashProducerBoundary::ObserverClear => "ObserverClear",
-            RuntimeFlashProducerBoundary::DebugMode => "DebugMode",
-            RuntimeFlashProducerBoundary::DebugVertices => "DebugVertices",
-            RuntimeFlashProducerBoundary::DebugActionCycle => "DebugActionCycle",
-            RuntimeFlashProducerBoundary::DebugSolidMask => "DebugSolidMask",
             RuntimeFlashProducerBoundary::RuntimeJoin => "RuntimeJoin",
             RuntimeFlashProducerBoundary::ControlRate => "ControlRate",
             RuntimeFlashProducerBoundary::FairCrew => "FairCrew",
             RuntimeFlashProducerBoundary::ScriptTargetFps => "ScriptTargetFps",
             RuntimeFlashProducerBoundary::AdaptivePreSend => "AdaptivePreSend",
         });
-        assert_eq!(names.len(), 11);
-        assert_eq!(names.into_iter().collect::<HashSet<_>>().len(), 11);
+        assert_eq!(names.len(), 7);
+        assert_eq!(names.into_iter().collect::<HashSet<_>>().len(), 7);
 
-        for (key, modifiers, producer) in [
-            (
-                VirtualKeyCode::F5,
-                ModifiersState::CTRL,
-                RuntimeFlashProducerBoundary::DebugMode,
-            ),
-            (
-                VirtualKeyCode::F6,
-                ModifiersState::CTRL,
-                RuntimeFlashProducerBoundary::DebugVertices,
-            ),
-            (
-                VirtualKeyCode::F7,
-                ModifiersState::CTRL,
-                RuntimeFlashProducerBoundary::DebugActionCycle,
-            ),
-            (
-                VirtualKeyCode::F8,
-                ModifiersState::CTRL,
-                RuntimeFlashProducerBoundary::DebugSolidMask,
-            ),
-        ] {
-            let mut app = new_running_sandbox_app();
-            app.handle_modifiers_changed(modifiers)
-                .expect("set exact producer chord");
-            let before = runtime_global_ui_snapshot(&app);
-            let error = app
-                .handle_key(key, ElementState::Pressed)
-                .expect_err("unmodeled producer must fail before action or flash state");
-            assert!(error.to_string().contains(&format!("{producer:?}")));
-            assert_eq!(runtime_global_ui_snapshot(&app), before);
-            app.bindings.rebind(ControlBindingId::Left, key);
+        let mut app = new_running_sandbox_app();
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set exact debug modifiers");
+        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("enable debug mode");
+        assert!(app.engine.debug_mode());
+        assert_eq!(runtime_flash_text(&app), Some("Debug mode: on"));
+        app.bindings.rebind(ControlBindingId::Left, VirtualKeyCode::F5);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .control
+            .pressed_coms = 1 << lc_engine::COM_LEFT;
+        app.handle_key(VirtualKeyCode::F5, ElementState::Released)
+            .expect("debug mode has no Up callback");
+        assert_ne!(
             app.engine
-                .player_mut(app.local_owner)
+                .player(app.local_owner)
                 .expect("local player")
                 .control
-                .pressed_coms = 1 << lc_engine::COM_LEFT;
-            app.handle_key(key, ElementState::Released)
-                .expect("C4KeyCB has no producer Up callback");
-            assert_ne!(
-                app.engine
-                    .player(app.local_owner)
-                    .expect("local player")
-                    .control
-                    .pressed_coms
-                    & (1 << lc_engine::COM_LEFT),
-                0,
-                "exact modified producer release must not leak to player control"
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+            "debug callback Up must not leak into modifier-blind player control"
+        );
+
+        app.handle_key(VirtualKeyCode::F6, ElementState::Pressed)
+            .expect("enable vertices and entrances");
+        let flags = app.graphics.debug_draw_flags();
+        assert!(flags.show_vertices && flags.show_entrance);
+        assert_eq!(runtime_flash_text(&app), Some("Entrance+Vertices: on"));
+        app.handle_key(VirtualKeyCode::F6, ElementState::Pressed)
+            .expect("disable vertices and entrances");
+        let flags = app.graphics.debug_draw_flags();
+        assert!(!flags.show_vertices && !flags.show_entrance);
+        assert_eq!(runtime_flash_text(&app), Some("Entrance+Vertices: off"));
+
+        for (expected, action, command, pathfinder) in [
+            ("Actions", true, false, false),
+            ("Commands", false, true, false),
+            ("Pathfinder", false, false, true),
+            ("Actions/Commands/Pathfinder: off", false, false, false),
+        ] {
+            app.handle_key(VirtualKeyCode::F7, ElementState::Pressed)
+                .expect("cycle the action overlay");
+            let flags = app.graphics.debug_draw_flags();
+            assert_eq!(
+                (flags.show_action, flags.show_command, flags.show_pathfinder),
+                (action, command, pathfinder)
             );
-            assert!(app.runtime_flash_message.is_none());
+            assert_eq!(runtime_flash_text(&app), Some(expected));
         }
 
-        let mut custom = new_running_sandbox_app();
-        custom.runtime_key_config_cache = OnceLock::new();
-        custom
+        app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+            .expect("enable solid-mask display");
+        assert!(app.graphics.debug_draw_flags().show_solid_mask);
+        assert_eq!(runtime_flash_text(&app), Some("SolidMasks: on"));
+        app.handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+            .expect("disable solid-mask display");
+        assert!(!app.graphics.debug_draw_flags().show_solid_mask);
+        assert_eq!(runtime_flash_text(&app), Some("SolidMasks: off"));
+
+        let mut flags = app.graphics.debug_draw_flags();
+        flags.show_net_status = true;
+        app.graphics.set_debug_draw_flags(flags);
+        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("disable debug mode");
+        assert!(!app.engine.debug_mode());
+        assert_eq!(
+            app.graphics.debug_draw_flags(),
+            lc_frontend::DebugDrawFlags::default()
+        );
+        assert_eq!(runtime_flash_text(&app), Some("Debug mode: off"));
+        assert_eq!(app.mode, AppMode::Running);
+        assert!(!app.exit_requested);
+    }
+
+    #[test]
+    fn l031_debug_key_gates_remaps_and_native_priority_are_nonfatal() {
+        for key in [VirtualKeyCode::F6, VirtualKeyCode::F7, VirtualKeyCode::F8] {
+            let mut app = new_running_sandbox_app();
+            app.handle_modifiers_changed(ModifiersState::CTRL)
+                .expect("set exact debug modifiers");
+            app.handle_key(key, ElementState::Pressed)
+                .expect("a denied overlay callback is not fatal");
+            assert_eq!(runtime_flash_text(&app), Some("No debug mode!"));
+            assert_eq!(
+                app.graphics.debug_draw_flags(),
+                lc_frontend::DebugDrawFlags::default()
+            );
+            assert!(!app.exit_requested);
+        }
+
+        let mut denied = new_running_sandbox_app();
+        denied.engine.set_allow_debug(false);
+        denied
+            .handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set exact debug modifiers");
+        denied
+            .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("AllowDebug denial is not fatal");
+        assert!(!denied.engine.debug_mode());
+        assert_eq!(runtime_flash_text(&denied), Some("Debug mode: not allowed"));
+
+        let mut missing_resources = new_running_sandbox_app();
+        missing_resources.runtime_key_config_cache = OnceLock::new();
+        missing_resources
             .runtime_key_config_cache
-            .set(Err("Extra.c4g/KeyConfig.txt override".to_string()))
-            .expect("install custom registry refusal");
-        let error = custom
-            .handle_key(VirtualKeyCode::A, ElementState::Pressed)
-            .expect_err("arbitrary remapped producer key must fail globally");
-        assert!(error
-            .to_string()
-            .contains("process-global key configuration"));
+            .set(Err("missing custom key list".to_string()))
+            .expect("install missing debug key configuration");
+        missing_resources.runtime_flash_resources_cache = OnceLock::new();
+        missing_resources
+            .runtime_flash_resources_cache
+            .set(Err("missing language table".to_string()))
+            .expect("install missing debug resources");
+        missing_resources
+            .handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set exact debug modifiers");
+        missing_resources
+            .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("missing flash resources cannot make the debug key fatal");
+        assert!(missing_resources.engine.debug_mode());
+        assert_eq!(
+            runtime_flash_text(&missing_resources),
+            Some("[Undefined: IDS_CTL_DEBUGMODE]: [Undefined: IDS_CTL_ON]")
+        );
+
+        let mut disabled_binding = new_running_sandbox_app();
+        disabled_binding.runtime_key_config_cache = OnceLock::new();
+        disabled_binding
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nDbgModeToggle=None\n",
+            )
+            .expect("parse disabled debug binding")))
+            .expect("install disabled debug binding");
+        disabled_binding
+            .handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set disabled default debug chord");
+        disabled_binding
+            .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("a replaced Ctrl+F5 binding is inert rather than fatal");
+        assert!(!disabled_binding.engine.debug_mode());
+        assert!(disabled_binding.runtime_flash_message.is_none());
+
+        let mut debug_collision = new_running_sandbox_app();
+        debug_collision.engine.set_allow_debug(false);
+        debug_collision.runtime_key_config_cache = OnceLock::new();
+        debug_collision
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nDbgModeToggle=G\nDbgShowVtxToggle=G\n",
+            )
+            .expect("parse same-priority debug collision")))
+            .expect("install same-priority debug collision");
+        debug_collision
+            .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .expect("denied debug callbacks fall through in registration order");
+        assert_eq!(runtime_flash_text(&debug_collision), Some("No debug mode!"));
+
+        let mut modified_player = new_running_sandbox_app();
+        modified_player
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F5);
+        modified_player
+            .handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set Ctrl for exact-modifier player priority");
+        modified_player
+            .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("bare player F5 does not steal Ctrl+F5");
+        assert!(modified_player.engine.debug_mode());
+
+        let mut context_priority = new_running_sandbox_app();
+        context_priority.runtime_key_config_cache = OnceLock::new();
+        context_priority
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nDbgModeToggle=R\n",
+            )
+            .expect("parse context/debug collision")))
+            .expect("install context/debug collision");
+        context_priority
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain off")
+                    .with_hotkey('R')],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("open higher-priority context menu");
+        context_priority
+            .handle_key(VirtualKeyCode::R, ElementState::Pressed)
+            .expect("context hotkey precedes remapped debug callback");
+        assert!(!context_priority.engine.debug_mode());
+        assert!(context_priority.runtime_flash_message.is_none());
+
+        let mut chat_priority = new_running_sandbox_app();
+        chat_priority.runtime_key_config_cache = OnceLock::new();
+        chat_priority
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nDbgModeToggle=Return\n",
+            )
+            .expect("parse chat/debug collision")))
+            .expect("install chat/debug collision");
+        chat_priority.start_running_chat(RunningChatMode::All);
+        chat_priority
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("focused chat Return precedes remapped debug callback");
+        assert!(!chat_priority.engine.debug_mode());
+        assert!(!chat_priority.running_chat_active());
+
+        let mut modified_chat_fallthrough = new_running_sandbox_app();
+        modified_chat_fallthrough.runtime_key_config_cache = OnceLock::new();
+        modified_chat_fallthrough
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nDbgModeToggle=Ctrl+Alt+G\n",
+            )
+            .expect("parse modified chat/debug collision")))
+            .expect("install modified chat/debug collision");
+        modified_chat_fallthrough.start_running_chat(RunningChatMode::All);
+        modified_chat_fallthrough
+            .handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::ALT)
+            .expect("set Ctrl+Alt chat/debug modifiers");
+        modified_chat_fallthrough
+            .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .expect("an unowned Ctrl+Alt chat chord reaches the debug callback");
+        assert!(modified_chat_fallthrough.engine.debug_mode());
+        assert!(modified_chat_fallthrough.running_chat_active());
+
+        let mut vote_priority = new_running_sandbox_app();
+        vote_priority.runtime_key_config_cache = OnceLock::new();
+        vote_priority
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nDbgModeToggle=Return\n",
+            )
+            .expect("parse vote/debug collision")))
+            .expect("install vote/debug collision");
+        vote_priority
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::new(
+                    "Vote?",
+                    "Voting",
+                    lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                    lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                    lc_frontend::message_dialog::MessageDialogSize::Regular,
+                    true,
+                ),
+                MessageDialogContinuation::LeagueSurrender,
+            )
+            .expect("show exclusive vote for debug priority");
+        vote_priority
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("exclusive vote Return precedes remapped debug callback");
+        assert!(!vote_priority.engine.debug_mode());
+        assert!(vote_priority.runtime_flash_message.is_none());
+        assert_eq!(vote_priority.message_dialogs.len(), 1);
+        vote_priority
+            .handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("exclusive vote owns the matching Return release");
+        assert!(vote_priority.message_dialogs.is_empty());
+        assert_eq!(vote_priority.mode, AppMode::Running);
+
+        let mut game_over_priority = new_game_over_keyboard_app();
+        game_over_priority.runtime_key_config_cache = OnceLock::new();
+        game_over_priority
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nDbgModeToggle=Return\n",
+            )
+            .expect("parse game-over/debug collision")))
+            .expect("install game-over/debug collision");
+        game_over_priority
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("game-over Return precedes remapped debug callback");
+        assert!(!game_over_priority.engine.debug_mode());
+        assert!(game_over_priority.running_chat_active());
+
+        let mut disable = new_running_sandbox_app();
+        disable.engine.set_allow_debug(false);
+        disable.engine.set_debug_mode(true);
+        disable
+            .graphics
+            .set_debug_draw_flags(lc_frontend::DebugDrawFlags {
+                show_vertices: true,
+                show_entrance: true,
+                show_action: true,
+                show_command: true,
+                show_pathfinder: true,
+                show_solid_mask: true,
+                show_net_status: true,
+            });
+        disable
+            .handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set exact debug modifiers");
+        disable
+            .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("an already-enabled mode may always be disabled");
+        assert!(!disable.engine.debug_mode());
+        assert_eq!(
+            disable.graphics.debug_draw_flags(),
+            lc_frontend::DebugDrawFlags::default()
+        );
+
+        let mut later_collision = new_running_sandbox_app();
+        later_collision.runtime_key_config_cache = OnceLock::new();
+        later_collision
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nDbgShowVtxToggle=G\nGameSpeedUp=G\n",
+            )
+            .expect("parse denied-debug/later-global collision")))
+            .expect("install denied-debug/later-global collision");
+        later_collision
+            .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .expect("denied debug callback falls through to later speed callback");
+        assert!(!later_collision.engine.debug_mode());
+        assert_eq!(later_collision.frame_skip, 2);
+        assert!(later_collision.full_speed);
+        assert_eq!(runtime_flash_text(&later_collision), Some("Speed: 2x"));
+
+        let mut rebound = new_running_sandbox_app();
+        rebound.runtime_key_config_cache = OnceLock::new();
+        rebound
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nDbgModeToggle=G\nDbgShowVtxToggle=H\n",
+            )
+            .expect("parse rebound debug keys")))
+            .expect("install rebound debug keys");
+        rebound
+            .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .expect("rebound debug mode key");
+        assert!(rebound.engine.debug_mode());
+        rebound
+            .handle_key(VirtualKeyCode::H, ElementState::Pressed)
+            .expect("rebound vertex key");
+        assert!(rebound.graphics.debug_draw_flags().show_vertices);
+
+        let mut player_collision = new_running_sandbox_app();
+        player_collision.runtime_key_config_cache = OnceLock::new();
+        player_collision
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nKbd1Key1=G\nDbgModeToggle=G\n",
+            )
+            .expect("parse player/debug collision")))
+            .expect("install player/debug collision");
+        player_collision
+            .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .expect("PRIO_PlrControl owns the debug collision");
+        assert!(!player_collision.engine.debug_mode());
+        assert!(player_collision.runtime_flash_message.is_none());
+
+        let mut global_collision = new_running_sandbox_app();
+        global_collision.runtime_key_config_cache = OnceLock::new();
+        global_collision
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nSoundToggle=G\nDbgModeToggle=G\n",
+            )
+            .expect("parse earlier-global/debug collision")))
+            .expect("install earlier-global/debug collision");
+        let sound_enabled = global_collision
+            .audio
+            .as_ref()
+            .expect("sandbox audio")
+            .options
+            .sound_enabled;
+        global_collision
+            .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .expect("earlier SoundToggle owns the collision");
+        assert_eq!(
+            global_collision
+                .audio
+                .as_ref()
+                .expect("sandbox audio")
+                .options
+                .sound_enabled,
+            !sound_enabled
+        );
+        assert!(!global_collision.engine.debug_mode());
+        assert!(global_collision.runtime_flash_message.is_none());
 
         let mut game_over = new_game_over_keyboard_app();
+        game_over.engine.set_debug_mode(true);
         game_over
             .handle_modifiers_changed(ModifiersState::CTRL)
             .expect("set Ctrl+F8 under game over");
-        let error = game_over
+        game_over
             .handle_key(VirtualKeyCode::F8, ElementState::Pressed)
-            .expect_err("Generic debug producer precedes exclusive GUI input");
-        assert!(error.to_string().contains("DebugSolidMask"));
+            .expect("Generic debug callback precedes exclusive GUI input");
+        assert!(game_over.graphics.debug_draw_flags().show_solid_mask);
         assert!(game_over.game_over_dialog.is_some());
-        assert!(game_over.runtime_flash_message.is_none());
+        assert_eq!(runtime_flash_text(&game_over), Some("SolidMasks: on"));
+        assert!(!game_over.exit_requested);
+    }
+
+    #[test]
+    fn l031_always_debug_survives_rust_saves_and_rearms_restored_rounds() {
+        for (config, expected) in [
+            (&b""[..], false),
+            (&b"[General]\nDebugMode=true\n"[..], true),
+            (&b"[General]\nDebugMode=1\n"[..], true),
+            (&b"[General]\nDebugMode= true\n"[..], false),
+            (&b"[General]\nDebugMode=invalid\n"[..], false),
+        ] {
+            let mut engine = Engine::new();
+            arm_graphical_engine_debug_mode(&mut engine, config);
+            assert_eq!(engine.debug_mode(), expected);
+        }
+
+        let enabled_config = b"[General]\nDebugMode=true\n";
+        let mut allowed = Engine::new();
+        arm_graphical_engine_debug_mode(&mut allowed, enabled_config);
+        let state = allowed.capture_state();
+        let mut restored = Engine::new();
+        restored
+            .restore_state(&state)
+            .expect("restore process-independent round state");
+        assert!(!restored.debug_mode(), "DebugMode is not serialized");
+        arm_graphical_engine_debug_mode(&mut restored, enabled_config);
+        assert!(restored.debug_mode(), "round restore reapplies AlwaysDebug");
+        let mut denied = Engine::new();
+        denied.set_allow_debug(false);
+        arm_graphical_engine_debug_mode(&mut denied, enabled_config);
+        assert!(!denied.debug_mode());
+        let mut disabled = Engine::new();
+        arm_graphical_engine_debug_mode(&mut disabled, b"");
+        assert!(!disabled.debug_mode());
+
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated AlwaysDebug config");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_native_config_values(
+            &paths,
+            "General",
+            &[("DebugMode", lc_app::NativeConfigValue::RawAscii("true"))],
+        )
+        .expect("enable native AlwaysDebug");
+
+        persist_config_value(&paths, "Network", "Comment", "preserve debug")
+            .expect("save unrelated config value");
+        let saved = fs::read(paths.config_file()).expect("read unrelated config save");
+        assert_eq!(
+            lc_app::configured_native_boolean(&saved, "General", "DebugMode"),
+            Some(true)
+        );
+        let mut next_round = Engine::new();
+        arm_configured_graphical_engine_debug_mode(&mut next_round, Some(&paths));
+        assert!(next_round.debug_mode());
+        reset_cached_app_paths();
     }
 
     #[test]

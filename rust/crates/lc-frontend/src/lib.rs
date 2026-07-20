@@ -552,7 +552,7 @@ pub struct DefinitionDebugGeometry {
 }
 
 /// Process-local `C4GraphicsSystem::Show*` flags. L140 owns the rendering
-/// consumers; keyboard mutation remains the separate L031 boundary.
+/// consumers and lc-app's L031 key callbacks own their native mutations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DebugDrawFlags {
     pub show_vertices: bool,
