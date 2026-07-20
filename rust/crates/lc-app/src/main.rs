@@ -8797,6 +8797,7 @@ enum MessageDialogContinuation {
     StartupIrcConnectWarning {
         login: lc_frontend::startup_netdlg::NetDlgChatLogin,
     },
+    StartupIrcDisconnectConfirm,
     NetworkClientStartWait,
     NetworkRuntimeJoin {
         reference: lc_network::NetworkGameReference,
@@ -10532,6 +10533,19 @@ struct GameApp {
     /// screens must not tear down a live connection.
     startup_irc_client: Option<lc_network::IrcClientHandle>,
     startup_irc_server: String,
+    /// Whether the singleton-style C4ChatDlg analogue is currently shown.
+    /// The controller and transport remain process-global when this UI closes.
+    external_irc_dialog_visible: bool,
+    /// Standalone C4ChatDlg owns a distinct C4ChatControl from the startup
+    /// NetworkGame sheet. Closing the window destroys this UI-local state
+    /// while the process-global IRC transport survives.
+    external_irc_dialog: Option<lc_frontend::startup_netdlg::NetDlgController>,
+    /// Distinguishes a resolver/TCP failure before the first Connected event
+    /// (classic modal failure) from an established-session disconnect (status
+    /// transcript line only).
+    startup_irc_initial_connect_pending: bool,
+    /// Shared double-click latch for the embedded and standalone chat views.
+    irc_dialog_last_click: Option<(GuiPoint, Instant)>,
     startup_game_search: Option<lc_network::StartupGameSearch>,
     #[cfg(test)]
     startup_game_search_test_events: VecDeque<lc_network::StartupGameSearchEvent>,
@@ -11756,7 +11770,6 @@ enum ClassicGameLobbyChild {
     Sheet(LobbySheet),
     RosterContext(LobbyRosterId),
     Chat,
-    ExternalIrcChat,
     GameOptionSideEffect(&'static str),
     NetworkEvent(&'static str),
 }
@@ -12145,7 +12158,6 @@ enum ClassicParityBoundary {
         action: &'static str,
     },
     RuntimeFlashProducer(RuntimeFlashProducerBoundary),
-    RuntimeIrcChatToggle,
     RuntimePause(RuntimePauseBoundary),
     Scoreboard {
         trigger: ClassicScoreboardTrigger,
@@ -12292,10 +12304,6 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic timed flash producer {producer:?} is unavailable because its authoritative runtime state is not modeled; refusing the producer action and partial flash mutation"
             ),
-            Self::RuntimeIrcChatToggle => write!(
-                f,
-                "classic standalone IRC Chat dialog is not wired yet; refusing the runtime Alt+C toggle"
-            ),
             Self::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable) => write!(
                 f,
                 "classic offline Pause toggle is unavailable because Game.HaltCount ownership is not modeled"
@@ -12354,12 +12362,6 @@ impl fmt::Display for ClassicParityBoundary {
             Self::GameLobby(ClassicGameLobbyBoundary::Model { detail }) => write!(
                 f,
                 "classic game-lobby model is unavailable: {detail}; refusing guessed lobby state"
-            ),
-            Self::GameLobby(ClassicGameLobbyBoundary::Child(
-                ClassicGameLobbyChild::ExternalIrcChat,
-            )) => write!(
-                f,
-                "classic standalone IRC Chat dialog is not wired yet; refusing the game-lobby IRC button"
             ),
             Self::GameLobby(ClassicGameLobbyBoundary::Child(child)) => write!(
                 f,
@@ -13150,6 +13152,7 @@ enum LobbyButton {
     Ready,
     Start,
     Sheet(LobbySheet),
+    ExternalChat,
 }
 
 #[derive(Clone, Debug)]
@@ -13157,7 +13160,35 @@ struct NetworkLobbyLayout {
     ready_button: GuiRect,
     start_button: Option<GuiRect>,
     sheet_buttons: Vec<(LobbySheet, GuiRect)>,
+    external_chat_button: Option<GuiRect>,
     menu_region_max_x: f32,
+}
+
+impl NetworkLobbyLayout {
+    fn from_classic(layout: &LobbyLayout) -> Self {
+        let as_gui_rect = |rect: lc_frontend::classic_gui::IntRect| {
+            GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32)
+        };
+        let sheet_buttons = layout
+            .tab_buttons
+            .iter()
+            .filter_map(|button| button.sheet.map(|sheet| (sheet, as_gui_rect(button.rect))))
+            .collect();
+        let external_chat_button = layout
+            .tab_buttons
+            .iter()
+            .find(|button| button.control == LobbyControl::ChatDialog)
+            .map(|button| as_gui_rect(button.rect));
+        Self {
+            ready_button: as_gui_rect(layout.ready_checkbox),
+            start_button: layout.run_button.map(as_gui_rect),
+            sheet_buttons,
+            external_chat_button,
+            // C4GameLobby has no startup scenario-selector pane. Keep all
+            // ordinary pointer traffic on the fullscreen dialog itself.
+            menu_region_max_x: -1.0,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -13168,6 +13199,9 @@ struct NetworkLobbyState {
     roster_rows: Vec<LobbyRosterRow>,
     max_players: i32,
     has_teams: bool,
+    /// Construction-time snapshot of C4ChatDlg::IsChatActive(). The native
+    /// lobby does not add or remove this button as IRC state later changes.
+    has_external_chat: bool,
     active_sheet: LobbySheet,
     /// Client-side C4Network2ResDlg snapshot. Network updates continue while
     /// hidden; the reconstructed controller receives it only when active.
@@ -13196,6 +13230,7 @@ enum LobbyAction {
     ToggleReady,
     StartGame,
     SelectSheet(LobbySheet),
+    OpenExternalIrcChat,
     SubmitMessage(String),
     ChatEdited,
 }
@@ -13437,6 +13472,7 @@ impl NetworkLobbyState {
             roster_rows: Vec::new(),
             max_players: 1,
             has_teams: false,
+            has_external_chat: false,
             active_sheet: LobbySheet::Players,
             resource_rows: BTreeMap::new(),
             resource_scroll: 0,
@@ -13454,6 +13490,11 @@ impl NetworkLobbyState {
             layout: None,
             pointer: None,
         }
+    }
+
+    fn with_external_chat(mut self, has_external_chat: bool) -> Self {
+        self.has_external_chat = has_external_chat;
+        self
     }
 
     fn scenario_label(&self) -> String {
@@ -13488,24 +13529,9 @@ impl NetworkLobbyState {
             22,
             role,
             self.has_teams,
-            false,
+            self.has_external_chat,
         );
-        let as_gui_rect = |rect: lc_frontend::classic_gui::IntRect| {
-            GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32)
-        };
-
-        self.layout = Some(NetworkLobbyLayout {
-            ready_button: as_gui_rect(layout.ready_checkbox),
-            start_button: layout.run_button.map(as_gui_rect),
-            sheet_buttons: layout
-                .tab_buttons
-                .into_iter()
-                .filter_map(|button| button.sheet.map(|sheet| (sheet, as_gui_rect(button.rect))))
-                .collect(),
-            // C4GameLobby has no startup scenario-selector pane. Keep all
-            // ordinary pointer traffic on the fullscreen dialog itself.
-            menu_region_max_x: -1.0,
-        });
+        self.layout = Some(NetworkLobbyLayout::from_classic(&layout));
         self.layout.as_ref().expect("layout just initialised")
     }
 
@@ -13538,6 +13564,7 @@ impl NetworkLobbyState {
                 Some(LobbyButton::Ready) => Some(LobbyAction::ToggleReady),
                 Some(LobbyButton::Start) => Some(LobbyAction::StartGame),
                 Some(LobbyButton::Sheet(sheet)) => Some(LobbyAction::SelectSheet(sheet)),
+                Some(LobbyButton::ExternalChat) => Some(LobbyAction::OpenExternalIrcChat),
                 None => None,
             }
         } else {
@@ -13706,7 +13733,7 @@ impl NetworkLobbyState {
             active_players,
             self.max_players.max(1),
             self.has_teams,
-            false,
+            self.has_external_chat,
             true,
             self.local_ready(),
             DEFAULT_LOBBY_COUNTDOWN_SECONDS,
@@ -13733,19 +13760,7 @@ impl NetworkLobbyState {
         let mut options = GameOptionButtons::new(role.game_option_context(), option_values);
         let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
         options.set_bounds(layout.game_option_strip);
-        let as_gui_rect = |rect: lc_frontend::classic_gui::IntRect| {
-            GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32)
-        };
-        self.layout = Some(NetworkLobbyLayout {
-            ready_button: as_gui_rect(layout.ready_checkbox),
-            start_button: layout.run_button.map(as_gui_rect),
-            sheet_buttons: layout
-                .tab_buttons
-                .iter()
-                .filter_map(|button| button.sheet.map(|sheet| (sheet, as_gui_rect(button.rect))))
-                .collect(),
-            menu_region_max_x: -1.0,
-        });
+        self.layout = Some(NetworkLobbyLayout::from_classic(&layout));
         Ok((controller, options))
     }
 
@@ -13926,6 +13941,13 @@ impl NetworkLobbyState {
             .find(|(_, rect)| point_in_rect(point, rect))
         {
             return Some(LobbyButton::Sheet(*sheet));
+        }
+        if layout
+            .external_chat_button
+            .as_ref()
+            .is_some_and(|rect| point_in_rect(point, rect))
+        {
+            return Some(LobbyButton::ExternalChat);
         }
         None
     }
@@ -20771,6 +20793,10 @@ impl GameApp {
             startup_network_dialog: None,
             startup_irc_client: None,
             startup_irc_server: String::new(),
+            external_irc_dialog_visible: false,
+            external_irc_dialog: None,
+            startup_irc_initial_connect_pending: false,
+            irc_dialog_last_click: None,
             startup_game_search: None,
             #[cfg(test)]
             startup_game_search_test_events: VecDeque::new(),
@@ -21747,6 +21773,18 @@ impl GameApp {
                 controller.cancel_interaction();
             }
         }
+        if self.external_irc_dialog_visible {
+            if let Some(dialog) = self.external_irc_dialog.as_mut() {
+                dialog.resize(width as i32, height as i32);
+                dialog.set_chat_bounds_override(Some(
+                    lc_frontend::startup_netdlg::NetDlgController::standalone_chat_bounds(
+                        width as i32,
+                        height as i32,
+                    ),
+                ));
+                dialog.pointer_left();
+            }
+        }
         if let Some(dialog) = restart_same_dialog_fade {
             self.begin_startup_dialog_fade(dialog);
         }
@@ -22183,6 +22221,24 @@ impl GameApp {
             return Ok(());
         }
         if !self.message_dialogs.is_empty() && !self.running_chat_active() {
+            return Ok(());
+        }
+        if self.external_irc_dialog_visible && self.context_menu.is_some() {
+            return Ok(());
+        }
+        if self.external_irc_dialog_visible {
+            let Some(fonts) = self.assets.clonk_fonts.clone() else {
+                return Ok(());
+            };
+            let mut encoded = [0_u8; 4];
+            let text = character.encode_utf8(&mut encoded);
+            let actions = self
+                .external_irc_dialog
+                .as_mut()
+                .map(|dialog| dialog.handle_text_input(text, &fonts.text))
+                .unwrap_or_default();
+            self.process_network_dialog_actions(actions)?;
+            self.mark_menu_dirty();
             return Ok(());
         }
         if self.startup_options_advanced_dialog.is_some() {
@@ -23018,6 +23074,37 @@ impl GameApp {
         if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
             return Ok(());
         }
+        if self.external_irc_dialog_visible {
+            if let Some(menu) = self.context_menu.as_mut() {
+                let point = menu.pointer_position();
+                let outcome = menu.handle_pointer_down(point, ContextMenuPointerButton::Other);
+                let captured = outcome.captured && !outcome.pass_through;
+                self.process_context_menu_outcome(outcome)?;
+                if captured {
+                    return Ok(());
+                }
+            }
+        }
+        if self.external_irc_dialog_visible {
+            let native_delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            let actions = self
+                .external_irc_dialog
+                .as_mut()
+                .and_then(|dialog| {
+                    dialog
+                        .pointer_position()
+                        .map(|point| dialog.handle_wheel(point, native_delta))
+                })
+                .unwrap_or_default();
+            self.process_network_dialog_actions(actions)?;
+            self.mark_menu_dirty();
+            return Ok(());
+        }
         if let Some(layout) = self.network_start_wait_layout() {
             let native_delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
@@ -23440,6 +23527,24 @@ impl GameApp {
         Ok(true)
     }
 
+    fn input_network_dialog(&self) -> Option<&lc_frontend::startup_netdlg::NetDlgController> {
+        if self.external_irc_dialog_visible {
+            self.external_irc_dialog.as_ref()
+        } else {
+            self.startup_network_dialog.as_ref()
+        }
+    }
+
+    fn input_network_dialog_mut(
+        &mut self,
+    ) -> Option<&mut lc_frontend::startup_netdlg::NetDlgController> {
+        if self.external_irc_dialog_visible {
+            self.external_irc_dialog.as_mut()
+        } else {
+            self.startup_network_dialog.as_mut()
+        }
+    }
+
     fn handle_network_edit_key(
         &mut self,
         key: VirtualKeyCode,
@@ -23449,7 +23554,9 @@ impl GameApp {
             NetDlgControl, NetDlgEditClipboardShortcut, NetDlgEditKey, NetDlgEditModifiers,
         };
 
-        if self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkGame {
+        let embedded_network_chat =
+            self.mode == AppMode::Menu && self.startup_view == StartupView::NetworkGame;
+        if !self.external_irc_dialog_visible && !embedded_network_chat {
             return Ok(false);
         }
         if state == ElementState::Released && self.netdlg_edit_consumed_keys.remove(&key) {
@@ -23461,7 +23568,7 @@ impl GameApp {
 
         let modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        let edit_focused = self.startup_network_dialog.as_ref().is_some_and(|dialog| {
+        let edit_focused = self.input_network_dialog().is_some_and(|dialog| {
             matches!(
                 dialog.focused_control(),
                 NetDlgControl::JoinAddress | NetDlgControl::ChatInput
@@ -23482,8 +23589,7 @@ impl GameApp {
         }
         if key == VirtualKeyCode::Apps && modifiers.is_empty() {
             let outcome = self
-                .startup_network_dialog
-                .as_mut()
+                .input_network_dialog_mut()
                 .map(|dialog| dialog.request_context_menu_from_key(clipboard_text_available()))
                 .unwrap_or_default();
             if !outcome.captured {
@@ -23535,8 +23641,7 @@ impl GameApp {
                     .ok()
             });
         let outcome = self
-            .startup_network_dialog
-            .as_mut()
+            .input_network_dialog_mut()
             .map(|dialog| {
                 if let Some(edit_key) = edit_key {
                     dialog.handle_edit_key_down(
@@ -23561,6 +23666,66 @@ impl GameApp {
         }
         self.netdlg_edit_consumed_keys.insert(key);
         self.process_network_dialog_actions(outcome.actions)?;
+        Ok(true)
+    }
+
+    fn handle_external_irc_dialog_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if !self.external_irc_dialog_visible {
+            return Ok(false);
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if key == VirtualKeyCode::Escape && modifiers.is_empty() {
+            if state == ElementState::Pressed {
+                self.hide_external_irc_dialog();
+            }
+            return Ok(true);
+        }
+        if self.handle_network_edit_key(key, state)? {
+            return Ok(true);
+        }
+        let actions = if state == ElementState::Pressed
+            && key == VirtualKeyCode::F4
+            && modifiers == ModifiersState::CTRL
+        {
+            self.external_irc_dialog
+                .as_mut()
+                .map(lc_frontend::startup_netdlg::NetDlgController::close_active_chat_sheet)
+                .unwrap_or_default()
+        } else if state == ElementState::Pressed
+            && key == VirtualKeyCode::Tab
+            && (modifiers == ModifiersState::CTRL
+                || modifiers == (ModifiersState::CTRL | ModifiersState::SHIFT))
+        {
+            self.external_irc_dialog
+                .as_mut()
+                .map(|dialog| dialog.cycle_chat_sheet(modifiers.contains(ModifiersState::SHIFT)))
+                .unwrap_or_default()
+        } else if let Some(key) = map_key_code(key) {
+            if key == KeyCode::Tab && !(modifiers.is_empty() || modifiers == ModifiersState::SHIFT)
+            {
+                Vec::new()
+            } else {
+                self.external_irc_dialog
+                    .as_mut()
+                    .map(|dialog| match state {
+                        ElementState::Pressed => dialog.handle_key_down_with_tab_direction(
+                            key,
+                            modifiers == ModifiersState::SHIFT,
+                        ),
+                        ElementState::Released => dialog.handle_key_up(key),
+                    })
+                    .unwrap_or_default()
+            }
+        } else {
+            Vec::new()
+        };
+        self.process_network_dialog_actions(actions)?;
+        self.mark_menu_dirty();
         Ok(true)
     }
 
@@ -23635,6 +23800,27 @@ impl GameApp {
         }
         let modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if self.startup_view == StartupView::NetworkGame
+            && (modifiers == ModifiersState::CTRL
+                || modifiers == (ModifiersState::CTRL | ModifiersState::SHIFT))
+            && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
+                dialog.mode() == lc_frontend::startup_netdlg::NetDlgMode::Chat
+                    && dialog.chat_page() == lc_frontend::startup_netdlg::NetDlgChatPage::Chats
+            })
+        {
+            let actions = if state == ElementState::Pressed {
+                self.startup_network_dialog
+                    .as_mut()
+                    .map(|dialog| {
+                        dialog.cycle_chat_sheet(modifiers.contains(ModifiersState::SHIFT))
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            self.process_network_dialog_actions(actions)?;
+            return Ok(true);
+        }
         let backwards = if modifiers.is_empty() {
             false
         } else if modifiers == ModifiersState::SHIFT {
@@ -25319,6 +25505,9 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
+        if self.external_irc_dialog_visible {
+            return Ok(false);
+        }
         if !matches!(self.mode, AppMode::Running) || key != VirtualKeyCode::Tab {
             return Ok(false);
         }
@@ -25867,6 +26056,9 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(RuntimeGlobalKeyOutcome::Unhandled);
         }
+        if self.external_irc_dialog_visible {
+            return Ok(RuntimeGlobalKeyOutcome::Unhandled);
+        }
         // X11/SDL update C4KeyboardInput::PressedKeys from the raw physical
         // edge before scope/priority dispatch. Keep the latch even when the
         // first down belongs to a global or modified route, so a later
@@ -26046,7 +26238,7 @@ impl GameApp {
         )))
     }
 
-    fn handle_runtime_irc_unported_key(
+    fn handle_runtime_irc_toggle_key(
         &mut self,
         key: VirtualKeyCode,
         state: ElementState,
@@ -26060,9 +26252,8 @@ impl GameApp {
             return Ok(false);
         }
         if state == ElementState::Pressed {
-            return Err(classic_parity_engine_error(report_classic_parity_boundary(
-                ClassicParityBoundary::RuntimeIrcChatToggle,
-            )));
+            self.toggle_external_irc_dialog()?;
+            return Ok(true);
         }
         // ToggleChat is a PRIO_Base C4KeyCB with no Up callback. Consume the
         // exact modified release after higher-priority GUI owners without
@@ -26182,7 +26373,7 @@ impl GameApp {
                 return Ok(());
             }
             if context_menu_was_open {
-                if self.handle_runtime_irc_unported_key(key, state)? {
+                if self.handle_runtime_irc_toggle_key(key, state)? {
                     return Ok(());
                 }
                 // A popup makes its parent Edit and chat callbacks inactive,
@@ -26219,6 +26410,48 @@ impl GameApp {
             return Ok(());
         }
         if message_dialog_was_open && self.handle_running_chat_open_key(key, state) {
+            return Ok(());
+        }
+        if self.external_irc_dialog_visible {
+            let c4_modifiers = self.keyboard_modifiers
+                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            if c4_modifiers.is_empty() && self.handle_context_menu_key(key, state)? {
+                return Ok(());
+            }
+            if self.context_menu.is_some() {
+                if self.handle_runtime_irc_toggle_key(key, state)? {
+                    return Ok(());
+                }
+                return Ok(());
+            }
+        }
+        if (self.external_irc_dialog_visible || self.running_chat_active())
+            && self.handle_runtime_irc_toggle_key(key, state)?
+        {
+            return Ok(());
+        }
+        if !message_dialog_was_open && self.handle_external_irc_dialog_key(key, state)? {
+            return Ok(());
+        }
+        if !message_dialog_was_open
+            && self.mode == AppMode::Menu
+            && self.startup_view == StartupView::NetworkGame
+            && key == VirtualKeyCode::F4
+            && self.keyboard_modifiers == ModifiersState::CTRL
+            && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
+                dialog.mode() == lc_frontend::startup_netdlg::NetDlgMode::Chat
+                    && dialog.chat_page() == lc_frontend::startup_netdlg::NetDlgChatPage::Chats
+            })
+        {
+            let actions = if state == ElementState::Pressed {
+                self.startup_network_dialog
+                    .as_mut()
+                    .map(lc_frontend::startup_netdlg::NetDlgController::close_active_chat_sheet)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            self.process_network_dialog_actions(actions)?;
             return Ok(());
         }
         if self.handle_network_start_wait_key(key, state)? {
@@ -26558,7 +26791,7 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.handle_runtime_irc_unported_key(key, state)? {
+        if self.handle_runtime_irc_toggle_key(key, state)? {
             return Ok(());
         }
         if self.handle_running_chat_key(key, state)? {
@@ -31228,6 +31461,13 @@ impl GameApp {
         }
         self.message_input_history.push_front(text.to_string());
         self.message_input_history.truncate(20);
+        let history = self.message_input_history.iter().cloned().collect::<Vec<_>>();
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            dialog.set_chat_history(history.clone());
+        }
+        if let Some(dialog) = self.external_irc_dialog.as_mut() {
+            dialog.set_chat_history(history);
+        }
     }
 
     fn complete_running_chat_nick(&mut self) {
@@ -32663,6 +32903,11 @@ impl GameApp {
                 ClusterOwner::ContextPending
             } else if !self.message_dialogs.is_empty() {
                 ClusterOwner::Message
+            } else if self.external_irc_dialog_visible {
+                // C4ChatDlg is the active shared-screen dialog. It has no
+                // legacy gamepad navigation callbacks, but the raw cluster
+                // must not leak to the lobby or running game behind it.
+                ClusterOwner::Suppressed
             } else if self.definition_selector.is_some() {
                 ClusterOwner::Definition
             } else if self.game_option_input_dialog.is_some() {
@@ -32765,6 +33010,8 @@ impl GameApp {
                                 } else if self.startup_dialog_fade_active()
                                     && self.startup_player_properties_dialog.is_none()
                                 {
+                                    ClusterOwner::Suppressed
+                                } else if self.external_irc_dialog_visible {
                                     ClusterOwner::Suppressed
                                 } else {
                                     ClusterOwner::Base
@@ -34059,6 +34306,33 @@ impl GameApp {
         if self.running_chat_controller().is_none()
             && self.handle_message_dialog_pointer_move(point)
         {
+            self.suspend_ingame_pointer_for_gui();
+            return Ok(());
+        }
+        if self.external_irc_dialog_visible {
+            if self.handle_context_menu_pointer_move(point)? {
+                self.suspend_ingame_pointer_for_gui();
+                return Ok(());
+            }
+            if self.context_menu.is_some() {
+                self.suspend_ingame_pointer_for_gui();
+                return Ok(());
+            }
+        }
+        if self.external_irc_dialog_visible {
+            if self.message_dialogs.is_empty() {
+                let actions = self
+                    .assets
+                    .clonk_fonts
+                    .clone()
+                    .and_then(|fonts| {
+                        self.external_irc_dialog
+                            .as_mut()
+                            .map(|dialog| dialog.handle_pointer_move(point, &fonts.text))
+                    })
+                    .unwrap_or_default();
+                self.process_network_dialog_actions(actions)?;
+            }
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
@@ -35758,10 +36032,9 @@ impl GameApp {
         if let Some(button) = lc_frontend::hud::viewport_button_region(
             viewport.rect,
             point,
-            self.display_flags.show_commands
-                && !(self.engine.film() && self.engine.replay()),
+            self.display_flags.show_commands && !(self.engine.film() && self.engine.replay()),
             mouse_viewport,
-            false, // The external IRC frontend is not wired yet (M09-P3-L028).
+            self.startup_irc_client_active(),
         ) {
             return Some(IngameViewportRegion::ViewportButton(button));
         }
@@ -36425,6 +36698,21 @@ impl GameApp {
         if self.handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Right)? {
             return Ok(());
         }
+        if self.external_irc_dialog_visible {
+            if button_state == ElementState::Pressed {
+                let outcome = self
+                    .external_irc_dialog
+                    .as_mut()
+                    .and_then(|dialog| {
+                        dialog.pointer_position().map(|point| {
+                            dialog.request_context_menu_at(point, clipboard_text_available())
+                        })
+                    })
+                    .unwrap_or_default();
+                self.process_network_dialog_actions(outcome.actions)?;
+            }
+            return Ok(());
+        }
         if self.game_option_input_dialog.is_some() {
             if button_state == ElementState::Pressed {
                 let point = self.game_option_input_pointer_position;
@@ -36598,6 +36886,28 @@ impl GameApp {
             return Ok(());
         }
         if self.handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Other)? {
+            return Ok(());
+        }
+        if self.external_irc_dialog_visible {
+            if button_state == ElementState::Pressed {
+                let primary = primary_clipboard_text();
+                let fonts = self.assets.clonk_fonts.clone();
+                let outcome = fonts
+                    .as_deref()
+                    .and_then(|fonts| {
+                        self.external_irc_dialog.as_mut().and_then(|dialog| {
+                            dialog.pointer_position().map(|point| {
+                                dialog.handle_pointer_middle_down(
+                                    point,
+                                    primary.as_deref(),
+                                    &fonts.text,
+                                )
+                            })
+                        })
+                    })
+                    .unwrap_or_default();
+                self.process_network_dialog_actions(outcome.actions)?;
+            }
             return Ok(());
         }
         if self.game_option_input_dialog.is_some() {
@@ -37857,11 +38167,7 @@ impl GameApp {
                 lc_frontend::hud::ViewportButton::PlayerMenu => {
                     self.activate_ingame_main_menu_for_player(owner)
                 }
-                lc_frontend::hud::ViewportButton::Chat => {
-                    // The conditional C4ChatDlg/IRC row is never registered
-                    // until the shared external IRC frontend is wired.
-                    Ok(())
-                }
+                lc_frontend::hud::ViewportButton::Chat => self.show_external_irc_dialog(),
             };
         }
         let (command, data) = region.control();
@@ -38235,6 +38541,55 @@ impl GameApp {
         {
             return Ok(());
         }
+        if self.external_irc_dialog_visible {
+            if self.handle_context_menu_pointer_button(
+                button_state,
+                ContextMenuPointerButton::Left,
+            )? {
+                return Ok(());
+            }
+            if self.context_menu.is_some() {
+                return Ok(());
+            }
+        }
+        if self.external_irc_dialog_visible {
+            if !self.message_dialogs.is_empty() {
+                return Ok(());
+            }
+            let Some(point) = self.running_pointer_position else {
+                return Ok(());
+            };
+            let Some(fonts) = self.assets.clonk_fonts.clone() else {
+                return Ok(());
+            };
+            let mut actions = self
+                .external_irc_dialog
+                .as_mut()
+                .map(|dialog| match button_state {
+                    ElementState::Pressed => dialog.handle_pointer_down(point, &fonts.text),
+                    ElementState::Released => dialog.handle_pointer_up(point, &fonts.text),
+                })
+                .unwrap_or_default();
+            if button_state == ElementState::Released {
+                let now = Instant::now();
+                let double = self.irc_dialog_last_click.is_some_and(|(last, at)| {
+                    now.saturating_duration_since(at) < CPP_DOUBLE_CLICK_INTERVAL
+                        && (last.x - point.x).abs() <= 4.0
+                        && (last.y - point.y).abs() <= 4.0
+                });
+                self.irc_dialog_last_click = (!double).then_some((point, now));
+                if double {
+                    actions.extend(
+                        self.external_irc_dialog
+                            .as_mut()
+                            .map(|dialog| dialog.handle_pointer_double_click(point, &fonts.text))
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+            self.process_network_dialog_actions(actions)?;
+            return Ok(());
+        }
         if let Some(layout) = self.network_start_wait_layout() {
             let actions = self
                 .network_start_wait
@@ -38506,6 +38861,35 @@ impl GameApp {
                                     .unwrap_or_default(),
                             );
                             self.netdlg_last_click = None;
+                        }
+                        let chat_double = button_state == ElementState::Released
+                            && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
+                                dialog.mode() == lc_frontend::startup_netdlg::NetDlgMode::Chat
+                            })
+                            && point.is_some_and(|point| {
+                                let now = Instant::now();
+                                let double =
+                                    self.irc_dialog_last_click.is_some_and(|(last, at)| {
+                                        now.saturating_duration_since(at)
+                                            < CPP_DOUBLE_CLICK_INTERVAL
+                                            && (last.x - point.x).abs() <= 4.0
+                                            && (last.y - point.y).abs() <= 4.0
+                                    });
+                                self.irc_dialog_last_click = (!double).then_some((point, now));
+                                double
+                            });
+                        if chat_double {
+                            actions.extend(
+                                self.startup_network_dialog
+                                    .as_mut()
+                                    .and_then(|dialog| {
+                                        point.map(|point| {
+                                            dialog.handle_pointer_double_click(point, &fonts.text)
+                                        })
+                                    })
+                                    .unwrap_or_default(),
+                            );
+                            self.irc_dialog_last_click = None;
                         }
                         self.process_network_dialog_actions(actions)
                     }
@@ -38819,6 +39203,31 @@ impl GameApp {
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.context_menu_pointer_dismissed_lobby_option = None;
         if self.startup_network_transition_blocks_input() {
+            return Ok(());
+        }
+        if self.external_irc_dialog_visible {
+            match phase {
+                TouchPhase::Started => {
+                    self.handle_cursor_moved(PhysicalPosition::new(
+                        f64::from(position.x),
+                        f64::from(position.y),
+                    ))?;
+                    self.handle_mouse_button(ElementState::Pressed)?;
+                }
+                TouchPhase::Moved => {
+                    self.handle_cursor_moved(PhysicalPosition::new(
+                        f64::from(position.x),
+                        f64::from(position.y),
+                    ))?;
+                }
+                TouchPhase::Ended => self.handle_mouse_button(ElementState::Released)?,
+                TouchPhase::Cancelled => {
+                    if let Some(dialog) = self.external_irc_dialog.as_mut() {
+                        dialog.pointer_left();
+                    }
+                }
+            }
+            self.mark_menu_dirty();
             return Ok(());
         }
         if self.running_chat_controller().is_some() {
@@ -39525,6 +39934,18 @@ impl GameApp {
             self.message_dialog_pointer_left_at(index);
         }
         if messages_open && self.running_chat_controller().is_none() {
+            return;
+        }
+        if self.external_irc_dialog_visible {
+            if let Some(menu) = self.context_menu.as_mut() {
+                let _ = menu.handle_pointer_left();
+            }
+        }
+        if self.external_irc_dialog_visible {
+            if let Some(dialog) = self.external_irc_dialog.as_mut() {
+                dialog.pointer_left();
+            }
+            self.irc_dialog_last_click = None;
             return;
         }
         if self
@@ -40989,22 +41410,179 @@ impl GameApp {
         snapshot: lc_frontend::startup_netdlg::NetDlgChatSnapshot,
     ) {
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            dialog.sync_chat_snapshot(snapshot.clone());
+        }
+        if let Some(dialog) = self.external_irc_dialog.as_mut() {
             dialog.sync_chat_snapshot(snapshot);
         }
         self.mark_menu_dirty();
+    }
+
+    fn startup_irc_client_active(&self) -> bool {
+        self.startup_irc_client
+            .as_ref()
+            .is_some_and(lc_network::IrcClientHandle::is_active)
+    }
+
+    fn startup_irc_chat_visible(&self) -> bool {
+        self.external_irc_dialog_visible
+            || (self.mode == AppMode::Menu
+                && self.startup_view == StartupView::NetworkGame
+                && self.startup_network_dialog.as_ref().is_some_and(|dialog| {
+                    dialog.mode() == lc_frontend::startup_netdlg::NetDlgMode::Chat
+                }))
+    }
+
+    fn show_startup_irc_error(&mut self, message: String) -> Result<(), EngineError> {
+        let caption = self.runtime_resource_text("IDS_DLG_ERROR", "Error");
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                message,
+                caption,
+                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        )
+    }
+
+    fn show_startup_irc_validation_error(
+        &mut self,
+        field: lc_frontend::startup_netdlg::NetDlgChatLoginField,
+    ) -> Result<(), EngineError> {
+        let (key, fallback) = match field {
+            lc_frontend::startup_netdlg::NetDlgChatLoginField::Nick => {
+                ("IDS_ERR_INVALIDNICKNAME", "Invalid nickname.")
+            }
+            lc_frontend::startup_netdlg::NetDlgChatLoginField::Password => (
+                "IDS_ERR_INVALIDPASSWORDMAX31CHARA",
+                "Invalid password. Maximum 31 characters. No spaces allowed.",
+            ),
+            lc_frontend::startup_netdlg::NetDlgChatLoginField::RealName => return Ok(()),
+            lc_frontend::startup_netdlg::NetDlgChatLoginField::Channel => {
+                ("IDS_ERR_INVALIDCHANNELNAME", "Invalid channel name.")
+            }
+        };
+        self.show_startup_irc_error(self.runtime_resource_text(key, fallback))
+    }
+
+    fn show_startup_irc_connect_failure(&mut self, error: &str) -> Result<(), EngineError> {
+        let template =
+            self.runtime_resource_text("IDS_ERR_IRCCONNECTIONFAILED", "IRC connection failed: %s");
+        self.show_startup_irc_error(format_resource_string(template, &[error]))
+    }
+
+    fn request_startup_irc_disconnect_confirmation(&mut self) -> Result<(), EngineError> {
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                self.runtime_resource_text(
+                    "IDS_MSG_DISCONNECTFROMSERVER",
+                    "Disconnect from server?",
+                ),
+                self.runtime_resource_text("IDS_DLG_CHAT", "Chat"),
+                lc_frontend::message_dialog::MessageDialogButtons::OK_CANCEL,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            MessageDialogContinuation::StartupIrcDisconnectConfirm,
+        )
+    }
+
+    fn show_external_irc_dialog(&mut self) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        let resource_check = self
+            .assets
+            .netdlg_assets()
+            .context("exact C4ChatDlg graphics are unavailable")
+            .and_then(|_| {
+                self.assets
+                    .clonk_fonts
+                    .as_ref()
+                    .context("C4ChatDlg fonts are unavailable")
+                    .map(|_| ())
+            });
+        Self::guard_gui_overlay_result("C4ChatDlg", resource_check)?;
+        if self.mode == AppMode::Running {
+            self.cancel_ingame_mouse_gestures();
+            self.menu_title_drag = None;
+            self.ingame_menu_close_pointer_capture = None;
+            self.script_menu_close_pointer_capture = None;
+        }
+        self.close_context_menu_silently();
+        if self.running_chat_controller().is_some() {
+            self.close_running_chat()?;
+        }
+        if self.external_irc_dialog_visible && self.external_irc_dialog.is_some() {
+            self.sync_startup_irc_snapshot();
+            self.mark_menu_dirty();
+            return Ok(());
+        }
+        let (width, height) = {
+            let surface = self.graphics.surface();
+            (surface.width() as i32, surface.height() as i32)
+        };
+        let bounds =
+            lc_frontend::startup_netdlg::NetDlgController::standalone_chat_bounds(width, height);
+        let active = self.startup_irc_client_active();
+        let history = self.message_input_history.iter().cloned().collect();
+        let mut dialog = self.new_network_dialog_controller();
+        dialog.resize(width, height);
+        dialog.set_chat_bounds_override(Some(bounds));
+        dialog.set_chat_history(history);
+        if !active {
+            dialog.show_chat_login();
+        }
+        self.external_irc_dialog = Some(dialog);
+        self.external_irc_dialog_visible = true;
+        self.irc_dialog_last_click = None;
+        self.sync_startup_irc_snapshot();
+        if let Some(dialog) = self.external_irc_dialog.as_mut() {
+            // The standalone C4ChatControl picks its initial focus after the
+            // process-global IRC projection has selected Login versus Chats.
+            dialog.force_chat_mode_and_default_focus();
+            dialog.pointer_left();
+        }
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn hide_external_irc_dialog(&mut self) {
+        self.close_context_menu_silently();
+        self.external_irc_dialog_visible = false;
+        self.external_irc_dialog = None;
+        self.irc_dialog_last_click = None;
+        self.mark_menu_dirty();
+    }
+
+    fn toggle_external_irc_dialog(&mut self) -> Result<(), EngineError> {
+        if self.external_irc_dialog_visible {
+            self.hide_external_irc_dialog();
+            Ok(())
+        } else {
+            self.show_external_irc_dialog()
+        }
     }
 
     fn sync_startup_irc_snapshot(&mut self) {
         let Some(client) = self.startup_irc_client.as_ref() else {
             return;
         };
-        let snapshot = if self.startup_network_dialog.is_some() {
+        let snapshot = if self.startup_irc_chat_visible() {
             client.snapshot_and_mark_message_log_read()
         } else {
             client.snapshot()
         };
         let snapshot = project_startup_irc_snapshot(&self.startup_irc_server, snapshot);
         self.sync_startup_irc_projection(snapshot);
+    }
+
+    fn show_irc_login_on_all_controllers(&mut self) {
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            dialog.show_chat_login();
+        }
+        if let Some(dialog) = self.external_irc_dialog.as_mut() {
+            dialog.show_chat_login();
+        }
     }
 
     fn request_startup_irc_connection(
@@ -41022,8 +41600,7 @@ impl GameApp {
         }
 
         if load_irc_settings(self.app_paths.as_ref()).hide_dangerous_warning {
-            self.connect_startup_irc(login);
-            return Ok(());
+            return self.connect_startup_irc(login);
         }
 
         let message = format_resource_string(
@@ -41056,12 +41633,16 @@ impl GameApp {
         Ok(())
     }
 
-    fn connect_startup_irc(&mut self, login: lc_frontend::startup_netdlg::NetDlgChatLogin) {
+    fn connect_startup_irc(
+        &mut self,
+        login: lc_frontend::startup_netdlg::NetDlgChatLogin,
+    ) -> Result<(), EngineError> {
         if let Some(mut client) = self.startup_irc_client.take() {
             if let Err(error) = client.close() {
                 tracing::warn!(%error, "failed to close the previous IRC connection");
             }
         }
+        self.startup_irc_initial_connect_pending = false;
 
         self.startup_irc_server.clone_from(&login.server);
         self.sync_startup_irc_projection(lc_frontend::startup_netdlg::NetDlgChatSnapshot {
@@ -41078,22 +41659,27 @@ impl GameApp {
         config.auto_join = (!login.channel.is_empty()).then_some(login.channel);
         match lc_network::IrcClientHandle::connect(config) {
             Ok(client) => {
+                self.startup_irc_initial_connect_pending = true;
                 self.startup_irc_client = Some(client);
                 self.sync_startup_irc_snapshot();
             }
             Err(error) => {
+                let error = error.to_string();
                 let snapshot = lc_frontend::startup_netdlg::NetDlgChatSnapshot {
                     server: login.server,
                     nick: login.nick,
-                    last_error: Some(error.to_string()),
                     ..Default::default()
                 };
                 self.sync_startup_irc_projection(snapshot);
+                self.show_irc_login_on_all_controllers();
+                self.show_startup_irc_connect_failure(&error)?;
             }
         }
+        Ok(())
     }
 
     fn disconnect_startup_irc(&mut self) {
+        self.startup_irc_initial_connect_pending = false;
         let Some(mut client) = self.startup_irc_client.take() else {
             return;
         };
@@ -41121,7 +41707,7 @@ impl GameApp {
         if let Err(error) = result {
             tracing::warn!(%error, "failed to queue IRC command");
             if let Some(client) = self.startup_irc_client.as_ref() {
-                let snapshot = if self.startup_network_dialog.is_some() {
+                let snapshot = if self.startup_irc_chat_visible() {
                     client.snapshot_and_mark_message_log_read()
                 } else {
                     client.snapshot()
@@ -41134,16 +41720,41 @@ impl GameApp {
         }
     }
 
-    fn poll_startup_irc(&mut self) {
-        let mut changed = false;
-        if let Some(client) = self.startup_irc_client.as_ref() {
-            while client.try_recv_event().is_ok() {
-                changed = true;
+    fn poll_startup_irc(&mut self) -> Result<(), EngineError> {
+        let events = self
+            .startup_irc_client
+            .as_ref()
+            .map(|client| client.events().try_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let changed = !events.is_empty();
+        let mut initial_failure = None;
+        for event in events {
+            match event {
+                lc_network::IrcClientEvent::Connected => {
+                    self.startup_irc_initial_connect_pending = false;
+                }
+                lc_network::IrcClientEvent::Disconnected { reason }
+                    if self.startup_irc_initial_connect_pending =>
+                {
+                    self.startup_irc_initial_connect_pending = false;
+                    initial_failure = Some(reason);
+                }
+                lc_network::IrcClientEvent::Closed => {
+                    self.startup_irc_initial_connect_pending = false;
+                }
+                lc_network::IrcClientEvent::Notification
+                | lc_network::IrcClientEvent::Disconnected { .. } => {}
             }
         }
         if changed {
             self.sync_startup_irc_snapshot();
         }
+        if let Some(error) = initial_failure {
+            self.startup_irc_client = None;
+            self.show_irc_login_on_all_controllers();
+            self.show_startup_irc_connect_failure(&error)?;
+        }
+        Ok(())
     }
 
     fn process_network_dialog_actions(
@@ -41226,8 +41837,7 @@ impl GameApp {
                             let follow_up = fonts
                                 .as_deref()
                                 .and_then(|fonts| {
-                                    self.startup_network_dialog
-                                        .as_mut()
+                                    self.input_network_dialog_mut()
                                         .map(|dialog| dialog.confirm_clipboard_cut(&fonts.text))
                                 })
                                 .unwrap_or_default();
@@ -41247,8 +41857,21 @@ impl GameApp {
                 NetDlgAction::ChatConnect(login) => {
                     self.request_startup_irc_connection(login)?;
                 }
+                NetDlgAction::ChatValidationFailed(error) => {
+                    self.show_startup_irc_validation_error(error.field())?;
+                }
                 NetDlgAction::ChatCommand(command) => self.dispatch_startup_irc_command(command),
-                NetDlgAction::ChatDisconnect => self.disconnect_startup_irc(),
+                NetDlgAction::ChatDisconnectConfirmationRequested => {
+                    self.request_startup_irc_disconnect_confirmation()?;
+                }
+                NetDlgAction::ChatDisconnect => {
+                    self.disconnect_startup_irc();
+                    self.show_irc_login_on_all_controllers();
+                }
+                NetDlgAction::ChatHistoryStored(text) => {
+                    self.store_message_input_history(&text);
+                }
+                NetDlgAction::ChatDialogCloseRequested => self.hide_external_irc_dialog(),
                 NetDlgAction::ChatSelectSheet { .. } => {
                     self.sync_startup_irc_snapshot();
                 }
@@ -41379,7 +42002,9 @@ impl GameApp {
         &mut self,
         command: lc_frontend::startup_netdlg::NetDlgEditContextCommand,
     ) -> Result<(), EngineError> {
-        if self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkGame {
+        if !self.external_irc_dialog_visible
+            && (self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkGame)
+        {
             tracing::error!(?command, "stale join-address context command");
             return Ok(());
         }
@@ -41397,7 +42022,7 @@ impl GameApp {
         let actions = fonts
             .as_deref()
             .and_then(|fonts| {
-                self.startup_network_dialog.as_mut().map(|dialog| {
+                self.input_network_dialog_mut().map(|dialog| {
                     dialog.apply_context_command(command, clipboard.as_deref(), &fonts.text)
                 })
             })
@@ -42239,7 +42864,7 @@ impl GameApp {
             active_players,
             staged.lobby.max_players,
             staged.lobby.has_teams,
-            false,
+            self.startup_irc_client_active(),
             self.admission_resources.lobby_ready_available(),
             false,
             staged.lobby.countdown_seconds,
@@ -42517,7 +43142,8 @@ impl GameApp {
                                 manager.local_client_id(),
                                 self.player_name.clone(),
                                 true,
-                            );
+                            )
+                            .with_external_chat(self.startup_irc_client_active());
                             lobby.select_scenario(identifier, title);
                             self.scenario_label = lobby.scenario_label();
                             if let NetworkMode::Host(HostSettings {
@@ -42632,7 +43258,8 @@ impl GameApp {
                         manager.local_client_id(),
                         self.player_name.clone(),
                         false,
-                    );
+                    )
+                    .with_external_chat(self.startup_irc_client_active());
                     self.network_game_advertiser = None;
                     self.advertised_game_reference = None;
                     self.host_reference_paused = false;
@@ -48243,6 +48870,7 @@ impl GameApp {
                 }
             }
             LobbyAction::StartGame => self.start_network_lobby_countdown()?,
+            LobbyAction::OpenExternalIrcChat => self.show_external_irc_dialog()?,
             LobbyAction::SubmitMessage(text) => {
                 self.store_message_input_history(&text);
                 if self.process_classic_lobby_command(&text)? {
@@ -49577,8 +50205,7 @@ impl GameApp {
                 // handled by keyboard/clipboard actions above.
             }
             LobbyChatRequest::OpenExternalDialog => {
-                // The retained external-chat sheet is not implemented yet,
-                // but opening it must not tear down the live network lobby.
+                self.show_external_irc_dialog()?;
             }
         }
         Ok(())
@@ -50556,18 +51183,39 @@ impl GameApp {
         self.acknowledge_initial_lobby_status_if_ready();
     }
 
-    fn open_network_game_dialog(&mut self) {
-        self.close_context_menu_silently();
-        self.status_text.clear();
-        self.startup_network_refresh_waiting_for_clear = false;
-        self.startup_network_ignore_redirect = false;
-        self.startup_game_references.clear();
-        self.startup_discovery_reference_queries.clear();
-        self.startup_direct_reference_queries.clear();
-        self.netdlg_last_click = None;
-        self.netdlg_join_edit_last_click = None;
-        self.netdlg_edit_consumed_keys.clear();
-        self.pending_network_join = None;
+    fn localized_irc_chat_strings(&self) -> lc_frontend::startup_netdlg::NetDlgChatStrings {
+        let command_template = |key: &str, fallback: &str| {
+            self.runtime_resource_text(key, fallback)
+                .replace("%s", "{command}")
+        };
+        lc_frontend::startup_netdlg::NetDlgChatStrings {
+            chat: self.runtime_resource_text("IDS_DLG_CHAT", "Chat"),
+            not_connected: self.runtime_resource_text("IDS_CHAT_NOTCONNECTED", "not connected"),
+            server: self.runtime_resource_text("IDS_CHAT_SERVER", "Server"),
+            nick: self.runtime_resource_text("IDS_CTL_NICK", "Nickname:"),
+            password_optional: self
+                .runtime_resource_text("IDS_CTL_PASSWORDOPTIONAL", "Password (optional):"),
+            real_name: self.runtime_resource_text("IDS_CTL_REALNAME", "Real name:"),
+            channel: self.runtime_resource_text("IDS_CTL_CHANNEL", "Channel:"),
+            connect: self.runtime_resource_text("IDS_BTN_CONNECT", "Connect"),
+            no_message: "No message entered".to_string(),
+            not_connected_error: self
+                .runtime_resource_text("IDS_ERR_NOTCONNECTEDTOSERVER", "Not connected to server."),
+            insufficient_parameters: command_template(
+                "IDS_ERR_INSUFFICIENTPARAMETERS",
+                "/%s: insufficient parameters",
+            ),
+            invalid_nick: command_template("IDS_ERR_INVALIDNICKNAME2", "/%s: invalid nick name"),
+            unknown_command: command_template(
+                "IDS_ERR_UNKNOWNCMD",
+                "Unknown command: \"%s\" - type /help to get a list of valid commands",
+            ),
+            not_on_channel: self
+                .runtime_resource_text("IDS_ERR_NOTONACHANNEL", "Not on a channel."),
+        }
+    }
+
+    fn new_network_dialog_controller(&self) -> lc_frontend::startup_netdlg::NetDlgController {
         let (masterserver_signup, _) = load_network_startup_settings(self.app_paths.as_ref());
         let metrics = self
             .assets
@@ -50588,12 +51236,9 @@ impl GameApp {
             },
             metrics,
         );
+        dialog.set_chat_strings(self.localized_irc_chat_strings());
         dialog.set_chat_login(load_irc_settings(self.app_paths.as_ref()).login());
-        let search_config = load_network_search_settings(self.app_paths.as_ref());
-        dialog.set_masterserver_entry(Self::startup_masterserver_query_entry(
-            self.app_paths.as_ref(),
-            &search_config.master_server_url,
-        ));
+        dialog.set_chat_history(self.message_input_history.iter().cloned().collect());
         if let Some(fonts) = self.assets.clonk_fonts.as_deref() {
             dialog.set_text_font(&fonts.text);
         }
@@ -50601,6 +51246,30 @@ impl GameApp {
             self.graphics.surface().width() as i32,
             self.graphics.surface().height() as i32,
         );
+        dialog
+    }
+
+    fn open_network_game_dialog(&mut self) {
+        self.external_irc_dialog_visible = false;
+        self.external_irc_dialog = None;
+        self.irc_dialog_last_click = None;
+        self.close_context_menu_silently();
+        self.status_text.clear();
+        self.startup_network_refresh_waiting_for_clear = false;
+        self.startup_network_ignore_redirect = false;
+        self.startup_game_references.clear();
+        self.startup_discovery_reference_queries.clear();
+        self.startup_direct_reference_queries.clear();
+        self.netdlg_last_click = None;
+        self.netdlg_join_edit_last_click = None;
+        self.netdlg_edit_consumed_keys.clear();
+        self.pending_network_join = None;
+        let mut dialog = self.new_network_dialog_controller();
+        let search_config = load_network_search_settings(self.app_paths.as_ref());
+        dialog.set_masterserver_entry(Self::startup_masterserver_query_entry(
+            self.app_paths.as_ref(),
+            &search_config.master_server_url,
+        ));
         let reference_config = load_reference_query_settings(self.app_paths.as_ref());
         self.startup_game_search = match lc_network::StartupGameSearch::start_with_reference_config(
             search_config,
@@ -53216,7 +53885,7 @@ impl GameApp {
         }
         self.poll_startup_game_search()?;
         self.poll_scenario_selector_discovery()?;
-        self.poll_startup_irc();
+        self.poll_startup_irc()?;
         self.poll_startup_network_connection();
         self.poll_live_masterserver_signup()?;
         self.process_network_events()?;
@@ -55518,6 +56187,15 @@ impl GameApp {
         ] {
             state.set_button_label(button, self.runtime_resource_text(key, fallback));
         }
+        if matches!(
+            continuation,
+            MessageDialogContinuation::StartupIrcDisconnectConfirm
+        ) {
+            state.set_button_label(
+                MessageDialogButton::Cancel,
+                self.runtime_resource_text("IDS_DLG_ABORT", "Abort"),
+            );
+        }
         state.set_close_tooltip(self.runtime_resource_text("IDS_MNU_CLOSE", "Close"));
         self.guard_classic_global_gui_bootstrap()?;
         Self::guard_gui_overlay_result(
@@ -55683,7 +56361,13 @@ impl GameApp {
                     }
                 }
                 if result == lc_frontend::message_dialog::MessageDialogResult::Ok {
-                    self.connect_startup_irc(login);
+                    self.connect_startup_irc(login)?;
+                }
+            }
+            MessageDialogContinuation::StartupIrcDisconnectConfirm => {
+                if result == lc_frontend::message_dialog::MessageDialogResult::Ok {
+                    self.disconnect_startup_irc();
+                    self.show_irc_login_on_all_controllers();
                 }
             }
             MessageDialogContinuation::NetworkClientStartWait => {
@@ -56537,6 +57221,74 @@ impl GameApp {
         Ok(())
     }
 
+    fn render_external_irc_dialog(&mut self, gamma: Option<&lc_graphics::GammaRamp>) -> Result<()> {
+        if !self.external_irc_dialog_visible {
+            return Ok(());
+        }
+        let assets = self
+            .assets
+            .netdlg_assets()
+            .context("exact C4ChatDlg graphics are unavailable")?;
+        let fonts = self
+            .assets
+            .clonk_fonts
+            .clone()
+            .context("C4ChatDlg fonts are unavailable")?;
+        let controller = self
+            .external_irc_dialog
+            .as_ref()
+            .context("C4ChatDlg controller is unavailable")?;
+        let draw_focus = self.message_dialogs.is_empty() && self.context_menu.is_none();
+        lc_frontend::startup_netdlg::NetDlgScreen::render_standalone_chat_dialog(
+            self.graphics.surface_mut(),
+            &assets,
+            &fonts,
+            gamma,
+            controller,
+            draw_focus,
+        );
+        Ok(())
+    }
+
+    fn render_external_irc_dialog_tooltip(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Result<bool> {
+        if !self.external_irc_dialog_visible
+            || !self.message_dialogs.is_empty()
+            || self.context_menu.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(pointer) = self.startup_tooltip.eligible_pointer() else {
+            return Ok(false);
+        };
+        let Some(target) = self
+            .external_irc_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.tooltip_at(pointer))
+        else {
+            return Ok(false);
+        };
+        let text = self.resolve_startup_tooltip_text(target);
+        if text.is_empty() {
+            return Ok(false);
+        }
+        let font = self
+            .assets
+            .global_tooltip_font
+            .as_deref()
+            .context("classic shadowless tooltip font is unavailable")?;
+        lc_frontend::context_menu::draw_classic_tooltip(
+            self.graphics.surface_mut(),
+            font,
+            pointer,
+            &text,
+            gamma,
+        );
+        Ok(true)
+    }
+
     fn render_message_dialog_tooltip(
         &mut self,
         gamma: Option<&lc_graphics::GammaRamp>,
@@ -57004,7 +57756,8 @@ impl GameApp {
         let active = self.context_menu.is_none()
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
-            && self.message_dialogs.is_empty();
+            && self.message_dialogs.is_empty()
+            && !self.external_irc_dialog_visible;
         let gamma = self.loader_gamma.as_ref();
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         let surface = self.graphics.surface_mut();
@@ -57050,7 +57803,8 @@ impl GameApp {
         let active = self.context_menu.is_none()
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
-            && self.message_dialogs.is_empty();
+            && self.message_dialogs.is_empty()
+            && !self.external_irc_dialog_visible;
         lobby.controller.render_tooltips(
             self.graphics.surface_mut(),
             &lobby_resources,
@@ -57197,6 +57951,17 @@ impl GameApp {
                             self.next_pending_native_overlay();
                         }
                     }
+                    if self.external_irc_dialog_visible {
+                        self.render_external_irc_dialog(gamma.as_ref())?;
+                        if ordered_native {
+                            self.next_pending_native_overlay();
+                        }
+                        if self.render_external_irc_dialog_tooltip(gamma.as_ref())?
+                            && ordered_native
+                        {
+                            self.next_pending_native_overlay();
+                        }
+                    }
                     if !self.message_dialogs.is_empty() {
                         self.render_message_dialogs(gamma.as_ref())?;
                     }
@@ -57272,6 +58037,7 @@ impl GameApp {
                     && self.game_option_input_dialog.is_none()
                     && self.definition_selector.is_none()
                     && self.message_dialogs.is_empty()
+                    && !self.external_irc_dialog_visible
                     && !startup_tooltip_pending;
                 if cache_eligible {
                     if let Some(cache) = self.menu_frame_cache.as_ref() {
@@ -57294,6 +58060,7 @@ impl GameApp {
                 // focused control. Reuse the renderer's inactive-focus path.
                 let context_menu_open = self.context_menu.is_some()
                     || self.startup_player_properties_dialog.is_some()
+                    || self.external_irc_dialog_visible
                     || fade_draw_inactive;
                 let options_draw_focus =
                     self.startup_options_dialog_has_focus_owner() && !fade_draw_inactive;
@@ -57449,6 +58216,17 @@ impl GameApp {
                         self.next_pending_native_overlay();
                     }
                 }
+                if self.external_irc_dialog_visible {
+                    self.render_external_irc_dialog(Some(startup_gamma()))?;
+                    if ordered_native {
+                        self.next_pending_native_overlay();
+                    }
+                    if self.render_external_irc_dialog_tooltip(Some(startup_gamma()))?
+                        && ordered_native
+                    {
+                        self.next_pending_native_overlay();
+                    }
+                }
                 if !self.message_dialogs.is_empty() {
                     self.render_message_dialogs(Some(startup_gamma()))?;
                 }
@@ -57467,6 +58245,7 @@ impl GameApp {
                         || self.startup_player_properties_dialog.is_some()
                         || definition_selector_open
                         || game_option_input_open
+                        || self.external_irc_dialog_visible
                         || !self.message_dialogs.is_empty())
                 {
                     let surface = self.graphics.surface();
@@ -57656,6 +58435,21 @@ impl GameApp {
                     .context("exact C4Network2ClientListDlg resource set is absent")
                     .and_then(|resources| resources.validate()),
                 "C4Network2ClientListDlg",
+            )?;
+        }
+        if self.external_irc_dialog_visible {
+            check(
+                self.assets
+                    .netdlg_assets()
+                    .context("exact C4ChatDlg graphics are unavailable")
+                    .and_then(|_| {
+                        self.assets
+                            .clonk_fonts
+                            .as_ref()
+                            .context("C4ChatDlg fonts are unavailable")
+                            .map(|_| ())
+                    }),
+                "C4ChatDlg",
             )?;
         }
         if self.mode == AppMode::Menu
@@ -58884,15 +59678,16 @@ impl GameApp {
         self.draw_classic_game_messages(&frame_gamma, defer_native_game_messages)?;
 
         // C4Viewport draws this local control layer after menus and game
-        // messages. Classic Chat is the intentionally unsupported external
-        // IRC client, so its conditional row is inactive in this port.
+        // messages. Classic Chat is conditional on the process-global IRC
+        // client being connecting or connected.
         if viewport_overlays_visible {
             let mouse_viewport_index = self
                 .active_ingame_mouse_viewport()
                 .map(|viewport| viewport.index);
+            let irc_chat_active = self.startup_irc_client_active();
             self.graphics.draw_viewport_control_overlays(
                 mouse_viewport_index,
-                false,
+                irc_chat_active,
                 None,
                 Some(&frame_gamma),
             );
@@ -59207,6 +60002,15 @@ impl GameApp {
             self.render_runtime_client_list_layer(&frame_gamma, ordered_native)?;
         }
 
+        if self.external_irc_dialog_visible {
+            self.render_external_irc_dialog(Some(&frame_gamma))?;
+            if ordered_native {
+                self.next_pending_native_overlay();
+            }
+            if self.render_external_irc_dialog_tooltip(Some(&frame_gamma))? && ordered_native {
+                self.next_pending_native_overlay();
+            }
+        }
         self.render_message_dialogs(Some(&frame_gamma))?;
         if ordered_native && !self.message_dialogs.is_empty() {
             self.next_pending_native_overlay();
@@ -89237,7 +90041,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn l016_forwarded_help_clear_kick_and_observer_commands_stay_in_lobby() {
-        let mut app = new_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         let (_events, mut commands) = install_classic_host_network_stub(&mut app);
         app.control_clients.replace_snapshot([
             message_client(0, b"Exact Host"),
@@ -89303,8 +90107,9 @@ public func Grant(password) { return GainMissionAccess(password); }
             .logs()
             .is_empty());
         app.process_classic_lobby_chat_request(LobbyChatRequest::OpenExternalDialog)
-            .expect("external-chat button is nonfatal while its sheet is unavailable");
+            .expect("external-chat button opens the implemented classic dialog");
         assert!(app.classic_host_lobby.is_some());
+        assert!(app.external_irc_dialog_visible);
     }
 
     #[test]
@@ -89640,6 +90445,52 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .is_empty(),
             "an authoritative PlayerInfo replay cannot resurrect a failed resource"
         );
+    }
+
+    #[test]
+    fn generic_client_lobby_external_irc_button_is_retained_and_emits_typed_action() {
+        let mut lobby =
+            NetworkLobbyState::new(7, "Client".to_string(), false).with_external_chat(true);
+
+        let pure_layout = lobby.update_layout(640.0, 480.0).clone();
+        assert!(pure_layout.external_chat_button.is_some());
+
+        let app = new_menu_app(640, 480);
+        let (controller, _) = lobby
+            .classic_render_state(
+                app.graphics.surface(),
+                app.assets.as_ref(),
+                &app.scenario_game_options,
+            )
+            .expect("build client lobby with the retained external IRC snapshot");
+        let fonts = app.assets.clonk_fonts.as_deref().unwrap();
+        assert!(controller
+            .layout(640, 480, fonts)
+            .tab_buttons
+            .iter()
+            .any(|button| button.control == LobbyControl::ChatDialog));
+
+        let rect = lobby
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.external_chat_button)
+            .expect("rendered client lobby keeps the external IRC hit region");
+        let point = GuiPoint::new(
+            rect.origin.x + rect.size.width / 2.0,
+            rect.origin.y + rect.size.height / 2.0,
+        );
+        lobby.handle_panel_pointer_move(point);
+        lobby.handle_panel_pointer_down(point);
+        assert_eq!(
+            lobby.handle_panel_pointer_up(point),
+            Some(LobbyAction::OpenExternalIrcChat)
+        );
+
+        let mut inactive = NetworkLobbyState::new(7, "Client".to_string(), false);
+        assert!(inactive
+            .update_layout(640.0, 480.0)
+            .external_chat_button
+            .is_none());
     }
 
     #[test]
@@ -96880,15 +97731,46 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn non_startup_irc_entry_points_keep_their_existing_scoped_behavior() {
-        let mut lobby_app = new_real_menu_app(640, 480);
+    fn standalone_irc_entry_points_share_the_singleton_dialog_and_alt_c_toggles_it() {
+        let mut lobby_app = new_real_classic_menu_app(640, 480);
         install_test_classic_host_lobby(&mut lobby_app);
         lobby_app
             .process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
                 LobbyChatRequest::OpenExternalDialog,
             )])
-            .expect("the unavailable external-chat sheet is a nonfatal lobby no-op");
+            .expect("the lobby IRC button opens the standalone dialog");
         assert!(lobby_app.classic_host_lobby.is_some());
+        assert!(lobby_app.external_irc_dialog_visible);
+        let dialog = lobby_app
+            .external_irc_dialog
+            .as_ref()
+            .expect("the standalone network/chat controller exists");
+        assert_eq!(
+            dialog.mode(),
+            lc_frontend::startup_netdlg::NetDlgMode::Chat
+        );
+        assert_eq!(
+            dialog.chat_bounds_override(),
+            Some(lc_frontend::startup_netdlg::NetDlgController::standalone_chat_bounds(640, 480))
+        );
+        let first_dialog_ptr = std::ptr::from_ref(dialog);
+        lobby_app
+            .process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
+                LobbyChatRequest::OpenExternalDialog,
+            )])
+            .expect("a repeated lobby request raises the same dialog");
+        assert!(lobby_app.external_irc_dialog_visible);
+        assert_eq!(
+            lobby_app
+                .external_irc_dialog
+                .as_ref()
+                .map(std::ptr::from_ref),
+            Some(first_dialog_ptr),
+            "raising the singleton must preserve its UI-local controller state"
+        );
+        lobby_app.hide_external_irc_dialog();
+        assert!(!lobby_app.external_irc_dialog_visible);
+        assert!(lobby_app.external_irc_dialog.is_none());
 
         for modifiers in [
             ModifiersState::ALT,
@@ -96901,22 +97783,26 @@ public func Grant(password) { return GainMissionAccess(password); }
             runtime_app
                 .handle_modifiers_changed(modifiers)
                 .expect("set the exact legacy IRC chord");
-            let before = runtime_global_ui_snapshot(&runtime_app);
-            let runtime_boundary = ClassicParityBoundary::RuntimeIrcChatToggle;
-            let runtime_expected = runtime_boundary.to_string();
-            assert_eq!(
-                runtime_expected,
-                "classic standalone IRC Chat dialog is not wired yet; refusing the runtime Alt+C toggle"
+            runtime_app.menu_title_drag = Some(MenuTitleDrag::Ingame {
+                player: runtime_app.local_owner,
+                start_pointer: GuiPoint::new(20.0, 20.0),
+                start_location: (40, 50),
+            });
+            runtime_app
+                .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+                .expect("runtime Alt+C opens the standalone IRC dialog");
+            assert!(runtime_app.external_irc_dialog_visible);
+            assert!(
+                runtime_app.menu_title_drag.is_none(),
+                "activating C4ChatDlg releases an obscured menu-title drag"
             );
-            for _ in 0..2 {
-                let runtime_error = runtime_app
-                    .handle_key(VirtualKeyCode::C, ElementState::Pressed)
-                    .expect_err("runtime IRC chord must fail at the pending frontend boundary");
-                let mut after = runtime_global_ui_snapshot(&runtime_app);
-                after.menu_render_version = before.menu_render_version;
-                assert_eq!(after, before);
-                assert_engine_parity_boundary(runtime_error, runtime_boundary.clone());
-            }
+            runtime_app
+                .handle_cursor_moved(PhysicalPosition::new(300.0, 200.0))
+                .expect("standalone dialog owns motion after activation");
+            runtime_app
+                .handle_mouse_button(ElementState::Released)
+                .expect("standalone dialog owns the pending pointer release");
+            assert!(runtime_app.external_irc_dialog_visible);
 
             runtime_app
                 .engine
@@ -96938,6 +97824,10 @@ public func Grant(password) { return GainMissionAccess(password); }
                 0,
                 "runtime IRC release must not leak to modifier-blind player control"
             );
+            runtime_app
+                .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+                .expect("a second runtime Alt+C closes only the IRC UI");
+            assert!(!runtime_app.external_irc_dialog_visible);
         }
 
         let mut ignored_runtime = new_running_sandbox_app();
@@ -96954,9 +97844,219 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .handle_modifiers_changed(modifiers)
                 .expect("set non-IRC modifiers");
             assert!(!ignored_runtime
-                .handle_runtime_irc_unported_key(VirtualKeyCode::C, ElementState::Pressed)
+                .handle_runtime_irc_toggle_key(VirtualKeyCode::C, ElementState::Pressed)
                 .expect("non-IRC chord is unhandled"));
+            assert!(!ignored_runtime.external_irc_dialog_visible);
         }
+    }
+
+    #[test]
+    fn active_irc_runtime_hud_chat_button_opens_ui_without_disconnecting_transport() {
+        let (address, server) = spawn_loopback_irc_server();
+        let handle = lc_network::IrcClientHandle::connect_with_timeout(
+            lc_network::IrcConnectConfig::new(address.clone(), "Clonker", "Clonker"),
+            Duration::from_secs(2),
+        )
+        .expect("start loopback IRC client");
+        assert!(matches!(
+            handle.recv_event_timeout(Duration::from_secs(2)),
+            Ok(lc_network::IrcClientEvent::Connected)
+        ));
+
+        let mut app = new_running_sandbox_app();
+        app.startup_irc_server = address;
+        app.startup_irc_client = Some(handle);
+        render_mouse_test_app(&mut app);
+        let owner = app.local_owner;
+        let chat = viewport_button_point(&app, owner, lc_frontend::hud::ViewportButton::Chat);
+        assert_eq!(
+            app.ingame_viewport_region(owner, chat),
+            Some(IngameViewportRegion::ViewportButton(
+                lc_frontend::hud::ViewportButton::Chat,
+            ))
+        );
+
+        physical_left_click_with_modifiers(
+            &mut app,
+            chat,
+            ModifiersState::empty(),
+            ModifiersState::empty(),
+        );
+        assert!(app.external_irc_dialog_visible);
+        assert!(app.startup_irc_client_active());
+        app.hide_external_irc_dialog();
+        assert!(app.startup_irc_client_active());
+
+        drop(app);
+        server.join().expect("join loopback IRC server");
+    }
+
+    #[test]
+    fn standalone_irc_validation_disconnect_and_window_close_use_classic_modal_ownership() {
+        use lc_frontend::message_dialog::{
+            MessageDialogButton, MessageDialogIcon, MessageDialogResult,
+        };
+        use lc_frontend::startup_netdlg::{
+            NetDlgAction, NetDlgChatConnectionState, NetDlgChatPage, NetDlgChatSnapshot,
+            NetDlgChatValidationError,
+        };
+
+        let mut app = new_real_classic_menu_app(640, 480);
+        app.startup_network_dialog = Some(app.new_network_dialog_controller());
+        let embedded_controller_ptr = app
+            .startup_network_dialog
+            .as_ref()
+            .map(std::ptr::from_ref);
+        app.show_external_irc_dialog()
+            .expect("open the standalone IRC dialog");
+        assert_ne!(
+            app.external_irc_dialog
+                .as_ref()
+                .map(std::ptr::from_ref),
+            embedded_controller_ptr,
+            "C4ChatDlg must own a distinct C4ChatControl from StartupNetDlg"
+        );
+        app.process_network_dialog_actions(vec![NetDlgAction::ChatValidationFailed(
+            NetDlgChatValidationError::InvalidPassword,
+        )])
+        .expect("invalid IRC login opens the localized modal");
+        let validation = app.message_dialogs.last().expect("validation modal");
+        assert_eq!(validation.state.icon(), MessageDialogIcon::ERROR);
+        assert!(validation.state.message().contains("31"));
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("dismiss validation modal");
+
+        app.external_irc_dialog
+            .as_mut()
+            .expect("standalone chat controller")
+            .sync_chat_snapshot(NetDlgChatSnapshot {
+                connection_state: NetDlgChatConnectionState::Connected,
+                server: "irc.example.test".into(),
+                nick: "Clonker".into(),
+                ..NetDlgChatSnapshot::default()
+            });
+        assert_eq!(
+            app.external_irc_dialog.as_ref().unwrap().chat_page(),
+            NetDlgChatPage::Chats
+        );
+        app.process_network_dialog_actions(vec![
+            NetDlgAction::ChatDisconnectConfirmationRequested,
+        ])
+        .expect("server-tab close opens the classic confirmation");
+        let confirmation = app.message_dialogs.last().expect("disconnect modal");
+        assert!(matches!(
+            confirmation.continuation,
+            MessageDialogContinuation::StartupIrcDisconnectConfirm
+        ));
+        assert_eq!(confirmation.state.caption(), "Chat");
+        assert_eq!(
+            confirmation.state.button_label(MessageDialogButton::Cancel),
+            "Abort"
+        );
+        app.finish_message_dialog(MessageDialogResult::Cancel)
+            .expect("Abort preserves the active chat sheet");
+        assert_eq!(
+            app.external_irc_dialog.as_ref().unwrap().chat_page(),
+            NetDlgChatPage::Chats
+        );
+
+        app.process_network_dialog_actions(vec![
+            NetDlgAction::ChatDisconnectConfirmationRequested,
+        ])
+        .expect("request disconnect again");
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("accept disconnect");
+        assert_eq!(
+            app.external_irc_dialog.as_ref().unwrap().chat_page(),
+            NetDlgChatPage::Login
+        );
+        assert!(app.external_irc_dialog_visible);
+
+        app.process_network_dialog_actions(vec![NetDlgAction::ChatDialogCloseRequested])
+            .expect("outer close hides only the standalone UI");
+        assert!(!app.external_irc_dialog_visible);
+        assert!(app.external_irc_dialog.is_none());
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .map(|dialog| std::ptr::from_ref(dialog)),
+            embedded_controller_ptr
+        );
+
+        app.show_external_irc_dialog()
+            .expect("recreate a fresh standalone controller");
+        app.external_irc_dialog
+            .as_mut()
+            .unwrap()
+            .force_chat_mode_and_focus();
+        let original_nick = app.external_irc_dialog.as_ref().unwrap().chat_login().nick;
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open the standalone login edit context");
+        assert!(app.context_menu.is_some());
+        app.handle_text_input('x')
+            .expect("an open edit context suppresses parent text input");
+        assert_eq!(
+            app.external_irc_dialog.as_ref().unwrap().chat_login().nick,
+            original_nick
+        );
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Escape closes only the edit context first");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("consume the context-owned Escape release");
+        assert!(app.context_menu.is_none());
+        assert!(app.external_irc_dialog_visible);
+        app.handle_text_input('x')
+            .expect("text reaches the login edit after its context closes");
+        assert_eq!(
+            app.external_irc_dialog.as_ref().unwrap().chat_login().nick,
+            format!("{original_nick}x")
+        );
+        app.hide_external_irc_dialog();
+        app.show_external_irc_dialog()
+            .expect("reopening creates new UI-local state");
+        assert_eq!(
+            app.external_irc_dialog.as_ref().unwrap().chat_login().nick,
+            original_nick,
+            "closing standalone chat discards its unsent edit state"
+        );
+
+        let initial_bounds = app
+            .external_irc_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.chat_bounds_override())
+            .expect("standalone dialog bounds");
+        let embedded_pointer = GuiPoint::new(17.0, 19.0);
+        app.startup_network_dialog
+            .as_mut()
+            .unwrap()
+            .set_pointer_position(Some(embedded_pointer));
+        let drag_start = GuiPoint::new(
+            (initial_bounds.x + 20) as f32,
+            (initial_bounds.y + 8) as f32,
+        );
+        app.handle_touch(TouchPhase::Started, drag_start)
+            .expect("begin standalone caption drag");
+        app.handle_touch(TouchPhase::Cancelled, drag_start)
+            .expect("cancel standalone caption drag");
+        app.handle_touch(
+            TouchPhase::Moved,
+            GuiPoint::new(drag_start.x + 50.0, drag_start.y + 40.0),
+        )
+        .expect("a move after cancellation is not captured");
+        assert_eq!(
+            app.external_irc_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.chat_bounds_override()),
+            Some(initial_bounds),
+            "touch cancellation clears the standalone caption capture"
+        );
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.pointer_position()),
+            Some(embedded_pointer),
+            "standalone cancellation must not mutate the embedded startup sheet"
+        );
     }
 
     fn enter_about_licenses(app: &mut GameApp) {
@@ -114712,13 +115812,10 @@ ScenInfoArea=70,5,25,90
         unmatched_vote_hotkey
             .handle_modifiers_changed(ModifiersState::ALT)
             .expect("hold Alt over vote");
-        let irc_error = unmatched_vote_hotkey
+        unmatched_vote_hotkey
             .handle_key(VirtualKeyCode::C, ElementState::Pressed)
-            .expect_err("unmatched vote mnemonic falls through to global Alt+C");
-        assert_engine_parity_boundary(
-            irc_error,
-            ClassicParityBoundary::RuntimeIrcChatToggle,
-        );
+            .expect("unmatched vote mnemonic falls through to global Alt+C");
+        assert!(unmatched_vote_hotkey.external_irc_dialog_visible);
         unmatched_vote_hotkey
             .handle_key(VirtualKeyCode::C, ElementState::Released)
             .expect("global Alt+C release also falls through the vote");
@@ -114924,17 +116021,24 @@ ScenInfoArea=70,5,25,90
         assert!(!app
             .handle_game_option_input_dialog_key(VirtualKeyCode::F11, ElementState::Released)
             .expect("non-character Alt release is also down-only fallthrough"));
-        let irc_error = app
-            .handle_key(VirtualKeyCode::C, ElementState::Pressed)
-            .expect_err("compact chat has no C mnemonic and yields global Alt+C");
-        assert_engine_parity_boundary(
-            irc_error,
-            ClassicParityBoundary::RuntimeIrcChatToggle,
-        );
+        app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect("compact chat yields to the global Alt+C dialog toggle");
+        assert!(app.external_irc_dialog_visible);
+        assert!(app.running_chat.is_none());
         app.handle_key(VirtualKeyCode::C, ElementState::Released)
             .expect("global Alt+C release passes compact chat");
+        app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect("second Alt+C closes the standalone dialog");
+        app.handle_key(VirtualKeyCode::C, ElementState::Released)
+            .expect("release the closing Alt+C chord");
+        assert!(!app.external_irc_dialog_visible);
         app.handle_modifiers_changed(ModifiersState::empty())
             .expect("release Alt over compact chat");
+        app.start_running_chat(RunningChatMode::All);
+        for character in "alpha beta".chars() {
+            app.handle_text_input(character)
+                .expect("restore compact chat after the standalone toggle probe");
+        }
         app.push_message_dialog(notice(), MessageDialogContinuation::None)
             .expect("push lower shared-screen message");
         assert_eq!(app.game_option_input_activity(), (true, true));
@@ -115520,32 +116624,20 @@ ScenInfoArea=70,5,25,90
 
         app.handle_modifiers_changed(ModifiersState::ALT)
             .expect("hold Alt over chat context menu");
-        let irc_error = app
-            .handle_key(VirtualKeyCode::C, ElementState::Pressed)
-            .expect_err("global IRC chord reaches its pending frontend boundary");
-        assert_engine_parity_boundary(
-            irc_error,
-            ClassicParityBoundary::RuntimeIrcChatToggle,
-        );
+        app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect("global IRC chord replaces compact chat with the standalone dialog");
+        assert!(app.external_irc_dialog_visible);
+        assert!(app.running_chat.is_none());
+        assert!(app.context_menu.is_none());
         app.handle_key(VirtualKeyCode::C, ElementState::Released)
             .expect("consume global IRC chord release");
-        assert!(app.context_menu.is_some());
+        app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect("second global IRC chord closes the standalone dialog");
+        app.handle_key(VirtualKeyCode::C, ElementState::Released)
+            .expect("consume closing IRC chord release");
+        assert!(!app.external_irc_dialog_visible);
         app.handle_modifiers_changed(ModifiersState::empty())
             .expect("release Alt");
-
-        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-            .expect("context keeps the parent chat abort binding inactive");
-        assert!(app.running_chat.is_some());
-        assert!(app.context_menu.is_some());
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .expect("Escape closes only the context menu");
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-            .expect("consume the context-owned Escape release");
-        assert!(app.running_chat.is_some());
-        assert!(app.context_menu.is_none());
-        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-            .expect("F2 closes chat once its context is gone");
-        assert!(app.running_chat.is_none());
         assert!(app.game_option_input_dialog.is_none());
         assert!(app.context_menu.is_none());
         assert_eq!(app.message_dialogs.len(), 1);
@@ -122539,7 +123631,8 @@ ScenInfoArea=70,5,25,90
             group
                 .add_file_with_metadata(
                     "Player.txt",
-                    format!("[Player]\nName={name}\n[Preferences]\nColorDw={color}\n").into_bytes(),
+                    format!("[Player]\nName={name}\n[Preferences]\nColorDw={color}\n")
+                        .into_bytes(),
                     1,
                     false,
                 )
@@ -122744,8 +123837,7 @@ ScenInfoArea=70,5,25,90
             group
                 .add_file_with_metadata(
                     "Player.txt",
-                    format!("[Player]\nName={name}\n[Preferences]\nColorDw={color}\n")
-                        .into_bytes(),
+                    format!("[Player]\nName={name}\n[Preferences]\nColorDw={color}\n").into_bytes(),
                     1,
                     false,
                 )
