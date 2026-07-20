@@ -94,8 +94,7 @@ use lc_engine::{
     FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER,
     FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, JoinPlayerConfig, Landscape, MaterialSet,
     LegacyCString, MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind,
-    MissionAccessStore,
-    MouseDragSource, MouseWorldCursor,
+    MissionAccessStore, MouseDragCarryableCursor, MouseDragSource, MouseWorldCursor,
     MovementProfile, OWNER_NONE, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData,
     PlayerConfig, PlayerSelectControlData, RgbColor, Scenario, ScenarioError,
     MessageControlData, ScoreboardPresentationRequest, ScriptControlPolicy,
@@ -146,7 +145,8 @@ use lc_frontend::{
     DefinitionDebugGeometry,
     DefinitionSprite, GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics,
     ImageData, InputDispatcher, InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction,
-    MainMenuItem, MaterialRenderInfo, MessageBoardMode, MessageBoardOverlay, PlayerOverlay,
+    MainMenuItem, MaterialRenderInfo, MessageBoardMode, MessageBoardOverlay, MouseCursorPhase,
+    PlayerOverlay,
     ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction,
     StartupTooltip, ViewportEdgeScroll, ViewportInput, ViewportPointer, default_owner_color,
     viewport_edge_scroll, viewport_edge_scroll_at,
@@ -5979,6 +5979,11 @@ impl FrontendAssets {
                 ));
             }
         }
+        if self.classic_hud_resources_required && !self.cursor_atlas.is_complete() {
+            issues.push(ClassicGuiBootstrapIssue::missing(
+                "CursorSmall..CursorXXXXXLarge",
+            ));
+        }
         issues
     }
 
@@ -7472,10 +7477,9 @@ fn main() -> Result<()> {
             Event::LoopDestroyed => {}
             _ => {}
         }
-        // C4MouseControl renders scrolling cursors from Cursor*.png and the
-        // platform cursor is hidden for that custom phase. Restore the OS
-        // cursor immediately when GUI ownership or an interior move wins.
-        window.set_cursor_visible(!app.ingame_custom_cursor_active());
+        // SDL hides the platform pointer throughout the game client area;
+        // C4MouseControl/C4GUI draw the selected themed cell themselves.
+        window.set_cursor_visible(app.platform_cursor_visible());
         if matches!(
             *control_flow,
             ControlFlow::Exit | ControlFlow::ExitWithCode(_)
@@ -7604,14 +7608,20 @@ fn handle_window_event(
             app.handle_cursor_moved(PhysicalPosition::new(x, y))
                 .context("failed to process cursor movement")?;
         }
+        WindowEvent::CursorEntered { .. } => {
+            app.pointer_inside_window = true;
+            window.request_redraw();
+        }
         WindowEvent::CursorLeft { .. } => {
             app.pointer_left()
                 .context("failed to process cursor exit")?;
+            window.request_redraw();
         }
         WindowEvent::Focused(false) => {
             app.window_active = false;
             app.handle_focus_lost()
                 .context("failed to clear controls after focus loss")?;
+            window.request_redraw();
         }
         WindowEvent::MouseInput { state, button, .. } => match button {
             MouseButton::Left => app
@@ -7681,7 +7691,8 @@ fn handle_window_event(
                 .context("failed to process touch input")?;
         }
         WindowEvent::Focused(true) => {
-            app.window_active = true;
+            app.handle_focus_gained()
+                .context("failed to restore controls after focus gain")?;
             window.request_redraw();
         }
         _ => {}
@@ -7694,6 +7705,10 @@ fn handle_window_event(
 
 fn enforce_min_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width.max(1), size.height.max(1))
+}
+
+fn classic_platform_cursor_visible(window_active: bool, pointer_inside_window: bool) -> bool {
+    !(window_active && pointer_inside_window)
 }
 
 fn toggle_fullscreen(window: &Window, display_options: &mut DisplayOptions) {
@@ -12890,6 +12905,19 @@ struct GameApp {
     free_view_scroll_momentum: FreeViewScrollMomentum,
     /// Presentation-only C4MouseControl caption timing and placement.
     ingame_mouse_caption: IngameMouseCaptionState,
+    /// Last mouse-only logical position. Touch input intentionally does not
+    /// materialize C4GUI's themed mouse pointer.
+    window_mouse_position: Option<GuiPoint>,
+    /// Platform client-area membership is independent of focus: focus loss
+    /// restores the OS cursor without forgetting where a stationary pointer
+    /// will be when focus returns.
+    pointer_inside_window: bool,
+    /// Exact C4GUI::CMouse ownership for the most recent running mouse move.
+    running_gui_mouse_owned: bool,
+    /// Exact C4MouseControl::fMouseOwned state. This is deliberately separate
+    /// from GUI ownership: MouseControl::Init resets this bit to true without
+    /// clearing C4GUI's bit, so both cursors can transiently be active.
+    running_world_mouse_owned: bool,
     running_pointer_position: Option<GuiPoint>,
     /// Physical primary-button state (`CMouse::LDown`), independent of any
     /// control that installed itself as `pDragElement`.
@@ -15296,12 +15324,59 @@ enum IngameMouseCursorKind {
     JumpRight,
     Scrolling(lc_frontend::MouseCursorPhase),
     Drop,
-    Throw,
+    ThrowLeft(Vector2),
+    ThrowRight(Vector2),
     Put,
     Vehicle,
     VehiclePut,
     Construct,
     Nothing,
+}
+
+impl IngameMouseCursorKind {
+    fn phase(self) -> MouseCursorPhase {
+        match self {
+            Self::Region => MouseCursorPhase::Region,
+            Self::Help => MouseCursorPhase::Help,
+            Self::Crosshair => MouseCursorPhase::Crosshair,
+            Self::Dig => MouseCursorPhase::Dig,
+            Self::DigMaterial => MouseCursorPhase::DigMaterial,
+            Self::Enter => MouseCursorPhase::Enter,
+            Self::Grab => MouseCursorPhase::Grab,
+            Self::Ungrab => MouseCursorPhase::Ungrab,
+            Self::Carryable => MouseCursorPhase::Object,
+            Self::DigObject => MouseCursorPhase::DigObject,
+            Self::Chop => MouseCursorPhase::Chop,
+            Self::Build => MouseCursorPhase::Build,
+            Self::Select => MouseCursorPhase::Select,
+            Self::Attack => MouseCursorPhase::Attack,
+            Self::JumpLeft => MouseCursorPhase::JumpLeft,
+            Self::JumpRight => MouseCursorPhase::JumpRight,
+            Self::Scrolling(phase) => phase,
+            Self::Drop => MouseCursorPhase::Drop,
+            Self::ThrowLeft(_) => MouseCursorPhase::ThrowLeft,
+            Self::ThrowRight(_) => MouseCursorPhase::ThrowRight,
+            Self::Put => MouseCursorPhase::Put,
+            Self::Vehicle => MouseCursorPhase::Vehicle,
+            Self::VehiclePut => MouseCursorPhase::VehiclePut,
+            Self::Construct => MouseCursorPhase::Construct,
+            Self::Nothing => MouseCursorPhase::Nothing,
+        }
+    }
+
+    fn throw_landing(self) -> Option<Vector2> {
+        match self {
+            Self::ThrowLeft(landing) | Self::ThrowRight(landing) => Some(landing),
+            _ => None,
+        }
+    }
+
+    fn allows_add_marker(self) -> bool {
+        !matches!(
+            self,
+            Self::Region | Self::Select | Self::JumpLeft | Self::JumpRight
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23886,6 +23961,12 @@ impl GameApp {
             ingame_edge_scroll: None,
             free_view_scroll_momentum: FreeViewScrollMomentum::default(),
             ingame_mouse_caption: IngameMouseCaptionState::default(),
+            window_mouse_position: None,
+            pointer_inside_window: false,
+            running_gui_mouse_owned: false,
+            // C4MouseControl::Default starts with fMouseOwned set even while
+            // the control itself is inactive outside a running game.
+            running_world_mouse_owned: true,
             running_pointer_position: None,
             primary_pointer_left_down: false,
             last_application_left_press: None,
@@ -34709,6 +34790,21 @@ impl GameApp {
         Ok(())
     }
 
+    fn handle_focus_gained(&mut self) -> Result<(), EngineError> {
+        self.window_active = true;
+        self.mark_menu_dirty();
+        let Some(point) = self.window_mouse_position else {
+            return Ok(());
+        };
+        // Focus loss clears C4MouseControl/C4GUI hover ownership but retains
+        // the client-area position. Re-route it so a stationary pointer is
+        // themed again as soon as the OS cursor is hidden on reactivation.
+        self.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+    }
+
     fn dispatch_control_event(&mut self, event: ControlEvent) -> Result<(), EngineError> {
         self.dispatch_control_event_for_local_player(self.local_owner, event)
     }
@@ -38571,6 +38667,8 @@ impl GameApp {
                 self.advance_scenario_loader(100, "Scenario activation complete");
                 self.loading_state = None;
                 self.pending_client_start_status = None;
+                self.running_gui_mouse_owned = false;
+                self.running_world_mouse_owned = true;
                 self.mode = AppMode::Running;
             }
             if let Some(network) = self.network.as_ref() {
@@ -43443,6 +43541,19 @@ impl GameApp {
         // coordinates once before either C4GUI::CMouse or viewport routing.
         let raw_point = gui_point_from_position(position);
         let point = GuiPoint::new(raw_point.x.ceil(), raw_point.y.ceil());
+        self.window_mouse_position = Some(point);
+        self.pointer_inside_window = true;
+        if self.mode == AppMode::Menu {
+            // The classic cursor is part of the cached startup frame, so a
+            // same-control move still invalidates the prior cursor pixels.
+            self.mark_menu_dirty();
+        }
+        if self.mode == AppMode::Running {
+            // C4GraphicsSystem first offers every new move to C4GUI, then
+            // returns ownership to C4MouseControl unless a GUI route wins.
+            self.running_gui_mouse_owned = false;
+            self.running_world_mouse_owned = true;
+        }
         self.startup_tooltip.note_pointer_move(point);
         if self.startup_network_transition_blocks_input() {
             self.suspend_ingame_pointer_for_gui();
@@ -43487,6 +43598,15 @@ impl GameApp {
             }
             if self.update_construction_menu_drag(point)? {
                 return Ok(());
+            }
+            if matches!(
+                self.construction_menu_drag,
+                Some(ConstructionMenuDrag::Candidate { .. })
+            ) {
+                // CMouse retains the originating menu element as its drag
+                // owner until the five-pixel threshold is crossed.
+                self.running_gui_mouse_owned = true;
+                self.running_world_mouse_owned = false;
             }
             if self.ingame_moving_drag_active() {
                 self.update_ingame_pointer(point)?;
@@ -43696,6 +43816,7 @@ impl GameApp {
                 wait.controller.handle_pointer_move(point, &layout);
             }
             self.play_network_start_wait_sounds();
+            self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
         if self.startup_options_advanced_dialog.is_some() {
@@ -43940,6 +44061,8 @@ impl GameApp {
                     }
                     // GUI hit-testing precedes MouseMoveToViewport. Do not mark
                     // this gesture moved merely because the menu owns the event.
+                    self.running_gui_mouse_owned = true;
+                    self.running_world_mouse_owned = false;
                     self.ingame_pointer = None;
                     self.ingame_edge_scroll = None;
                     self.ingame_mouse_caption = IngameMouseCaptionState::default();
@@ -44024,6 +44147,8 @@ impl GameApp {
     }
 
     fn suspend_ingame_pointer_for_gui(&mut self) {
+        self.running_gui_mouse_owned = true;
+        self.running_world_mouse_owned = false;
         if self.mode != AppMode::Running {
             return;
         }
@@ -44095,6 +44220,53 @@ impl GameApp {
             || self.ingame_help_cursor_active()
     }
 
+    fn platform_cursor_visible(&self) -> bool {
+        classic_platform_cursor_visible(self.window_active, self.pointer_inside_window)
+    }
+
+    fn classic_gui_cursor_request(&self) -> Option<(GuiPoint, bool)> {
+        let gui_owned = match self.mode {
+            AppMode::Menu => true,
+            AppMode::Loading => {
+                self.network_start_wait
+                    .as_ref()
+                    .is_some_and(|wait| wait.visible)
+                    || self.league_signup_dialog.is_some()
+                    || !self.message_dialogs.is_empty()
+            }
+            AppMode::Running => self.running_gui_mouse_owned,
+        };
+        let Some(position) = (gui_owned && self.window_active && self.pointer_inside_window)
+            .then_some(self.window_mouse_position)
+            .flatten()
+        else {
+            return None;
+        };
+        Some((
+            position,
+            self.mode == AppMode::Running && self.ingame_mouse_help,
+        ))
+    }
+
+    fn draw_classic_gui_cursor(&mut self, gamma: Option<&lc_graphics::GammaRamp>) -> bool {
+        let Some((position, help)) = self.classic_gui_cursor_request() else {
+            return false;
+        };
+        self.graphics.draw_gui_mouse_cursor(position, help, gamma)
+    }
+
+    fn draw_classic_gui_cursor_to_surface(
+        &self,
+        surface: &mut Surface,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let Some((position, help)) = self.classic_gui_cursor_request() else {
+            return false;
+        };
+        self.graphics
+            .draw_gui_mouse_cursor_to_surface(surface, position, help, gamma)
+    }
+
     fn ingame_region_drag_active(&self) -> bool {
         self.mouse_state
             .is_some_and(|state| state.motion.region_drag_started)
@@ -44149,6 +44321,10 @@ impl GameApp {
     }
 
     fn reset_ingame_mouse_control(&mut self) {
+        // C4MouseControl::Init calls Default, which restores fMouseOwned but
+        // does not touch C4GUI::CMouse ownership. Both may therefore remain
+        // true until the next platform move resolves one side.
+        self.running_world_mouse_owned = true;
         self.ingame_mouse_init_centered = false;
         self.ingame_pointer = None;
         self.ingame_viewport_mouse = None;
@@ -44404,6 +44580,7 @@ impl GameApp {
     }
 
     fn update_ingame_pointer(&mut self, point: GuiPoint) -> Result<(), EngineError> {
+        self.running_world_mouse_owned = true;
         self.advance_ingame_mouse_caption_lifetime();
         let moving_drag_before_move = self.ingame_moving_drag_active();
         let selection_drag_before_move = self.ingame_selection_drag_active();
@@ -44613,6 +44790,65 @@ impl GameApp {
             self.ingame_mouse_caption = IngameMouseCaptionState::default();
         }
         Ok(())
+    }
+
+    fn running_classic_gui_is_active(&self, external_menu_shown: bool) -> bool {
+        external_menu_shown
+            || !self.running_dialog_stack.is_empty()
+            || !self.runtime_default_dialog_order_snapshot().is_empty()
+            || self.context_menu.is_some()
+            || self.definition_selector.is_some()
+            || self.game_option_input_dialog.is_some()
+            || self.league_signup_dialog.is_some()
+            || !self.message_dialogs.is_empty()
+            || self.game_over_dialog.is_some()
+            || self.network_chart_dialog.is_some()
+            || self.runtime_client_list.is_some()
+            || self.external_irc_dialog_visible
+            || self.startup_options_advanced_dialog.is_some()
+            || self.startup_player_properties_dialog.is_some()
+            || self
+                .network_start_wait
+                .as_ref()
+                .is_some_and(|wait| wait.visible)
+            || self.save_browser.is_some()
+            || self.object_menu.is_some()
+    }
+
+    fn running_external_menu_is_shown(&self) -> bool {
+        self.ingame_menu.is_some() || self.engine.has_active_object_menu()
+    }
+
+    /// C4GraphicsSystem::Execute releases CMouse only after the last shown
+    /// C4GUI dialog closes, then sends the retained point straight to the
+    /// viewport mouse without repeating GUI hit-testing.
+    fn reconcile_running_mouse_after_last_gui_close(
+        &mut self,
+        external_menu_shown: bool,
+    ) -> Result<(), EngineError> {
+        if self.mode != AppMode::Running
+            || !self.running_gui_mouse_owned
+            || self.running_classic_gui_is_active(external_menu_shown)
+        {
+            return Ok(());
+        }
+        self.running_gui_mouse_owned = false;
+        if self.running_world_mouse_owned {
+            // SetMouseInGUI(false, false) only replays the retained GUI point
+            // when C4MouseControl did not already own the mouse. A preceding
+            // MouseControl::Init leaves the world cursor at its own position.
+            return Ok(());
+        }
+        self.running_world_mouse_owned = true;
+        let Some(point) = self
+            .window_mouse_position
+            .filter(|_| self.window_active && self.pointer_inside_window)
+        else {
+            return Ok(());
+        };
+        self.running_pointer_position = Some(point);
+        self.ingame_gui_pointer = Some(point);
+        self.update_ingame_pointer(point)
     }
 
     /// Apply one C4MouseControl::UpdateScrolling step. Pointer movement calls
@@ -45591,12 +45827,18 @@ impl GameApp {
             .flatten();
         let Some(target) = target else {
             let kind = match source {
-                MouseDragSource::Carryable => match self.engine.mouse_drag_carryable_command(
-                    pointer.owner,
-                    ingame_pointer_world_pixel(pointer),
-                ) {
-                    Some(CommandId::Drop) => IngameMouseCursorKind::Drop,
-                    Some(CommandId::Throw) => IngameMouseCursorKind::Throw,
+                MouseDragSource::Carryable => match self
+                    .engine
+                    .mouse_drag_carryable_cursor(pointer.owner, ingame_pointer_world_pixel(pointer))
+                {
+                    Some(MouseDragCarryableCursor::Drop) => IngameMouseCursorKind::Drop,
+                    Some(MouseDragCarryableCursor::Throw {
+                        direction: -1,
+                        landing,
+                    }) => IngameMouseCursorKind::ThrowLeft(landing),
+                    Some(MouseDragCarryableCursor::Throw { landing, .. }) => {
+                        IngameMouseCursorKind::ThrowRight(landing)
+                    }
                     _ => IngameMouseCursorKind::Carryable,
                 },
                 MouseDragSource::Vehicle => IngameMouseCursorKind::Vehicle,
@@ -45787,7 +46029,11 @@ impl GameApp {
         }
 
         if !self.mouse_control {
-            self.ingame_mouse_caption.cursor = IngameMouseCursorKind::Nothing;
+            self.ingame_mouse_caption.cursor = if pointer.owner == OWNER_NONE {
+                IngameMouseCursorKind::Region
+            } else {
+                IngameMouseCursorKind::Nothing
+            };
             return;
         }
         let point = ingame_pointer_world_pixel(pointer);
@@ -50140,6 +50386,8 @@ impl GameApp {
 
     fn pointer_left(&mut self) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.window_mouse_position = None;
+        self.pointer_inside_window = false;
         self.running_pointer_position = None;
         self.pointer_left_unchecked();
         Ok(())
@@ -71031,6 +71279,9 @@ impl GameApp {
         &mut self,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) -> Result<()> {
+        if self.context_menu.is_some() {
+            return Ok(());
+        }
         let Some(tooltip_pointer) = self.startup_tooltip.eligible_pointer() else {
             return Ok(());
         };
@@ -71117,10 +71368,27 @@ impl GameApp {
                 .render_panel(self.graphics.surface_mut(), index, gamma)?;
             self.next_pending_native_overlay();
         }
+        Ok(())
+    }
+
+    fn render_context_menu_panels(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Result<()> {
         if let Some(context_menu) = self.context_menu.as_ref() {
-            context_menu.render_tooltip(self.graphics.surface_mut(), gamma);
+            context_menu.render_panels(self.graphics.surface_mut(), gamma)?;
         }
         Ok(())
+    }
+
+    fn render_context_menu_tooltip(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let Some(context_menu) = self.context_menu.as_ref() else {
+            return false;
+        };
+        context_menu.render_tooltip(self.graphics.surface_mut(), gamma)
     }
 
     fn game_option_input_activity(&self) -> (bool, bool) {
@@ -71143,7 +71411,7 @@ impl GameApp {
         let resources = assets
             .input_dialog_resources()
             .with_context(|| "classic C4GUI::InputDialog resources are unavailable")?;
-        let (keyboard_active, mouse_active) = self.game_option_input_activity();
+        let (keyboard_active, _) = self.game_option_input_activity();
         self.game_option_input_dialog
             .as_ref()
             .expect("checked above")
@@ -71163,14 +71431,45 @@ impl GameApp {
             if self.context_menu.is_some() {
                 self.next_pending_native_overlay();
             }
-        } else if let Some(context_menu) = self.context_menu.as_ref() {
-            context_menu.render(self.graphics.surface_mut(), gamma)?;
+        } else {
+            self.render_context_menu_panels(gamma)?;
         }
-        self.game_option_input_dialog
-            .as_ref()
-            .expect("checked above")
+        Ok(())
+    }
+
+    fn render_game_option_input_dialog_tooltip(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Result<bool> {
+        let (_, mouse_active) = self.game_option_input_activity();
+        let Some(dialog) = self.game_option_input_dialog.as_ref() else {
+            return Ok(false);
+        };
+        let assets = Arc::clone(&self.assets);
+        let resources = assets
+            .input_dialog_resources()
+            .with_context(|| "classic C4GUI::InputDialog resources are unavailable")?;
+        let now = Instant::now();
+        let tooltip_visible = dialog
             .controller
-            .render_tooltip(self.graphics.surface_mut(), &resources, mouse_active, gamma)
+            .tooltip_state_at(
+                now,
+                &dialog.controller.layout(
+                    self.graphics.surface().width() as i32,
+                    self.graphics.surface().height() as i32,
+                    &resources.fonts().text,
+                ),
+                mouse_active,
+            )
+            .is_some();
+        dialog.controller.render_tooltip_at(
+            self.graphics.surface_mut(),
+            &resources,
+            mouse_active,
+            gamma,
+            now,
+        )?;
+        Ok(tooltip_visible)
     }
 
     fn render_running_chat_layer(
@@ -71254,6 +71553,8 @@ impl GameApp {
             || self.game_option_input_dialog.is_some()
             || self.league_signup_dialog.is_some()
             || self.startup_options_advanced_dialog.is_some()
+            || self.external_irc_dialog_visible
+            || self.runtime_client_list.is_some()
         {
             return None;
         }
@@ -71516,11 +71817,23 @@ impl GameApp {
         Ok(true)
     }
 
-    fn render_ordered_startup_tooltips(&mut self) -> Result<()> {
-        let _ = self.render_startup_element_tooltip()?;
+    fn render_startup_tooltips(&mut self) -> Result<bool> {
+        let mut rendered = self.render_startup_element_tooltip()?;
         match self.startup_view {
             StartupView::NetworkLobby
-                if self.classic_host_lobby.is_none() && self.runtime_client_list.is_none() =>
+                if self.classic_host_lobby.is_none()
+                    && self.runtime_client_list.is_none()
+                    && self.context_menu.is_none()
+                    && self.definition_selector.is_none()
+                    && self.game_option_input_dialog.is_none()
+                    && self.league_signup_dialog.is_none()
+                    && self.message_dialogs.is_empty()
+                    && self.startup_player_properties_dialog.is_none()
+                    && !self.external_irc_dialog_visible
+                    && self
+                        .network_start_wait
+                        .as_ref()
+                        .is_none_or(|wait| !wait.visible) =>
             {
                 let assets = Arc::clone(&self.assets);
                 if let Some(lobby) = self.network_lobby.as_mut() {
@@ -71529,11 +71842,12 @@ impl GameApp {
                         assets.as_ref(),
                         &self.scenario_game_options,
                     )?;
+                    rendered = true;
                 }
             }
             _ => {}
         }
-        Ok(())
+        Ok(rendered)
     }
 
     fn render_classic_host_lobby(&mut self) -> Result<()> {
@@ -71579,28 +71893,16 @@ impl GameApp {
             && self.runtime_client_list.is_none()
             && !self.external_irc_dialog_visible;
         let gamma = self.loader_gamma.as_ref();
-        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         let surface = self.graphics.surface_mut();
         loader.render_background(surface, config, gamma);
-        if ordered_native {
-            lobby.controller.render_without_tooltips(
-                surface,
-                &lobby_resources,
-                &self.scenario_game_options,
-                &option_resources,
-                active,
-                gamma,
-            )
-        } else {
-            lobby.controller.render(
-                surface,
-                &lobby_resources,
-                &self.scenario_game_options,
-                &option_resources,
-                active,
-                gamma,
-            )
-        }
+        lobby.controller.render_without_tooltips(
+            surface,
+            &lobby_resources,
+            &self.scenario_game_options,
+            &option_resources,
+            active,
+            gamma,
+        )
     }
 
     fn render_classic_host_lobby_tooltips(&mut self) -> Result<()> {
@@ -71696,7 +71998,7 @@ impl GameApp {
             let resources = assets
                 .runtime_client_list_resources()
                 .expect("runtime client-list resources were preflighted before rendering");
-            dialog.render_with_activity(
+            dialog.render_body_with_activity(
                 self.graphics.surface_mut(),
                 preferred,
                 resources,
@@ -71709,6 +72011,34 @@ impl GameApp {
             self.next_pending_native_overlay();
         }
         Ok(())
+    }
+
+    fn render_runtime_client_list_tooltip(
+        &mut self,
+        frame_gamma: &lc_graphics::GammaRamp,
+    ) -> Result<bool> {
+        let mouse_active = self.runtime_client_list_mouse_active();
+        let Some(dialog) = self.runtime_client_list.as_ref() else {
+            return Ok(false);
+        };
+        if dialog.is_static_info_only() {
+            return Ok(false);
+        }
+        let assets = Arc::clone(&self.assets);
+        let resources = assets
+            .runtime_client_list_resources()
+            .expect("runtime client-list resources were preflighted before rendering");
+        let preferred = scoreboard_preferred_rect(
+            self.graphics
+                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+        );
+        dialog.render_tooltip(
+            self.graphics.surface_mut(),
+            preferred,
+            resources,
+            mouse_active,
+            Some(frame_gamma),
+        )
     }
 
     fn runtime_client_list_keyboard_active(&self) -> bool {
@@ -71954,8 +72284,6 @@ impl GameApp {
                     if ordered_native {
                         self.commit_pending_native_base(frame);
                         self.begin_native_text_capture(true);
-                        self.render_classic_host_lobby_tooltips()?;
-                        self.next_pending_native_overlay();
                     }
                     let gamma = self.loader_gamma.clone();
                     if self.definition_selector.is_some() {
@@ -71981,11 +72309,6 @@ impl GameApp {
                         if ordered_native {
                             self.next_pending_native_overlay();
                         }
-                        if self.render_external_irc_dialog_tooltip(gamma.as_ref())?
-                            && ordered_native
-                        {
-                            self.next_pending_native_overlay();
-                        }
                     }
                     if self
                         .runtime_client_list
@@ -72008,15 +72331,39 @@ impl GameApp {
                         self.render_ordered_context_menu(gamma.as_ref())?;
                     } else if !ordered_native && self.game_option_input_dialog.is_none() {
                         if let Some(context_menu) = self.context_menu.as_ref() {
-                            context_menu.render(self.graphics.surface_mut(), gamma.as_ref())?;
+                            context_menu
+                                .render_panels(self.graphics.surface_mut(), gamma.as_ref())?;
                         }
                     }
-                    if self.render_classic_dialog_title_tooltip(gamma.as_ref())?
+                    let gui_cursor_drawn = self.draw_classic_gui_cursor(gamma.as_ref());
+                    if ordered_native && gui_cursor_drawn {
+                        self.next_pending_native_overlay();
+                    }
+                    if self.render_game_option_input_dialog_tooltip(gamma.as_ref())?
                         && ordered_native
                     {
                         self.next_pending_native_overlay();
                     }
+                    if self.render_runtime_client_list_tooltip(
+                        gamma.as_ref().unwrap_or(startup_gamma()),
+                    )? && ordered_native
+                    {
+                        self.next_pending_native_overlay();
+                    }
+                    self.render_classic_host_lobby_tooltips()?;
+                    if ordered_native {
+                        self.next_pending_native_overlay();
+                    }
+                    if self.render_external_irc_dialog_tooltip(gamma.as_ref())? && ordered_native {
+                        self.next_pending_native_overlay();
+                    }
+                    if self.render_classic_dialog_title_tooltip(gamma.as_ref())? && ordered_native {
+                        self.next_pending_native_overlay();
+                    }
                     self.render_message_dialog_tooltip(gamma.as_ref())?;
+                    if self.render_context_menu_tooltip(gamma.as_ref()) && ordered_native {
+                        self.next_pending_native_overlay();
+                    }
                     if !ordered_native {
                         let surface = self.graphics.surface();
                         if surface.pixels().len() == frame.len() {
@@ -72241,15 +72588,6 @@ impl GameApp {
                 if ordered_native {
                     self.commit_pending_native_overlay();
                     self.begin_native_text_capture(true);
-                    self.render_ordered_startup_tooltips()?;
-                    self.next_pending_native_overlay();
-                } else if self.render_startup_element_tooltip()? {
-                    let surface = self.graphics.surface();
-                    if surface.pixels().len() == frame.len() {
-                        frame.copy_from_slice(surface.pixels());
-                    } else {
-                        copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
-                    }
                 }
                 if definition_selector_open {
                     self.render_definition_selector(Some(startup_gamma()))?;
@@ -72268,18 +72606,10 @@ impl GameApp {
                     if ordered_native {
                         self.next_pending_native_overlay();
                     }
-                    if self.render_league_signup_tooltip(Some(startup_gamma()))? && ordered_native {
-                        self.next_pending_native_overlay();
-                    }
                 }
                 if self.external_irc_dialog_visible {
                     self.render_external_irc_dialog(Some(startup_gamma()))?;
                     if ordered_native {
-                        self.next_pending_native_overlay();
-                    }
-                    if self.render_external_irc_dialog_tooltip(Some(startup_gamma()))?
-                        && ordered_native
-                    {
                         self.next_pending_native_overlay();
                     }
                 }
@@ -72299,8 +72629,32 @@ impl GameApp {
                 } else if fade_was_active && !game_option_input_open {
                     if let Some(context_menu) = self.context_menu.as_ref() {
                         context_menu
-                            .render(self.graphics.surface_mut(), Some(startup_gamma()))?;
+                            .render_panels(self.graphics.surface_mut(), Some(startup_gamma()))?;
                     }
+                }
+                let gui_cursor_drawn = self.draw_classic_gui_cursor(Some(startup_gamma()));
+                if ordered_native && gui_cursor_drawn {
+                    self.next_pending_native_overlay();
+                }
+                if self
+                    .render_game_option_input_dialog_tooltip(Some(startup_gamma()))?
+                    && ordered_native
+                {
+                    self.next_pending_native_overlay();
+                }
+                if self.render_runtime_client_list_tooltip(startup_gamma())? && ordered_native {
+                    self.next_pending_native_overlay();
+                }
+                let startup_tooltips_drawn = self.render_startup_tooltips()?;
+                if ordered_native && startup_tooltips_drawn {
+                    self.next_pending_native_overlay();
+                }
+                if self.render_league_signup_tooltip(Some(startup_gamma()))? && ordered_native {
+                    self.next_pending_native_overlay();
+                }
+                if self.render_external_irc_dialog_tooltip(Some(startup_gamma()))? && ordered_native
+                {
+                    self.next_pending_native_overlay();
                 }
                 if self.render_classic_dialog_title_tooltip(Some(startup_gamma()))?
                     && ordered_native
@@ -72308,6 +72662,9 @@ impl GameApp {
                     self.next_pending_native_overlay();
                 }
                 self.render_message_dialog_tooltip(Some(startup_gamma()))?;
+                if self.render_context_menu_tooltip(Some(startup_gamma())) && ordered_native {
+                    self.next_pending_native_overlay();
+                }
                 if !ordered_native
                     && (fade_was_active
                         || self.startup_player_properties_dialog.is_some()
@@ -72316,7 +72673,9 @@ impl GameApp {
                         || league_signup_open
                         || self.external_irc_dialog_visible
                         || self.runtime_client_list.is_some()
-                        || !self.message_dialogs.is_empty())
+                        || !self.message_dialogs.is_empty()
+                        || gui_cursor_drawn
+                        || startup_tooltips_drawn)
                 {
                     let surface = self.graphics.surface();
                     if surface.pixels().len() == frame.len() {
@@ -72855,14 +73214,20 @@ impl GameApp {
             if self.league_signup_dialog.is_some() {
                 self.next_pending_native_overlay();
             }
+            self.render_message_dialogs(gamma.as_ref())
+                .map_err(|error| self.loader_boundary(error.to_string()))?;
+            if !self.message_dialogs.is_empty() {
+                self.next_pending_native_overlay();
+            }
+            if self.draw_classic_gui_cursor(gamma.as_ref()) {
+                self.next_pending_native_overlay();
+            }
             if self
                 .render_league_signup_tooltip(gamma.as_ref())
                 .map_err(|error| self.loader_boundary(error.to_string()))?
             {
                 self.next_pending_native_overlay();
             }
-            self.render_message_dialogs(gamma.as_ref())
-                .map_err(|error| self.loader_boundary(error.to_string()))?;
             self.render_message_dialog_tooltip(gamma.as_ref())
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
             return Ok(());
@@ -72897,8 +73262,10 @@ impl GameApp {
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
         }
         self.render_loading_league_signup_dialog(&mut surface)?;
-        self.render_loading_league_signup_tooltip(&mut surface)?;
         self.render_loading_message_dialogs(&mut surface)?;
+        self.draw_classic_gui_cursor_to_surface(&mut surface, self.loader_gamma.as_ref());
+        self.render_loading_league_signup_tooltip(&mut surface)?;
+        self.render_loading_message_dialog_tooltip(&mut surface)?;
         frame.copy_from_slice(surface.pixels());
         Ok(())
     }
@@ -72932,6 +73299,20 @@ impl GameApp {
                 return Err(self.loader_boundary(error.to_string()));
             }
         }
+
+        Ok(())
+    }
+
+    fn render_loading_message_dialog_tooltip(&mut self, surface: &mut Surface) -> Result<()> {
+        if self.message_dialogs.is_empty() {
+            return Ok(());
+        }
+        let assets = Arc::clone(&self.assets);
+        let resources = assets.message_dialog_resources().ok_or_else(|| {
+            self.loader_boundary(
+                "classic message-dialog resources are unavailable during network start wait",
+            )
+        })?;
 
         let Some(tooltip_pointer) = self.startup_tooltip.eligible_pointer() else {
             return Ok(());
@@ -73277,11 +73658,16 @@ impl GameApp {
                 .ingame_menu
                 .iter()
                 .any(|(owner, _)| self.ingame_menu_has_visible_surface(owner));
+        let has_visible_script_menu = viewport_overlays_visible
+            && script_menu_owners
+                .iter()
+                .any(|&owner| self.engine.cursor_object_menu(owner).is_some());
+        // C4Menu::InitMenu registers every active menu as a C4GUI dialog.
+        // Screen::IsActive therefore retains GUI mouse ownership even when
+        // film/replay or viewport suppression omits the menu's pixels.
+        let has_shown_external_menu = self.running_external_menu_is_shown();
         if viewport_overlays_visible
-            && (has_visible_ingame_menu
-                || script_menu_owners
-                    .iter()
-                    .any(|&owner| self.engine.cursor_object_menu(owner).is_some()))
+            && (has_visible_ingame_menu || has_visible_script_menu)
         {
             self.assets
                 .require_classic_ingame_menu_resources()
@@ -73312,6 +73698,7 @@ impl GameApp {
         // typed refusal before that mutation can occur.
         self.reconcile_initial_scoreboard();
         self.sync_scoreboard_presentation();
+        self.reconcile_running_mouse_after_last_gui_close(has_shown_external_menu)?;
         let scoreboard_font_images = self.preflight_visible_scoreboard()?;
         let message_board = self.advance_message_board_overlay();
         self.update_network_status_overlay();
@@ -74040,7 +74427,11 @@ impl GameApp {
         // construction previews and selection frames therefore remain
         // legible over both (src/C4Viewport.cpp:836-870;
         // src/C4MouseControl.cpp:317-430,1093-1113).
-        let construction_cursor = viewport_overlays_visible
+        let running_world_cursor_drawable = viewport_overlays_visible
+            && self.running_world_mouse_owned
+            && self.window_active
+            && self.pointer_inside_window;
+        let construction_cursor = running_world_cursor_drawable
             .then(|| {
                 self.construction_menu_drag
                     .as_ref()
@@ -74122,7 +74513,7 @@ impl GameApp {
                 );
             }
         }
-        let selection_frame_drawn = if viewport_overlays_visible {
+        let selection_frame_drawn = if running_world_cursor_drawable {
             if let Some((selection, down_world, current_screen)) = self.ingame_selection_frame() {
                 self.graphics.draw_mouse_selection_marks(
                     &self.snapshot,
@@ -74143,30 +74534,73 @@ impl GameApp {
         } else {
             false
         };
-        let help_cursor = (viewport_overlays_visible && self.ingame_help_cursor_active())
-            .then(|| self.ingame_pointer.map(|pointer| pointer.screen))
-            .flatten();
         if !construction_cursor_drawn
             && !self.ingame_construction_drag_active()
             && !selection_frame_drawn
+            && running_world_cursor_drawable
         {
-            if let Some(screen) = help_cursor {
-                self.graphics.draw_mouse_cursor(
-                    lc_frontend::MouseCursorPhase::Help,
-                    screen,
-                    Some(&frame_gamma),
-                );
-            } else if viewport_overlays_visible && self.ingame_edge_cursor_active() {
-                if let Some(scroll) = self.ingame_edge_scroll {
-                    self.graphics.draw_mouse_cursor(
-                        scroll.edge.cursor,
-                        scroll.screen,
+            if let Some(pointer) = self.ingame_pointer.filter(|pointer| {
+                self.window_active && self.ingame_mouse_controls_owner(pointer.owner)
+            }) {
+                let viewport = self.ingame_viewport_mouse.and_then(|retained| {
+                    self.graphics
+                        .active_viewport_projections()
+                        .into_iter()
+                        .find(|viewport| viewport.index == retained.viewport_index)
+                });
+                if let Some(viewport) = viewport {
+                    let (cursor_kind, screen) = if self.ingame_help_cursor_active() {
+                        (IngameMouseCursorKind::Help, pointer.screen)
+                    } else if self.ingame_edge_cursor_active() {
+                        self.ingame_edge_scroll.map_or(
+                            (self.ingame_mouse_caption.cursor, pointer.screen),
+                            |scroll| {
+                                (
+                                    IngameMouseCursorKind::Scrolling(scroll.edge.cursor),
+                                    scroll.screen,
+                                )
+                            },
+                        )
+                    } else {
+                        (self.ingame_mouse_caption.cursor, pointer.screen)
+                    };
+                    let phase = cursor_kind.phase();
+                    let cursor_drawn = self.graphics.draw_mouse_cursor_clipped(
+                        phase,
+                        viewport.rect,
+                        screen,
                         Some(&frame_gamma),
                     );
+                    if cursor_drawn {
+                        if let Some(landing) = cursor_kind.throw_landing() {
+                            let (x, y) = viewport.logical_to_output(landing);
+                            self.graphics.draw_mouse_cursor_clipped(
+                                MouseCursorPhase::Point,
+                                viewport.rect,
+                                GuiPoint::new(x, y),
+                                Some(&frame_gamma),
+                            );
+                        }
+                        if self.mouse_control
+                            && self.keyboard_modifiers.shift()
+                            && cursor_kind.allows_add_marker()
+                        {
+                            if let Some(primary_offset) =
+                                self.graphics.mouse_cursor_primary_offset(phase)
+                            {
+                                self.graphics.draw_construction_add_marker(
+                                    viewport.rect,
+                                    screen,
+                                    primary_offset,
+                                    Some(&frame_gamma),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
-        let help_caption = viewport_overlays_visible
+        let help_caption = running_world_cursor_drawable
             .then(|| {
                 self.ingame_mouse_help_caption
                     .as_ref()
@@ -74192,7 +74626,7 @@ impl GameApp {
                 &caption,
                 Some(&frame_gamma),
             );
-        } else if let Some((caption, viewport)) = viewport_overlays_visible
+        } else if let Some((caption, viewport)) = running_world_cursor_drawable
             .then(|| {
                 self.ingame_mouse_caption.caption.clone().and_then(|caption| {
                     self.graphics
@@ -74381,9 +74815,6 @@ impl GameApp {
         if ordered_native && self.league_signup_dialog.is_some() {
             self.next_pending_native_overlay();
         }
-        if self.render_league_signup_tooltip(Some(&frame_gamma))? && ordered_native {
-            self.next_pending_native_overlay();
-        }
         if use_running_dialog_stack {
             self.render_running_dialog_stack(
                 running_stack_split,
@@ -74418,8 +74849,18 @@ impl GameApp {
             if ordered_native {
                 self.render_ordered_context_menu(Some(&frame_gamma))?;
             } else if let Some(context_menu) = self.context_menu.as_ref() {
-                context_menu.render(self.graphics.surface_mut(), Some(&frame_gamma))?;
+                context_menu.render_panels(self.graphics.surface_mut(), Some(&frame_gamma))?;
             }
+        }
+        let gui_cursor_drawn = self.draw_classic_gui_cursor(Some(&frame_gamma));
+        if ordered_native && gui_cursor_drawn {
+            self.next_pending_native_overlay();
+        }
+        if self.render_runtime_client_list_tooltip(&frame_gamma)? && ordered_native {
+            self.next_pending_native_overlay();
+        }
+        if self.render_league_signup_tooltip(Some(&frame_gamma))? && ordered_native {
+            self.next_pending_native_overlay();
         }
         if self.render_external_irc_dialog_tooltip(Some(&frame_gamma))? && ordered_native {
             self.next_pending_native_overlay();
@@ -74432,11 +74873,19 @@ impl GameApp {
             if ordered_native {
                 self.next_pending_native_overlay();
             }
+        } else if running_chat_input_open
+            && self.render_game_option_input_dialog_tooltip(Some(&frame_gamma))?
+            && ordered_native
+        {
+            self.next_pending_native_overlay();
         }
         if self.render_classic_dialog_title_tooltip(Some(&frame_gamma))? && ordered_native {
             self.next_pending_native_overlay();
         }
         self.render_message_dialog_tooltip(Some(&frame_gamma))?;
+        if self.render_context_menu_tooltip(Some(&frame_gamma)) && ordered_native {
+            self.next_pending_native_overlay();
+        }
 
         if !ordered_native {
             let surface = self.graphics.surface();
@@ -78533,6 +78982,8 @@ impl GameApp {
         self.network_chart_consumed_keys.clear();
         self.network_chart_pointer_capture = false;
         self.reset_runtime_default_dialog_order();
+        self.running_gui_mouse_owned = false;
+        self.running_world_mouse_owned = true;
         self.mode = AppMode::Running;
         self.reconcile_network_stats_series();
         // Startup hint + join log line for the HUD. Game.Time is owned by the
@@ -79407,7 +79858,6 @@ fn render_startup_frame(
     defer_native_main_text: bool,
     frame: &mut [u8],
 ) -> Result<()> {
-    let ordered_native = graphics.surface().is_clonk_text_capture_active();
     if view == StartupView::MainMenu {
         assets
             .require_classic_startup_main_resources()
@@ -79562,7 +80012,7 @@ fn render_startup_frame(
                         surface,
                         assets,
                         scenario_game_options,
-                        !ordered_native,
+                        false,
                         !context_menu_open
                             && !definition_selector_open
                             && !game_option_input_open
@@ -79635,7 +80085,7 @@ fn render_startup_frame(
         };
         if parity_rendered {
             if let Some(context_menu) = context_menu {
-                context_menu.render(surface, Some(startup_gamma()))?;
+                context_menu.render_panels(surface, Some(startup_gamma()))?;
             }
             startup_gamma().apply_to_surface(surface);
             let surface = graphics.surface();
@@ -79752,7 +80202,7 @@ fn render_startup_frame(
             StartupView::Options | StartupView::About => {}
         }
         if let Some(context_menu) = context_menu {
-            context_menu.render(surface, Some(startup_gamma()))?;
+            context_menu.render_panels(surface, Some(startup_gamma()))?;
         }
 
         // The C++ blit shader applies the gamma ramp to every fragment
@@ -94994,7 +95444,23 @@ func Award()
                 repository.join("planet/Graphics.c4g").join(canonical_name),
                 graphics.join(canonical_name),
             )
-            .unwrap_or_else(|error| panic!("copy fixture {canonical_name}: {error}"));
+                .unwrap_or_else(|error| panic!("copy fixture {canonical_name}: {error}"));
+        }
+        for cursor_name in [
+            "CursorSmall.png",
+            "CursorMedium.png",
+            "CursorLarge.png",
+            "CursorXLarge.png",
+            "CursorXXLarge.png",
+            "CursorXXXLarge.png",
+            "CursorXXXXLarge.png",
+            "CursorXXXXXLarge.png",
+        ] {
+            fs::copy(
+                repository.join("planet/Graphics.c4g").join(cursor_name),
+                graphics.join(cursor_name),
+            )
+            .unwrap_or_else(|error| panic!("copy fixture {cursor_name}: {error}"));
         }
     }
 
@@ -116425,6 +116891,532 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.menu_frame_cache = None;
         app.menu_backdrop_cache = StartupBackdropCache::default();
         app.mark_menu_dirty();
+    }
+
+    fn l018_cursor_atlas() -> Arc<CursorAtlas> {
+        let cell = 4u32;
+        let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
+        for _y in 0..cell {
+            for x in 0..40 * cell {
+                let phase = (x / cell) as u8;
+                pixels.extend_from_slice(&[phase, phase.wrapping_add(40), 200, 255]);
+            }
+        }
+        let mut entries = vec![None; 8];
+        entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
+        Arc::new(CursorAtlas::new(entries))
+    }
+
+    fn install_l018_cursor_atlas(app: &mut GameApp) {
+        assert!(
+            app.active_game_graphics.is_none(),
+            "focused cursor fixtures use the process atlas"
+        );
+        Arc::get_mut(&mut app.assets)
+            .expect("focused fixture uniquely owns frontend assets")
+            .cursor_atlas = l018_cursor_atlas();
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        app.resize(width, height)
+            .expect("rebuild graphics with focused cursor atlas");
+    }
+
+    #[test]
+    fn l018_production_bootstrap_rejects_a_partial_cursor_resolution_set() {
+        let mut app = new_menu_app(320, 200);
+        let assets = Arc::get_mut(&mut app.assets).expect("focused fixture owns its assets");
+        assets.classic_hud_resources_required = true;
+        assets.cursor_atlas = l018_cursor_atlas();
+        assert_eq!(
+            assets
+                .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+                .expect_err("C++ PreInit requires all eight sized cursor sheets"),
+            ClassicParityBoundary::GlobalGuiBootstrapResources {
+                issues: vec![ClassicGuiBootstrapIssue::missing(
+                    "CursorSmall..CursorXXXXXLarge",
+                )],
+            }
+        );
+    }
+
+    #[test]
+    fn l018_ingame_cursor_kinds_map_to_cpp_phases_and_add_rules() {
+        let landing = Vector2::new(73, 41);
+        let cases = [
+            (IngameMouseCursorKind::Region, MouseCursorPhase::Region),
+            (IngameMouseCursorKind::Help, MouseCursorPhase::Help),
+            (
+                IngameMouseCursorKind::Crosshair,
+                MouseCursorPhase::Crosshair,
+            ),
+            (IngameMouseCursorKind::Dig, MouseCursorPhase::Dig),
+            (
+                IngameMouseCursorKind::DigMaterial,
+                MouseCursorPhase::DigMaterial,
+            ),
+            (IngameMouseCursorKind::Enter, MouseCursorPhase::Enter),
+            (IngameMouseCursorKind::Grab, MouseCursorPhase::Grab),
+            (IngameMouseCursorKind::Ungrab, MouseCursorPhase::Ungrab),
+            (IngameMouseCursorKind::Carryable, MouseCursorPhase::Object),
+            (
+                IngameMouseCursorKind::DigObject,
+                MouseCursorPhase::DigObject,
+            ),
+            (IngameMouseCursorKind::Chop, MouseCursorPhase::Chop),
+            (IngameMouseCursorKind::Build, MouseCursorPhase::Build),
+            (IngameMouseCursorKind::Select, MouseCursorPhase::Select),
+            (IngameMouseCursorKind::Attack, MouseCursorPhase::Attack),
+            (IngameMouseCursorKind::JumpLeft, MouseCursorPhase::JumpLeft),
+            (
+                IngameMouseCursorKind::JumpRight,
+                MouseCursorPhase::JumpRight,
+            ),
+            (
+                IngameMouseCursorKind::Scrolling(MouseCursorPhase::UpLeft),
+                MouseCursorPhase::UpLeft,
+            ),
+            (IngameMouseCursorKind::Drop, MouseCursorPhase::Drop),
+            (
+                IngameMouseCursorKind::ThrowLeft(landing),
+                MouseCursorPhase::ThrowLeft,
+            ),
+            (
+                IngameMouseCursorKind::ThrowRight(landing),
+                MouseCursorPhase::ThrowRight,
+            ),
+            (IngameMouseCursorKind::Put, MouseCursorPhase::Put),
+            (IngameMouseCursorKind::Vehicle, MouseCursorPhase::Vehicle),
+            (
+                IngameMouseCursorKind::VehiclePut,
+                MouseCursorPhase::VehiclePut,
+            ),
+            (
+                IngameMouseCursorKind::Construct,
+                MouseCursorPhase::Construct,
+            ),
+            (IngameMouseCursorKind::Nothing, MouseCursorPhase::Nothing),
+        ];
+        for (kind, phase) in cases {
+            assert_eq!(kind.phase(), phase, "{kind:?}");
+        }
+        assert_eq!(
+            IngameMouseCursorKind::ThrowLeft(landing).throw_landing(),
+            Some(landing)
+        );
+        assert_eq!(
+            IngameMouseCursorKind::ThrowRight(landing).throw_landing(),
+            Some(landing)
+        );
+        assert_eq!(IngameMouseCursorKind::Drop.throw_landing(), None);
+
+        for kind in [
+            IngameMouseCursorKind::Region,
+            IngameMouseCursorKind::Select,
+            IngameMouseCursorKind::JumpLeft,
+            IngameMouseCursorKind::JumpRight,
+        ] {
+            assert!(!kind.allows_add_marker(), "{kind:?}");
+        }
+        for kind in [
+            IngameMouseCursorKind::Help,
+            IngameMouseCursorKind::Grab,
+            IngameMouseCursorKind::ThrowRight(landing),
+            IngameMouseCursorKind::Nothing,
+        ] {
+            assert!(kind.allows_add_marker(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn l018_platform_cursor_tracks_client_area_and_focus_in_every_mode() {
+        for (active, inside, visible) in [
+            (false, false, true),
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            assert_eq!(classic_platform_cursor_visible(active, inside), visible);
+        }
+
+        let mut app = new_menu_app(64, 48);
+        app.handle_cursor_moved(PhysicalPosition::new(20.0, 18.0))
+            .expect("enter client area");
+        assert!(!app.platform_cursor_visible());
+        let retained = app.window_mouse_position;
+
+        app.window_active = false;
+        app.handle_focus_lost().expect("lose focus");
+        assert!(app.platform_cursor_visible());
+        assert_eq!(app.window_mouse_position, retained);
+        assert!(app.pointer_inside_window);
+
+        app.handle_focus_gained().expect("regain focus");
+        assert_eq!(app.window_mouse_position, retained);
+        for mode in [AppMode::Menu, AppMode::Loading, AppMode::Running] {
+            app.mode = mode;
+            assert!(!app.platform_cursor_visible(), "{mode:?}");
+        }
+        app.mode = AppMode::Menu;
+        app.pointer_left().expect("leave client area");
+        assert!(app.platform_cursor_visible());
+        assert_eq!(app.window_mouse_position, None);
+    }
+
+    #[test]
+    fn l018_menu_cursor_moves_with_cached_startup_frame_and_clears_on_leave() {
+        let mut app = new_menu_app(64, 48);
+        install_l018_cursor_atlas(&mut app);
+        let background = Color::opaque(9, 10, 11);
+
+        let version = app.menu_render_version;
+        app.handle_cursor_moved(PhysicalPosition::new(20.0, 18.0))
+            .expect("first startup cursor move");
+        assert!(app.menu_render_version > version);
+        app.graphics.surface_mut().fill(background);
+        assert!(app.draw_classic_gui_cursor(None));
+        assert_eq!(
+            app.graphics.surface().get_pixel(18, 16),
+            Some(Color::opaque(0, 40, 200))
+        );
+
+        let version = app.menu_render_version;
+        app.handle_cursor_moved(PhysicalPosition::new(40.0, 30.0))
+            .expect("same-control startup cursor move");
+        assert!(app.menu_render_version > version);
+        app.graphics.surface_mut().fill(background);
+        assert!(app.draw_classic_gui_cursor(None));
+        assert_eq!(app.graphics.surface().get_pixel(18, 16), Some(background));
+        assert_eq!(
+            app.graphics.surface().get_pixel(38, 28),
+            Some(Color::opaque(0, 40, 200))
+        );
+
+        let version = app.menu_render_version;
+        app.pointer_left().expect("leave startup window");
+        assert!(app.menu_render_version > version);
+        assert!(!app.draw_classic_gui_cursor(None));
+    }
+
+    #[test]
+    fn l018_loading_dialog_renders_gui_cursor_between_body_and_tooltip_passes() {
+        let mut app = new_menu_app(320, 200);
+        install_l018_cursor_atlas(&mut app);
+        let fonts = app
+            .assets
+            .clonk_fonts
+            .clone()
+            .expect("synthetic classic loader fonts");
+        app.loader_screen = Some(
+            LoaderScreen::new(
+                LoaderSelection::startup("LoaderSynthetic.png")
+                    .expect("valid synthetic loader selection"),
+                ImageData::new(1, 1, vec![7, 8, 9, 255]),
+                LoaderResources::new(fonts, ImageData::new(3, 1, vec![255; 12]))
+                    .expect("valid synthetic loader resources"),
+                LoaderState::initial("Loading"),
+            )
+            .expect("valid synthetic loader screen"),
+        );
+        app.loader_error = None;
+        app.loader_render_error = None;
+        app.mode = AppMode::Loading;
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Wait",
+                "Loading",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("install loading message dialog");
+        app.handle_cursor_moved(PhysicalPosition::new(20.0, 18.0))
+            .expect("route loading GUI pointer");
+
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("render loader, dialog, GUI cursor, and tooltip passes");
+        let cursor_pixel = ((16 * 320 + 18) * 4) as usize;
+        assert_eq!(
+            &frame[cursor_pixel..cursor_pixel + 4],
+            &[1, 40, 200, 255],
+            "standard C4 gamma raises the Region cell's zero channel to one"
+        );
+    }
+
+    #[test]
+    fn l018_running_render_draws_resolved_world_cursor() {
+        let mut app = new_synthetic_running_sandbox_app();
+        install_l018_cursor_atlas(&mut app);
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let mut frame = vec![0_u8; width as usize * height as usize * 4];
+        app.render(&mut frame).expect("establish running viewport");
+        let viewport = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.owner == app.local_owner)
+            .expect("mouse owner viewport");
+        let point = GuiPoint::new(
+            (viewport.rect.x + viewport.rect.width as i32 / 2) as f32,
+            (viewport.rect.y + viewport.rect.height as i32 / 2) as f32,
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("route running mouse pointer");
+        let retained = app.window_mouse_position;
+        app.window_active = false;
+        app.handle_focus_lost().expect("clear running hover on focus loss");
+        assert!(app.ingame_pointer.is_none());
+        app.handle_focus_gained()
+            .expect("reproject stationary pointer after focus gain");
+        assert_eq!(app.window_mouse_position, retained);
+        app.ingame_mouse_caption.cursor = IngameMouseCursorKind::Grab;
+        app.ingame_mouse_caption.caption = None;
+        app.running_gui_mouse_owned = false;
+        let pointer = app.ingame_pointer.expect("running viewport owns pointer");
+
+        app.render(&mut frame)
+            .expect("draw resolved running cursor");
+        let origin_x = (pointer.screen.x as i32 - 2) as u32;
+        let origin_y = (pointer.screen.y as i32 - 2) as u32;
+        assert_eq!(
+            app.graphics.surface().get_pixel(origin_x, origin_y),
+            Some(Color::opaque(3, 43, 200))
+        );
+
+        app.external_irc_dialog_visible = true;
+        app.running_world_mouse_owned = true;
+        app.pointer_left().expect("leave while a running dialog is shown");
+        assert!(
+            app.ingame_pointer.is_some(),
+            "fixture exercises the dialog-owned pointer-left early return"
+        );
+        app.external_irc_dialog_visible = false;
+        app.render(&mut frame)
+            .expect("render after restoring the OS pointer outside the client");
+        assert_ne!(
+            app.graphics.surface().get_pixel(origin_x, origin_y),
+            Some(Color::opaque(3, 43, 200)),
+            "the retained world pointer must not draw outside the client area"
+        );
+    }
+
+    #[test]
+    fn l018_passive_observer_renders_region_cursor() {
+        let mut app = new_synthetic_running_sandbox_app();
+        install_l018_cursor_atlas(&mut app);
+        app.engine.set_local_players([]);
+        app.local_controls = LocalControlRegistry::default();
+        app.mouse_control = false;
+        app.snapshot = app.engine.snapshot();
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let mut frame = vec![0_u8; width as usize * height as usize * 4];
+        app.render(&mut frame)
+            .expect("establish passive physical viewport");
+        let viewport = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.is_no_owner_viewport)
+            .expect("passive viewport");
+        let point = GuiPoint::new(
+            (viewport.rect.x + viewport.rect.width as i32 / 2) as f32,
+            (viewport.rect.y + viewport.rect.height as i32 / 2) as f32,
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("route passive observer pointer");
+        assert_eq!(
+            app.ingame_mouse_caption.cursor,
+            IngameMouseCursorKind::Region
+        );
+
+        app.render(&mut frame).expect("render passive Region cursor");
+        assert_eq!(
+            app.ingame_mouse_caption.cursor,
+            IngameMouseCursorKind::Region
+        );
+        assert!(
+            app.graphics
+                .surface()
+                .pixels()
+                .chunks_exact(4)
+                .any(|pixel| pixel == [1, 40, 200, 255]),
+            "passive Region cell must reach the composed frame"
+        );
+    }
+
+    #[test]
+    fn l018_running_render_draws_throw_point_and_shift_add_marker() {
+        let mut app = new_synthetic_running_sandbox_app();
+        install_l018_cursor_atlas(&mut app);
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let mut frame = vec![0_u8; width as usize * height as usize * 4];
+        app.render(&mut frame).expect("establish running viewport");
+        let viewport = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.owner == app.local_owner)
+            .expect("mouse owner viewport");
+        let point = GuiPoint::new(
+            (viewport.rect.x + viewport.rect.width as i32 / 2) as f32,
+            (viewport.rect.y + viewport.rect.height as i32 / 2) as f32,
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("route running pointer");
+        let pointer = app.ingame_pointer.expect("running viewport pointer");
+        let pointer_world = ingame_pointer_world_pixel(pointer);
+        let landing = Vector2::new(pointer_world.x.saturating_add(24), pointer_world.y);
+        app.ingame_mouse_caption.cursor = IngameMouseCursorKind::ThrowRight(landing);
+        app.ingame_mouse_caption.caption = None;
+        app.keyboard_modifiers = ModifiersState::SHIFT;
+        app.running_gui_mouse_owned = false;
+
+        app.render(&mut frame)
+            .expect("render throw cursor, landing point, and Add marker");
+        for (phase, color) in [
+            ("throw", [21, 61, 200, 255]),
+            ("landing Point", [27, 67, 200, 255]),
+            ("Shift Add", [31, 71, 200, 255]),
+        ] {
+            assert!(
+                app.graphics
+                    .surface()
+                    .pixels()
+                    .chunks_exact(4)
+                    .any(|pixel| pixel == color),
+                "{phase} cursor cell must reach the composed frame"
+            );
+        }
+    }
+
+    #[test]
+    fn l018_running_gui_ownership_matches_cpp_reset_and_dialog_lifetime() {
+        let mut app = new_synthetic_running_sandbox_app();
+        install_l018_cursor_atlas(&mut app);
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let mut frame = vec![0_u8; width as usize * height as usize * 4];
+        app.render(&mut frame).expect("establish running viewport");
+        app.open_ingame_menu().expect("show external C4Menu");
+        let menu_point = (0..height)
+            .flat_map(|y| (0..width).map(move |x| GuiPoint::new(x as f32, y as f32)))
+            .find(|point| app.ingame_menu_pointer_target(*point).is_some())
+            .expect("visible menu owns at least one output point");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(menu_point.x),
+            f64::from(menu_point.y),
+        ))
+        .expect("route pointer into external C4Menu");
+        assert!(app.running_gui_mouse_owned);
+        assert!(!app.running_world_mouse_owned);
+        assert!(app.ingame_pointer.is_none());
+
+        app.reset_ingame_mouse_control();
+        assert!(
+            app.running_gui_mouse_owned,
+            "C4MouseControl reset must not deactivate C4GUI::CMouse"
+        );
+        assert!(
+            app.running_world_mouse_owned,
+            "C4MouseControl::Default independently restores fMouseOwned"
+        );
+        app.initialize_ingame_mouse_center()
+            .expect("execute reset C4MouseControl while menu remains shown");
+        let reset_world_pointer = app
+            .ingame_pointer
+            .expect("reset world mouse remains independently drawable");
+        assert!(
+            app.classic_gui_cursor_request().is_some(),
+            "GUI cursor remains independently drawable after the reset"
+        );
+        app.runtime_help_visible = true;
+        app.close_ingame_menu_for_player(app.local_owner);
+        assert!(
+            app.running_gui_mouse_owned,
+            "Dialog::Close leaves ownership for C4GraphicsSystem::Execute"
+        );
+        app.reconcile_running_mouse_after_last_gui_close(false)
+            .expect("execute last-dialog stationary handoff with F1 help shown");
+        assert!(!app.running_gui_mouse_owned);
+        assert!(app.running_world_mouse_owned);
+        assert!(
+            app.ingame_pointer.is_some(),
+            "the independently reinitialized world pointer remains active"
+        );
+        assert_eq!(app.ingame_pointer, Some(reset_world_pointer));
+
+        app.runtime_help_visible = false;
+        app.open_ingame_menu().expect("show external C4Menu again");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(menu_point.x),
+            f64::from(menu_point.y),
+        ))
+        .expect("route pointer into second menu");
+        assert!(!app.running_world_mouse_owned);
+        set_test_scenario_head_flags(&mut app, 1, 1);
+        app.render(&mut frame)
+            .expect("render film/replay with the shown menu pixels suppressed");
+        assert!(
+            app.running_gui_mouse_owned,
+            "a shown C4Menu remains a C4GUI owner when viewport pixels are suppressed"
+        );
+        assert!(!app.running_world_mouse_owned);
+
+        let non_cursor_menu_object = app
+            .engine
+            .spawn_object(SpawnConfig::new("CLNK").with_position(Vector2::new(40, 30)))
+            .expect("spawn arbitrary non-cursor menu object");
+        install_test_cursor_menu(
+            &mut app,
+            non_cursor_menu_object,
+            two_item_script_menu(non_cursor_menu_object),
+        );
+        assert_ne!(
+            app.engine.crew_cursor(app.local_owner),
+            Some(non_cursor_menu_object)
+        );
+        app.close_ingame_menu_for_player(app.local_owner);
+        app.render(&mut frame)
+            .expect("retain GUI ownership for a shown non-cursor object menu");
+        assert!(app.running_gui_mouse_owned);
+        assert!(!app.running_world_mouse_owned);
+
+        app.engine
+            .apply_object_update(
+                non_cursor_menu_object,
+                ObjectUpdate {
+                    menu: Some(None),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("close arbitrary non-cursor object menu");
+        app.render(&mut frame)
+            .expect("handoff after the final suppressed object menu closes");
+        assert!(!app.running_gui_mouse_owned);
+        assert!(app.running_world_mouse_owned);
+        assert!(app.ingame_pointer.is_some());
     }
 
     fn new_classic_menu_app(width: u32, height: u32) -> GameApp {

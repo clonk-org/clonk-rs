@@ -633,9 +633,13 @@ impl<A: Clone> ClassicContextMenu<A> {
     }
 
     pub fn hovered_tooltip(&self) -> Option<&str> {
+        self.hovered_tooltip_at(Instant::now())
+    }
+
+    pub fn hovered_tooltip_at(&self, now: Instant) -> Option<&str> {
         if !self.open
             || !self.pointer_active
-            || self.last_pointer_activity.elapsed() < TOOLTIP_DELAY
+            || now.saturating_duration_since(self.last_pointer_activity) < TOOLTIP_DELAY
         {
             return None;
         }
@@ -891,8 +895,13 @@ impl<A: Clone> ClassicContextMenu<A> {
 
     /// Draw only the delayed tooltip belonging to the current pointer hover.
     /// This is the final context-menu layer and intentionally excludes panels.
-    pub fn render_tooltip(&self, surface: &mut Surface, gamma: Option<&GammaRamp>) {
-        if let Some(tooltip) = self.hovered_tooltip() {
+    pub fn render_tooltip_at(
+        &self,
+        surface: &mut Surface,
+        gamma: Option<&GammaRamp>,
+        now: Instant,
+    ) -> bool {
+        if let Some(tooltip) = self.hovered_tooltip_at(now) {
             draw_classic_tooltip(
                 surface,
                 &self.resources.tooltip_font,
@@ -900,16 +909,31 @@ impl<A: Clone> ClassicContextMenu<A> {
                 tooltip,
                 gamma,
             );
+            true
+        } else {
+            false
         }
     }
 
-    pub fn render(&self, surface: &mut Surface, gamma: Option<&GammaRamp>) -> Result<()> {
+    pub fn render_tooltip(&self, surface: &mut Surface, gamma: Option<&GammaRamp>) -> bool {
+        self.render_tooltip_at(surface, gamma, Instant::now())
+    }
+
+    /// Draw the recursively owned menu panels without the delayed tooltip.
+    /// C4GUI draws CMouse after dialog elements and before screen-global
+    /// tooltips, so hosts that draw the classic cursor need the two passes.
+    pub fn render_panels(&self, surface: &mut Surface, gamma: Option<&GammaRamp>) -> Result<()> {
         if !self.open {
             return Ok(());
         }
         for index in 0..self.panel_count() {
             self.render_panel(surface, index, gamma)?;
         }
+        Ok(())
+    }
+
+    pub fn render(&self, surface: &mut Surface, gamma: Option<&GammaRamp>) -> Result<()> {
+        self.render_panels(surface, gamma)?;
         self.render_tooltip(surface, gamma);
         Ok(())
     }
@@ -1789,6 +1813,39 @@ mod tests {
         assert_eq!(menu.hovered_tooltip(), Some("Parent tip"));
         menu.handle_gamepad_direction(ContextMenuDirection::Down);
         assert_eq!(menu.hovered_tooltip(), None);
+    }
+
+    #[test]
+    fn l018_context_tooltip_draw_and_layer_signal_share_one_timestamp() {
+        let entries = vec![ContextMenuEntry::new("Entry").with_tooltip("Delayed tip")];
+        let (mut menu, _) = ClassicContextMenu::<()>::open(
+            entries,
+            GuiPoint::new(20.0, 30.0),
+            screen(),
+            capturing_resources(),
+        );
+        let row = menu.layout().panels[0].rows[0].rect;
+        menu.handle_pointer_move(GuiPoint::new((row.x + 1) as f32, (row.y + 1) as f32));
+        let hovered_at = menu.last_pointer_activity;
+        let mut surface = Surface::new(320, 200, PixelFormat::Rgba8888);
+
+        surface.begin_clonk_text_capture();
+        assert!(!menu.render_tooltip_at(
+            &mut surface,
+            None,
+            hovered_at + TOOLTIP_DELAY - Duration::from_millis(1),
+        ));
+        assert!(surface.take_clonk_text_capture().is_empty());
+
+        surface.begin_clonk_text_capture();
+        assert!(menu.render_tooltip_at(
+            &mut surface,
+            None,
+            hovered_at + TOOLTIP_DELAY,
+        ));
+        let commands = surface.take_clonk_text_capture();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].text, "Delayed tip");
     }
 
     #[test]

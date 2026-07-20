@@ -28,8 +28,8 @@ use crate::math::{self, itofix};
 use crate::player::CountedControlType;
 use crate::{
     C4Fixed, CATEGORY_MOUSE_SELECT, CommandDirection, CrewInfoLink, Direction, Engine, EngineError,
-    FixedVec2, MessageSpec, MouseDragSource, ObjectEnterOutcome, ObjectId, PhysicalInfo, Value,
-    Vector2, message, ocf, tolerate_script_error,
+    FixedVec2, MessageSpec, MouseDragCarryableCursor, MouseDragSource, ObjectEnterOutcome,
+    ObjectId, PhysicalInfo, Value, Vector2, message, ocf, tolerate_script_error,
 };
 
 /// `C4DoubleClick` (C4Constants.h:156): frames within which a repeated com
@@ -3303,10 +3303,14 @@ impl Engine {
     /// separate region/container slice; ordinary liquid/near-ground Drop and
     /// ballistic Throw are exact (C4MouseControl.cpp:833-879;
     /// C4Landscape.cpp:2055-2100).
-    pub fn mouse_drag_carryable_command(&self, owner: i32, position: Vector2) -> Option<CommandId> {
+    pub fn mouse_drag_carryable_cursor(
+        &self,
+        owner: i32,
+        position: Vector2,
+    ) -> Option<MouseDragCarryableCursor> {
         let landscape = self.landscape.as_ref()?;
         if landscape.is_liquid_at(position.x, position.y) {
-            return Some(CommandId::Drop);
+            return Some(MouseDragCarryableCursor::Drop);
         }
         if landscape.is_solid_at(position.x, position.y) {
             return None;
@@ -3318,7 +3322,7 @@ impl Engine {
             ground_y += 1;
         }
         if (ground_y - position.y).abs() <= 5 {
-            return Some(CommandId::Drop);
+            return Some(MouseDragCarryableCursor::Drop);
         }
 
         let (throw_force, throw_height, cursor_x) = self
@@ -3338,7 +3342,7 @@ impl Engine {
         let preferred_direction = if cursor_x > position.x { -1 } else { 1 };
         [preferred_direction, -preferred_direction]
             .into_iter()
-            .any(|direction| {
+            .find_map(|direction| {
                 landscape
                     .find_throwing_position(
                         position,
@@ -3346,9 +3350,16 @@ impl Engine {
                         throw_height,
                         self.physics.gravity_as_c4fixed(),
                     )
-                    .is_some()
+                    .map(|landing| MouseDragCarryableCursor::Throw { direction, landing })
             })
-            .then_some(CommandId::Throw)
+    }
+
+    pub fn mouse_drag_carryable_command(&self, owner: i32, position: Vector2) -> Option<CommandId> {
+        self.mouse_drag_carryable_cursor(owner, position)
+            .map(|cursor| match cursor {
+                MouseDragCarryableCursor::Drop => CommandId::Drop,
+                MouseDragCarryableCursor::Throw { .. } => CommandId::Throw,
+            })
     }
 
     fn mouse_world_point_is_solid(&self, point: Vector2) -> bool {
@@ -17774,7 +17785,7 @@ protected func ControlContents(idTarget) { return(1); }
     }
 
     #[test]
-    fn mouse_carryable_cursor_distinguishes_drop_solid_and_throw_points() {
+    fn l018_mouse_carryable_cursor_preserves_throw_direction_and_point() {
         // DragMoving selects Drop within five pixels of ground, no moving
         // command in solid, and Throw when FindThrowingPosition reaches a
         // free-air target (C4MouseControl.cpp:849-878).
@@ -17785,16 +17796,26 @@ protected func ControlContents(idTarget) { return(1); }
         engine.set_physics(PhysicsSettings::new(100, 12, -20));
 
         assert_eq!(
-            engine.mouse_drag_carryable_command(1, Vector2::new(20, 45)),
-            Some(CommandId::Drop)
+            engine.mouse_drag_carryable_cursor(1, Vector2::new(20, 45)),
+            Some(MouseDragCarryableCursor::Drop)
         );
         assert_eq!(
-            engine.mouse_drag_carryable_command(1, Vector2::new(20, 50)),
+            engine.mouse_drag_carryable_cursor(1, Vector2::new(20, 50)),
             None
         );
         assert_eq!(
-            engine.mouse_drag_carryable_command(1, Vector2::new(70, 20)),
-            Some(CommandId::Throw)
+            engine.mouse_drag_carryable_cursor(1, Vector2::new(70, 20)),
+            Some(MouseDragCarryableCursor::Throw {
+                direction: 1,
+                landing: Vector2::new(64, 49),
+            })
+        );
+        assert_eq!(
+            engine.mouse_drag_carryable_cursor(1, Vector2::new(5, 20)),
+            Some(MouseDragCarryableCursor::Throw {
+                direction: -1,
+                landing: Vector2::new(11, 49),
+            })
         );
     }
 

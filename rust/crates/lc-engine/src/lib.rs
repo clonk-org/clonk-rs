@@ -1375,6 +1375,15 @@ pub enum MouseDragSource {
     Vehicle,
 }
 
+/// Presentation result of `C4MouseControl::DragMoving` for a carryable.
+/// A throw retains the direction and `ShowPoint` landing coordinate selected
+/// by the first successful `FindThrowingPosition` probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseDragCarryableCursor {
+    Drop,
+    Throw { direction: i32, landing: Vector2 },
+}
+
 /// `C4D_Grab_Put` / `C4D_Grab_Get` (C4Def.h:80-81): the GrabPutGet
 /// DefCore bits feeding OCF_Container (SetOCF, C4Object.cpp:658-660).
 pub const GRAB_PUT_GET_PUT: i32 = 1;
@@ -46008,6 +46017,13 @@ impl Engine {
             .menu
             .as_ref()
             .map(|menu| (cursor, menu))
+    }
+
+    /// Whether any runtime C4ObjectMenu is registered as a shown C4GUI
+    /// dialog. CreateMenu may target an arbitrary object, not only a player's
+    /// current cursor, so presentation ownership must use the global scan.
+    pub fn has_active_object_menu(&self) -> bool {
+        self.objects.iter().any(|object| object.state.menu.is_some())
     }
 
     /// Resolve `C4MenuItem::IsDragElement` for an item in the owner's live

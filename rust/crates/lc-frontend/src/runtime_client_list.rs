@@ -1758,6 +1758,29 @@ impl RuntimeClientListDialog {
         )
     }
 
+    /// Draw the dialog body while deferring its delayed tooltip to the
+    /// screen-global pass that follows C4GUI::CMouse.
+    pub fn render_body_with_activity(
+        &self,
+        surface: &mut Surface,
+        preferred: IntRect,
+        resources: RuntimeClientListResources<'_>,
+        keyboard_active: bool,
+        mouse_active: bool,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
+        self.render_at_with_activity_and_tooltip(
+            surface,
+            preferred,
+            resources,
+            keyboard_active,
+            mouse_active,
+            gamma,
+            Instant::now(),
+            false,
+        )
+    }
+
     pub fn render_static_info(
         &self,
         surface: &mut Surface,
@@ -1819,6 +1842,30 @@ impl RuntimeClientListDialog {
         mouse_active: bool,
         gamma: Option<&GammaRamp>,
         now: Instant,
+    ) -> Result<()> {
+        self.render_at_with_activity_and_tooltip(
+            surface,
+            preferred,
+            resources,
+            keyboard_active,
+            mouse_active,
+            gamma,
+            now,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_at_with_activity_and_tooltip(
+        &self,
+        surface: &mut Surface,
+        preferred: IntRect,
+        resources: RuntimeClientListResources<'_>,
+        keyboard_active: bool,
+        mouse_active: bool,
+        gamma: Option<&GammaRamp>,
+        now: Instant,
+        draw_tooltip: bool,
     ) -> Result<()> {
         if self.is_static_info_only() {
             return self.render_static_info_at(
@@ -2019,7 +2066,7 @@ impl RuntimeClientListDialog {
                 gamma,
                 now,
             );
-        } else if mouse_active {
+        } else if mouse_active && draw_tooltip {
             if let Some(tooltip) = self.tooltip_state_at(now, preferred, &resources.fonts.text) {
                 draw_classic_tooltip(
                     surface,
@@ -2031,6 +2078,36 @@ impl RuntimeClientListDialog {
             }
         }
         Ok(())
+    }
+
+    /// Draw only the delayed list/option tooltip in the host's final overlay
+    /// pass. Title and close tooltips remain owned by the global dialog pass.
+    pub fn render_tooltip(
+        &self,
+        surface: &mut Surface,
+        preferred: IntRect,
+        resources: RuntimeClientListResources<'_>,
+        mouse_active: bool,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<bool> {
+        resources.validate()?;
+        self.measure_option_caption_width(&resources.fonts.text);
+        let layout = self.layout(preferred, resources.fonts.text.line_height);
+        if !mouse_active || self.info_layout_from_parent(&layout).is_some() {
+            return Ok(false);
+        }
+        let Some(tooltip) = self.tooltip_state_at(Instant::now(), preferred, &resources.fonts.text)
+        else {
+            return Ok(false);
+        };
+        draw_classic_tooltip(
+            surface,
+            resources.tooltip_font,
+            tooltip.pointer,
+            &tooltip.text,
+            gamma,
+        );
+        Ok(true)
     }
 
     fn draw_rows(

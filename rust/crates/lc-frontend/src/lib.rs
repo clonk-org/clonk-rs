@@ -1808,12 +1808,20 @@ pub struct ViewportPointer {
     pub screen: GuiPoint,
 }
 
-/// The C4MouseControl cursor cells currently drawn by the Rust frontend: the
-/// eight viewport-scroll cursors, help, Shift add marker, and construction
-/// fallback.
-/// Their numeric atlas phases are fixed in src/C4MouseControl.cpp:45-75.
+/// The themed C4MouseControl/C4GUI cursor cells.
+/// Their numeric atlas phases are fixed in src/C4MouseControl.cpp:43-76.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MouseCursorPhase {
+    Region,
+    Crosshair,
+    Enter,
+    Grab,
+    Chop,
+    Dig,
+    Build,
+    Select,
+    Object,
+    Ungrab,
     Up,
     Down,
     Left,
@@ -1822,14 +1830,37 @@ pub enum MouseCursorPhase {
     UpRight,
     DownLeft,
     DownRight,
+    JumpLeft,
+    JumpRight,
+    Drop,
+    ThrowRight,
+    Put,
+    Vehicle,
+    VehiclePut,
+    ThrowLeft,
+    Point,
+    DigObject,
     Help,
+    DigMaterial,
     Add,
     Construct,
+    Attack,
+    Nothing,
 }
 
 impl MouseCursorPhase {
     pub const fn atlas_phase(self) -> i32 {
         match self {
+            Self::Region => 0,
+            Self::Crosshair => 1,
+            Self::Enter => 2,
+            Self::Grab => 3,
+            Self::Chop => 4,
+            Self::Dig => 5,
+            Self::Build => 6,
+            Self::Select => 7,
+            Self::Object => 8,
+            Self::Ungrab => 9,
             Self::Up => 10,
             Self::Down => 11,
             Self::Left => 12,
@@ -1838,25 +1869,47 @@ impl MouseCursorPhase {
             Self::UpRight => 15,
             Self::DownLeft => 16,
             Self::DownRight => 17,
+            Self::JumpLeft => 18,
+            Self::JumpRight => 19,
+            Self::Drop => 20,
+            Self::ThrowRight => 21,
+            Self::Put => 22,
+            Self::Vehicle => 24,
+            Self::VehiclePut => 25,
+            Self::ThrowLeft => 26,
+            Self::Point => 27,
+            Self::DigObject => 28,
             Self::Help => 29,
+            Self::DigMaterial => 30,
             Self::Add => 31,
             Self::Construct => 32,
+            Self::Attack => 33,
+            Self::Nothing => 34,
         }
     }
 
     fn hotspot(self, cell: i32) -> (i32, i32) {
         let center = cell / 2;
+        if cell == 13 {
+            return match self {
+                Self::Region | Self::Select => (0, 0),
+                Self::Dig | Self::DigMaterial => (0, cell),
+                _ => (center, center),
+            };
+        }
         match self {
             Self::Up => (center, 0),
-            Self::Down => (center, cell),
+            Self::Down => (center, center.saturating_add(cell / 2)),
             Self::Left => (0, center),
-            Self::Right => (cell, center),
+            Self::Right => (center.saturating_add(cell / 2), center),
             Self::UpLeft => (0, 0),
-            Self::UpRight => (cell, 0),
-            Self::DownLeft => (0, cell),
-            Self::DownRight => (cell, cell),
-            Self::Help | Self::Add => (center, center),
-            Self::Construct => (center, center),
+            Self::UpRight => (center.saturating_add(cell / 2), 0),
+            Self::DownLeft => (0, center.saturating_add(cell / 2)),
+            Self::DownRight => {
+                let edge = center.saturating_add(cell / 2);
+                (edge, edge)
+            }
+            _ => (center, center),
         }
     }
 }
@@ -2285,6 +2338,12 @@ impl CursorAtlas {
 
     pub fn empty() -> Self {
         Self { images: Vec::new() }
+    }
+
+    /// PreInit's sized cursor path succeeds only when all eight classic
+    /// resolution sheets loaded; a partial set is not a usable fallback.
+    pub fn is_complete(&self) -> bool {
+        self.images.len() == 8 && self.images.iter().all(Option::is_some)
     }
 
     pub fn image_for_resolution(&self, width: u32) -> Option<ImageData> {
@@ -3403,7 +3462,7 @@ impl GraphicsSystem {
     }
 
     /// Draw one selected C4MouseControl cursor from the resolution-selected
-    /// 40-cell cursor sheet. `screen` is an absolute logical output point; the
+    /// cursor sheet. `screen` is an absolute logical output point; the
     /// native hotspot and inverse presentation scale are applied here.
     pub fn draw_mouse_cursor(
         &mut self,
@@ -3411,9 +3470,45 @@ impl GraphicsSystem {
         screen: GuiPoint,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) -> bool {
-        let Some(image) = self.cursor_atlas.image_for_scaled_resolution(
+        self.draw_mouse_cursor_with_native_offset(phase, phase, screen, (0, 0), gamma)
+    }
+
+    fn draw_mouse_cursor_with_native_offset(
+        &mut self,
+        phase: MouseCursorPhase,
+        hotspot_phase: MouseCursorPhase,
+        screen: GuiPoint,
+        native_offset: (i32, i32),
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        Self::draw_mouse_cursor_to_surface(
+            &mut self.surface,
+            self.cursor_atlas.as_ref(),
             self.logical_resolution_width,
             self.presentation_scale,
+            phase,
+            hotspot_phase,
+            screen,
+            native_offset,
+            gamma,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_mouse_cursor_to_surface(
+        surface: &mut Surface,
+        cursor_atlas: &CursorAtlas,
+        logical_resolution_width: u32,
+        presentation_scale: f32,
+        phase: MouseCursorPhase,
+        hotspot_phase: MouseCursorPhase,
+        screen: GuiPoint,
+        native_offset: (i32, i32),
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let Some(image) = cursor_atlas.image_for_scaled_resolution(
+            logical_resolution_width,
+            presentation_scale,
         ) else {
             return false;
         };
@@ -3423,18 +3518,20 @@ impl GraphicsSystem {
             return false;
         }
 
-        let scale = self.presentation_scale;
+        let scale = presentation_scale;
         let inverse_scale = scale.recip();
-        let (offset_x, offset_y) = phase.hotspot(cell);
+        let (offset_x, offset_y) = hotspot_phase.hotspot(cell);
         let destination = GuiRect::from_origin_size(
             GuiPoint::new(
-                ((screen.x * scale).trunc() - offset_x as f32) * inverse_scale,
-                ((screen.y * scale).trunc() - offset_y as f32) * inverse_scale,
+                (screen.x * scale - offset_x as f32 + native_offset.0 as f32).trunc()
+                    * inverse_scale,
+                (screen.y * scale - offset_y as f32 + native_offset.1 as f32).trunc()
+                    * inverse_scale,
             ),
             GuiSize::new(cell as f32 * inverse_scale, cell as f32 * inverse_scale),
         );
         draw_image_region(
-            &mut self.surface,
+            surface,
             &destination,
             &image,
             None,
@@ -3448,10 +3545,11 @@ impl GraphicsSystem {
         true
     }
 
-    /// Draw the missing-image construction fallback without allowing its
-    /// centered cursor cell to escape the originating split-screen viewport.
-    pub fn draw_construction_cursor_fallback(
+    /// Draw a C4MouseControl cursor while retaining the viewport clip that
+    /// encloses `C4MouseControl::Draw` in the native renderer.
+    pub fn draw_mouse_cursor_clipped(
         &mut self,
+        phase: MouseCursorPhase,
         viewport_clip: SurfaceRect,
         screen: GuiPoint,
         gamma: Option<&lc_graphics::GammaRamp>,
@@ -3467,7 +3565,7 @@ impl GraphicsSystem {
                 }
             });
         self.surface.set_clip(clip);
-        let drawn = self.draw_mouse_cursor(MouseCursorPhase::Construct, screen, gamma);
+        let drawn = self.draw_mouse_cursor(phase, screen, gamma);
         match previous_clip {
             Some(clip) => self.surface.set_clip(clip),
             None => self.surface.clear_clip(),
@@ -3475,16 +3573,83 @@ impl GraphicsSystem {
         drawn
     }
 
-    /// Returns the selected construction cursor cell's centered native
-    /// hotspot. The offset is in source pixels and is applied before the
-    /// inverse presentation transform, just like C4MouseControl's `iOffset`.
-    pub fn construction_cursor_primary_offset(&self) -> Option<GuiPoint> {
+    /// Draw C4GUI::CMouse: the base Region cell and, while mouse Help owns
+    /// the GUI, its second Help cell at the native (+5,-5) source-pixel offset.
+    pub fn draw_gui_mouse_cursor(
+        &mut self,
+        screen: GuiPoint,
+        help: bool,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let drawn = self.draw_mouse_cursor(MouseCursorPhase::Region, screen, gamma);
+        if help {
+            self.draw_mouse_cursor_with_native_offset(
+                MouseCursorPhase::Help,
+                MouseCursorPhase::Region,
+                screen,
+                (5, -5),
+                gamma,
+            );
+        }
+        drawn
+    }
+
+    /// Draw C4GUI::CMouse into a caller-owned logical surface. Loading uses
+    /// this path because its non-native compositor intentionally builds the
+    /// loader and dialog stack in a temporary surface before presentation.
+    pub fn draw_gui_mouse_cursor_to_surface(
+        &self,
+        surface: &mut Surface,
+        screen: GuiPoint,
+        help: bool,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let drawn = Self::draw_mouse_cursor_to_surface(
+            surface,
+            self.cursor_atlas.as_ref(),
+            self.logical_resolution_width,
+            self.presentation_scale,
+            MouseCursorPhase::Region,
+            MouseCursorPhase::Region,
+            screen,
+            (0, 0),
+            gamma,
+        );
+        if help {
+            Self::draw_mouse_cursor_to_surface(
+                surface,
+                self.cursor_atlas.as_ref(),
+                self.logical_resolution_width,
+                self.presentation_scale,
+                MouseCursorPhase::Help,
+                MouseCursorPhase::Region,
+                screen,
+                (5, -5),
+                gamma,
+            );
+        }
+        drawn
+    }
+
+    /// Draw the missing-image construction fallback without allowing its
+    /// centered cursor cell to escape the originating split-screen viewport.
+    pub fn draw_construction_cursor_fallback(
+        &mut self,
+        viewport_clip: SurfaceRect,
+        screen: GuiPoint,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        self.draw_mouse_cursor_clipped(MouseCursorPhase::Construct, viewport_clip, screen, gamma)
+    }
+
+    /// Returns one selected cursor cell's native source-pixel hotspot.
+    pub fn mouse_cursor_primary_offset(&self, phase: MouseCursorPhase) -> Option<GuiPoint> {
         let image = self
             .cursor_atlas
             .image_for_scaled_resolution(self.logical_resolution_width, self.presentation_scale)?;
         let cell = i32::try_from(image.height()).ok()?;
         let source = SourceRect::new(
-            MouseCursorPhase::Construct.atlas_phase().saturating_mul(cell),
+            phase.atlas_phase().saturating_mul(cell),
             0,
             cell,
             cell,
@@ -3492,8 +3657,15 @@ impl GraphicsSystem {
         if !Self::source_within_image(&image, &source) {
             return None;
         }
-        let (x, y) = MouseCursorPhase::Construct.hotspot(cell);
+        let (x, y) = phase.hotspot(cell);
         Some(GuiPoint::new(x as f32, y as f32))
+    }
+
+    /// Returns the selected construction cursor cell's centered native
+    /// hotspot. The offset is in source pixels and is applied before the
+    /// inverse presentation transform, just like C4MouseControl's `iOffset`.
+    pub fn construction_cursor_primary_offset(&self) -> Option<GuiPoint> {
+        self.mouse_cursor_primary_offset(MouseCursorPhase::Construct)
     }
 
     /// Draws C4MouseControl's Shift add marker relative to a construction
@@ -21439,7 +21611,11 @@ mod tests {
     }
 
     #[test]
-    fn directional_mouse_cursor_uses_native_cells_and_hotspots() {
+    fn l018_all_cursor_phases_use_cpp_cells_and_hotspots() {
+        assert_eq!(MouseCursorPhase::Down.hotspot(15), (7, 14));
+        assert_eq!(MouseCursorPhase::Right.hotspot(15), (14, 7));
+        assert_eq!(MouseCursorPhase::DownRight.hotspot(15), (14, 14));
+
         let cell = 4u32;
         let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
         for _y in 0..cell {
@@ -21462,6 +21638,16 @@ mod tests {
         );
 
         let cases = [
+            (MouseCursorPhase::Region, (8, 8)),
+            (MouseCursorPhase::Crosshair, (8, 8)),
+            (MouseCursorPhase::Enter, (8, 8)),
+            (MouseCursorPhase::Grab, (8, 8)),
+            (MouseCursorPhase::Chop, (8, 8)),
+            (MouseCursorPhase::Dig, (8, 8)),
+            (MouseCursorPhase::Build, (8, 8)),
+            (MouseCursorPhase::Select, (8, 8)),
+            (MouseCursorPhase::Object, (8, 8)),
+            (MouseCursorPhase::Ungrab, (8, 8)),
             (MouseCursorPhase::Up, (8, 10)),
             (MouseCursorPhase::Down, (8, 6)),
             (MouseCursorPhase::Left, (10, 8)),
@@ -21470,9 +21656,22 @@ mod tests {
             (MouseCursorPhase::UpRight, (6, 10)),
             (MouseCursorPhase::DownLeft, (10, 6)),
             (MouseCursorPhase::DownRight, (6, 6)),
+            (MouseCursorPhase::JumpLeft, (8, 8)),
+            (MouseCursorPhase::JumpRight, (8, 8)),
+            (MouseCursorPhase::Drop, (8, 8)),
+            (MouseCursorPhase::ThrowRight, (8, 8)),
+            (MouseCursorPhase::Put, (8, 8)),
+            (MouseCursorPhase::Vehicle, (8, 8)),
+            (MouseCursorPhase::VehiclePut, (8, 8)),
+            (MouseCursorPhase::ThrowLeft, (8, 8)),
+            (MouseCursorPhase::Point, (8, 8)),
+            (MouseCursorPhase::DigObject, (8, 8)),
             (MouseCursorPhase::Help, (8, 8)),
+            (MouseCursorPhase::DigMaterial, (8, 8)),
             (MouseCursorPhase::Add, (8, 8)),
             (MouseCursorPhase::Construct, (8, 8)),
+            (MouseCursorPhase::Attack, (8, 8)),
+            (MouseCursorPhase::Nothing, (8, 8)),
         ];
         for (phase, expected_origin) in cases {
             graphics.surface_mut().fill(Color::opaque(0, 0, 0));
@@ -21502,6 +21701,137 @@ mod tests {
                 "phase {phase:?} y hotspot"
             );
         }
+    }
+
+    #[test]
+    fn l018_world_cursor_is_clipped_to_its_viewport() {
+        let cell = 4u32;
+        let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
+        for _y in 0..cell {
+            for x in 0..40 * cell {
+                let phase = (x / cell) as u8;
+                pixels.extend_from_slice(&[phase, 100, 200, 255]);
+            }
+        }
+        let mut entries = vec![None; 8];
+        entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
+        let mut graphics = GraphicsSystem::new(
+            24,
+            24,
+            24,
+            "Mouse cursor clip",
+            test_font(),
+            empty_sprites(),
+            Arc::new(CursorAtlas::new(entries)),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+
+        assert!(graphics.draw_mouse_cursor_clipped(
+            MouseCursorPhase::Grab,
+            SurfaceRect::new(10, 9, 2, 2),
+            GuiPoint::new(10.0, 10.0),
+            None,
+        ));
+        let expected = Color::opaque(MouseCursorPhase::Grab.atlas_phase() as u8, 100, 200);
+        let points = (0..24)
+            .flat_map(|y| (0..24).map(move |x| (x, y)))
+            .filter(|&(x, y)| graphics.surface().get_pixel(x, y) == Some(expected))
+            .collect::<Vec<_>>();
+        assert_eq!(points, vec![(10, 9), (11, 9), (10, 10), (11, 10)]);
+        assert_eq!(graphics.surface().clip(), None, "caller clip is restored");
+    }
+
+    #[test]
+    fn l018_old_style_cursor_uses_cpp_thirteen_pixel_hotspots() {
+        let cell = 13u32;
+        let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
+        for _y in 0..cell {
+            for x in 0..40 * cell {
+                let phase = (x / cell) as u8;
+                pixels.extend_from_slice(&[phase, phase.wrapping_add(40), 200, 255]);
+            }
+        }
+        let mut entries = vec![None; 8];
+        entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
+        let mut graphics = GraphicsSystem::new(
+            48,
+            48,
+            48,
+            "Old-style mouse cursor",
+            test_font(),
+            empty_sprites(),
+            Arc::new(CursorAtlas::new(entries)),
+            empty_hud_graphics(),
+        );
+        let origin = |graphics: &GraphicsSystem, phase: MouseCursorPhase| {
+            let expected = Color::opaque(
+                phase.atlas_phase() as u8,
+                phase.atlas_phase() as u8 + 40,
+                200,
+            );
+            let points = (0..48)
+                .flat_map(|y| (0..48).map(move |x| (x, y)))
+                .filter(|&(x, y)| graphics.surface().get_pixel(x, y) == Some(expected))
+                .collect::<Vec<_>>();
+            (
+                points.iter().map(|point| point.0).min(),
+                points.iter().map(|point| point.1).min(),
+            )
+        };
+        for (phase, expected) in [
+            (MouseCursorPhase::Region, (Some(20), Some(20))),
+            (MouseCursorPhase::Select, (Some(20), Some(20))),
+            (MouseCursorPhase::Dig, (Some(20), Some(7))),
+            (MouseCursorPhase::DigMaterial, (Some(20), Some(7))),
+            (MouseCursorPhase::Up, (Some(14), Some(14))),
+        ] {
+            graphics.surface_mut().fill(Color::opaque(1, 2, 3));
+            assert!(graphics.draw_mouse_cursor(phase, GuiPoint::new(20.0, 20.0), None));
+            assert_eq!(origin(&graphics, phase), expected, "{phase:?}");
+        }
+
+        graphics.surface_mut().fill(Color::opaque(1, 2, 3));
+        assert!(graphics.draw_gui_mouse_cursor(GuiPoint::new(20.0, 20.0), true, None));
+        assert_eq!(origin(&graphics, MouseCursorPhase::Region), (Some(20), Some(20)));
+        assert_eq!(origin(&graphics, MouseCursorPhase::Help), (Some(25), Some(15)));
+    }
+
+    #[test]
+    fn l018_gui_help_cursor_offsets_second_cell_in_native_pixels() {
+        let cell = 4u32;
+        let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
+        for _y in 0..cell {
+            for x in 0..40 * cell {
+                let phase = (x / cell) as u8;
+                pixels.extend_from_slice(&[phase, phase, phase, 255]);
+            }
+        }
+        let mut entries = vec![None; 8];
+        entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
+        let mut graphics = GraphicsSystem::new(
+            40,
+            40,
+            40,
+            "GUI help cursor",
+            test_font(),
+            empty_sprites(),
+            Arc::new(CursorAtlas::new(entries)),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(200, 200, 200));
+
+        assert!(graphics.draw_gui_mouse_cursor(GuiPoint::new(10.0, 10.0), true, None));
+        let region = Color::opaque(0, 0, 0);
+        let help = Color::opaque(29, 29, 29);
+        assert_eq!(graphics.surface().get_pixel(8, 8), Some(region));
+        assert_eq!(graphics.surface().get_pixel(13, 3), Some(help));
+
+        graphics.set_presentation_scale(0.5);
+        graphics.surface_mut().fill(Color::opaque(200, 200, 200));
+        assert!(graphics.draw_gui_mouse_cursor(GuiPoint::new(20.0, 20.0), true, None));
+        assert_eq!(graphics.surface().get_pixel(16, 16), Some(region));
+        assert_eq!(graphics.surface().get_pixel(26, 6), Some(help));
     }
 
     #[test]
