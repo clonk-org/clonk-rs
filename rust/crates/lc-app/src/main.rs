@@ -30225,6 +30225,14 @@ impl GameApp {
                                 tracing::warn!(%error, "failed to submit league self-kick vote");
                             }
                         } else {
+                            let result_message = self.runtime_resource_bytes(
+                                "IDS_ERR_GAMELEFTVIAPLAYERMENU",
+                            );
+                            self.engine.evaluate_network_round_results(
+                                lc_engine::RoundResultsNetworkResult::NetworkError,
+                                Some(result_message),
+                            );
+                            self.snapshot.round_results = self.engine.snapshot().round_results;
                             if let Some(Err(error)) =
                                 self.network.as_ref().map(NetworkManager::graceful_part)
                             {
@@ -65104,6 +65112,25 @@ impl GameApp {
             .ok()
             .and_then(|table| table.entries.get(key).cloned())
             .unwrap_or_else(|| format!("[Undefined: {key}]"))
+    }
+
+    fn runtime_resource_bytes(&self, key: &str) -> Vec<u8> {
+        let Ok(table) = load_runtime_language_table(self.app_paths.as_ref())
+            .or_else(|_| load_runtime_language_table(None))
+        else {
+            return format!("[Undefined: {key}]").into_bytes();
+        };
+        let Some(value) = table.entries.get(key) else {
+            return format!("[Undefined: {key}]").into_bytes();
+        };
+        match table.charset {
+            RuntimeHelpCharset::Windows1252 => value
+                .chars()
+                .map(runtime_cp1252_byte)
+                .collect::<Result<Vec<_>>>()
+                .expect("decoded Windows-1252 resources re-encode losslessly"),
+            RuntimeHelpCharset::Utf8 => value.as_bytes().to_vec(),
+        }
     }
 
     fn startup_tooltip_resource_string(&self, key: &str) -> String {
@@ -157811,6 +157838,14 @@ func ControlDig() { dig_count = 1; return(1); }
         app.sync_checks.record_local(queued_check);
         app.apply_ingame_menu_action(MenuAction::ActivateOptions)
             .expect("open options menu");
+        assert!(
+            app.engine
+                .snapshot()
+                .round_results
+                .network_result
+                .is_none(),
+            "fresh Part fixture has no earlier, more-specific result"
+        );
 
         let frame_before = app.engine.frame();
         let control_tick_before = app.engine.sync_check(local_client).control_tick;
@@ -157858,6 +157893,19 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(!app.control_clients.contains(0));
         assert!(app.engine.player(local_player).is_some());
         assert!(app.engine.player(remote_player).is_none());
+        let engine_results = app.engine.snapshot().round_results;
+        assert_eq!(
+            engine_results.network_result,
+            Some(lc_engine::RoundResultsNetworkResult::NetworkError)
+        );
+        assert_eq!(
+            engine_results.network_result_message.as_slice(),
+            b"Game left via player menu."
+        );
+        assert_eq!(
+            app.snapshot.round_results, engine_results,
+            "the eventual evaluation screen sees the Part verdict immediately"
+        );
         let removed = app
             .control_player_infos
             .get(remote_info)
@@ -157944,6 +157992,14 @@ func ControlDig() { dig_count = 1; return(1); }
                 data: local_client as i32,
                 by_client: local_client as i32,
             }]
+        );
+        assert!(
+            app.engine
+                .snapshot()
+                .round_results
+                .network_result
+                .is_none(),
+            "league self-kick does not execute the ordinary Part verdict"
         );
     }
 
@@ -158634,6 +158690,15 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(app.network.is_none());
         assert!(app.network_mode.is_none());
         assert!(matches!(app.mode, AppMode::Running));
+        assert_eq!(
+            app.snapshot.round_results.network_result,
+            Some(lc_engine::RoundResultsNetworkResult::NetworkError)
+        );
+        assert_eq!(
+            app.snapshot.round_results.network_result_message.as_slice(),
+            b"Game left via player menu.",
+            "a league observer uses the ordinary localized Part verdict"
+        );
     }
 
     #[test]
