@@ -20755,6 +20755,17 @@ fn load_startup_alphabetical_sorting(paths: Option<&AppPaths>) -> bool {
         .unwrap_or(false)
 }
 
+fn load_startup_last_portrait_folder_index(paths: Option<&AppPaths>) -> Option<usize> {
+    native_config_text(
+        &load_native_config_bytes(paths),
+        "Startup",
+        "LastPortraitFolderIdx",
+    )
+    .as_deref()
+    .and_then(parse_classic_loader_i32)
+    .and_then(|index| usize::try_from(index).ok())
+}
+
 fn repair_rust_truncated_masterserver_urls(config_path: &Path) -> io::Result<bool> {
     let mut config = Config::load(config_path)?;
     let mut repaired = false;
@@ -22260,6 +22271,18 @@ fn persist_irc_warning_preference(paths: &AppPaths, checked: bool) -> io::Result
         &[(
             "HideMsgIRCDangerous",
             lc_app::NativeConfigValue::RawAscii(if checked { "1" } else { "0" }),
+        )],
+    )
+}
+
+fn persist_startup_portrait_location(paths: &AppPaths, index: usize) -> io::Result<()> {
+    let index = index.to_string();
+    persist_native_config_values(
+        paths,
+        "Startup",
+        &[(
+            "LastPortraitFolderIdx",
+            lc_app::NativeConfigValue::RawAscii(&index),
         )],
     )
 }
@@ -51417,7 +51440,7 @@ impl GameApp {
                                 return Ok(());
                             }
                             NetworkScenarioOpenDecision::Warning { message, caption }
-                                if !self.hide_msg_start_dedicated() =>
+                                if !self.startup_message_hidden("HideMsgStartDedicated") =>
                             {
                                 self.status_text.clear();
                                 let checkbox = self.runtime_resource_text(
@@ -58645,6 +58668,11 @@ impl GameApp {
                     self.open_startup_player_portrait_selector();
                 }
                 PlayerPropertiesAction::PortraitLocationChanged { index, path } => {
+                    if let Some(paths) = self.app_paths.as_ref() {
+                        if let Err(error) = persist_startup_portrait_location(paths, index) {
+                            tracing::warn!(%error, "failed to persist portrait location");
+                        }
+                    }
                     self.reload_startup_player_portrait_location(index, &path);
                 }
                 PlayerPropertiesAction::ApplyPicture(commit) => {
@@ -58677,18 +58705,23 @@ impl GameApp {
                 program_path,
             ));
         }
-        let entries = lc_frontend::startup_portraitsel::portrait_files_in_location(&user_path);
+        let current_location = load_startup_last_portrait_folder_index(Some(paths))
+            .filter(|index| *index < locations.len())
+            .unwrap_or(0);
+        let current_path = locations[current_location].path.clone();
+        let entries =
+            lc_frontend::startup_portraitsel::portrait_files_in_location(&current_path);
         let (entries, scan_error) = match entries {
             Ok(entries) => (entries, None),
             Err(error) => (
                 Vec::new(),
-                Some(format!("failed to scan {}: {error}", user_path.display())),
+                Some(format!("failed to scan {}: {error}", current_path.display())),
             ),
         };
         if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
             pending
                 .controller
-                .open_portrait_selector(locations, 0, entries);
+                .open_portrait_selector(locations, current_location, entries);
             pending.controller.clear_validation_error();
             if let Some(error) = scan_error {
                 pending.controller.set_portrait_selector_error(error);
@@ -62106,7 +62139,9 @@ impl GameApp {
         if check_league_rules && !self.check_classic_lobby_league_rules_start()? {
             return Ok(());
         }
-        if confirm_unassociated_savegame_players {
+        if confirm_unassociated_savegame_players
+            && !self.startup_message_hidden("HideMsgPlrNoTakeOver")
+        {
             let table = load_runtime_language_table(self.app_paths.as_ref()).ok();
             let message = table
                 .as_ref()
@@ -62120,6 +62155,11 @@ impl GameApp {
                 .and_then(|table| table.entries.get("IDS_MSG_FREESAVEGAMEPLRS"))
                 .cloned()
                 .unwrap_or_else(|| "Player assignment".to_string());
+            let checkbox = table
+                .as_ref()
+                .and_then(|table| table.entries.get("IDS_MSG_DONTSHOW"))
+                .cloned()
+                .unwrap_or_else(|| "&Don't display this message in the future.".to_string());
             self.push_message_dialog(
                 lc_frontend::message_dialog::MessageDialogState::new(
                     message,
@@ -62128,7 +62168,8 @@ impl GameApp {
                     lc_frontend::message_dialog::MessageDialogIcon::Standard(12),
                     lc_frontend::message_dialog::MessageDialogSize::Regular,
                     false,
-                ),
+                )
+                .with_checkbox(checkbox, false),
                 MessageDialogContinuation::ClassicLobbyStart { countdown_seconds },
             )?;
             return Ok(());
@@ -70501,6 +70542,11 @@ impl GameApp {
         let Some((key, description, native_irc_preference, changes)) = self.message_dialogs.get_mut(index).and_then(
             |dialog| {
                 let (key, description, native_irc_preference) = match &dialog.continuation {
+                    MessageDialogContinuation::ClassicLobbyStart { .. } => (
+                        "HideMsgPlrNoTakeOver",
+                        "unassociated savegame-player warning preference",
+                        false,
+                    ),
                     MessageDialogContinuation::NetworkScenarioPlayerCountWarning { .. } => (
                         "HideMsgStartDedicated",
                         "scenario-start warning preference",
@@ -70710,13 +70756,23 @@ impl GameApp {
             MessageDialogContinuation::NetworkServerRedirect { .. } => {
                 self.startup_network_ignore_redirect = true;
             }
-            MessageDialogContinuation::ClassicLobbyStart { countdown_seconds }
+            MessageDialogContinuation::ClassicLobbyStart { countdown_seconds } => {
+                if let (Some(paths), Some(checked)) = (self.app_paths.as_ref(), checkbox_checked) {
+                    if let Err(error) = persist_config_value(
+                        paths,
+                        "Startup",
+                        "HideMsgPlrNoTakeOver",
+                        i32::from(checked).to_string(),
+                    ) {
+                        tracing::warn!(%error, "failed to persist unassociated savegame-player warning preference");
+                    }
+                }
                 if result == lc_frontend::message_dialog::MessageDialogResult::Yes
-                    && self.classic_host_lobby_active() =>
-            {
-                self.start_network_lobby_countdown_with(countdown_seconds)?;
+                    && self.classic_host_lobby_active()
+                {
+                    self.start_network_lobby_countdown_with(countdown_seconds)?;
+                }
             }
-            MessageDialogContinuation::ClassicLobbyStart { .. } => {}
             MessageDialogContinuation::LobbyResourceOverwrite { resource_id }
                 if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
             {
@@ -77382,13 +77438,13 @@ impl GameApp {
             .unwrap_or_else(|| fallback.to_string())
     }
 
-    fn hide_msg_start_dedicated(&self) -> bool {
+    fn startup_message_hidden(&self, key: &str) -> bool {
         self.app_paths
             .as_ref()
             .and_then(|paths| Config::load(paths.config_file()).ok())
             .and_then(|config| {
                 config
-                    .get_in(Some("Startup"), "HideMsgStartDedicated")
+                    .get_in(Some("Startup"), key)
                     .map(parse_config_bool)
             })
             .unwrap_or(false)
@@ -107797,8 +107853,12 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn classic_host_start_waits_for_unassociated_savegame_confirmation() {
-        let mut app = new_menu_app(640, 480);
+    fn l035_classic_host_start_persists_and_honors_unassociated_savegame_warning() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated savegame-warning user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
         let (_events, mut commands) = install_classic_host_network_stub(&mut app);
 
         app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
@@ -107822,14 +107882,38 @@ public func Grant(password) { return GainMissionAccess(password); }
                 countdown_seconds: 5
             }
         ));
+        assert_eq!(warning.state.checkbox_checked(), Some(false));
 
-        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
-            .expect("confirm classic host start");
+        app.message_dialogs
+            .last_mut()
+            .expect("savegame warning dialog")
+            .state
+            .handle_hotkey('D');
+        app.persist_top_message_dialog_checkbox_changes();
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("cancel classic host start after remembering warning preference");
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(app.host_lobby_countdown.is_none());
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("load persisted warning preference")
+                .get_in(Some("Startup"), "HideMsgPlrNoTakeOver"),
+            Some("1")
+        );
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+            countdown_seconds: 5,
+            check_league_rules: true,
+            confirm_unassociated_savegame_players: true,
+        }])
+        .expect("hidden savegame assignment warning starts immediately");
+        assert!(app.message_dialogs.is_empty());
         assert_eq!(
             commands.take_submitted_lobby_countdowns(),
             vec![lc_network::LobbyCountdownPacket::new(5)]
         );
         assert_eq!(app.host_lobby_countdown, Some(HostLobbyCountdown::new()));
+        reset_cached_app_paths();
     }
 
     #[test]
@@ -120863,6 +120947,115 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(controller.big_icon_preview().is_some_and(|image| {
             image.width() <= 64 && image.height() <= 64
         }));
+    }
+
+    #[test]
+    fn l035_portrait_selector_uses_and_persists_last_folder_index() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let program_data = tempdir().expect("portrait program data");
+        let user_data = tempdir().expect("portrait user data");
+        fs::create_dir_all(program_data.path().join("planet/System.c4g"))
+            .expect("create program path marker");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(program_data.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover portrait paths");
+        paths.ensure_user_dirs().expect("create portrait user path");
+        write_preview_image(
+            &paths.user_data_dir().join("Custom.PNG"),
+            [12, 34, 56, 255],
+            image::ImageFormat::Png,
+        );
+        write_preview_image(
+            &program_data.path().join("Program.BMP"),
+            [65, 43, 21, 255],
+            image::ImageFormat::Bmp,
+        );
+        persist_native_config_values(
+            &paths,
+            "Startup",
+            &[(
+                "LastPortraitFolderIdx",
+                lc_app::NativeConfigValue::RawAscii("1"),
+            )],
+        )
+        .expect("seed remembered portrait location");
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.app_paths = Some(paths.clone());
+        app.open_new_startup_player_properties();
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
+        ]);
+        let selector = app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .expect("Picture opens the remembered portrait location");
+        assert_eq!(selector.current_location_index(), 1);
+        assert!(selector
+            .items()
+            .iter()
+            .any(|item| item.filename() == Some("Program.BMP")));
+
+        for _ in 0..5 {
+            let actions = app
+                .startup_player_properties_dialog
+                .as_mut()
+                .expect("properties remain open")
+                .controller
+                .handle_key_down(KeyCode::Tab);
+            assert!(actions.is_empty());
+        }
+        let actions = app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("properties remain open")
+            .controller
+            .handle_key_down(KeyCode::Right);
+        app.process_startup_player_properties_actions(actions);
+        let selector = app
+            .startup_player_properties_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.portrait_selector())
+            .expect("selector remains open after changing location");
+        assert_eq!(selector.current_location_index(), 0);
+        assert!(selector
+            .items()
+            .iter()
+            .any(|item| item.filename() == Some("Custom.PNG")));
+        assert_eq!(
+            lc_app::configured_native_value(
+                &fs::read(paths.config_file()).expect("read portrait config"),
+                "Startup",
+                "LastPortraitFolderIdx",
+            )
+            .expect("persisted portrait location")
+            .as_bytes(),
+            b"0"
+        );
+
+        let actions = app
+            .startup_player_properties_dialog
+            .as_mut()
+            .expect("properties remain open")
+            .controller
+            .handle_key_down(KeyCode::Escape);
+        assert!(actions.is_empty(), "selector cancel stays in player properties");
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
+        ]);
+        assert_eq!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .and_then(|pending| pending.controller.portrait_selector())
+                .expect("selector reopens at the persisted location")
+                .current_location_index(),
+            0
+        );
+        reset_cached_app_paths();
     }
 
     #[test]
