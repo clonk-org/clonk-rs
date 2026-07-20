@@ -315,13 +315,16 @@ model rather than an interchangeable scheduling choice.
 
 ### Debug-payload and scenario-preparation follow-up
 
-The next compile pass removed test-profile debug data from the production
-frontend, resources, and script crates. Their previous rlibs contained
-18,365,488 bytes (17.515 MiB) of object-file DWARF, measured with `size -m`.
-Those tables were repeatedly processed by the large app and engine links but
-did not affect generated code or test runtime. Panic-site text and exported
-function names remain available, while the development profile retains line
-tables for interactive debugging.
+Two compile passes removed additional test-profile debug data without changing
+generated code or test runtime. Frontend, resources, and script accounted for
+18,365,488 bytes (17.515 MiB) of object-file DWARF. A post-change artifact
+audit found another 8,343,469 bytes across the remaining workspace rlibs,
+expanded to 43,125,856 bytes after downstream-link fanout, plus 25,171,978
+bytes in loose debug-map objects. The follow-up therefore made `debug = false`
+the workspace test-profile default instead of accumulating package exceptions.
+Panic-site text and function symbols remain available, while the development
+profile retains debug information for interactive use. Set
+`CARGO_PROFILE_TEST_DEBUG=line-tables-only` for a line-symbolized test build.
 
 The same pass eliminated four redundant installed-scenario preparations while
 preserving a fresh `Engine` and player for every assertion body. Tutorial05's

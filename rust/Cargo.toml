@@ -75,75 +75,44 @@ lto = "off"
 # broad codegen parallelism Cargo gives incremental local builds so the large
 # app and engine test wrappers do not become single long LLVM/link tails.
 codegen-units = 256
-# Full DWARF dominates codegen, linking, and disk use for the very large test
-# harnesses. Line tables retain source locations in failures and backtraces.
-debug = "line-tables-only"
+# Test-profile debug data increases codegen, link I/O, and target size without
+# affecting assertions or runtime. Panic-site text and function symbols remain;
+# use the dev profile or override CARGO_PROFILE_TEST_DEBUG when line-symbolized
+# test backtraces are needed.
+debug = false
 debug-assertions = true
 overflow-checks = true
 
-# Dependency frames are symbolized by their exported names; generating line
-# tables for every registry crate only adds cold codegen, link, and disk work.
-# Preserve the dev profile's optimized dependencies for test runtime; workspace
-# crates retain line tables through the profile above.
+# Preserve the dev profile's optimized dependencies for test runtime.
 [profile.test.package."*"]
 opt-level = 3
-debug = false
 
 # The main application test harness is the largest final link in the workspace.
 # Level 2 keeps its gameplay-heavy tests close to fully optimized while
-# avoiding the longest level-3 codegen tail on this 192k-line wrapper. Keep
-# debug data disabled so future global changes do not grow that final link.
+# avoiding the longest level-3 codegen tail on this 192k-line wrapper.
 [profile.test.package.lc-app]
 opt-level = 2
-debug = false
-
-# Engine line tables account for roughly 36 MiB of its test-profile rlib and
-# are repeatedly processed by the large app and integration-test links.
-# Function names remain available in backtraces without this per-instruction
-# source mapping.
-[profile.test.package.lc-engine]
-debug = false
-
-# Frontend debug data accounts for roughly 10 MiB of its test-profile rlib and
-# are repeatedly processed by the large app link. The inline frontend wrapper
-# already exercises the same source without debug data, while function names
-# and panic source locations remain available.
-[profile.test.package.lc-frontend]
-debug = false
-
-# Resources and script form the shared input/runtime spine for the app,
-# engine, frontend, and launcher harnesses. Their debug data adds another
-# roughly 8 MiB across those downstream links without changing test code.
-[profile.test.package.lc-resources]
-debug = false
-
-[profile.test.package.lc-script]
-debug = false
 
 # The large async lc-network harness is a cold-build tail, while its complete
 # suite remains only a few seconds without LLVM optimization. Skip optimization
-# and line tables for this crate's test-profile copy to shorten that tail.
+# for this crate's test-profile copy to shorten that tail.
 [profile.test.package.lc-network]
 opt-level = 0
-debug = false
 
 # The inline and small unit wrappers are compile-bound, so avoid LLVM
-# optimization and line tables for their leaf package.
+# optimization for their leaf package.
 [profile.test.package.lc-engine-unit-tests]
 opt-level = 0
-debug = false
 
 # The integration wrapper spends most of its wall time running scenario and
 # virtual-player loops. Light optimization pays for itself there without
 # restoring the level-3 compiler tail for the much larger inline wrapper.
 [profile.test.package.lc-engine-integration-tests]
 opt-level = 1
-debug = false
 
 # Keep the production frontend optimized for the app and render-heavy tests,
-# while using only light optimization and no line tables for its large inline
-# unit-test wrapper. Level 1 keeps the 666-test software-render suite fast
+# while using only light optimization for its large inline unit-test wrapper.
+# Level 1 keeps the 666-test software-render suite fast
 # without restoring the level-3 compiler tail.
 [profile.test.package.lc-frontend-unit-tests]
 opt-level = 1
-debug = false
