@@ -4126,6 +4126,7 @@ fn build_runtime_flash_resources(table: &RuntimeLanguageTable) -> RuntimeFlashRe
     RuntimeFlashResources {
         charset: table.charset,
         music: text("IDS_CTL_MUSIC"),
+        speed: text("IDS_MSG_SPEED"),
         on: text("IDS_CTL_ON"),
         off: text("IDS_CTL_OFF"),
     }
@@ -7277,6 +7278,12 @@ fn main() -> Result<()> {
                     &mut accumulator,
                     frame_time,
                 );
+                if app.mode == AppMode::Running && app.full_speed {
+                    // C4Application::NextTick(false) drives one unpaced game
+                    // iteration. Do not let wall-clock debt create a second
+                    // source of fast-forward ticks.
+                    accumulator = Duration::ZERO;
+                }
 
                 let simulation_pass = match advance_simulation_pass(
                     &mut app,
@@ -7295,7 +7302,7 @@ fn main() -> Result<()> {
                     tracing::trace!(
                         frames = simulation_pass.executed_frames,
                         skipped_renders = simulation_pass.skipped_render_frames,
-                        "network control catch-up skipped intermediate renders"
+                        "simulation pacing skipped intermediate renders"
                     );
                 }
 
@@ -7312,12 +7319,16 @@ fn main() -> Result<()> {
                     window.request_redraw();
                 }
 
-                let wait_duration = frame_schedule.refresh_interval.min(
-                    frame_schedule
-                        .simulation_interval
-                        .saturating_sub(accumulator),
-                );
-                *control_flow = ControlFlow::WaitUntil(now + wait_duration);
+                if app.mode == AppMode::Running && app.full_speed {
+                    *control_flow = ControlFlow::Poll;
+                } else {
+                    let wait_duration = frame_schedule.refresh_interval.min(
+                        frame_schedule
+                            .simulation_interval
+                            .saturating_sub(accumulator),
+                    );
+                    *control_flow = ControlFlow::WaitUntil(now + wait_duration);
+                }
             }
             Event::RedrawRequested(id) if id == window.id() => {
                 app.graphics.set_presentation_scale(presenter.scale());
@@ -12719,6 +12730,10 @@ struct GameApp {
     /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
     frames_per_second: i32,
     frames_since_second: i32,
+    /// C4Game::FullSpeed and FrameSkip are transient per-game scheduler
+    /// controls. They are deliberately excluded from save capture/restore.
+    full_speed: bool,
+    frame_skip: i32,
     /// C4Game::pNetworkStatistics exists for every running game. Only the
     /// Pings presentation tab is conditional on an enabled network session.
     network_stats: Option<NetworkStats>,
@@ -14056,6 +14071,7 @@ struct RuntimeHelpColumns {
 struct RuntimeFlashResources {
     charset: RuntimeHelpCharset,
     music: String,
+    speed: String,
     on: String,
     off: String,
 }
@@ -14067,6 +14083,10 @@ impl RuntimeFlashResources {
             self.music,
             if enabled { &self.on } else { &self.off }
         )
+    }
+
+    fn speed(&self, frame_skip: i32) -> String {
+        format_resource_string(self.speed.clone(), &[&frame_skip.to_string()])
     }
 }
 
@@ -14187,6 +14207,8 @@ enum RuntimeCustomGamepadAction {
     Scoreboard,
     Abort,
     Chart,
+    SpeedUp,
+    SpeedDown,
     Menu(ControlCommand),
     MenuOpen,
 }
@@ -14199,8 +14221,6 @@ enum RuntimeFlashProducerBoundary {
     DebugVertices,
     DebugActionCycle,
     DebugSolidMask,
-    SpeedUp,
-    SpeedDown,
     RuntimeJoin,
     ControlRate,
     FairCrew,
@@ -14209,15 +14229,13 @@ enum RuntimeFlashProducerBoundary {
 }
 
 impl RuntimeFlashProducerBoundary {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 11] = [
         Self::ObserverPrompt,
         Self::ObserverClear,
         Self::DebugMode,
         Self::DebugVertices,
         Self::DebugActionCycle,
         Self::DebugSolidMask,
-        Self::SpeedUp,
-        Self::SpeedDown,
         Self::RuntimeJoin,
         Self::ControlRate,
         Self::FairCrew,
@@ -14811,9 +14829,10 @@ fn accumulate_frame_time_for_mode(
     );
 }
 
-/// Executes timer-paced updates and any C++-style network catch-up frames in
-/// one event-loop pass. Immediate catch-up frames do not consume elapsed-time
-/// budget; a stalled pre-execution gate breaks the loop instead of spinning.
+/// Executes one FullSpeed update, timer-paced updates, and any C++-style
+/// network catch-up frames in one event-loop pass. Immediate frames do not
+/// consume elapsed-time budget; a stalled pre-execution gate breaks the loop
+/// instead of spinning.
 fn advance_simulation_pass(
     app: &mut GameApp,
     frame_schedule: &mut FrameSchedule,
@@ -14821,10 +14840,16 @@ fn advance_simulation_pass(
 ) -> Result<SimulationPassOutcome, EngineError> {
     let mut outcome = SimulationPassOutcome::default();
     let mut catch_up = false;
+    let mut full_speed_due = app.mode == AppMode::Running && app.full_speed;
+    if full_speed_due {
+        // FullSpeed is driven by one Winit Poll iteration at a time. Discard
+        // timer debt so this pass cannot monopolize the event loop.
+        *accumulator = Duration::ZERO;
+    }
 
     loop {
         let timer_due = *accumulator >= frame_schedule.simulation_interval;
-        if !timer_due && !catch_up {
+        if !timer_due && !catch_up && !full_speed_due {
             break;
         }
 
@@ -14843,15 +14868,20 @@ fn advance_simulation_pass(
         if timer_due {
             *accumulator -= executed_interval;
         }
+        full_speed_due = false;
         outcome.did_update = true;
 
         let frame_advanced = app.engine.frame() != frame_before;
         let pacing = frame_advanced
             .then(|| app.network_control_pacing())
             .unwrap_or_default();
+        let frame_skip = u64::try_from(app.frame_skip).unwrap_or(1);
+        let manual_skip =
+            frame_advanced && frame_skip > 1 && app.engine.frame().rem_euclid(frame_skip) != 0;
+        let skip_render = pacing.skip_render || manual_skip;
         if frame_advanced {
             outcome.executed_frames = outcome.executed_frames.saturating_add(1);
-            if pacing.skip_render {
+            if skip_render {
                 outcome.skipped_render_frames =
                     outcome.skipped_render_frames.saturating_add(1);
             }
@@ -14859,7 +14889,7 @@ fn advance_simulation_pass(
         // Winit already coalesces intermediate catch-up frames into this one
         // pass. The post-pass redraw follows only the latest C++ frame-skip
         // decision; an earlier skipped frame must not hide recovered state.
-        outcome.skip_redraw = frame_advanced && pacing.skip_render;
+        outcome.skip_redraw = frame_advanced && skip_render;
         catch_up = frame_advanced && pacing.overflow;
 
         let schedule_changed = synchronize_frame_schedule(
@@ -23622,6 +23652,8 @@ impl GameApp {
             network_stream_address,
             frames_per_second: 0,
             frames_since_second: 0,
+            full_speed: false,
+            frame_skip: 1,
             network_stats: None,
             network_stats_clients: HashSet::new(),
             network_stats_players: HashSet::new(),
@@ -32605,6 +32637,16 @@ impl GameApp {
             key,
             key == VirtualKeyCode::F3 && c4_modifiers.is_empty(),
         );
+        let speed_up_binding = self.runtime_keyboard_binding_matches(
+            "GameSpeedUp",
+            key,
+            key == VirtualKeyCode::NumpadAdd && c4_modifiers == ModifiersState::SHIFT,
+        );
+        let speed_down_binding = self.runtime_keyboard_binding_matches(
+            "GameSlowDown",
+            key,
+            key == VirtualKeyCode::NumpadSubtract && c4_modifiers == ModifiersState::SHIFT,
+        );
         // X11/SDL update C4KeyboardInput::PressedKeys from the raw physical
         // edge before scope/priority dispatch. Keep the latch even when the
         // first down belongs to a global or modified route, so a later
@@ -32681,17 +32723,6 @@ impl GameApp {
                 "DbgShowSolidMaskToggle",
                 RuntimeFlashProducerBoundary::DebugSolidMask,
                 key == VirtualKeyCode::F8 && c4_modifiers == ModifiersState::CTRL,
-            ),
-            (
-                "GameSpeedUp",
-                RuntimeFlashProducerBoundary::SpeedUp,
-                key == VirtualKeyCode::NumpadAdd && c4_modifiers == ModifiersState::SHIFT,
-            ),
-            (
-                "GameSlowDown",
-                RuntimeFlashProducerBoundary::SpeedDown,
-                key == VirtualKeyCode::NumpadSubtract
-                    && c4_modifiers == ModifiersState::SHIFT,
             ),
         ]
         .into_iter()
@@ -32787,6 +32818,31 @@ impl GameApp {
             }
             self.toggle_runtime_client_list()?;
             return Ok(RuntimeGlobalKeyOutcome::Handled);
+        }
+        if speed_up_binding || speed_down_binding {
+            // Native player controls have PRIO_PlrControl and therefore own
+            // an exact custom collision before these PRIO_Base callbacks.
+            if self.local_player_key_binding_owner_in_scope(key).is_some() {
+                self.handle_engine_key(key, state)?;
+                return Ok(RuntimeGlobalKeyOutcome::Handled);
+            }
+            // ToggleChat was registered before the speed callbacks but is
+            // routed later so higher-priority GUI owners can refuse it.
+            let earlier_toggle_chat = self.runtime_keyboard_binding_matches(
+                "ToggleChat",
+                key,
+                key == VirtualKeyCode::C && c4_modifiers == ModifiersState::ALT,
+            );
+            if earlier_toggle_chat {
+                return Ok(RuntimeGlobalKeyOutcome::Unhandled);
+            }
+            if state == ElementState::Pressed {
+                self.step_runtime_speed(speed_up_binding)?;
+                return Ok(RuntimeGlobalKeyOutcome::Handled);
+            }
+            // The callbacks have no Up handler. Suppress a modified physical
+            // release from leaking into modifier-blind fallback controls.
+            return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
         }
         if pause_binding {
             if state == ElementState::Released || self.game_over_dialog.is_some() {
@@ -33125,6 +33181,12 @@ impl GameApp {
         {
             return None;
         }
+        if matches("GameSpeedUp") {
+            return Some(RuntimeCustomGamepadAction::SpeedUp);
+        }
+        if matches("GameSlowDown") {
+            return Some(RuntimeCustomGamepadAction::SpeedDown);
+        }
         if self.ingame_menu_belongs_to(OWNER_NONE) {
             for (name, command) in [
                 ("FullscreenMenuLeft", ControlCommand::MenuLeft),
@@ -33196,6 +33258,8 @@ impl GameApp {
                 }
             }
             RuntimeCustomGamepadAction::Chart => self.toggle_network_chart(),
+            RuntimeCustomGamepadAction::SpeedUp => self.step_runtime_speed(true)?,
+            RuntimeCustomGamepadAction::SpeedDown => self.step_runtime_speed(false)?,
             RuntimeCustomGamepadAction::Menu(command) => {
                 self.handle_menu_command_failsafe(
                     OWNER_NONE,
@@ -36769,6 +36833,49 @@ impl GameApp {
             })
     }
 
+    fn prepare_runtime_speed_flash(
+        &self,
+        frame_skip: i32,
+    ) -> Result<Option<RuntimeFlashMessage>, EngineError> {
+        let (charset, message_text) = self
+            .runtime_flash_resources()
+            .map(|resources| (resources.charset, resources.speed(frame_skip)))
+            .map_err(|error| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeFlashResources {
+                        detail: error.to_string(),
+                    },
+                ))
+            })?;
+        self.prepare_runtime_flash_message(&message_text, charset)
+            .map_err(|error| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeFlashResources {
+                        detail: error.to_string(),
+                    },
+                ))
+            })
+    }
+
+    /// C4Game::SpeedUp/SlowDown use a narrower interactive 1..=50 clamp
+    /// than `/fast`, and only the key callbacks produce IDS_MSG_SPEED.
+    fn step_runtime_speed(&mut self, speed_up: bool) -> Result<(), EngineError> {
+        let frame_skip = if speed_up {
+            self.frame_skip.saturating_add(1).clamp(1, 50)
+        } else {
+            self.frame_skip.saturating_sub(1).clamp(1, 50)
+        };
+        let flash_message = self.prepare_runtime_speed_flash(frame_skip)?;
+        self.frame_skip = frame_skip;
+        if speed_up {
+            self.full_speed = true;
+        } else if frame_skip == 1 {
+            self.full_speed = false;
+        }
+        self.runtime_flash_message = flash_message;
+        Ok(())
+    }
+
     fn set_runtime_music_playback(&mut self, enabled: bool) {
         self.runtime_music_enabled = enabled;
         if enabled {
@@ -39340,6 +39447,25 @@ impl GameApp {
         match name {
             b"help" => self.append_running_command_help(),
             b"clear" => self.clear_message_board_log(),
+            b"fast" => {
+                if self.network_is_league {
+                    self.append_running_command_resource(
+                        "IDS_LOG_COMMANDNOTALLOWEDINLEAGUE",
+                        "Command not allowed in league games!",
+                    );
+                } else {
+                    let parameter = native_bytes_as_legacy_text(parameter);
+                    let frame_skip = legacy_atoi_i32(&parameter);
+                    if frame_skip != 0 {
+                        self.frame_skip = frame_skip.clamp(1, 500);
+                        self.full_speed = true;
+                    }
+                }
+            }
+            b"slow" => {
+                self.full_speed = false;
+                self.frame_skip = 1;
+            }
             b"kick" => {
                 if network_host {
                     let target = self
@@ -75471,6 +75597,8 @@ impl GameApp {
         self.league_votes.clear();
         self.frames_per_second = 0;
         self.frames_since_second = 0;
+        self.full_speed = false;
+        self.frame_skip = 1;
         self.control_clients =
             initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
         self.network_client_activity.clear();
@@ -78060,6 +78188,8 @@ impl GameApp {
         self.ingame_ignore_left_up = false;
         self.frames_per_second = 0;
         self.frames_since_second = 0;
+        self.full_speed = false;
+        self.frame_skip = 1;
         self.network_stats = Some(NetworkStats::new());
         self.network_stats_clients.clear();
         self.network_stats_players.clear();
@@ -93455,6 +93585,73 @@ func Award()
         assert_eq!(app.network_control_pacing().behind, 3);
         assert!(!outcome.skip_redraw);
         assert_eq!(accumulator, Duration::ZERO);
+    }
+
+    #[test]
+    fn l013_full_speed_runs_unpaced_skips_requested_renders_and_slow_restores_timer() {
+        let mut app = new_running_sandbox_app();
+        let mut schedule = frame_schedule_for_mode(
+            app.mode,
+            app.engine.game_tick_delay_ms(),
+            app.engine.game_tick_delay_revision(),
+        );
+        let mut accumulator = Duration::ZERO;
+        let first_frame = app.engine.frame();
+        app.full_speed = true;
+        app.frame_skip = 3;
+
+        for offset in 1..=6 {
+            let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+                .expect("execute one unpaced FullSpeed pass");
+            let frame = first_frame + offset;
+            assert_eq!(outcome.executed_frames, 1);
+            assert_eq!(app.engine.frame(), frame);
+            assert_eq!(outcome.skip_redraw, frame.rem_euclid(3) != 0);
+            assert_eq!(accumulator, Duration::ZERO);
+        }
+
+        app.process_running_chat_text("/slow");
+        assert!(!app.full_speed);
+        assert_eq!(app.frame_skip, 1);
+        let paced_frame = app.engine.frame();
+        let waiting = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+            .expect("normal pacing waits without elapsed time");
+        assert_eq!(waiting.executed_frames, 0);
+        accumulator += Duration::from_millis(27);
+        assert_eq!(
+            advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+                .expect("27ms remains below the normal tick")
+                .executed_frames,
+            0
+        );
+        accumulator += Duration::from_millis(1);
+        let paced = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+            .expect("the 28th millisecond executes one normal tick");
+        assert_eq!(paced.executed_frames, 1);
+        assert!(!paced.skip_redraw);
+        assert_eq!(app.engine.frame(), paced_frame + 1);
+
+        app.process_running_chat_text("/fast 1");
+        let fast_one = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+            .expect("/fast 1 is still unpaced");
+        assert_eq!(fast_one.executed_frames, 1);
+        assert!(!fast_one.skip_redraw);
+    }
+
+    #[test]
+    fn l013_new_game_and_teardown_reset_transient_speed_state() {
+        let mut app = new_running_sandbox_app();
+        app.full_speed = true;
+        app.frame_skip = 500;
+        app.configure_running_state("Next game".to_string(), DEFAULT_GROUND_HEIGHT);
+        assert!(!app.full_speed);
+        assert_eq!(app.frame_skip, 1);
+
+        app.full_speed = true;
+        app.frame_skip = 7;
+        app.return_to_menu_for_relaunch();
+        assert!(!app.full_speed);
+        assert_eq!(app.frame_skip, 1);
     }
 
     #[test]
@@ -135138,6 +135335,47 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn l013_running_fast_slow_commands_bound_and_honor_league_gate() {
+        let mut app = new_state_only_running_sandbox_app();
+        assert!(!app.full_speed);
+        assert_eq!(app.frame_skip, 1);
+
+        app.process_running_chat_text("/fast 12tail");
+        assert!(app.full_speed);
+        assert_eq!(app.frame_skip, 12);
+        assert!(app.runtime_flash_message.is_none());
+
+        app.process_running_chat_text("/fast 999");
+        assert_eq!(app.frame_skip, 500);
+        app.process_running_chat_text("/fast -4");
+        assert!(app.full_speed, "/fast 1 remains unpaced");
+        assert_eq!(app.frame_skip, 1);
+
+        app.process_running_chat_text("/fast 0");
+        app.process_running_chat_text("/fast");
+        assert!(app.full_speed);
+        assert_eq!(app.frame_skip, 1, "zero input is a recognized no-op");
+        assert!(message_board_logical_entries(&app)
+            .iter()
+            .all(|line| !line.contains("Unknown command")));
+
+        app.full_speed = true;
+        app.frame_skip = 37;
+        app.network_is_league = true;
+        app.process_running_chat_text("/fast 7");
+        assert!(app.full_speed);
+        assert_eq!(app.frame_skip, 37);
+        assert!(latest_message_board_logical_entry(&app)
+            .as_deref()
+            .is_some_and(|line| line.contains("not allowed in league")));
+
+        app.process_running_chat_text("/slow");
+        assert!(!app.full_speed, "/slow is allowed in league games");
+        assert_eq!(app.frame_skip, 1);
+        assert!(app.runtime_flash_message.is_none());
+    }
+
+    #[test]
     fn l119_running_kick_uses_exact_name_and_live_player_league_gate() {
         let mut app = new_state_only_running_sandbox_app();
         let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
@@ -173561,6 +173799,118 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
+    fn l013_speed_keys_flash_clamp_and_honor_keyconfig_priority() {
+        let mut app = new_running_sandbox_app();
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("set default speed-key modifiers");
+        app.handle_key(VirtualKeyCode::NumpadAdd, ElementState::Pressed)
+            .expect("Shift+Numpad+ speeds up without terminating");
+        assert!(app.full_speed);
+        assert_eq!(app.frame_skip, 2);
+        assert_eq!(
+            app.runtime_flash_message.as_ref().map(|message| message.text.as_str()),
+            Some("Speed: 2x")
+        );
+        app.handle_key(VirtualKeyCode::NumpadAdd, ElementState::Released)
+            .expect("speed-up release has no callback");
+        app.handle_key(VirtualKeyCode::NumpadAdd, ElementState::Pressed)
+            .expect("repeated speed-up press");
+        assert_eq!(app.frame_skip, 3);
+
+        for expected in [2, 1] {
+            app.handle_key(VirtualKeyCode::NumpadSubtract, ElementState::Pressed)
+                .expect("Shift+Numpad- slows down without terminating");
+            assert_eq!(app.frame_skip, expected);
+        }
+        assert!(!app.full_speed);
+        assert_eq!(
+            app.runtime_flash_message.as_ref().map(|message| message.text.as_str()),
+            Some("Speed: 1x")
+        );
+
+        app.frame_skip = 50;
+        app.full_speed = false;
+        app.handle_key(VirtualKeyCode::NumpadAdd, ElementState::Pressed)
+            .expect("upper-bound speed-up still flashes");
+        assert_eq!(app.frame_skip, 50);
+        assert!(app.full_speed);
+        assert_eq!(
+            app.runtime_flash_message.as_ref().map(|message| message.text.as_str()),
+            Some("Speed: 50x")
+        );
+
+        let mut rebound = new_running_sandbox_app();
+        rebound.runtime_key_config_cache = OnceLock::new();
+        rebound
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nGameSpeedUp=G\nGameSlowDown=H\n",
+            )
+            .expect("parse rebound speed keys")))
+            .expect("install rebound speed keys");
+        rebound
+            .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .expect("rebound speed-up key");
+        assert_eq!(rebound.frame_skip, 2);
+        rebound
+            .handle_key(VirtualKeyCode::H, ElementState::Pressed)
+            .expect("rebound speed-down key");
+        assert_eq!(rebound.frame_skip, 1);
+        assert!(!rebound.full_speed);
+
+        let mut global_collision = new_running_sandbox_app();
+        global_collision.app_paths = None;
+        global_collision.runtime_key_config_cache = OnceLock::new();
+        global_collision
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nSoundToggle=G\nGameSpeedUp=G\n",
+            )
+            .expect("parse earlier-global collision")))
+            .expect("install earlier-global collision");
+        let sound_enabled = global_collision
+            .audio
+            .as_ref()
+            .expect("sandbox audio context")
+            .options
+            .sound_enabled;
+        global_collision
+            .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .expect("earlier registered global owns collision");
+        assert_eq!(
+            global_collision
+                .audio
+                .as_ref()
+                .expect("sandbox audio context")
+                .options
+                .sound_enabled,
+            !sound_enabled
+        );
+        assert_eq!(global_collision.frame_skip, 1);
+        assert!(!global_collision.full_speed);
+        assert!(global_collision.runtime_flash_message.is_none());
+
+        let mut collision = new_running_sandbox_app();
+        collision.runtime_key_config_cache = OnceLock::new();
+        collision
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nKbd1Key1=G\nGameSpeedUp=G\n",
+            )
+            .expect("parse player/global collision")))
+            .expect("install player/global collision");
+        collision
+            .handle_key(VirtualKeyCode::G, ElementState::Pressed)
+            .expect("higher-priority player binding owns collision");
+        assert_eq!(collision.frame_skip, 1);
+        assert!(!collision.full_speed);
+        assert!(collision.runtime_flash_message.is_none());
+        collision
+            .handle_key(VirtualKeyCode::G, ElementState::Released)
+            .expect("player binding owns collision release");
+    }
+
+    #[test]
     fn runtime_flash_producer_inventory_and_unwired_chords_fail_typed() {
         let names = RuntimeFlashProducerBoundary::ALL.map(|producer| match producer {
             RuntimeFlashProducerBoundary::ObserverPrompt => "ObserverPrompt",
@@ -173569,16 +173919,14 @@ func ControlDig() { dig_count = 1; return(1); }
             RuntimeFlashProducerBoundary::DebugVertices => "DebugVertices",
             RuntimeFlashProducerBoundary::DebugActionCycle => "DebugActionCycle",
             RuntimeFlashProducerBoundary::DebugSolidMask => "DebugSolidMask",
-            RuntimeFlashProducerBoundary::SpeedUp => "SpeedUp",
-            RuntimeFlashProducerBoundary::SpeedDown => "SpeedDown",
             RuntimeFlashProducerBoundary::RuntimeJoin => "RuntimeJoin",
             RuntimeFlashProducerBoundary::ControlRate => "ControlRate",
             RuntimeFlashProducerBoundary::FairCrew => "FairCrew",
             RuntimeFlashProducerBoundary::ScriptTargetFps => "ScriptTargetFps",
             RuntimeFlashProducerBoundary::AdaptivePreSend => "AdaptivePreSend",
         });
-        assert_eq!(names.len(), 13);
-        assert_eq!(names.into_iter().collect::<HashSet<_>>().len(), 13);
+        assert_eq!(names.len(), 11);
+        assert_eq!(names.into_iter().collect::<HashSet<_>>().len(), 11);
 
         for (key, modifiers, producer) in [
             (
@@ -173600,16 +173948,6 @@ func ControlDig() { dig_count = 1; return(1); }
                 VirtualKeyCode::F8,
                 ModifiersState::CTRL,
                 RuntimeFlashProducerBoundary::DebugSolidMask,
-            ),
-            (
-                VirtualKeyCode::NumpadAdd,
-                ModifiersState::SHIFT,
-                RuntimeFlashProducerBoundary::SpeedUp,
-            ),
-            (
-                VirtualKeyCode::NumpadSubtract,
-                ModifiersState::SHIFT,
-                RuntimeFlashProducerBoundary::SpeedDown,
             ),
         ] {
             let mut app = new_running_sandbox_app();
