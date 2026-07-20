@@ -658,6 +658,625 @@ mod tests {
         );
     }
 
+    #[test]
+    fn captured_blast_free_rng_advances_once_through_host_and_fold() {
+        // BlastFree consumes its per-pixel Random calls before returning to
+        // script. The authoritative fold must replay those captured choices
+        // without drawing them a second time.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Granite]
+            Name=Granite
+            Density=110
+            BlastShiftTo=Earth
+
+            [Material Earth]
+            Name=Earth
+            Density=90
+        "#,
+        )
+        .expect("blast materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mut engine = Engine::with_seed(29);
+        engine.set_materials(materials);
+        let grid = landscape::PixelGrid::new(
+            7,
+            7,
+            vec![1; 7 * 7],
+            vec![0, 110, 90],
+            vec![None, Some("Granite".to_owned()), Some("Earth".to_owned())],
+            vec![None; 3],
+        );
+        let mut world = Landscape::new(7, vec![0; 7]).expect("blast landscape builds");
+        world.set_world_height(7);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        let probe = Definition::from_script(
+            "BPRB",
+            "Blast replay probe",
+            r#"#strict 3
+func Probe()
+{
+    BlastFree(3, 3, 2, 1);
+    return Random(1000);
+}
+"#,
+        )
+        .expect("blast probe compiles");
+        engine
+            .register_definition(probe)
+            .expect("blast probe registers");
+        let probe = engine
+            .spawn_object(SpawnConfig::new("BPRB"))
+            .expect("blast probe spawns");
+
+        // The complete r=2 raster scan contains ten Granite pixels. Each
+        // BlastShiftTo source consumes Random(10), followed by the script's
+        // own Random(1000).
+        let mut expected_rng = engine.rng.clone();
+        let mut expected_shifts = 0;
+        for _ in 0..10 {
+            if expected_rng.random(10) < 2 {
+                expected_shifts += 1;
+            }
+        }
+        assert!(expected_shifts > 0, "seed fixture exercises captured writes");
+        let expected_tail = expected_rng.random(1000);
+
+        let probe_index = engine.find_object_index(probe).expect("blast probe exists");
+        assert_eq!(
+            engine
+                .call_object_function(probe_index, "Probe", Vec::new())
+                .expect("BlastFree probe runs"),
+            Value::Int(expected_tail),
+            "the callback tail observes BlastFree's synchronous RNG position"
+        );
+        assert_eq!(
+            engine.rng, expected_rng,
+            "the authoritative replay consumes no duplicate blast draws"
+        );
+        assert_eq!(
+            engine
+                .debug_landscape_plane()
+                .expect("blast raster remains")
+                .2
+                .iter()
+                .filter(|byte| **byte == 2)
+                .count(),
+            expected_shifts,
+            "the fold applies each captured BlastShiftTo choice once"
+        );
+    }
+
+    #[test]
+    fn shake_free_host_fold_creates_each_pxs_once() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+        "#,
+        )
+        .expect("shake material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("Earth exists");
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        let grid = landscape::PixelGrid::new(
+            5,
+            5,
+            vec![1; 5 * 5],
+            vec![0, 80],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        );
+        let mut world = Landscape::new(5, vec![0; 5]).expect("shake landscape builds");
+        world.set_world_height(5);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        let probe = Definition::from_script(
+            "SPRB",
+            "Shake replay probe",
+            "#strict 3\nfunc Probe() { return ShakeFree(2, 2, 2); }",
+        )
+        .expect("shake probe compiles");
+        engine
+            .register_definition(probe)
+            .expect("shake probe registers");
+        let probe = engine
+            .spawn_object(SpawnConfig::new("SPRB"))
+            .expect("shake probe spawns");
+        let probe_index = engine.find_object_index(probe).expect("shake probe exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(probe_index, "Probe", Vec::new())
+                .expect("ShakeFree probe runs"),
+            Value::Nil
+        );
+        assert_eq!(
+            engine.pxs_system.count(),
+            9,
+            "the nine pixels in the C++ r=2 scan become PXS exactly once"
+        );
+        assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
+    }
+
+    #[test]
+    fn dig_free_rect_host_fold_credits_material_contents_once() {
+        // Two fresh pixels per call and a conversion threshold of three make
+        // duplicate host/fold credit observable: the first call must not cast,
+        // while the second crosses the retained-content threshold exactly once.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            Dig2Object=GEM_
+            Dig2ObjectRatio=3
+        "#,
+        )
+        .expect("dig material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        let grid = landscape::PixelGrid::new(
+            4,
+            1,
+            vec![1; 4],
+            vec![0, 80],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        );
+        let mut world = Landscape::new(4, vec![1; 4]).expect("dig landscape builds");
+        world.set_world_height(1);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        let digger = Definition::from_script(
+            "DGRR",
+            "Digger",
+            "#strict 3\nfunc Dig(int x) { return DigFreeRect(x, 0, 2, 1); }",
+        )
+        .expect("digger compiles");
+        let gem = Definition::from_script("GEM_", "Gem", "#strict 3\n")
+            .expect("gem compiles");
+        engine
+            .register_definition(digger)
+            .expect("digger registers");
+        engine.register_definition(gem).expect("gem registers");
+        let digger = engine
+            .spawn_object(SpawnConfig::new("DGRR"))
+            .expect("digger spawns");
+        let digger_index = engine.find_object_index(digger).expect("digger exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(digger_index, "Dig", vec![Value::Int(0)])
+                .expect("first DigFreeRect runs"),
+            Value::Nil
+        );
+        assert_eq!(
+            engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "GEM_" && !object.destroyed)
+                .count(),
+            0,
+            "two pixels are credited once and remain below the ratio-three threshold"
+        );
+
+        let digger_index = engine.find_object_index(digger).expect("digger remains");
+        assert_eq!(
+            engine
+                .call_object_function(digger_index, "Dig", vec![Value::Int(2)])
+                .expect("second DigFreeRect runs"),
+            Value::Nil
+        );
+        assert_eq!(
+            engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "GEM_" && !object.destroyed)
+                .count(),
+            1,
+            "the second two-pixel credit crosses the threshold once"
+        );
+    }
+
+    #[test]
+    fn blast_free_runs_object_lifecycle_before_pxs_and_caller_rng() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            BlastFree=1
+            Blast2Object=DEBR
+            Blast2ObjectRatio=1
+            Blast2PXSRatio=1
+        "#,
+        )
+        .expect("blast material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("Earth exists");
+        let mut engine = Engine::with_seed(41);
+        engine.set_materials(materials);
+        let grid = landscape::PixelGrid::new(
+            1,
+            1,
+            vec![1],
+            vec![0, 80],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        );
+        let mut world = Landscape::new(1, vec![1]).expect("blast landscape builds");
+        world.set_world_height(1);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        let probe = Definition::from_script(
+            "BPR2",
+            "Blast lifecycle probe",
+            r#"#strict 3
+func Probe()
+{
+    BlastFree(0, 0, 0, 8);
+    var debris = FindObject(DEBR);
+    return [!!debris, debris->Read(), GetController(debris), Random(1000)];
+}
+"#,
+        )
+        .expect("blast probe compiles");
+        let mut debris = Definition::from_script(
+            "DEBR",
+            "Debris",
+            r#"#strict 3
+local construction_random;
+func Construction() { construction_random = Random(1000); }
+func Read() { return construction_random; }
+"#,
+        )
+        .expect("debris compiles");
+        debris.set_rotateable(1);
+        engine
+            .register_definition(probe)
+            .expect("blast probe registers");
+        engine
+            .register_definition(debris)
+            .expect("debris registers");
+        let probe = engine
+            .spawn_object(SpawnConfig::new("BPR2"))
+            .expect("blast probe spawns");
+
+        let mut expected_rng = engine.rng.clone();
+        let _rotation_velocity = expected_rng.random(3);
+        let _ydir = expected_rng.random(61);
+        let _xdir = expected_rng.random(61);
+        let _rotation = expected_rng.random(360);
+        let expected_construction = expected_rng.random(1_000);
+        let _pxs_ydir = expected_rng.random(61);
+        let _pxs_xdir = expected_rng.random(61);
+        let expected_tail = expected_rng.random(1_000);
+
+        let probe_index = engine.find_object_index(probe).expect("blast probe exists");
+        assert_eq!(
+            engine
+                .call_object_function(probe_index, "Probe", Vec::new())
+                .expect("BlastFree lifecycle probe runs"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(expected_construction),
+                Value::Int(7),
+                Value::Int(expected_tail),
+            ]),
+            "Blast2Object is findable after Construction and before the caller resumes"
+        );
+        assert_eq!(engine.rng, expected_rng, "every blast draw runs exactly once");
+        assert_eq!(engine.pxs_system.count(), 1);
+        assert!(engine.pxs_system.iter().all(|pxs| pxs.mat == earth));
+        assert_eq!(
+            engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "DEBR" && !object.destroyed)
+                .count(),
+            1
+        );
+        assert_eq!(
+            engine
+                .debug_landscape_plane()
+                .expect("blast raster remains")
+                .2,
+            vec![0],
+            "the captured terrain write folds once"
+        );
+    }
+
+    #[test]
+    fn dig_free_recomputes_creator_geometry_between_material_lifecycles() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            Dig2Object=GEMA
+            Dig2ObjectRatio=1
+
+            [Material Rock]
+            Name=Rock
+            Density=100
+            DigFree=1
+            Dig2Object=GEMB
+            Dig2ObjectRatio=1
+        "#,
+        )
+        .expect("dig materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mut engine = Engine::with_seed(43);
+        engine.set_materials(materials);
+        let grid = landscape::PixelGrid::new(
+            2,
+            1,
+            vec![1, 2],
+            vec![0, 80, 100],
+            vec![None, Some("Earth".to_owned()), Some("Rock".to_owned())],
+            vec![None; 3],
+        );
+        let mut world = Landscape::new(2, vec![1; 2]).expect("dig landscape builds");
+        world.set_world_height(1);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        let mut digger = Definition::from_script(
+            "DGR2",
+            "Digger",
+            r#"#strict 3
+func Probe()
+{
+    DigFreeRect(0, 0, 2, 1);
+    return [FindObject(GEMA)->Read(), FindObject(GEMB)->Read(), Random(1000)];
+}
+"#,
+        )
+        .expect("digger compiles");
+        digger.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 2)));
+        let first = Definition::from_script(
+            "GEMA",
+            "First gem",
+            r#"#strict 3
+local construction_random;
+func Construction(object creator)
+{
+    construction_random = Random(1000);
+    SetPosition(10, 20, creator);
+    SetShape(-1, 3, 4, 7, creator);
+}
+func Read() { return construction_random; }
+"#,
+        )
+        .expect("first gem compiles");
+        let second = Definition::from_script(
+            "GEMB",
+            "Second gem",
+            r#"#strict 3
+local construction_random;
+func Construction() { construction_random = Random(1000); }
+func Read() { return construction_random; }
+"#,
+        )
+        .expect("second gem compiles");
+        engine.register_definition(digger).expect("digger registers");
+        engine.register_definition(first).expect("first gem registers");
+        engine
+            .register_definition(second)
+            .expect("second gem registers");
+        let digger = engine
+            .spawn_object(SpawnConfig::new("DGR2"))
+            .expect("digger spawns");
+
+        let mut expected_rng = engine.rng.clone();
+        let _first_rotation = expected_rng.random(360);
+        let expected_first_construction = expected_rng.random(1_000);
+        let _second_rotation = expected_rng.random(360);
+        let expected_second_construction = expected_rng.random(1_000);
+        let expected_tail = expected_rng.random(1_000);
+
+        let digger_index = engine.find_object_index(digger).expect("digger exists");
+        assert_eq!(
+            engine
+                .call_object_function(digger_index, "Probe", Vec::new())
+                .expect("DigFreeRect lifecycle probe runs"),
+            Value::Array(vec![
+                Value::Int(expected_first_construction),
+                Value::Int(expected_second_construction),
+                Value::Int(expected_tail),
+            ])
+        );
+        assert_eq!(engine.rng, expected_rng, "dig lifecycle draws run once");
+        let first = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GEMA")
+            .expect("first gem exists");
+        let second = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GEMB")
+            .expect("second gem exists");
+        assert_eq!(
+            first.state.position,
+            Vector2::ZERO,
+            "initial NewObject growth preserves the raw y=0 shape bottom"
+        );
+        assert_eq!(
+            second.state.position,
+            Vector2::new(10, 30),
+            "the second cast observes the first Construction's move and shape write"
+        );
+    }
+
+    #[test]
+    fn sequential_effect_callbacks_share_dig_material_contents() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            Dig2Object=GEM_
+            Dig2ObjectRatio=3
+        "#,
+        )
+        .expect("dig material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mut engine = Engine::with_seed(47);
+        engine.set_materials(materials);
+        let grid = landscape::PixelGrid::new(
+            4,
+            1,
+            vec![1; 4],
+            vec![0, 80],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        );
+        let mut world = Landscape::new(4, vec![1; 4]).expect("dig landscape builds");
+        world.set_world_height(1);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        let mut digger = Definition::from_script(
+            "DFX2",
+            "Effect digger",
+            r#"#strict 3
+func Arm()
+{
+    AddEffect("First", this(), 200, 1, this());
+    AddEffect("Second", this(), 100, 1, this());
+}
+func FxFirstTimer() { DigFreeRect(0, 0, 2, 1); return 0; }
+func FxSecondTimer() { DigFreeRect(2, 0, 2, 1); return 0; }
+"#,
+        )
+        .expect("effect digger compiles");
+        digger.set_c4_callback_convention(true);
+        engine.register_definition(digger).expect("digger registers");
+        engine
+            .register_definition(simple_definition("GEM_"))
+            .expect("gem registers");
+        let digger = engine
+            .spawn_object(SpawnConfig::new("DFX2"))
+            .expect("digger spawns");
+        let digger_index = engine.find_object_index(digger).expect("digger exists");
+        engine
+            .call_object_function(digger_index, "Arm", Vec::new())
+            .expect("effects arm");
+
+        engine.frame = 4;
+        engine
+            .tick_without_snapshot()
+            .expect("shared-content timer frame succeeds");
+        assert_eq!(
+            engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "GEM_" && !object.destroyed)
+                .count(),
+            1,
+            "two callbacks in one effect batch accumulate 2 + 2 before conversion"
+        );
+    }
+
+    #[test]
+    fn construction_and_initialize_share_dig_material_contents_before_insertion() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            Dig2Object=GEM_
+            Dig2ObjectRatio=2
+        "#,
+        )
+        .expect("dig material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mut engine = Engine::with_seed(53);
+        engine.set_materials(materials);
+        let grid = landscape::PixelGrid::new(
+            2,
+            1,
+            vec![1; 2],
+            vec![0, 80],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        );
+        let mut world = Landscape::new(2, vec![1; 2]).expect("dig landscape builds");
+        world.set_world_height(1);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        let mut digger = Definition::from_script(
+            "DINI",
+            "Lifecycle digger",
+            r#"#strict 3
+func Construction() { DigFreeRect(0, 0, 1, 1); }
+func Initialize() { DigFreeRect(1, 0, 1, 1); }
+"#,
+        )
+        .expect("lifecycle digger compiles");
+        digger.set_c4_callback_convention(true);
+        engine.register_definition(digger).expect("digger registers");
+        let mut gem = Definition::from_script(
+            "GEM_",
+            "Lifecycle gem",
+            r#"#strict 3
+local creator_found;
+func Construction(object creator)
+{
+    creator_found = FindObject(DINI) == creator;
+}
+"#,
+        )
+        .expect("gem compiles");
+        gem.set_c4_callback_convention(true);
+        engine
+            .register_definition(gem)
+            .expect("gem registers");
+
+        engine
+            .spawn_object(SpawnConfig::new("DINI").with_loaded(true))
+            .expect("existing lifecycle digger loads without callbacks");
+        let digger = engine
+            .spawn_object(SpawnConfig::new("DINI"))
+            .expect("lifecycle digger spawns");
+        assert!(engine.find_object_index(digger).is_some());
+        let gem = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GEM_" && !object.destroyed)
+            .expect("conversion gem exists");
+        assert_eq!(
+            gem.state.local_vars.get("creator_found"),
+            Some(&Value::Bool(true)),
+            "a nested Dig2Object Construction sees its pending creator in the C++ master list"
+        );
+        assert_eq!(
+            engine
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "GEM_" && !object.destroyed)
+                .count(),
+            1,
+            "Initialize inherits Construction's pre-insertion material credit"
+        );
+    }
+
     fn free_rect_mask_test_engine(script_body: &str) -> (Engine, ObjectId, MaterialId) {
         let library = MaterialLibrary::parse(
             r#"
@@ -10427,6 +11046,69 @@ protected func OnOldAbort()
     }
 
     #[test]
+    fn initial_effect_set_action_runs_one_start_then_abort_pair() {
+        let script = r#"#strict 3
+func FxSwitchStart(object target, int number, int temp)
+{
+    SetAction("New");
+    return 1;
+}
+
+func OnNewStart() { return 1; }
+func OnOldAbort() { return 1; }
+"#;
+        let call_log = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                if name == "OnNewStart" || name == "OnOldAbort" {
+                    call_log.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+        let mut definition =
+            Definition::from_script("ACEF", "Action callback effect", script).expect("compiles");
+        definition.set_debugger_hooks(hooks);
+        definition.set_c4_callback_convention(true);
+        definition.configure_actions(
+            Some("Old".to_string()),
+            HashMap::from([
+                (
+                    "Old".to_string(),
+                    ActionSpec::default().with_abort_call("OnOldAbort"),
+                ),
+                (
+                    "New".to_string(),
+                    ActionSpec::default().with_start_call("OnNewStart"),
+                ),
+            ]),
+        );
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let object_id = ObjectId::new(77);
+        engine
+            .spawn_object(
+                SpawnConfig::new("ACEF")
+                    .with_id(object_id)
+                    .add_effect(
+                        EffectState::new("Switch")
+                            .with_priority(100)
+                            .with_command_target(Some(object_id.as_u64() as i32)),
+                    ),
+            )
+            .expect("object spawns");
+
+        assert_eq!(
+            call_log.lock().unwrap().as_slice(),
+            ["OnNewStart", "OnOldAbort"],
+            "initial FxStart SetAction is not replayed after insertion"
+        );
+    }
+
+    #[test]
     fn engine_set_action_same_name_dispatches_start_then_abort_with_saved_phase(
     ) -> Result<(), EngineError> {
         // C4Object::SetAction saves iLastPhase before resetting Phase even for
@@ -13714,6 +14396,97 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         );
         assert_eq!(snapshot.rng.hold, expected_hold);
         assert_eq!(snapshot.rng.count, before.count + 1);
+    }
+
+    #[test]
+    fn legacy_dig_conversion_recomputes_creator_geometry_between_materials() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            Dig2Object=GEMA
+            Dig2ObjectRatio=1
+
+            [Material Rock]
+            Name=Rock
+            Density=100
+            DigFree=1
+            Dig2Object=GEMB
+            Dig2ObjectRatio=1
+        "#,
+        )
+        .expect("dig materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mut engine = Engine::with_seed(44);
+        engine.set_materials(materials);
+
+        let mut digger = Definition::from_script("DGR3", "Digger", "#strict 3")
+            .expect("digger compiles");
+        digger.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 2)));
+        let first = Definition::from_script(
+            "GEMA",
+            "First gem",
+            r#"#strict 3
+func Construction(object creator)
+{
+    SetPosition(10, 20, creator);
+    SetShape(-1, 3, 4, 7, creator);
+}
+"#,
+        )
+        .expect("first gem compiles");
+        engine.register_definition(digger).expect("digger registers");
+        engine.register_definition(first).expect("first gem registers");
+        engine
+            .register_definition(simple_definition("GEMB"))
+            .expect("second gem registers");
+
+        let grid = landscape::PixelGrid::new(
+            2,
+            1,
+            vec![1, 2],
+            vec![0, 80, 100],
+            vec![None, Some("Earth".to_owned()), Some("Rock".to_owned())],
+            vec![None; 3],
+        );
+        let mut landscape = Landscape::new(2, vec![1; 2]).expect("landscape builds");
+        landscape.set_world_height(1);
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+        let digger = engine
+            .spawn_object(SpawnConfig::new("DGR3"))
+            .expect("digger spawns");
+
+        engine.apply_landscape_operations(vec![LandscapeOperation::DigRect {
+            origin: Vector2::ZERO,
+            width: 2,
+            height: 1,
+            requested: false,
+            by_object: Some(digger),
+        }]);
+
+        let first = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GEMA")
+            .expect("first gem exists");
+        let second = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GEMB")
+            .expect("second gem exists");
+        assert_eq!(
+            first.state.position,
+            Vector2::ZERO,
+            "initial NewObject growth preserves the raw y=0 shape bottom"
+        );
+        assert_eq!(
+            second.state.position,
+            Vector2::new(10, 30),
+            "legacy movement/direct dig conversion observes prior lifecycle writes"
+        );
     }
 
     #[test]

@@ -2050,6 +2050,87 @@ pub(crate) struct RasterChangeRect {
     height: i32,
 }
 
+/// Fully synthesized, deterministic payload for one `MapToLandscape` call.
+/// DrawMap/DrawDefMap build this while the script callback owns the synced
+/// RNG, then both the callback COW preview and the authoritative fold apply
+/// these exact bytes without parsing, rendering, or drawing RNG again.
+struct IndexedMapRasterDraw {
+    bounds: RasterChangeRect,
+    origin: Vector2,
+    target_width: i32,
+    target_height: i32,
+    synthesized_width: i32,
+    bytes: Vec<u8>,
+    texmap: RuntimeTexMapState,
+}
+
+enum PreparedIndexedMapDraw {
+    Noop,
+    Draw(IndexedMapRasterDraw),
+}
+
+fn prepare_indexed_map_draw(
+    landscape: &Landscape,
+    origin: Vector2,
+    bitmap: &lc_resources::bitmap::IndexedBitmap,
+    requested_map_width: i32,
+    requested_map_height: i32,
+    texmap: RuntimeTexMapState,
+) -> Option<PreparedIndexedMapDraw> {
+    let (map_zoom, map_seed) = landscape
+        .raster_state()
+        .map(|state| (state.map_zoom(), state.map_seed()))?;
+    let (map_width, map_height) = (
+        i32::try_from(bitmap.width).ok()?,
+        i32::try_from(bitmap.height).ok()?,
+    );
+    let expected_len = (map_width as usize).checked_mul(map_height as usize)?;
+    if map_zoom <= 0 || bitmap.indices.len() != expected_len {
+        return None;
+    }
+    let map_segment_width = requested_map_width.min(map_width);
+    let map_segment_height = requested_map_height.min(map_height);
+    if map_segment_width <= 0 || map_segment_height <= 0 {
+        return Some(PreparedIndexedMapDraw::Noop);
+    }
+    let target_width = map_segment_width.checked_mul(map_zoom)?;
+    let target_height = map_segment_height.checked_mul(map_zoom)?;
+    let synthesized_width = map_width.checked_mul(map_zoom)?;
+    let surface = crate::chunky::synthesize_landscape(
+        &bitmap.indices,
+        map_width,
+        map_height,
+        map_zoom,
+        map_seed,
+        &texmap.shapes,
+    );
+    Some(PreparedIndexedMapDraw::Draw(IndexedMapRasterDraw {
+        bounds: RasterChangeRect::new(origin.x, origin.y, target_width, target_height),
+        origin,
+        target_width,
+        target_height,
+        synthesized_width,
+        bytes: surface.into_bytes(),
+        texmap,
+    }))
+}
+
+impl IndexedMapRasterDraw {
+    fn apply(self, grid: &mut PixelGrid, state: &mut LandscapeRasterState) {
+        state.replace_texmap(self.texmap, false);
+        for local_y in 0..self.target_height {
+            for local_x in 0..self.target_width {
+                let index = (local_y * self.synthesized_width + local_x) as usize;
+                grid.write_byte(
+                    self.origin.x + local_x,
+                    self.origin.y + local_y,
+                    self.bytes[index],
+                );
+            }
+        }
+    }
+}
+
 impl RasterChangeRect {
     pub(crate) const fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
         Self {
@@ -3436,6 +3517,38 @@ impl Landscape {
                 grid.draw_polygon(&polygon, byte);
             });
             true
+        })
+    }
+
+    /// Callback-COW counterpart of Engine::draw_indexed_map, including the
+    /// rounded PrepareChange/FinishChange bounds and live mask repair.
+    pub(crate) fn preview_draw_indexed_map_with_masks(
+        &mut self,
+        bakes: &mut [(crate::ObjectId, crate::SolidMaskBake)],
+        origin: Vector2,
+        bitmap: &lc_resources::bitmap::IndexedBitmap,
+        requested_map_width: i32,
+        requested_map_height: i32,
+        texmap: RuntimeTexMapState,
+    ) -> bool {
+        let Some(prepared) = prepare_indexed_map_draw(
+            self,
+            origin,
+            bitmap,
+            requested_map_width,
+            requested_map_height,
+            texmap,
+        ) else {
+            return false;
+        };
+        let PreparedIndexedMapDraw::Draw(draw) = prepared else {
+            return true;
+        };
+        let bounds = draw.bounds;
+        self.preview_raster_transaction_with_masks(bakes, bounds, move |landscape| {
+            landscape
+                .raster_transaction(bounds, move |grid, state| draw.apply(grid, state))
+                .is_some()
         })
     }
 
@@ -6844,64 +6957,24 @@ impl crate::Engine {
         requested_map_height: i32,
         texmap: RuntimeTexMapState,
     ) -> bool {
-        let Some((map_zoom, map_seed)) = self
-            .landscape
-            .as_ref()
-            .and_then(Landscape::raster_state)
-            .map(|state| (state.map_zoom(), state.map_seed()))
-        else {
+        let Some(prepared) = self.landscape.as_ref().and_then(|landscape| {
+            prepare_indexed_map_draw(
+                landscape,
+                origin,
+                bitmap,
+                requested_map_width,
+                requested_map_height,
+                texmap,
+            )
+        }) else {
             return false;
         };
-        let (Ok(map_width), Ok(map_height)) =
-            (i32::try_from(bitmap.width), i32::try_from(bitmap.height))
-        else {
-            return false;
-        };
-        let Some(expected_len) = (map_width as usize).checked_mul(map_height as usize) else {
-            return false;
-        };
-        if map_zoom <= 0 || bitmap.indices.len() != expected_len {
-            return false;
-        }
-        let map_segment_width = requested_map_width.min(map_width);
-        let map_segment_height = requested_map_height.min(map_height);
-        if map_segment_width <= 0 || map_segment_height <= 0 {
-            // MapToLandscape treats an empty post-source-clip segment as a
-            // successful no-op (C4Landscape.cpp:485-494).
+        let PreparedIndexedMapDraw::Draw(draw) = prepared else {
             return true;
-        }
-        let (Some(target_width), Some(target_height)) = (
-            map_segment_width.checked_mul(map_zoom),
-            map_segment_height.checked_mul(map_zoom),
-        ) else {
-            return false;
         };
-        let Some(synthesized_width) = map_width.checked_mul(map_zoom) else {
-            return false;
-        };
-        let surface = crate::chunky::synthesize_landscape(
-            &bitmap.indices,
-            map_width,
-            map_height,
-            map_zoom,
-            map_seed,
-            &texmap.shapes,
-        );
-        let bytes = surface.into_bytes();
-        let bounds = RasterChangeRect::new(origin.x, origin.y, target_width, target_height);
-        self.landscape_raster_transaction(bounds, move |grid, state| {
-            state.replace_texmap(texmap, false);
-            // SkyToLandscape clears the entire rounded target before any
-            // material pass. Copy zero bytes too; skipping them would leave
-            // old landscape under sky cells (C4Landscape.cpp:441-461).
-            for local_y in 0..target_height {
-                for local_x in 0..target_width {
-                    let index = (local_y * synthesized_width + local_x) as usize;
-                    grid.write_byte(origin.x + local_x, origin.y + local_y, bytes[index]);
-                }
-            }
-        })
-        .is_some()
+        let bounds = draw.bounds;
+        self.landscape_raster_transaction(bounds, move |grid, state| draw.apply(grid, state))
+            .is_some()
     }
 
     /// C4Landscape::MapToLandscape for a segment of the retained editor map.

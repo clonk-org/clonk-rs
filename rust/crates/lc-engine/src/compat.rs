@@ -205,6 +205,10 @@ pub(crate) struct HostWorldObject {
     /// GameCall): lets host functions build a complete object scope for
     /// another object mid-VM-call. `None` in legacy fixture contexts.
     state: Option<Rc<ObjectState>>,
+    /// C4Object::MaterialContents at callback entry. This runtime-only
+    /// accumulation is not part of ObjectState, but DigFree must update and
+    /// inspect it synchronously before the engine outcome folds.
+    material_contents: Vec<i32>,
     /// C4Object::LastEnergyLossCausePlayer (kill trace) — carried beside
     /// the state snapshot because it lives on the engine object wrapper.
     pub last_energy_loss_cause: i32,
@@ -1456,6 +1460,7 @@ impl HostWorldObject {
             commands: Vec::new(),
             command_stack: CommandStackSnapshot::default(),
             state: None,
+            material_contents: Vec::new(),
             last_energy_loss_cause: OWNER_NONE,
         }
     }
@@ -1547,6 +1552,11 @@ impl HostWorldObject {
 
     pub(crate) fn with_full_state(mut self, state: Rc<ObjectState>) -> Self {
         self.state = Some(state);
+        self
+    }
+
+    pub(crate) fn with_material_contents(mut self, material_contents: Vec<i32>) -> Self {
+        self.material_contents = material_contents;
         self
     }
 
@@ -3169,6 +3179,9 @@ impl HostWorldContext {
         if let Some(status) = update.status {
             object.status = status;
         }
+        if let Some(material_contents) = update.material_contents.as_ref() {
+            object.material_contents = material_contents.clone();
+        }
 
         if let Some(state) = object.state.as_mut() {
             let state = Rc::make_mut(state);
@@ -3190,6 +3203,9 @@ impl HostWorldContext {
             if let Some(container) = update.container {
                 state.container = container;
             }
+            if let Some(layer) = update.layer {
+                state.layer = layer;
+            }
             if let Some(status) = update.status {
                 state.status = status;
             }
@@ -3198,6 +3214,9 @@ impl HostWorldContext {
             }
             if let Some(base_graphics) = update.base_graphics.clone() {
                 state.base_graphics = base_graphics;
+            }
+            if let Some(shape_override) = update.shape_override {
+                state.shape_override = shape_override;
             }
             if let Some(local_vars) = update.local_vars.as_ref() {
                 state.local_vars = local_vars.clone();
@@ -3281,22 +3300,36 @@ impl HostWorldContext {
     }
 
     /// Thread state-bearing landscape operations across effect callbacks
-    /// that execute before the authoritative Engine fold. DrawMatChunks and
-    /// DrawVolcanoBranch are synchronously visible to native pixel reads;
-    /// DrawMap keeps its older deferred-pixel boundary. Texture-map
-    /// allocations and DrawDefMap's retained creator mutation are live state
-    /// in both cases.
+    /// that execute before the authoritative Engine fold. Pixel mutations,
+    /// texture-map allocations, and retained map-creator state are all live.
     pub(crate) fn preview_runtime_landscape_operation(&mut self, operation: &LandscapeOperation) {
         match operation {
             LandscapeOperation::DrawMap {
+                origin,
+                bitmap,
+                map_width,
+                map_height,
                 texmap,
                 map_creator,
-                ..
             } => {
-                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
+                self.ensure_landscape_initialized();
+                let Some(landscape) = self
+                    .landscape
+                    .get_mut()
+                    .and_then(Option::as_mut)
+                    .map(Rc::make_mut)
+                else {
                     return;
                 };
-                let _ = landscape.replace_runtime_texmap_state(texmap.clone());
+                let bakes = Rc::make_mut(&mut self.solid_mask_bakes);
+                let _ = landscape.preview_draw_indexed_map_with_masks(
+                    bakes,
+                    *origin,
+                    bitmap,
+                    *map_width,
+                    *map_height,
+                    texmap.clone(),
+                );
                 if let Some(map_creator) = map_creator {
                     let _ = landscape.replace_runtime_map_creator_state(map_creator.0.clone());
                 }
@@ -3463,15 +3496,99 @@ impl HostWorldContext {
                 let _ = landscape.draw_volcano_branch(*from, *to, *size, *material_byte);
             }
             LandscapeOperation::DrawDefMap {
+                origin,
+                bitmap,
+                map_width,
+                map_height,
                 texmap,
                 map_creator,
-                ..
             } => {
-                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
+                self.ensure_landscape_initialized();
+                let Some(landscape) = self
+                    .landscape
+                    .get_mut()
+                    .and_then(Option::as_mut)
+                    .map(Rc::make_mut)
+                else {
                     return;
                 };
-                let _ = landscape.replace_runtime_texmap_state(texmap.clone());
+                let bakes = Rc::make_mut(&mut self.solid_mask_bakes);
+                let _ = landscape.preview_draw_indexed_map_with_masks(
+                    bakes,
+                    *origin,
+                    bitmap,
+                    *map_width,
+                    *map_height,
+                    texmap.clone(),
+                );
                 let _ = landscape.replace_runtime_map_creator_state(map_creator.0.clone());
+            }
+            LandscapeOperation::DigCircle { center, radius, .. } => {
+                let materials = self.materials.clone().unwrap_or_default();
+                if let Some(landscape) = self.landscape_mut() {
+                    preview_dig_circle_pixels(landscape, materials.as_ref(), *center, *radius);
+                }
+            }
+            LandscapeOperation::DigCirclePreviewed { center, radius } => {
+                let materials = self.materials.clone().unwrap_or_default();
+                if let Some(landscape) = self.landscape_mut() {
+                    preview_dig_circle_pixels(landscape, materials.as_ref(), *center, *radius);
+                }
+            }
+            LandscapeOperation::DigRect {
+                origin,
+                width,
+                height,
+                ..
+            } => {
+                let materials = self.materials.clone().unwrap_or_default();
+                if let Some(landscape) = self.landscape_mut() {
+                    preview_dig_rect_pixels(
+                        landscape,
+                        materials.as_ref(),
+                        *origin,
+                        *width,
+                        *height,
+                    );
+                }
+            }
+            LandscapeOperation::DigRectPreviewed {
+                origin,
+                width,
+                height,
+            } => {
+                let materials = self.materials.clone().unwrap_or_default();
+                if let Some(landscape) = self.landscape_mut() {
+                    preview_dig_rect_pixels(
+                        landscape,
+                        materials.as_ref(),
+                        *origin,
+                        *width,
+                        *height,
+                    );
+                }
+            }
+            LandscapeOperation::ShakeCircle { center, radius } => {
+                let materials = self.materials.clone().unwrap_or_default();
+                if let Some(landscape) = self.landscape_mut() {
+                    preview_shake_circle_pixels(landscape, materials.as_ref(), *center, *radius);
+                }
+            }
+            LandscapeOperation::BlastCirclePreviewed {
+                center,
+                radius,
+                replay,
+            } => {
+                let materials = self.materials.clone().unwrap_or_default();
+                if let Some(landscape) = self.landscape_mut() {
+                    preview_captured_blast_pixels(
+                        landscape,
+                        materials.as_ref(),
+                        *center,
+                        *radius,
+                        &replay.pixels,
+                    );
+                }
             }
             LandscapeOperation::MatAdjust { modulation } => {
                 if let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) {
@@ -11195,6 +11312,7 @@ pub(super) fn buy(args: &[Value]) -> Result<Value, RuntimeError> {
         definition: definition.clone(),
         creator,
         owner: for_player,
+        controller: for_player,
         position: Vector2::new(50, 50),
         rotation: 0,
         velocity: FixedVec2::ZERO,
@@ -18241,6 +18359,34 @@ where
 pub struct RetainedMapCreatorUpdate(pub(crate) crate::map_creator_s2::MapCreatorS2State);
 
 #[derive(Debug, Clone)]
+pub(crate) struct BlastRasterReplayStep {
+    pub(crate) position: Vector2,
+    pub(crate) original_material: Option<crate::MaterialId>,
+    pub(crate) shift_byte: Option<u8>,
+    pub(crate) clear: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum BlastPixelReplay {
+    Raster {
+        steps: Vec<BlastRasterReplayStep>,
+        pixel_count_by_material: HashMap<crate::MaterialId, i32>,
+    },
+    Column {
+        shift_decisions: Vec<bool>,
+    },
+}
+
+/// Random-dependent pixel decisions made synchronously by BlastFree. Object
+/// creation callbacks and PXS draws also run synchronously in the host; the
+/// engine replay only commits these exact terrain writes once.
+#[derive(Debug, Clone)]
+#[doc(hidden)]
+pub struct BlastReplay {
+    pub(crate) pixels: BlastPixelReplay,
+}
+
+#[derive(Debug, Clone)]
 #[doc(hidden)]
 pub enum LandscapeOperation {
     DigCircle {
@@ -18249,12 +18395,24 @@ pub enum LandscapeOperation {
         requested: bool,
         by_object: Option<ObjectId>,
     },
+    /// Host-previewed DigFree pixels. MaterialContents, conversion RNG, and
+    /// creation callbacks already ran synchronously and copy out separately.
+    DigCirclePreviewed {
+        center: Vector2,
+        radius: i32,
+    },
     DigRect {
         origin: Vector2,
         width: i32,
         height: i32,
         requested: bool,
         by_object: Option<ObjectId>,
+    },
+    /// Host-previewed DigFreeRect pixels; see DigCirclePreviewed.
+    DigRectPreviewed {
+        origin: Vector2,
+        width: i32,
+        height: i32,
     },
     /// FnFreeRect -> Landscape::ClearRect (C4Script.cpp:3125-3131): the
     /// rect clears outright — no dug-out material, no PXS.
@@ -18364,6 +18522,13 @@ pub enum LandscapeOperation {
         center: Vector2,
         radius: i32,
         controller: Option<i32>,
+    },
+    /// Host-previewed BlastFree pixels. Every random-dependent pixel choice,
+    /// object lifecycle, and PXS velocity was already decided synchronously.
+    BlastCirclePreviewed {
+        center: Vector2,
+        radius: i32,
+        replay: BlastReplay,
     },
     ShakeCircle {
         center: Vector2,
@@ -18574,6 +18739,397 @@ fn preview_construction_terrain(
 /// an object other than the outer call's `this`. Folded out of the nested
 /// scope in first-call order; the engine applies them after the outer
 /// object's update.
+fn preview_dig_single_pixel(
+    landscape: &mut Landscape,
+    materials: &MaterialSet,
+    x: i32,
+    y: i32,
+    dx: i32,
+    dy: i32,
+) {
+    if landscape.density_at(x, y, materials) > landscape.density_at(x + dx, y + dy, materials) {
+        let _ = landscape.dig_free_pix(x, y, materials);
+    }
+}
+
+fn preview_dig_column(
+    landscape: &mut Landscape,
+    materials: &MaterialSet,
+    column: i32,
+    target_height: i32,
+) -> Option<(crate::MaterialId, i32)> {
+    if column < 0 || column >= landscape.width() as i32 {
+        return None;
+    }
+    if materials.is_empty() {
+        landscape.ensure_surface_at_least(column, target_height);
+        return None;
+    }
+    let previous = landscape.surface_height(column).unwrap_or(0);
+    let material_id = landscape.solid_material_at(column)?;
+    let material = materials.get_by_id(material_id)?;
+    if !material.dig_free() {
+        return None;
+    }
+    let target = target_height.max(0);
+    let desired = if target <= previous {
+        if target.saturating_add(1) <= previous {
+            return None;
+        }
+        previous.saturating_add(1)
+    } else {
+        target
+    };
+    landscape.ensure_surface_at_least(column, desired);
+    let removed = landscape
+        .surface_height(column)
+        .unwrap_or(previous)
+        .saturating_sub(previous);
+    (removed > 0).then_some((material_id, removed))
+}
+
+fn preview_dig_circle_pixels(
+    landscape: &mut Landscape,
+    materials: &MaterialSet,
+    center: Vector2,
+    radius: i32,
+) -> HashMap<crate::MaterialId, i32> {
+    let mut counts = HashMap::new();
+    if radius <= 0 {
+        return counts;
+    }
+    if landscape.pixel_grid().is_some() {
+        let mut line_width = 0;
+        for ycnt in -radius..radius {
+            let remaining = i64::from(radius) * i64::from(radius)
+                - i64::from(ycnt) * i64::from(ycnt);
+            line_width = (remaining as f64).sqrt() as i32;
+            let y = center.y.saturating_add(ycnt);
+            let extend = i32::from(line_width == 0);
+            for xcnt in -line_width..line_width + extend {
+                if let Some(material) =
+                    landscape.dig_free_pix(center.x.saturating_add(xcnt), y, materials)
+                {
+                    *counts.entry(material).or_insert(0) += 1;
+                }
+            }
+            preview_dig_single_pixel(
+                landscape,
+                materials,
+                center.x.saturating_sub(line_width).saturating_sub(1),
+                y,
+                -1,
+                0,
+            );
+            preview_dig_single_pixel(
+                landscape,
+                materials,
+                center.x.saturating_add(line_width).saturating_add(extend),
+                y,
+                1,
+                0,
+            );
+        }
+        preview_dig_single_pixel(
+            landscape,
+            materials,
+            center.x,
+            center.y.saturating_sub(radius).saturating_sub(1),
+            0,
+            -1,
+        );
+        let extend = i32::from(line_width == 0);
+        for xcnt in -line_width..line_width + extend {
+            preview_dig_single_pixel(
+                landscape,
+                materials,
+                center.x.saturating_add(xcnt),
+                center.y.saturating_add(radius),
+                0,
+                1,
+            );
+        }
+        if let Some((width, _)) = landscape.grid_dimensions() {
+            let start = center.x.saturating_sub(radius).saturating_sub(1).clamp(0, width) as usize;
+            let end = center.x.saturating_add(radius).saturating_add(2).clamp(0, width) as usize;
+            landscape.refresh_raster_columns(start..end);
+        }
+        return counts;
+    }
+    let radius_sq = i64::from(radius) * i64::from(radius);
+    for dx in -radius..=radius {
+        let remaining = radius_sq - i64::from(dx) * i64::from(dx);
+        if remaining >= 0 {
+            if let Some((material, removed)) = preview_dig_column(
+                landscape,
+                materials,
+                center.x.saturating_add(dx),
+                center.y.saturating_add((remaining as f64).sqrt().floor() as i32),
+            ) {
+                *counts.entry(material).or_insert(0) += removed;
+            }
+        }
+    }
+    counts
+}
+
+fn preview_dig_rect_pixels(
+    landscape: &mut Landscape,
+    materials: &MaterialSet,
+    origin: Vector2,
+    width: i32,
+    height: i32,
+) -> HashMap<crate::MaterialId, i32> {
+    let mut counts = HashMap::new();
+    if width <= 0 || height <= 0 {
+        return counts;
+    }
+    if landscape.pixel_grid().is_some() {
+        for x in origin.x..origin.x.saturating_add(width) {
+            for y in origin.y..origin.y.saturating_add(height) {
+                if let Some(material) = landscape.dig_free_pix(x, y, materials) {
+                    *counts.entry(material).or_insert(0) += 1;
+                }
+            }
+        }
+        if let Some((grid_width, _)) = landscape.grid_dimensions() {
+            landscape.refresh_raster_columns(
+                origin.x.clamp(0, grid_width) as usize
+                    ..origin.x.saturating_add(width).clamp(0, grid_width) as usize,
+            );
+        }
+        return counts;
+    }
+    let bottom = origin.y.saturating_add(height);
+    for offset in 0..width {
+        if let Some((material, removed)) = preview_dig_column(
+            landscape,
+            materials,
+            origin.x.saturating_add(offset),
+            bottom,
+        ) {
+            *counts.entry(material).or_insert(0) += removed;
+        }
+    }
+    counts
+}
+
+fn preview_shake_circle_pixels(
+    landscape: &mut Landscape,
+    materials: &MaterialSet,
+    center: Vector2,
+    radius: i32,
+) {
+    if radius <= 0 {
+        return;
+    }
+    if landscape.pixel_grid().is_some() {
+        for ycnt in (-radius..radius).rev() {
+            let remaining = i64::from(radius) * i64::from(radius)
+                - i64::from(ycnt) * i64::from(ycnt);
+            let line_width = (remaining as f64).sqrt() as i32;
+            let y = center.y.saturating_add(ycnt);
+            for xcnt in -line_width..line_width + i32::from(line_width == 0) {
+                let _ = landscape.dig_free_pix(center.x.saturating_add(xcnt), y, materials);
+            }
+        }
+        if let Some((width, _)) = landscape.grid_dimensions() {
+            landscape.refresh_raster_columns(
+                center.x.saturating_sub(radius).clamp(0, width) as usize
+                    ..center.x.saturating_add(radius).saturating_add(1).clamp(0, width) as usize,
+            );
+        }
+        return;
+    }
+    if materials.is_empty() {
+        return;
+    }
+    let radius_sq = i64::from(radius) * i64::from(radius);
+    for dx in -radius..=radius {
+        let column = center.x.saturating_add(dx);
+        if column < 0 || column >= landscape.width() as i32 {
+            continue;
+        }
+        let remaining = radius_sq - i64::from(dx) * i64::from(dx);
+        if remaining < 0 {
+            continue;
+        }
+        let previous = landscape.surface_height(column).unwrap_or(0);
+        let mut target = center.y.saturating_add((remaining as f64).sqrt().floor() as i32);
+        if target <= previous {
+            if previous.saturating_sub(target) > radius {
+                continue;
+            }
+            target = previous.saturating_add(1);
+        }
+        let _ = preview_dig_column(landscape, materials, column, target);
+    }
+}
+
+fn blast_threshold(radius: i32) -> i64 {
+    let radius = i64::from(radius.max(0));
+    let size = (radius * radius * 6283) / 2000;
+    let grade = i64::from(((radius as i32 / 10) - 1).clamp(1, 3));
+    (size * grade) / 6
+}
+
+fn preview_raster_blast(
+    landscape: &mut Landscape,
+    materials: &MaterialSet,
+    center: Vector2,
+    radius: i32,
+    rng: &mut LcgRng,
+) -> (BlastPixelReplay, HashMap<crate::MaterialId, i32>) {
+    let mut counts = HashMap::new();
+    for ycnt in -radius..=radius {
+        let remaining = i64::from(radius) * i64::from(radius)
+            - i64::from(ycnt) * i64::from(ycnt);
+        let line_width = (remaining.max(0) as f64).sqrt() as i32;
+        let y = center.y.saturating_add(ycnt);
+        for xcnt in -line_width..line_width + i32::from(line_width == 0) {
+            if let Some(material) = landscape.border_material_at(center.x.saturating_add(xcnt), y)
+            {
+                *counts.entry(material).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let threshold = blast_threshold(radius);
+    let mut steps = Vec::new();
+    for ycnt in -radius..=radius {
+        let remaining = i64::from(radius) * i64::from(radius)
+            - i64::from(ycnt) * i64::from(ycnt);
+        let line_width = (remaining.max(0) as f64).sqrt() as i32;
+        let y = center.y.saturating_add(ycnt);
+        for xcnt in -line_width..line_width + i32::from(line_width == 0) {
+            let x = center.x.saturating_add(xcnt);
+            let original_material = landscape.border_material_at(x, y);
+            let mut shift_byte = None;
+            let mut clear = false;
+            if let Some((material_id, material)) = original_material
+                .and_then(|id| materials.get_by_id(id).map(|entry| (id, entry)))
+            {
+                clear = material.blast_free();
+                if let Some(byte) = material
+                    .blast_shift_to_spec()
+                    .zip(material.blast_shift_to_target())
+                    .and_then(|(spec, fallback)| {
+                        landscape.crossmapped_material_texture_byte(
+                            spec,
+                            material_id,
+                            materials,
+                            fallback,
+                        )
+                    })
+                {
+                    let total = counts.get(&material_id).copied().unwrap_or(0);
+                    if i64::from(rng.random(total)) < threshold {
+                        shift_byte = Some(byte);
+                    }
+                }
+            }
+            if let Some(byte) = shift_byte {
+                let _ = landscape.insert_material_texture_pix(x, y, byte);
+            }
+            if clear {
+                let _ = landscape.clear_pix(x, y);
+            }
+            steps.push(BlastRasterReplayStep {
+                position: Vector2::new(x, y),
+                original_material,
+                shift_byte,
+                clear,
+            });
+        }
+    }
+    if let Some((width, _)) = landscape.grid_dimensions() {
+        landscape.refresh_raster_columns(
+            center.x.saturating_sub(radius).clamp(0, width) as usize
+                ..center.x.saturating_add(radius).saturating_add(1).clamp(0, width) as usize,
+        );
+    }
+    (
+        BlastPixelReplay::Raster {
+            steps,
+            pixel_count_by_material: counts.clone(),
+        },
+        counts,
+    )
+}
+
+fn preview_column_blast(
+    landscape: &mut Landscape,
+    materials: &MaterialSet,
+    center: Vector2,
+    radius: i32,
+    rng: &mut LcgRng,
+) -> (BlastPixelReplay, HashMap<crate::MaterialId, i32>) {
+    let result = landscape.blast_circle(center, radius, materials);
+    let threshold = blast_threshold(radius);
+    let mut shift_decisions = Vec::with_capacity(result.shift_candidates.len());
+    for candidate in &result.shift_candidates {
+        let total = result
+            .pixel_count_by_material
+            .get(&candidate.material)
+            .copied()
+            .unwrap_or(0);
+        let mut should_shift = false;
+        if total > 0 {
+            for _ in 0..candidate.pixel_count.max(0) {
+                if i64::from(rng.random(total)) < threshold {
+                    should_shift = true;
+                }
+            }
+        }
+        shift_decisions.push(should_shift);
+        if should_shift && candidate.apply_column_shift && candidate.column >= 0 {
+            landscape.set_solid_material(candidate.column as u32, Some(candidate.target));
+        }
+    }
+    let counts = result.pixel_count_by_material;
+    (BlastPixelReplay::Column { shift_decisions }, counts)
+}
+
+fn preview_captured_blast_pixels(
+    landscape: &mut Landscape,
+    materials: &MaterialSet,
+    center: Vector2,
+    radius: i32,
+    replay: &BlastPixelReplay,
+) {
+    match replay {
+        BlastPixelReplay::Raster { steps, .. } => {
+            for step in steps {
+                if let Some(byte) = step.shift_byte {
+                    let _ = landscape.insert_material_texture_pix(
+                        step.position.x,
+                        step.position.y,
+                        byte,
+                    );
+                }
+                if step.clear {
+                    let _ = landscape.clear_pix(step.position.x, step.position.y);
+                }
+            }
+            if let Some((width, _)) = landscape.grid_dimensions() {
+                landscape.refresh_raster_columns(
+                    center.x.saturating_sub(radius).clamp(0, width) as usize
+                        ..center.x.saturating_add(radius).saturating_add(1).clamp(0, width)
+                            as usize,
+                );
+            }
+        }
+        BlastPixelReplay::Column { shift_decisions } => {
+            let result = landscape.blast_circle(center, radius, materials);
+            for (candidate, should_shift) in result.shift_candidates.iter().zip(shift_decisions) {
+                if *should_shift && candidate.apply_column_shift && candidate.column >= 0 {
+                    landscape.set_solid_material(candidate.column as u32, Some(candidate.target));
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NestedObjectOutcome {
     pub object_id: ObjectId,
@@ -28058,8 +28614,7 @@ fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
 /// are GLOBAL even with an object context. PixCol2Tex strips IFT, then the
 /// live callback TextureMap supplies the raw entry texture name (presentation
 /// may resolve liquid Smooth through the Liquid image). Parser-time allocations
-/// are immediately visible; deferred DrawMap pixel writes remain the explicitly
-/// logged same-callback preview gap.
+/// and callback-COW terrain writes are both immediately visible.
 fn get_texture(args: &[Value]) -> Result<Value, RuntimeError> {
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetTexture", "x")?;
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "GetTexture", "y")?;
@@ -28188,7 +28743,7 @@ fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
     let caused_by_plus_one =
         value_to_i32(args.get(3).unwrap_or(&Value::Nil), "BlastFree", "caused by")?;
 
-    HOST_CONTEXT.with(|cell| {
+    let (center, controller, counts) = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
@@ -28209,15 +28764,219 @@ fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
 
-        context.register_landscape_operation(LandscapeOperation::BlastCircle {
-            center: Vector2::new(x, y),
-            radius: level,
-            controller,
+        let center = Vector2::new(x, y);
+        let preview = context.preview_blast_circle(center, level);
+        let counts = preview
+            .as_ref()
+            .map(|(_, counts)| counts.clone())
+            .unwrap_or_default();
+        let replay = preview.map(|(replay, _)| replay);
+        let operation = match replay {
+            Some(replay) => LandscapeOperation::BlastCirclePreviewed {
+                center,
+                radius: level,
+                replay,
+            },
+            None => LandscapeOperation::BlastCircle {
+                center,
+                radius: level,
+                controller,
+            },
+        };
+        context.register_landscape_operation(operation);
+        Ok((center, controller, counts))
+    })?;
+    process_preview_blast_reactions(center, controller, &counts)?;
+    // FnBlastFree is a void engine function; C4AulEngineFunc maps void to
+    // C4VNull after performing the landscape side effect.
+    Ok(Value::Nil)
+}
+
+/// The post-pixel evaluate loop of C4Landscape::BlastFree. Object creation
+/// and its lifecycle callbacks happen between consecutive groups of four
+/// random draws; PXS draws follow that material's objects before the next
+/// material. Keeping this in the live host context makes callbacks and the
+/// outer script observe the same order as C++ while the queued operations
+/// only commit already-previewed terrain/PXS storage.
+fn process_preview_blast_reactions(
+    center: Vector2,
+    controller: Option<i32>,
+    counts: &HashMap<crate::MaterialId, i32>,
+) -> Result<(), RuntimeError> {
+    let materials = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref().ok_or_else(|| {
+            RuntimeError::new("BlastFree requires an active engine context")
+        })?;
+        Ok::<_, RuntimeError>(
+            context
+                .world
+                .materials()
+                .map(|materials| {
+                    materials
+                        .iter()
+                        .map(|material| {
+                            (
+                                material.id(),
+                                material.blast_to_object_name().map(str::to_string),
+                                material.blast_to_object_ratio(),
+                                material.blast_to_pxs_ratio(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        )
+    })?;
+
+    for (material, definition, object_ratio, pxs_ratio) in materials {
+        let count = counts.get(&material).copied().unwrap_or(0);
+        if count == 0 {
+            continue;
+        }
+        if let (Some(definition), Some(ratio)) = (definition, object_ratio) {
+            if ratio != 0 {
+                for _ in 0..count / ratio {
+                    let rotation_velocity = itofix(draw_context_random(3)? + 1);
+                    let ydir = fixed10(draw_context_random(61)? - 40);
+                    let xdir = fixed10(draw_context_random(61)? - 30);
+                    let rotation = draw_context_random(360)?;
+                    let _ = create_native_object(NativeObjectCreation {
+                        definition: definition.clone(),
+                        creator: None,
+                        owner: OWNER_NONE,
+                        controller: controller.unwrap_or(OWNER_NONE),
+                        position: center,
+                        rotation,
+                        velocity: FixedVec2::new(xdir, ydir),
+                        rotation_velocity,
+                    })?;
+                }
+            }
+        }
+        if let Some(ratio) = pxs_ratio {
+            if ratio != 0 {
+                let velocities = RANDOM_CONTEXT.with(|cell| {
+                    let random = cell
+                        .borrow()
+                        .as_ref()
+                        .ok_or_else(|| RuntimeError::new("random context unavailable"))?
+                        .clone();
+                    let mut rng = random.rng.borrow_mut();
+                    Ok::<_, RuntimeError>(
+                        (0..count / ratio)
+                            .map(|_| crate::pxs::PxsSystem::sample_cast_velocity(&mut rng, 60))
+                            .collect::<Vec<_>>(),
+                    )
+                })?;
+                HOST_CONTEXT.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    let context = borrow.as_mut().ok_or_else(|| {
+                        RuntimeError::new("BlastFree requires an active engine context")
+                    })?;
+                    context.register_landscape_operation(LandscapeOperation::CastPxs {
+                        material,
+                        position: center,
+                        velocities,
+                    });
+                    Ok::<_, RuntimeError>(())
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// C4Object::DigOutMaterialCast at the end of DigFree/DigFreeRect. The
+/// creator's MaterialContents stay live through each spawned object's
+/// lifecycle callbacks and reset only after CreateObject returns.
+fn process_preview_dig_reactions(
+    by_object: Option<ObjectId>,
+    counts: &HashMap<crate::MaterialId, i32>,
+    requested: bool,
+) -> Result<(), RuntimeError> {
+    let Some(target) = by_object else {
+        return Ok(());
+    };
+    let (frame, materials) = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("DigFree requires an active engine context")
+        })?;
+        if !context.add_dig_material_counts(target, counts) {
+            return Ok((context.world.frame, Vec::new()));
+        }
+        let materials = context
+            .world
+            .materials()
+            .map(|materials| {
+                materials
+                    .iter()
+                    .map(|material| {
+                        (
+                            material.id(),
+                            material.dig_to_object_name().map(str::to_string),
+                            material.dig_to_object_ratio(),
+                            material.dig_to_object_on_request_only(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok::<_, RuntimeError>((context.world.frame, materials))
+    })?;
+    if frame % 5 != 0 {
+        return Ok(());
+    }
+
+    for (material, definition, ratio, on_request_only) in materials {
+        let (Some(definition), Some(ratio)) = (definition, ratio) else {
+            continue;
+        };
+        if ratio == 0 || (on_request_only && !requested) {
+            continue;
+        }
+        let position = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let context = borrow.as_mut()?;
+            let content = context.dig_material_content(target, material);
+            if content == 0 || content < ratio {
+                return None;
+            }
+            let object = context.get_world_object(target)?;
+            let position = context
+                .object_scope(target)
+                .map(ObjectScopeContext::effective_position)
+                .unwrap_or(object.position);
+            let bottom = live_object_shape(context, target).map_or(position.y, |shape| {
+                position
+                    .y
+                    .saturating_add(shape.y)
+                    .saturating_add(shape.height)
+            });
+            Some(Vector2::new(position.x, bottom))
         });
-        // FnBlastFree is a void engine function; C4AulEngineFunc maps void to
-        // C4VNull after performing the landscape side effect.
-        Ok(Value::Nil)
-    })
+        let Some(position) = position else {
+            continue;
+        };
+        let rotation = draw_context_random(360)?;
+        let _ = create_native_object(NativeObjectCreation {
+            definition,
+            creator: Some(target),
+            owner: OWNER_NONE,
+            controller: OWNER_NONE,
+            position,
+            rotation,
+            velocity: FixedVec2::ZERO,
+            rotation_velocity: C4Fixed::ZERO,
+        })?;
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                context.reset_dig_material_content(target, material);
+            }
+        });
+    }
+    Ok(())
 }
 
 fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -28239,10 +28998,12 @@ fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("ShakeFree requires an active engine context"))?;
-        context.register_landscape_operation(LandscapeOperation::ShakeCircle {
+        let operation = LandscapeOperation::ShakeCircle {
             center: Vector2::new(x, y),
             radius,
-        });
+        };
+        context.world.preview_runtime_landscape_operation(&operation);
+        context.register_landscape_operation(operation);
         Ok(Value::Nil)
     })
 }
@@ -29058,20 +29819,22 @@ fn dig_free(args: &[Value]) -> Result<Value, RuntimeError> {
         false
     };
 
-    HOST_CONTEXT.with(|cell| {
+    let (by_object, counts) = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("DigFree requires an active engine context"))?;
         let by_object = context.object_context().map(|object| object.id());
-        context.register_landscape_operation(LandscapeOperation::DigCircle {
-            center: Vector2::new(x, y),
+        let center = Vector2::new(x, y);
+        let counts = context.preview_dig_circle(center, radius);
+        context.register_landscape_operation(LandscapeOperation::DigCirclePreviewed {
+            center,
             radius,
-            requested,
-            by_object,
         });
-        Ok(Value::Nil)
-    })
+        Ok((by_object, counts))
+    })?;
+    process_preview_dig_reactions(by_object, &counts, requested)?;
+    Ok(Value::Nil)
 }
 
 /// FnFreeRect (C4Script.cpp:3125-3131): clears the landscape rect in
@@ -29434,7 +30197,7 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
             texmap,
             map_creator,
         };
-        context.world.preview_runtime_landscape_operation(&operation);
+        context.preview_draw_indexed_map(&operation);
         context.register_landscape_operation(operation);
         Ok(Value::Int(1))
     })
@@ -29531,7 +30294,7 @@ fn draw_def_map(args: &[Value]) -> Result<Value, RuntimeError> {
             texmap,
             map_creator: RetainedMapCreatorUpdate(map_creator),
         };
-        context.world.preview_runtime_landscape_operation(&operation);
+        context.preview_draw_indexed_map(&operation);
         context.register_landscape_operation(operation);
         Ok(Value::Int(1))
     })
@@ -29577,21 +30340,23 @@ fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
         false
     };
 
-    HOST_CONTEXT.with(|cell| {
+    let (by_object, counts) = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("DigFreeRect requires an active engine context"))?;
         let by_object = context.object_context().map(|object| object.id());
-        context.register_landscape_operation(LandscapeOperation::DigRect {
-            origin: Vector2::new(x, y),
+        let origin = Vector2::new(x, y);
+        let counts = context.preview_dig_rect(origin, width, height);
+        context.register_landscape_operation(LandscapeOperation::DigRectPreviewed {
+            origin,
             width,
             height,
-            requested,
-            by_object,
         });
-        Ok(Value::Nil)
-    })
+        Ok((by_object, counts))
+    })?;
+    process_preview_dig_reactions(by_object, &counts, requested)?;
+    Ok(Value::Nil)
 }
 
 // ── C4FindObject / C4SortObject condition trees (C4FindObject.{h,cpp}) ──────
@@ -38354,6 +39119,7 @@ struct NativeObjectCreation {
     definition: String,
     creator: Option<ObjectId>,
     owner: i32,
+    controller: i32,
     position: Vector2,
     rotation: i32,
     velocity: FixedVec2,
@@ -38389,6 +39155,11 @@ fn create_native_object(request: NativeObjectCreation) -> Result<Option<ObjectId
         } else {
             (request.rotation, request.rotation_velocity)
         };
+        let controller = if request.controller > OWNER_NONE {
+            request.controller
+        } else {
+            request.owner
+        };
         let creator_layer = request
             .creator
             .and_then(|creator| context.object_layer(creator));
@@ -38399,6 +39170,7 @@ fn create_native_object(request: NativeObjectCreation) -> Result<Option<ObjectId
             .with_rotation(rotation)
             .with_rotation_velocity(rotation_velocity)
             .with_owner(request.owner)
+            .with_controller(controller)
             .with_category(metadata.category)
             .with_construction(0)
             .with_id(id);
@@ -38453,7 +39225,7 @@ fn create_native_object(request: NativeObjectCreation) -> Result<Option<ObjectId
             let mut state = crate::preview_spawn_state_with_components(
                 request.position,
                 request.owner,
-                request.owner,
+                controller,
                 metadata.category,
                 0,
                 metadata.contact_density(),
@@ -38652,6 +39424,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             definition: definition.clone(),
             creator: Some(container),
             owner,
+            controller: owner,
             position: Vector2::new(50, 50),
             rotation: 0,
             velocity: FixedVec2::ZERO,
@@ -39002,6 +39775,7 @@ fn split_to_components(args: &[Value]) -> Result<Value, RuntimeError> {
                 definition: component.clone(),
                 creator: Some(source),
                 owner,
+                controller: owner,
                 position,
                 rotation,
                 velocity: FixedVec2::new(itofix(xdir), itofix(ydir)),
@@ -43685,12 +44459,15 @@ struct EffectHostContext {
     /// the synchronous callback-outcome fold.
     pending_command_events: Vec<CommandEvent>,
     pending_landscape_ops: Vec<LandscapeOperation>,
+    /// Live C4Object::MaterialContents overlays for DigFree/DigFreeRect.
+    /// Entries are seeded lazily from HostWorldObject and copied into each
+    /// affected object's final ObjectUpdate.
+    dig_material_contents: HashMap<ObjectId, Vec<i32>>,
     /// Live C4TextureMap preview for synchronous GetIndexMatTex return
     /// values. DrawMaterialQuad/DrawMap operations still fold into the real
     /// engine, but later calls in this same VM session must see slots
-    /// allocated by earlier calls (C4Texture.cpp:319-369). DrawMap's pixel
-    /// plane is still deferred: same-callback GBack* visibility needs a
-    /// separate structural landscape-preview layer and remains explicit.
+    /// allocated by earlier calls (C4Texture.cpp:319-369); the companion COW
+    /// Landscape supplies their same-callback pixel visibility.
     runtime_texmap: OnceCell<Option<crate::landscape::RuntimeTexMapState>>,
     /// Live script-visible sky values. Host writes update this before their
     /// deferred landscape operation is folded into the engine.
@@ -43951,6 +44728,7 @@ impl EffectHostContext {
             pending_menu_requests: Vec::new(),
             pending_command_events: Vec::new(),
             pending_landscape_ops: Vec::new(),
+            dig_material_contents: HashMap::new(),
             runtime_texmap: OnceCell::new(),
             sky_adjustment,
             audio,
@@ -44450,6 +45228,190 @@ impl EffectHostContext {
             *vertices,
             *ift,
         );
+    }
+
+    fn preview_draw_indexed_map(&mut self, operation: &LandscapeOperation) {
+        let (origin, bitmap, map_width, map_height, texmap, map_creator) = match operation {
+            LandscapeOperation::DrawMap {
+                origin,
+                bitmap,
+                map_width,
+                map_height,
+                texmap,
+                map_creator,
+            } => (
+                *origin,
+                bitmap,
+                *map_width,
+                *map_height,
+                texmap,
+                map_creator.as_ref(),
+            ),
+            LandscapeOperation::DrawDefMap {
+                origin,
+                bitmap,
+                map_width,
+                map_height,
+                texmap,
+                map_creator,
+            } => (
+                *origin,
+                bitmap,
+                *map_width,
+                *map_height,
+                texmap,
+                Some(map_creator),
+            ),
+            _ => return,
+        };
+        let Some(landscape) = self.world.landscape_mut() else {
+            return;
+        };
+        let _ = landscape.preview_draw_indexed_map_with_masks(
+            &mut self.solid_mask_bakes,
+            origin,
+            bitmap,
+            map_width,
+            map_height,
+            texmap.clone(),
+        );
+        if let Some(map_creator) = map_creator {
+            let _ = landscape.replace_runtime_map_creator_state(map_creator.0.clone());
+        }
+        self.world.solid_mask_bakes = Rc::new(self.solid_mask_bakes.clone());
+    }
+
+    fn preview_dig_circle(
+        &mut self,
+        center: Vector2,
+        radius: i32,
+    ) -> HashMap<crate::MaterialId, i32> {
+        let materials = self.world.materials.clone().unwrap_or_default();
+        self.world
+            .landscape_mut()
+            .map(|landscape| {
+                preview_dig_circle_pixels(landscape, materials.as_ref(), center, radius)
+            })
+            .unwrap_or_default()
+    }
+
+    fn preview_dig_rect(
+        &mut self,
+        origin: Vector2,
+        width: i32,
+        height: i32,
+    ) -> HashMap<crate::MaterialId, i32> {
+        let materials = self.world.materials.clone().unwrap_or_default();
+        self.world
+            .landscape_mut()
+            .map(|landscape| {
+                preview_dig_rect_pixels(
+                    landscape,
+                    materials.as_ref(),
+                    origin,
+                    width,
+                    height,
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    fn ensure_dig_material_contents(&mut self, target: ObjectId) -> bool {
+        if self.dig_material_contents.contains_key(&target) {
+            return true;
+        }
+        let Some(object) = self.get_world_object(target) else {
+            return false;
+        };
+        self.dig_material_contents
+            .insert(target, object.material_contents);
+        true
+    }
+
+    fn stage_dig_material_contents(&mut self, target: ObjectId) {
+        let Some(contents) = self.dig_material_contents.get(&target).cloned() else {
+            return;
+        };
+        if self.ensure_object_scope(target) {
+            if let Some(scope) = self.object_scope_mut(target) {
+                scope.pending_update.material_contents = Some(contents.clone());
+            }
+        }
+        if let Some(object) = self.pending_objects.get_mut(&target) {
+            object.material_contents = contents;
+        }
+    }
+
+    fn add_dig_material_counts(
+        &mut self,
+        target: ObjectId,
+        counts: &HashMap<crate::MaterialId, i32>,
+    ) -> bool {
+        if !self.ensure_dig_material_contents(target) {
+            return false;
+        }
+        let contents = self
+            .dig_material_contents
+            .get_mut(&target)
+            .expect("dig contents seeded above");
+        for (material, amount) in counts {
+            if *amount <= 0 {
+                continue;
+            }
+            if contents.len() <= material.index() {
+                contents.resize(material.index() + 1, 0);
+            }
+            let slot = &mut contents[material.index()];
+            *slot = slot.saturating_add(*amount);
+        }
+        self.stage_dig_material_contents(target);
+        true
+    }
+
+    fn dig_material_content(&mut self, target: ObjectId, material: crate::MaterialId) -> i32 {
+        if !self.ensure_dig_material_contents(target) {
+            return 0;
+        }
+        self.dig_material_contents
+            .get(&target)
+            .and_then(|contents| contents.get(material.index()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn reset_dig_material_content(&mut self, target: ObjectId, material: crate::MaterialId) {
+        if !self.ensure_dig_material_contents(target) {
+            return;
+        }
+        let contents = self
+            .dig_material_contents
+            .get_mut(&target)
+            .expect("dig contents seeded above");
+        if contents.len() <= material.index() {
+            contents.resize(material.index() + 1, 0);
+        }
+        contents[material.index()] = 0;
+        self.stage_dig_material_contents(target);
+    }
+
+    fn preview_blast_circle(
+        &mut self,
+        center: Vector2,
+        radius: i32,
+    ) -> Option<(BlastReplay, HashMap<crate::MaterialId, i32>)> {
+        if radius < 0 || self.world.landscape_ref().is_none() {
+            return None;
+        }
+        let random = RANDOM_CONTEXT.with(|cell| cell.borrow().as_ref().cloned())?;
+        let materials = self.world.materials.clone().unwrap_or_default();
+        let landscape = self.world.landscape_mut()?;
+        let mut rng = random.rng.borrow_mut();
+        let (pixels, counts) = if landscape.pixel_grid().is_some() {
+            preview_raster_blast(landscape, materials.as_ref(), center, radius, &mut rng)
+        } else {
+            preview_column_blast(landscape, materials.as_ref(), center, radius, &mut rng)
+        };
+        Some((BlastReplay { pixels }, counts))
     }
 
     /// FnDrawVolcanoBranch mutates Surface8 before returning to script, so
@@ -58408,6 +59370,47 @@ public func RejectConstruction(x, y, builder)
         )
     }
 
+    fn draw_map_masked_world() -> HostWorldContext {
+        let mut world = draw_map_world(8, 7, 3, true);
+        let landscape = world.landscape_mut().expect("landscape exists");
+        let mut texmap = landscape
+            .raster_state()
+            .expect("raster state exists")
+            .texmap()
+            .clone();
+        texmap.densities[3] = 100;
+        texmap.material_names[3] = Some("Vehicle".to_string());
+        texmap.texture_names[3] = Some("Smooth".to_string());
+        texmap.match_texture_names[3] = Some("Smooth".to_string());
+        texmap.shapes[3] = Some(crate::chunky::ChunkShape::Flat);
+        texmap.materials.push(crate::landscape::RuntimeTexMapMaterial {
+            name: "Vehicle".to_string(),
+            density: 100,
+            shape: crate::chunky::ChunkShape::Flat,
+        });
+        texmap.texture_inventory.push("Smooth".to_string());
+        texmap.set_default_material_entry("Vehicle", 3);
+        assert!(landscape.replace_runtime_texmap_state(texmap));
+        landscape.grid_write_byte(0, 1, 3);
+        landscape.refresh_all_raster_columns();
+        world.with_solid_mask_bakes(vec![(
+            ObjectId::new(91),
+            crate::SolidMaskBake {
+                instance_sequence: 1,
+                x: 0,
+                y: 1,
+                width: 1,
+                height: 1,
+                tx: 0,
+                ty: 0,
+                mask_width: 1,
+                pixels: None,
+                buffer: vec![0],
+                rotated: None,
+            },
+        )])
+    }
+
     fn remove_unused_texmap_world() -> HostWorldContext {
         let mut densities = vec![0; 128];
         let mut material_names = vec![None; 128];
@@ -59215,14 +60218,73 @@ public func RejectConstruction(x, y, builder)
     }
 
     #[test]
+    fn draw_map_hosts_repair_active_masks_during_synchronous_preview() {
+        let draw_map_args = [
+            Value::Int(-2),
+            Value::Int(1),
+            Value::Int(7),
+            Value::Int(5),
+            Value::String("map Runtime { seed = 9; Named; };".to_string()),
+        ];
+        let draw_def_map_args = [
+            Value::Int(-2),
+            Value::Int(1),
+            Value::Int(7),
+            Value::Int(5),
+            Value::String("Requested".to_string()),
+        ];
+
+        for (name, seed, draw_def) in [
+            ("DrawMap", 17, false),
+            ("DrawDefMap", 37, true),
+        ] {
+            let world = draw_map_masked_world();
+            let guard = enter_random_context(LcgRng::new(seed));
+            let (result, outcome) = with_effect_context(None, &[], world.clone(), 1, || {
+                let drew = if draw_def {
+                    draw_def_map(&draw_def_map_args)?
+                } else {
+                    draw_map(&draw_map_args)?
+                };
+                let visible_mask = get_texture(&[Value::Int(0), Value::Int(1)])?;
+                Ok::<_, RuntimeError>((drew, visible_mask))
+            });
+            let _ = guard.finish();
+
+            assert_eq!(
+                result.unwrap_or_else(|error| panic!("{name} failed: {error}")),
+                (Value::Int(1), Value::String("Smooth".to_string())),
+                "{name} re-puts the Vehicle mask before returning"
+            );
+            assert_eq!(outcome.landscape.len(), 1);
+
+            let mut replay_world = world;
+            replay_world.preview_runtime_landscape_operation(&outcome.landscape[0]);
+            assert_eq!(
+                replay_world
+                    .landscape_ref()
+                    .expect("landscape exists")
+                    .grid_byte_at(0, 1),
+                Some(3),
+                "{name} leaves the live mask pixel in place"
+            );
+            assert_eq!(
+                replay_world.solid_mask_bakes[0].1.buffer,
+                vec![1 | 0x80],
+                "{name} stores the newly painted Earth beneath the mask"
+            );
+        }
+    }
+
+    #[test]
     fn draw_map_texmap_allocation_is_immediately_visible_to_get_texture() {
         // ReadScript evaluates a complete top-level overlay immediately, so
         // GetIndexMatTex may allocate a TextureMap slot before Render finds
         // no map. The allocation survives even though DrawMap returns false
         // (C4MapCreatorS2.cpp:1201-1203,773-815; C4Landscape.cpp:2659-2663;
         // C4Texture.cpp:319-369). A subsequent GetTexture in the same
-        // callback resolves through that live mapping, although deferred
-        // DrawMap pixels themselves remain the documented preview gap.
+        // callback resolves through that live mapping even though this
+        // particular source contains no renderable map and changes no pixel.
         let args = [
             Value::Int(0),
             Value::Int(0),
@@ -60116,21 +61178,16 @@ public func RejectConstruction(x, y, builder)
                     center: Vector2 { x: 10, y: 20 },
                     radius: 3,
                 },
-                LandscapeOperation::DigCircle {
+                LandscapeOperation::DigCirclePreviewed {
                     center: Vector2 { x: 30, y: 40 },
                     radius: 5,
-                    requested: true,
-                    by_object: Some(dig_object),
                 },
-                LandscapeOperation::DigRect {
+                LandscapeOperation::DigRectPreviewed {
                     origin: Vector2 { x: 50, y: 60 },
                     width: 7,
                     height: 8,
-                    requested: false,
-                    by_object: Some(rect_object),
                 },
             ]
-            if *dig_object == ObjectId::new(1) && *rect_object == ObjectId::new(1)
         ));
 
         let (no_op_result, no_op_outcome) = with_object_host_context(|| {
@@ -60171,6 +61228,136 @@ public func RejectConstruction(x, y, builder)
     }
 
     #[test]
+    fn terrain_mutators_are_visible_to_same_callback_gback_queries() {
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=100\nDigFree=1\nBlastFree=1\n",
+        )
+        .expect("terrain-query material builds");
+        let materials = Rc::new(MaterialSet::from_resource_library(&library));
+        let earth = materials.id_of("Earth").expect("Earth exists");
+        let map_world = || {
+            let mut world = draw_map_world(8, 7, 3, true);
+            world
+                .landscape_mut()
+                .expect("landscape exists")
+                .resolve_grid_materials(|name| materials.id_of(name));
+            world.with_materials(Some(Rc::clone(&materials)))
+        };
+        let terrain_world = || {
+            let mut world = map_world();
+            let landscape = world.landscape_mut().expect("landscape exists");
+            for y in 0..7 {
+                for x in 0..8 {
+                    landscape.grid_write_byte(x, y, 1);
+                }
+            }
+            landscape.refresh_all_raster_columns();
+            world
+        };
+
+        let mut script = lc_script::Engine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"#strict 2
+func TerrainState(x, y) { return [GBackSolid(x, y), GetMaterial(x, y), GetTexture(x, y)]; }
+func ProbeBlast() {
+    var before = TerrainState(3, 3);
+    var changed = BlastFree(3, 3, 1, 1);
+    return [before, changed, TerrainState(3, 3)];
+}
+func ProbeShake() {
+    var before = TerrainState(3, 3);
+    var changed = ShakeFree(3, 3, 1);
+    return [before, changed, TerrainState(3, 3)];
+}
+func ProbeDig() {
+    var before = TerrainState(3, 3);
+    var changed = DigFree(3, 3, 1);
+    return [before, changed, TerrainState(3, 3)];
+}
+func ProbeDigRect() {
+    var before = TerrainState(3, 3);
+    var changed = DigFreeRect(3, 3, 1, 1);
+    return [before, changed, TerrainState(3, 3)];
+}
+func ProbeDrawMap() {
+    var before = TerrainState(0, 1);
+    var changed = DrawMap(-2, 1, 7, 5, "map Runtime { seed = 9; Named; };");
+    return [before, changed, TerrainState(0, 1)];
+}
+func ProbeDrawDefMap() {
+    var before = TerrainState(0, 1);
+    var changed = DrawDefMap(-2, 1, 7, 5, "Requested");
+    return [before, changed, TerrainState(0, 1)];
+}
+"#,
+            )
+            .expect("terrain visibility probes compile");
+
+        let earth_state = Value::Array(vec![
+            Value::Bool(true),
+            Value::Int(earth.index() as i32),
+            Value::String("Rough".to_string()),
+        ]);
+        let sky_state = Value::Array(vec![
+            Value::Bool(false),
+            Value::Int(MATERIAL_NONE),
+            Value::Nil,
+        ]);
+        for probe in ["ProbeBlast", "ProbeShake", "ProbeDig", "ProbeDigRect"] {
+            let random = enter_random_context(LcgRng::new(101));
+            let (result, outcome) = with_effect_context(None, &[], terrain_world(), 1, || {
+                script.call(probe, &[])
+            });
+            let _ = random.finish();
+            assert_eq!(
+                result.unwrap_or_else(|error| panic!("{probe} failed: {error}")),
+                Value::Array(vec![earth_state.clone(), Value::Nil, sky_state.clone()]),
+                "{probe} must expose its cleared pixel before returning from the callback"
+            );
+            assert_eq!(outcome.landscape.len(), 1, "{probe} queues one fold");
+            assert!(
+                matches!(
+                    (probe, &outcome.landscape[0]),
+                    ("ProbeBlast", LandscapeOperation::BlastCirclePreviewed { .. })
+                        | ("ProbeShake", LandscapeOperation::ShakeCircle { .. })
+                        | ("ProbeDig", LandscapeOperation::DigCirclePreviewed { .. })
+                        | ("ProbeDigRect", LandscapeOperation::DigRectPreviewed { .. })
+                ),
+                "{probe} queued {:?}",
+                outcome.landscape[0]
+            );
+        }
+
+        for (probe, seed) in [("ProbeDrawMap", 17), ("ProbeDrawDefMap", 37)] {
+            let random = enter_random_context(LcgRng::new(seed));
+            let (result, outcome) =
+                with_effect_context(None, &[], map_world(), 1, || script.call(probe, &[]));
+            let _ = random.finish();
+            assert_eq!(
+                result.unwrap_or_else(|error| panic!("{probe} failed: {error}")),
+                Value::Array(vec![
+                    sky_state.clone(),
+                    Value::Int(1),
+                    earth_state.clone(),
+                ]),
+                "{probe} must expose its painted pixel before returning from the callback"
+            );
+            assert_eq!(outcome.landscape.len(), 1, "{probe} queues one fold");
+            assert!(
+                matches!(
+                    (probe, &outcome.landscape[0]),
+                    ("ProbeDrawMap", LandscapeOperation::DrawMap { .. })
+                        | ("ProbeDrawDefMap", LandscapeOperation::DrawDefMap { .. })
+                ),
+                "{probe} queued {:?}",
+                outcome.landscape[0]
+            );
+        }
+    }
+
+    #[test]
     fn dig_free_registers_landscape_operation() {
         let args = [
             Value::Int(42),
@@ -60182,16 +61369,9 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(result.expect("DigFree succeeds"), Value::Nil);
         assert_eq!(outcome.landscape.len(), 1);
         match &outcome.landscape[0] {
-            LandscapeOperation::DigCircle {
-                center,
-                radius,
-                requested,
-                by_object,
-            } => {
+            LandscapeOperation::DigCirclePreviewed { center, radius } => {
                 assert_eq!(*center, Vector2::new(42, 128));
                 assert_eq!(*radius, 6);
-                assert!(*requested);
-                assert!(by_object.is_some());
             }
             other => panic!("unexpected landscape operation: {:?}", other),
         }
@@ -60218,18 +61398,14 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(result.expect("DigFreeRect succeeds"), Value::Nil);
         assert_eq!(outcome.landscape.len(), 1);
         match &outcome.landscape[0] {
-            LandscapeOperation::DigRect {
+            LandscapeOperation::DigRectPreviewed {
                 origin,
                 width,
                 height,
-                requested,
-                by_object,
             } => {
                 assert_eq!(*origin, Vector2::new(10, 20));
                 assert_eq!(*width, 5);
                 assert_eq!(*height, 7);
-                assert!(!*requested);
-                assert!(by_object.is_some());
             }
             other => panic!("unexpected landscape operation: {:?}", other),
         }
@@ -60246,6 +61422,7 @@ public func RejectConstruction(x, y, builder)
                 center,
                 radius,
                 controller,
+                ..
             } => {
                 assert_eq!(*center, Vector2::new(12, 34));
                 assert_eq!(*radius, 5);
@@ -60293,6 +61470,7 @@ public func RejectConstruction(x, y, builder)
                 center,
                 radius,
                 controller,
+                ..
             } => {
                 assert_eq!(*center, Vector2::new(8, 17));
                 assert_eq!(*radius, 6);
@@ -60363,6 +61541,7 @@ public func RejectConstruction(x, y, builder)
                 center: Vector2 { x: 3, y: 7 },
                 radius: 6,
                 controller: Some(-3),
+                ..
             }]
         ));
     }
@@ -60384,6 +61563,7 @@ public func RejectConstruction(x, y, builder)
                 center: Vector2 { x: 0, y: 0 },
                 radius: 0,
                 controller: Some(OWNER_NONE),
+                ..
             }]
         ));
 
@@ -60402,6 +61582,7 @@ public func RejectConstruction(x, y, builder)
                 center: Vector2 { x: 2, y: 4 },
                 radius: 6,
                 controller: Some(0),
+                ..
             }]
         ));
     }

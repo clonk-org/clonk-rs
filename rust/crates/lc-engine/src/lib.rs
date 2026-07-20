@@ -65,6 +65,8 @@ pub use action::{
 };
 use action::SharedActionLibrary;
 pub use command::{CommandStackSnapshot, MenuRequest, MenuRequestKind};
+#[doc(hidden)]
+pub use compat::BlastReplay;
 pub use control::{
     interpret_player_control_command, ActivateGameGoalMenuControlData,
     ActivateGameGoalRuleControlData, ClientCoreControlData, ClientJoinControlData,
@@ -794,6 +796,7 @@ use command::{
     CommandRuntimeContext, CommandStack, CommandStepResult, GetAttemptDisposition,
 };
 use compat::{
+    BlastPixelReplay,
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
     object_reference_value, AudioRegistry, DefinitionMetadata, EffectContextOutcome,
     EnvironmentDelta, HostSolidMaskImage, HostSolidMaskMetadata, HostWorldContext, HostWorldObject,
@@ -5384,6 +5387,7 @@ struct ObjectDelta {
     base_graphics: Option<Option<ObjectBaseGraphics>>,
     components: Option<HashMap<DefinitionId, i32>>,
     component_order: Option<Vec<DefinitionId>>,
+    material_contents: Option<Vec<i32>>,
     local_vars: Option<HashMap<String, Value>>,
     physicals: Option<PhysicalsUpdate>,
     /// Rotate `contents` cyclically so this id becomes the front —
@@ -5603,6 +5607,9 @@ impl ObjectDelta {
         if let Some(component_order) = update.component_order {
             self.component_order = Some(component_order);
         }
+        if let Some(material_contents) = update.material_contents {
+            self.material_contents = Some(material_contents);
+        }
         if let Some(physicals) = update.physicals {
             self.physicals = Some(physicals);
         }
@@ -5685,6 +5692,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             base_graphics: update.base_graphics,
             components: update.components,
             component_order: update.component_order,
+            material_contents: update.material_contents,
             local_vars: update.local_vars,
             physicals: update.physicals,
             contents_front: update.contents_front,
@@ -5980,6 +5988,11 @@ pub struct ObjectUpdate {
         deserialize_with = "deserialize_double_option"
     )]
     pub shape_override: Option<Option<DefinitionRect>>,
+    /// Runtime-only C4Object::MaterialContents overwrite produced by the
+    /// synchronous DigFree host preview. It never enters save/control data.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub material_contents: Option<Vec<i32>>,
     /// Rotate the contents list cyclically so this id becomes the front —
     /// C4ObjectList::ShiftContents (C4ObjectList.cpp:815-833), the
     /// FnShiftContents/DirectComContents write path.
@@ -6213,6 +6226,7 @@ impl ObjectUpdate {
             && self.solid_mask_override.is_none()
             && self.solid_mask_instance_sequence.is_none()
             && self.shape_override.is_none()
+            && self.material_contents.is_none()
             && self.change_def.is_none()
             && !self.change_def_reinsert
             && self.change_def_contents_sort.is_none()
@@ -7056,6 +7070,9 @@ impl Object {
                 None if !shape_changed => self.refresh_shape_geometry(),
                 None => {}
             }
+        }
+        if let Some(material_contents) = &delta.material_contents {
+            self.material_contents = material_contents.clone();
         }
         if let Some(vertices) = &delta.live_vertices {
             self.set_live_shape_vertices(vertices.clone());
@@ -25382,6 +25399,7 @@ impl Engine {
         .with_commands(object.commands.command_views())
         .with_command_stack(object.commands.snapshot())
         .with_full_state(Rc::new(object.script_state_snapshot()))
+        .with_material_contents(object.material_contents.clone())
         .with_last_energy_loss_cause(object.last_energy_loss_cause)
     }
 
@@ -25722,6 +25740,30 @@ impl Engine {
             index,
             Self::host_world_object(&self.definitions, &self.objects[index]),
         )
+    }
+
+    /// C4Game::NewObject links a fresh object into Game.Objects before its
+    /// Construction/Initialize/effect callbacks. Rust still owns that object
+    /// as a local until those phases finish, so seed both lookup storage and
+    /// the forward master-list position into their callback world.
+    fn host_world_context_for_pending_object(
+        &self,
+        object: &Object,
+        exec_position: usize,
+    ) -> HostWorldContext {
+        let mut world = self.host_world_context();
+        world.seed_object(
+            self.objects.len(),
+            Self::host_world_object(&self.definitions, object),
+        );
+        let mut master_order = world.master_object_ids().to_vec();
+        if !master_order.contains(&object.id) {
+            let master_position = master_order
+                .len()
+                .saturating_sub(exec_position.min(master_order.len()));
+            master_order.insert(master_position, object.id);
+        }
+        world.with_master_order(master_order)
     }
 
     /// The shared definition-script table host contexts carry (nested
@@ -30768,6 +30810,7 @@ impl Engine {
                     effect_solid_mask_operations,
                     effect_host_raster_preview,
                     effect_solid_mask_changed,
+                    _effect_action_callbacks_dispatched,
                     effect_change_def_reinsert,
                     effect_next_object_id,
                     triggered_game_over,
@@ -31573,6 +31616,7 @@ impl Engine {
                         effect_solid_mask_operations,
                         effect_host_raster_preview,
                         effect_solid_mask_changed,
+                        _effect_action_callbacks_dispatched,
                         effect_change_def_reinsert,
                         effect_next_object_id,
                         triggered_game_over,
@@ -33173,6 +33217,7 @@ impl Engine {
                 nested_effect_solid_mask_operations,
                 nested_effect_host_raster_preview,
                 nested_effect_solid_mask_changed,
+                _nested_effect_action_callbacks_dispatched,
                 nested_effect_change_def_reinsert,
                 effect_next_object_id,
                 triggered_game_over,
@@ -33537,6 +33582,7 @@ impl Engine {
                     nested_effect_solid_mask_operations,
                     nested_effect_host_raster_preview,
                     nested_effect_solid_mask_changed,
+                    _nested_effect_action_callbacks_dispatched,
                     nested_effect_change_def_reinsert,
                     effect_next_object_id,
                     triggered_game_over,
@@ -35178,6 +35224,7 @@ impl Engine {
             effect_solid_mask_operations,
             effect_host_raster_preview,
             effect_solid_mask_changed,
+            _effect_action_callbacks_dispatched,
             effect_change_def_reinsert,
             effect_next_object_id,
             triggered_game_over,
@@ -35304,6 +35351,7 @@ impl Engine {
             Vec<HostSolidMaskOperation>,
             Option<compat::HostRasterPreview>,
             bool,
+            bool,
             Option<bool>,
             u64,
             bool,
@@ -35331,6 +35379,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 None,
+                false,
                 false,
                 None,
                 next_object_id,
@@ -35368,6 +35417,7 @@ impl Engine {
         let mut pending_other_objects = Vec::new();
         let mut pending_solid_mask_operations = Vec::new();
         let mut solid_mask_changed = false;
+        let mut action_callbacks_dispatched = false;
         let mut change_def_reinsert = None;
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
@@ -35988,13 +36038,12 @@ impl Engine {
             }
 
             if let Some(update) = object_update {
-                if let Some(new_definition) = update.change_def.as_deref() {
-                    // Later callbacks in this same deferred batch must see
-                    // the carrier's new live definition, just as
-                    // C4Effect::OnObjectChangedDef immediately reassigns
-                    // every callback pointer.
-                    world.preview_object_change_def(object_id, new_definition);
-                }
+                // Later callbacks in this same deferred batch must see the
+                // carrier's complete live update. C++ mutates the object in
+                // place; in particular, consecutive DigFree callbacks share
+                // MaterialContents rather than reseeding from the batch's
+                // entry snapshot.
+                world.preview_object_update(object_id, &update);
                 solid_mask_changed |= update.change_def.is_some()
                     || update.solid_mask_override.is_some()
                     || update.base_graphics.is_some()
@@ -36032,6 +36081,7 @@ impl Engine {
                     .as_ref()
                     .map(|action| action.callbacks_dispatched)
                     .unwrap_or(false);
+                action_callbacks_dispatched |= callbacks_dispatched;
                 let outcome = object.apply_delta(&delta, callback_action_library);
                 if definition_changed {
                     if let Some(current_definition) = definitions.get(&object.definition_id) {
@@ -36189,6 +36239,7 @@ impl Engine {
             pending_solid_mask_operations,
             host_raster_preview,
             solid_mask_changed,
+            action_callbacks_dispatched,
             change_def_reinsert,
             next_object_id,
             game_over_requested,
@@ -53077,63 +53128,59 @@ impl Engine {
             return;
         }
 
-        let (creator, position, bottom, layer) = {
-            let object = &self.objects[idx];
-            let position = object.state.position;
-            let bottom = object
-                .state
-                .shape_override
-                .or_else(|| object.current_shape_rect())
-                .map_or(position.y, |shape| {
+        self.objects[idx].ensure_material_capacity(self.materials.len());
+        let casts = self
+            .materials
+            .iter()
+            .filter_map(|material| {
+                Some((
+                    material.id(),
+                    material.dig_to_object_name()?.to_string(),
+                    material.dig_to_object_ratio()?,
+                    material.dig_to_object_on_request_only(),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        // C4Object::DigOutMaterialCast walks materials inline. Each
+        // CreateObject lifecycle may move, reshape, relayer, or add contents
+        // to the digger before the next material is considered; reset only
+        // the current bucket after that lifecycle returns.
+        for (material, definition_id, ratio, on_request_only) in casts {
+            if ratio == 0 || (on_request_only && !requested) {
+                continue;
+            }
+            let current = self.objects[idx].material_content(material);
+            if current == 0 || current < ratio {
+                continue;
+            }
+            let (creator, spawn_position, layer) = {
+                let object = &self.objects[idx];
+                let position = object.state.position;
+                let bottom = object.current_shape_rect().map_or(position.y, |shape| {
                     position
                         .y
                         .saturating_add(shape.y)
                         .saturating_add(shape.height)
                 });
-            (object.id, position, bottom, object.state.layer)
-        };
-
-        let mut spawn_definitions: Vec<DefinitionId> = Vec::new();
-
-        {
-            let object = &mut self.objects[idx];
-            object.ensure_material_capacity(self.materials.len());
-            for material in self.materials.iter() {
-                let Some(definition_id) = material.dig_to_object_name() else {
-                    continue;
-                };
-                let Some(ratio) = material.dig_to_object_ratio() else {
-                    continue;
-                };
-                if ratio <= 0 {
-                    continue;
-                }
-                if material.dig_to_object_on_request_only() && !requested {
-                    continue;
-                }
-                let current = object.material_content(material.id());
-                if current < ratio {
-                    continue;
-                }
-                object.set_material_content(material.id(), 0);
-                spawn_definitions.push(definition_id.to_string());
-            }
-        }
-
-        let spawn_position = Vector2::new(position.x, bottom);
-        for definition_id in spawn_definitions {
+                (
+                    object.id,
+                    Vector2::new(position.x, bottom),
+                    object.state.layer,
+                )
+            };
             let rotation = self.rng.random(360);
-            if !self.definitions.contains_key(&definition_id) {
-                continue;
+            if self.definitions.contains_key(&definition_id) {
+                let mut config = SpawnConfig::new(definition_id)
+                    .with_position(spawn_position)
+                    .with_owner(OWNER_NONE)
+                    .with_rotation(rotation);
+                if let Some(layer) = layer {
+                    config = config.with_layer(layer);
+                }
+                let _ = self.spawn_object_with_initial_lifecycle(config, Some(creator));
             }
-            let mut config = SpawnConfig::new(definition_id)
-                .with_position(spawn_position)
-                .with_owner(OWNER_NONE)
-                .with_rotation(rotation);
-            if let Some(layer) = layer {
-                config = config.with_layer(layer);
-            }
-            let _ = self.spawn_object_with_initial_lifecycle(config, Some(creator));
+            self.objects[idx].set_material_content(material, 0);
         }
     }
 
@@ -53155,6 +53202,9 @@ impl Engine {
                     requested,
                     by_object,
                 } => self.execute_dig_circle_operation(center, radius, requested, by_object),
+                LandscapeOperation::DigCirclePreviewed { center, radius } => {
+                    self.execute_dig_circle_pixels_only(center, radius)
+                }
                 LandscapeOperation::DigRect {
                     origin,
                     width,
@@ -53162,6 +53212,11 @@ impl Engine {
                     requested,
                     by_object,
                 } => self.execute_dig_rect_operation(origin, width, height, requested, by_object),
+                LandscapeOperation::DigRectPreviewed {
+                    origin,
+                    width,
+                    height,
+                } => self.execute_dig_rect_pixels_only(origin, width, height),
                 LandscapeOperation::ClearRect {
                     origin,
                     width,
@@ -53268,6 +53323,11 @@ impl Engine {
                     radius,
                     controller,
                 } => self.execute_blast_circle_operation(center, radius, controller),
+                LandscapeOperation::BlastCirclePreviewed {
+                    center,
+                    radius,
+                    replay,
+                } => self.execute_blast_replay(center, radius, replay),
                 LandscapeOperation::ShakeCircle { center, radius } => {
                     self.execute_shake_circle_operation(center, radius)
                 }
@@ -53479,6 +53539,19 @@ impl Engine {
         requested: bool,
         by_object: Option<ObjectId>,
     ) {
+        self.execute_dig_circle_operation_inner(center, radius, Some((requested, by_object)));
+    }
+
+    fn execute_dig_circle_pixels_only(&mut self, center: Vector2, radius: i32) {
+        self.execute_dig_circle_operation_inner(center, radius, None);
+    }
+
+    fn execute_dig_circle_operation_inner(
+        &mut self,
+        center: Vector2,
+        radius: i32,
+        material_accounting: Option<(bool, Option<ObjectId>)>,
+    ) {
         if radius <= 0 {
             return;
         }
@@ -53542,7 +53615,9 @@ impl Engine {
                 }
             }
         }
-        self.apply_dig_removal_counts(removal_counts, requested, by_object);
+        if let Some((requested, by_object)) = material_accounting {
+            self.apply_dig_removal_counts(removal_counts, requested, by_object);
+        }
     }
 
     fn execute_dig_rect_operation(
@@ -53552,6 +53627,30 @@ impl Engine {
         height: i32,
         requested: bool,
         by_object: Option<ObjectId>,
+    ) {
+        self.execute_dig_rect_operation_inner(
+            origin,
+            width,
+            height,
+            Some((requested, by_object)),
+        );
+    }
+
+    fn execute_dig_rect_pixels_only(
+        &mut self,
+        origin: Vector2,
+        width: i32,
+        height: i32,
+    ) {
+        self.execute_dig_rect_operation_inner(origin, width, height, None);
+    }
+
+    fn execute_dig_rect_operation_inner(
+        &mut self,
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        material_accounting: Option<(bool, Option<ObjectId>)>,
     ) {
         if width <= 0 || height <= 0 {
             return;
@@ -53593,7 +53692,9 @@ impl Engine {
                 }
             }
         }
-        self.apply_dig_removal_counts(removal_counts, requested, by_object);
+        if let Some((requested, by_object)) = material_accounting {
+            self.apply_dig_removal_counts(removal_counts, requested, by_object);
+        }
     }
 
     /// `Landscape::ClearRect/ClearRectDensity` (FnFreeRect, C4Script.cpp:
@@ -53736,6 +53837,102 @@ impl Engine {
             return;
         }
         let _ = self.blast_circle(center, radius, controller);
+    }
+
+    fn execute_blast_replay(
+        &mut self,
+        center: Vector2,
+        radius: i32,
+        replay: BlastReplay,
+    ) {
+        match replay.pixels {
+            BlastPixelReplay::Raster {
+                steps,
+                pixel_count_by_material,
+            } => {
+                let mut result = BlastResult {
+                    pixel_count_by_material,
+                    ..BlastResult::default()
+                };
+                let mut changed_columns = HashSet::new();
+                for step in steps {
+                    if let Some(byte) = step.shift_byte {
+                        if self.landscape.as_mut().is_some_and(|landscape| {
+                            landscape.insert_material_texture_pix(
+                                step.position.x,
+                                step.position.y,
+                                byte,
+                            )
+                        }) {
+                            changed_columns.insert(step.position.x);
+                        }
+                    }
+                    if step.clear
+                        && self.landscape.as_mut().is_some_and(|landscape| {
+                            landscape.clear_pix(step.position.x, step.position.y)
+                        })
+                    {
+                        if let Some(material) = step.original_material {
+                            *result.removed_by_material.entry(material).or_insert(0) += 1;
+                        }
+                        changed_columns.insert(step.position.x);
+                    }
+                    self.check_instability_range(step.position.x, step.position.y);
+                }
+                if let Some((width, _)) = self
+                    .landscape
+                    .as_ref()
+                    .and_then(Landscape::grid_dimensions)
+                {
+                    let start = center.x.saturating_sub(radius).clamp(0, width) as usize;
+                    let end = center
+                        .x
+                        .saturating_add(radius)
+                        .saturating_add(1)
+                        .clamp(0, width) as usize;
+                    if let Some(landscape) = self.landscape.as_mut() {
+                        landscape.refresh_raster_columns(start..end);
+                        for x in start..end {
+                            let x = x as i32;
+                            if changed_columns.contains(&x) {
+                                if let Some(surface) = landscape.surface_height(x) {
+                                    result.affected_columns.push((x, surface));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            BlastPixelReplay::Column { shift_decisions } => {
+                let result = self
+                    .landscape
+                    .as_mut()
+                    .map(|landscape| landscape.blast_circle(center, radius, &self.materials))
+                    .unwrap_or_default();
+                if let Some(landscape) = self.landscape.as_mut() {
+                    for (candidate, should_shift) in
+                        result.shift_candidates.iter().zip(shift_decisions)
+                    {
+                        if should_shift && candidate.apply_column_shift && candidate.column >= 0 {
+                            landscape.set_solid_material(
+                                candidate.column as u32,
+                                Some(candidate.target),
+                            );
+                        }
+                    }
+                }
+                for ycnt in -radius..=radius {
+                    let remaining = i64::from(radius) * i64::from(radius)
+                        - i64::from(ycnt) * i64::from(ycnt);
+                    let line_width = (remaining.max(0) as f64).sqrt() as i32;
+                    let y = center.y.saturating_add(ycnt);
+                    for xcnt in -line_width..line_width + i32::from(line_width == 0) {
+                        self.check_instability_range(center.x.saturating_add(xcnt), y);
+                    }
+                }
+            }
+        }
+
     }
 
     #[doc(hidden)]
@@ -56246,6 +56443,9 @@ impl Engine {
         // (RemoveObject in a placer script, e.g. the grass distributor):
         // the object spawns and immediately ends Deleted like C++.
         let mut destroy_requested = false;
+        // The ordinary post-insertion StartCall is only for an object whose
+        // creation phases did not already execute SetAction synchronously.
+        let mut creation_action_callbacks_dispatched = false;
 
         // Call Construction() before Initialize()
         // Construction() initializes local variables that may be used in Initialize() or action callbacks
@@ -56291,6 +56491,8 @@ impl Engine {
                 next_object_id,
                 construction_error,
             ) = {
+                let world =
+                    self.host_world_context_for_pending_object(&object, initial_exec_position);
                 let definition = self
                     .definitions
                     .get(&definition_id)
@@ -56303,7 +56505,7 @@ impl Engine {
                     self.physics,
                     self.environment,
                     self.frame,
-                    self.host_world_context(),
+                    world,
                     self.game_over_triggered,
                     self.audio_registry.clone(),
                 )?
@@ -56382,18 +56584,25 @@ impl Engine {
             if change_def.is_some() {
                 change_def_reinsert = callback_change_def_reinsert;
             }
+            let callbacks_dispatched = delta
+                .action
+                .as_ref()
+                .is_some_and(|action| action.callbacks_dispatched);
+            creation_action_callbacks_dispatched |= callbacks_dispatched;
             let outcome = object.apply_delta(&delta, &callback_action_library);
             if change_def.is_some() {
                 if let Some(current_definition) = self.definitions.get(&object.definition_id) {
                     object.state.ocf = current_definition.compute_ocf(&object.state);
                 }
             }
-            // The object is not in self.objects yet, so creation-scope
-            // SetAction cannot run its nested callbacks through the world
-            // lookup. Keep this deferred stand-in even when the staged
-            // ActionUpdate carries callbacks_dispatched=true.
+            // A pending object is seeded into the callback world, so
+            // SetAction can run its Start/Abort calls synchronously just as
+            // it does after insertion. Only legacy/non-host action writes
+            // still need an engine-side deferred transition.
             if let Some(change) = outcome.action_change {
-                object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                if !callbacks_dispatched {
+                    object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                }
             }
             if let Some(change) = outcome.container_change {
                 container_changes.push(change);
@@ -56487,7 +56696,8 @@ impl Engine {
                 // landscape while folding Construction would split dirty
                 // generations. Replay only the ordered zone overlay that
                 // C++ kept live between the two callbacks.
-                let mut world = self.host_world_context();
+                let mut world =
+                    self.host_world_context_for_pending_object(&object, initial_exec_position);
                 for command in &deferred_transfer_zones {
                     world.preview_transfer_zone_command(command);
                 }
@@ -56583,16 +56793,23 @@ impl Engine {
             if change_def.is_some() {
                 change_def_reinsert = callback_change_def_reinsert;
             }
+            let callbacks_dispatched = delta
+                .action
+                .as_ref()
+                .is_some_and(|action| action.callbacks_dispatched);
+            creation_action_callbacks_dispatched |= callbacks_dispatched;
             let outcome = object.apply_delta(&delta, &callback_action_library);
             if change_def.is_some() {
                 if let Some(current_definition) = self.definitions.get(&object.definition_id) {
                     object.state.ocf = current_definition.compute_ocf(&object.state);
                 }
             }
-            // See the Construction fold above: this pre-insertion scope still
-            // owes the Start/Abort pair despite callbacks_dispatched.
+            // See the Construction fold above: callback-world SetAction has
+            // already completed its synchronous Start/Abort sequence.
             if let Some(change) = outcome.action_change {
-                object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                if !callbacks_dispatched {
+                    object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                }
             }
             if let Some(change) = outcome.container_change {
                 container_changes.push(change);
@@ -56629,7 +56846,8 @@ impl Engine {
         }
 
         if !effect_events.is_empty() {
-            let mut world = self.host_world_context();
+            let mut world =
+                self.host_world_context_for_pending_object(&object, initial_exec_position);
             for command in &deferred_transfer_zones {
                 world.preview_transfer_zone_command(command);
             }
@@ -56658,6 +56876,7 @@ impl Engine {
                 effect_solid_mask_operations,
                 effect_host_raster_preview,
                 _effect_solid_mask_changed,
+                effect_action_callbacks_dispatched,
                 effect_change_def_reinsert,
                 effect_next_object_id,
                 triggered_game_over,
@@ -56686,6 +56905,7 @@ impl Engine {
             );
             self.rng = new_rng;
             self.audio_registry = audio_state;
+            creation_action_callbacks_dispatched |= effect_action_callbacks_dispatched;
             if let Some(marker) = effect_change_def_reinsert {
                 change_def_reinsert = marker;
             }
@@ -56810,7 +57030,9 @@ impl Engine {
         // Start/Abort callback synchronously before this materialization;
         // replaying it here double-fired Construction-selected actions.
         if !loaded && !initialized {
-            self.trigger_action_callbacks(index, None)?;
+            let previous_action = creation_action_callbacks_dispatched
+                .then(|| self.objects[index].state.action.name.clone());
+            self.trigger_action_callbacks(index, previous_action)?;
         }
         self.update_sector_for_index(index);
         Ok((id, additional_spawns, pending_nested_outcomes))
@@ -68052,6 +68274,123 @@ mod pathfinder_host_state_regression {
         assert!(
             engine.find_path(from, to, 1, true).is_none(),
             "the effect batch folds the clear into the authoritative table"
+        );
+    }
+
+    #[test]
+    fn effect_batch_threads_dig_contents_shape_and_layer() {
+        let library = lc_resources::MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            DigFree=1
+            Dig2Object=GEM_
+            Dig2ObjectRatio=2
+            "#,
+        )
+        .expect("dig material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mut engine = Engine::with_seed(59);
+        engine.set_materials(materials);
+        engine.set_landscape(pixel_landscape(2, 1, vec![1, 1]));
+
+        engine
+            .register_definition(
+                Definition::from_script("LAYR", "Layer", "")
+                    .expect("layer definition compiles"),
+            )
+            .expect("layer definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("GEM_", "Gem", "")
+                    .expect("gem definition compiles"),
+            )
+            .expect("gem definition registers");
+        let mut digger = Definition::from_script(
+            "FXDG",
+            "Effect digger",
+            r#"
+                #strict 3
+                func Arm()
+                {
+                    AddEffect("First", this(), 200, 1, this());
+                    AddEffect("Second", this(), 100, 1, this());
+                }
+
+                func FxFirstTimer()
+                {
+                    DigFreeRect(0, 0, 1, 1);
+                    SetPosition(10, 20);
+                    SetShape(-1, 3, 4, 7);
+                    SetObjectLayer(FindObject(LAYR));
+                    return 0;
+                }
+
+                func FxSecondTimer()
+                {
+                    DigFreeRect(1, 0, 1, 1);
+                    return 0;
+                }
+            "#,
+        )
+        .expect("effect digger compiles");
+        digger.set_c4_callback_convention(true);
+        digger.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 2)));
+        engine
+            .register_definition(digger)
+            .expect("effect digger registers");
+
+        let layer = engine
+            .spawn_object(SpawnConfig::new("LAYR"))
+            .expect("layer spawns");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("FXDG"))
+            .expect("effect digger spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_index, "Arm", Vec::new())
+            .expect("effects arm");
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let first = engine.objects[actor_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "First")
+            .cloned()
+            .expect("first effect exists");
+        let second = engine.objects[actor_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Second")
+            .cloned()
+            .expect("second effect exists");
+        let definition_id = engine.objects[actor_index].definition_id.clone();
+
+        engine
+            .dispatch_object_effect_events(
+                actor_index,
+                &definition_id,
+                vec![EffectEvent::timer(first), EffectEvent::timer(second)],
+            )
+            .expect("effect batch executes");
+
+        let gems = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "GEM_" && !object.destroyed)
+            .collect::<Vec<_>>();
+        assert_eq!(gems.len(), 1, "both callbacks share material credit");
+        assert_eq!(
+            gems[0].state.position,
+            Vector2::new(10, 30),
+            "the second callback uses the first callback's shape and position"
+        );
+        assert_eq!(
+            gems[0].state.layer,
+            Some(layer),
+            "the second callback uses the first callback's layer"
         );
     }
 
