@@ -30,6 +30,7 @@ mod prepared_host_bootstrap;
 mod save_browser;
 mod settings;
 mod startup_player_files;
+mod system_fonts;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map::DefaultHasher};
@@ -1457,6 +1458,7 @@ struct ClassicStartupFontBundle {
 #[derive(Clone)]
 struct ClassicNativeFontSource {
     bytes: Arc<[u8]>,
+    face_index: u32,
 }
 
 fn classic_font_request(paths: &AppPaths, scenario_font: Option<&str>) -> Result<(String, i32)> {
@@ -1513,23 +1515,24 @@ fn build_classic_font_spec(
         ResolvedFontSpec::Vector {
             face,
             bytes,
+            face_index,
             size,
             weight,
         } => {
-            let bytes = match bytes {
-                Some(bytes) => bytes,
-                None => Arc::from(
-                    fs::read(&face)
-                        .with_context(|| format!("classic font face `{face}` is unavailable"))?
-                        .into_boxed_slice(),
-                ),
-            };
+            let bytes = bytes
+                .with_context(|| format!("classic font face `{face}` was not resolved"))?;
             let size = u32::try_from(size)
                 .ok()
                 .filter(|size| *size > 0)
                 .with_context(|| format!("classic font `{face}` has invalid size {size}"))?;
-            lc_frontend::clonk_fonts::build_vector_font(&bytes, size, weight, shadow)
-                .with_context(|| format!("failed to initialize classic vector font `{face}`"))
+            lc_frontend::clonk_fonts::build_vector_font_face(
+                &bytes,
+                face_index,
+                size,
+                weight,
+                shadow,
+            )
+            .with_context(|| format!("failed to initialize classic vector font `{face}`"))
         }
         ResolvedFontSpec::Bitmap { filename, indent } => {
             let image = load_classic_bitmap_font_image(&filename, registrations, graphics)?;
@@ -1544,6 +1547,48 @@ fn build_classic_font_spec(
     }
 }
 
+fn resolve_classic_font_spec(
+    spec: ResolvedFontSpec,
+    system_fonts: &dyn system_fonts::SystemFontProvider,
+) -> Result<ResolvedFontSpec> {
+    let ResolvedFontSpec::Vector {
+        face,
+        bytes,
+        face_index,
+        size,
+        weight,
+    } = spec
+    else {
+        return Ok(spec);
+    };
+    if bytes.is_some() {
+        return Ok(ResolvedFontSpec::Vector {
+            face,
+            bytes,
+            face_index,
+            size,
+            weight,
+        });
+    }
+
+    let (bytes, face_index) = match fs::read(&face) {
+        Ok(bytes) => (Arc::from(bytes.into_boxed_slice()), 0),
+        Err(_) => {
+            let resolved = system_fonts
+                .resolve(&face, weight)
+                .with_context(|| format!("classic font face `{face}` is unavailable"))?;
+            (resolved.bytes, resolved.face_index)
+        }
+    };
+    Ok(ResolvedFontSpec::Vector {
+        face,
+        bytes: Some(bytes),
+        face_index,
+        size,
+        weight,
+    })
+}
+
 fn matching_native_font_source(
     title: &ResolvedFontSpec,
     caption: &ResolvedFontSpec,
@@ -1552,28 +1597,29 @@ fn matching_native_font_source(
     mini: &ResolvedFontSpec,
     tooltip: &ResolvedFontSpec,
 ) -> Option<ClassicNativeFontSource> {
-    let vector_bytes = |spec: &ResolvedFontSpec, expected_size: i32| match spec {
+    let vector_source = |spec: &ResolvedFontSpec, expected_size: i32| match spec {
         ResolvedFontSpec::Vector {
             bytes: Some(bytes),
+            face_index,
             size,
             weight,
             ..
-        } if *size == expected_size && *weight == 400 => Some(bytes.clone()),
+        } if *size == expected_size && *weight == 400 => Some((bytes.clone(), *face_index)),
         _ => None,
     };
     let sources = [
-        vector_bytes(title, 22)?,
-        vector_bytes(caption, 16)?,
-        vector_bytes(text, 14)?,
-        vector_bytes(main_small?, 13)?,
-        vector_bytes(mini, 12)?,
-        vector_bytes(tooltip, 14)?,
+        vector_source(title, 22)?,
+        vector_source(caption, 16)?,
+        vector_source(text, 14)?,
+        vector_source(main_small?, 13)?,
+        vector_source(mini, 12)?,
+        vector_source(tooltip, 14)?,
     ];
-    let bytes = sources[0].clone();
+    let (bytes, face_index) = sources[0].clone();
     sources
         .iter()
-        .all(|candidate| candidate.as_ref() == bytes.as_ref())
-        .then_some(ClassicNativeFontSource { bytes })
+        .all(|candidate| candidate.0.as_ref() == bytes.as_ref() && candidate.1 == face_index)
+        .then_some(ClassicNativeFontSource { bytes, face_index })
 }
 
 fn resolve_classic_font_bundle(
@@ -1599,10 +1645,28 @@ fn resolve_classic_font_bundle_for_request(
     catalog_registrations: &[LoaderGroupRegistration],
     graphics_registrations: &[LoaderGroupRegistration],
 ) -> Result<ClassicFontBundle> {
+    resolve_classic_font_bundle_for_request_with_system_fonts(
+        paths,
+        request,
+        base_size,
+        catalog_registrations,
+        graphics_registrations,
+        system_fonts::installed_system_fonts(),
+    )
+}
+
+fn resolve_classic_font_bundle_for_request_with_system_fonts(
+    paths: &AppPaths,
+    request: &str,
+    base_size: i32,
+    catalog_registrations: &[LoaderGroupRegistration],
+    graphics_registrations: &[LoaderGroupRegistration],
+    system_fonts: &dyn system_fonts::SystemFontProvider,
+) -> Result<ClassicFontBundle> {
     let catalog = load_classic_font_catalog(paths, catalog_registrations)?;
     let graphics = main_graphics_group(paths)?;
     let resolve = |role, apply_definition| {
-        catalog
+        let spec = catalog
             .resolve(&request, base_size, role, apply_definition)
             .with_context(|| {
                 format!(
@@ -1615,7 +1679,8 @@ fn resolve_classic_font_bundle_for_request(
                         FontRole::Title => "TitleFont",
                     }
                 )
-            })
+            })?;
+        resolve_classic_font_spec(spec, system_fonts)
     };
     let build = |spec: &ResolvedFontSpec, shadow| {
         build_classic_font_spec(spec.clone(), graphics_registrations, &graphics, shadow)
@@ -1667,14 +1732,33 @@ fn resolve_classic_startup_font_bundle_for_request(
     catalog_registrations: &[LoaderGroupRegistration],
     graphics_registrations: &[LoaderGroupRegistration],
 ) -> Result<ClassicStartupFontBundle> {
+    resolve_classic_startup_font_bundle_for_request_with_system_fonts(
+        paths,
+        request,
+        base_size,
+        catalog_registrations,
+        graphics_registrations,
+        system_fonts::installed_system_fonts(),
+    )
+}
+
+fn resolve_classic_startup_font_bundle_for_request_with_system_fonts(
+    paths: &AppPaths,
+    request: &str,
+    base_size: i32,
+    catalog_registrations: &[LoaderGroupRegistration],
+    graphics_registrations: &[LoaderGroupRegistration],
+    system_fonts: &dyn system_fonts::SystemFontProvider,
+) -> Result<ClassicStartupFontBundle> {
     use lc_graphics::clonk_font::ClonkFontRole;
 
     let catalog = load_classic_font_catalog(paths, catalog_registrations)?;
     let graphics = main_graphics_group(paths)?;
     let resolve = |role| {
-        catalog
+        let spec = catalog
             .resolve(request, base_size, role, true)
-            .with_context(|| format!("classic startup font `{request}` has no {role:?} mapping"))
+            .with_context(|| format!("classic startup font `{request}` has no {role:?} mapping"))?;
+        resolve_classic_font_spec(spec, system_fonts)
     };
     let build = |spec: ResolvedFontSpec| {
         build_classic_font_spec(spec, graphics_registrations, &graphics, false)
@@ -20761,7 +20845,11 @@ impl GameApp {
             self.native_startup_fonts = None;
             return;
         };
-        let fonts = lc_frontend::clonk_fonts::build_native_font_set(&source.bytes, scale);
+        let fonts = lc_frontend::clonk_fonts::build_native_font_set_face(
+            &source.bytes,
+            source.face_index,
+            scale,
+        );
         match fonts {
             Ok(fonts) => {
                 self.native_startup_fonts = Some(Arc::new(fonts));
@@ -20783,7 +20871,11 @@ impl GameApp {
             return None;
         }
         let source = source?;
-        match lc_frontend::clonk_fonts::build_native_font_set(&source.bytes, scale) {
+        match lc_frontend::clonk_fonts::build_native_font_set_face(
+            &source.bytes,
+            source.face_index,
+            scale,
+        ) {
             Ok(fonts) => Some(Arc::new(fonts)),
             Err(error) => {
                 tracing::warn!(%error, scale, "failed to build scale-native active fonts");
@@ -46062,6 +46154,19 @@ impl GameApp {
         selected_face: Option<String>,
         selected_size: Option<i32>,
     ) -> Result<(), EngineError> {
+        self.apply_options_font_selection_with_system_fonts(
+            selected_face,
+            selected_size,
+            system_fonts::installed_system_fonts(),
+        )
+    }
+
+    fn apply_options_font_selection_with_system_fonts(
+        &mut self,
+        selected_face: Option<String>,
+        selected_size: Option<i32>,
+        system_fonts: &dyn system_fonts::SystemFontProvider,
+    ) -> Result<(), EngineError> {
         let Some((current_face, current_size)) =
             self.startup_options_dialog.as_ref().map(|dialog| {
                 (
@@ -46084,19 +46189,21 @@ impl GameApp {
         };
         let resources = (|| -> Result<_> {
             let registrations = startup_loader_registrations(paths)?;
-            let gui = resolve_classic_font_bundle_for_request(
+            let gui = resolve_classic_font_bundle_for_request_with_system_fonts(
                 paths,
                 &face,
                 size,
                 &registrations,
                 &registrations,
+                system_fonts,
             )?;
-            let startup = resolve_classic_startup_font_bundle_for_request(
+            let startup = resolve_classic_startup_font_bundle_for_request_with_system_fonts(
                 paths,
                 &face,
                 size,
                 &registrations,
                 &registrations,
+                system_fonts,
             )?;
             Ok((gui, startup))
         })();
@@ -101655,6 +101762,147 @@ ScenInfoArea=70,5,25,90
         assert_eq!(parse_classic_loader_i32("123tail"), None);
     }
 
+    struct FakeSystemFontProvider {
+        family: String,
+        bytes: Arc<[u8]>,
+        face_index: u32,
+        requests: Mutex<Vec<(String, u32)>>,
+    }
+
+    impl FakeSystemFontProvider {
+        fn new(family: impl Into<String>, bytes: impl Into<Arc<[u8]>>) -> Self {
+            Self {
+                family: family.into(),
+                bytes: bytes.into(),
+                face_index: 0,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<(String, u32)> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        fn clear_requests(&self) {
+            self.requests.lock().unwrap().clear();
+        }
+    }
+
+    impl system_fonts::SystemFontProvider for FakeSystemFontProvider {
+        fn resolve(&self, family: &str, weight: u32) -> Option<system_fonts::SystemFontFace> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((family.to_string(), weight));
+            self.family
+                .eq_ignore_ascii_case(family)
+                .then(|| system_fonts::SystemFontFace {
+                    bytes: self.bytes.clone(),
+                    face_index: self.face_index,
+                })
+        }
+    }
+
+    #[test]
+    fn l091_system_family_fallback_preserves_precedence_and_failure_boundary() {
+        let _lock = env_lock().lock();
+        let root = tempdir().expect("system font fixture");
+        install_global_gui_and_loader_test_root(root.path());
+        let user = root.path().join("user");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root.path())),
+            ("LC_CONTENT_DIR", None),
+            ("LC_USER_DATA_DIR", Some(user.as_path())),
+        ]);
+        let paths = AppPaths::discover().expect("system font paths");
+        paths.ensure_user_dirs().expect("system font user dirs");
+        let font_bytes: Arc<[u8]> = fs::read(root.path().join("planet/System.c4g/Endeavour.ttf"))
+            .expect("fixture vector font")
+            .into();
+        let provider = FakeSystemFontProvider::new("Mock System Face", font_bytes.clone());
+
+        let gui = resolve_classic_font_bundle_for_request_with_system_fonts(
+            &paths,
+            "mock system face",
+            14,
+            &[],
+            &[],
+            &provider,
+        )
+        .expect("exact case-insensitive system family resolves GUI fonts");
+        let native = gui
+            .native_source
+            .expect("raw-size system family keeps a scale-native source");
+        assert_eq!(native.bytes.as_ref(), font_bytes.as_ref());
+        assert_eq!(native.face_index, 0);
+        resolve_classic_startup_font_bundle_for_request_with_system_fonts(
+            &paths,
+            "MOCK SYSTEM FACE",
+            14,
+            &[],
+            &[],
+            &provider,
+        )
+        .expect("same system family resolves the startup book fonts");
+        assert!(
+            provider
+                .requests()
+                .iter()
+                .all(|(_, weight)| *weight == 400),
+            "the requested FontDef weight reaches system lookup"
+        );
+
+        provider.clear_requests();
+        resolve_classic_font_bundle_for_request_with_system_fonts(
+            &paths,
+            "Endeavour",
+            14,
+            &[],
+            &[],
+            &provider,
+        )
+        .expect("catalog font wins before system lookup");
+        assert!(provider.requests().is_empty());
+
+        let explicit_face = root.path().join("ExplicitFace.ttf");
+        fs::write(&explicit_face, font_bytes.as_ref()).expect("explicit font file");
+        resolve_classic_font_bundle_for_request_with_system_fonts(
+            &paths,
+            explicit_face.to_str().expect("UTF-8 fixture path"),
+            14,
+            &[],
+            &[],
+            &provider,
+        )
+        .expect("readable explicit file wins before system lookup");
+        assert!(provider.requests().is_empty());
+
+        let missing = resolve_classic_font_bundle_for_request_with_system_fonts(
+            &paths,
+            "Definitely Missing Font",
+            14,
+            &[],
+            &[],
+            &provider,
+        )
+        .err()
+        .expect("genuinely missing family keeps the typed failure boundary");
+        assert!(missing.to_string().contains("is unavailable"));
+
+        let malformed = FakeSystemFontProvider::new("Malformed System Face", b"not a font".as_slice());
+        let error = resolve_classic_font_bundle_for_request_with_system_fonts(
+            &paths,
+            "Malformed System Face",
+            14,
+            &[],
+            &[],
+            &malformed,
+        )
+        .err()
+        .expect("malformed system bytes cannot be substituted or accepted");
+        assert!(error.to_string().contains("failed to initialize classic vector font"));
+    }
+
     #[test]
     fn general_font_size_sixteen_builds_the_cpp_derived_app_bundle() {
         let _lock = env_lock().lock();
@@ -103523,6 +103771,137 @@ ScenInfoArea=70,5,25,90
                 .message(),
             "Error initializing fonts"
         );
+    }
+
+    #[test]
+    fn l091_options_system_font_rebuilds_persists_and_rolls_back_missing_face() {
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        fs::write(
+            paths.config_file(),
+            "[General]\nFontName=Endeavour\nFontSize=14\n",
+        )
+        .expect("seed font config");
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_options_menu();
+        app.configure_native_startup_fonts(2.0, false);
+
+        let prior_gui = app.assets.clonk_fonts.clone().expect("initial GUI fonts");
+        let prior_book = app.assets.book_fonts.clone().expect("initial book fonts");
+        let prior_options = app
+            .assets
+            .options_book_fonts
+            .clone()
+            .expect("initial options fonts");
+        let prior_player = app
+            .assets
+            .plrsel_book_fonts
+            .clone()
+            .expect("initial player-selection fonts");
+        let font_bytes: Arc<[u8]> = fs::read(install_root.join("planet/System.c4g/Endeavour.ttf"))
+            .expect("valid fake-provider font bytes")
+            .into();
+        let provider = FakeSystemFontProvider::new("Mock System Face", font_bytes.clone());
+        let dialog_count = app.message_dialogs.len();
+
+        app.apply_options_font_selection_with_system_fonts(
+            Some("Mock System Face".to_string()),
+            None,
+            &provider,
+        )
+        .expect("select fake-provider system face");
+
+        assert_eq!(app.message_dialogs.len(), dialog_count);
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("reopened Options")
+                .program()
+                .font_face,
+            "Mock System Face"
+        );
+        let config = Config::load(paths.config_file()).expect("reload system font selection");
+        assert_eq!(
+            config.get_in(Some("General"), "FontName"),
+            Some("Mock System Face")
+        );
+        assert!(!Arc::ptr_eq(
+            app.assets.clonk_fonts.as_ref().unwrap(),
+            &prior_gui
+        ));
+        assert!(!Arc::ptr_eq(
+            app.assets.book_fonts.as_ref().unwrap(),
+            &prior_book
+        ));
+        assert!(!Arc::ptr_eq(
+            app.assets.options_book_fonts.as_ref().unwrap(),
+            &prior_options
+        ));
+        assert!(!Arc::ptr_eq(
+            app.assets.plrsel_book_fonts.as_ref().unwrap(),
+            &prior_player
+        ));
+        let native_source = app
+            .assets
+            .startup_native_font_source
+            .as_ref()
+            .expect("system face retains scale-native source");
+        assert_eq!(native_source.bytes.as_ref(), font_bytes.as_ref());
+        assert_eq!(native_source.face_index, 0);
+        assert_eq!(
+            app.native_startup_fonts
+                .as_ref()
+                .expect("system face builds at application scale")
+                .scale(),
+            2.0
+        );
+
+        let selected_gui = app.assets.clonk_fonts.clone().unwrap();
+        let before_failure = fs::read(paths.config_file()).expect("config before missing face");
+        app.apply_options_font_selection_with_system_fonts(
+            Some("Definitely Missing Font".to_string()),
+            None,
+            &provider,
+        )
+        .expect("report unavailable system face");
+        assert_eq!(app.message_dialogs.len(), dialog_count + 1);
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .program()
+                .font_face,
+            "Mock System Face"
+        );
+        assert!(Arc::ptr_eq(
+            app.assets.clonk_fonts.as_ref().unwrap(),
+            &selected_gui
+        ));
+        assert_eq!(fs::read(paths.config_file()).unwrap(), before_failure);
     }
 
     #[test]

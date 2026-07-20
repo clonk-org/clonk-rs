@@ -33,6 +33,7 @@ png = "0.17"
 image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 freetype-rs = "0.38.0"
+ttf-parser = "0.25.1"
 thiserror = "1"
 gethostname = "1.0"
 

@@ -1497,9 +1497,22 @@ pub fn build_vector_font(
     weight: u32,
     shadow: bool,
 ) -> Result<ClonkFont> {
+    build_vector_font_face(ttf_bytes, 0, px_height, weight, shadow)
+}
+
+/// Builds one vector CStdFont from a selected face in a standalone font or
+/// TrueType/OpenType collection.
+pub fn build_vector_font_face(
+    ttf_bytes: &[u8],
+    face_index: u32,
+    px_height: u32,
+    weight: u32,
+    shadow: bool,
+) -> Result<ClonkFont> {
     let library = Library::init().context("FreeType init failed")?;
+    let face_index = isize::try_from(face_index).context("font face index exceeds FreeType")?;
     let face = library
-        .new_memory_face(ttf_bytes.to_vec(), 0)
+        .new_memory_face(ttf_bytes.to_vec(), face_index)
         .context("failed to load font face")?;
     build_font(&face, px_height, weight, shadow)
 }
@@ -1635,6 +1648,16 @@ pub fn build_native_font_set(
     ttf_bytes: &[u8],
     scale: impl Into<f64>,
 ) -> Result<NativeClonkFontSet> {
+    build_native_font_set_face(ttf_bytes, 0, scale)
+}
+
+/// Builds the scale-native GUI font set from a selected face in a standalone
+/// font or TrueType/OpenType collection.
+pub fn build_native_font_set_face(
+    ttf_bytes: &[u8],
+    face_index: u32,
+    scale: impl Into<f64>,
+) -> Result<NativeClonkFontSet> {
     let scale = scale.into();
     anyhow::ensure!(
         scale.is_finite() && scale > 0.0,
@@ -1643,8 +1666,9 @@ pub fn build_native_font_set(
     let scale = scale as f32;
     anyhow::ensure!(scale.is_finite(), "font scale exceeds f32 geometry");
     let library = Library::init().context("FreeType init failed")?;
+    let face_index = isize::try_from(face_index).context("font face index exceeds FreeType")?;
     let face = library
-        .new_memory_face(ttf_bytes.to_vec(), 0)
+        .new_memory_face(ttf_bytes.to_vec(), face_index)
         .context("failed to load font face")?;
     Ok(NativeClonkFontSet {
         title: build_native_font(&face, 22, scale, true)?,
@@ -1668,6 +1692,45 @@ mod tests {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../planet/System.c4g/Endeavour.ttf");
         std::fs::read(path).expect("read Endeavour.ttf")
+    }
+
+    fn duplicate_font_collection(font: &[u8]) -> Vec<u8> {
+        const TTC_HEADER_SIZE: u32 = 20;
+        let table_count = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        let mut embedded = font.to_vec();
+        for table in 0..table_count {
+            let offset_position = 12 + table * 16 + 8;
+            let offset = u32::from_be_bytes(
+                embedded[offset_position..offset_position + 4]
+                    .try_into()
+                    .expect("font table offset"),
+            );
+            embedded[offset_position..offset_position + 4]
+                .copy_from_slice(&offset.saturating_add(TTC_HEADER_SIZE).to_be_bytes());
+        }
+
+        let mut collection = Vec::with_capacity(TTC_HEADER_SIZE as usize + embedded.len());
+        collection.extend_from_slice(b"ttcf");
+        collection.extend_from_slice(&0x0001_0000_u32.to_be_bytes());
+        collection.extend_from_slice(&2_u32.to_be_bytes());
+        collection.extend_from_slice(&TTC_HEADER_SIZE.to_be_bytes());
+        collection.extend_from_slice(&TTC_HEADER_SIZE.to_be_bytes());
+        collection.extend_from_slice(&embedded);
+        collection
+    }
+
+    #[test]
+    fn l091_nonzero_collection_face_builds_logical_and_scale_native_fonts() {
+        let collection = duplicate_font_collection(&endeavour_bytes());
+        let logical = build_vector_font_face(&collection, 1, 14, 400, true)
+            .expect("build second collection face");
+        assert!(logical.glyph('A').is_some());
+
+        let native = build_native_font_set_face(&collection, 1, 2.0)
+            .expect("build second collection face at native scale");
+        assert_eq!(native.scale(), 2.0);
+        assert!(native.text.glyph('A').is_some());
+        assert!(build_vector_font_face(&collection, 2, 14, 400, true).is_err());
     }
 
     #[test]

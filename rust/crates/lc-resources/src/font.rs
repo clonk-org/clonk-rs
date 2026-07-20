@@ -80,6 +80,9 @@ pub enum ResolvedFontSpec {
     Vector {
         face: String,
         bytes: Option<Arc<[u8]>>,
+        /// Face within a TrueType/OpenType collection. Standalone catalog
+        /// fonts use zero; system-family lookup may select another face.
+        face_index: u32,
         size: i32,
         weight: u32,
     },
@@ -262,6 +265,7 @@ impl FontCatalog {
         Some(ResolvedFontSpec::Vector {
             face: face.to_string(),
             bytes,
+            face_index: 0,
             size,
             weight,
         })
@@ -469,6 +473,7 @@ TitleFont=LaterTitle
             let ResolvedFontSpec::Vector {
                 face,
                 bytes,
+                face_index,
                 size,
                 weight,
             } = catalog
@@ -479,6 +484,7 @@ TitleFont=LaterTitle
             };
             assert_eq!(face, "SomeFace");
             assert_eq!(bytes.as_deref(), Some(b"font bytes".as_slice()));
+            assert_eq!(face_index, 0);
             assert_eq!(size, expected_size);
             assert_eq!(weight, 400);
         }
