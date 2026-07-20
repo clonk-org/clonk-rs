@@ -1,5 +1,5 @@
-//! Classic `C4GameLobby::MainDlg` frontend, including its roster, resources
-//! and core Options sheets.
+//! Classic `C4GameLobby::MainDlg` frontend, including its roster, resources,
+//! core Options, and scenario-description sheets.
 //!
 //! The fullscreen lobby is a transparent overlay: the C++ dialog deliberately
 //! leaves the loader/game background in place.  This module therefore draws
@@ -32,6 +32,9 @@ const TAB_ICON_EXTENT: i32 = 16;
 const SCROLLBAR_EXTENT: i32 = 16;
 const TAB_SHEET_MARGIN: i32 = 4;
 const LIST_BOX_MARGIN: i32 = 3;
+const SCENARIO_TEXT_LEFT_MARGIN: i32 = 10;
+const SCENARIO_TEXT_RIGHT_MARGIN: i32 = 5;
+const SCENARIO_TEXT_VERTICAL_MARGIN: i32 = 8;
 const CLIENT_ROW_SPACING: i32 = 8;
 const DEFAULT_ROW_SPACING: i32 = 1;
 const PLAYER_ROW_INDENT: i32 = 3;
@@ -83,8 +86,7 @@ impl LobbyRole {
     }
 }
 
-/// A right-side sheet. Scenario remains a typed app-owned request; the other
-/// sheets have frontend presentation state.
+/// A right-side sheet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LobbySheet {
     Players,
@@ -92,6 +94,32 @@ pub enum LobbySheet {
     Resources,
     Options,
     Scenario,
+}
+
+/// Plain-text presentation installed into the lobby's `ScenDesc` window.
+/// Resource loading and RTF conversion remain app-owned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LobbyScenarioText {
+    /// Loading text or the native hard-coded scenario-file error.
+    Message(String),
+    /// A successfully loaded `Desc{}.rtf` component.
+    Description(String),
+    /// Scenario-title fallback when no nonempty description exists.
+    Title(String),
+}
+
+impl Default for LobbyScenarioText {
+    fn default() -> Self {
+        Self::Message(String::new())
+    }
+}
+
+impl LobbyScenarioText {
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Message(text) | Self::Description(text) | Self::Title(text) => text,
+        }
+    }
 }
 
 /// One of the always-defined core rows in the lobby Options sheet.
@@ -865,10 +893,24 @@ pub struct LobbyChatScrollMetrics {
     pub scroll: i32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LobbyScenarioScrollMetrics {
+    pub content_height: i32,
+    pub max_scroll: i32,
+    pub scroll: i32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WrappedLobbyLogLine {
     text: String,
     color: [u8; 4],
+    new_paragraph: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WrappedLobbyScenarioLine {
+    text: String,
+    title_font: bool,
     new_paragraph: bool,
 }
 
@@ -1405,6 +1447,10 @@ pub struct GameLobby {
     resource_scroll: i32,
     resource_max_scroll: i32,
     resource_scroll_pin: i32,
+    scenario_text: LobbyScenarioText,
+    scenario_scroll: i32,
+    scenario_max_scroll: i32,
+    scenario_scroll_pin: i32,
     option_scroll: i32,
     option_max_scroll: i32,
     option_scroll_pin: i32,
@@ -1472,6 +1518,10 @@ impl GameLobby {
             resource_scroll: 0,
             resource_max_scroll: 0,
             resource_scroll_pin: 0,
+            scenario_text: LobbyScenarioText::default(),
+            scenario_scroll: 0,
+            scenario_max_scroll: 0,
+            scenario_scroll_pin: 0,
             option_scroll: 0,
             option_max_scroll: 0,
             option_scroll_pin: 0,
@@ -1730,14 +1780,36 @@ impl GameLobby {
         self.resource_scroll
     }
 
+    pub const fn scenario_scroll(&self) -> i32 {
+        self.scenario_scroll
+    }
+
     pub const fn option_scroll(&self) -> i32 {
         self.option_scroll
+    }
+
+    pub fn scenario_text(&self) -> &LobbyScenarioText {
+        &self.scenario_text
+    }
+
+    pub fn set_scenario_text(&mut self, text: LobbyScenarioText) {
+        if self.scenario_text == text {
+            return;
+        }
+        self.scenario_text = text;
+        self.scenario_scroll = 0;
+        self.scenario_max_scroll = 0;
+        self.scenario_scroll_pin = 0;
     }
 
     /// Restores app-owned scroll state before a transient controller is
     /// laid out. `roster_layout` applies the current content clamp and pin.
     pub fn set_resource_scroll(&mut self, scroll: i32) {
         self.resource_scroll = scroll.max(0);
+    }
+
+    pub fn set_scenario_scroll(&mut self, scroll: i32) {
+        self.scenario_scroll = scroll.max(0);
     }
 
     pub fn set_option_scroll(&mut self, scroll: i32) {
@@ -1951,8 +2023,37 @@ impl GameLobby {
             layout.roster_scrollbar.y += LIST_BOX_MARGIN;
             layout.roster_scrollbar.h =
                 (layout.roster_scrollbar.h - 2 * LIST_BOX_MARGIN).max(0);
+        } else if self.active_sheet == LobbySheet::Scenario {
+            let bounds = layout.roster;
+            layout.roster_client = IntRect {
+                x: bounds.x + SCENARIO_TEXT_LEFT_MARGIN,
+                y: bounds.y + SCENARIO_TEXT_VERTICAL_MARGIN,
+                w: (bounds.w
+                    - SCENARIO_TEXT_LEFT_MARGIN
+                    - SCENARIO_TEXT_RIGHT_MARGIN
+                    - SCROLLBAR_EXTENT)
+                    .max(0),
+                h: (bounds.h - 2 * SCENARIO_TEXT_VERTICAL_MARGIN).max(0),
+            };
+            layout.roster_scrollbar = IntRect {
+                x: bounds.x + bounds.w - SCENARIO_TEXT_RIGHT_MARGIN - SCROLLBAR_EXTENT,
+                y: bounds.y + SCENARIO_TEXT_VERTICAL_MARGIN,
+                w: SCROLLBAR_EXTENT,
+                h: (bounds.h - 2 * SCENARIO_TEXT_VERTICAL_MARGIN).max(0),
+            };
         }
         layout
+    }
+
+    pub fn right_list_layout(
+        &mut self,
+        layout: &LobbyLayout,
+        fonts: &ClonkFontSet,
+    ) -> LobbyRosterLayout {
+        if self.active_sheet == LobbySheet::Scenario {
+            let _ = self.scenario_scroll_metrics(layout, fonts);
+        }
+        self.roster_layout(layout, fonts.text.line_height)
     }
 
     pub fn roster_layout(
@@ -1965,6 +2066,14 @@ impl GameLobby {
         }
         if self.active_sheet == LobbySheet::Options {
             return self.option_list_layout(layout, text_line_height);
+        }
+        if self.active_sheet == LobbySheet::Scenario {
+            return LobbyRosterLayout {
+                rows: Vec::new(),
+                content_height: layout.roster_client.h + self.scenario_max_scroll,
+                max_scroll: self.scenario_max_scroll,
+                collapsed: false,
+            };
         }
         if !self.active_sheet.is_roster() {
             return LobbyRosterLayout {
@@ -2217,6 +2326,85 @@ impl GameLobby {
                         wrapped.remove(0);
                     }
                 }
+            }
+        }
+        wrapped
+    }
+
+    pub fn scenario_scroll_metrics(
+        &mut self,
+        layout: &LobbyLayout,
+        fonts: &ClonkFontSet,
+    ) -> LobbyScenarioScrollMetrics {
+        let lines = self.wrapped_scenario_lines(layout, fonts);
+        let content_height = lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                let font = if line.title_font {
+                    &fonts.caption
+                } else {
+                    &fonts.text
+                };
+                font.line_height
+                    + if index > 0 && line.new_paragraph {
+                        font.line_height / 3
+                    } else {
+                        0
+                    }
+            })
+            .sum::<i32>();
+        let max_scroll = (content_height - layout.roster_client.h).max(0);
+        self.scenario_scroll = self.scenario_scroll.clamp(0, max_scroll);
+        if max_scroll != self.scenario_max_scroll {
+            self.scenario_scroll_pin = scroll_to_pin(
+                self.scenario_scroll,
+                max_scroll,
+                scrollbar_max_pin(layout.roster_scrollbar),
+            );
+            self.scenario_max_scroll = max_scroll;
+        }
+        LobbyScenarioScrollMetrics {
+            content_height,
+            max_scroll,
+            scroll: self.scenario_scroll,
+        }
+    }
+
+    fn wrapped_scenario_lines(
+        &self,
+        layout: &LobbyLayout,
+        fonts: &ClonkFontSet,
+    ) -> Vec<WrappedLobbyScenarioLine> {
+        let text = self.scenario_text.text();
+        let title_only = matches!(self.scenario_text, LobbyScenarioText::Title(_));
+        let first_description_line_is_title = matches!(
+            self.scenario_text,
+            LobbyScenarioText::Description(_)
+        ) && (text.contains('\r') || text.contains('\n'));
+        let mut wrapped = Vec::new();
+        for (paragraph_index, paragraph) in text
+            .split(['\r', '\n'])
+            .filter(|paragraph| !paragraph.is_empty())
+            .enumerate()
+        {
+            let title_font = title_only || first_description_line_is_title && paragraph_index == 0;
+            let font = if title_font {
+                &fonts.caption
+            } else {
+                &fonts.text
+            };
+            let physical_lines = break_message(font, paragraph, layout.roster_client.w.max(1));
+            for (physical_index, physical) in physical_lines
+                .split('\n')
+                .filter(|physical| !physical.is_empty())
+                .enumerate()
+            {
+                wrapped.push(WrappedLobbyScenarioLine {
+                    text: physical.to_string(),
+                    title_font,
+                    new_paragraph: physical_index == 0,
+                });
             }
         }
         wrapped
@@ -2911,6 +3099,10 @@ impl GameLobby {
                 self.resource_scroll = (self.resource_scroll - delta).clamp(0, roster.max_scroll);
                 self.resource_scroll_pin =
                     scroll_to_pin(self.resource_scroll, roster.max_scroll, max_pin);
+            } else if self.active_sheet == LobbySheet::Scenario {
+                self.scenario_scroll = (self.scenario_scroll - delta).clamp(0, roster.max_scroll);
+                self.scenario_scroll_pin =
+                    scroll_to_pin(self.scenario_scroll, roster.max_scroll, max_pin);
             } else if self.active_sheet == LobbySheet::Options {
                 self.option_scroll = (self.option_scroll - delta).clamp(0, roster.max_scroll);
                 self.option_scroll_pin =
@@ -3868,6 +4060,9 @@ impl GameLobby {
         if self.active_sheet == LobbySheet::Resources {
             self.resource_scroll_pin = pin;
             self.resource_scroll = scroll;
+        } else if self.active_sheet == LobbySheet::Scenario {
+            self.scenario_scroll_pin = pin;
+            self.scenario_scroll = scroll;
         } else if self.active_sheet == LobbySheet::Options {
             self.option_scroll_pin = pin;
             self.option_scroll = scroll;
@@ -3914,6 +4109,10 @@ impl GameLobby {
                     self.resource_scroll_pin = (self.resource_scroll_pin - 1).max(0);
                     self.resource_scroll =
                         pin_to_scroll(self.resource_scroll_pin, roster_max_scroll, max_pin);
+                } else if self.active_sheet == LobbySheet::Scenario {
+                    self.scenario_scroll_pin = (self.scenario_scroll_pin - 1).max(0);
+                    self.scenario_scroll =
+                        pin_to_scroll(self.scenario_scroll_pin, roster_max_scroll, max_pin);
                 } else if self.active_sheet == LobbySheet::Options {
                     self.option_scroll_pin = (self.option_scroll_pin - 1).max(0);
                     self.option_scroll =
@@ -3930,6 +4129,10 @@ impl GameLobby {
                     self.resource_scroll_pin = (self.resource_scroll_pin + 1).min(max_pin);
                     self.resource_scroll =
                         pin_to_scroll(self.resource_scroll_pin, roster_max_scroll, max_pin);
+                } else if self.active_sheet == LobbySheet::Scenario {
+                    self.scenario_scroll_pin = (self.scenario_scroll_pin + 1).min(max_pin);
+                    self.scenario_scroll =
+                        pin_to_scroll(self.scenario_scroll_pin, roster_max_scroll, max_pin);
                 } else if self.active_sheet == LobbySheet::Options {
                     self.option_scroll_pin = (self.option_scroll_pin + 1).min(max_pin);
                     self.option_scroll =
@@ -3949,7 +4152,7 @@ impl GameLobby {
             LobbySheet::Resources => self.resource_scroll_pin,
             LobbySheet::Options => self.option_scroll_pin,
             LobbySheet::Players | LobbySheet::Teams => self.roster_scroll_pin,
-            LobbySheet::Scenario => 0,
+            LobbySheet::Scenario => self.scenario_scroll_pin,
         }
     }
 
@@ -4235,10 +4438,10 @@ impl GameLobby {
             resources.fonts,
         );
         self.league_mode = option_buttons.values().lobby_is_league;
-        let roster = self.roster_layout(&layout, resources.fonts.text.line_height);
+        let roster = self.right_list_layout(&layout, resources.fonts);
         let _ = self.chat_scroll_metrics(&layout, &resources.fonts.text);
         self.advance_held_scrollbars(&layout, roster.max_scroll);
-        let roster = self.roster_layout(&layout, resources.fonts.text.line_height);
+        let roster = self.right_list_layout(&layout, resources.fonts);
         let chat_metrics = self.chat_scroll_metrics(&layout, &resources.fonts.text);
         ensure!(
             option_buttons.context() == self.role.game_option_context(),
@@ -4332,15 +4535,17 @@ impl GameLobby {
             gamma,
         );
         draw_3d_frame(surface, layout.right_tab, gamma);
-        draw_engine_box(
-            surface,
-            layout.roster.x,
-            layout.roster.y,
-            layout.roster.x + layout.roster.w - 1,
-            layout.roster.y + layout.roster.h - 1,
-            DARK_BACKGROUND,
-            gamma,
-        );
+        if self.active_sheet != LobbySheet::Scenario {
+            draw_engine_box(
+                surface,
+                layout.roster.x,
+                layout.roster.y,
+                layout.roster.x + layout.roster.w - 1,
+                layout.roster.y + layout.roster.h - 1,
+                DARK_BACKGROUND,
+                gamma,
+            );
+        }
         match self.active_sheet {
             LobbySheet::Players | LobbySheet::Teams => {
                 self.draw_roster(surface, &layout, &roster, resources, active, gamma)?
@@ -4351,18 +4556,20 @@ impl GameLobby {
             LobbySheet::Options => {
                 self.draw_option_rows(surface, &layout, &roster, resources, active, gamma)
             }
-            LobbySheet::Scenario => {}
+            LobbySheet::Scenario => self.draw_scenario_text(surface, &layout, resources, gamma),
         }
-        draw_scrollbar(
-            surface,
-            layout.roster_scrollbar,
-            resources.scroll,
-            self.right_list_scroll_pin(),
-            roster.max_scroll,
-            self.pointer_pressed == Some(HitTarget::RosterScrollTop),
-            self.pointer_pressed == Some(HitTarget::RosterScrollBottom),
-            gamma,
-        );
+        if self.active_sheet != LobbySheet::Scenario || roster.max_scroll > 0 {
+            draw_scrollbar(
+                surface,
+                layout.roster_scrollbar,
+                resources.scroll,
+                self.right_list_scroll_pin(),
+                roster.max_scroll,
+                self.pointer_pressed == Some(HitTarget::RosterScrollTop),
+                self.pointer_pressed == Some(HitTarget::RosterScrollBottom),
+                gamma,
+            );
+        }
 
         skin.draw_button(
             surface,
@@ -4421,7 +4628,7 @@ impl GameLobby {
         );
         option_buttons.render_tooltip(surface, option_resources, active, gamma)?;
         if active {
-            let roster = self.roster_layout(&layout, resources.fonts.text.line_height);
+            let roster = self.right_list_layout(&layout, resources.fonts);
             if let Some(tooltip) =
                 self.tooltip_state_with_roster_at(Instant::now(), &roster, &resources.fonts.text)
             {
@@ -4462,6 +4669,40 @@ impl GameLobby {
                 layout.chat_log_client,
             );
             y += resources.fonts.text.line_height;
+        }
+    }
+
+    fn draw_scenario_text(
+        &self,
+        surface: &mut Surface,
+        layout: &LobbyLayout,
+        resources: &LobbyResources<'_>,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let lines = self.wrapped_scenario_lines(layout, resources.fonts);
+        let mut y = layout.roster_client.y - self.scenario_scroll;
+        for (line_index, line) in lines.iter().enumerate() {
+            let font = if line.title_font {
+                &resources.fonts.caption
+            } else {
+                &resources.fonts.text
+            };
+            if line_index > 0 && line.new_paragraph {
+                y += font.line_height / 3;
+            }
+            draw_clipped_text_mode(
+                surface,
+                font,
+                layout.roster_client.x,
+                y,
+                &line.text,
+                COLOR_WHITE,
+                TextAlign::Left,
+                gamma,
+                layout.roster_client,
+                false,
+            );
+            y += font.line_height;
         }
     }
 
@@ -6678,6 +6919,54 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Some(LobbySheet::Teams)]
         );
+    }
+
+    #[test]
+    fn l108_scenario_sheet_uses_text_window_geometry_and_scrolls_overflow() {
+        let fonts = endeavour_font_set();
+        let mut lobby = lobby(LobbyRole::Host, vec![]);
+        lobby.set_active_sheet(LobbySheet::Scenario);
+        lobby.set_scenario_text(LobbyScenarioText::Description(
+            (0..80)
+                .map(|index| format!("Paragraph {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+
+        let layout = lobby.layout(640, 300, &fonts);
+        assert_eq!(layout.roster_client.x, layout.roster.x + 10);
+        assert_eq!(layout.roster_client.y, layout.roster.y + 8);
+        assert_eq!(
+            layout.roster_client.w,
+            layout.roster.w - 10 - 5 - SCROLLBAR_EXTENT
+        );
+        assert_eq!(layout.roster_client.h, layout.roster.h - 16);
+        assert_eq!(
+            layout.roster_scrollbar.x,
+            layout.roster.x + layout.roster.w - 5 - SCROLLBAR_EXTENT
+        );
+        assert_eq!(layout.roster_scrollbar.w, SCROLLBAR_EXTENT);
+
+        let scenario = lobby.right_list_layout(&layout, &fonts);
+        assert!(scenario.rows.is_empty());
+        assert!(scenario.max_scroll > 0);
+        let point = GuiPoint::new(
+            (layout.roster_client.x + 1) as f32,
+            (layout.roster_client.y + 1) as f32,
+        );
+        assert!(lobby.wheel(point, -10, &layout, &scenario));
+        assert_eq!(lobby.scenario_scroll(), 10);
+
+        lobby.set_scenario_text(LobbyScenarioText::Title("Gold Mine".to_string()));
+        let scenario = lobby.right_list_layout(&layout, &fonts);
+        assert_eq!(scenario.max_scroll, 0);
+        assert_eq!(lobby.scenario_scroll(), 0);
+        assert!(lobby.wrapped_scenario_lines(&layout, &fonts)[0].title_font);
+
+        lobby.set_scenario_text(LobbyScenarioText::Description(
+            "One-line description".to_string(),
+        ));
+        assert!(!lobby.wrapped_scenario_lines(&layout, &fonts)[0].title_font);
     }
 
     #[test]

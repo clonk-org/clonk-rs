@@ -114,7 +114,8 @@ use lc_frontend::game_lobby::{
     LobbyHeaderRow, LobbyJoinedPlayerOverlay, LobbyLabels, LobbyLayout, LobbyLogLine,
     LobbyOptionKind, LobbyOptionLabels, LobbyOptionRow, LobbyPlayerRow, LobbyResourceRow,
     LobbyResources, LobbyRole, LobbyRosterHeader, LobbyRosterIcon, LobbyRosterId, LobbyRosterLayout,
-    LobbyRosterRow, LobbySheet, LobbySound, LobbyTeamValue, core_lobby_option_rows,
+    LobbyRosterRow, LobbyScenarioText, LobbySheet, LobbySound, LobbyTeamValue,
+    core_lobby_option_rows,
 };
 use lc_frontend::game_option_buttons::{
     FairCrewConstraint, GameOptionAction, GameOptionButton, GameOptionButtons, GameOptionContext,
@@ -1096,6 +1097,23 @@ fn classic_language_packs(paths: &AppPaths) -> LanguagePacks {
     // similarly named containers under content/install roots must not be
     // concatenated into an invented precedence chain.
     LanguagePacks::discover(&[paths.planet_dir().join("Language.c4g")], &logical_roots)
+}
+
+fn load_lobby_scenario_description(
+    path: &Path,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+) -> std::result::Result<Option<String>, GroupError> {
+    let group = Group::open(path)?;
+    let components = language_packs.component_groups(&group, None, None);
+    for candidate in languages.iter().map(|code| format!("Desc{code}.rtf")) {
+        let Some(component) = components.read(candidate).ok().flatten() else {
+            continue;
+        };
+        let description = lc_resources::rtf::rtf_to_plain_text(&component.bytes);
+        return Ok((!description.is_empty()).then_some(description));
+    }
+    Ok(None)
 }
 
 fn mapped_classic_extra_group_path(paths: &AppPaths) -> Result<Option<PathBuf>> {
@@ -9044,6 +9062,39 @@ fn resolve_scenario_fair_crew_parameters(
     (use_fair_crew, fair_crew_strength)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LobbyScenarioDescriptionUpdate {
+    Loading(String),
+    Complete(LobbyScenarioText),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct LobbyScenarioDescriptionState {
+    text: LobbyScenarioText,
+    finished: bool,
+}
+
+impl LobbyScenarioDescriptionState {
+    fn apply(&mut self, update: Option<LobbyScenarioDescriptionUpdate>) -> bool {
+        if self.finished {
+            return false;
+        }
+        let Some(update) = update else {
+            return false;
+        };
+        let (text, finished) = match update {
+            LobbyScenarioDescriptionUpdate::Loading(text) => {
+                (LobbyScenarioText::Message(text), false)
+            }
+            LobbyScenarioDescriptionUpdate::Complete(text) => (text, true),
+        };
+        let changed = self.text != text || self.finished != finished;
+        self.text = text;
+        self.finished = finished;
+        changed
+    }
+}
+
 struct ClassicHostLobbyState {
     controller: ClassicGameLobby,
     pointer: Option<GuiPoint>,
@@ -9056,6 +9107,7 @@ struct ClassicHostLobbyState {
     /// C4Network2ResDlg keeps receiving network updates while inactive, but
     /// does not reconcile its visible rows until the sheet is activated.
     resource_rows: BTreeMap<i32, LobbyResourceRow>,
+    scenario_description: LobbyScenarioDescriptionState,
 }
 
 const RESTART_RESTORE_PLAYER_TEAMS: i32 = 0x2;
@@ -13552,6 +13604,8 @@ struct NetworkLobbyState {
     /// hidden; the reconstructed controller receives it only when active.
     resource_rows: BTreeMap<i32, LobbyResourceRow>,
     resource_scroll: i32,
+    scenario_description: LobbyScenarioDescriptionState,
+    scenario_scroll: i32,
     logs: Vec<LobbyLogLine>,
     chat_edit: LobbyChatEditView,
     chat_history_index: i32,
@@ -13823,6 +13877,8 @@ impl NetworkLobbyState {
             active_sheet: LobbySheet::Players,
             resource_rows: BTreeMap::new(),
             resource_scroll: 0,
+            scenario_description: LobbyScenarioDescriptionState::default(),
+            scenario_scroll: 0,
             logs: Vec::new(),
             chat_edit: LobbyChatEditView::default(),
             chat_history_index: -1,
@@ -14131,6 +14187,8 @@ impl NetworkLobbyState {
             rows,
         );
         controller.set_active_sheet(self.active_sheet);
+        controller.set_scenario_text(self.scenario_description.text.clone());
+        controller.set_scenario_scroll(self.scenario_scroll);
         if self.active_sheet == LobbySheet::Resources {
             controller.set_resource_rows(self.resource_rows.values().cloned().collect());
             controller.set_resource_scroll(self.resource_scroll);
@@ -14175,7 +14233,7 @@ impl NetworkLobbyState {
         let (mut controller, _) =
             self.classic_render_state(surface, assets, scenario_game_options)?;
         let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
-        let roster = controller.roster_layout(&layout, fonts.text.line_height);
+        let roster = controller.right_list_layout(&layout, fonts);
         Ok(controller
             .pointer_secondary_down(point, &layout, &roster)
             .into_iter()
@@ -14219,6 +14277,7 @@ impl NetworkLobbyState {
             )
         };
         self.resource_scroll = controller.resource_scroll();
+        self.scenario_scroll = controller.scenario_scroll();
         result
     }
 
@@ -14242,14 +14301,17 @@ impl NetworkLobbyState {
         )
     }
 
-    fn wheel_resources(
+    fn wheel_right_sheet(
         &mut self,
         delta: i32,
         surface: &Surface,
         assets: &FrontendAssets,
         scenario_game_options: &GameOptionButtons,
     ) -> Result<bool> {
-        if self.active_sheet != LobbySheet::Resources {
+        if !matches!(
+            self.active_sheet,
+            LobbySheet::Resources | LobbySheet::Scenario
+        ) {
             return Ok(false);
         }
         let Some(point) = self.pointer else {
@@ -14262,9 +14324,10 @@ impl NetworkLobbyState {
         let (mut controller, _) =
             self.classic_render_state(surface, assets, scenario_game_options)?;
         let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
-        let roster = controller.roster_layout(&layout, fonts.text.line_height);
+        let roster = controller.right_list_layout(&layout, fonts);
         let changed = controller.wheel(point, delta, &layout, &roster);
         self.resource_scroll = controller.resource_scroll();
+        self.scenario_scroll = controller.scenario_scroll();
         Ok(changed)
     }
 
@@ -23716,7 +23779,7 @@ impl GameApp {
                 }
             };
             let changed = match self.network_lobby.as_mut() {
-                Some(lobby) => lobby.wheel_resources(
+                Some(lobby) => lobby.wheel_right_sheet(
                     amount,
                     self.graphics.surface(),
                     self.assets.as_ref(),
@@ -43605,7 +43668,7 @@ impl GameApp {
         let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
         options.set_bounds(layout.game_option_strip);
         // Prime scroll metrics before the first pointer or wheel event.
-        let _ = controller.roster_layout(&layout, fonts.text.line_height);
+        let _ = controller.right_list_layout(&layout, fonts);
         let resource_rows = initial_classic_lobby_resource_rows(
             settings
                 .prepared
@@ -43620,6 +43683,7 @@ impl GameApp {
                 chat_history_index: -1,
                 runtime_join_allowed,
                 resource_rows,
+                scenario_description: LobbyScenarioDescriptionState::default(),
             },
             options,
         ))
@@ -45132,10 +45196,118 @@ impl GameApp {
         self.sync_classic_lobby_resource_ready();
     }
 
-    fn select_classic_lobby_sheet(&mut self, sheet: LobbySheet) -> bool {
-        if sheet == LobbySheet::Scenario {
+    fn lobby_scenario_loading_text(&self, present_percent: u8) -> String {
+        let present_percent = present_percent.to_string();
+        let template = self.runtime_resource_text(
+            "IDS_MSG_SCENARIODESC_LOADING",
+            "Loading... (%d%%)",
+        );
+        format_resource_string(template, &[&present_percent]).replace("%%", "%")
+    }
+
+    fn completed_lobby_scenario_description(
+        &self,
+        path: &Path,
+        title: String,
+    ) -> LobbyScenarioText {
+        let languages = startup_language_sequence(self.app_paths.as_ref());
+        let language_packs = self
+            .app_paths
+            .as_ref()
+            .map(classic_language_packs)
+            .unwrap_or_default();
+        match load_lobby_scenario_description(path, &languages, &language_packs) {
+            Ok(Some(description)) => LobbyScenarioText::Description(description),
+            Ok(None) => LobbyScenarioText::Title(title),
+            Err(_) => LobbyScenarioText::Message("scenario file load error".to_string()),
+        }
+    }
+
+    fn current_lobby_scenario_description_update(
+        &self,
+    ) -> Option<LobbyScenarioDescriptionUpdate> {
+        match self.network_mode.as_ref()? {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => {
+                let config = prepared.host_config();
+                let snapshot = config.initial_join_snapshot.as_ref()?;
+                let scenario = &snapshot.parameters.scenario;
+                let title = legacy_presentation_text(snapshot.parameters.title.as_bytes());
+                let path = config
+                    .resource_files
+                    .iter()
+                    .find(|resource| resource.core.id == scenario.id)
+                    .map(|resource| resource.path.clone())?;
+                Some(LobbyScenarioDescriptionUpdate::Complete(
+                    self.completed_lobby_scenario_description(&path, title),
+                ))
+            }
+            NetworkMode::Client(_) => {
+                let join_data = self.pending_network_join_data.as_ref()?;
+                let scenario = &join_data.parameters.scenario;
+                let resource_id = scenario.id;
+                let title = legacy_presentation_text(join_data.parameters.title.as_bytes());
+                match self.admission_resources.status(resource_id).cloned()? {
+                    AdmissionResourceState::Loading { removed: false } => {
+                        let percent = self
+                            .admission_resources
+                            .present_percent
+                            .get(&resource_id)
+                            .copied()
+                            .unwrap_or(0);
+                        Some(LobbyScenarioDescriptionUpdate::Loading(
+                            self.lobby_scenario_loading_text(percent),
+                        ))
+                    }
+                    AdmissionResourceState::Complete { path, .. } => {
+                        Some(LobbyScenarioDescriptionUpdate::Complete(
+                            self.completed_lobby_scenario_description(&path, title),
+                        ))
+                    }
+                    AdmissionResourceState::Loading { removed: true }
+                    | AdmissionResourceState::Unavailable(_) => None,
+                }
+            }
+            NetworkMode::Host(_) => None,
+        }
+    }
+
+    fn refresh_lobby_scenario_description(&mut self) -> bool {
+        let host_active = self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+            lobby.controller.active_sheet() == LobbySheet::Scenario
+                && !lobby.scenario_description.finished
+        });
+        let client_active = self.network_lobby.as_ref().is_some_and(|lobby| {
+            lobby.active_sheet == LobbySheet::Scenario && !lobby.scenario_description.finished
+        });
+        if !host_active && !client_active {
             return false;
         }
+
+        let update = self.current_lobby_scenario_description_update();
+        let mut changed = false;
+        if host_active {
+            if let Some(lobby) = self.classic_host_lobby.as_mut() {
+                let host_changed = lobby.scenario_description.apply(update.clone());
+                if host_changed {
+                    lobby
+                        .controller
+                        .set_scenario_text(lobby.scenario_description.text.clone());
+                }
+                changed |= host_changed;
+            }
+        }
+        if client_active {
+            if let Some(lobby) = self.network_lobby.as_mut() {
+                changed |= lobby.scenario_description.apply(update);
+            }
+        }
+        changed
+    }
+
+    fn select_classic_lobby_sheet(&mut self, sheet: LobbySheet) -> bool {
         let has_teams = self
             .network_team_assignment
             .as_ref()
@@ -45168,6 +45340,9 @@ impl GameApp {
         }
         if sheet.is_roster() {
             self.sync_classic_lobby_roster();
+        }
+        if sheet == LobbySheet::Scenario {
+            let _ = self.refresh_lobby_scenario_description();
         }
         true
     }
@@ -50203,8 +50378,10 @@ impl GameApp {
             }
             LobbyAction::SelectSheet(sheet) => {
                 let selected = self.network_lobby.as_mut().is_some_and(|lobby| {
-                    let supported = matches!(sheet, LobbySheet::Players | LobbySheet::Resources)
-                        || sheet == LobbySheet::Teams && lobby.has_teams;
+                    let supported = matches!(
+                        sheet,
+                        LobbySheet::Players | LobbySheet::Resources | LobbySheet::Scenario
+                    ) || sheet == LobbySheet::Teams && lobby.has_teams;
                     if supported {
                         lobby.active_sheet = sheet;
                     }
@@ -50214,6 +50391,9 @@ impl GameApp {
                     return Err(classic_game_lobby_child_error(
                         ClassicGameLobbyChild::Sheet(sheet),
                     ));
+                }
+                if sheet == LobbySheet::Scenario {
+                    let _ = self.refresh_lobby_scenario_description();
                 }
             }
             LobbyAction::StartGame => self.start_network_lobby_countdown()?,
@@ -50281,9 +50461,7 @@ impl GameApp {
         })?;
         let layout = state.controller.layout(width, height, &fonts);
         let _ = state.controller.chat_scroll_metrics(&layout, &fonts.text);
-        let roster = state
-            .controller
-            .roster_layout(&layout, fonts.text.line_height);
+        let roster = state.controller.right_list_layout(&layout, &fonts);
         Ok((layout, roster))
     }
 
@@ -55671,6 +55849,7 @@ impl GameApp {
         let ready_check_changed = self.tick_lobby_ready_check_prompt();
         let scale_test_changed = self.tick_options_scale_test_prompt();
         let lobby_options_changed = self.refresh_classic_lobby_options(false);
+        let lobby_scenario_changed = self.refresh_lobby_scenario_description();
         let lobby_client_telemetry_changed = self.refresh_classic_lobby_client_telemetry();
         let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
         let vote_timeout_changed = self.tick_host_league_vote_timeout_at(now);
@@ -55694,6 +55873,7 @@ impl GameApp {
             || ready_check_changed
             || scale_test_changed
             || lobby_options_changed
+            || lobby_scenario_changed
             || lobby_client_telemetry_changed
             || vote_timeout_changed
             || client_list_changed
@@ -89254,6 +89434,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             chat_history_index: -1,
             runtime_join_allowed: false,
             resource_rows: BTreeMap::new(),
+            scenario_description: LobbyScenarioDescriptionState::default(),
         });
         app.scenario_game_options =
             GameOptionButtons::new(GameOptionContext::LobbyHost, GameOptionValues::default());
@@ -90328,19 +90509,13 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn unsupported_classic_host_lobby_children_are_typed_fail_fast() {
-        let cases = vec![
-            (
-                ClassicLobbyAction::RosterContextRequested {
-                    row: LobbyRosterId::Header(LobbyRosterHeader::ScriptPlayers),
-                    position: GuiPoint::new(1.0, 1.0),
-                },
-                "RosterContext",
-            ),
-            (
-                ClassicLobbyAction::SheetRequested(LobbySheet::Scenario),
-                "Scenario",
-            ),
-        ];
+        let cases = vec![(
+            ClassicLobbyAction::RosterContextRequested {
+                row: LobbyRosterId::Header(LobbyRosterHeader::ScriptPlayers),
+                position: GuiPoint::new(1.0, 1.0),
+            },
+            "RosterContext",
+        )];
         for (action, expected) in cases {
             let mut app = new_menu_app(640, 480);
             install_test_classic_host_lobby(&mut app);
@@ -90359,6 +90534,18 @@ public func Grant(password) { return GainMissionAccess(password); }
             LobbySheet::Players,
         )])
         .expect("already-visible Players sheet is a safe no-op");
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::SheetRequested(
+            LobbySheet::Scenario,
+        )])
+        .expect("Scenario description sheet is implemented");
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .active_sheet(),
+            LobbySheet::Scenario
+        );
     }
 
     fn install_classic_host_network_stub(
@@ -92356,6 +92543,148 @@ public func Grant(password) { return GainMissionAccess(password); }
             .update_layout(640.0, 480.0)
             .external_chat_button
             .is_none());
+    }
+
+    #[test]
+    fn l108_completed_scenario_description_uses_exact_desc_or_title() {
+        let app = new_state_only_menu_app(640, 480);
+        let directory = tempdir().expect("scenario description fixture");
+        let scenario = directory.path().join("Remote.c4s");
+        fs::create_dir_all(&scenario).expect("create unpacked scenario group");
+        fs::write(
+            scenario.join("DescUS.rtf"),
+            br"{\rtf1 Gold Mine\par Mine some gold.\par}",
+        )
+        .expect("write scenario RTF description");
+
+        assert_eq!(
+            app.completed_lobby_scenario_description(&scenario, "Remote title".to_string()),
+            LobbyScenarioText::Description("Gold Mine\nMine some gold.\n".to_string())
+        );
+
+        fs::remove_file(scenario.join("DescUS.rtf")).expect("remove exact description");
+        fs::write(scenario.join("Scenario.txt"), b"Unrelated fallback")
+            .expect("write unrelated scenario component");
+        assert_eq!(
+            app.completed_lobby_scenario_description(&scenario, "Remote title".to_string()),
+            LobbyScenarioText::Title("Remote title".to_string())
+        );
+        assert_eq!(
+            app.completed_lobby_scenario_description(
+                &directory.path().join("Missing.c4s"),
+                "Remote title".to_string(),
+            ),
+            LobbyScenarioText::Message("scenario file load error".to_string())
+        );
+    }
+
+    #[test]
+    fn l108_client_scenario_description_refreshes_only_while_active_until_terminal() {
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        let scenario_core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Scenario as u8,
+            id: 9,
+            loadable: true,
+            filename: LegacyCString::from_bytes(b"Scenarios/Remote.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.parameters.scenario = scenario_core.clone();
+        snapshot.parameters.title =
+            LegacyCString::from_bytes(b"Remote title".to_vec()).unwrap();
+        app.pending_network_join_data = Some(lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 0,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        });
+        app.admission_resources
+            .register_lobby_resource(&scenario_core);
+        app.admission_resources.mark_progress(9, 42);
+
+        app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Scenario))
+            .expect("Scenario tab activates");
+        fn scenario_state(app: &GameApp) -> &LobbyScenarioDescriptionState {
+            &app.network_lobby
+                .as_ref()
+                .expect("client lobby")
+                .scenario_description
+        }
+        assert_eq!(
+            scenario_state(&app).text,
+            LobbyScenarioText::Message("Loading... (42%)".to_string())
+        );
+        assert!(!scenario_state(&app).finished);
+
+        app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Players))
+            .expect("Scenario tab deactivates");
+        app.admission_resources.mark_progress(9, 73);
+        app.sec1_timer().expect("pulse inactive Scenario timer");
+        assert_eq!(
+            scenario_state(&app).text,
+            LobbyScenarioText::Message("Loading... (42%)".to_string()),
+            "inactive ScenDesc retains its last presentation"
+        );
+
+        app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Scenario))
+            .expect("Scenario reactivation forces an immediate update");
+        assert_eq!(
+            scenario_state(&app).text,
+            LobbyScenarioText::Message("Loading... (73%)".to_string())
+        );
+        app.admission_resources.mark_progress(9, 100);
+        app.sec1_timer().expect("refresh active Scenario loading state");
+        assert_eq!(
+            scenario_state(&app).text,
+            LobbyScenarioText::Message("Loading... (100%)".to_string())
+        );
+        assert!(
+            !scenario_state(&app).finished,
+            "present percent does not make an incomplete resource terminal"
+        );
+
+        let directory = tempdir().expect("completed scenario resource");
+        let scenario = directory.path().join("Remote.c4s");
+        fs::create_dir_all(&scenario).expect("create unpacked scenario group");
+        fs::write(
+            scenario.join("DescUS.rtf"),
+            br"{\rtf1 Gold Mine\par Mine some gold.\par}",
+        )
+        .expect("write completed description");
+        app.admission_resources.mark_complete(9, scenario);
+        app.sec1_timer().expect("install completed Scenario description");
+        assert_eq!(
+            scenario_state(&app).text,
+            LobbyScenarioText::Description("Gold Mine\nMine some gold.\n".to_string())
+        );
+        assert!(scenario_state(&app).finished);
+
+        app.admission_resources.resources.insert(
+            9,
+            AdmissionResourceState::Loading { removed: false },
+        );
+        app.admission_resources.present_percent.insert(9, 7);
+        app.sec1_timer().expect("terminal ScenDesc ignores later ticks");
+        app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Players))
+            .expect("leave terminal Scenario tab");
+        app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Scenario))
+            .expect("terminal Scenario reactivation is a no-op");
+        assert_eq!(
+            scenario_state(&app).text,
+            LobbyScenarioText::Description("Gold Mine\nMine some gold.\n".to_string())
+        );
+        assert!(scenario_state(&app).finished);
     }
 
     #[test]
