@@ -15623,9 +15623,9 @@ protected func ControlCommand() { own_control_calls++; return 1; }
         let builder_script = r#"#strict 2
 local missing_id, missing_count, contents_seen, action_seen, callback_order;
 
-protected func BuildNeedsMaterial(id, count)
+protected func BuildNeedsMaterial(component_id, count)
 {
-    missing_id = id;
+    missing_id = component_id;
     missing_count = count;
     contents_seen = ContentsCount();
     action_seen = GetAction();
@@ -25005,7 +25005,7 @@ func ReadMenu() { return GetMenu(); }
         let script = r#"
         func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         func NoObj() { return SetMenuDecoration(DECO); }
-        func Deco(id) { return SetMenuDecoration(id, this()); }
+        func Deco(decoration) { return SetMenuDecoration(decoration, this()); }
         "#;
         let mut engine = Engine::with_seed(7);
         engine
@@ -28215,11 +28215,11 @@ local pre_dir, finished_dir;
 
 public func RunNow() { return ExecuteCommand(); }
 
-protected func BuildNeedsMaterial(id, count)
+protected func BuildNeedsMaterial(component_id, count)
 {
-  needed_id = id;
+  needed_id = component_id;
   needed_count = count;
-  needed_id_is_nil = GetType(id) == 0;
+  needed_id_is_nil = GetType(component_id) == 0;
   needed_count_is_int = GetType(count) == C4V_Int;
   pre_dir = GetComDir();
   return 1;
@@ -45527,7 +45527,7 @@ protected func TumbleStart()
             "Old",
             r#"#strict
 local shadow_calls;
-func ChangeDef(id) { shadow_calls += 1; return(0); }
+func ChangeDef(unused_definition) { shadow_calls += 1; return(0); }
 "#,
         )
         .expect("old definition compiles");
@@ -50693,7 +50693,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             return ShiftContents(nil, back, nil, true);
         }
         func Cycle(back) { return ShiftContents(nil, back); }
-        func ControlContents(id) { controlled = id; return false; }
+        func ControlContents(selected_id) { controlled = selected_id; return false; }
         "#;
         let item_script = r#"#strict 3
         local selected;
@@ -50971,7 +50971,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let script = r#"#strict
 local iSeen;
 func Cycle() { return ShiftContents(0, 0, 0, 1); }
-func ControlContents(id) { iSeen = id; return 1; }
+func ControlContents(selected_id) { iSeen = selected_id; return 1; }
 "#;
         let mut engine = Engine::with_seed(11);
         engine
@@ -74919,7 +74919,7 @@ protected func RejectEntrance(pContainer) { return(1); }
     ) -> Result<(), EngineError> {
         let mut engine = Engine::new();
         let collector_script = r#"#strict
-protected func RejectCollect(id, pObject) { return(1); }
+protected func RejectCollect(object_id, pObject) { return(1); }
 "#;
         let mut collector = Definition::from_script("Croc", "Croc", collector_script)?;
         collector.set_c4_callback_convention(true);

@@ -91,21 +91,237 @@ fn map_parameter_type_parses_after_an_int_parameter() {
 }
 
 #[test]
-fn lone_map_type_word_remains_an_untyped_parameter_named_map() {
-    let script = Script::compile("func F(map) { return map; }")
-        .expect("a parameter named map still compiles");
-    let parameter = &script.functions()["F"].params[0];
-    assert_eq!(parameter.name, "map");
-    assert_eq!(parameter.type_annotation, None);
+fn lone_cpp_type_words_warn_and_become_untyped_parameters_before_strict_two() {
+    for strict_prefix in ["", "#strict\n"] {
+        for type_name in [
+            "int", "bool", "id", "object", "string", "array", "map", "any",
+        ] {
+            let source = format!("{strict_prefix}func F({type_name}) {{ return {type_name}; }}");
+            let script = Script::compile(&source).expect("the legacy diagnostic is nonfatal");
+            assert_eq!(script.parse_diagnostics().len(), 1, "source: {source}");
+            assert_eq!(
+                script.parse_diagnostics()[0].message(),
+                format!("parameter has the same name as type {type_name}"),
+                "source: {source}"
+            );
 
-    let mut engine = Engine::new();
-    engine.add_script(script);
-    assert_eq!(
-        engine
-            .call("F", &[Value::Int(7)])
-            .expect("the untyped parameter accepts an integer"),
-        Value::Int(7)
+            let parameter = &script.functions()["F"].params[0];
+            assert_eq!(parameter.name, type_name, "source: {source}");
+            assert_eq!(parameter.type_annotation, None, "source: {source}");
+            assert!(!parameter.is_reference, "source: {source}");
+        }
+    }
+}
+
+#[test]
+fn lone_legacy_type_reference_warning_clears_the_reference_flag() {
+    for strict_prefix in ["", "#strict\n"] {
+        let source = format!("{strict_prefix}func F(int &) {{ return int; }}");
+        let script = Script::compile(&source).expect("the legacy diagnostic is nonfatal");
+        assert_eq!(script.parse_diagnostics().len(), 1, "source: {source}");
+        assert_eq!(
+            script.parse_diagnostics()[0].message(),
+            "parameter has the same name as type int",
+            "source: {source}"
+        );
+
+        let parameter = &script.functions()["F"].params[0];
+        assert_eq!(parameter.name, "int", "source: {source}");
+        assert_eq!(parameter.type_annotation, None, "source: {source}");
+        assert!(!parameter.is_reference, "source: {source}");
+    }
+}
+
+#[test]
+fn strict_two_rejects_parameter_named_only_by_type() {
+    for strict_level in [2, 3] {
+        for type_name in [
+            "int", "bool", "id", "object", "string", "array", "map", "any",
+        ] {
+            let source = format!(
+                "#strict {strict_level}\nfunc Broken({type_name}) {{ return 1; }}\n\
+                 func Healthy() {{ return 7; }}"
+            );
+            let script = Script::compile(&source).expect("the bad declaration is recovered");
+            assert!(
+                script.parse_diagnostics().iter().any(|error| {
+                    error.message() == format!("parameter has the same name as type {type_name}")
+                }),
+                "missing lone-type diagnostic for {source:?}: {:?}",
+                script.parse_diagnostics()
+            );
+            assert!(
+                script.functions().contains_key("Healthy"),
+                "the next declaration must survive recovery: {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nonlegacy_parameter_type_extensions_are_rejected() {
+    for (strict_prefix, strict_level) in [
+        ("", 0),
+        ("#strict\n", 1),
+        ("#strict 2\n", 2),
+        ("#strict 3\n", 3),
+    ] {
+        for parameters in [
+            "proplist value",
+            "effect value",
+            "nil value",
+            "object|nil value",
+            "int|string value",
+        ] {
+            let source = format!(
+                "{strict_prefix}func Broken({parameters}) {{ return 1; }}\n\
+                 func Healthy() {{ return 7; }}"
+            );
+            let script = Script::compile(&source).expect("the bad declaration is recovered");
+            assert!(
+                !script.parse_diagnostics().is_empty(),
+                "extension must be rejected: {source}"
+            );
+            if strict_level >= 2 && parameters.contains('|') {
+                assert_eq!(
+                    script.parse_diagnostics()[0].message(),
+                    "unexpected character '|' found",
+                    "C++ disables operator lexing after a parameter type: {source}"
+                );
+            }
+            assert!(
+                script.functions().contains_key("Healthy"),
+                "the next declaration must survive recovery: {source}"
+            );
+        }
+    }
+
+    let ordinary_names = Script::compile(
+        "#strict 3\nfunc Names(proplist, effect, Int) { return 1; }",
+    )
+    .expect("non-type words remain ordinary parameter names");
+    assert!(
+        ordinary_names.parse_diagnostics().is_empty(),
+        "unexpected ordinary-name diagnostic: {:?}",
+        ordinary_names.parse_diagnostics()
     );
+    let parameters = &ordinary_names.functions()["Names"].params;
+    assert_eq!(
+        parameters
+            .iter()
+            .map(|parameter| parameter.name.as_str())
+            .collect::<Vec<_>>(),
+        ["proplist", "effect", "Int"]
+    );
+    assert!(parameters
+        .iter()
+        .all(|parameter| parameter.type_annotation.is_none()));
+
+    let contextual_nil = Script::compile("#strict 2\nfunc Name(nil) { return nil; }")
+        .expect("nil remains an identifier below STRICT3");
+    assert!(contextual_nil.parse_diagnostics().is_empty());
+    assert_eq!(contextual_nil.functions()["Name"].params[0].name, "nil");
+    assert_eq!(
+        contextual_nil.functions()["Name"].params[0].type_annotation,
+        None
+    );
+}
+
+#[test]
+fn legacy_pipe_parameter_names_are_not_union_annotations() {
+    for strict_prefix in ["", "#strict\n"] {
+        let source = format!(
+            "{strict_prefix}func F(object|nil, object|123_AbC, &|value, |plain) {{ return 1; }}"
+        );
+        let script = Script::compile(&source).expect("legacy pipe identifiers compile");
+        assert!(
+            script.parse_diagnostics().is_empty(),
+            "unexpected legacy diagnostic: {:?}",
+            script.parse_diagnostics()
+        );
+        let parameters = &script.functions()["F"].params;
+        assert_eq!(parameters[0].name, "|nil");
+        assert_eq!(parameters[0].type_annotation, Some(TypeAnnotation::Object));
+        assert!(!parameters[0].is_reference);
+        assert_eq!(parameters[1].name, "|123_AbC");
+        assert_eq!(parameters[1].type_annotation, Some(TypeAnnotation::Object));
+        assert!(!parameters[1].is_reference);
+        assert_eq!(parameters[2].name, "|value");
+        assert_eq!(parameters[2].type_annotation, None);
+        assert!(parameters[2].is_reference);
+        assert_eq!(parameters[3].name, "|plain");
+        assert_eq!(parameters[3].type_annotation, None);
+        assert!(!parameters[3].is_reference);
+
+        let separated = format!(
+            "{strict_prefix}func Broken(|@name) {{ return 1; }}\n\
+             func Healthy() {{ return 7; }}"
+        );
+        let script = Script::compile(&separated).expect("the split legacy name is recovered");
+        assert!(!script.parse_diagnostics().is_empty());
+        assert!(script.functions().contains_key("Healthy"));
+    }
+
+    for declaration in [
+        "|nil",
+        "int|nil",
+        "int &|nil",
+        "int||nil",
+        "int|=nil",
+    ] {
+        let source = format!("#strict 2\nfunc Broken({declaration}) {{ return 1; }}");
+        let script = Script::compile(&source).expect("the invalid pipe spelling is recovered");
+        assert_eq!(
+            script.parse_diagnostics()[0].message(),
+            "unexpected character '|' found",
+            "source: {source}"
+        );
+    }
+
+    let over_cap = Script::compile(
+        "#strict 2\nfunc Broken(a,b,c,d,e,f,g,h,i,j,|name) { return 1; }",
+    )
+    .expect("the invalid eleventh token is recovered");
+    assert_eq!(
+        over_cap.parse_diagnostics()[0].message(),
+        "unexpected character '|' found"
+    );
+
+    for declaration in ["int &=value", "int =value", "int & =value"] {
+        let source = format!("#strict 2\nfunc Broken({declaration}) {{ return 1; }}");
+        let amp_equal =
+            Script::compile(&source).expect("the disabled equals spelling is recovered");
+        assert_eq!(
+            amp_equal.parse_diagnostics()[0].message(),
+            "unexpected character '=' found",
+            "source: {source}"
+        );
+    }
+
+    let over_cap_equal = Script::compile(
+        "#strict 2\nfunc Broken(a,b,c,d,e,f,g,h,i,j,=value) { return 1; }",
+    )
+    .expect("the invalid eleventh token is recovered");
+    assert_eq!(
+        over_cap_equal.parse_diagnostics()[0].message(),
+        "unexpected character '=' found"
+    );
+}
+
+#[test]
+fn boolean_literals_are_not_parameter_names() {
+    for declaration in ["true", "false", "int true", "int false"] {
+        let source = format!(
+            "#strict 3\nfunc Broken({declaration}) {{ return 1; }}\n\
+             func Healthy() {{ return 7; }}"
+        );
+        let script = Script::compile(&source).expect("the bad declaration is recovered");
+        assert!(
+            !script.parse_diagnostics().is_empty(),
+            "boolean literal must not bind as a parameter: {source}"
+        );
+        assert!(script.functions().contains_key("Healthy"), "source: {source}");
+    }
 }
 
 #[test]

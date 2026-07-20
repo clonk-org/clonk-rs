@@ -531,6 +531,11 @@ impl<'a> Parser<'a> {
                 break;
             }
 
+            // The token after `(` or `,` is already scanned before C++ checks
+            // the ten-parameter cap. Invalid operator-disabled bytes therefore
+            // win over the cap diagnostic.
+            self.reject_initial_parameter_disabled_operator()?;
+
             // The cap check also precedes `...`: nine named parameters plus
             // ellipsis is legal, but ten named parameters plus ellipsis is
             // the rejected eleventh iteration.
@@ -550,8 +555,7 @@ impl<'a> Parser<'a> {
             }
 
             // Strict-3 `nil` is ATT_NIL, not an identifier or a parameter
-            // type. A union that starts with an ordinary type is handled by
-            // the existing type grammar below.
+            // type.
             let parameter_start = self.peek()?.clone();
             if matches!(parameter_start.kind, TokenKind::Keyword(Keyword::Nil)) {
                 return Err(ParseError::new(
@@ -561,40 +565,77 @@ impl<'a> Parser<'a> {
                 ));
             }
 
-            // Check for optional type annotation
-            let type_annotation = self.parse_type_annotation()?;
+            // C++ tokenizes parameter heads with operators disabled. In
+            // legacy modes, a single `|` can therefore begin a wacky ATT_IDTF
+            // such as `|nil`; STRICT2+ rejects the same byte. Preserve that
+            // distinction without admitting Rust's former union grammar.
+            let leading_legacy_name = self.consume_legacy_pipe_parameter_name()?;
+            let (type_annotation, is_reference, legacy_name) =
+                if let Some(name) = leading_legacy_name {
+                    (None, false, Some(name))
+                } else {
+                    let type_annotation = self.parse_type_annotation()?;
+                    self.reject_parameter_disabled_operator()?;
+                    if let Some(name) = self.consume_legacy_pipe_parameter_name()? {
+                        (type_annotation, false, Some(name))
+                    } else {
+                        let is_reference =
+                            self.consume_if_symbol(Symbol::Ampersand)?.is_some();
+                        self.reject_parameter_disabled_operator()?;
+                        let legacy_name = self.consume_legacy_pipe_parameter_name()?;
+                        (type_annotation, is_reference, legacy_name)
+                    }
+                };
 
-            // Check for optional reference parameter (&)
-            let is_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
-
-            // Try to get parameter name
-            // If we have a type annotation but the next token is not an identifier (nor &),
-            // then the "type" was actually the parameter name itself
-            let next_token = self.peek()?;
-            let (name, actual_type) = match &next_token.kind {
-                TokenKind::Identifier(param_name) => {
-                    let name = param_name.clone();
-                    self.consume()?;
-                    (name, type_annotation)
-                }
-                // C4Aul declaration words are contextual (plain ATT_IDTF
-                // words in the C++ tokenizer), so names such as `private`
-                // remain legal; strict-3 `nil` is reserved above.
-                TokenKind::Keyword(keyword) if *keyword != Keyword::Nil => {
-                    let name = keyword.lexeme().to_string();
-                    self.consume()?;
-                    (name, type_annotation)
-                }
-                _ if type_annotation.is_some() => {
-                    // The type annotation token was actually the parameter name
-                    // (e.g., "effect" in "func Foo(effect, target)")
-                    let param_name = type_annotation.as_ref().unwrap().to_string();
-                    (param_name, None)
-                }
-                _ => {
-                    let line = next_token.line;
-                    let column = next_token.column;
-                    return Err(ParseError::new("expected parameter name", line, column));
+            // Try to get the parameter name. C++ warns below STRICT2 when a
+            // recognized type word is the declaration's only word, then
+            // binds it as an untyped parameter. STRICT2+ rejects it.
+            let next_token = self.peek()?.clone();
+            let (name, actual_type, actual_is_reference) = if let Some(name) = legacy_name {
+                (name, type_annotation, is_reference)
+            } else {
+                match &next_token.kind {
+                    TokenKind::Identifier(param_name) => {
+                        let name = param_name.clone();
+                        self.consume()?;
+                        (name, type_annotation, is_reference)
+                    }
+                    // C4Aul declaration words are contextual (plain ATT_IDTF
+                    // words in the C++ tokenizer), so names such as `private`
+                    // remain legal. Boolean literals and strict-3 `nil` are
+                    // distinct native tokens and cannot be parameter names.
+                    TokenKind::Keyword(keyword)
+                        if !matches!(
+                            *keyword,
+                            Keyword::Nil | Keyword::True | Keyword::False
+                        ) =>
+                    {
+                        let name = keyword.lexeme().to_string();
+                        self.consume()?;
+                        (name, type_annotation, is_reference)
+                    }
+                    _ => {
+                        let Some(annotation) = type_annotation else {
+                            return Err(ParseError::new(
+                                "expected parameter name",
+                                next_token.line,
+                                next_token.column,
+                            ));
+                        };
+                        let param_name = annotation.to_string();
+                        let diagnostic = ParseError::new(
+                            format!("parameter has the same name as type {param_name}"),
+                            next_token.line,
+                            next_token.column,
+                        );
+                        if self.strict_level >= 2 {
+                            return Err(diagnostic);
+                        }
+                        self.non_fatal_diagnostics.push(diagnostic);
+                        // C4AulParse.cpp resets ParType to Any after this warning,
+                        // including when an ampersand followed the type word.
+                        (param_name, None, false)
+                    }
                 }
             };
 
@@ -604,8 +645,12 @@ impl<'a> Parser<'a> {
             // C4ValueMap.cpp:406-411). A few shipped legacy callbacks rely
             // on the following unique name shifting into that reused slot.
             if !params.iter().any(|parameter| parameter.name == name) {
-                if is_reference || actual_type.is_some() {
-                    params.push(Parameter::with_reference(name, actual_type, is_reference));
+                if actual_is_reference || actual_type.is_some() {
+                    params.push(Parameter::with_reference(
+                        name,
+                        actual_type,
+                        actual_is_reference,
+                    ));
                 } else {
                     params.push(Parameter::new(name));
                 }
@@ -620,134 +665,88 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
+    fn reject_parameter_disabled_operator(&mut self) -> Result<(), ParseError> {
+        let token = self.peek()?.clone();
+        let invalid = match token.kind {
+            TokenKind::Symbol(Symbol::Pipe | Symbol::OrOr | Symbol::OrEqual)
+                if self.strict_level >= 2 =>
+            {
+                Some(('|', 0))
+            }
+            // With operators disabled, C++ scans `&=` as ATT_AMP followed by
+            // an invalid `=` byte rather than as one compound operator.
+            TokenKind::Symbol(Symbol::AndEqual) => Some(('=', 1)),
+            TokenKind::Symbol(Symbol::Equal | Symbol::EqualEqual) => Some(('=', 0)),
+            _ => None,
+        };
+        let Some((invalid, column_offset)) = invalid else {
+            return Ok(());
+        };
+        self.consume()?;
+        Err(ParseError::new(
+            format!("unexpected character '{invalid}' found"),
+            token.line,
+            token.column + column_offset,
+        ))
+    }
+
+    fn reject_initial_parameter_disabled_operator(&mut self) -> Result<(), ParseError> {
+        let token = self.peek()?.clone();
+        let invalid = match token.kind {
+            TokenKind::Symbol(Symbol::Pipe | Symbol::OrOr | Symbol::OrEqual)
+                if self.strict_level >= 2 =>
+            {
+                Some('|')
+            }
+            TokenKind::Symbol(Symbol::Equal | Symbol::EqualEqual) => Some('='),
+            _ => None,
+        };
+        let Some(invalid) = invalid else {
+            return Ok(());
+        };
+        self.consume()?;
+        Err(ParseError::new(
+            format!("unexpected character '{invalid}' found"),
+            token.line,
+            token.column,
+        ))
+    }
+
+    fn consume_legacy_pipe_parameter_name(&mut self) -> Result<Option<String>, ParseError> {
+        if self.strict_level >= 2 {
+            return Ok(None);
+        }
+        let pipe = self.peek()?.clone();
+        if !matches!(pipe.kind, TokenKind::Symbol(Symbol::Pipe)) {
+            return Ok(None);
+        }
+        self.consume()?;
+
+        let mut name = String::from("|");
+        debug_assert!(self.peeked.is_none() && self.lookahead_buffer.is_empty());
+        name.push_str(&self.lexer.consume_legacy_identifier_continuation());
+        Ok(Some(name))
+    }
+
     fn parse_type_annotation(&mut self) -> Result<Option<TypeAnnotation>, ParseError> {
-        let token = self.peek()?;
-        let base_type = match &token.kind {
-            // Type keywords are contextual - check identifier names
+        let annotation = match &self.peek()?.kind {
+            // C4Aul's eight type words are case-sensitive contextual
+            // identifiers (C4AulParse.cpp:1654-1667).
             TokenKind::Identifier(name) => match name.as_str() {
-                "int" => {
-                    self.consume()?;
-                    TypeAnnotation::Int
-                }
-                "bool" => {
-                    self.consume()?;
-                    TypeAnnotation::Bool
-                }
-                "string" => {
-                    self.consume()?;
-                    TypeAnnotation::String
-                }
-                "object" => {
-                    self.consume()?;
-                    TypeAnnotation::Object
-                }
-                "id" => {
-                    self.consume()?;
-                    TypeAnnotation::Id
-                }
-                "array" => {
-                    self.consume()?;
-                    TypeAnnotation::Array
-                }
-                "map" => {
-                    self.consume()?;
-                    TypeAnnotation::Map
-                }
-                "proplist" => {
-                    self.consume()?;
-                    TypeAnnotation::Proplist
-                }
-                "effect" => {
-                    self.consume()?;
-                    TypeAnnotation::Effect
-                }
-                "any" => {
-                    self.consume()?;
-                    TypeAnnotation::Any
-                }
+                "int" => TypeAnnotation::Int,
+                "bool" => TypeAnnotation::Bool,
+                "string" => TypeAnnotation::String,
+                "object" => TypeAnnotation::Object,
+                "id" => TypeAnnotation::Id,
+                "array" => TypeAnnotation::Array,
+                "map" => TypeAnnotation::Map,
+                "any" => TypeAnnotation::Any,
                 _ => return Ok(None),
             },
-            TokenKind::Keyword(Keyword::Nil) => {
-                self.consume()?;
-                TypeAnnotation::Nil
-            }
-            _ => return Ok(None), // No type annotation
+            _ => return Ok(None),
         };
-
-        // Check for union types (e.g., object|nil)
-        if self.check_symbol(Symbol::Pipe)? {
-            let mut types = vec![base_type];
-            while self.consume_if_symbol(Symbol::Pipe)?.is_some() {
-                let next_token = self.peek()?;
-                let next_type = match &next_token.kind {
-                    // Type keywords are contextual - check identifier names
-                    TokenKind::Identifier(name) => match name.as_str() {
-                        "int" => {
-                            self.consume()?;
-                            TypeAnnotation::Int
-                        }
-                        "bool" => {
-                            self.consume()?;
-                            TypeAnnotation::Bool
-                        }
-                        "string" => {
-                            self.consume()?;
-                            TypeAnnotation::String
-                        }
-                        "object" => {
-                            self.consume()?;
-                            TypeAnnotation::Object
-                        }
-                        "id" => {
-                            self.consume()?;
-                            TypeAnnotation::Id
-                        }
-                        "array" => {
-                            self.consume()?;
-                            TypeAnnotation::Array
-                        }
-                        "map" => {
-                            self.consume()?;
-                            TypeAnnotation::Map
-                        }
-                        "proplist" => {
-                            self.consume()?;
-                            TypeAnnotation::Proplist
-                        }
-                        "effect" => {
-                            self.consume()?;
-                            TypeAnnotation::Effect
-                        }
-                        "any" => {
-                            self.consume()?;
-                            TypeAnnotation::Any
-                        }
-                        _ => {
-                            return Err(ParseError::new(
-                                "expected type name after '|' in union type".to_string(),
-                                next_token.line,
-                                next_token.column,
-                            ))
-                        }
-                    },
-                    TokenKind::Keyword(Keyword::Nil) => {
-                        self.consume()?;
-                        TypeAnnotation::Nil
-                    }
-                    _ => {
-                        return Err(ParseError::new(
-                            "expected type name after '|' in union type".to_string(),
-                            next_token.line,
-                            next_token.column,
-                        ))
-                    }
-                };
-                types.push(next_type);
-            }
-            Ok(Some(TypeAnnotation::Union(types)))
-        } else {
-            Ok(Some(base_type))
-        }
+        self.consume()?;
+        Ok(Some(annotation))
     }
 
     fn parse_block_statements(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -3535,8 +3534,8 @@ func Ok() { return 1; }
     fn speculative_unary_records_synthesized_string_operands_once() {
         let script = parse_script(
             r#"#strict 3
-               func Test(object) {
-                   return [!{if = 1}, !{"quoted" = 2}, !object.dot, !object->arrow];
+               func Test(target) {
+                   return [!{if = 1}, !{"quoted" = 2}, !target.dot, !target->arrow];
                }"#,
         )
         .expect("unary operands parse after their speculative preflight");
@@ -3552,13 +3551,13 @@ func Ok() { return 1; }
     fn link_string_operands_include_map_and_property_identifier_keys_in_order() {
         let script = parse_script(
             r#"#strict 3
-               func Test(object) {
+               func Test(target) {
                    var map = {
                        bare = "value",
                        "quoted" = 2,
                        ["computed"] = 3
                    };
-                   return [object.dot, object->arrow, object->Method()];
+                   return [target.dot, target->arrow, target->Method()];
                }"#,
         )
         .expect("map and property string operands parse");

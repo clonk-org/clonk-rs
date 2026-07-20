@@ -81,19 +81,14 @@ fn jungle_clonk_pattern() {
 }
 
 #[test]
-fn any_with_other_types() {
-    // Mix of all types including any
-    let source = r#"func Test(int a, bool b, string c, object d, id e, array f, proplist g, effect h, any i) { }"#;
-    let result = lc_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!(
-            "Error: line {}, col {}: {}",
-            e.line(),
-            e.column(),
-            e.message()
-        );
-    }
-    assert!(result.is_ok());
+fn all_cpp_parameter_types_compile_without_diagnostics() {
+    let source = r#"func Test(int a, bool b, id c, object d, string e, array f, map g, any h) { }"#;
+    let script = lc_script::Script::compile(source).expect("all eight C++ types compile");
+    assert!(
+        script.parse_diagnostics().is_empty(),
+        "unexpected diagnostics: {:?}",
+        script.parse_diagnostics()
+    );
 }
 
 #[test]

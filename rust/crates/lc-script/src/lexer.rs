@@ -109,6 +109,22 @@ impl<'a> Lexer<'a> {
             .truncate(checkpoint.string_literals_len);
     }
 
+    /// After a non-alphanumeric byte starts a legacy ATT_IDTF, C4Aul keeps
+    /// only its ordinary ASCII identifier continuation. Parameter parsing
+    /// uses this after consuming a standalone `|`; bypassing normal Rust
+    /// tokenization also preserves digit-leading and underscore-rich tails.
+    pub(crate) fn consume_legacy_identifier_continuation(&mut self) -> String {
+        let mut continuation = String::new();
+        while let Some(ch) = self.peek_char() {
+            if !ch.is_ascii_alphanumeric() && ch != '_' {
+                break;
+            }
+            self.bump_char();
+            continuation.push(ch);
+        }
+        continuation
+    }
+
     pub(crate) fn take_diagnostics(&mut self) -> Vec<ParseError> {
         std::mem::take(&mut self.diagnostics)
     }
@@ -708,9 +724,8 @@ impl<'a> Lexer<'a> {
             "false" => TokenKind::Keyword(Keyword::False),
             "nil" if self.strict_level >= 3 => TokenKind::Keyword(Keyword::Nil),
             "this" => TokenKind::Keyword(Keyword::This),
-            // Type keywords are contextual - treated as identifiers here,
-            // recognized as keywords only in type annotation contexts by parser
-            // "int", "bool", "string", "object", "id", "array", "proplist", "effect"
+            // C4Aul type words are contextual identifiers and are recognized
+            // only in parameter type position by the parser.
             // The legacy string operators `eq` and `ne` are contextual and
             // remain identifiers at the lexer level.
             _ => {

@@ -95,11 +95,7 @@ pub enum TypeAnnotation {
     Id,
     Array,
     Map,
-    Proplist,
-    Effect,
-    Nil,
     Any,
-    Union(Vec<TypeAnnotation>),
 }
 
 impl fmt::Display for TypeAnnotation {
@@ -112,18 +108,7 @@ impl fmt::Display for TypeAnnotation {
             TypeAnnotation::Id => f.write_str("id"),
             TypeAnnotation::Array => f.write_str("array"),
             TypeAnnotation::Map => f.write_str("map"),
-            TypeAnnotation::Proplist => f.write_str("proplist"),
-            TypeAnnotation::Effect => f.write_str("effect"),
-            TypeAnnotation::Nil => f.write_str("nil"),
             TypeAnnotation::Any => f.write_str("any"),
-            TypeAnnotation::Union(types) => {
-                let joined = types
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("|");
-                f.write_str(&joined)
-            }
         }
     }
 }

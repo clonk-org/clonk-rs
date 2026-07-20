@@ -52998,7 +52998,7 @@ global func PreInitializePlayer(int player)
         let mut engine = lc_script::Engine::new();
         register_host_functions(&mut engine);
         engine
-            .load_script("global func Probe(object) { return SetObjectOrder(object); }")
+            .load_script("global func Probe(target) { return SetObjectOrder(target); }")
             .expect("SetObjectOrder probe compiles");
 
         let result = engine.call("Probe", &[Value::Object(2)]);
@@ -64463,22 +64463,22 @@ func Transfer(object donor, object recipient)
             script
                 .load_script(
                     r#"#strict 2
-func Probe(id) {
+func Probe(definition) {
   // Start in mid-air (no ground support): the check fails, the
   // probe searches for the surface.
   Var(0) = 50; Var(1) = 40;
-  var r = FindConstructionSite(id, 0, 1);
+  var r = FindConstructionSite(definition, 0, 1);
   return([r, Var(0), Var(1)]);
 }
-func ProbeValid(id) {
+func ProbeValid(definition) {
   // Free ground-level spot: the start-position check accepts and the
   // vars stay untouched (C4Script.cpp:1970-1971).
   Var(0) = 50; Var(1) = 100;
-  return([FindConstructionSite(id, 0, 1), Var(0), Var(1)]);
+  return([FindConstructionSite(definition, 0, 1), Var(0), Var(1)]);
 }
-func ProbeBadIndex(id) {
+func ProbeBadIndex(definition) {
   // Var indices outside 0..C4AUL_MAX_Par-1 yield nil (:1964).
-  return(FindConstructionSite(id, 10, 1));
+  return(FindConstructionSite(definition, 10, 1));
 }
 "#,
                 )
@@ -75710,9 +75710,9 @@ protected func FxComposeRemovalStop(target, number, reason)
     removal_reason = reason;
     removal_id = GetID(target);
 }
-protected func BuildNeedsMaterial(id, count)
+protected func BuildNeedsMaterial(component_id, count)
 {
-    missing_id = id;
+    missing_id = component_id;
     missing_count = count;
     return 1;
 }

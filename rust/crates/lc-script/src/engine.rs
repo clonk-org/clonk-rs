@@ -2864,9 +2864,9 @@ mod tests {
         engine
             .load_script(
                 "#strict 3\n\
-                 func Probe(object) {\n\
+                 func Probe(target) {\n\
                      var map = { bare = 1 };\n\
-                     return [object.dot, object->arrow];\n\
+                     return [target.dot, target->arrow];\n\
                  }",
             )
             .expect("map and property operands link");

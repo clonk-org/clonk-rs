@@ -53,15 +53,6 @@ pub enum Keyword {
     False,
     Nil,
     This,
-    // Type keywords
-    Int,
-    Bool,
-    String,
-    Object,
-    Id,
-    Array,
-    Proplist,
-    Effect,
     // Keyword operators (synonyms for symbolic operators)
     Eq,  // ==
     Ne,  // !=
@@ -102,14 +93,6 @@ impl Keyword {
             Keyword::False => "false",
             Keyword::Nil => "nil",
             Keyword::This => "this",
-            Keyword::Int => "int",
-            Keyword::Bool => "bool",
-            Keyword::String => "string",
-            Keyword::Object => "object",
-            Keyword::Id => "id",
-            Keyword::Array => "array",
-            Keyword::Proplist => "proplist",
-            Keyword::Effect => "effect",
             Keyword::Eq => "eq",
             Keyword::Ne => "ne",
             Keyword::Lt => "lt",

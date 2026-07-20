@@ -10373,7 +10373,7 @@ protected func Destruction()
     #[test]
     fn line_pickup_enters_an_inactive_kit_in_cpp_callback_order() {
         let clonk_script = r#"#strict 2
-protected func RejectCollect(id, object item)
+protected func RejectCollect(item_id, object item)
 {
   item->NoteEnter(2);
   return(0);
@@ -10544,7 +10544,7 @@ protected func Entrance()
             "CLNK",
             r#"#strict 2
 local rejected_kit_destructions;
-protected func RejectCollect(id, object item)
+protected func RejectCollect(item_id, object item)
 {
   item->Arm(this());
   return(1);

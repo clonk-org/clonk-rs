@@ -68236,9 +68236,9 @@ mod pathfinder_host_state_regression {
             "Pathfinder mover",
             r#"
                 #strict 2
-                func RemoveGate(object)
+                func RemoveGate(gate)
                 {
-                    RemoveObject(object);
+                    RemoveObject(gate);
                     return GetPath(10, 50, 90, 50);
                 }
             "#,
@@ -68389,7 +68389,7 @@ mod pathfinder_host_state_regression {
             "Effect remover",
             r#"
                 #strict 2
-                func Arm(object)
+                func Arm(initiator)
                 {
                     AddEffect("RemoveGate", this(), 10, 1, this());
                     AddEffect("Observe", this(), 20, 1, this());
