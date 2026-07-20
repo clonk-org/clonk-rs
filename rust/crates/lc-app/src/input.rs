@@ -853,12 +853,36 @@ fn german_system_from_sources(
     )
 }
 
-fn is_german_system() -> bool {
+fn german_system_from_windows_lang_id(lang_id: u16) -> bool {
+    const PRIMARY_LANGUAGE_MASK: u16 = 0x03ff;
+    const LANG_GERMAN: u16 = 0x07;
+    lang_id & PRIMARY_LANGUAGE_MASK == LANG_GERMAN
+}
+
+#[cfg(windows)]
+fn windows_user_default_language_is_german() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetUserDefaultLangID() -> u16;
+    }
+
+    // SAFETY: GetUserDefaultLangID has no arguments and returns a LANGID by
+    // value. This is the same platform query used by C4Config.cpp.
+    german_system_from_windows_lang_id(unsafe { GetUserDefaultLangID() })
+}
+
+pub(super) fn is_german_system() -> bool {
+    #[cfg(windows)]
+    {
+        return windows_user_default_language_is_german();
+    }
     #[cfg(target_os = "macos")]
     let apple_language = macos_apple_language();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     let apple_language: Option<String> = None;
+    #[cfg(not(windows))]
     let environment_locale = environment_locale();
+    #[cfg(not(windows))]
     german_system_from_sources(
         apple_language.as_deref(),
         environment_locale.as_deref(),
@@ -1648,6 +1672,13 @@ mod tests {
         assert!(german_system_from_sources(None, Some("de_DE.UTF-8")));
         assert!(!german_system_from_sources(None, Some("en_US.UTF-8")));
         assert!(!german_system_from_sources(None, None));
+    }
+
+    #[test]
+    fn l032_windows_language_uses_the_primary_lang_id() {
+        assert!(german_system_from_windows_lang_id(0x0407));
+        assert!(german_system_from_windows_lang_id(0x0807));
+        assert!(!german_system_from_windows_lang_id(0x0409));
     }
 
     #[test]

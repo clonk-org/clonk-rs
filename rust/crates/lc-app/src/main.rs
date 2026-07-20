@@ -3118,20 +3118,11 @@ fn classic_loader_language_prefix(
 }
 
 fn classic_loader_system_language() -> Result<&'static str> {
-    #[cfg(target_os = "linux")]
-    {
-        let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
-            .into_iter()
-            .find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()))
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        return Ok(if locale.contains("de") { "DE" } else { "US" });
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    anyhow::bail!(
-        "classic loader cannot derive C4Config::DefaultLanguage from the platform locale; configure General.Language or General.LanguageEx explicitly"
-    )
+    Ok(if input::is_german_system() {
+        "DE"
+    } else {
+        "US"
+    })
 }
 
 fn load_classic_loader_config(paths: &AppPaths) -> Result<Option<Config>> {
@@ -3221,9 +3212,8 @@ fn load_classic_global_system_scripts(
     system: &Group,
 ) -> Result<Vec<(String, String)>> {
     // C4Config has already materialized LanguageEx before InitScriptEngine.
-    // The strict loader helper cannot derive that platform default on every
-    // Rust target, so preserve the app's existing startup fallback when no
-    // explicit Language/LanguageEx value is available.
+    // Preserve the app's best-effort fallback if an unusual platform locale
+    // still cannot be projected into the strict two-byte sequence.
     let config = load_classic_loader_config(paths)?;
     let has_explicit_language = config.as_ref().is_some_and(|config| {
         ["LanguageEx", "Language"].into_iter().any(|key| {
@@ -7293,6 +7283,297 @@ fn parse_test_input_spec(spec: &str) -> Result<Vec<(u32, ControlEvent)>> {
         .collect()
 }
 
+const CLASSIC_CONFIG_RESET_SAFETY: i32 = 42;
+const CLASSIC_DEFAULT_RESOLUTION_X: i32 = 800;
+const CUSTOM_CONFIG_CORRUPTED_ERROR: &str =
+    "Warning: Custom configuration corrupted - program abort!";
+
+fn load_startup_integrity_config(config_path: &Path) -> Result<Option<Vec<u8>>> {
+    let bytes = match fs::read(config_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to read startup configuration {}",
+                    config_path.display()
+                )
+            });
+        }
+    };
+    Ok(Some(bytes))
+}
+
+fn narrow_startup_strtol_value(value: i128) -> i32 {
+    // C4's INI reader parses DWord values through native `long` and then
+    // assigns them to int32_t. `long` is 32-bit on Windows and 32-bit targets,
+    // but 64-bit on the Unix targets we support.
+    #[cfg(all(not(windows), target_pointer_width = "64"))]
+    {
+        value.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64 as i32
+    }
+    #[cfg(any(windows, target_pointer_width = "32"))]
+    {
+        value.clamp(i128::from(i32::MIN), i128::from(i32::MAX)) as i32
+    }
+}
+
+fn parse_startup_config_integer(value: &[u8]) -> Option<i32> {
+    let start = value
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        .unwrap_or(value.len());
+    let value = &value[start..];
+    let radix = if value.first() == Some(&b'0')
+        && value
+            .get(1)
+            .is_some_and(|byte| byte.eq_ignore_ascii_case(&b'x'))
+    {
+        16_i128
+    } else {
+        10_i128
+    };
+    let (negative, unsigned) = match value.first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let digits = if radix == 16 {
+        unsigned.get(2..).unwrap_or_default()
+    } else {
+        unsigned
+    };
+    let mut parsed = 0_i128;
+    // strtol(base 16) consumes the leading zero even when `x` is not followed
+    // by a hex digit, so a bare `0x` is the numeric value zero.
+    let mut consumed = radix == 16;
+    for byte in digits.iter().copied() {
+        let digit = match byte {
+            b'0'..=b'9' => i128::from(byte - b'0'),
+            b'a'..=b'f' if radix == 16 => i128::from(byte - b'a') + 10,
+            b'A'..=b'F' if radix == 16 => i128::from(byte - b'A') + 10,
+            _ => break,
+        };
+        if digit >= radix {
+            break;
+        }
+        parsed = parsed.saturating_mul(radix).saturating_add(digit);
+        consumed = true;
+    }
+    consumed.then(|| narrow_startup_strtol_value(if negative { -parsed } else { parsed }))
+}
+
+fn startup_config_integer(config: &[u8], section: &str, key: &str, default: i32) -> i32 {
+    lc_app::configured_native_scalar(config, section, key)
+        .and_then(parse_startup_config_integer)
+        .unwrap_or(default)
+}
+
+fn startup_config_is_corrupted(config: &[u8]) -> bool {
+    startup_config_integer(
+        config,
+        "General",
+        "ConfigResetSafety",
+        CLASSIC_CONFIG_RESET_SAFETY,
+    ) != CLASSIC_CONFIG_RESET_SAFETY
+        || startup_config_integer(
+            config,
+            "Graphics",
+            "ResolutionX",
+            CLASSIC_DEFAULT_RESOLUTION_X,
+        ) == 0
+}
+
+fn canonicalize_startup_integrity_scalars(config: &[u8]) -> Result<Option<Vec<u8>>> {
+    let mut canonical = config.to_vec();
+    for (section, key, default) in [
+        (
+            "General",
+            "ConfigResetSafety",
+            CLASSIC_CONFIG_RESET_SAFETY,
+        ),
+        (
+            "Graphics",
+            "ResolutionX",
+            CLASSIC_DEFAULT_RESOLUTION_X,
+        ),
+    ] {
+        if lc_app::configured_native_scalar(&canonical, section, key).is_none() {
+            continue;
+        }
+        let value = startup_config_integer(&canonical, section, key, default).to_string();
+        canonical = lc_app::update_configured_native_values(
+            &canonical,
+            section,
+            &[(key, lc_app::NativeConfigValue::RawAscii(&value))],
+        )
+        .with_context(|| format!("failed to canonicalize startup configuration {section}.{key}"))?;
+    }
+    Ok((canonical != config).then_some(canonical))
+}
+
+fn publish_startup_config_in_place(serialized: &[u8], config_path: &Path) -> Result<()> {
+    let mut config_file = File::create(config_path).with_context(|| {
+        format!(
+            "failed to open startup configuration {} for in-place save",
+            config_path.display()
+        )
+    })?;
+    config_file.write_all(serialized).with_context(|| {
+        format!(
+            "failed to save startup configuration {} in place",
+            config_path.display()
+        )
+    })?;
+    config_file.sync_all().with_context(|| {
+        format!(
+            "failed to flush startup configuration {} saved in place",
+            config_path.display()
+        )
+    })
+}
+
+fn publish_startup_config_atomically(serialized: &[u8], config_path: &Path) -> Result<()> {
+    let file_name = config_path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "config path has no filename"))?
+        .to_string_lossy();
+    let parent = config_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staged = match tempfile::Builder::new()
+        .prefix(&format!(".{file_name}.startup-config-"))
+        .tempfile_in(parent)
+    {
+        Ok(staged) => staged,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            // C4Config::Save opens the existing file directly. Preserve that
+            // path when the file is writable but its parent forbids creating
+            // a sibling staging file.
+            return publish_startup_config_in_place(serialized, config_path);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to stage startup configuration {}",
+                    config_path.display()
+                )
+            });
+        }
+    };
+    staged.write_all(serialized).with_context(|| {
+        format!(
+            "failed to stage startup configuration {}",
+            config_path.display()
+        )
+    })?;
+    staged.as_file().sync_all().with_context(|| {
+        format!(
+            "failed to flush startup configuration {}",
+            config_path.display()
+        )
+    })?;
+    match staged.persist(config_path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.error.kind() == io::ErrorKind::PermissionDenied => {
+            drop(error.file);
+            publish_startup_config_in_place(serialized, config_path)
+        }
+        Err(error) => Err(error.error).with_context(|| {
+            format!(
+                "failed to publish startup configuration {}",
+                config_path.display()
+            )
+        }),
+    }
+}
+
+fn validate_or_repair_startup_config(
+    config_path: &Path,
+    command_line_config: bool,
+) -> Result<bool> {
+    let Some(config) = load_startup_integrity_config(config_path)? else {
+        return Ok(false);
+    };
+    if !startup_config_is_corrupted(&config) {
+        if let Some(canonical) = canonicalize_startup_integrity_scalars(&config)? {
+            publish_startup_config_atomically(&canonical, config_path)?;
+        }
+        return Ok(false);
+    }
+    if command_line_config {
+        return Err(anyhow!(CUSTOM_CONFIG_CORRUPTED_ERROR));
+    }
+
+    tracing::warn!("Configuration corrupted - restoring default!");
+    let mut defaults = advanced_config::default_config();
+    // The native recovery immediately reloads the saved defaults. Reflect the
+    // post-load version adaptation in this file-backed runtime: build 347
+    // enables shaders and is then stamped to the current engine build.
+    defaults.set_in(
+        Some("General"),
+        "Version",
+        CLASSIC_ENGINE_BUILD.to_string(),
+    );
+    defaults.set_in(Some("Graphics"), "Shader", "1");
+    let serialized = defaults
+        .to_string()
+        .context("failed to serialize restored default configuration")?;
+    publish_startup_config_atomically(serialized.as_bytes(), config_path)?;
+    let repaired = load_startup_integrity_config(config_path)?.with_context(|| {
+        format!(
+            "restored default configuration {} disappeared before reload",
+            config_path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        !startup_config_is_corrupted(&repaired),
+        "restored default configuration {} is still corrupt",
+        config_path.display()
+    );
+    Ok(true)
+}
+
+fn discover_validated_startup_paths(
+    explicit_config: Option<&Path>,
+) -> Result<Option<Arc<AppPaths>>> {
+    let command_line_config =
+        explicit_config.is_some_and(|path| !path.as_os_str().is_empty());
+    let mut app_paths = match cached_app_paths_with_config_file(explicit_config) {
+        Ok(paths) => Some(paths),
+        Err(_) => {
+            // C4Application checks a custom configuration before opening the
+            // System group. Preserve that ordering even when broader AppPaths
+            // discovery cannot complete yet; LC_CONFIG_FILE still wins the
+            // selected file while only a command-line path selects abort.
+            let selected_config = std::env::var_os("LC_CONFIG_FILE")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| explicit_config.map(Path::to_path_buf));
+            if let Some(config_path) = selected_config {
+                validate_or_repair_startup_config(&config_path, command_line_config)?;
+            }
+            return Ok(None);
+        }
+    };
+    let repaired_config = app_paths
+        .as_ref()
+        .map(|paths| {
+            validate_or_repair_startup_config(&paths.config_file(), command_line_config)
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if repaired_config {
+        // AppPaths may already have projected a poisoned General.UserPath.
+        // C++ reloads the freshly defaulted config, so rediscover every path
+        // from that repaired document before any consumer observes it.
+        reset_cached_app_paths();
+        app_paths = cached_app_paths_with_config_file(explicit_config).ok();
+    }
+    Ok(app_paths)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let classic = parse_classic_command_line(&cli.classic_arguments);
@@ -7302,7 +7583,7 @@ fn main() -> Result<()> {
         .config_file
         .as_deref()
         .or(cli.config_file.as_deref());
-    let app_paths = cached_app_paths_with_config_file(explicit_config).ok();
+    let app_paths = discover_validated_startup_paths(explicit_config)?;
     if let Some(paths) = app_paths.as_ref() {
         let log_path = paths.logs_dir().join("Clonk.log");
         match lc_logging::init_verbose_with_file(classic.verbose, &log_path) {
@@ -19626,7 +19907,6 @@ fn cached_app_paths_with_config_file(
     discovered
 }
 
-#[cfg(test)]
 fn reset_cached_app_paths() {
     let mut cache = APP_PATH_CACHE.lock().unwrap();
     *cache = None;
@@ -97224,6 +97504,288 @@ func Award()
     pub(super) fn env_lock() -> &'static ReentrantMutex<()> {
         static LOCK: OnceLock<ReentrantMutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| ReentrantMutex::new(()))
+    }
+
+    #[test]
+    fn l032_startup_numbers_follow_native_long_narrowing() {
+        assert_eq!(parse_startup_config_integer(b"7junk"), Some(7));
+        assert_eq!(parse_startup_config_integer(b"0x2ajunk"), Some(42));
+        assert_eq!(parse_startup_config_integer(b"0x"), Some(0));
+
+        #[cfg(all(not(windows), target_pointer_width = "64"))]
+        {
+            assert_eq!(parse_startup_config_integer(b"4294967296"), Some(0));
+            assert_eq!(
+                parse_startup_config_integer(b"9223372036854775808"),
+                Some(-1),
+                "strtol overflow clamps to native LONG_MAX before int32 narrowing"
+            );
+        }
+        #[cfg(any(windows, target_pointer_width = "32"))]
+        {
+            assert_eq!(
+                parse_startup_config_integer(b"4294967296"),
+                Some(i32::MAX)
+            );
+            assert_eq!(
+                parse_startup_config_integer(b"-4294967296"),
+                Some(i32::MIN)
+            );
+        }
+    }
+
+    #[test]
+    fn l032_integrity_numbers_keep_native_scalar_grammar() {
+        let quoted =
+            b"[General]\nConfigResetSafety=\"7\"\n\n[Graphics]\nResolutionX=\"0\"\n";
+        assert!(
+            !startup_config_is_corrupted(quoted),
+            "quoted strings are not native DWord values and retain typed defaults"
+        );
+
+        let bare_hex_prefix =
+            b"[General]\nConfigResetSafety=42\n\n[Graphics]\nResolutionX=0x\n";
+        assert!(startup_config_is_corrupted(bare_hex_prefix));
+
+        let dir = tempdir().expect("config root");
+        let path = dir.path().join("legacyclonk.config");
+        fs::write(
+            &path,
+            "[General]\nConfigResetSafety=\"7\"\nVendor=keep\n\n[Graphics]\nResolutionX=1234junk\n",
+        )
+        .expect("write native prefix config");
+        assert!(
+            !validate_or_repair_startup_config(&path, false)
+                .expect("canonicalize healthy native prefix config")
+        );
+        let canonical = Config::load(&path).expect("reload native prefix config");
+        assert_eq!(
+            canonical.get_in(Some("General"), "ConfigResetSafety"),
+            Some("42")
+        );
+        assert_eq!(canonical.get_in(Some("General"), "Vendor"), Some("keep"));
+        assert_eq!(
+            canonical.get_in(Some("Graphics"), "ResolutionX"),
+            Some("1234")
+        );
+
+        fs::write(
+            &path,
+            "[General]\nConfigResetSafety=42\n\n[Graphics]\nResolutionX=\"1234\"\n",
+        )
+        .expect("write quoted resolution config");
+        assert!(
+            !validate_or_repair_startup_config(&path, false)
+                .expect("canonicalize quoted resolution default")
+        );
+        assert_eq!(
+            Config::load(&path)
+                .expect("reload quoted resolution config")
+                .get_in(Some("Graphics"), "ResolutionX"),
+            Some("800")
+        );
+    }
+
+    #[test]
+    fn l032_default_bad_safety_restores_and_saves_defaults() {
+        let dir = tempdir().expect("config root");
+        let path = dir.path().join("legacyclonk.config");
+        fs::write(
+            &path,
+            "[General]\nConfigResetSafety=7junk\nVendorPoison=keep\n\n[Graphics]\nResolutionX=1234\n\n[Vendor]\nPoison=yes\n",
+        )
+        .expect("write corrupt config");
+
+        assert!(
+            validate_or_repair_startup_config(&path, false).expect("repair default config")
+        );
+
+        let repaired = Config::load(&path).expect("reload repaired config");
+        assert_eq!(
+            repaired.get_in(Some("General"), "ConfigResetSafety"),
+            Some("42")
+        );
+        assert_eq!(
+            repaired.get_in(Some("Graphics"), "ResolutionX"),
+            Some("800")
+        );
+        assert_eq!(repaired.get_in(Some("General"), "Version"), Some("362"));
+        assert_eq!(repaired.get_in(Some("Graphics"), "Shader"), Some("1"));
+        assert_eq!(
+            repaired.get_in(Some("General"), "VendorPoison"),
+            None
+        );
+        assert_eq!(repaired.get_in(Some("Vendor"), "Poison"), None);
+    }
+
+    #[test]
+    fn l032_default_zero_resolution_restores_and_saves_defaults() {
+        let dir = tempdir().expect("config root");
+        let path = dir.path().join("legacyclonk.config");
+        fs::write(
+            &path,
+            "[General]\nConfigResetSafety=42\n\n[Graphics]\nResolutionX=0junk\nResolutionY=777\n",
+        )
+        .expect("write zero-resolution config");
+
+        assert!(
+            validate_or_repair_startup_config(&path, false).expect("repair zero resolution")
+        );
+        let repaired = Config::load(&path).expect("reload repaired config");
+        assert_eq!(
+            repaired.get_in(Some("Graphics"), "ResolutionX"),
+            Some("800")
+        );
+        assert_eq!(
+            repaired.get_in(Some("Graphics"), "ResolutionY"),
+            Some("600")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn l032_writable_config_repairs_when_parent_forbids_staging() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("config root");
+        let path = dir.path().join("legacyclonk.config");
+        fs::write(&path, "[General]\nConfigResetSafety=7\n")
+            .expect("write corrupt config");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("make config writable");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500))
+            .expect("forbid sibling staging files");
+
+        let repair = validate_or_repair_startup_config(&path, false);
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))
+            .expect("restore config directory permissions");
+
+        assert!(repair.expect("repair writable config in place"));
+        assert_eq!(
+            Config::load(&path)
+                .expect("reload in-place repaired config")
+                .get_in(Some("General"), "ConfigResetSafety"),
+            Some("42")
+        );
+    }
+
+    #[test]
+    fn l032_custom_corrupt_config_aborts_without_default_replacement() {
+        let install = tempdir().expect("install root");
+        let user_data = tempdir().expect("user data");
+        let dir = tempdir().expect("config root");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub")
+            .expect("system group stub");
+        let path = dir.path().join("portable.config");
+        let original = b"[General]\nConfigResetSafety=7\nName=Portable\n";
+        fs::write(&path, original).expect("write corrupt custom config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("LC_CONFIG_FILE", None),
+        ]);
+
+        let error = discover_validated_startup_paths(Some(&path))
+            .expect_err("custom corruption must abort");
+
+        assert_eq!(error.to_string(), CUSTOM_CONFIG_CORRUPTED_ERROR);
+        assert_eq!(fs::read(&path).expect("read untouched custom config"), original);
+    }
+
+    #[test]
+    fn l032_environment_config_repairs_instead_of_custom_abort() {
+        let install = tempdir().expect("install root");
+        let user_data = tempdir().expect("user data");
+        let custom = tempdir().expect("environment config root");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub")
+            .expect("system group stub");
+        let path = custom.path().join("environment.config");
+        fs::write(&path, "[General]\nConfigResetSafety=7\n")
+            .expect("write corrupt environment config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("LC_CONFIG_FILE", Some(path.as_path())),
+        ]);
+
+        let paths = discover_validated_startup_paths(None)
+            .expect("repair environment-selected config")
+            .expect("rediscover environment-selected paths");
+
+        assert_eq!(paths.config_file(), path);
+        let repaired = Config::load(paths.config_file()).expect("reload environment config");
+        assert_eq!(
+            repaired.get_in(Some("General"), "ConfigResetSafety"),
+            Some("42")
+        );
+    }
+
+    #[test]
+    fn l032_missing_integrity_fields_use_typed_defaults() {
+        let dir = tempdir().expect("config root");
+        let path = dir.path().join("legacyclonk.config");
+        let original = b"[General]\nName=Keep\n\n[Graphics]\nResolutionY=0\n";
+        fs::write(&path, original).expect("write config without integrity fields");
+
+        assert!(
+            !validate_or_repair_startup_config(&path, false)
+                .expect("missing integrity fields are defaults")
+        );
+        assert_eq!(fs::read(&path).expect("read unchanged config"), original);
+    }
+
+    #[test]
+    fn l032_default_repair_discards_cached_corrupt_user_path() {
+        let install = tempdir().expect("install root");
+        let home = tempdir().expect("home root");
+        let poison = tempdir().expect("poison user root");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub")
+            .expect("system group stub");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("HOME", Some(home.path())),
+            ("LC_USER_DATA_DIR", None),
+            ("LC_CONFIG_FILE", None),
+            ("XDG_DATA_HOME", None),
+            ("LOCALAPPDATA", None),
+            ("APPDATA", None),
+        ]);
+        let initial = cached_app_paths_with_config_file(None).expect("discover default paths");
+        let config_path = initial.config_file();
+        fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("create config parent");
+        fs::write(
+            &config_path,
+            format!(
+                "[General]\nConfigResetSafety=7\nUserPath={}\n",
+                poison.path().display()
+            ),
+        )
+        .expect("write corrupt user path");
+
+        reset_cached_app_paths();
+        let poisoned = cached_app_paths_with_config_file(None).expect("discover poisoned paths");
+        assert_eq!(poisoned.user_data_dir(), poison.path());
+        let repaired = discover_validated_startup_paths(None)
+            .expect("repair poisoned config")
+            .expect("rediscover repaired paths");
+        let expected_language = if input::is_german_system() { "DE" } else { "US" };
+
+        assert_eq!(repaired.config_file(), config_path);
+        assert_ne!(repaired.user_data_dir(), poison.path());
+        assert_eq!(
+            classic_loader_language_sequence(&repaired).expect("post-repair language default"),
+            vec![expected_language.to_string()]
+        );
+        assert_eq!(
+            cached_app_paths_with_config_file(None)
+                .expect("cache repaired paths")
+                .user_data_dir(),
+            repaired.user_data_dir()
+        );
     }
 
     #[test]

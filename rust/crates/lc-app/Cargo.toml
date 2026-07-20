@@ -36,6 +36,7 @@ freetype-rs = "0.38.0"
 ttf-parser = "0.25.1"
 thiserror = "1"
 gethostname = "1.0"
+tempfile = "3.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSProcessInfo", "NSUserDefaults"] }
@@ -48,7 +49,6 @@ windows = { version = "0.54", features = ["Data_Xml_Dom", "Foundation", "UI_Noti
 
 [dev-dependencies]
 flate2 = "1"
-tempfile = "3.8"
 # Keep lc-engine's property-test dependencies in the app test graph so adding
 # lc-engine or the full workspace does not rebuild shared transitive crates.
 lc-engine = { path = "../lc-engine", features = ["test-graph"] }

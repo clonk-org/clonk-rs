@@ -162,7 +162,7 @@ pub fn configured_native_dynamic_value(
 /// grammar. In particular, the value starts immediately after `=` and the
 /// textual forms are case-sensitive prefixes.
 pub fn configured_native_boolean(config: &[u8], section: &str, key: &str) -> Option<bool> {
-    let value = configured_native_boolean_value(config, section, key)?;
+    let value = configured_native_scalar(config, section, key)?;
     if value.first() == Some(&b'1') && !value.get(1).is_some_and(u8::is_ascii_digit) {
         Some(true)
     } else if value.first() == Some(&b'0') && !value.get(1).is_some_and(u8::is_ascii_digit) {
@@ -176,7 +176,10 @@ pub fn configured_native_boolean(config: &[u8], section: &str, key: &str) -> Opt
     }
 }
 
-fn configured_native_boolean_value<'a>(
+/// Returns the undecoded bytes following `=` for the first exact key in the
+/// first exact live section. Numeric and Boolean C4Config fields consume this
+/// scalar grammar directly rather than accepting quoted string values.
+pub fn configured_native_scalar<'a>(
     config: &'a [u8],
     section: &str,
     key: &str,

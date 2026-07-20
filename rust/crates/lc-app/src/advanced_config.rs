@@ -623,6 +623,26 @@ pub fn sections(config: &Config) -> Vec<AdvancedConfigSection> {
     sections
 }
 
+/// Materializes the typed defaults traversed by `C4Config::Default` into a
+/// fresh document. Startup corruption recovery must discard every value from
+/// the damaged file, including unknown extensions, rather than canonicalize
+/// that file in place.
+pub fn default_config() -> Config {
+    let empty = Config::new();
+    let mut defaults = Config::new();
+    for section in sections(&empty) {
+        let section_name = section.name;
+        for row in section.rows {
+            defaults.set_in(
+                Some(section_name.as_str()),
+                row.name,
+                row.value.serialized(),
+            );
+        }
+    }
+    defaults
+}
+
 /// Replays the native typed config load/save normalization for fields that
 /// are already present. Missing defaults stay missing, protected rows remain
 /// untouched, and unknown extension keys never enter the projection.
