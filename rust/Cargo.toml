@@ -6,10 +6,12 @@ members = [
     "crates/lc-script",
     "crates/lc-engine",
     "crates/lc-engine-unit-tests",
+    "crates/lc-engine-integration-tests",
     "crates/lc-engine-core",
     "crates/lc-app",
     "crates/lc-graphics",
     "crates/lc-frontend",
+    "crates/lc-frontend-unit-tests",
     "crates/lc-launcher",
     "crates/lc-launcher-ui",
     "crates/lc-launcher-shell",
@@ -72,6 +74,13 @@ debug = false
 [profile.test.package.lc-app]
 debug = false
 
+# Engine line tables account for roughly 36 MiB of its test-profile rlib and
+# are repeatedly processed by the large app and integration-test links.
+# Function names remain available in backtraces without this per-instruction
+# source mapping.
+[profile.test.package.lc-engine]
+debug = false
+
 # The large async lc-network harness is a cold-build tail, while its complete
 # suite remains only a few seconds without LLVM optimization. Skip optimization
 # and line tables for this crate's test-profile copy to shorten that tail.
@@ -79,9 +88,23 @@ debug = false
 opt-level = 0
 debug = false
 
-# Keep the production simulation engine optimized while avoiding LLVM
-# optimization and line-table generation for all leaf test harnesses: the
-# extracted 72k-line suite, inline engine units, and integration scenarios.
+# The inline and small unit wrappers are compile-bound, so avoid LLVM
+# optimization and line tables for their leaf package.
 [profile.test.package.lc-engine-unit-tests]
 opt-level = 0
+debug = false
+
+# The integration wrapper spends most of its wall time running scenario and
+# virtual-player loops. Light optimization pays for itself there without
+# restoring the level-3 compiler tail for the much larger inline wrapper.
+[profile.test.package.lc-engine-integration-tests]
+opt-level = 1
+debug = false
+
+# Keep the production frontend optimized for the app and render-heavy tests,
+# while using only light optimization and no line tables for its large inline
+# unit-test wrapper. Level 1 keeps the 666-test software-render suite fast
+# without restoring the level-3 compiler tail.
+[profile.test.package.lc-frontend-unit-tests]
+opt-level = 1
 debug = false

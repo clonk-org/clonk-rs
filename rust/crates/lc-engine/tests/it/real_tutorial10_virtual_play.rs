@@ -34,21 +34,11 @@ fn load_tutorial10() -> (Engine, i32) {
 }
 
 fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine
-        .snapshot()
-        .hud
-        .messages
-        .iter()
-        .any(|message| message.lines.iter().any(|line| line.contains(needle)))
+    engine.message_line_contains(needle)
 }
 
 fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == definition)
-        .map(|object| object.id)
+    engine.first_object_for_definition(definition)
 }
 
 fn object_menu_identification(engine: &Engine, owner: i32) -> Option<lc_script::Value> {
@@ -668,7 +658,7 @@ fn tutorial10_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.wait_until(
         "Tutorial10 fulfills SCRG and reaches GameOver",
         600,
-        |engine| engine.snapshot().game_over,
+        Engine::is_game_over,
     )?;
     player.assert_milestone("Tutorial10 records its fulfilled SCRG goal", |engine| {
         engine

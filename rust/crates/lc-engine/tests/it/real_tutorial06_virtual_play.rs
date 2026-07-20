@@ -35,12 +35,7 @@ fn load_tutorial06() -> (Engine, i32) {
 }
 
 fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == definition)
-        .map(|object| object.id)
+    engine.first_object_for_definition(definition)
 }
 
 fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
@@ -54,12 +49,7 @@ fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
 }
 
 fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine
-        .snapshot()
-        .hud
-        .messages
-        .iter()
-        .any(|message| message.lines.iter().any(|line| line.contains(needle)))
+    engine.message_line_contains(needle)
 }
 
 fn object_menu_identification(engine: &Engine, owner: i32) -> Option<lc_script::Value> {
@@ -1030,7 +1020,7 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     player.wait_until(
         "Tutorial06 fulfilled goal reaches GameOver",
         320,
-        |engine| engine.snapshot().game_over,
+        Engine::is_game_over,
     )?;
     player.assert_milestone("Tutorial06 records its fulfilled SCRG goal", |engine| {
         engine

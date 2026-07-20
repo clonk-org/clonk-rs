@@ -1,35 +1,20 @@
 [package]
-name = "lc-engine-unit-tests"
+name = "lc-engine-integration-tests"
 version = "0.1.0"
 edition = "2021"
 publish = false
 autotests = false
 
-[features]
-# Mirror lc-engine's cfg namespace because engine_inline compiles that crate
-# root directly. The complete workspace gate uses the same default feature set
-# as lc-engine's former built-in unit harness.
-default = []
-bench = []
-ffi = []
-test-graph = []
-
 [[test]]
-name = "unit"
-path = "tests/unit/main.rs"
-
-[[test]]
-name = "engine_inline"
-path = "../lc-engine/src/lib.rs"
+name = "engine_it"
+path = "../lc-engine/tests/it/main.rs"
 
 [dev-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
 indexmap = { version = "2", features = ["serde"] }
 lc-core = { path = "../lc-core" }
-# Match lc-app's test-only engine feature request. The feature only exposes
-# proptest to lc-engine's cfg(test) modules, but an unmatched request gives
-# focused engine-then-app runs two separate optimized lc-engine artifacts.
+# Keep the optimized engine artifact feature-identical to lc-app's test graph.
 lc-engine = { path = "../lc-engine", features = ["test-graph"] }
 lc-engine-core = { path = "../lc-engine-core" }
 lc-resources = { path = "../lc-resources" }

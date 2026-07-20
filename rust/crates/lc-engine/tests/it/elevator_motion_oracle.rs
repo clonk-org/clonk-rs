@@ -45,21 +45,11 @@ fn load_tutorial07() -> (Engine, i32) {
 }
 
 fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine
-        .snapshot()
-        .hud
-        .messages
-        .iter()
-        .any(|message| message.lines.iter().any(|line| line.contains(needle)))
+    engine.message_line_contains(needle)
 }
 
 fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == definition)
-        .map(|object| object.id)
+    engine.first_object_for_definition(definition)
 }
 
 fn raw_fixed(value: Option<C4Fixed>, pixels: i32) -> i32 {

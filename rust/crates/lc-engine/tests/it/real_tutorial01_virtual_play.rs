@@ -34,12 +34,7 @@ fn load_tutorial01() -> (Engine, i32) {
 }
 
 fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == definition)
-        .map(|object| object.id)
+    engine.first_object_for_definition(definition)
 }
 
 fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
@@ -53,12 +48,7 @@ fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
 }
 
 fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine
-        .snapshot()
-        .hud
-        .messages
-        .iter()
-        .any(|message| message.lines.iter().any(|line| line.contains(needle)))
+    engine.message_line_contains(needle)
 }
 
 #[test]
@@ -384,7 +374,7 @@ fn tutorial01_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     player.wait_until(
         "Tutorial01 fulfilled goal reaches GameOver",
         320,
-        |engine| engine.snapshot().game_over,
+        Engine::is_game_over,
     )?;
     let completed = player.engine().snapshot();
     assert!(

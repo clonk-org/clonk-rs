@@ -305,10 +305,20 @@ impl<'engine> VirtualPlayer<'engine> {
             return Ok(0);
         }
         let mut recent = VecDeque::with_capacity(RECENT_STATE_LIMIT);
-        self.remember_observable_state(&mut recent);
+        // Timeout diagnostics retain only the final few observations. Avoid
+        // eagerly cloning and formatting object/menu state on every successful
+        // route tick; start collecting exactly where the bounded queue would
+        // otherwise have discarded all earlier entries.
+        let diagnostics_start =
+            max_ticks.saturating_sub(u32::try_from(RECENT_STATE_LIMIT - 1).unwrap_or(u32::MAX));
+        if diagnostics_start == 0 {
+            self.remember_observable_state(&mut recent);
+        }
         for elapsed in 1..=max_ticks {
             self.tick_once()?;
-            self.remember_observable_state(&mut recent);
+            if elapsed >= diagnostics_start {
+                self.remember_observable_state(&mut recent);
+            }
             if reached(self.engine) {
                 return Ok(elapsed);
             }

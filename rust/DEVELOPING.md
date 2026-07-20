@@ -44,13 +44,19 @@ Use a focused crate test when its name is already known:
 ```sh
 cargo nextest run -p lc-engine-unit-tests --test engine_inline test_name
 cargo nextest run -p lc-engine-unit-tests --test unit test_name
-cargo nextest run -p lc-engine-unit-tests --test engine_it module_name::test_name
+cargo nextest run -p lc-engine-integration-tests --test engine_it module_name::test_name
+cargo nextest run -p lc-frontend-unit-tests --test frontend_inline test_name
 ```
 
-All engine test wrappers live in `lc-engine-unit-tests` so Cargo can compile
-their orchestration code quickly while keeping the production `lc-engine`
-library optimized. A bare `-p lc-engine` selection therefore checks the
-library package but does not select these three test binaries.
+The engine wrappers live in dedicated leaf packages so Cargo can keep their
+orchestration code cheap while retaining an optimized production `lc-engine`
+library. The scenario-heavy `engine_it` wrapper uses light optimization; the
+larger compile-bound inline wrapper does not. A bare `-p lc-engine` selection
+therefore checks the library package but does not select these test binaries.
+
+The frontend's inline unit surface likewise lives in
+`lc-frontend-unit-tests`; `lc-frontend` retains the opt-in
+`dev_feedback_render` integration target and the optimized production library.
 
 Do not run `cargo clean` between feedback cycles. Cargo's local incremental
 state is valuable to the edit-test loop. CI disables incremental compilation

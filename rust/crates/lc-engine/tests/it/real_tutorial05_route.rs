@@ -42,12 +42,7 @@ fn load_tutorial05() -> (Engine, i32) {
 }
 
 fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == definition)
-        .map(|object| object.id)
+    engine.first_object_for_definition(definition)
 }
 
 fn object_with_definition_near_x(
@@ -75,12 +70,7 @@ fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
 }
 
 fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine
-        .snapshot()
-        .hud
-        .messages
-        .iter()
-        .any(|message| message.lines.iter().any(|line| line.contains(needle)))
+    engine.message_line_contains(needle)
 }
 
 fn player_state(engine: &Engine, owner: i32) -> PlayerState {
@@ -1996,7 +1986,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     player.wait_until(
         "Tutorial05 fulfills SCRG and reaches GameOver",
         600,
-        |engine| engine.snapshot().game_over,
+        Engine::is_game_over,
     )?;
     player.assert_milestone("Tutorial05 records its fulfilled SCRG goal", |engine| {
         engine

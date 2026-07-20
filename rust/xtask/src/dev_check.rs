@@ -535,7 +535,7 @@ fn add_replay_and_render(plan: &mut CheckPlan, reason: &str) {
             "nextest",
             "run",
             "-p",
-            "lc-engine-unit-tests",
+            "lc-engine-integration-tests",
             "--test",
             "engine_it",
             "--",
@@ -624,7 +624,7 @@ fn add_test_target(
     reason: &str,
 ) {
     let (package, target) = if package == "lc-engine" && target == "it" {
-        ("lc-engine-unit-tests", "engine_it")
+        ("lc-engine-integration-tests", "engine_it")
     } else {
         (package, target)
     };
@@ -786,7 +786,7 @@ fn add_engine_filter(plan: &mut CheckPlan, id: &str, filter: &str, kind: CheckKi
             "nextest",
             "run",
             "-p",
-            "lc-engine-unit-tests",
+            "lc-engine-integration-tests",
             "--test",
             "engine_it",
             filter,
@@ -796,6 +796,24 @@ fn add_engine_filter(plan: &mut CheckPlan, id: &str, filter: &str, kind: CheckKi
 }
 
 fn add_package(plan: &mut CheckPlan, package: &str, reason: &str) {
+    if package == "lc-frontend" {
+        plan.add(
+            "lc-frontend-inline",
+            CheckKind::Unit,
+            CheckCwd::Workspace,
+            "cargo",
+            &[
+                "nextest",
+                "run",
+                "-p",
+                "lc-frontend-unit-tests",
+                "--test",
+                "frontend_inline",
+            ],
+            reason,
+        );
+        return;
+    }
     plan.add(
         format!("{package}-tests"),
         CheckKind::Unit,
@@ -1704,7 +1722,7 @@ mod tests {
             "nextest",
             "run",
             "-p",
-            "lc-engine-unit-tests",
+            "lc-engine-integration-tests",
             "--test",
             "engine_it",
             "real_scenario_harness::",
@@ -1721,6 +1739,16 @@ mod tests {
             assert_eq!(plan.commands[0].kind, CheckKind::Replay, "{path}");
             assert_eq!(plan.commands[1].kind, CheckKind::RenderProbe, "{path}");
             assert_eq!(plan.commands[2].kind, CheckKind::Hygiene, "{path}");
+            if path.starts_with("rust/crates/lc-frontend/") {
+                assert!(plan.has_args(&[
+                    "nextest",
+                    "run",
+                    "-p",
+                    "lc-frontend-unit-tests",
+                    "--test",
+                    "frontend_inline",
+                ]));
+            }
         }
     }
 
@@ -1733,7 +1761,7 @@ mod tests {
             "nextest",
             "run",
             "-p",
-            "lc-engine-unit-tests",
+            "lc-engine-integration-tests",
             "--test",
             "engine_it",
             "real_scenario_harness::",
@@ -1754,7 +1782,7 @@ mod tests {
                 "nextest",
                 "run",
                 "-p",
-                "lc-engine-unit-tests",
+                "lc-engine-integration-tests",
                 "--test",
                 "engine_it",
                 filter,
@@ -1772,7 +1800,7 @@ mod tests {
             "nextest",
             "run",
             "-p",
-            "lc-engine-unit-tests",
+            "lc-engine-integration-tests",
             "--test",
             "engine_it",
             "real_alchemy_revision::",
@@ -1788,7 +1816,7 @@ mod tests {
             "nextest",
             "run",
             "-p",
-            "lc-engine-unit-tests",
+            "lc-engine-integration-tests",
             "--test",
             "engine_it",
             "tutorial02_",

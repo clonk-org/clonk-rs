@@ -2105,6 +2105,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "lc-engine-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "image",
+ "indexmap 2.11.4",
+ "lc-core",
+ "lc-engine",
+ "lc-engine-core",
+ "lc-resources",
+ "lc-script",
+ "once_cell",
+ "proptest",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lc-engine-unit-tests"
 version = "0.1.0"
 dependencies = [
@@ -2130,6 +2154,23 @@ dependencies = [
 
 [[package]]
 name = "lc-frontend"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "freetype-rs",
+ "image",
+ "lc-engine",
+ "lc-graphics",
+ "lc-gui",
+ "lc-resources",
+ "lc-scaling",
+ "lc-script",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "lc-frontend-unit-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",

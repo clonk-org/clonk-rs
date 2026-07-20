@@ -166,6 +166,67 @@ pub enum MenuCommandKind {
 }
 
 #[cfg(test)]
+mod command_definition_snapshot_cache_regression {
+    use super::*;
+
+    #[test]
+    fn late_definition_registration_invalidates_the_shared_command_table() -> Result<(), EngineError>
+    {
+        let mut engine = Engine::new();
+        engine.register_definition(Definition::from_script("BASE", "Base", "")?)?;
+
+        let first = engine.command_definition_snapshot_table();
+        let reused = engine.command_definition_snapshot_table();
+        assert!(Rc::ptr_eq(&first, &reused));
+
+        let mut chopper = Definition::from_script("CHOP", "Chopper", "")?;
+        chopper.configure_actions(
+            None,
+            HashMap::from([(
+                "ChopWood".to_string(),
+                ActionSpec::default().with_procedure("CHOP"),
+            )]),
+        );
+        engine.register_definition(chopper)?;
+
+        let rebuilt = engine.command_definition_snapshot_table();
+        assert!(!Rc::ptr_eq(&first, &rebuilt));
+        let snapshot = rebuilt.get("CHOP").expect("late definition is visible");
+        assert!(snapshot.can_chop);
+        assert_eq!(snapshot.chop_action.as_deref(), Some("ChopWood"));
+        Ok(())
+    }
+
+    #[test]
+    fn definition_and_script_boundaries_invalidate_shared_host_tables() -> Result<(), EngineError>
+    {
+        let mut engine = Engine::new();
+        engine.register_definition(Definition::from_script("BASE", "Base", "")?)?;
+
+        let first = engine.host_definition_tables();
+        assert!(Rc::ptr_eq(&first, &engine.host_definition_tables()));
+
+        engine.register_definition(Definition::from_script("LATE", "Late", "")?)?;
+        let after_definition = engine.host_definition_tables();
+        assert!(!Rc::ptr_eq(&first, &after_definition));
+
+        engine.install_global_scripts(&[(
+            "System.c4g".to_string(),
+            "global func SharedHostCacheProbe() { return 1; }".to_string(),
+        )]);
+        let after_script = engine.host_definition_tables();
+        assert!(!Rc::ptr_eq(&after_definition, &after_script));
+
+        engine.set_standard_names(Some("Ada\nGrace".to_string()));
+        assert!(!Rc::ptr_eq(
+            &after_script,
+            &engine.host_definition_tables()
+        ));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod signed_action_direction_regression {
     use super::*;
 
@@ -16566,7 +16627,7 @@ fn mission_access_store_updates_semicolon_modules_case_insensitively() {
 }
 
 pub struct Engine {
-    #[doc(hidden)] pub definitions: HashMap<DefinitionId, Definition>,
+    #[doc(hidden)] pub(crate) definitions: HashMap<DefinitionId, Definition>,
     /// Definition registration order — C++ links scripts in child
     /// registration order (C4AulScript::Child0 walk, C4AulLink.cpp:31),
     /// which decides the overload chain when several appends hit the same
@@ -16610,6 +16671,16 @@ pub struct Engine {
     /// re-cloning every ActionLibrary there dominated tick time).
     definition_metadata_cache:
         std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>>>,
+    /// Immutable command-facing definition fields. Command execution consults
+    /// this table every tick, while definitions only change during loading.
+    /// Sharing one table avoids cloning IDs and rescanning every ActMap on
+    /// each frame and immediate command continuation.
+    command_definition_snapshot_cache:
+        std::cell::RefCell<Option<Rc<HashMap<DefinitionId, CommandDefinitionSnapshot>>>>,
+    /// Definition/script lookup data shared by copied host worlds. These
+    /// tables change only at definition-load or script-relink boundaries.
+    host_definition_tables_cache:
+        std::cell::RefCell<Option<Rc<compat::HostDefinitionTables>>>,
     /// Cached pending-spawn solid-mask descriptors. Sprite pixel payloads
     /// remain Arc-shared; host contexts only clone this Rc table.
     solid_mask_metadata_cache:
@@ -18860,6 +18931,8 @@ impl Engine {
             objects_generation: std::cell::Cell::new(1),
             object_index_cache: std::cell::RefCell::new((0, HashMap::new())),
             definition_metadata_cache: std::cell::RefCell::new(None),
+            command_definition_snapshot_cache: std::cell::RefCell::new(None),
+            host_definition_tables_cache: std::cell::RefCell::new(None),
             solid_mask_metadata_cache: std::cell::RefCell::new(None),
             materials: MaterialSet::default(),
             materials_shared: std::cell::RefCell::new(None),
@@ -19434,6 +19507,7 @@ impl Engine {
     /// list crew-info creation draws from when the def has no ClonkNames.
     pub fn set_standard_names(&mut self, names: Option<String>) {
         self.standard_names = names;
+        self.invalidate_host_definition_tables();
     }
 
     /// Attach the process-local mission-access configuration shared across
@@ -21866,6 +21940,10 @@ impl Engine {
         Ok(player.adjust_wealth(delta))
     }
 
+    pub fn player_wealth(&self, id: i32) -> Option<i32> {
+        self.player(id).map(Player::wealth)
+    }
+
     /// `C4Menu::DrawElement` arms ViewWealth whenever it renders a
     /// `C4MN_Extra_Value` footer (C4Menu.cpp:895-907). This presentation-time
     /// mutation is intentionally explicit because it is client-local.
@@ -22078,6 +22156,10 @@ impl Engine {
 
     pub fn frame(&self) -> u64 {
         self.frame
+    }
+
+    pub fn is_game_over(&self) -> bool {
+        self.game_over_triggered
     }
 
     pub fn game_time(&self) -> i32 {
@@ -23932,6 +24014,12 @@ impl Engine {
         &self.message_board_commands
     }
 
+    /// Whether any active in-game message line contains `needle`, without
+    /// cloning the complete simulation snapshot.
+    pub fn message_line_contains(&self, needle: &str) -> bool {
+        self.messages.line_contains(needle)
+    }
+
     pub fn environment(&self) -> EnvironmentSettings {
         self.environment
     }
@@ -24108,6 +24196,134 @@ impl Engine {
         table
     }
 
+    fn command_definition_snapshot_table(
+        &self,
+    ) -> Rc<HashMap<DefinitionId, CommandDefinitionSnapshot>> {
+        let mut cache = self.command_definition_snapshot_cache.borrow_mut();
+        if let Some(table) = cache.as_ref() {
+            return Rc::clone(table);
+        }
+        let table = Rc::new(
+            self.definitions
+                .iter()
+                .map(|(id, definition)| {
+                    let chop_action = definition
+                        .action_library()
+                        .specs()
+                        .iter()
+                        .find_map(|(name, spec)| {
+                            spec.procedure
+                                .as_deref()
+                                .filter(|procedure| {
+                                    ActionProcedure::from_name(procedure) == ActionProcedure::Chop
+                                })
+                                .map(|_| name.clone())
+                        });
+                    (
+                        id.clone(),
+                        CommandDefinitionSnapshot {
+                            value: definition.value(),
+                            shape: definition.shape_rect(),
+                            category: definition.category(),
+                            construction_offset: definition.construction_offset(),
+                            collection_limit: definition.collection_limit(),
+                            collection_rect: definition.collection_rect(),
+                            fragile: definition.fragile(),
+                            projectile: definition.projectile(),
+                            can_chop: chop_action.is_some(),
+                            chop_action,
+                            constructable: definition.is_constructable(),
+                            grab: definition.grab(),
+                            grab_put_get: definition.grab_put_get(),
+                            no_get: definition.no_get(),
+                        },
+                    )
+                })
+                .collect(),
+        );
+        *cache = Some(Rc::clone(&table));
+        table
+    }
+
+    fn host_definition_tables(&self) -> Rc<compat::HostDefinitionTables> {
+        let mut cache = self.host_definition_tables_cache.borrow_mut();
+        if let Some(tables) = cache.as_ref() {
+            return Rc::clone(tables);
+        }
+        let tables = Rc::new(compat::HostDefinitionTables::new(
+            self.definitions
+                .iter()
+                .filter(|(_, definition)| definition.color_by_owner())
+                .map(|(id, _)| id.clone())
+                .collect(),
+            self.definitions
+                .iter()
+                .filter(|(_, definition)| definition.base_auto_sell())
+                .map(|(id, _)| id.clone())
+                .collect(),
+            self.definitions
+                .iter()
+                .filter(|(_, definition)| definition.rebuyable())
+                .map(|(id, _)| id.clone())
+                .collect(),
+            self.definitions
+                .iter()
+                .filter(|(_, definition)| definition.no_sell() != 0)
+                .map(|(id, _)| id.clone())
+                .collect(),
+            self.definitions
+                .iter()
+                .filter_map(|(id, definition)| {
+                    definition
+                        .description()
+                        .map(|description| (id.clone(), description.to_string()))
+                })
+                .collect(),
+            self.definitions
+                .iter()
+                .filter_map(|(id, definition)| {
+                    definition
+                        .rank_names()
+                        .map(|names| (id.clone(), names.to_vec()))
+                })
+                .collect(),
+            self.definitions
+                .iter()
+                .filter_map(|(id, definition)| {
+                    definition.rank_base().map(|base| (id.clone(), base))
+                })
+                .collect(),
+            self.definitions
+                .iter()
+                .map(|(id, definition)| (id.clone(), definition.script_arc()))
+                .collect(),
+            self.script_link_sources
+                .iter()
+                .filter_map(|source| match source {
+                    ScriptLinkSource::Script { name, script, .. } => {
+                        Some((name.clone(), Arc::clone(script)))
+                    }
+                    ScriptLinkSource::Definition(_) | ScriptLinkSource::Scenario => None,
+                })
+                .collect(),
+            self.standard_names.clone(),
+            self.definitions
+                .iter()
+                .filter_map(|(id, definition)| {
+                    definition
+                        .clonk_names()
+                        .map(|names| (id.as_str().to_string(), names.to_string()))
+                })
+                .collect(),
+        ));
+        *cache = Some(Rc::clone(&tables));
+        tables
+    }
+
+    fn invalidate_host_definition_tables(&self) {
+        self.host_definition_tables_cache.borrow_mut().take();
+    }
+
     fn solid_mask_metadata_table(&self) -> Rc<HashMap<DefinitionId, HostSolidMaskMetadata>> {
         let mut cache = self.solid_mask_metadata_cache.borrow_mut();
         if let Some(table) = cache.as_ref() {
@@ -24153,6 +24369,7 @@ impl Engine {
     fn host_world_context(&self) -> HostWorldContext {
         let landscape = self.landscape.clone();
         let definition_metadata = self.definition_metadata_table();
+        let host_definition_tables = self.host_definition_tables();
         let solid_mask_metadata = self.solid_mask_metadata_table();
         let transfer_zones = self.transfer_zones.states();
         let players: HashMap<i32, PlayerState> = self
@@ -24255,6 +24472,8 @@ impl Engine {
             }),
             landscape,
             definition_metadata,
+            Rc::clone(&self.scenario_values),
+            Rc::clone(&self.default_rank_names),
             transfer_zones,
             players,
             crew_selection,
@@ -24262,7 +24481,6 @@ impl Engine {
             self.team_home_base_rule,
         )
         .with_needed_material_strings(Rc::clone(&self.needed_material_strings))
-        .with_default_rank_names(Rc::clone(&self.default_rank_names))
         .with_control_key_names(Rc::clone(&self.control_key_names))
         .with_solid_mask_metadata(solid_mask_metadata)
         .with_solid_mask_bakes(
@@ -24282,7 +24500,6 @@ impl Engine {
                 .collect(),
             self.next_solid_mask_instance_sequence,
         )
-        .with_scenario_values(Rc::clone(&self.scenario_values))
         .with_scenario_sections(
             self.scenario_sections
                 .values()
@@ -24301,28 +24518,10 @@ impl Engine {
         .with_league_scores(Rc::clone(&self.player_info_league_scores))
         .with_movement_solid_masks(self.ocf_solid_mask_overlay())
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
-        .with_color_by_owner_definitions(
-            self.definitions
-                .iter()
-                .filter(|(_, definition)| definition.color_by_owner())
-                .map(|(id, _)| id.clone()),
-        )
-        .with_base_auto_sell_definitions(
-            self.definitions
-                .iter()
-                .filter(|(_, definition)| definition.base_auto_sell())
-                .map(|(id, _)| id.clone()),
-            self.definitions
-                .iter()
-                .filter(|(_, definition)| definition.rebuyable())
-                .map(|(id, _)| id.clone()),
+        .with_definition_tables(
+            host_definition_tables,
             self.base_auto_sell_enabled,
-        )
-        .with_no_sell_definitions(
-            self.definitions
-                .iter()
-                .filter(|(_, definition)| definition.no_sell() != 0)
-                .map(|(id, _)| id.clone()),
+            self.host_crew_info_state(),
         )
         // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
         // execution. FindBase is one of the APIs that explicitly walks the
@@ -24338,51 +24537,6 @@ impl Engine {
         .with_crew_infos(Rc::clone(&self.crew_object_infos))
         .with_crew_info_links(Rc::clone(&self.crew_info_links))
         .with_materials(Some(self.materials_shared()))
-        .with_definition_scripts(
-            self.definitions
-                .iter()
-                .map(|(id, definition)| (id.clone(), definition.script_arc()))
-                .collect(),
-        )
-        .with_linked_script_hosts(
-            self.script_link_sources
-                .iter()
-                .filter_map(|source| match source {
-                    ScriptLinkSource::Script { name, script, .. } => {
-                        Some((name.clone(), Arc::clone(script)))
-                    }
-                    ScriptLinkSource::Definition(_) | ScriptLinkSource::Scenario => None,
-                })
-                .collect(),
-        )
-        .with_definition_descriptions(
-            self.definitions
-                .iter()
-                .filter_map(|(id, definition)| {
-                    definition
-                        .description()
-                        .map(|description| (id.clone(), description.to_string()))
-                })
-                .collect(),
-        )
-        .with_definition_rank_names(
-            self.definitions
-                .iter()
-                .filter_map(|(id, definition)| {
-                    definition
-                        .rank_names()
-                        .map(|names| (id.clone(), names.to_vec()))
-                })
-                .collect(),
-        )
-        .with_definition_rank_bases(
-            self.definitions
-                .iter()
-                .filter_map(|(id, definition)| {
-                    definition.rank_base().map(|base| (id.clone(), base))
-                })
-                .collect(),
-        )
         .with_scenario_script(
             self.scenario_script
                 .as_ref()
@@ -24424,18 +24578,6 @@ impl Engine {
         )
         .with_structures_need_energy(self.structures_need_energy)
         .with_flag_removeable(self.flag_removeable)
-        .with_crew_name_sources(
-            self.standard_names.clone(),
-            self.definitions
-                .iter()
-                .filter_map(|(id, definition)| {
-                    definition
-                        .clonk_names()
-                        .map(|names| (id.as_str().to_string(), names.to_string()))
-                })
-                .collect(),
-            self.host_crew_info_state(),
-        )
         .with_sky_adjustment(sky_adjustment)
         .with_sky_fade(sky_fade[0], sky_fade[1]);
         if self.defer_solid_mask_updates {
@@ -26542,6 +26684,8 @@ impl Engine {
         });
         self.definitions.insert(id, definition);
         self.definition_metadata_cache.borrow_mut().take();
+        self.command_definition_snapshot_cache.borrow_mut().take();
+        self.invalidate_host_definition_tables();
         self.solid_mask_metadata_cache.borrow_mut().take();
         Ok(())
     }
@@ -26568,6 +26712,7 @@ impl Engine {
                 Arc::make_mut(script).set_global_functions(table.clone());
             }
         }
+        self.invalidate_host_definition_tables();
     }
 
     fn global_menu_callback_script(&self, function: &str) -> Option<(String, Arc<ScriptEngine>)> {
@@ -26786,6 +26931,8 @@ impl Engine {
             }
         }
         self.definition_metadata_cache.borrow_mut().take();
+        self.command_definition_snapshot_cache.borrow_mut().take();
+        self.invalidate_host_definition_tables();
         self.solid_mask_metadata_cache.borrow_mut().take();
     }
 
@@ -26977,6 +27124,8 @@ impl Engine {
 
     pub fn resolve_includes(&mut self) -> Result<(), EngineError> {
         self.definition_metadata_cache.borrow_mut().take();
+        self.command_definition_snapshot_cache.borrow_mut().take();
+        self.invalidate_host_definition_tables();
         self.solid_mask_metadata_cache.borrow_mut().take();
         fn resolve_definition(
             engine: &mut Engine,
@@ -27095,10 +27244,14 @@ impl Engine {
         Ok(())
     }
 
+    /// Read-only definition access. Keeping mutation behind engine methods
+    /// ensures definition-derived runtime caches cannot become stale.
+    pub fn definition(&self, definition_id: &str) -> Option<&Definition> {
+        self.definitions.get(definition_id)
+    }
+
     pub fn definition_name(&self, definition_id: &str) -> Option<&str> {
-        self.definitions
-            .get(definition_id)
-            .map(|definition| definition.name())
+        self.definition(definition_id).map(Definition::name)
     }
 
     pub fn definition_description(&self, definition_id: &str) -> Option<&str> {
@@ -28809,43 +28962,7 @@ impl Engine {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let definition_snapshots = self
-            .definitions
-            .iter()
-            .map(|(id, definition)| {
-                let chop_action = definition
-                    .action_library()
-                    .specs()
-                    .iter()
-                    .find_map(|(name, spec)| {
-                        spec.procedure
-                            .as_deref()
-                            .filter(|procedure| {
-                                ActionProcedure::from_name(procedure) == ActionProcedure::Chop
-                            })
-                            .map(|_| name.clone())
-                    });
-                (
-                    id.clone(),
-                    CommandDefinitionSnapshot {
-                        value: definition.value(),
-                        shape: definition.shape_rect(),
-                        category: definition.category(),
-                        construction_offset: definition.construction_offset(),
-                        collection_limit: definition.collection_limit(),
-                        collection_rect: definition.collection_rect(),
-                        fragile: definition.fragile(),
-                        projectile: definition.projectile(),
-                        can_chop: chop_action.is_some(),
-                        chop_action,
-                        constructable: definition.is_constructable(),
-                        grab: definition.grab(),
-                        grab_put_get: definition.grab_put_get(),
-                        no_get: definition.no_get(),
-                    },
-                )
-            })
-            .collect::<HashMap<_, _>>();
+        let definition_snapshots = self.command_definition_snapshot_table();
         let transfer_zones = self.transfer_zones.clone();
         let Some(index) = self.find_object_index(object_id) else {
             return Ok(());
@@ -28862,7 +28979,7 @@ impl Engine {
             object: object_snapshot,
             objects: &command_snapshots,
             players: &player_snapshots,
-            definitions: &definition_snapshots,
+            definitions: definition_snapshots.as_ref(),
             structures_need_energy: self.structures_need_energy,
             base_buy_enabled: self.base_buy_enabled,
             base_sell_enabled: self.base_sell_enabled,
@@ -29164,43 +29281,7 @@ impl Engine {
             })
             .collect();
 
-        let definition_snapshots: HashMap<DefinitionId, CommandDefinitionSnapshot> = self
-            .definitions
-            .iter()
-            .map(|(id, definition)| {
-                let mut chop_action = None;
-                let mut can_chop = false;
-                for (action_name, spec) in definition.action_library().specs() {
-                    if let Some(procedure_name) = spec.procedure.as_deref() {
-                        if ActionProcedure::from_name(procedure_name) == ActionProcedure::Chop {
-                            can_chop = true;
-                            if chop_action.is_none() {
-                                chop_action = Some(action_name.clone());
-                            }
-                        }
-                    }
-                }
-                (
-                    id.clone(),
-                    CommandDefinitionSnapshot {
-                        value: definition.value(),
-                        shape: definition.shape_rect(),
-                        category: definition.category(),
-                        construction_offset: definition.construction_offset(),
-                        collection_limit: definition.collection_limit(),
-                        collection_rect: definition.collection_rect(),
-                        fragile: definition.fragile(),
-                        projectile: definition.projectile(),
-                        can_chop,
-                        chop_action,
-                        constructable: definition.is_constructable(),
-                        grab: definition.grab(),
-                        grab_put_get: definition.grab_put_get(),
-                        no_get: definition.no_get(),
-                    },
-                )
-            })
-            .collect();
+        let definition_snapshots = self.command_definition_snapshot_table();
 
         // The synced RNG rides along for command-AI draws (C4Command Get's
         // Random calls); swapped in only around step_command_stack so the
@@ -29396,7 +29477,7 @@ impl Engine {
                     object: builder_snapshot,
                     objects: &command_snapshots,
                     players: &player_snapshots,
-                    definitions: &definition_snapshots,
+                    definitions: definition_snapshots.as_ref(),
                     structures_need_energy: self.structures_need_energy,
                     base_buy_enabled: self.base_buy_enabled,
                     base_sell_enabled: self.base_sell_enabled,
@@ -30558,8 +30639,11 @@ impl Engine {
             }
         }
         self.detach_destroyed_objects()?;
+        let object_count_before_retain = self.objects.len();
         self.objects.retain(|object| !object.destroyed);
-        self.note_objects_changed();
+        if self.objects.len() != object_count_before_retain {
+            self.note_objects_changed();
+        }
         self.rebuild_sectors();
         let alive: HashSet<_> = self.objects.iter().map(|object| object.id).collect();
         self.surface_pending_runtime_flash_boundary()?;
@@ -30647,16 +30731,42 @@ impl Engine {
     }
 
     pub fn object_snapshot(&self, id: ObjectId) -> Option<ObjectSnapshot> {
+        let object = &self.objects[self.find_object_index(id)?];
+        let library = self
+            .definitions
+            .get(&object.definition_id)
+            .map(|definition| definition.action_library());
+        Some(object.snapshot(library))
+    }
+
+    /// Lowest-ID object with this definition, matching the ordering exposed
+    /// by [`Engine::snapshot`] without constructing that snapshot.
+    pub fn first_object_for_definition(&self, definition: &str) -> Option<ObjectId> {
         self.objects
             .iter()
-            .find(|object| object.id == id)
-            .map(|object| {
-                let library = self
-                    .definitions
-                    .get(&object.definition_id)
-                    .map(|definition| definition.action_library());
-                object.snapshot(library)
+            .filter(|object| object.definition_id == definition)
+            .map(|object| object.id)
+            .min()
+    }
+
+    pub fn object_count_for_definition(&self, definition: &str) -> usize {
+        self.objects
+            .iter()
+            .filter(|object| object.definition_id == definition)
+            .count()
+    }
+
+    pub fn object_count_for_definition_in_container(
+        &self,
+        definition: &str,
+        container: ObjectId,
+    ) -> usize {
+        self.objects
+            .iter()
+            .filter(|object| {
+                object.definition_id == definition && object.state.container == Some(container)
             })
+            .count()
     }
 
     /// Exact text used by `C4MouseControl` for an object's help caption:

@@ -1,10 +1,28 @@
 nextest-version = "0.9.91"
 
+# Opt-in workspace profiling. Keep this separate from the default gate so
+# ordinary runs stay concise while performance work can retain every test's
+# duration in a machine-readable JUnit report.
+[profile.profiling]
+fail-fast = false
+status-level = "fail"
+final-status-level = "fail"
+
+[profile.profiling.junit]
+path = "junit.xml"
+store-success-output = false
+
 # Known-flaky lc-app tests: env-lock / process-parallelism races
 # (install_definition_resolver path-case probe; the threaded audio boot).
 # Retry them instead of failing whole gate batteries on one-offs.
 [[profile.default.overrides]]
 filter = 'package(lc-app) and (test(install_definition_resolver_handles_case_insensitive_paths) or test(menu_music_runs_in_menu_cycle))'
+retries = 2
+
+# Host preparation uses a real background runtime and can exhaust its bounded
+# poll window when several worker gates saturate the machine simultaneously.
+[[profile.default.overrides]]
+filter = 'package(lc-app) and test(selected_network_scenario_installs_prepared_host_before_admission)'
 retries = 2
 
 [[profile.default.overrides]]
@@ -15,11 +33,11 @@ retries = 2
 # scenario routes first so they overlap the thousands of short unit tests
 # instead of becoming a serial tail at the end of the workspace gate.
 [[profile.default.overrides]]
-filter = '(package(lc-app) and test(/app_virtual_keyboard_(completes_real_tutorial0[1-3]_route|delivers_tutorial08_surface_wipfs_to_hut|flings_tutorial05_wood_to_the_right_hill)/)) or ((package(lc-engine) or package(lc-engine-unit-tests)) and test(/(dragon_rock_princess_scream_is_|tutorial(01|02|03|08|09|10)_virtual_player_completes_)/))'
+filter = '(package(lc-app) and test(/app_virtual_keyboard_(completes_real_tutorial0[1-3]_route|delivers_tutorial08_surface_wipfs_to_hut|flings_tutorial05_wood_to_the_right_hill)/)) or (package(lc-engine-integration-tests) and test(/(dragon_rock_princess_scream_is_|tutorial(01|02|03|08|09|10)_virtual_player_completes_)/))'
 priority = 100
 
 [[profile.default.overrides]]
-filter = '(package(lc-app) and test(/(classic_host_zero_countdown_|complete_resource_join_|fair_crew_set_|locally_authored_join_|offline_player_info_control_|secondary_local_player_|simultaneous_local_team_selection_|synchronized_team_selection_|unknown_loadable_resource_join_|regicide_assigns_the_initial_host_player_|tutorial01_builds_the_exact_supported_initial_host_bootstrap|selected_network_scenario_installs_prepared_host_|staged_host_installs_activated_participant_|l052_(ready_tick_local_join|synchronized_remote_join)|real_alchemy_right_drag_frame_)/)) or ((package(lc-engine) or package(lc-engine-unit-tests)) and test(/(tutorial08_empty_messages_clear_|alchemy_earthquake_cast_|dragon_rock_script25_casts_|sky_race_finish_eliminates_|gold_rush_global_fade_timer_|committed_real_scenario_replays_|tutorial05_jump_and_run_held_down_|replayed_section_load_realigns_|western_global_fade_restores_)/))'
+filter = '(package(lc-app) and test(/(classic_host_zero_countdown_|complete_resource_join_|fair_crew_set_|locally_authored_join_|offline_player_info_control_|secondary_local_player_|simultaneous_local_team_selection_|synchronized_team_selection_|unknown_loadable_resource_join_|regicide_assigns_the_initial_host_player_|tutorial01_builds_the_exact_supported_initial_host_bootstrap|selected_network_scenario_installs_prepared_host_|staged_host_installs_activated_participant_|l052_(ready_tick_local_join|synchronized_remote_join)|real_alchemy_right_drag_frame_)/)) or (package(lc-engine-integration-tests) and test(/(tutorial08_empty_messages_clear_|alchemy_earthquake_cast_|dragon_rock_script25_casts_|sky_race_finish_eliminates_|gold_rush_global_fade_timer_|committed_real_scenario_replays_|tutorial05_jump_and_run_held_down_|replayed_section_load_realigns_|western_global_fade_restores_)/))'
 priority = 80
 
 # The remaining real-scenario cases are individually slower than the thousands
@@ -27,5 +45,5 @@ priority = 80
 # their final few multi-second cases do not become the workspace's serial tail;
 # the especially long cases above retain their higher priority.
 [[profile.default.overrides]]
-filter = 'package(lc-engine-unit-tests) and test(real_scenario_harness::)'
+filter = 'package(lc-engine-integration-tests) and test(real_scenario_harness::)'
 priority = 60

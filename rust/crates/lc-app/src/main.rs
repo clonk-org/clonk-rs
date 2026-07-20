@@ -6969,17 +6969,29 @@ impl AudioContext {
             options.music_volume,
         )));
         #[cfg(test)]
-        let system = if options.sound_enabled
+        let audio_resources_enabled = options.sound_enabled
             || options.music_enabled
             || options.menu_music_enabled
-            || options.menu_sound_enabled
-        {
+            || options.menu_sound_enabled;
+        #[cfg(test)]
+        let system = if audio_resources_enabled {
             AudioSystem::new_null(options.max_channels)
         } else {
             AudioSystem::new_deferred_null(options.max_channels)
         };
         #[cfg(not(test))]
         let system = AudioSystem::new(options.max_channels)?;
+        #[cfg(test)]
+        let (resolver, music_resolver) = if audio_resources_enabled {
+            (SoundResolver::new(), MusicResolver::discover())
+        } else {
+            // Silent app fixtures exercise audio state and fail-closed UI
+            // routes, but never resolve install media. Avoid walking every
+            // Sound/Music/Extra group for each nextest subprocess.
+            (SoundResolver::empty(), MusicResolver::empty())
+        };
+        #[cfg(not(test))]
+        let (resolver, music_resolver) = (SoundResolver::new(), MusicResolver::discover());
         Ok(Self {
             system,
             options,
@@ -6990,8 +7002,8 @@ impl AudioContext {
             active_channels: HashMap::new(),
             lobby_elevator_channel: None,
             next_sound_instance_order: 1,
-            resolver: SoundResolver::new(),
-            music_resolver: MusicResolver::discover(),
+            resolver,
+            music_resolver,
             missing_sounds: HashSet::new(),
         })
     }
@@ -8074,20 +8086,26 @@ struct SoundResolver {
 }
 
 impl SoundResolver {
-    fn new() -> Self {
-        let (global, base_sample_loads) = discover_global_sound_libraries();
-        let mut resolver = Self {
-            global,
+    fn empty() -> Self {
+        Self {
+            global: Vec::new(),
             scenario: Vec::new(),
             scenario_root: None,
             registered_definitions: HashSet::new(),
             definition_library_count: 0,
-            base_sample_loads,
+            base_sample_loads: Vec::new(),
             definition_sample_loads: Vec::new(),
             scenario_sample_loads: Vec::new(),
             sample_ranks: HashMap::new(),
             sample_ranks_prebuilt: false,
-        };
+        }
+    }
+
+    fn new() -> Self {
+        let (global, base_sample_loads) = discover_global_sound_libraries();
+        let mut resolver = Self::empty();
+        resolver.global = global;
+        resolver.base_sample_loads = base_sample_loads;
         resolver.rebuild_sample_ranks();
         resolver
     }
@@ -21524,14 +21542,18 @@ impl GameApp {
             tracing::warn!("no System.c4g scripts found; global script functions unavailable");
         }
 
-        // Start async material loading
-        let (tx, rx) = std::sync::mpsc::channel();
-        let paths_clone = paths.cloned();
-        std::thread::spawn(move || {
-            let material_library = load_install_material_library(paths_clone.as_ref());
-            let _ = tx.send(BootLoadingEvent::Finished(material_library));
+        // Pathless test/sandbox apps have no install material library. Keep
+        // their loader boundary state intact without spawning a worker whose
+        // only possible result is immediately `None`.
+        let boot_loading = paths.map(|paths| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let paths = paths.clone();
+            std::thread::spawn(move || {
+                let material_library = load_install_material_library(Some(&paths));
+                let _ = tx.send(BootLoadingEvent::Finished(material_library));
+            });
+            BootLoadingState::new(rx)
         });
-        let boot_loading = Some(BootLoadingState::new(rx));
 
         let base_sprites = assets.base_sprite_map().clone();
         let sprite_cache = Arc::new(base_sprites.clone());
@@ -71819,6 +71841,46 @@ fn try_load_install_definition(
         }
     };
 
+    #[cfg(test)]
+    {
+        // The repository's ordinary sandbox crew is a stable test resource.
+        // Open its canonical group directly before the recursive resolver so
+        // every isolated app test does not walk all of Objects.c4d. Restrict
+        // this shortcut to the stock test install: production and custom
+        // fixture installs retain the resolver's first-match precedence.
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent);
+        if repository == Some(paths.install_root()) && definition_id.eq_ignore_ascii_case("CLNK") {
+            let relative_path = Path::new("Crew.c4d/Clonk.c4d");
+            if let Ok(group) = objects_group.open_child(relative_path) {
+                let eligible = !group.exists("Particle.txt")
+                    && ResourceDefCore::load(&group).is_ok_and(|core| {
+                        core.has_valid_id()
+                            && core.needed_gfx_mode != 2
+                            && core.id.eq_ignore_ascii_case(definition_id)
+                    });
+                if eligible {
+                    match ResourceDefinitionData::load(&group) {
+                        Ok(definition) if definition.graphics_image.is_some() => {
+                            return Some(definition);
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::debug!(
+                                definition = definition_id,
+                                path = %relative_path.display(),
+                                error = %error,
+                                "canonical install definition lookup failed; using recursive fallback"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     match find_definition_in_group(&objects_group, definition_id) {
         Ok(result) => result,
         Err(err) => {
@@ -72689,19 +72751,23 @@ struct MusicResolver {
 }
 
 impl MusicResolver {
+    fn empty() -> Self {
+        Self {
+            global: MusicCatalog::empty(),
+            extra: None,
+            scenario: MusicCatalog::empty(),
+            scenario_has_local_sources: false,
+            scenario_root: None,
+            playlist: None,
+        }
+    }
+
     fn discover() -> Self {
         let paths = match AppPaths::discover() {
             Ok(paths) => paths,
             Err(error) => {
                 tracing::warn!(%error, "music resource discovery skipped");
-                return Self {
-                    global: MusicCatalog::empty(),
-                    extra: None,
-                    scenario: MusicCatalog::empty(),
-                    scenario_has_local_sources: false,
-                    scenario_root: None,
-                    playlist: None,
-                };
+                return Self::empty();
             }
         };
         let global = (|| -> anyhow::Result<MusicCatalog> {
@@ -83373,6 +83439,23 @@ func Award()
     pub(super) fn env_lock() -> &'static ReentrantMutex<()> {
         static LOCK: OnceLock<ReentrantMutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| ReentrantMutex::new(()))
+    }
+
+    #[test]
+    fn fully_disabled_test_audio_skips_install_resource_discovery() {
+        let audio = AudioContext::try_new(AudioOptions {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        })
+        .expect("silent audio context");
+
+        assert!(audio.resolver.global.is_empty());
+        assert!(audio.resolver.base_sample_loads.is_empty());
+        assert!(audio.music_resolver.global.assets.is_empty());
+        assert!(audio.music_resolver.extra.is_none());
     }
 
     #[test]
@@ -110535,7 +110618,7 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn startup_loader_failure_cannot_be_bypassed_by_fast_boot_completion() {
+    fn pathless_startup_skips_boot_worker_without_bypassing_loader_failure() {
         let mut app = GameApp::new(
             320,
             200,
@@ -110550,14 +110633,8 @@ ScenInfoArea=70,5,25,90
         )
         .expect("asset-less app state");
         install_classic_test_assets(&mut app);
-        for _ in 0..480 {
-            app.update().expect("poll boot worker");
-            if app.boot_loading.is_none() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(2));
-        }
-        assert!(app.boot_loading.is_none(), "boot worker completed");
+        assert!(app.boot_loading.is_none(), "pathless app skips boot worker");
+        app.update().expect("update pathless startup");
         assert_eq!(app.mode, AppMode::Loading);
         let mut frame = vec![0_u8; 320 * 200 * 4];
         assert!(app.render(&mut frame).is_err());

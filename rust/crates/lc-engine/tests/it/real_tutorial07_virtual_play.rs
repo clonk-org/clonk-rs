@@ -75,21 +75,11 @@ fn tutorial07_workshop_basement_keeps_cpp_pre_growth_creation_position() {
 }
 
 fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine
-        .snapshot()
-        .hud
-        .messages
-        .iter()
-        .any(|message| message.lines.iter().any(|line| line.contains(needle)))
+    engine.message_line_contains(needle)
 }
 
 fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == definition)
-        .map(|object| object.id)
+    engine.first_object_for_definition(definition)
 }
 
 fn object_menu_identification(engine: &Engine, owner: i32) -> Option<lc_script::Value> {
@@ -121,13 +111,7 @@ fn clonk_carries(engine: &Engine, clonk: ObjectId, definition: &str) -> bool {
 }
 
 fn player_wealth(engine: &Engine, owner: i32) -> i32 {
-    engine
-        .snapshot()
-        .hud
-        .players
-        .into_iter()
-        .find(|player| player.owner == owner)
-        .map_or(0, |player| player.wealth)
+    engine.player_wealth(owner).unwrap_or(0)
 }
 
 struct DetonationTransition {
@@ -1772,7 +1756,7 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.wait_until(
         "Tutorial07 fulfilled goal reaches GameOver",
         320,
-        |engine| engine.snapshot().game_over,
+        Engine::is_game_over,
     )?;
     player.assert_milestone("Tutorial07 records its fulfilled SCRG goal", |engine| {
         engine

@@ -1134,7 +1134,7 @@ fn write_logs(directory: &Path, value: &Value) -> Result<(), DevFeedbackError> {
 
 fn write_readme(directory: &Path, scenario: &str) -> Result<(), DevFeedbackError> {
     let contents = format!(
-        "Deterministic LegacyClonk replay artifact\n\nScenario: {scenario}\nReplay: replay.json\nMetrics: replay-metrics.json\n\nReproduce from rust/:\n  LC_CONTENT_ROOT=/path/to/content cargo nextest run -p lc-engine-unit-tests --test engine_it -- dev_feedback_replay::committed_real_scenario_replays_are_deterministic --exact\n"
+        "Deterministic LegacyClonk replay artifact\n\nScenario: {scenario}\nReplay: replay.json\nMetrics: replay-metrics.json\n\nReproduce from rust/:\n  LC_CONTENT_ROOT=/path/to/content cargo nextest run -p lc-engine-integration-tests --test engine_it -- dev_feedback_replay::committed_real_scenario_replays_are_deterministic --exact\n"
     );
     fs::write(directory.join("README.txt"), contents)
         .map_err(|error| io_error("write README.txt", error))

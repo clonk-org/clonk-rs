@@ -278,6 +278,17 @@ fn wait_until_reports_elapsed_ticks_and_a_labeled_timeout() -> Result<(), Box<dy
     ));
 
     let error = player
+        .wait_until("long impossible milestone", 8, |_| false)
+        .expect_err("a longer unmet milestone must time out");
+    let diagnostics = match &error {
+        VirtualPlayerError::Timeout { diagnostics, .. } => diagnostics,
+        other => panic!("expected timeout diagnostics, got {other:?}"),
+    };
+    assert!(diagnostics.starts_with("recent=[frame=8 "));
+    assert!(diagnostics.contains("frame=13 "));
+    assert_eq!(diagnostics.matches(" | ").count(), 5);
+
+    let error = player
         .hold_until(COM_RIGHT, "unreachable while walking", 2, |_| false)
         .expect_err("an unmet held-control milestone must time out");
     assert!(matches!(error, VirtualPlayerError::Timeout { .. }));

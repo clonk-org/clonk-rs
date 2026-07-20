@@ -11692,8 +11692,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         let lifter_idx = engine.find_object_index(lifter_id).expect("lifter exists");
         let target_definition_id = engine.objects[target_idx].definition_id.clone();
         let target_actions = engine
-            .definitions
-            .get(&target_definition_id)
+            .definition(&target_definition_id)
             .expect("target definition exists")
             .action_library()
             .clone();
@@ -29196,8 +29195,7 @@ func Death(by) { death_by = by; return 1; }
             .set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
         let definition_id = engine.objects[fighter_idx].definition_id.clone();
         let actions = engine
-            .definitions
-            .get(&definition_id)
+            .definition(&definition_id)
             .expect("fighter definition exists")
             .action_library()
             .clone();
@@ -29250,8 +29248,7 @@ func Death(by) { death_by = by; return 1; }
             .set_fixed_velocity(FixedVec2::new(itofix(-4), itofix(-5)));
         let definition_id = engine.objects[actor_idx].definition_id.clone();
         let actions = engine
-            .definitions
-            .get(&definition_id)
+            .definition(&definition_id)
             .expect("fighter definition exists")
             .action_library()
             .clone();
@@ -29290,8 +29287,7 @@ func Death(by) { death_by = by; return 1; }
             .set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
         let definition_id = engine.objects[pusher_idx].definition_id.clone();
         let actions = engine
-            .definitions
-            .get(&definition_id)
+            .definition(&definition_id)
             .expect("pusher definition exists")
             .action_library()
             .clone();
@@ -57273,8 +57269,7 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
 
         let definition_id = engine.objects[first_index].definition_id.clone();
         let actions = engine
-            .definitions
-            .get(&definition_id)
+            .definition(&definition_id)
             .expect("first mask definition remains")
             .action_library()
             .clone();
@@ -58750,8 +58745,7 @@ func ProbeGraphicsBounds() {
             );
             let definition_id = engine.objects[mover_idx].definition_id.clone();
             let actions = engine
-                .definitions
-                .get(&definition_id)
+                .definition(&definition_id)
                 .expect("mover definition exists")
                 .action_library()
                 .clone();
@@ -58859,8 +58853,7 @@ func ProbeGraphicsBounds() {
             .expect("mover definition registers");
         assert_eq!(
             engine
-                .definitions
-                .get("Mover")
+                .definition("Mover")
                 .expect("mover definition exists")
                 .has_function("ContactBottom"),
             callback_present,
@@ -58887,8 +58880,7 @@ func ProbeGraphicsBounds() {
         );
         let definition_id = engine.objects[idx].definition_id.clone();
         let actions = engine
-            .definitions
-            .get(&definition_id)
+            .definition(&definition_id)
             .expect("mover definition exists")
             .action_library()
             .clone();
@@ -59134,8 +59126,7 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
         engine.objects[hooked_no_attach_idx].state.t_attach = CNAT_BOTTOM | CNAT_RIGHT;
         engine.objects[hooked_no_attach_idx].frame_t_attach = CNAT_BOTTOM | CNAT_RIGHT;
         let hook_actions = engine
-            .definitions
-            .get("HOOK")
+            .definition("HOOK")
             .expect("hook definition exists")
             .action_library()
             .clone();
@@ -59264,8 +59255,7 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
         let mut engine = Engine::with_seed(0);
         engine.register_definition(scaler).expect("scaler registers");
         let actions = engine
-            .definitions
-            .get("STSC")
+            .definition("STSC")
             .expect("scaler definition exists")
             .action_library()
             .clone();
@@ -59345,8 +59335,7 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
             .expect("scaler spawns");
         let idx = engine.find_object_index(id).expect("scaler exists");
         let actions = engine
-            .definitions
-            .get("SCLR")
+            .definition("SCLR")
             .expect("scaler definition exists")
             .action_library()
             .clone();
@@ -61525,8 +61514,7 @@ protected func Initialize() {
             engine.objects[index].frame_t_attach = attach;
             let definition_id = engine.objects[index].definition_id.clone();
             let actions = engine
-                .definitions
-                .get(&definition_id)
+                .definition(&definition_id)
                 .expect("climber definition exists")
                 .action_library()
                 .clone();
@@ -61662,8 +61650,7 @@ protected func Initialize() {
         engine.objects[idx].frame_t_attach = CNAT_BOTTOM;
         let definition_id = engine.objects[idx].definition_id.clone();
         let actions = engine
-            .definitions
-            .get(&definition_id)
+            .definition(&definition_id)
             .expect("definition exists")
             .action_library()
             .clone();
@@ -61791,8 +61778,7 @@ protected func Initialize() {
         let idx = engine.find_object_index(id).expect("redirect wheel exists");
         let definition_id = engine.objects[idx].definition_id.clone();
         let actions = engine
-            .definitions
-            .get(&definition_id)
+            .definition(&definition_id)
             .expect("redirect wheel definition exists")
             .action_library()
             .clone();
@@ -61982,8 +61968,7 @@ func Arm()
 
         let definition_id = engine.objects[idx].definition_id.clone();
         let actions = engine
-            .definitions
-            .get(&definition_id)
+            .definition(&definition_id)
             .expect("rail mover definition exists")
             .action_library()
             .clone();
@@ -62041,8 +62026,7 @@ func Arm()
 
         let definition_id = engine.objects[idx].definition_id.clone();
         let actions = engine
-            .definitions
-            .get(&definition_id)
+            .definition(&definition_id)
             .expect("horizontal-fix hit probe definition exists")
             .action_library()
             .clone();

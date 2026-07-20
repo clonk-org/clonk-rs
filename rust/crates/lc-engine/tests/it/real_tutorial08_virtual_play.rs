@@ -38,30 +38,15 @@ fn load_tutorial08() -> (Engine, i32) {
 }
 
 fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == definition)
-        .map(|object| object.id)
+    engine.first_object_for_definition(definition)
 }
 
 fn definition_count(engine: &Engine, definition: &str) -> usize {
-    engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .filter(|object| object.definition_id == definition)
-        .count()
+    engine.object_count_for_definition(definition)
 }
 
 fn contained_definition_count(engine: &Engine, container: ObjectId, definition: &str) -> usize {
-    engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .filter(|object| object.definition_id == definition && object.container == Some(container))
-        .count()
+    engine.object_count_for_definition_in_container(definition, container)
 }
 
 fn carried_object(engine: &Engine, carrier: ObjectId) -> Option<ObjectId> {
@@ -71,12 +56,7 @@ fn carried_object(engine: &Engine, carrier: ObjectId) -> Option<ObjectId> {
 }
 
 fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine
-        .snapshot()
-        .hud
-        .messages
-        .iter()
-        .any(|message| message.lines.iter().any(|line| line.contains(needle)))
+    engine.message_line_contains(needle)
 }
 
 fn wait_for_tutorial_message_lines(
@@ -369,7 +349,7 @@ fn tutorial08_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.wait_until(
         "Tutorial08 fulfills SCRG and reaches GameOver",
         800,
-        |engine| engine.snapshot().game_over,
+        Engine::is_game_over,
     )?;
     player.assert_milestone("Tutorial08 records its fulfilled SCRG goal", |engine| {
         engine

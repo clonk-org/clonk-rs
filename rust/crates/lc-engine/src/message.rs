@@ -229,6 +229,12 @@ impl MessageManager {
             .collect::<Vec<_>>()
     }
 
+    pub fn line_contains(&self, needle: &str) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.lines.iter().any(|line| line.contains(needle)))
+    }
+
     pub fn persisted(&self) -> Vec<PersistedMessage> {
         self.messages
             .iter()

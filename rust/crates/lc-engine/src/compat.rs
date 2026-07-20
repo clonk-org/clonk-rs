@@ -1714,6 +1714,56 @@ pub(crate) struct HostCrewInfoState {
     pub(crate) control_counts: HashMap<CrewInfoLink, i32>,
 }
 
+/// Definition- and script-derived host data that is immutable between load
+/// or relink boundaries. Host callbacks are frequent, so keep these tables
+/// shared instead of rebuilding and immediately wrapping them in `Rc` for
+/// every copied world context.
+#[derive(Clone, Default)]
+pub(crate) struct HostDefinitionTables {
+    color_by_owner: Rc<HashSet<DefinitionId>>,
+    base_auto_sell: Rc<HashSet<DefinitionId>>,
+    rebuyable: Rc<HashSet<DefinitionId>>,
+    no_sell: Rc<HashSet<DefinitionId>>,
+    descriptions: Rc<HashMap<DefinitionId, String>>,
+    rank_names: Rc<HashMap<DefinitionId, Vec<String>>>,
+    rank_bases: Rc<HashMap<DefinitionId, i32>>,
+    scripts: Rc<HashMap<DefinitionId, Arc<ScriptEngine>>>,
+    linked_script_hosts: Rc<Vec<(String, Arc<ScriptEngine>)>>,
+    standard_crew_names: Option<String>,
+    definition_crew_names: Rc<HashMap<String, String>>,
+}
+
+impl HostDefinitionTables {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        color_by_owner: HashSet<DefinitionId>,
+        base_auto_sell: HashSet<DefinitionId>,
+        rebuyable: HashSet<DefinitionId>,
+        no_sell: HashSet<DefinitionId>,
+        descriptions: HashMap<DefinitionId, String>,
+        rank_names: HashMap<DefinitionId, Vec<String>>,
+        rank_bases: HashMap<DefinitionId, i32>,
+        scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
+        linked_script_hosts: Vec<(String, Arc<ScriptEngine>)>,
+        standard_crew_names: Option<String>,
+        definition_crew_names: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            color_by_owner: Rc::new(color_by_owner),
+            base_auto_sell: Rc::new(base_auto_sell),
+            rebuyable: Rc::new(rebuyable),
+            no_sell: Rc::new(no_sell),
+            descriptions: Rc::new(descriptions),
+            rank_names: Rc::new(rank_names),
+            rank_bases: Rc::new(rank_bases),
+            scripts: Rc::new(scripts),
+            linked_script_hosts: Rc::new(linked_script_hosts),
+            standard_crew_names,
+            definition_crew_names: Rc::new(definition_crew_names),
+        }
+    }
+}
+
 // Not `derive(Debug)`: `ScriptEngine` (in `definition_scripts`) has no Debug.
 #[derive(Clone)]
 #[doc(hidden)]
@@ -2027,6 +2077,28 @@ impl Default for HostWorldContext {
 }
 
 impl HostWorldContext {
+    pub(crate) fn with_definition_tables(
+        mut self,
+        tables: Rc<HostDefinitionTables>,
+        base_auto_sell_enabled: bool,
+        crew_info_state: HostCrewInfoState,
+    ) -> Self {
+        self.color_by_owner_definitions = Rc::clone(&tables.color_by_owner);
+        self.base_auto_sell_definitions = Rc::clone(&tables.base_auto_sell);
+        self.rebuyable_definitions = Rc::clone(&tables.rebuyable);
+        self.no_sell_definitions = Rc::clone(&tables.no_sell);
+        self.definition_descriptions = Rc::clone(&tables.descriptions);
+        self.definition_rank_names = Rc::clone(&tables.rank_names);
+        self.definition_rank_bases = Rc::clone(&tables.rank_bases);
+        self.definition_scripts = Rc::clone(&tables.scripts);
+        self.linked_script_hosts = Rc::clone(&tables.linked_script_hosts);
+        self.standard_crew_names = tables.standard_crew_names.clone();
+        self.definition_crew_names = Rc::clone(&tables.definition_crew_names);
+        self.base_auto_sell_enabled = base_auto_sell_enabled;
+        self.crew_info_state = Rc::new(RefCell::new(crew_info_state));
+        self
+    }
+
     pub(crate) fn with_needed_material_strings(
         mut self,
         strings: Rc<crate::NeededMaterialStrings>,
@@ -2058,18 +2130,6 @@ impl HostWorldContext {
 
     pub(crate) fn with_flag_removeable(mut self, value: bool) -> Self {
         self.flag_removeable = value;
-        self
-    }
-
-    pub(crate) fn with_crew_name_sources(
-        mut self,
-        standard_names: Option<String>,
-        definition_names: HashMap<String, String>,
-        info_state: HostCrewInfoState,
-    ) -> Self {
-        self.standard_crew_names = standard_names;
-        self.definition_crew_names = Rc::new(definition_names);
-        self.crew_info_state = Rc::new(RefCell::new(info_state));
         self
     }
 
@@ -2137,6 +2197,8 @@ impl HostWorldContext {
             objects,
             landscape,
             Rc::new(definitions),
+            Rc::new(ScenarioValueStore::default()),
+            Rc::new(crate::us_default_rank_names()),
             transfer_zones,
             players,
             crew_selection,
@@ -2152,6 +2214,8 @@ impl HostWorldContext {
         objects: I,
         landscape: Option<Landscape>,
         definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
+        scenario_values: Rc<ScenarioValueStore>,
+        default_rank_names: Rc<Vec<String>>,
         transfer_zones: Vec<TransferZoneState>,
         players: HashMap<i32, PlayerState>,
         crew_selection: HashMap<i32, CrewSelectionState>,
@@ -2195,7 +2259,7 @@ impl HostWorldContext {
             master_order: Rc::clone(&order),
             order,
             landscape: landscape.map(Rc::new),
-            scenario_values: Rc::new(ScenarioValueStore::default()),
+            scenario_values,
             scenario_sections: Rc::new(HashSet::new()),
             movement_solid_masks: Rc::new(Vec::new()),
             definitions,
@@ -2209,7 +2273,7 @@ impl HostWorldContext {
             no_sell_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_rank_names: Rc::new(HashMap::new()),
-            default_rank_names: Rc::new(crate::us_default_rank_names()),
+            default_rank_names,
             definition_rank_bases: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors,
@@ -2282,35 +2346,6 @@ impl HostWorldContext {
 
     pub(crate) fn with_sky_fade(mut self, top: RgbColor, bottom: RgbColor) -> Self {
         self.sky_fade = [top, bottom];
-        self
-    }
-
-    pub(crate) fn with_definition_descriptions(
-        mut self,
-        descriptions: HashMap<DefinitionId, String>,
-    ) -> Self {
-        self.definition_descriptions = Rc::new(descriptions);
-        self
-    }
-
-    pub(crate) fn with_definition_rank_names(
-        mut self,
-        names: HashMap<DefinitionId, Vec<String>>,
-    ) -> Self {
-        self.definition_rank_names = Rc::new(names);
-        self
-    }
-
-    pub(crate) fn with_default_rank_names(mut self, names: Rc<Vec<String>>) -> Self {
-        self.default_rank_names = names;
-        self
-    }
-
-    pub(crate) fn with_definition_rank_bases(
-        mut self,
-        bases: HashMap<DefinitionId, i32>,
-    ) -> Self {
-        self.definition_rank_bases = Rc::new(bases);
         self
     }
 
@@ -2619,32 +2654,8 @@ impl HostWorldContext {
         self
     }
 
-    pub(crate) fn with_color_by_owner_definitions<I>(mut self, definitions: I) -> Self
-    where
-        I: IntoIterator<Item = DefinitionId>,
-    {
-        self.color_by_owner_definitions = Rc::new(definitions.into_iter().collect());
-        self
-    }
-
     fn definition_color_by_owner(&self, id: &str) -> bool {
         self.color_by_owner_definitions.contains(id)
-    }
-
-    pub(crate) fn with_base_auto_sell_definitions<I, J>(
-        mut self,
-        auto_sell: I,
-        rebuyable: J,
-        enabled: bool,
-    ) -> Self
-    where
-        I: IntoIterator<Item = DefinitionId>,
-        J: IntoIterator<Item = DefinitionId>,
-    {
-        self.base_auto_sell_definitions = Rc::new(auto_sell.into_iter().collect());
-        self.rebuyable_definitions = Rc::new(rebuyable.into_iter().collect());
-        self.base_auto_sell_enabled = enabled;
-        self
     }
 
     fn definition_base_auto_sell(&self, id: &str) -> bool {
@@ -2653,14 +2664,6 @@ impl HostWorldContext {
 
     fn definition_rebuyable(&self, id: &str) -> bool {
         self.rebuyable_definitions.contains(id)
-    }
-
-    pub(crate) fn with_no_sell_definitions<I>(mut self, definitions: I) -> Self
-    where
-        I: IntoIterator<Item = DefinitionId>,
-    {
-        self.no_sell_definitions = Rc::new(definitions.into_iter().collect());
-        self
     }
 
     fn definition_no_sell(&self, id: &str) -> bool {
@@ -2680,6 +2683,7 @@ impl HostWorldContext {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_linked_script_hosts(
         mut self,
         scripts: Vec<(String, Arc<ScriptEngine>)>,
@@ -3168,6 +3172,7 @@ impl HostWorldContext {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_scenario_values(mut self, values: Rc<ScenarioValueStore>) -> Self {
         self.scenario_values = values;
         self

@@ -3,6 +3,12 @@ name = "lc-frontend"
 version = "0.1.0"
 edition = "2021"
 
+# The inline unit surface is compiled from this crate root by the lightly optimized
+# lc-frontend-unit-tests leaf package. Keep the production frontend optimized
+# without also emitting a second optimized copy for its unit harness.
+[lib]
+test = false
+
 [features]
 default = []
 # The deterministic render probe is an explicitly invoked developer tool. Its

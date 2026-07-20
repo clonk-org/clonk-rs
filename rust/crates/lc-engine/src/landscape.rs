@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::mem;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::material::TemperatureDirection;
 use crate::{math, C4Fixed, FixedVec2, MaterialId, MaterialSet, Vector2};
@@ -2112,6 +2112,22 @@ impl PartialEq for RuntimeInitialPixels {
 
 impl Eq for RuntimeInitialPixels {}
 
+/// Runtime-only memoization for synthetic/old landscapes which do not carry
+/// C4Landscape's exact `GBackHgt`. Height is queried in the innermost terrain
+/// probe loops, while deriving it requires walking every surface and liquid
+/// column. Mutators clear this cache at the same seams that maintain those
+/// derived columns.
+#[derive(Debug, Clone, Default)]
+struct RuntimeEstimatedHeight(OnceLock<i32>);
+
+impl PartialEq for RuntimeEstimatedHeight {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for RuntimeEstimatedHeight {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Landscape {
     width: u32,
@@ -2152,6 +2168,9 @@ pub struct Landscape {
     /// this when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     world_height: Option<i32>,
+    /// Runtime-only cached fallback for [`Self::estimated_height`].
+    #[serde(skip)]
+    estimated_height_cache: RuntimeEstimatedHeight,
     /// The per-pixel plane (C4Landscape Surface8). When present it is the
     /// TRUTH for solidity/material queries; the column model above stays
     /// maintained as the approximation legacy helpers consume.
@@ -2426,6 +2445,7 @@ impl Landscape {
             default_liquid_material: None,
             tunnels: HashMap::new(),
             world_height: None,
+            estimated_height_cache: RuntimeEstimatedHeight::default(),
             pixels: None,
             scan_x: 0,
             no_scan: false,
@@ -3259,6 +3279,7 @@ impl Landscape {
     }
 
     pub(crate) fn refresh_raster_columns(&mut self, columns: Range<usize>) {
+        self.invalidate_estimated_height();
         let end = columns.end.min(self.surface.len());
         let start = columns.start.min(end);
         self.ensure_liquid_capacity();
@@ -3716,6 +3737,7 @@ impl Landscape {
     }
 
     pub fn set_height(&mut self, x: u32, height: i32) {
+        self.invalidate_estimated_height();
         let old = self.surface.get(x as usize).copied();
         if let Some(slot) = self.surface.get_mut(x as usize) {
             if *slot != height {
@@ -3747,6 +3769,7 @@ impl Landscape {
     }
 
     pub fn set_liquid_column(&mut self, x: u32, segments: Vec<LiquidSegment>) {
+        self.invalidate_estimated_height();
         self.ensure_liquid_capacity();
         if let Some(column) = self.liquids.get_mut(x as usize) {
             *column = LiquidColumn::from_segments(segments);
@@ -3754,6 +3777,7 @@ impl Landscape {
     }
 
     pub fn clear_liquid_column(&mut self, x: u32) {
+        self.invalidate_estimated_height();
         self.ensure_liquid_capacity();
         if let Some(column) = self.liquids.get_mut(x as usize) {
             column.clear();
@@ -3837,15 +3861,25 @@ impl Landscape {
         height.max(0)
     }
 
+    fn invalidate_estimated_height(&mut self) {
+        self.estimated_height_cache.0.take();
+    }
+
     pub fn estimated_height(&self) -> i32 {
         self.world_height
-            .unwrap_or_else(|| self.estimate_world_height())
+            .unwrap_or_else(|| {
+                *self
+                    .estimated_height_cache
+                    .0
+                    .get_or_init(|| self.estimate_world_height())
+            })
     }
 
     /// Pin the real landscape height (`GBackHgt`). The legacy loader knows
     /// it exactly (map height × zoom); without it the estimate from surface
     /// depths is used.
     pub fn set_world_height(&mut self, height: i32) {
+        self.invalidate_estimated_height();
         self.world_height = Some(height.max(0));
     }
 
@@ -3887,6 +3921,7 @@ impl Landscape {
         if self.surface.is_empty() || materials.is_empty() {
             return;
         }
+        self.invalidate_estimated_height();
         self.ensure_material_capacity();
         self.ensure_liquid_capacity();
         let original_default = self.default_solid_material;
@@ -4290,6 +4325,7 @@ impl Landscape {
 
     fn ensure_liquid_capacity(&mut self) {
         if self.liquids.len() != self.surface.len() {
+            self.invalidate_estimated_height();
             self.liquids
                 .resize(self.surface.len(), LiquidColumn::default());
         }
@@ -4556,6 +4592,7 @@ impl Landscape {
         let Ok(index) = usize::try_from(x) else {
             return None;
         };
+        self.invalidate_estimated_height();
         self.ensure_liquid_capacity();
         let column = self.liquids.get_mut(index)?;
         if let Some(material) = column.remove_pixel(y) {
@@ -4581,6 +4618,7 @@ impl Landscape {
         if y >= surface_y {
             return false;
         }
+        self.invalidate_estimated_height();
         self.ensure_liquid_capacity();
         let column = self.liquids.get_mut(index).expect("column must exist");
         let desired_material = material.or(self.default_liquid_material);
@@ -4605,6 +4643,7 @@ impl Landscape {
         if clamped_start >= clamped_end {
             return;
         }
+        self.invalidate_estimated_height();
         let target_height = height.max(0);
         for x in clamped_start..clamped_end {
             let old = self.surface.get(x as usize).copied();
@@ -4630,6 +4669,7 @@ impl Landscape {
         if index >= self.surface.len() {
             return;
         }
+        self.invalidate_estimated_height();
         let target_height = height.max(0);
         let old = self.surface.get(index).copied();
         if let Some(slot) = self.surface.get_mut(index) {
@@ -4653,6 +4693,7 @@ impl Landscape {
             return result;
         }
 
+        self.invalidate_estimated_height();
         self.ensure_material_capacity();
 
         // BlastMatCount (C4Landscape::BlastFree, C4Landscape.cpp:1044-1055):
@@ -5680,6 +5721,7 @@ impl Landscape {
         if index >= self.surface.len() {
             return false;
         }
+        self.invalidate_estimated_height();
         self.ensure_material_capacity();
         let current_height = self.surface[index].max(0);
         let mut target = y.saturating_add(1);
@@ -5879,6 +5921,7 @@ impl Landscape {
             Ok(index) => index,
             Err(_) => return false,
         };
+        self.invalidate_estimated_height();
         if let Some(height) = self.surface.get_mut(index) {
             if *height <= 0 {
                 return false;
@@ -9401,6 +9444,50 @@ func TransactionThenRaw()
         assert!(landscape.is_solid_at(5, 400));
         // Inside the ground body is solid as before.
         assert!(landscape.is_solid_at(5, 200));
+    }
+
+    #[test]
+    fn estimated_height_cache_tracks_surface_and_liquid_mutations() {
+        let material = MaterialId::new(0).expect("material id");
+        let mut landscape =
+            Landscape::new(3, vec![10, 20, 30]).expect("synthetic landscape builds");
+
+        assert!(landscape.estimated_height_cache.0.get().is_none());
+        assert_eq!(landscape.estimated_height(), 30);
+        assert_eq!(landscape.estimated_height_cache.0.get(), Some(&30));
+
+        landscape.set_height(2, 5);
+        assert!(landscape.estimated_height_cache.0.get().is_none());
+        assert_eq!(landscape.estimated_height(), 20);
+
+        landscape.set_liquid_column(0, vec![LiquidSegment::new(40, 50)]);
+        assert_eq!(landscape.estimated_height(), 50);
+        assert_eq!(landscape.remove_liquid_at(0, 50), None);
+        assert_eq!(landscape.estimated_height(), 49);
+        landscape.clear_liquid_column(0);
+        assert_eq!(landscape.estimated_height(), 20);
+
+        landscape.lower_range(0, 1, 60);
+        assert_eq!(landscape.estimated_height(), 60);
+        landscape.ensure_surface_at_least(1, 70);
+        assert_eq!(landscape.estimated_height(), 70);
+        assert!(landscape.insert_material_at(2, 79, material));
+        assert_eq!(landscape.estimated_height(), 80);
+        assert!(landscape.remove_material_at(2, 79));
+        assert_eq!(landscape.estimated_height(), 79);
+    }
+
+    #[test]
+    fn estimated_height_cache_is_runtime_only_state() {
+        let uncached = Landscape::flat(8, 40);
+        let cached = uncached.clone();
+        assert_eq!(cached.estimated_height(), 40);
+
+        assert_eq!(cached, uncached);
+        assert_eq!(
+            serde_json::to_value(&cached).expect("cached landscape serializes"),
+            serde_json::to_value(&uncached).expect("uncached landscape serializes")
+        );
     }
 
     #[test]

@@ -5,9 +5,8 @@ edition = "2021"
 autotests = false
 
 # The inline unit and integration surfaces are compiled from their original
-# source paths by the opt-level-0 lc-engine-unit-tests leaf package. Building
-# them here as well would repeat level-3 test-wrapper codegen on every complete
-# workspace gate.
+# source paths by dedicated test-only leaf packages. Building them here as well
+# would repeat level-3 test-wrapper codegen on every complete workspace gate.
 [lib]
 test = false
 

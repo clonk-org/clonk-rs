@@ -139,6 +139,52 @@ base gained 29 tests during the pass, so this is retained as correctness and
 warm-build evidence rather than promoted to a comparable execution baseline.
 Use an idle machine for the final cached and cold workspace measurements.
 
+### Cached-runtime and leaf-profile follow-up
+
+The next pass added an opt-in nextest `profiling` profile with JUnit output.
+One deliberately contended diagnostic run passed 7,359 tests (24 skipped) in
+134.203s after 16.60s of compilation. The sum of individual testcase durations
+was 2,138.4s; that sum measures work across concurrent processes, not elapsed
+feedback-loop time. It identified the app and engine scenario binaries as the
+dominant remaining surfaces and should not be compared with an idle gate.
+
+The resulting changes keep compile-bound wrappers cheap while optimizing only
+the runtime-heavy leaves:
+
+- the 666-test frontend inline surface moved to `lc-frontend-unit-tests` at
+  level 1; its isolated execution fell from 12.798s at level 0 to 3.409s;
+- `engine_it` moved to `lc-engine-integration-tests` at level 1, while the much
+  larger `engine_inline` and `unit` wrappers remain at level 0;
+- both engine leaf packages request the app's `test-graph` feature, preventing
+  a focused engine-then-app cycle from producing two optimized engine copies;
+- test-profile engine line tables are disabled. The previous engine rlib held
+  about 36 MiB of debug sections that every large test link had to process;
+- silent/pathless app fixtures skip install audio discovery and a guaranteed
+  empty boot worker; and
+- immutable definition/script tables, command metadata, object indices, and
+  fallback landscape height are reused across hot simulation queries.
+
+A cached isolated app sample after these changes passed 1,409 tests (5
+skipped) in 44.770s (`n = 1`). The earlier 48.794s component reference had
+1,385 tests, so the newer result is useful feedback-loop evidence but not a
+strict same-inventory A/B. An exact landscape hot-path sample retired 308.3
+million instructions after caching the fallback height, versus 345.3 million
+before it (`n = 1`, 10.7% less instruction work).
+
+A same-machine, same-test, single-sample (`n = 1`) binary A/B used hardware
+work counters because other workers made wall time non-comparable:
+
+| Binary | Instructions | Cycles |
+| --- | ---: | ---: |
+| Earlier level-0 integration binary | 213,410,300,013 | 42,184,413,414 |
+| Level-1 binary plus engine hot-path changes | 137,649,905,676 | 27,927,766,891 |
+
+The complete Tutorial09 virtual route therefore used 35.5% less instruction
+work and 33.8% fewer cycles. The command shape was
+`/usr/bin/time -lp target/debug/deps/engine_it-<hash> --exact real_tutorial09_virtual_play::tutorial09_virtual_player_completes_the_real_tutorial_route --nocapture`.
+Promote an elapsed speedup only after a repeated idle full-workspace
+measurement.
+
 The first local reference baseline was recorded on 2026-07-12 from
 `dd32e5d3` with content `67a54d0`, Rust 1.87.0, macOS/Darwin arm64, and an
 Apple M4 Max. The representative command was:

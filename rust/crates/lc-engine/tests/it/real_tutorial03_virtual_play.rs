@@ -35,12 +35,7 @@ fn load_tutorial03() -> (Engine, i32) {
 }
 
 fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
-    engine
-        .snapshot()
-        .objects
-        .into_iter()
-        .find(|object| object.definition_id == definition)
-        .map(|object| object.id)
+    engine.first_object_for_definition(definition)
 }
 
 fn object_with_definition_near_x(
@@ -64,12 +59,7 @@ fn object_menu_identification(engine: &Engine, owner: i32) -> Option<lc_script::
 }
 
 fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
-    engine
-        .snapshot()
-        .hud
-        .messages
-        .iter()
-        .any(|message| message.lines.iter().any(|line| line.contains(needle)))
+    engine.message_line_contains(needle)
 }
 
 #[test]
@@ -511,7 +501,7 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     player.wait_until(
         "Tutorial03 fulfilled goal reaches GameOver",
         320,
-        |engine| engine.snapshot().game_over,
+        Engine::is_game_over,
     )?;
     let completed = player.engine().snapshot();
     assert!(
