@@ -1,5 +1,9 @@
 #![allow(dead_code)]
 
+use crate::object_visibility::{
+    shipped_invisibility_recast_carries_remaining_time_into_reset_timer,
+    shipped_invisibility_spell_hides_and_restores_its_mage,
+};
 use crate::support::real_scenario::{
     join_local_player, join_local_player_on_team, load_installed_scenario, load_tutorial,
     prepare_installed_scenario, PreparedInstalledScenario,
@@ -832,6 +836,10 @@ fn alchemy_real_scenario_subcases_batch_2() {
             "make_artefact_cast_opens_the_real_enchantment_menu",
             alchemy_make_artefact_cast_opens_the_real_enchantment_menu,
         ),
+        (
+            "shipped_invisibility_spell_hides_and_restores_its_mage",
+            shipped_invisibility_spell_hides_and_restores_its_mage,
+        ),
     ]);
 }
 
@@ -853,6 +861,10 @@ fn alchemy_real_scenario_subcases_batch_3() {
         (
             "combo_mode_opens_and_accepts_the_shipped_element_control",
             alchemy_combo_mode_opens_and_accepts_the_shipped_element_control,
+        ),
+        (
+            "shipped_invisibility_recast_carries_remaining_time_into_reset_timer",
+            shipped_invisibility_recast_carries_remaining_time_into_reset_timer,
         ),
     ]);
 }

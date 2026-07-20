@@ -266,6 +266,53 @@ focused comparison passed all three batches in 6.049s; their durations totaled
 family's elapsed span by 3.851s (38.9%) and aggregate process time by 59.188s
 (80.3%) while preserving three-way parallel execution.
 
+### Linker, development-profile, and feature-graph follow-up
+
+On 2026-07-20, the Apple M4 Max/Rust 1.87.0 reference machine used fresh
+target directories to measure the compile side of the complete feedback loop.
+All commands were offline and lockfile-pinned; each result is a single local
+sample, not a portable regression threshold.
+
+| Workload | Before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| Cold `cargo build --workspace` | 111.95s | 93.38s | 18.57s (16.6%) |
+| Cold `cargo test --workspace --no-run` | 103.94s | 91.30s | 12.64s (12.2%) |
+| Focused Alchemy compile after a workspace build | 57.97s | 21.55s | 36.42s (62.8%) |
+| Focused compile plus two Alchemy batches | 64.10s | 26.87s | 37.23s (58.1%) |
+
+The default development profile now keeps workspace crates at level 1. An
+explicit `play` profile applies level 3 only when launching representative
+gameplay, so interactive runtime requirements no longer lengthen every normal
+edit/build cycle. On Apple Silicon, a checked-in Clang-driver wrapper selects
+the LLVM-matched `ld64.lld` shipped with the active Rust toolchain. A direct
+same-source linker probe reduced the cold test build from 103.94s to 99.21s
+(4.5%); the lower 91.30s final sample also includes the other changes and host
+variation, so it is not attributed to the linker alone.
+
+The first focused integration command after a complete workspace build
+unexpectedly rebuilt the engine dependency chain. Comparing Cargo feature
+graphs found focused-only resolver-v2 fingerprints in `libc`, `rustix`,
+`memchr`, `smallvec`, and host-side `syn`. The engine, frontend, and network
+test entry points now anchor the feature sets already enabled by the complete
+workspace. A post-change `cargo tree` comparison found zero focused-only
+feature fingerprints for all five entry points, and the exact rerun rebuilt
+only the integration wrapper, producing the 58.1% command reduction above.
+
+Two remaining standalone Alchemy visibility tests now run inside existing
+prepared-scenario batches. Every subcase still instantiates a fresh engine and
+the batch still catches and aggregates each named failure, while two redundant
+scenario parses and two nextest processes disappear. A priority-20 nextest
+tier also starts the five network dynamic-parameter tests and two xtask Git
+tests before ordinary priority-zero work; these seven tests repeatedly formed
+the cached suite's final tail, while all real-scenario tiers retain priority
+60 or higher.
+
+Two alternatives were rejected by measurement. Limiting Rayon to two threads
+made the exact 7,921-test cached suite slower (59.601s versus 57.976s), and a
+single-process libtest run immediately exposed races in process-global app
+state. Nextest process isolation therefore remains part of the correctness
+model rather than an interchangeable scheduling choice.
+
 The first local reference baseline was recorded on 2026-07-12 from
 `dd32e5d3` with content `67a54d0`, Rust 1.87.0, macOS/Darwin arm64, and an
 Apple M4 Max. The representative command was:

@@ -1,3 +1,9 @@
 [alias]
 xtask = "run --package xtask --bin xtask --"
 dev-check = "run --package xtask --bin xtask -- dev-check"
+
+# Rust ships an LLVM-matched Mach-O LLD next to rustc. Resolve that linker at
+# runtime through the checked-in wrapper so every rustup toolchain uses its own
+# compatible binary instead of a potentially mismatched system/Homebrew LLD.
+[target.aarch64-apple-darwin]
+linker = ".cargo/macos-lld-clang"

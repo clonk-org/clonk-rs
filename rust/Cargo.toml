@@ -26,9 +26,9 @@ members = [
 resolver = "2"
 default-members = ["crates/lc-app"]
 
-# The frontend renders in software (per-pixel blits); at opt-level 0 the menu
-# and boot are ~12x slower than release and unplayable. Keep dev builds
-# optimized enough to run while retaining debug assertions.
+# Keep the ordinary edit/build loop lightly optimized. Live gameplay uses the
+# `play` profile below so runtime-heavy rendering and simulation do not force
+# level-3 codegen onto every development build.
 [profile.dev]
 opt-level = 1
 
@@ -43,22 +43,25 @@ debug = "line-tables-only"
 [profile.dev.package.lc-scaling]
 opt-level = 3
 
-# Scenario presentation and script callbacks dominate live gameplay. Keep the
-# hot workspace crates at production optimization even in the runnable dev
-# binary; debug assertions remain enabled for parity diagnostics.
-[profile.dev.package.lc-app]
+# Scenario presentation and script callbacks dominate live gameplay. The
+# explicit playable profile retains debug assertions and incremental reuse but
+# optimizes the hot workspace crates without slowing the default compile loop.
+[profile.play]
+inherits = "dev"
+
+[profile.play.package.lc-app]
 opt-level = 3
 
-[profile.dev.package.lc-frontend]
+[profile.play.package.lc-frontend]
 opt-level = 3
 
-[profile.dev.package.lc-engine]
+[profile.play.package.lc-engine]
 opt-level = 3
 
-[profile.dev.package.lc-script]
+[profile.play.package.lc-script]
 opt-level = 3
 
-[profile.dev.package.lc-graphics]
+[profile.play.package.lc-graphics]
 opt-level = 3
 
 # Simulation-heavy integration tests spend most of their time in workspace
@@ -88,7 +91,7 @@ debug = false
 
 # The main application test harness is the largest final link in the workspace.
 # Level 2 keeps its gameplay-heavy tests close to fully optimized while
-# avoiding the longest level-3 codegen tail on this 150k-line wrapper. Keep
+# avoiding the longest level-3 codegen tail on this 192k-line wrapper. Keep
 # debug data disabled so future global changes do not grow that final link.
 [profile.test.package.lc-app]
 opt-level = 2

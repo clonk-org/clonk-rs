@@ -46,3 +46,11 @@ priority = 80
 [[profile.default.overrides]]
 filter = 'package(lc-engine-integration-tests) and test(/(real_scenario_harness::|goldrush_scenario_batches::goldrush_shared_scenario_subcases_batch_3)/)'
 priority = 60
+
+# These small families repeatedly formed the final cached-suite tail after all
+# scenario work had drained. Start them ahead of ordinary priority-zero tests
+# without competing with the scenario tiers above; priority changes ordering,
+# not nextest's process isolation or concurrency.
+[[profile.default.overrides]]
+filter = '(package(lc-network) and test(/^initial_network_dynamic::/)) or (package(xtask) and test(/^dev_check::tests::(base_collection_includes_committed_and_worktree_changes|git_collection_unions_staged_unstaged_untracked_and_rename_ends)$/))'
+priority = 20

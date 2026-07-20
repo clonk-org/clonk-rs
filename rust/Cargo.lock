@@ -2139,16 +2139,22 @@ dependencies = [
  "lc-engine-core",
  "lc-resources",
  "lc-script",
+ "libc",
+ "memchr",
  "once_cell",
  "proptest",
  "rand 0.8.5",
  "rand_core 0.6.4",
+ "rustix",
  "serde",
  "serde_json",
+ "smallvec",
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",
+ "yoke-derive",
+ "zerofrom-derive",
 ]
 
 [[package]]
@@ -2163,16 +2169,22 @@ dependencies = [
  "lc-engine-core",
  "lc-resources",
  "lc-script",
+ "libc",
+ "memchr",
  "once_cell",
  "proptest",
  "rand 0.8.5",
  "rand_core 0.6.4",
+ "rustix",
  "serde",
  "serde_json",
+ "smallvec",
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",
+ "yoke-derive",
+ "zerofrom-derive",
 ]
 
 [[package]]
@@ -2188,9 +2200,15 @@ dependencies = [
  "lc-resources",
  "lc-scaling",
  "lc-script",
+ "libc",
+ "memchr",
  "rayon",
+ "rustix",
  "serde_json",
  "tempfile",
+ "tracing-core",
+ "yoke-derive",
+ "zerofrom-derive",
 ]
 
 [[package]]
@@ -2206,9 +2224,15 @@ dependencies = [
  "lc-resources",
  "lc-scaling",
  "lc-script",
+ "libc",
+ "memchr",
  "rayon",
+ "rustix",
  "serde_json",
  "tempfile",
+ "tracing-core",
+ "yoke-derive",
+ "zerofrom-derive",
 ]
 
 [[package]]
@@ -2305,17 +2329,20 @@ dependencies = [
 name = "lc-network"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.13.1",
  "flate2",
  "iconv-native",
  "lc-engine",
  "lc-resources",
  "libc",
+ "log",
  "reqwest",
  "serde",
  "sha1",
  "socket2",
  "thiserror 1.0.69",
  "tokio",
+ "tracing-core",
  "xml-rs",
 ]
 

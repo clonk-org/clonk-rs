@@ -62,6 +62,20 @@ Do not run `cargo clean` between feedback cycles. Cargo's local incremental
 state is valuable to the edit-test loop. CI disables incremental compilation
 because its build cache is reused between clean runners instead.
 
+The default `dev` profile is tuned for the edit/build loop. Use the explicit
+`play` profile when launching the interactive client; it keeps debug assertions
+but applies level-3 optimization to the rendering, simulation, and script crates
+whose level-1 runtime is too slow for representative gameplay:
+
+```sh
+cargo run --profile play -p lc-app
+```
+
+On Apple Silicon macOS, Cargo invokes the Rust toolchain's LLVM-matched
+`ld64.lld` through Apple Clang. The checked-in wrapper discovers it from the
+active `rustc` sysroot, so do not replace it with a separately installed LLD;
+other targets continue using their platform default linker.
+
 ## Artifacts and replay reproduction
 
 Each invocation writes `target/dev-check/<run-id>/` with this stable layout:

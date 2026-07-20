@@ -1,10 +1,11 @@
-use crate::support::real_scenario::{join_local_player, load_installed_scenario};
+use crate::support::real_scenario::{join_local_player, PreparedInstalledScenario};
 use lc_engine::{Definition, SpawnConfig, VIS_ALL, VIS_ALLIES, VIS_GOD, VIS_OWNER};
 use lc_script::Value;
 
-#[test]
-fn shipped_invisibility_spell_hides_and_restores_its_mage() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+pub(crate) fn shipped_invisibility_spell_hides_and_restores_its_mage(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     assert!(
         engine.definition_script_has_function("MINV", "FxInvisPSpellStart"),
         "the installed MINV definition retains its shipped effect callback"
@@ -92,9 +93,10 @@ public func Stop(object target)
     assert!(restored.object_visible_for_player(mage, observer, false));
 }
 
-#[test]
-fn shipped_invisibility_recast_carries_remaining_time_into_reset_timer() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+pub(crate) fn shipped_invisibility_recast_carries_remaining_time_into_reset_timer(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Invisibility owner");
     let mage = engine
         .crew_cursor(owner)
