@@ -251,6 +251,21 @@ controlled). The probe showed no benefit, so the override was removed;
 preserving 256 units keeps more LLVM parallelism and finer-grained incremental
 reuse for this unusually large test target.
 
+After those batches landed, the complete workspace gate compiled in 38.36s,
+passed 7,440 tests (20 skipped) in 62.517s, and took 104.18s wall time. The
+execution phase was 2.480s faster than the preceding 64.997s reference but
+remained 2.517s above the sub-minute target.
+
+A follow-up profile found ten more seed-zero Goldrush tests across six
+integration modules, each independently parsing the same installed scenario.
+Their ten testcase durations totaled 73.696s and the slowest completed in
+9.900s. Three balanced nextest-visible batches now prepare Goldrush once per
+process and instantiate a fresh engine for every unchanged assertion body. The
+focused comparison passed all three batches in 6.049s; their durations totaled
+14.508s (2.959s, 5.501s, and 6.048s). That single-sample comparison reduces the
+family's elapsed span by 3.851s (38.9%) and aggregate process time by 59.188s
+(80.3%) while preserving three-way parallel execution.
+
 The first local reference baseline was recorded on 2026-07-12 from
 `dd32e5d3` with content `67a54d0`, Rust 1.87.0, macOS/Darwin arm64, and an
 Apple M4 Max. The representative command was:

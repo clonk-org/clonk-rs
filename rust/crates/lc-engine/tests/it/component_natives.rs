@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::support::real_scenario::load_installed_scenario;
+use crate::support::real_scenario::PreparedInstalledScenario;
 use lc_engine::{math, Definition, DefinitionId, SpawnConfig, Vector2};
 use lc_script::Value;
 
@@ -103,14 +103,15 @@ global func GetCustomComponents(object builder)
     );
 }
 
-#[test]
-fn get_component_definition_branch_uses_custom_recipe_and_builder() {
+pub(super) fn get_component_definition_branch_uses_custom_recipe_and_builder(
+    prepared: &PreparedInstalledScenario,
+) {
     // FnGetComponent's idDef branch passes the calling object as builder to
     // C4Def::GetCustomComponents. The shipped dead fish returns two FSHM and
     // one FSHB only for a trapper/Indian builder; indexed reads collapse the
     // adjacent duplicate FSHM entries (C4Script.cpp:2679-2691;
     // C4Def.cpp:1278-1320).
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    let mut engine = prepared.instantiate();
     let query = Definition::from_script(
         "QRY1",
         "Component query",
@@ -161,8 +162,9 @@ public func Probe()
     );
 }
 
-#[test]
-fn dead_fish_embowel_uses_the_trappers_custom_components() {
+pub(super) fn dead_fish_embowel_uses_the_trappers_custom_components(
+    prepared: &PreparedInstalledScenario,
+) {
     // FnSplit2Components asks the SOURCE definition for custom components,
     // executing GetCustomComponents on the dead fish with the native-call
     // object (the Trapper) as builder. It then consumes rdir/ydir/xdir via
@@ -170,7 +172,7 @@ fn dead_fish_embowel_uses_the_trappers_custom_components() {
     // with the fish as creator and owner source, and enters the fish's saved
     // container before finally removing it (src/C4Script.cpp:415-454;
     // src/C4Def.cpp:1266-1355).
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    let mut engine = prepared.instantiate();
     let trapper = engine
         .spawn_object(
             SpawnConfig::new("TRPR")

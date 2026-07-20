@@ -1,15 +1,16 @@
 use lc_engine::{Definition, SpawnConfig, Vector2};
 use lc_script::Value;
 
-use crate::support::real_scenario::load_installed_scenario;
+use crate::support::real_scenario::PreparedInstalledScenario;
 
 const PIXEL_COLOR: u32 = 0x0011_2233;
 
-#[test]
-fn set_landscape_pixel_accepts_rgb_and_only_changes_the_relative_surface32_pixel() {
+pub(super) fn set_landscape_pixel_accepts_rgb_and_only_changes_the_relative_surface32_pixel(
+    prepared: &PreparedInstalledScenario,
+) {
     // The installed System.c4g layer supplies RGB, matching the shipped
     // Volcano and MapScreen callers rather than a test-only packing helper.
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    let mut engine = prepared.instantiate();
     engine
         .register_definition(
             Definition::from_script(
@@ -99,9 +100,10 @@ public func Paint()
     );
 }
 
-#[test]
-fn shipped_volcano_draw_x_gradient_runs_through_set_landscape_pixel() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+pub(super) fn shipped_volcano_draw_x_gradient_runs_through_set_landscape_pixel(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     assert_eq!(
         engine.debug_definition_has_function("FXV1", "DrawXGradient"),
         Some(true),

@@ -4,11 +4,12 @@ use lc_engine::{
 };
 use lc_script::Value;
 
-use crate::support::real_scenario::load_installed_scenario;
+use crate::support::real_scenario::{load_installed_scenario, PreparedInstalledScenario};
 
-#[test]
-fn gold_rush_do_change_section_loads_ash_city_landscape() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+pub(super) fn gold_rush_do_change_section_loads_ash_city_landscape(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     // SaveObjects expects the campaign wagon created by InitializePlayer.
     // A playerless, empty wagon keeps this test focused on the section
     // boundary instead of recursively staging a complete campaign inventory.

@@ -1,11 +1,12 @@
 use lc_engine::{Definition, SpawnConfig};
 use lc_script::Value;
 
-use crate::support::real_scenario::load_installed_scenario;
+use crate::support::real_scenario::PreparedInstalledScenario;
 
-#[test]
-fn set_material_color_matches_native_modulation_formula_and_invalid_gate() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+pub(super) fn set_material_color_matches_native_modulation_formula_and_invalid_gate(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     engine
         .register_definition(
             Definition::from_script(

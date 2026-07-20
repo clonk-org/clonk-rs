@@ -1,11 +1,12 @@
 use lc_engine::{Definition, SpawnConfig};
 use lc_script::Value;
 
-use crate::support::real_scenario::load_installed_scenario;
+use crate::support::real_scenario::PreparedInstalledScenario;
 
-#[test]
-fn get_material_color_reads_earth_palette_and_system_rgb_wrapper() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+pub(super) fn get_material_color_reads_earth_palette_and_system_rgb_wrapper(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     assert!(engine.debug_global_has_function("GetMaterialColorX"));
     engine
         .register_definition(

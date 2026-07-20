@@ -1,13 +1,14 @@
 use lc_engine::{Definition, EffectVarValue, SpawnConfig};
 use lc_script::Value;
 
-use crate::support::real_scenario::load_installed_scenario;
+use crate::support::real_scenario::PreparedInstalledScenario;
 
-#[test]
-fn get_mat_adjust_tracks_default_and_same_call_set_value() {
+pub(super) fn get_mat_adjust_tracks_default_and_same_call_set_value(
+    prepared: &PreparedInstalledScenario,
+) {
     // RGB is supplied by the installed System.c4g layer, just as it is for
     // the shipped Western scripts which call SetMatAdjust(RGB(...)).
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    let mut engine = prepared.instantiate();
     engine
         .register_definition(
             Definition::from_script(
@@ -68,9 +69,10 @@ public func Probe()
     );
 }
 
-#[test]
-fn western_global_fade_restores_pre_fade_material_modulation() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+pub(super) fn western_global_fade_restores_pre_fade_material_modulation(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     engine
         .register_definition(
             Definition::from_script(
@@ -144,9 +146,10 @@ public func StopFade()
         .all(|effect| effect.name != "IntGlobalClrMod" || effect.priority == 0));
 }
 
-#[test]
-fn gold_rush_global_fade_timer_reaches_its_completion_check() {
-    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+pub(super) fn gold_rush_global_fade_timer_reaches_its_completion_check(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     assert!(engine.debug_global_has_function("GlobalFadeTo"));
     assert!(engine.debug_global_has_function("FxIntGlobalClrModTimer"));
 

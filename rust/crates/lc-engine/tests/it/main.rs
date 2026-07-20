@@ -30,6 +30,7 @@ mod get_entrance;
 mod get_inventory;
 mod get_material_color;
 mod global_call;
+mod goldrush_scenario_batches;
 mod hangle_movement;
 mod is_newgfx;
 mod legacy_scenario_loading;
