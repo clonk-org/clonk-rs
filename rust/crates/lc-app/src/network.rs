@@ -2895,6 +2895,27 @@ impl NetworkManager {
             .map_err(|message| anyhow!(message))
     }
 
+    /// Queue a client resource removal without waiting for either command
+    /// capacity or the network worker's completion notification.
+    pub fn remove_client_resource_async(
+        &self,
+        resource_id: i32,
+    ) -> Result<Receiver<std::result::Result<(), String>>> {
+        if self.role != NetworkRole::Client {
+            return Err(anyhow!(
+                "only a network client may remove a network resource"
+            ));
+        }
+        let (completion, removed) = mpsc::channel();
+        self.command_tx
+            .try_send(NetworkCommand::RemoveResource {
+                resource_id,
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting resource removals"))?;
+        Ok(removed)
+    }
+
     pub fn graceful_part(&self) -> Result<()> {
         if self.role != NetworkRole::Client {
             return Err(anyhow!("only a network client may part gracefully"));
@@ -8948,6 +8969,41 @@ mod tests {
             .join()
             .expect("resource-removal caller exits")
             .expect("resource removal succeeds");
+    }
+
+    #[test]
+    fn client_manager_can_request_merged_dynamic_removal_without_waiting() {
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+
+        let removed = manager
+            .remove_client_resource_async(23)
+            .expect("queue resource removal");
+        let (resource_id, completion) = commands.receive_resource_removal();
+        assert_eq!(resource_id, 23);
+        assert_eq!(removed.try_recv(), Err(TryRecvError::Empty));
+
+        completion
+            .send(Err("remove failed".to_owned()))
+            .expect("complete resource removal");
+        assert_eq!(
+            removed.recv().expect("resource-removal result"),
+            Err("remove failed".to_owned())
+        );
+    }
+
+    #[test]
+    fn host_manager_cannot_request_async_client_resource_removal() {
+        let (manager, _events, _commands) = NetworkManager::test_stub_with_commands();
+
+        let error = manager
+            .remove_client_resource_async(23)
+            .expect_err("host must not queue a client resource removal");
+
+        assert_eq!(
+            error.to_string(),
+            "only a network client may remove a network resource"
+        );
     }
 
     #[test]

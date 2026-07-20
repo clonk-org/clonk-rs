@@ -296,6 +296,7 @@ pub struct LobbyLabels {
     pub start: String,
     pub cancel: String,
     pub ready: String,
+    pub preload: String,
     pub still_loading: String,
     pub countdown_template: String,
     pub countdown_short_template: String,
@@ -305,6 +306,7 @@ pub struct LobbyLabels {
     pub tooltip_start: String,
     pub tooltip_ready: String,
     pub tooltip_ready_unavailable: String,
+    pub tooltip_preload: String,
     pub tooltip_ping: String,
     pub tooltip_unassigned_savegame_players: String,
     pub tooltip_script_players: String,
@@ -326,6 +328,7 @@ impl Default for LobbyLabels {
             start: "&Start".into(),
             cancel: "Cancel".into(),
             ready: "R&eady".into(),
+            preload: "Preload".into(),
             still_loading: "Still loading".into(),
             countdown_template: "The game will start in {seconds} seconds.".into(),
             countdown_short_template: "{seconds}...".into(),
@@ -337,6 +340,7 @@ impl Default for LobbyLabels {
             tooltip_ready_unavailable:
                 "In order to set yourself as ready to play, all network resources have to be loaded completely."
                     .into(),
+            tooltip_preload: "Preload game data".into(),
             tooltip_ping: "Ping".into(),
             tooltip_unassigned_savegame_players: "Unassociated savegame players.".into(),
             tooltip_script_players: "Players controlled by computer.".into(),
@@ -767,6 +771,8 @@ pub enum LobbyAction {
     },
     /// App-owned `Game.Network.AbortLobbyCountdown()` request.
     AbortCountdownRequested,
+    /// App-owned `C4Game::Preload()` request from the Resources-sheet button.
+    PreloadRequested,
     ReadyChanged(bool),
     SheetRequested(LobbySheet),
     TabContextRequested {
@@ -823,6 +829,7 @@ pub enum LobbyControl {
     GameOption(GameOptionButton),
     Run,
     Ready,
+    Preload,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -858,6 +865,9 @@ pub struct LobbyLayout {
     pub run_button: Option<IntRect>,
     pub ready_checkbox: IntRect,
     pub ready_square: IntRect,
+    /// Visible manual preload button. The Resources list may still reserve
+    /// its 32-pixel strip while this is `None` and preloading is ineligible.
+    pub preload_button: Option<IntRect>,
     /// Bounds passed verbatim to `C4GameOptionButtons`.
     pub game_option_strip: IntRect,
     pub tab_buttons: Vec<LobbyTabButtonLayout>,
@@ -1211,6 +1221,7 @@ pub fn game_lobby_layout(
             w: ready_checkbox.h,
             ..ready_checkbox
         },
+        preload_button: None,
         game_option_strip,
         tab_buttons,
     }
@@ -1371,6 +1382,7 @@ enum HitTarget {
     GameOption(GameOptionButton),
     Run,
     Ready,
+    Preload,
 }
 
 impl HitTarget {
@@ -1379,6 +1391,7 @@ impl HitTarget {
             Self::Tab(control) => Some(control),
             Self::Exit => Some(LobbyControl::Exit),
             Self::Run => Some(LobbyControl::Run),
+            Self::Preload => Some(LobbyControl::Preload),
             Self::AddPlayer(_) => Some(LobbyControl::RosterAddPlayer),
             Self::ResourceSave(resource_id) => Some(LobbyControl::ResourceSave(resource_id)),
             _ => None,
@@ -1414,6 +1427,10 @@ pub struct GameLobby {
     has_teams: bool,
     has_external_chat: bool,
     resources_loaded: bool,
+    /// Manual preload button lifetime is separate from visibility: native
+    /// reserves its strip from construction until a successful click.
+    preload_button_present: bool,
+    preload_eligible: bool,
     ready: bool,
     configured_countdown_seconds: i32,
     league_mode: bool,
@@ -1485,6 +1502,8 @@ impl GameLobby {
             has_teams,
             has_external_chat,
             resources_loaded,
+            preload_button_present: false,
+            preload_eligible: false,
             ready,
             configured_countdown_seconds,
             league_mode: false,
@@ -1571,6 +1590,7 @@ impl GameLobby {
                 | HitTarget::RosterScrollBottom
                 | HitTarget::RosterScrollTrack
                 | HitTarget::RosterScrollInert
+                | HitTarget::Preload
         ) {
             self.hovered = HitTarget::None;
         }
@@ -1589,6 +1609,7 @@ impl GameLobby {
                     | HitTarget::RosterScrollBottom
                     | HitTarget::RosterScrollTrack
                     | HitTarget::RosterScrollInert
+                    | HitTarget::Preload
             )
         ) {
             self.pointer_pressed = None;
@@ -1612,6 +1633,10 @@ impl GameLobby {
             self.focus = LobbyControl::ChatInput;
             self.key_pressed = None;
         }
+        if sheet != LobbySheet::Resources && self.focus == LobbyControl::Preload {
+            self.focus = LobbyControl::ChatInput;
+            self.key_pressed = None;
+        }
     }
 
     pub const fn focus(&self) -> LobbyControl {
@@ -1620,6 +1645,49 @@ impl GameLobby {
 
     pub const fn ready(&self) -> bool {
         self.ready
+    }
+
+    pub const fn resources_loaded(&self) -> bool {
+        self.resources_loaded
+    }
+
+    pub const fn preload_button_present(&self) -> bool {
+        self.preload_button_present
+    }
+
+    pub const fn preload_button_visible(&self) -> bool {
+        self.preload_button_present && self.preload_eligible && self.resources_loaded
+    }
+
+    /// Restores the app-owned `Game.CanPreload()` projection. `present`
+    /// models the lifetime of the manual button object; `eligible` supplies
+    /// the caller-owned half of its native Show/Enable gate. Resource
+    /// completion is enforced independently by this controller.
+    pub fn set_preload_button_state(&mut self, present: bool, eligible: bool) {
+        self.preload_button_present = present;
+        self.preload_eligible = present && eligible;
+        self.clear_invalid_preload_interaction();
+    }
+
+    fn clear_invalid_preload_interaction(&mut self) {
+        if !self.preload_button_visible() {
+            if self.focus == LobbyControl::Preload {
+                self.focus = LobbyControl::ResourcesTab;
+            }
+            if self
+                .key_pressed
+                .is_some_and(|(control, _)| control == LobbyControl::Preload)
+            {
+                self.key_pressed = None;
+            }
+            if matches!(self.hovered, HitTarget::Preload) {
+                self.hovered = HitTarget::None;
+            }
+            if matches!(self.pointer_pressed, Some(HitTarget::Preload)) {
+                self.pointer_pressed = None;
+                self.pointer_inside_pressed = false;
+            }
+        }
     }
 
     pub const fn countdown(&self) -> LobbyCountdownState {
@@ -1874,6 +1942,7 @@ impl GameLobby {
 
     pub fn set_resources_loaded(&mut self, loaded: bool) -> Vec<LobbyAction> {
         self.resources_loaded = loaded;
+        self.clear_invalid_preload_interaction();
         if !loaded && self.focus == LobbyControl::Ready {
             let replacement = if self.role == LobbyRole::Host {
                 LobbyControl::Run
@@ -2041,6 +2110,17 @@ impl GameLobby {
                 w: SCROLLBAR_EXTENT,
                 h: (bounds.h - 2 * SCENARIO_TEXT_VERTICAL_MARGIN).max(0),
             };
+        } else if self.active_sheet == LobbySheet::Resources && self.preload_button_present {
+            let button = IntRect {
+                x: layout.roster.x,
+                y: layout.roster.y + (layout.roster.h - BUTTON_HEIGHT).max(0),
+                w: layout.roster.w,
+                h: BUTTON_HEIGHT.min(layout.roster.h),
+            };
+            layout.roster.h = (layout.roster.h - BUTTON_HEIGHT).max(0);
+            layout.roster_client.h = (layout.roster_client.h - BUTTON_HEIGHT).max(0);
+            layout.roster_scrollbar.h = (layout.roster_scrollbar.h - BUTTON_HEIGHT).max(0);
+            layout.preload_button = self.preload_button_visible().then_some(button);
         }
         layout
     }
@@ -3221,7 +3301,8 @@ impl GameLobby {
             | LobbyControl::ScenarioTab
             | LobbyControl::ChatDialog
             | LobbyControl::Exit
-            | LobbyControl::Run)
+            | LobbyControl::Run
+            | LobbyControl::Preload)
                 if matches!(key, KeyCode::Enter | KeyCode::Space) =>
             {
                 if self.key_pressed.is_none() {
@@ -3636,6 +3717,9 @@ impl GameLobby {
                 order.push(LobbyControl::Option(kind));
             }
         }
+        if self.active_sheet == LobbySheet::Resources && self.preload_button_visible() {
+            order.push(LobbyControl::Preload);
+        }
         order.push(LobbyControl::Exit);
         order.extend(
             self.role
@@ -3868,6 +3952,7 @@ impl GameLobby {
             HitTarget::Tab(control) => self.activate_control(control),
             HitTarget::Exit => vec![LobbyAction::ExitRequested],
             HitTarget::Run => self.activate_control(LobbyControl::Run),
+            HitTarget::Preload => self.activate_control(LobbyControl::Preload),
             HitTarget::AddPlayer(index) => match self.rows.get(index) {
                 Some(LobbyRosterRow::Client(client)) => {
                     vec![LobbyAction::AddPlayerRequested {
@@ -3971,6 +4056,12 @@ impl GameLobby {
                 vec![LobbyAction::Chat(LobbyChatRequest::OpenExternalDialog)]
             }
             LobbyControl::Exit => vec![LobbyAction::ExitRequested],
+            LobbyControl::Preload
+                if self.active_sheet == LobbySheet::Resources
+                    && self.preload_button_visible() =>
+            {
+                vec![LobbyAction::PreloadRequested]
+            }
             LobbyControl::RosterTeam if self.active_sheet.is_roster() => self
                 .selected_row
                 .and_then(|index| self.rows.get(index))
@@ -4258,6 +4349,9 @@ impl GameLobby {
         if contains(layout.roster_scrollbar, point) {
             return HitTarget::RosterScrollInert;
         }
+        if layout.preload_button.is_some_and(|rect| contains(rect, point)) {
+            return HitTarget::Preload;
+        }
         if contains(layout.ready_square, point) {
             return HitTarget::Ready;
         }
@@ -4304,6 +4398,7 @@ impl GameLobby {
             HitTarget::Run => self.labels.tooltip_start.clone(),
             HitTarget::Ready if self.resources_loaded => self.labels.tooltip_ready.clone(),
             HitTarget::Ready => self.labels.tooltip_ready_unavailable.clone(),
+            HitTarget::Preload => self.labels.tooltip_preload.clone(),
             HitTarget::RosterRow(index) | HitTarget::AddPlayer(index) | HitTarget::Team(index) => {
                 match self.rows.get(index) {
                     Some(LobbyRosterRow::Client(client)) => {
@@ -4567,6 +4662,17 @@ impl GameLobby {
                 roster.max_scroll,
                 self.pointer_pressed == Some(HitTarget::RosterScrollTop),
                 self.pointer_pressed == Some(HitTarget::RosterScrollBottom),
+                gamma,
+            );
+        }
+
+        if let Some(preload) = layout.preload_button {
+            skin.draw_button(
+                surface,
+                preload,
+                &self.labels.preload,
+                resources.fonts,
+                self.button_state(LobbyControl::Preload, active),
                 gamma,
             );
         }
@@ -5327,6 +5433,7 @@ impl GameLobby {
         let target = match control {
             LobbyControl::Exit => HitTarget::Exit,
             LobbyControl::Run => HitTarget::Run,
+            LobbyControl::Preload => HitTarget::Preload,
             _ => HitTarget::None,
         };
         ClassicButtonState {
@@ -6597,6 +6704,148 @@ mod tests {
             lobby.pointer_up(point, &layout, &roster, Instant::now()),
             vec![LobbyAction::SaveResourceRequested { resource_id: 7 }]
         );
+    }
+
+    #[test]
+    fn manual_preload_reserves_strip_until_success_and_activates_only_when_eligible() {
+        let fonts = endeavour_font_set();
+        let mut lobby = lobby(LobbyRole::Client, vec![]);
+        lobby.set_resource_rows(
+            (0..40)
+                .map(|id| LobbyResourceRow {
+                    id,
+                    filename: format!("Network/Resource{id}.c4d"),
+                    present_percent: 100,
+                    save_possible: false,
+                })
+                .collect(),
+        );
+        lobby.set_active_sheet(LobbySheet::Resources);
+        let full = lobby.layout(1280, 720, &fonts);
+        let full_resources = lobby.roster_layout(&full, fonts.text.line_height);
+        assert!(full_resources.max_scroll > 0);
+
+        lobby.set_preload_button_state(true, false);
+        let hidden = lobby.layout(1280, 720, &fonts);
+        let hidden_resources = lobby.roster_layout(&hidden, fonts.text.line_height);
+        assert_eq!(full.roster.h - hidden.roster.h, BUTTON_HEIGHT);
+        assert_eq!(
+            full.roster_client.h - hidden.roster_client.h,
+            BUTTON_HEIGHT
+        );
+        assert_eq!(
+            full.roster_scrollbar.h - hidden.roster_scrollbar.h,
+            BUTTON_HEIGHT
+        );
+        assert_eq!(
+            hidden_resources.max_scroll - full_resources.max_scroll,
+            BUTTON_HEIGHT
+        );
+        assert_eq!(hidden_resources.content_height, full_resources.content_height);
+        assert_eq!(hidden.preload_button, None);
+        assert!(!lobby.focus_order().contains(&LobbyControl::Preload));
+
+        lobby.set_preload_button_state(true, true);
+        let visible = lobby.layout(1280, 720, &fonts);
+        let button = visible.preload_button.expect("eligible preload button");
+        assert_eq!(visible.roster.h, hidden.roster.h);
+        assert_eq!(button.y, visible.roster.y + visible.roster.h);
+        assert!(lobby.focus_order().contains(&LobbyControl::Preload));
+        let roster = lobby.roster_layout(&visible, fonts.text.line_height);
+        let point = GuiPoint::new((button.x + 2) as f32, (button.y + 2) as f32);
+        assert!(lobby.pointer_move(point, &visible, &roster).is_empty());
+        assert_eq!(
+            lobby
+                .tooltip_state_at(lobby.hover_since + TOOLTIP_DELAY)
+                .map(|tooltip| tooltip.text),
+            Some("Preload game data".into())
+        );
+        assert!(lobby.pointer_down(point, &visible, &roster).is_empty());
+        assert_eq!(
+            lobby.pointer_up(point, &visible, &roster, Instant::now()),
+            [LobbyAction::PreloadRequested]
+        );
+        lobby.focus = LobbyControl::Preload;
+        assert!(lobby
+            .key_down(
+                KeyCode::Enter,
+                false,
+                &visible,
+                &roster,
+                Instant::now()
+            )
+            .is_empty());
+        assert_eq!(
+            lobby.key_up(KeyCode::Enter),
+            [LobbyAction::PreloadRequested]
+        );
+
+        // A failed app-side request restores this same presentation.
+        lobby.set_preload_button_state(true, true);
+        assert!(lobby.preload_button_visible());
+        assert_eq!(
+            lobby.layout(1280, 720, &fonts).roster.h,
+            hidden.roster.h
+        );
+
+        // Losing caller eligibility cancels every in-flight interaction.
+        lobby.focus = LobbyControl::Preload;
+        assert!(lobby
+            .key_down(
+                KeyCode::Space,
+                false,
+                &visible,
+                &roster,
+                Instant::now()
+            )
+            .is_empty());
+        assert!(lobby.pointer_down(point, &visible, &roster).is_empty());
+        assert!(lobby.key_pressed.is_some());
+        assert_eq!(lobby.pointer_pressed, Some(HitTarget::Preload));
+        lobby.set_preload_button_state(true, false);
+        assert_eq!(lobby.focus(), LobbyControl::ResourcesTab);
+        assert!(lobby.key_pressed.is_none());
+        assert!(lobby.pointer_pressed.is_none());
+        assert!(!lobby.pointer_inside_pressed);
+        assert_eq!(lobby.hovered, HitTarget::None);
+        assert!(lobby.key_up(KeyCode::Space).is_empty());
+
+        // Resource completion is an independent half of the same gate, even
+        // when the app's CanPreload projection remains true.
+        lobby.set_preload_button_state(true, true);
+        lobby.focus = LobbyControl::Preload;
+        assert!(lobby
+            .key_down(
+                KeyCode::Enter,
+                false,
+                &visible,
+                &roster,
+                Instant::now()
+            )
+            .is_empty());
+        assert!(lobby.pointer_down(point, &visible, &roster).is_empty());
+        assert!(lobby.set_resources_loaded(false).is_empty());
+        assert!(!lobby.preload_button_visible());
+        assert_eq!(lobby.focus(), LobbyControl::ResourcesTab);
+        assert!(lobby.key_pressed.is_none());
+        assert!(lobby.pointer_pressed.is_none());
+        assert_eq!(lobby.hovered, HitTarget::None);
+        assert!(!lobby.focus_order().contains(&LobbyControl::Preload));
+        assert!(lobby.activate_control(LobbyControl::Preload).is_empty());
+        let incomplete = lobby.layout(1280, 720, &fonts);
+        assert_eq!(incomplete.preload_button, None);
+        assert_eq!(incomplete.roster.h, hidden.roster.h);
+
+        // Success deletes the native button object and returns its strip.
+        let _ = lobby.set_resources_loaded(true);
+        lobby.set_preload_button_state(false, false);
+        let consumed = lobby.layout(1280, 720, &fonts);
+        let consumed_resources = lobby.roster_layout(&consumed, fonts.text.line_height);
+        assert_eq!(consumed.roster.h, full.roster.h);
+        assert_eq!(consumed.roster_client.h, full.roster_client.h);
+        assert_eq!(consumed.roster_scrollbar.h, full.roster_scrollbar.h);
+        assert_eq!(consumed_resources.max_scroll, full_resources.max_scroll);
+        assert_eq!(consumed.preload_button, None);
     }
 
     #[test]

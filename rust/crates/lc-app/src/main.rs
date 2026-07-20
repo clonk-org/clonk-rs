@@ -72,9 +72,9 @@ use ingame_menu::{
 };
 use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
 use lc_app::{
-    ClientStartBarrier, ClientStartResourceRole, ConfiguredClientPlayerSelection,
-    PendingClientStartResource, SelectedClientPlayer,
-    compose_client_network_scenario, load_configured_mission_access,
+    ClientScenarioResources, ClientStartBarrier, ClientStartResourceRole,
+    ConfiguredClientPlayerSelection, PendingClientStartResource, ResolvedClientStartResource,
+    SelectedClientPlayer, compose_client_network_scenario, load_configured_mission_access,
     load_snapshotted_client_players,
     publish_initial_configured_client_players, resolve_client_game_resources,
     resolve_client_scenario_resources, snapshot_configured_client_player_selection,
@@ -227,6 +227,7 @@ const STARTUP_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const INGAME_FRAME_INTERVAL: Duration = Duration::from_millis(28);
 const MAX_REFRESH_INTERVAL: Duration = Duration::from_millis(30);
 const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
+static LOBBY_PRELOAD_SERIAL: AtomicU64 = AtomicU64::new(0);
 const NETWORK_CONTROL_OVERFLOW_LIMIT: u32 = 3;
 const NETWORK_RENDER_SKIP_BEHIND: u32 = 25;
 const GAME_SECOND_INTERVAL: Duration = Duration::from_secs(1);
@@ -693,6 +694,153 @@ struct GameGraphicsResources {
     options: Option<Arc<ImageData>>,
     palette: Arc<GamePalette>,
     liquid_animation: Option<Arc<ImageData>>,
+}
+
+/// Immutable activation work produced by the lobby Preload action and
+/// consumed only when the same scenario/definition vector enters the game.
+struct LobbyPreloadArtifact {
+    scenario_path: PathBuf,
+    definition_paths: Vec<String>,
+    game_graphics: GameGraphicsResources,
+    material_texture_images: Arc<HashMap<String, ImageData>>,
+    material_render_info: Arc<HashMap<String, MaterialRenderInfo>>,
+    catalog_host: Option<CatalogHostLobbyPreloadArtifact>,
+    client: Option<ClientLobbyPreloadArtifact>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CatalogHostLobbyPreloadKey {
+    identifier: String,
+    scenario_path: PathBuf,
+    definition_load: ScenarioDefinitionLoad,
+    languages: Vec<String>,
+}
+
+struct CatalogHostLobbyPreloadArtifact {
+    key: CatalogHostLobbyPreloadKey,
+    scenario: Option<Scenario>,
+}
+
+impl CatalogHostLobbyPreloadArtifact {
+    fn take_matching_scenario(&mut self, key: &CatalogHostLobbyPreloadKey) -> Option<Scenario> {
+        if &self.key == key {
+            self.scenario.take()
+        } else {
+            None
+        }
+    }
+}
+
+struct ClientLobbyPreloadArtifact {
+    client_id: i32,
+    dynamic_resource_id: i32,
+    random_seed: u64,
+    scenario: Option<Scenario>,
+    material_groups: Vec<Group>,
+    staging_path: Option<PathBuf>,
+}
+
+impl Drop for ClientLobbyPreloadArtifact {
+    fn drop(&mut self) {
+        if let Some(path) = self.staging_path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+#[derive(Default)]
+struct ClientCombinedPreloadFile(Option<PathBuf>);
+
+impl ClientCombinedPreloadFile {
+    fn replace(&mut self, path: PathBuf) {
+        self.clear();
+        self.0 = Some(path);
+    }
+
+    fn clear(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    fn is_owned(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+impl Drop for ClientCombinedPreloadFile {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+#[derive(Clone)]
+struct LobbyPreloadGraphicsContext {
+    app_paths: Option<AppPaths>,
+    fallback: GameGraphicsResources,
+    liquid_animation_enabled: bool,
+}
+
+struct LobbyPreloadJob {
+    graphics: LobbyPreloadGraphicsContext,
+    source: LobbyPreloadJobSource,
+}
+
+enum LobbyPreloadJobSource {
+    Host {
+        frontend: FrontendScenario,
+        scenario_path: PathBuf,
+        definition_paths: Vec<String>,
+    },
+    CatalogHost {
+        frontend: FrontendScenario,
+        key: CatalogHostLobbyPreloadKey,
+    },
+    Client {
+        join_data: lc_network::JoinDataEnvelope,
+        scenario_resources: Option<ClientScenarioResources>,
+        game_resources: Vec<ResolvedClientStartResource>,
+        resource_directory: PathBuf,
+        maker: String,
+        scenario_path: PathBuf,
+        staging_path: Option<PathBuf>,
+    },
+}
+
+struct LobbyPreloadTask {
+    state: LobbyPreloadTaskState,
+    start_host_when_ready: bool,
+    worker: LobbyPreloadWorker,
+}
+
+struct LobbyPreloadWorker(Option<thread::JoinHandle<()>>);
+
+impl LobbyPreloadWorker {
+    fn new(worker: thread::JoinHandle<()>) -> Self {
+        Self(Some(worker))
+    }
+
+    fn join(&mut self) {
+        if let Some(worker) = self.0.take() {
+            if worker.join().is_err() {
+                tracing::error!("lobby preload worker panicked");
+            }
+        }
+    }
+}
+
+impl Drop for LobbyPreloadWorker {
+    fn drop(&mut self) {
+        self.join();
+    }
+}
+
+enum LobbyPreloadTaskState {
+    Loading(Receiver<std::result::Result<LobbyPreloadArtifact, String>>),
+    RemovingClientResource {
+        artifact: LobbyPreloadArtifact,
+        receiver: Receiver<std::result::Result<(), String>>,
+    },
 }
 
 extern "C" {
@@ -2251,6 +2399,65 @@ fn resolve_game_graphics_resources(
         palette: Arc::new(palette),
         liquid_animation,
     })
+}
+
+fn load_game_graphics_resources(
+    paths: Option<&AppPaths>,
+    fallback: GameGraphicsResources,
+    liquid_animation_enabled: bool,
+    frontend: &FrontendScenario,
+    definition_load: Option<&ScenarioDefinitionLoad>,
+) -> Result<GameGraphicsResources> {
+    let Some(paths) = paths else {
+        return Ok(fallback);
+    };
+    let path = frontend
+        .path
+        .as_deref()
+        .context("loaded scenario has no path for game graphics resolution")?;
+    let scenario_group = open_group_path_for_folder_map(path)
+        .with_context(|| format!("failed to open loaded scenario at {}", path.display()))?;
+    // Graphics registration only consumes Origin, Definitions and Extra;
+    // it must not resolve or validate unrelated presentation title data.
+    let head = ScenarioLoaderHead::load_from_group_for_resource_registration(&scenario_group)
+        .map_err(anyhow::Error::from)?;
+    let fallback_definition_load;
+    let definition_load = match definition_load {
+        Some(definition_load) => definition_load,
+        None => {
+            fallback_definition_load = ScenarioDefinitionLoad::Seed {
+                modules: Vec::new(),
+                definition_root: None,
+            };
+            &fallback_definition_load
+        }
+    };
+    let mut registrations =
+        classic_loader_registrations(frontend, &scenario_group, &head, definition_load, paths)?;
+    let first_definition_order = registrations
+        .iter()
+        .map(|registration| registration.registration_order)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    registrations.extend(definition_graphics_source_registrations(
+        &head,
+        &scenario_group,
+        definition_load,
+        paths,
+        first_definition_order,
+    )?);
+    let graphics_registrations = loader_graphics_registrations(&registrations)?;
+    if graphics_registrations.is_empty() {
+        return Ok(fallback);
+    }
+    let graphics = main_graphics_group(paths)?;
+    resolve_game_graphics_resources(
+        &graphics_registrations,
+        &graphics,
+        Some(Arc::clone(&fallback.cursor_atlas)),
+        liquid_animation_enabled,
+    )
 }
 
 fn load_classic_bitmap_font_image(
@@ -9200,6 +9407,7 @@ impl LobbyScenarioDescriptionState {
 
 struct ClassicHostLobbyState {
     controller: ClassicGameLobby,
+    preload: LobbyPreloadState,
     pointer: Option<GuiPoint>,
     last_roster_click: Option<(LobbyRosterId, Instant)>,
     chat_history_index: i32,
@@ -9211,6 +9419,46 @@ struct ClassicHostLobbyState {
     /// does not reconcile its visible rows until the sheet is activated.
     resource_rows: BTreeMap<i32, LobbyResourceRow>,
     scenario_description: LobbyScenarioDescriptionState,
+}
+
+/// Process-local projection of `Game.CanPreload()` plus the construction-time
+/// General.Preloading mode. Eligibility edges are shared by automatic and
+/// manual paths; a failed launch stays retryable, while success is one-shot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LobbyPreloadState {
+    automatic: bool,
+    manual_button_present: bool,
+    eligible: bool,
+    spent: bool,
+}
+
+impl LobbyPreloadState {
+    const fn new(automatic: bool) -> Self {
+        Self {
+            automatic,
+            manual_button_present: !automatic,
+            eligible: false,
+            spent: false,
+        }
+    }
+
+    fn synchronize(&mut self, resources_complete: bool, context_ready: bool) -> bool {
+        let was_eligible = self.eligible;
+        self.eligible = resources_complete && context_ready && !self.spent;
+        self.automatic && !was_eligible && self.eligible
+    }
+
+    fn record_result(&mut self, succeeded: bool) {
+        if succeeded {
+            self.spent = true;
+            self.eligible = false;
+            self.manual_button_present = false;
+        }
+    }
+
+    fn reset_for_context(&mut self) {
+        *self = Self::new(self.automatic);
+    }
 }
 
 const RESTART_RESTORE_PLAYER_TEAMS: i32 = 0x2;
@@ -9334,7 +9582,7 @@ enum StartupNetworkJoinTarget {
     QueryError(String),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum ScenarioDefinitionLoad {
     /// C4StartupScenSelDlg's unchecked branch seeds Objects.c4d; a non-local
     /// scenario preset may replace it during C4Game initialization.
@@ -11160,6 +11408,8 @@ struct GameApp {
     network_mode: Option<NetworkMode>,
     network_lobby: Option<NetworkLobbyState>,
     classic_host_lobby: Option<ClassicHostLobbyState>,
+    lobby_preload_task: Option<LobbyPreloadTask>,
+    lobby_preload_artifact: Option<LobbyPreloadArtifact>,
     network_start_wait: Option<NetworkStartWaitDialogState>,
     /// Host-owned `C4Network2::pLobbyCountdown` analogue. Packet-derived
     /// `NetworkLobbyState::countdown` is presentation only and never arms GO.
@@ -11237,6 +11487,7 @@ struct GameApp {
     client_start_barrier: ClientStartBarrier,
     pending_client_start_status: Option<lc_network::NetworkStatus>,
     client_combined_scenario_path: Option<PathBuf>,
+    client_combined_preload_file: ClientCombinedPreloadFile,
     /// Exact host-ordered NRT_Material groups from JoinData. `Some([])` is
     /// authoritative too: a network client must not fall back to local files.
     client_material_resource_groups: Option<Vec<Group>>,
@@ -13611,6 +13862,7 @@ enum LobbyPointerRegion {
 enum LobbyButton {
     Ready,
     Start,
+    Preload,
     Sheet(LobbySheet),
     ResourceSave(i32),
     ExternalChat,
@@ -13620,6 +13872,7 @@ enum LobbyButton {
 struct NetworkLobbyLayout {
     ready_button: GuiRect,
     start_button: Option<GuiRect>,
+    preload_button: Option<GuiRect>,
     sheet_buttons: Vec<(LobbySheet, GuiRect)>,
     roster_client: GuiRect,
     resource_save_buttons: Vec<(i32, GuiRect)>,
@@ -13680,6 +13933,7 @@ impl NetworkLobbyLayout {
         Self {
             ready_button: as_gui_rect(layout.ready_checkbox),
             start_button: layout.run_button.map(as_gui_rect),
+            preload_button: layout.preload_button.map(as_gui_rect),
             sheet_buttons,
             roster_client: as_gui_rect(layout.roster_client),
             resource_save_buttons,
@@ -13710,6 +13964,9 @@ struct NetworkLobbyState {
     resource_scroll: i32,
     scenario_description: LobbyScenarioDescriptionState,
     scenario_scroll: i32,
+    resources_loaded: bool,
+    preload: LobbyPreloadState,
+    labels: LobbyLabels,
     logs: Vec<LobbyLogLine>,
     chat_edit: LobbyChatEditView,
     chat_history_index: i32,
@@ -13732,6 +13989,7 @@ struct NetworkLobbyState {
 enum LobbyAction {
     ToggleReady,
     StartGame,
+    Preload,
     SelectSheet(LobbySheet),
     SaveResource(i32),
     OpenExternalIrcChat,
@@ -13983,6 +14241,9 @@ impl NetworkLobbyState {
             resource_scroll: 0,
             scenario_description: LobbyScenarioDescriptionState::default(),
             scenario_scroll: 0,
+            resources_loaded: false,
+            preload: LobbyPreloadState::new(false),
+            labels: LobbyLabels::default(),
             logs: Vec::new(),
             chat_edit: LobbyChatEditView::default(),
             chat_history_index: -1,
@@ -14001,6 +14262,12 @@ impl NetworkLobbyState {
 
     fn with_external_chat(mut self, has_external_chat: bool) -> Self {
         self.has_external_chat = has_external_chat;
+        self
+    }
+
+    fn with_preloading(mut self, automatic: bool, labels: LobbyLabels) -> Self {
+        self.preload = LobbyPreloadState::new(automatic);
+        self.labels = labels;
         self
     }
 
@@ -14029,7 +14296,7 @@ impl NetworkLobbyState {
         } else {
             LobbyRole::Client
         };
-        let layout = lc_frontend::game_lobby::game_lobby_layout(
+        let mut layout = lc_frontend::game_lobby::game_lobby_layout(
             width as i32,
             height as i32,
             34,
@@ -14038,6 +14305,17 @@ impl NetworkLobbyState {
             self.has_teams,
             self.has_external_chat,
         );
+        if self.active_sheet == LobbySheet::Resources
+            && self.preload.manual_button_present
+            && self.preload.eligible
+        {
+            layout.preload_button = Some(lc_frontend::classic_gui::IntRect {
+                x: layout.roster.x,
+                y: layout.roster.y + (layout.roster.h - 32).max(0),
+                w: layout.roster.w,
+                h: 32.min(layout.roster.h),
+            });
+        }
         self.layout = Some(NetworkLobbyLayout::from_classic(
             &layout,
             self.active_sheet,
@@ -14076,6 +14354,7 @@ impl NetworkLobbyState {
             match hit {
                 Some(LobbyButton::Ready) => Some(LobbyAction::ToggleReady),
                 Some(LobbyButton::Start) => Some(LobbyAction::StartGame),
+                Some(LobbyButton::Preload) => Some(LobbyAction::Preload),
                 Some(LobbyButton::Sheet(sheet)) => Some(LobbyAction::SelectSheet(sheet)),
                 Some(LobbyButton::ResourceSave(resource_id)) => {
                     Some(LobbyAction::SaveResource(resource_id))
@@ -14285,10 +14564,15 @@ impl NetworkLobbyState {
             self.max_players.max(1),
             self.has_teams,
             self.has_external_chat,
-            true,
+            self.resources_loaded,
             self.local_ready(),
             DEFAULT_LOBBY_COUNTDOWN_SECONDS,
             rows,
+        );
+        controller.set_labels(self.labels.clone());
+        controller.set_preload_button_state(
+            self.preload.manual_button_present,
+            self.preload.eligible,
         );
         controller.set_active_sheet(self.active_sheet);
         controller.set_scenario_text(self.scenario_description.text.clone());
@@ -14533,6 +14817,11 @@ impl NetworkLobbyState {
         if let Some(rect) = layout.start_button.as_ref() {
             if point_in_rect(point, rect) {
                 return Some(LobbyButton::Start);
+            }
+        }
+        if let Some(rect) = layout.preload_button.as_ref() {
+            if point_in_rect(point, rect) {
+                return Some(LobbyButton::Preload);
             }
         }
         if let Some((sheet, _)) = layout
@@ -17571,9 +17860,10 @@ fn material_render_info(
 
 /// Render sources in C4Game order: scenario-local first, then either the exact
 /// synchronized NRT_Material vector or the offline installation search chain.
-fn resolved_material_groups(
+fn resolved_material_groups_with_paths(
     scenario_path: &Path,
     authoritative_external_groups: Option<&[Group]>,
+    app_paths: Option<&AppPaths>,
 ) -> Vec<Group> {
     let mut groups = Vec::new();
     if let Ok(scenario) = open_group_path_for_folder_map(scenario_path) {
@@ -17584,7 +17874,7 @@ fn resolved_material_groups(
             groups.extend(authoritative_external_groups.iter().cloned());
             return groups;
         }
-        let resolver = InstallDefinitionResolver::new(cached_app_paths().ok());
+        let resolver = InstallDefinitionResolver::new(app_paths.cloned().map(Arc::new));
         match resolver.resolve_material_groups(&scenario) {
             Ok(external) => groups.extend(external),
             Err(error) => {
@@ -17655,11 +17945,16 @@ fn material_texture_stems(group: &Group) -> Vec<String> {
         .collect()
 }
 
-fn admitted_material_groups(
+fn admitted_material_groups_with_paths(
     scenario_path: &Path,
     authoritative_external_groups: Option<&[Group]>,
+    app_paths: Option<&AppPaths>,
 ) -> Vec<AdmittedMaterialGroup> {
-    let groups = resolved_material_groups(scenario_path, authoritative_external_groups);
+    let groups = resolved_material_groups_with_paths(
+        scenario_path,
+        authoritative_external_groups,
+        app_paths,
+    );
     let mut admitted = Vec::new();
     let mut seen_materials = HashSet::new();
     let mut seen_textures = HashSet::new();
@@ -17725,8 +18020,25 @@ fn load_material_render_info(
     scenario_path: &Path,
     authoritative_external_groups: Option<&[Group]>,
 ) -> HashMap<String, lc_frontend::MaterialRenderInfo> {
+    let app_paths = cached_app_paths().ok();
+    load_material_render_info_with_paths(
+        scenario_path,
+        authoritative_external_groups,
+        app_paths.as_deref(),
+    )
+}
+
+fn load_material_render_info_with_paths(
+    scenario_path: &Path,
+    authoritative_external_groups: Option<&[Group]>,
+    app_paths: Option<&AppPaths>,
+) -> HashMap<String, lc_frontend::MaterialRenderInfo> {
     let mut render_info = HashMap::new();
-    for source in admitted_material_groups(scenario_path, authoritative_external_groups) {
+    for source in admitted_material_groups_with_paths(
+        scenario_path,
+        authoritative_external_groups,
+        app_paths,
+    ) {
         if !source.materials {
             continue;
         }
@@ -17794,14 +18106,25 @@ fn load_scenario_material_textures(
     scenario_path: &Path,
     authoritative_external_groups: Option<&[Group]>,
 ) -> HashMap<String, ImageData> {
+    let app_paths = cached_app_paths().ok();
+    load_scenario_material_textures_with_paths(
+        scenario_path,
+        authoritative_external_groups,
+        app_paths.as_deref(),
+    )
+}
+
+fn load_scenario_material_textures_with_paths(
+    scenario_path: &Path,
+    authoritative_external_groups: Option<&[Group]>,
+    app_paths: Option<&AppPaths>,
+) -> HashMap<String, ImageData> {
     let mut textures = HashMap::new();
     let use_shared_cache = authoritative_external_groups.is_none();
     // Offline shared groups stay in the process cache; synchronized groups
     // decode from the exact validated Group handles. Source order is overload
     // order, so the first source's texture name wins.
-    let paths = cached_app_paths().ok();
-    let shared: HashSet<String> = paths
-        .as_deref()
+    let shared: HashSet<String> = app_paths
         .map(|paths| {
             candidate_material_paths(paths)
                 .into_iter()
@@ -17809,13 +18132,17 @@ fn load_scenario_material_textures(
                 .collect()
         })
         .unwrap_or_default();
-    for source in admitted_material_groups(scenario_path, authoritative_external_groups) {
+    for source in admitted_material_groups_with_paths(
+        scenario_path,
+        authoritative_external_groups,
+        app_paths,
+    ) {
         if !source.textures {
             continue;
         }
         let source_key = scenario_root_key(source.group.root());
         if use_shared_cache && shared.contains(&source_key) {
-            if let Some(paths) = paths.as_deref() {
+            if let Some(paths) = app_paths {
                 let cached = shared_material_texture_images(paths);
                 if let Some(group_textures) = cached.get(&source_key) {
                     for (name, image) in group_textures {
@@ -21136,6 +21463,10 @@ impl GameApp {
                 manager.local_client_id(),
                 player_name.clone(),
                 matches!(mode, NetworkMode::Host(_)),
+            )
+            .with_preloading(
+                load_options_program_state(paths).preloading,
+                LobbyLabels::default(),
             )),
             _ => None,
         };
@@ -21482,6 +21813,8 @@ impl GameApp {
             network_mode,
             network_lobby,
             classic_host_lobby: None,
+            lobby_preload_task: None,
+            lobby_preload_artifact: None,
             network_start_wait: None,
             host_lobby_countdown: None,
             pending_local_lobby_countdown_echoes: VecDeque::new(),
@@ -21523,6 +21856,7 @@ impl GameApp {
             client_start_barrier: ClientStartBarrier::default(),
             pending_client_start_status: None,
             client_combined_scenario_path: None,
+            client_combined_preload_file: ClientCombinedPreloadFile::default(),
             client_material_resource_groups: None,
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
@@ -31448,6 +31782,9 @@ impl GameApp {
         let Some(join_data) = self.pending_network_join_data.clone() else {
             return Ok(());
         };
+        if self.lobby_preload_task.is_some() {
+            return Ok(());
+        }
         let Some(NetworkMode::Client(settings)) = self.network_mode.as_ref() else {
             return Ok(());
         };
@@ -31484,10 +31821,36 @@ impl GameApp {
                         join_data.dynamic.id
                     )
                 })?;
+            self.client_combined_preload_file.clear();
             self.client_combined_scenario_path = Some(combined_path);
         }
         if self.loading_state.is_some() {
             return Ok(());
+        }
+        let combined_path = self
+            .client_combined_scenario_path
+            .clone()
+            .expect("combined path was installed above");
+        let preloaded_scenario = self
+            .lobby_preload_artifact
+            .as_mut()
+            .filter(|artifact| artifact.scenario_path == combined_path)
+            .and_then(|artifact| artifact.client.as_mut())
+            .filter(|client| {
+                client.client_id == join_data.client_id
+                    && client.dynamic_resource_id == join_data.dynamic.id
+                    && client.random_seed
+                        == u64::from(join_data.parameters.random_seed as u32)
+            })
+            .and_then(|client| client.scenario.take());
+        if let Some(scenario_data) = preloaded_scenario {
+            return self.install_prepared_client_network_scenario(
+                status,
+                join_data,
+                combined_path,
+                scenario_data,
+                None,
+            );
         }
         let game_resources = match resolve_client_game_resources(&join_data, |core| {
             self.admission_resources
@@ -31500,10 +31863,6 @@ impl GameApp {
                 return Ok(());
             }
         };
-        let combined_path = self
-            .client_combined_scenario_path
-            .clone()
-            .expect("combined path was installed above");
         let mut definition_groups = Vec::new();
         let mut material_groups = Vec::new();
         for resource in &game_resources {
@@ -31540,7 +31899,6 @@ impl GameApp {
             .map(classic_language_packs)
             .unwrap_or_default();
         let random_seed = u64::from(join_data.parameters.random_seed as u32);
-        self.fade_out_game_music();
         let scenario_data = Scenario::load_network_from_path_with_languages_and_seed_and_packs(
             &combined_path,
             &definition_groups,
@@ -31551,7 +31909,30 @@ impl GameApp {
             &language_packs,
         )
         .map_err(|error| error.to_string())?;
+        self.install_prepared_client_network_scenario(
+            status,
+            join_data,
+            combined_path,
+            scenario_data,
+            Some(material_groups),
+        )
+    }
+
+    fn install_prepared_client_network_scenario(
+        &mut self,
+        status: lc_network::NetworkStatus,
+        join_data: lc_network::JoinDataEnvelope,
+        combined_path: PathBuf,
+        scenario_data: Scenario,
+        material_groups: Option<Vec<Group>>,
+    ) -> Result<(), String> {
         validate_client_network_scenario(&scenario_data)?;
+        let scenario_group = Group::open(&combined_path).map_err(|error| {
+            format!(
+                "failed to open combined scenario {} for runtime data: {error}",
+                combined_path.display()
+            )
+        })?;
         let initial_game_source = read_optional_initial_network_game_source(&scenario_group)
             .map_err(|error| {
                 format!(
@@ -31577,7 +31958,11 @@ impl GameApp {
         scenario_data
             .validate_initial_network_game_data(&initial_game_state)
             .map_err(|error| format!("invalid network Game.txt: {error}"))?;
-        self.client_material_resource_groups = Some(material_groups);
+        if let Some(material_groups) = material_groups {
+            self.client_material_resource_groups = Some(material_groups);
+        }
+        self.fade_out_game_music();
+        let random_seed = u64::from(join_data.parameters.random_seed as u32);
         let title = legacy_presentation_text(join_data.parameters.title.as_bytes());
         let scenario = FrontendScenario {
             identifier: combined_path
@@ -33313,8 +33698,10 @@ impl GameApp {
                         self.client_start_barrier =
                             ClientStartBarrier::from_join_data_status(join_data.status);
                         self.pending_client_start_status = None;
-                        self.client_combined_scenario_path = None;
-                        self.client_material_resource_groups = None;
+                        self.clear_lobby_preload();
+                        if let Some(lobby) = self.network_lobby.as_mut() {
+                            lobby.preload.reset_for_context();
+                        }
                         self.pending_network_join_data = Some(join_data);
                         self.sync_classic_lobby_roster();
                         self.sync_classic_lobby_resource_ready();
@@ -41588,9 +41975,10 @@ impl GameApp {
                     }
                     self.play_ui_sound("Click");
                     if matches!(self.startup_view, StartupView::NetworkLobby) {
-                        if let Some(lobby) = self.network_lobby.as_mut() {
-                            lobby.select_scenario(&summary.identifier, &summary.title);
-                            self.scenario_label = lobby.scenario_label();
+                        if self.select_network_lobby_scenario(
+                            &summary.identifier,
+                            &summary.title,
+                        ) {
                             self.status_text = format!("Selected {}", summary.title);
                         }
                     } else {
@@ -41635,9 +42023,10 @@ impl GameApp {
                         Some(ScenarioKind::Scenario) => {
                             self.play_ui_sound("Click");
                             if matches!(self.startup_view, StartupView::NetworkLobby) {
-                                if let Some(lobby) = self.network_lobby.as_mut() {
-                                    lobby.select_scenario(&summary.identifier, &summary.title);
-                                    self.scenario_label = lobby.scenario_label();
+                                if self.select_network_lobby_scenario(
+                                    &summary.identifier,
+                                    &summary.title,
+                                ) {
                                     self.status_text = format!("Selected {}", summary.title);
                                 }
                             } else {
@@ -43547,6 +43936,7 @@ impl GameApp {
     /// reference-backed or unresolved direct join. The synchronized client
     /// load replaces this seed with the host's exact fixed resources later.
     fn prepare_network_join_game_state(&mut self) {
+        self.clear_lobby_preload();
         self.active_scenario = None;
         self.active_definition_load = Some(self.scenario_seed_definition_load());
     }
@@ -43629,6 +44019,7 @@ impl GameApp {
         labels.start = resource("IDS_DLG_GAMEGO", &labels.start);
         labels.cancel = resource("IDS_DLG_CANCEL", &labels.cancel);
         labels.ready = resource("IDS_DLG_READY", &labels.ready);
+        labels.preload = resource("IDS_DLG_PRELOAD", &labels.preload);
         labels.still_loading = resource("IDS_DLG_STILLLOADING", &labels.still_loading);
         labels.countdown_template = resource("IDS_PRC_COUNTDOWN", &labels.countdown_template)
             .replacen("%d", "{seconds}", 1);
@@ -43641,6 +44032,7 @@ impl GameApp {
             "IDS_DLGTIP_READYNOTAVAILABLE",
             &labels.tooltip_ready_unavailable,
         );
+        labels.tooltip_preload = resource("IDS_DLGTIP_PRELOAD", &labels.tooltip_preload);
         labels.tooltip_ping = resource("IDS_DLGTIP_PING", &labels.tooltip_ping);
         labels.tooltip_unassigned_savegame_players = resource(
             "IDS_DESC_UNASSOCIATEDSAVEGAMEPLAYE",
@@ -44119,6 +44511,13 @@ impl GameApp {
             rows,
         );
         controller.set_labels(self.classic_lobby_labels());
+        let preload = LobbyPreloadState::new(
+            load_options_program_state(self.app_paths.as_ref()).preloading,
+        );
+        controller.set_preload_button_state(
+            preload.manual_button_present,
+            preload.eligible,
+        );
         let runtime_join_allowed = settings
             .prepared
             .as_ref()
@@ -44159,6 +44558,7 @@ impl GameApp {
         Ok((
             ClassicHostLobbyState {
                 controller,
+                preload,
                 pointer: None,
                 last_roster_click: None,
                 chat_history_index: -1,
@@ -44195,6 +44595,7 @@ impl GameApp {
         // partially installed network-game projection before doing likewise.
         self.restore_startup_fonts();
         self.active_global_gui_overrides.clear();
+        self.clear_lobby_preload();
         self.classic_host_lobby = None;
         self.network_lobby = None;
         self.network_start_wait = None;
@@ -44237,6 +44638,7 @@ impl GameApp {
         self.client_start_barrier = ClientStartBarrier::default();
         self.pending_client_start_status = None;
         self.client_combined_scenario_path = None;
+        self.client_combined_preload_file.clear();
         self.client_material_resource_groups = None;
         self.active_scenario = None;
         self.active_definition_load = None;
@@ -44461,7 +44863,11 @@ impl GameApp {
                                 self.player_name.clone(),
                                 true,
                             )
-                            .with_external_chat(self.startup_irc_client_active());
+                            .with_external_chat(self.startup_irc_client_active())
+                            .with_preloading(
+                                load_options_program_state(self.app_paths.as_ref()).preloading,
+                                self.classic_lobby_labels(),
+                            );
                             lobby.select_scenario(identifier, title);
                             self.scenario_label = lobby.scenario_label();
                             if let NetworkMode::Host(HostSettings {
@@ -44580,7 +44986,11 @@ impl GameApp {
                         self.player_name.clone(),
                         false,
                     )
-                    .with_external_chat(self.startup_irc_client_active());
+                    .with_external_chat(self.startup_irc_client_active())
+                    .with_preloading(
+                        load_options_program_state(self.app_paths.as_ref()).preloading,
+                        self.classic_lobby_labels(),
+                    );
                     self.network_game_advertiser = None;
                     self.advertised_game_reference = None;
                     self.host_reference_paused = false;
@@ -50017,6 +50427,12 @@ impl GameApp {
             self.status_text = "Only the host can start the game".to_string();
             return Ok(());
         }
+        if let Some(task) = self.lobby_preload_task.as_mut() {
+            // C++ blocks InitGame on PreloadMutex. Keep the lobby responsive
+            // while the worker runs, then resume this exact start request.
+            task.start_host_when_ready = true;
+            return Ok(());
+        }
         let classic_start = self.classic_host_lobby.is_some();
         let prepared = self.network_mode.as_ref().and_then(|mode| match mode {
             NetworkMode::Host(HostSettings {
@@ -50882,6 +51298,7 @@ impl GameApp {
             LobbyAction::SaveResource(resource_id) => {
                 self.request_lobby_resource_save(resource_id, false)?;
             }
+            LobbyAction::Preload => self.request_lobby_preload(),
             LobbyAction::OpenExternalIrcChat => self.show_external_irc_dialog()?,
             LobbyAction::SubmitMessage(text) => {
                 self.store_message_input_history(&text);
@@ -51216,6 +51633,7 @@ impl GameApp {
                 ClassicLobbyAction::AbortCountdownRequested => {
                     self.abort_network_lobby_countdown();
                 }
+                ClassicLobbyAction::PreloadRequested => self.request_lobby_preload(),
                 ClassicLobbyAction::ReadyChanged(ready) => {
                     self.apply_classic_lobby_ready_change(ready)?;
                 }
@@ -51594,13 +52012,70 @@ impl GameApp {
         Ok(true)
     }
 
+    fn catalog_host_preload_scenario(&self) -> Option<&FrontendScenario> {
+        if !matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_))) {
+            return None;
+        }
+        let lobby = self.network_lobby.as_ref().filter(|lobby| lobby.is_host)?;
+        self.scenario_catalog.get(lobby.selected_identifier()?)
+    }
+
+    fn catalog_host_preload_key(&self) -> Option<CatalogHostLobbyPreloadKey> {
+        let scenario = self.catalog_host_preload_scenario()?;
+        Some(CatalogHostLobbyPreloadKey {
+            identifier: scenario.identifier.clone(),
+            scenario_path: scenario.path.clone()?,
+            definition_load: self.scenario_seed_definition_load(),
+            languages: startup_language_sequence(self.app_paths.as_ref()),
+        })
+    }
+
+    fn select_network_lobby_scenario(&mut self, identifier: &str, title: &str) -> bool {
+        let Some(current_identifier) = self
+            .network_lobby
+            .as_ref()
+            .map(|lobby| lobby.selected_identifier().map(str::to_owned))
+        else {
+            return false;
+        };
+        let changed = current_identifier.as_deref() != Some(identifier);
+        if changed {
+            self.clear_lobby_preload();
+            if let Some(lobby) = self.network_lobby.as_mut() {
+                lobby.preload.reset_for_context();
+            }
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.select_scenario(identifier, title);
+            self.scenario_label = lobby.scenario_label();
+        }
+        if changed {
+            self.sync_classic_lobby_resource_ready();
+        }
+        true
+    }
+
     fn sync_classic_lobby_resource_ready(&mut self) {
         let ready = self.admission_resources.lobby_ready_available();
-        let actions = self
-            .classic_host_lobby
-            .as_mut()
-            .map(|lobby| lobby.controller.set_resources_loaded(ready))
-            .unwrap_or_default();
+        let context_ready = self.staged_network_host_scenario.is_some()
+            || self.pending_network_join_data.is_some()
+            || self.catalog_host_preload_scenario().is_some();
+        let mut automatic_preload = false;
+        let actions = if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            let actions = lobby.controller.set_resources_loaded(ready);
+            automatic_preload = lobby.preload.synchronize(ready, context_ready);
+            lobby.controller.set_preload_button_state(
+                lobby.preload.manual_button_present,
+                lobby.preload.eligible,
+            );
+            actions
+        } else {
+            Vec::new()
+        };
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.resources_loaded = ready;
+            automatic_preload |= lobby.preload.synchronize(ready, context_ready);
+        }
         for action in actions {
             if let ClassicLobbyAction::FocusChanged(control) = action {
                 self.scenario_game_options.set_focused_button(match control {
@@ -51609,7 +52084,677 @@ impl GameApp {
                 });
             }
         }
+        if automatic_preload {
+            self.request_lobby_preload();
+        }
         self.mark_menu_dirty();
+    }
+
+    fn active_lobby_preload_state(&self) -> Option<&LobbyPreloadState> {
+        self.classic_host_lobby
+            .as_ref()
+            .map(|lobby| &lobby.preload)
+            .or_else(|| self.network_lobby.as_ref().map(|lobby| &lobby.preload))
+    }
+
+    fn record_lobby_preload_result(&mut self, succeeded: bool) {
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.preload.record_result(succeeded);
+            lobby.controller.set_preload_button_state(
+                lobby.preload.manual_button_present,
+                lobby.preload.eligible,
+            );
+        } else if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.preload.record_result(succeeded);
+        }
+    }
+
+    fn request_lobby_preload(&mut self) {
+        let launched = (|| {
+            if !self
+                .active_lobby_preload_state()
+                .is_some_and(|preload| preload.eligible)
+            {
+                return Err("Game.CanPreload() is false".to_string());
+            }
+            if self.lobby_preload_task.is_some() || self.lobby_preload_artifact.is_some() {
+                return Err("a lobby preload has already been launched".to_string());
+            }
+            let job = self.prepare_lobby_preload_job()?;
+            let (sender, receiver) = mpsc::channel();
+            let worker = thread::Builder::new()
+                .name("LobbyPreload".to_string())
+                .spawn(move || {
+                    let result = Self::run_lobby_preload_job(job);
+                    if let Err(error) = sender.send(result) {
+                        if let Ok(artifact) = error.0 {
+                            Self::discard_lobby_preload_artifact(artifact);
+                        }
+                    }
+                })
+                .map_err(|error| format!("failed to launch lobby preload worker: {error}"))?;
+            self.lobby_preload_task = Some(LobbyPreloadTask {
+                state: LobbyPreloadTaskState::Loading(receiver),
+                start_host_when_ready: false,
+                worker: LobbyPreloadWorker::new(worker),
+            });
+            Ok(())
+        })();
+        match launched {
+            Ok(()) => {
+                // Native treats successful thread creation as Preload success;
+                // the manual button disappears before the worker completes.
+                self.record_lobby_preload_result(true);
+            }
+            Err(error) => {
+                tracing::info!(%error, "lobby preload failed");
+                self.record_lobby_preload_result(false);
+                let message =
+                    self.runtime_resource_text("IDS_ERR_PRELOADING", "Preloading error.");
+                self.append_control_message_log(message, 0x00ff_1f1f, None);
+            }
+        }
+        self.mark_menu_dirty();
+    }
+
+    fn prepare_lobby_preload_job(&self) -> Result<LobbyPreloadJob, String> {
+        let graphics = LobbyPreloadGraphicsContext {
+            app_paths: self.app_paths.clone(),
+            fallback: self.startup_game_graphics_resources(),
+            liquid_animation_enabled: self.assets.liquid_animation_enabled(),
+        };
+        if let Some(staged) = self.staged_network_host_scenario.as_ref() {
+            let frontend = staged.frontend.clone();
+            let scenario_path = frontend
+                .path
+                .clone()
+                .ok_or_else(|| "staged host scenario has no filesystem path".to_string())?;
+            let definition_paths = staged
+                .scenario
+                .definition_resource_paths()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            return Ok(LobbyPreloadJob {
+                graphics,
+                source: LobbyPreloadJobSource::Host {
+                    frontend,
+                    scenario_path,
+                    definition_paths,
+                },
+            });
+        }
+
+        if let Some(frontend) = self.catalog_host_preload_scenario().cloned() {
+            let key = self
+                .catalog_host_preload_key()
+                .ok_or_else(|| "selected host scenario has no preload key".to_string())?;
+            return Ok(LobbyPreloadJob {
+                graphics,
+                source: LobbyPreloadJobSource::CatalogHost {
+                    frontend,
+                    key,
+                },
+            });
+        }
+
+        let join_data = self
+            .pending_network_join_data
+            .clone()
+            .ok_or_else(|| "client JoinData is unavailable".to_string())?;
+        let (resource_directory, maker) = match self.network_mode.as_ref() {
+            Some(NetworkMode::Client(settings)) => (
+                settings.resource_directory.clone(),
+                settings.player_name.clone(),
+            ),
+            _ => return Err("lobby preload has no staged host or client scenario".to_string()),
+        };
+        let filename = format!("Combined{}.c4s", join_data.client_id);
+        let scenario_path = self
+            .client_combined_scenario_path
+            .clone()
+            .unwrap_or_else(|| resource_directory.join(&filename));
+        let (scenario_resources, staging_path) = if self.client_combined_scenario_path.is_some() {
+            (None, None)
+        } else {
+            let resources = resolve_client_scenario_resources(&join_data, |core| {
+                self.admission_resources
+                    .complete_path(core.id)
+                    .map(Path::to_path_buf)
+            })
+            .map_err(|error| error.to_string())?;
+            let serial = LOBBY_PRELOAD_SERIAL.fetch_add(1, AtomicOrdering::Relaxed);
+            let staging_path = resource_directory.join(format!(
+                ".{filename}.preload-{}-{serial}.tmp",
+                std::process::id()
+            ));
+            (Some(resources), Some(staging_path))
+        };
+        let game_resources = resolve_client_game_resources(&join_data, |core| {
+            self.admission_resources
+                .complete_path(core.id)
+                .map(Path::to_path_buf)
+        })
+        .map_err(|error| error.to_string())?;
+        Ok(LobbyPreloadJob {
+            graphics,
+            source: LobbyPreloadJobSource::Client {
+                join_data,
+                scenario_resources,
+                game_resources,
+                resource_directory,
+                maker,
+                scenario_path,
+                staging_path,
+            },
+        })
+    }
+
+    fn run_lobby_preload_job(
+        job: LobbyPreloadJob,
+    ) -> std::result::Result<LobbyPreloadArtifact, String> {
+        let LobbyPreloadJob { graphics, source } = job;
+        match source {
+            LobbyPreloadJobSource::Host {
+                frontend,
+                scenario_path,
+                definition_paths,
+            } => {
+                let definition_load = ScenarioDefinitionLoad::Fixed {
+                    modules: definition_paths.clone(),
+                    definition_root: None,
+                };
+                let game_graphics = load_game_graphics_resources(
+                    graphics.app_paths.as_ref(),
+                    graphics.fallback,
+                    graphics.liquid_animation_enabled,
+                    &frontend,
+                    Some(&definition_load),
+                )
+                .map_err(|error| format!("failed to preload host graphics: {error:#}"))?;
+                Ok(LobbyPreloadArtifact {
+                    scenario_path: scenario_path.clone(),
+                    definition_paths,
+                    game_graphics,
+                    material_texture_images: Arc::new(load_scenario_material_textures_with_paths(
+                        &scenario_path,
+                        None,
+                        graphics.app_paths.as_ref(),
+                    )),
+                    material_render_info: Arc::new(load_material_render_info_with_paths(
+                        &scenario_path,
+                        None,
+                        graphics.app_paths.as_ref(),
+                    )),
+                    catalog_host: None,
+                    client: None,
+                })
+            }
+            LobbyPreloadJobSource::CatalogHost {
+                frontend,
+                key,
+            } => {
+                let resolver = InstallDefinitionResolver::new(
+                    graphics.app_paths.clone().map(Arc::new),
+                );
+                let scenario = load_scenario_with_definition_load(
+                    &key.scenario_path,
+                    &resolver,
+                    &key.languages,
+                    &key.definition_load,
+                )
+                .map_err(|error| format!("failed to preload host scenario: {error}"))?;
+                let definition_paths = scenario
+                    .definition_resource_paths()
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                let effective_definition_load = ScenarioDefinitionLoad::Fixed {
+                    modules: definition_paths.clone(),
+                    definition_root: None,
+                };
+                let game_graphics = load_game_graphics_resources(
+                    graphics.app_paths.as_ref(),
+                    graphics.fallback,
+                    graphics.liquid_animation_enabled,
+                    &frontend,
+                    Some(&effective_definition_load),
+                )
+                .map_err(|error| format!("failed to preload host graphics: {error:#}"))?;
+                Ok(LobbyPreloadArtifact {
+                    scenario_path: key.scenario_path.clone(),
+                    definition_paths,
+                    game_graphics,
+                    material_texture_images: Arc::new(
+                        load_scenario_material_textures_with_paths(
+                            &key.scenario_path,
+                            None,
+                            graphics.app_paths.as_ref(),
+                        ),
+                    ),
+                    material_render_info: Arc::new(load_material_render_info_with_paths(
+                        &key.scenario_path,
+                        None,
+                        graphics.app_paths.as_ref(),
+                    )),
+                    catalog_host: Some(CatalogHostLobbyPreloadArtifact {
+                        key,
+                        scenario: Some(scenario),
+                    }),
+                    client: None,
+                })
+            }
+            LobbyPreloadJobSource::Client {
+                join_data,
+                scenario_resources,
+                game_resources,
+                resource_directory,
+                maker,
+                scenario_path,
+                staging_path,
+            } => {
+                let working_path = staging_path.as_ref().unwrap_or(&scenario_path).clone();
+                let result = (|| {
+                    if let Some(resources) = scenario_resources.as_ref() {
+                        let filename = scenario_path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| format!("Combined{}.c4s", join_data.client_id));
+                        let packed = compose_client_network_scenario(resources, &filename, &maker)
+                            .map_err(|error| error.to_string())?;
+                        fs::create_dir_all(&resource_directory).map_err(|error| {
+                            format!(
+                                "failed to create {}: {error}",
+                                resource_directory.display()
+                            )
+                        })?;
+                        fs::write(&working_path, packed).map_err(|error| {
+                            format!("failed to write {}: {error}", working_path.display())
+                        })?;
+                    }
+
+                    let definition_paths = game_resources
+                        .iter()
+                        .filter(|resource| {
+                            resource.core.resource_type
+                                == lc_network::HostResourceType::Definitions as u8
+                        })
+                        .map(|resource| resource.path.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>();
+                    let mut definition_groups = Vec::new();
+                    let mut material_groups = Vec::new();
+                    for resource in &game_resources {
+                        let target = match resource.core.resource_type {
+                            value
+                                if value
+                                    == lc_network::HostResourceType::Definitions as u8 =>
+                            {
+                                &mut definition_groups
+                            }
+                            value if value == lc_network::HostResourceType::Material as u8 => {
+                                &mut material_groups
+                            }
+                            _ => continue,
+                        };
+                        target.push(Group::open(&resource.path).map_err(|error| {
+                            format!(
+                                "failed to open synchronized game resource {} at {}: {error}",
+                                resource.core.id,
+                                resource.path.display()
+                            )
+                        })?);
+                    }
+                    let scenario_group = Group::open(&working_path).map_err(|error| {
+                        format!(
+                            "failed to open combined scenario {}: {error}",
+                            working_path.display()
+                        )
+                    })?;
+                    let resolver_paths = graphics.app_paths.clone().map(Arc::new);
+                    let graphics_groups = InstallDefinitionResolver::new(resolver_paths.clone())
+                        .resolve_graphics_groups_with_definition_roots(
+                            &scenario_group,
+                            &definition_groups,
+                        )
+                        .map_err(|error| {
+                            format!("failed to resolve client graphics resources: {error}")
+                        })?;
+                    let languages = startup_language_sequence(resolver_paths.as_deref());
+                    let language_packs = resolver_paths
+                        .as_deref()
+                        .map(classic_language_packs)
+                        .unwrap_or_default();
+                    let random_seed = u64::from(join_data.parameters.random_seed as u32);
+                    let scenario =
+                        Scenario::load_network_from_path_with_languages_and_seed_and_packs(
+                            &working_path,
+                            &definition_groups,
+                            &material_groups,
+                            &graphics_groups,
+                            &languages,
+                            random_seed,
+                            &language_packs,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    validate_client_network_scenario(&scenario)?;
+
+                    let title = legacy_presentation_text(join_data.parameters.title.as_bytes());
+                    let frontend = FrontendScenario {
+                        identifier: working_path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| format!("Combined{}.c4s", join_data.client_id)),
+                        title: if title.is_empty() {
+                            "Network game".to_string()
+                        } else {
+                            title
+                        },
+                        description: None,
+                        kind: ScenarioKind::Scenario,
+                        is_editable: false,
+                        is_playable: true,
+                        mission_access: None,
+                        path: Some(working_path.clone()),
+                        source_paths: vec![working_path.clone()],
+                        root_label: None,
+                        preview: None,
+                        title_picture: None,
+                        children: Vec::new(),
+                        folder_index: None,
+                        icon_index: None,
+                        difficulty: None,
+                        author: None,
+                        version: None,
+                        local_only: None,
+                        allow_user_change: None,
+                        definition_modules: Vec::new(),
+                    };
+                    let definition_load = ScenarioDefinitionLoad::Fixed {
+                        modules: definition_paths.clone(),
+                        definition_root: None,
+                    };
+                    let game_graphics = load_game_graphics_resources(
+                        graphics.app_paths.as_ref(),
+                        graphics.fallback,
+                        graphics.liquid_animation_enabled,
+                        &frontend,
+                        Some(&definition_load),
+                    )
+                    .map_err(|error| format!("failed to preload client graphics: {error:#}"))?;
+                    Ok(LobbyPreloadArtifact {
+                        scenario_path: scenario_path.clone(),
+                        definition_paths,
+                        game_graphics,
+                        material_texture_images: Arc::new(load_scenario_material_textures_with_paths(
+                            &working_path,
+                            Some(&material_groups),
+                            graphics.app_paths.as_ref(),
+                        )),
+                        material_render_info: Arc::new(load_material_render_info_with_paths(
+                            &working_path,
+                            Some(&material_groups),
+                            graphics.app_paths.as_ref(),
+                        )),
+                        catalog_host: None,
+                        client: Some(ClientLobbyPreloadArtifact {
+                            client_id: join_data.client_id,
+                            dynamic_resource_id: join_data.dynamic.id,
+                            random_seed,
+                            scenario: Some(scenario),
+                            material_groups,
+                            staging_path: staging_path.clone(),
+                        }),
+                    })
+                })();
+                if result.is_err() {
+                    if let Some(path) = staging_path {
+                        let _ = fs::remove_file(path);
+                    }
+                }
+                result
+            }
+        }
+    }
+
+    fn discard_lobby_preload_artifact(mut artifact: LobbyPreloadArtifact) {
+        if let Some(client) = artifact.client.as_mut() {
+            if let Some(path) = client.staging_path.take() {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    fn join_lobby_preload_worker(worker: &mut LobbyPreloadWorker) {
+        worker.join();
+    }
+
+    fn clear_client_preload_projection(&mut self) {
+        self.client_combined_preload_file.clear();
+        self.client_combined_scenario_path = None;
+        self.client_material_resource_groups = None;
+    }
+
+    fn clear_lobby_preload(&mut self) {
+        if let Some(mut task) = self.lobby_preload_task.take() {
+            Self::join_lobby_preload_worker(&mut task.worker);
+            if let LobbyPreloadTaskState::RemovingClientResource { artifact, .. } = task.state {
+                Self::discard_lobby_preload_artifact(artifact);
+            }
+        }
+        if let Some(artifact) = self.lobby_preload_artifact.take() {
+            Self::discard_lobby_preload_artifact(artifact);
+        }
+        self.clear_client_preload_projection();
+    }
+
+    fn install_lobby_preload_artifact(
+        &mut self,
+        mut artifact: LobbyPreloadArtifact,
+    ) -> std::result::Result<(), String> {
+        if artifact.client.is_some() {
+            let current = {
+                let client = artifact.client.as_ref().expect("client artifact");
+                self.pending_network_join_data
+                    .as_ref()
+                    .is_some_and(|join_data| {
+                        join_data.client_id == client.client_id
+                            && join_data.dynamic.id == client.dynamic_resource_id
+                            && u64::from(join_data.parameters.random_seed as u32)
+                                == client.random_seed
+                    })
+            };
+            if !current {
+                if self.client_combined_scenario_path.as_ref() == Some(&artifact.scenario_path) {
+                    self.clear_client_preload_projection();
+                }
+                Self::discard_lobby_preload_artifact(artifact);
+                return Err("client preload completed for stale JoinData".to_string());
+            }
+            self.client_combined_scenario_path = Some(artifact.scenario_path.clone());
+            let client = artifact.client.as_mut().expect("client artifact");
+            self.client_material_resource_groups =
+                Some(std::mem::take(&mut client.material_groups));
+        } else if let Some(catalog_host) = artifact.catalog_host.as_ref() {
+            let current = self.catalog_host_preload_key().as_ref() == Some(&catalog_host.key);
+            if !current {
+                Self::discard_lobby_preload_artifact(artifact);
+                return Err("host preload completed for a stale catalog scenario".to_string());
+            }
+        } else {
+            let current = self
+                .staged_network_host_scenario
+                .as_ref()
+                .is_some_and(|staged| {
+                    let definition_paths = staged
+                        .scenario
+                        .definition_resource_paths()
+                        .iter()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>();
+                    staged.frontend.path.as_ref() == Some(&artifact.scenario_path)
+                        && definition_paths == artifact.definition_paths
+                });
+            if !current {
+                Self::discard_lobby_preload_artifact(artifact);
+                return Err("host preload completed for a stale scenario".to_string());
+            }
+        }
+        self.lobby_preload_artifact = Some(artifact);
+        Ok(())
+    }
+
+    fn poll_lobby_preload(&mut self) -> Result<(), EngineError> {
+        let Some(task) = self.lobby_preload_task.take() else {
+            return Ok(());
+        };
+        let start_host_when_ready = task.start_host_when_ready;
+        let mut worker = task.worker;
+        let mut finished = false;
+        match task.state {
+            LobbyPreloadTaskState::Loading(receiver) => match receiver.try_recv() {
+                Ok(Ok(mut artifact)) => {
+                    Self::join_lobby_preload_worker(&mut worker);
+                    let staging_path = artifact
+                        .client
+                        .as_mut()
+                        .and_then(|client| client.staging_path.take());
+                    if let Some(staging_path) = staging_path {
+                        let current = {
+                            let client = artifact.client.as_ref().expect("client artifact");
+                            self.pending_network_join_data
+                                .as_ref()
+                                .is_some_and(|join_data| {
+                                    join_data.client_id == client.client_id
+                                        && join_data.dynamic.id == client.dynamic_resource_id
+                                        && u64::from(join_data.parameters.random_seed as u32)
+                                            == client.random_seed
+                                })
+                        };
+                        let mut committed = false;
+                        let commit = if !current {
+                            Err("client preload completed for stale JoinData".to_string())
+                        } else {
+                            self.client_combined_preload_file.clear();
+                            if artifact.scenario_path.exists() {
+                                let _ = fs::remove_file(&artifact.scenario_path);
+                            }
+                            fs::rename(&staging_path, &artifact.scenario_path)
+                                .map(|()| {
+                                    committed = true;
+                                    self.client_combined_scenario_path =
+                                        Some(artifact.scenario_path.clone());
+                                    self.client_combined_preload_file
+                                        .replace(artifact.scenario_path.clone());
+                                })
+                                .map_err(|error| {
+                                    format!(
+                                        "failed to commit {} to {}: {error}",
+                                        staging_path.display(),
+                                        artifact.scenario_path.display()
+                                    )
+                                })
+                        };
+                        match commit.and_then(|()| {
+                            let resource_id = artifact
+                                .client
+                                .as_ref()
+                                .expect("client artifact")
+                                .dynamic_resource_id;
+                            self.network
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    "client network disappeared during preload commit".to_string()
+                                })?
+                                .remove_client_resource_async(resource_id)
+                                .map_err(|error| error.to_string())
+                        }) {
+                            Ok(receiver) => {
+                                self.lobby_preload_task = Some(LobbyPreloadTask {
+                                    state: LobbyPreloadTaskState::RemovingClientResource {
+                                        artifact,
+                                        receiver,
+                                    },
+                                    start_host_when_ready,
+                                    worker,
+                                });
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "lobby preload client commit failed");
+                                let _ = fs::remove_file(staging_path);
+                                if committed {
+                                    self.clear_client_preload_projection();
+                                }
+                                Self::discard_lobby_preload_artifact(artifact);
+                                finished = true;
+                            }
+                        }
+                    } else {
+                        if let Err(error) = self.install_lobby_preload_artifact(artifact) {
+                            tracing::error!(%error, "discarding stale lobby preload");
+                        }
+                        finished = true;
+                    }
+                }
+                Ok(Err(error)) => {
+                    Self::join_lobby_preload_worker(&mut worker);
+                    tracing::error!(%error, "lobby preload worker failed");
+                    finished = true;
+                }
+                Err(TryRecvError::Empty) => {
+                    self.lobby_preload_task = Some(LobbyPreloadTask {
+                        state: LobbyPreloadTaskState::Loading(receiver),
+                        start_host_when_ready,
+                        worker,
+                    });
+                }
+                Err(TryRecvError::Disconnected) => {
+                    Self::join_lobby_preload_worker(&mut worker);
+                    tracing::error!("lobby preload worker disconnected");
+                    finished = true;
+                }
+            },
+            LobbyPreloadTaskState::RemovingClientResource {
+                artifact,
+                receiver,
+            } => match receiver.try_recv() {
+                Ok(Ok(())) => {
+                    if let Err(error) = self.install_lobby_preload_artifact(artifact) {
+                        tracing::error!(%error, "discarding stale lobby preload");
+                    }
+                    finished = true;
+                }
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "failed to retire preloaded dynamic resource");
+                    self.clear_client_preload_projection();
+                    Self::discard_lobby_preload_artifact(artifact);
+                    finished = true;
+                }
+                Err(TryRecvError::Empty) => {
+                    self.lobby_preload_task = Some(LobbyPreloadTask {
+                        state: LobbyPreloadTaskState::RemovingClientResource {
+                            artifact,
+                            receiver,
+                        },
+                        start_host_when_ready,
+                        worker,
+                    });
+                }
+                Err(TryRecvError::Disconnected) => {
+                    tracing::error!("client resource-removal worker disconnected");
+                    self.clear_client_preload_projection();
+                    Self::discard_lobby_preload_artifact(artifact);
+                    finished = true;
+                }
+            },
+        }
+        if finished {
+            if start_host_when_ready {
+                self.start_network_game_now()?;
+            } else if self.pending_client_start_status.is_some() {
+                self.prepare_client_network_scenario_if_ready();
+            }
+        }
+        Ok(())
     }
 
     fn classic_lobby_has_unassociated_savegame_players(&self) -> bool {
@@ -53294,7 +54439,9 @@ impl GameApp {
         if let Err(err) = self.handle_menu_input(|menu| menu.select_default_entry()) {
             tracing::error!(error = %err, "failed to select default scenario entry");
         }
+        let labels = self.classic_lobby_labels();
         if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.labels = labels;
             lobby.update_layout(width, height);
             self.scenario_label = lobby.scenario_label();
         } else {
@@ -53691,6 +54838,7 @@ impl GameApp {
             self.classic_host_lobby = None;
             self.network_start_wait = None;
             self.staged_network_host_scenario = None;
+            self.clear_lobby_preload();
             self.host_lobby_countdown = None;
             self.pending_local_lobby_countdown_echoes.clear();
             self.loader_screen = None;
@@ -54377,6 +55525,7 @@ impl GameApp {
         // C4GameControl::ChangeToLocal preserves FrameCounter, ControlTick and
         // Game.Parameters while changing only the cadence to ControlRate=1
         // (C4GameControl.cpp:93-127).
+        self.clear_lobby_preload();
         let control_tick = self.engine.sync_check(local_client_id).control_tick;
         self.remove_remote_runtime_players(local_client_id);
         if let Ok(timing) = lc_engine::NetworkControlTiming::new(control_tick, 1) {
@@ -54413,6 +55562,7 @@ impl GameApp {
         self.client_start_barrier = ClientStartBarrier::default();
         self.pending_client_start_status = None;
         self.client_combined_scenario_path = None;
+        self.client_combined_preload_file.clear();
         self.client_material_resource_groups = None;
         self.control_clients = ControlClientRegistry::default();
         self.network_client_activity.clear();
@@ -56014,6 +57164,7 @@ impl GameApp {
 
     fn update(&mut self) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.poll_lobby_preload()?;
         if let Some(network) = self.network.as_ref() {
             network.refresh_current_frame(self.current_network_input_frame());
         }
@@ -63592,6 +64743,7 @@ impl GameApp {
 
     fn return_to_menu_with_dialog_restore(&mut self, restore_dialog: bool) {
         let last_startup_dialog = self.last_startup_dialog;
+        self.clear_lobby_preload();
         self.restart_restore_roster_items.clear();
         // C4Game::Clear starts the fade before tearing down game state.
         self.fade_out_game_music();
@@ -63700,6 +64852,7 @@ impl GameApp {
         self.client_start_barrier = ClientStartBarrier::default();
         self.pending_client_start_status = None;
         self.client_combined_scenario_path = None;
+        self.client_combined_preload_file.clear();
         self.client_material_resource_groups = None;
         self.refresh_object_menu();
         self.focus_id = None;
@@ -64142,6 +65295,7 @@ impl GameApp {
         definition_load: ScenarioDefinitionLoad,
     ) {
         self.staged_network_host_scenario = None;
+        self.clear_lobby_preload();
         let title = frontend.title.clone();
         let path = frontend.path.clone();
         let staged = match self.prepare_network_host_scenario(frontend, definition_load) {
@@ -64372,6 +65526,12 @@ impl GameApp {
 
         let resolver_paths = cached_app_paths().ok();
         let languages = startup_language_sequence(resolver_paths.as_deref());
+        let catalog_preload_key = CatalogHostLobbyPreloadKey {
+            identifier: scenario.identifier.clone(),
+            scenario_path: path.clone(),
+            definition_load: definition_load.clone(),
+            languages: languages.clone(),
+        };
         let scenario_title = scenario.title.clone();
         let (sender, receiver) = mpsc::channel();
         let path_for_thread = path.clone();
@@ -64440,42 +65600,53 @@ impl GameApp {
             && offline_startup_error.is_none()
             && replay_startup.is_none())
         .then(|| current_offline_round_random_seed(offline_parameter_seed));
+        let preloaded_scenario = self
+            .lobby_preload_artifact
+            .as_mut()
+            .and_then(|artifact| artifact.catalog_host.as_mut())
+            .and_then(|catalog_host| {
+                catalog_host.take_matching_scenario(&catalog_preload_key)
+            });
 
         thread::spawn(move || {
             let resolver = InstallDefinitionResolver::new(resolver_paths);
-            let scenario_data = match offline_startup_error.or(replay_startup_error) {
-                Some(error) => Err(error),
-                None => match (replay_startup, startup_player_count) {
-                    (Some(replay), _) => {
-                        load_scenario_with_definition_load_and_seed_and_startup_player_count(
+            let scenario_data = if let Some(preloaded_scenario) = preloaded_scenario {
+                Ok(preloaded_scenario)
+            } else {
+                match offline_startup_error.or(replay_startup_error) {
+                    Some(error) => Err(error),
+                    None => match (replay_startup, startup_player_count) {
+                        (Some(replay), _) => {
+                            load_scenario_with_definition_load_and_seed_and_startup_player_count(
+                                &path_for_thread,
+                                &resolver,
+                                &languages,
+                                &definition_load,
+                                u64::from(replay.random_seed as u32),
+                                replay.startup_player_count,
+                            )
+                            .map_err(|error| error.to_string())
+                        }
+                        (None, Some(startup_player_count)) => {
+                            load_scenario_with_definition_load_and_seed_and_startup_player_count(
+                                &path_for_thread,
+                                &resolver,
+                                &languages,
+                                &definition_load,
+                                offline_random_seed.unwrap_or(0),
+                                startup_player_count,
+                            )
+                            .map_err(|error| error.to_string())
+                        }
+                        (None, None) => load_scenario_with_definition_load(
                             &path_for_thread,
                             &resolver,
                             &languages,
                             &definition_load,
-                            u64::from(replay.random_seed as u32),
-                            replay.startup_player_count,
                         )
-                        .map_err(|error| error.to_string())
-                    }
-                    (None, Some(startup_player_count)) => {
-                        load_scenario_with_definition_load_and_seed_and_startup_player_count(
-                            &path_for_thread,
-                            &resolver,
-                            &languages,
-                            &definition_load,
-                            offline_random_seed.unwrap_or(0),
-                            startup_player_count,
-                        )
-                        .map_err(|error| error.to_string())
-                    }
-                    (None, None) => load_scenario_with_definition_load(
-                        &path_for_thread,
-                        &resolver,
-                        &languages,
-                        &definition_load,
-                    )
-                    .map_err(|error| error.to_string()),
-                },
+                        .map_err(|error| error.to_string()),
+                    },
+                }
             };
 
             match scenario_data {
@@ -64520,24 +65691,39 @@ impl GameApp {
             .path
             .clone()
             .ok_or_else(|| format!("Scenario `{}` is missing a filesystem path", scenario.title))?;
+        let effective_definition_paths = scenario_data
+            .definition_resource_paths()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         let effective_definition_load = ScenarioDefinitionLoad::Fixed {
-            modules: scenario_data
-                .definition_resource_paths()
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect(),
+            modules: effective_definition_paths.clone(),
             // The vector already contains the rooted and original blocks
             // selected during this load. C++ backs up that effective vector.
             definition_root: None,
         };
-        let active_game_graphics = self
-            .loaded_game_graphics_resources(&scenario, Some(&effective_definition_load))
-            .map_err(|error| {
-                ScenarioActivationError::Recoverable(format!(
-                    "Failed to load {} graphics: {error:#}",
-                    scenario.title
-                ))
-            })?;
+        let matching_preload = self.lobby_preload_artifact.take().filter(|artifact| {
+            artifact.scenario_path == path && artifact.definition_paths == effective_definition_paths
+        });
+        let (active_game_graphics, preloaded_materials) = match matching_preload {
+            Some(artifact) => (
+                artifact.game_graphics,
+                Some((
+                    artifact.material_texture_images,
+                    artifact.material_render_info,
+                )),
+            ),
+            None => (
+                self.loaded_game_graphics_resources(&scenario, Some(&effective_definition_load))
+                    .map_err(|error| {
+                        ScenarioActivationError::Recoverable(format!(
+                            "Failed to load {} graphics: {error:#}",
+                            scenario.title
+                        ))
+                    })?,
+                None,
+            ),
+        };
 
         tracing::info!(
             scenario = %scenario.title,
@@ -65092,14 +66278,19 @@ impl GameApp {
                 Some(NetworkMode::Client(_)) => self.client_material_resource_groups.as_deref(),
                 _ => None,
             };
-            self.material_texture_images = Arc::new(load_scenario_material_textures(
-                &path,
-                authoritative_external_groups,
-            ));
-            self.material_render_info = Arc::new(load_material_render_info(
-                &path,
-                authoritative_external_groups,
-            ));
+            if let Some((texture_images, render_info)) = preloaded_materials {
+                self.material_texture_images = texture_images;
+                self.material_render_info = render_info;
+            } else {
+                self.material_texture_images = Arc::new(load_scenario_material_textures(
+                    &path,
+                    authoritative_external_groups,
+                ));
+                self.material_render_info = Arc::new(load_material_render_info(
+                    &path,
+                    authoritative_external_groups,
+                ));
+            }
             self.graphics
                 .set_material_textures(Arc::clone(&self.material_texture_images));
             self.graphics
@@ -65529,62 +66720,12 @@ impl GameApp {
         frontend: &FrontendScenario,
         definition_load: Option<&ScenarioDefinitionLoad>,
     ) -> Result<GameGraphicsResources> {
-        let Some(paths) = self.app_paths.as_ref() else {
-            return Ok(self.startup_game_graphics_resources());
-        };
-        let path = frontend
-            .path
-            .as_deref()
-            .context("loaded scenario has no path for game graphics resolution")?;
-        let scenario_group = open_group_path_for_folder_map(path)
-            .with_context(|| format!("failed to open loaded scenario at {}", path.display()))?;
-        // Graphics registration only consumes Origin, Definitions and Extra;
-        // it must not resolve or validate unrelated presentation title data.
-        let head = ScenarioLoaderHead::load_from_group_for_resource_registration(
-            &scenario_group,
-        )
-        .map_err(anyhow::Error::from)?;
-        let fallback_definition_load;
-        let definition_load = match definition_load {
-            Some(definition_load) => definition_load,
-            None => {
-                fallback_definition_load = ScenarioDefinitionLoad::Seed {
-                    modules: Vec::new(),
-                    definition_root: None,
-                };
-                &fallback_definition_load
-            }
-        };
-        let mut registrations = classic_loader_registrations(
-            frontend,
-            &scenario_group,
-            &head,
-            definition_load,
-            paths,
-        )?;
-        let first_definition_order = registrations
-            .iter()
-            .map(|registration| registration.registration_order)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-        registrations.extend(definition_graphics_source_registrations(
-            &head,
-            &scenario_group,
-            definition_load,
-            paths,
-            first_definition_order,
-        )?);
-        let graphics_registrations = loader_graphics_registrations(&registrations)?;
-        if graphics_registrations.is_empty() {
-            return Ok(self.startup_game_graphics_resources());
-        }
-        let graphics = main_graphics_group(paths)?;
-        resolve_game_graphics_resources(
-            &graphics_registrations,
-            &graphics,
-            Some(self.assets.cursor_atlas()),
+        load_game_graphics_resources(
+            self.app_paths.as_ref(),
+            self.startup_game_graphics_resources(),
             self.assets.liquid_animation_enabled(),
+            frontend,
+            definition_load,
         )
     }
 
@@ -90193,13 +91334,17 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(frame.iter().any(|byte| *byte != 0x4c));
     }
 
-    fn prepare_tutorial_host_lobby(app: &GameApp, repository: &Path) -> StagedNetworkHostScenario {
+    fn tutorial_frontend(repository: &Path) -> FrontendScenario {
         let mut frontend = FrontendScenario::fallback();
         frontend.identifier = "Tutorial.c4f/Tutorial01.c4s".to_string();
         frontend.title = "selector title must not own the lobby".to_string();
         frontend.path = Some(repository.join("content/Tutorial.c4f/Tutorial01.c4s"));
+        frontend
+    }
+
+    fn prepare_tutorial_host_lobby(app: &GameApp, repository: &Path) -> StagedNetworkHostScenario {
         app.prepare_network_host_scenario(
-            frontend,
+            tutorial_frontend(repository),
             ScenarioDefinitionLoad::Seed {
                 modules: vec!["Objects.c4d".to_string()],
                 definition_root: None,
@@ -90233,6 +91378,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                     ping_ms: None,
                 })],
             ),
+            preload: LobbyPreloadState::new(false),
             pointer: None,
             last_roster_click: None,
             chat_history_index: -1,
@@ -125464,6 +126610,588 @@ ScenInfoArea=70,5,25,90
         });
 
         assert!(resources.lobby_ready_available());
+    }
+
+    #[test]
+    fn lobby_preload_gate_uses_one_shared_eligibility_edge_and_success_is_one_shot() {
+        let mut automatic = LobbyPreloadState::new(true);
+        assert!(!automatic.synchronize(false, true));
+        assert!(!automatic.synchronize(true, false));
+        assert!(automatic.synchronize(true, true));
+        assert!(!automatic.synchronize(true, true));
+        automatic.record_result(false);
+        assert!(automatic.eligible, "failure remains eligible but does not spin");
+        assert!(!automatic.synchronize(true, true));
+        assert!(!automatic.synchronize(false, true));
+        assert!(automatic.synchronize(true, true));
+
+        let mut manual = LobbyPreloadState::new(false);
+        assert!(!manual.synchronize(true, true));
+        assert!(manual.manual_button_present);
+        assert!(manual.eligible);
+        manual.record_result(true);
+        assert!(manual.spent);
+        assert!(!manual.eligible);
+        assert!(!manual.manual_button_present);
+        assert!(!manual.synchronize(true, true));
+        manual.reset_for_context();
+        assert!(!manual.spent);
+        assert!(manual.manual_button_present);
+        assert!(!manual.synchronize(true, true));
+        assert!(manual.eligible);
+    }
+
+    #[test]
+    fn catalog_host_selection_change_discards_and_rearms_preload_state() {
+        let mut app = new_state_only_menu_app(320, 200);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        for (identifier, title) in [("Old.c4s", "Old"), ("New.c4s", "New")] {
+            let mut scenario = FrontendScenario::fallback();
+            scenario.identifier = identifier.to_string();
+            scenario.title = title.to_string();
+            scenario.path = Some(PathBuf::from(identifier));
+            app.scenario_catalog.insert(identifier.to_string(), scenario);
+        }
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario("Old.c4s", "Old");
+        lobby.preload.record_result(true);
+        app.network_lobby = Some(lobby);
+
+        assert!(app.select_network_lobby_scenario("New.c4s", "New"));
+
+        let preload = app.network_lobby.as_ref().unwrap().preload;
+        assert!(!preload.spent);
+        assert!(preload.manual_button_present);
+        assert!(preload.eligible);
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .and_then(NetworkLobbyState::selected_identifier),
+            Some("New.c4s")
+        );
+    }
+
+    #[test]
+    fn queued_client_lobby_preload_cleanup_removes_uncommitted_staging_file() {
+        let directory = tempdir().expect("client preload staging directory");
+        let staging_path = directory.path().join(".Combined7.c4s.preload.tmp");
+        fs::write(&staging_path, b"staged scenario").expect("write staged scenario");
+        let artifact = ClientLobbyPreloadArtifact {
+            client_id: 7,
+            dynamic_resource_id: 23,
+            random_seed: 41,
+            scenario: None,
+            material_groups: Vec::new(),
+            staging_path: Some(staging_path.clone()),
+        };
+        let (sender, receiver) = mpsc::channel();
+        assert!(sender.send(artifact).is_ok(), "queue completed preload");
+
+        drop(receiver);
+
+        assert!(
+            !staging_path.exists(),
+            "dropping an unread completed result must retire its staging file"
+        );
+    }
+
+    #[test]
+    fn clearing_client_lobby_preload_removes_only_its_committed_combined_file() {
+        let directory = tempdir().expect("client preload combined directory");
+        let owned_path = directory.path().join("Combined7.c4s");
+        fs::write(&owned_path, b"preload-owned scenario").expect("write committed scenario");
+        let mut app = new_state_only_menu_app(320, 200);
+        app.client_combined_scenario_path = Some(owned_path.clone());
+        app.client_combined_preload_file.replace(owned_path.clone());
+        app.client_material_resource_groups = Some(Vec::new());
+
+        app.clear_lobby_preload();
+
+        assert!(!owned_path.exists());
+        assert!(app.client_combined_scenario_path.is_none());
+        assert!(!app.client_combined_preload_file.is_owned());
+        assert!(app.client_material_resource_groups.is_none());
+
+        let existing_path = directory.path().join("Combined8.c4s");
+        fs::write(&existing_path, b"pre-existing scenario").expect("write existing scenario");
+        app.client_combined_scenario_path = Some(existing_path.clone());
+        app.clear_lobby_preload();
+
+        assert!(
+            existing_path.exists(),
+            "clearing preload state must not remove a pack it did not create"
+        );
+        assert!(app.client_combined_scenario_path.is_none());
+
+        let dropped_path = directory.path().join("Combined9.c4s");
+        fs::write(&dropped_path, b"drop-owned scenario").expect("write drop-owned scenario");
+        {
+            let mut dropped_app = new_state_only_menu_app(320, 200);
+            dropped_app.client_combined_scenario_path = Some(dropped_path.clone());
+            dropped_app
+                .client_combined_preload_file
+                .replace(dropped_path.clone());
+        }
+        assert!(
+            !dropped_path.exists(),
+            "dropping the app must retire its preload-owned combined pack"
+        );
+    }
+
+    #[test]
+    fn configured_automatic_lobby_preload_runs_off_thread_and_activation_reuses_it() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated preload config");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "General", "Preloading", "1")
+            .expect("enable automatic preloading");
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        let mut staged = prepare_tutorial_host_lobby(&app, repository);
+        app.loader_screen = staged.loader_screen.take();
+        app.staged_network_host_scenario = Some(staged);
+        let (manager, _events) = NetworkManager::test_stub();
+        let mode = NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            player_name: "Exact Host".to_string(),
+            prepared: None,
+        });
+        let (lobby, options) = app
+            .build_classic_host_lobby(&mode, &manager)
+            .expect("build exact host lobby");
+        assert!(lobby.preload.automatic);
+        assert!(!lobby.preload.manual_button_present);
+        app.classic_host_lobby = Some(lobby);
+        app.scenario_game_options = options;
+        app.network_mode = Some(mode);
+        app.network = Some(manager);
+
+        app.sync_classic_lobby_resource_ready();
+        let preload = app
+            .classic_host_lobby
+            .as_ref()
+            .map(|lobby| lobby.preload)
+            .expect("live host lobby");
+        assert!(preload.spent, "successful worker launch is one-shot");
+        assert!(app.lobby_preload_task.is_some());
+
+        let deadline = Instant::now() + Duration::from_secs(180);
+        while app.lobby_preload_task.is_some() {
+            app.poll_lobby_preload().expect("poll lobby preload");
+            assert!(Instant::now() < deadline, "lobby preload did not finish");
+            thread::yield_now();
+        }
+        let artifact = app
+            .lobby_preload_artifact
+            .as_ref()
+            .expect("completed preload artifact");
+        let expected_hud = Arc::clone(&artifact.game_graphics.hud_graphics);
+        let expected_textures = Arc::clone(&artifact.material_texture_images);
+        let expected_render_info = Arc::clone(&artifact.material_render_info);
+
+        app.network = None;
+        app.network_mode = None;
+        app.classic_host_lobby = None;
+        let staged = app
+            .staged_network_host_scenario
+            .take()
+            .expect("same staged scenario");
+        app.activate_loaded_scenario(staged.frontend, staged.scenario)
+            .expect("activate preloaded scenario");
+        assert!(Arc::ptr_eq(
+            &expected_hud,
+            &app.active_game_graphics
+                .as_ref()
+                .expect("active game graphics")
+                .hud_graphics
+        ));
+        assert!(Arc::ptr_eq(
+            &expected_textures,
+            &app.material_texture_images
+        ));
+        assert!(Arc::ptr_eq(
+            &expected_render_info,
+            &app.material_render_info
+        ));
+    }
+
+    #[test]
+    fn catalog_host_lobby_preload_is_eligible_and_caches_the_selected_scenario() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated catalog-host preload config");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let frontend = tutorial_frontend(repository);
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.scenario_catalog
+            .insert(frontend.identifier.clone(), frontend.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Catalog Host".to_string(), true)
+            .with_preloading(true, LobbyLabels::default());
+        lobby.select_scenario(&frontend.identifier, &frontend.title);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            player_name: "Catalog Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events) = NetworkManager::test_stub();
+        app.network = Some(manager);
+
+        app.sync_classic_lobby_resource_ready();
+        assert!(app.lobby_preload_task.is_some());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while app.lobby_preload_task.is_some() {
+            app.poll_lobby_preload().expect("poll catalog preload");
+            assert!(Instant::now() < deadline, "catalog preload did not finish");
+            thread::yield_now();
+        }
+        assert!(
+            app.lobby_preload_artifact
+                .as_ref()
+                .and_then(|artifact| artifact.catalog_host.as_ref())
+                .is_some_and(|catalog_host| catalog_host.scenario.is_some()),
+            "catalog preload retains the parsed scenario for the start path"
+        );
+        let catalog_host = app
+            .lobby_preload_artifact
+            .as_mut()
+            .and_then(|artifact| artifact.catalog_host.as_mut())
+            .unwrap();
+        let mut stale_key = catalog_host.key.clone();
+        stale_key.languages.push("DE".to_string());
+        assert!(catalog_host.take_matching_scenario(&stale_key).is_none());
+        assert!(
+            catalog_host.scenario.is_some(),
+            "a changed raw load key must leave the cached scenario untouched"
+        );
+        let artifact = app.lobby_preload_artifact.as_ref().unwrap();
+        let expected_hud = Arc::clone(&artifact.game_graphics.hud_graphics);
+        let expected_textures = Arc::clone(&artifact.material_texture_images);
+        let expected_render_info = Arc::clone(&artifact.material_render_info);
+
+        let definition_load = app.scenario_seed_definition_load();
+        app.begin_loading_scenario(frontend, definition_load)
+            .expect("start the preloaded catalog scenario");
+
+        assert!(
+            app.lobby_preload_artifact
+                .as_ref()
+                .and_then(|artifact| artifact.catalog_host.as_ref())
+                .is_some_and(|catalog_host| catalog_host.scenario.is_none()),
+            "the regular loading path consumes the cached scenario"
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while app.loading_state.is_some() {
+            app.poll_loading().expect("finish catalog scenario loading");
+            assert!(
+                Instant::now() < deadline,
+                "preloaded catalog scenario did not activate"
+            );
+            thread::yield_now();
+        }
+        assert!(Arc::ptr_eq(
+            &expected_hud,
+            &app.active_game_graphics
+                .as_ref()
+                .expect("active catalog graphics")
+                .hud_graphics
+        ));
+        assert!(Arc::ptr_eq(
+            &expected_textures,
+            &app.material_texture_images
+        ));
+        assert!(Arc::ptr_eq(
+            &expected_render_info,
+            &app.material_render_info
+        ));
+    }
+
+    #[test]
+    fn client_lobby_preload_commits_async_and_pending_go_reuses_the_artifact() {
+        let directory = tempdir().expect("client preload resource directory");
+        let scenario_path = directory.path().join("Scenario.c4s");
+        let dynamic_path = directory.path().join("Dynamic.c4s");
+        let definitions_path = directory.path().join("Objects.c4d");
+        let mut scenario_group = lc_resources::MutableGroup::new("Scenario.c4s");
+        scenario_group
+            .add_file(
+                "Scenario.txt",
+                b"[Head]\nTitle=Preloaded client\nNetworkGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=MissingLocal.c4d\n".to_vec(),
+            )
+            .expect("add client scenario core");
+        fs::write(
+            &scenario_path,
+            scenario_group.pack().expect("pack client scenario"),
+        )
+        .expect("write client scenario");
+        let mut dynamic_group = lc_resources::MutableGroup::new("Dynamic.c4s");
+        dynamic_group
+            .add_file("Dynamic.txt", b"preloaded".to_vec())
+            .expect("add dynamic marker");
+        fs::write(
+            &dynamic_path,
+            dynamic_group.pack().expect("pack client dynamic data"),
+        )
+        .expect("write client dynamic data");
+        let mut definitions = lc_resources::MutableGroup::new("Objects.c4d");
+        let mut definition = lc_resources::MutableGroup::new("Host.c4d");
+        definition
+            .add_file(
+                "DefCore.txt",
+                b"[DefCore]\nid=HOST\nName=Host\nCategory=1\n".to_vec(),
+            )
+            .expect("add synchronized definition core");
+        definition
+            .add_file(
+                "Graphics.png",
+                include_bytes!("../../../../content/Material.c4g/Snow.png").to_vec(),
+            )
+            .expect("add synchronized definition graphics");
+        definitions
+            .add_child("Host.c4d", definition)
+            .expect("add synchronized definition");
+        fs::write(
+            &definitions_path,
+            definitions.pack().expect("pack synchronized definitions"),
+        )
+        .expect("write synchronized definitions");
+
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let mut settings =
+            ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Observer");
+        settings.resource_directory = directory.path().to_path_buf();
+        app.network_mode = Some(NetworkMode::Client(settings));
+        app.network_lobby = Some(
+            NetworkLobbyState::new(7, "Observer".to_string(), false)
+                .with_preloading(false, LobbyLabels::default()),
+        );
+        app.startup_view = StartupView::NetworkLobby;
+        let resource = |resource_type: lc_network::HostResourceType, id, name: &[u8]| {
+            lc_engine::NetworkResourceCore {
+                resource_type: resource_type as u8,
+                id,
+                loadable: true,
+                filename: lc_engine::LegacyCString::from_bytes(name.to_vec())
+                    .expect("fixture filename is NUL-free"),
+                ..Default::default()
+            }
+        };
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot.parameters.random_seed = 41;
+        snapshot.parameters.scenario =
+            resource(lc_network::HostResourceType::Scenario, 70, b"Scenario.c4s");
+        snapshot.dynamic = resource(lc_network::HostResourceType::Dynamic, 71, b"Dynamic.c4s");
+        snapshot.parameters.game_resources = vec![resource(
+            lc_network::HostResourceType::Definitions,
+            72,
+            b"Objects.c4d",
+        )];
+        snapshot
+            .parameters
+            .clients
+            .clients
+            .push(lc_engine::ClientCoreControlData {
+                client_id: 7,
+                name: lc_engine::LegacyCString::from_bytes(b"Observer".to_vec()).unwrap(),
+                observer: true,
+                ..Default::default()
+            });
+        snapshot.parameters.clients.local_client_id = Some(7);
+        let mut reference_status = host_config.initial_status;
+        reference_status.target_tick = -1;
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 23,
+            status: reference_status,
+            dynamic: snapshot.dynamic.clone(),
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data.clone()))
+            .expect("queue preload JoinData");
+        app.process_network_events().expect("enter client lobby");
+        commands.take_framed_status_acknowledgements();
+
+        for (resource_id, core, path) in [
+            (
+                70,
+                join_data.parameters.scenario.clone(),
+                scenario_path,
+            ),
+            (71, join_data.dynamic.clone(), dynamic_path),
+            (
+                72,
+                join_data.parameters.game_resources[0].clone(),
+                definitions_path,
+            ),
+        ] {
+            event_tx
+                .send(NetworkEvent::ResourceComplete {
+                    resource_id,
+                    core,
+                    path,
+                    local: false,
+                })
+                .expect("complete preload resource");
+        }
+        app.process_network_events()
+            .expect("make client preload eligible");
+        assert!(app
+            .network_lobby
+            .as_ref()
+            .is_some_and(|lobby| lobby.preload.eligible));
+
+        app.request_lobby_preload();
+        let go = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 23,
+        };
+        event_tx
+            .send(NetworkEvent::StatusRequested(go))
+            .expect("queue GO during preload");
+        app.process_network_events().expect("defer GO behind preload");
+        assert_eq!(app.pending_client_start_status, Some(go));
+        assert!(app.loading_state.is_none());
+        let (removed_tx, removed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let removal_observer = thread::spawn(move || {
+            let (resource_id, completion) = commands.receive_resource_removal();
+            removed_tx
+                .send(resource_id)
+                .expect("report preload removal");
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            completion.send(Ok(())).expect("complete preload removal");
+            commands
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !matches!(
+            app.lobby_preload_task.as_ref().map(|task| &task.state),
+            Some(LobbyPreloadTaskState::RemovingClientResource { .. })
+        ) {
+            app.poll_lobby_preload().expect("poll client preload worker");
+            assert!(
+                app.lobby_preload_task.is_some(),
+                "client preload ended before asynchronous removal"
+            );
+            assert!(Instant::now() < deadline, "client preload did not commit");
+            thread::yield_now();
+        }
+        let combined_path = directory.path().join("Combined7.c4s");
+        assert_eq!(
+            Group::open(&combined_path)
+                .expect("open committed client scenario")
+                .read_file("Dynamic.txt")
+                .unwrap(),
+            b"preloaded"
+        );
+        assert!(app.client_combined_preload_file.is_owned());
+        assert!(app.lobby_preload_artifact.is_none());
+        let (expected_hud, expected_textures, expected_render_info) = {
+            let task = app.lobby_preload_task.as_ref().unwrap();
+            let LobbyPreloadTaskState::RemovingClientResource { artifact, .. } = &task.state
+            else {
+                unreachable!("client removal is pending")
+            };
+            (
+                Arc::clone(&artifact.game_graphics.hud_graphics),
+                Arc::clone(&artifact.material_texture_images),
+                Arc::clone(&artifact.material_render_info),
+            )
+        };
+        assert_eq!(
+            removed_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("preload removal command"),
+            71
+        );
+        app.poll_lobby_preload()
+            .expect("resource removal remains asynchronous");
+        assert!(app.lobby_preload_task.is_some());
+        assert!(app.loading_state.is_none());
+
+        release_tx.send(()).expect("release dynamic removal");
+        let mut commands = removal_observer.join().expect("removal observer exits");
+        while app.lobby_preload_task.is_some() {
+            app.poll_lobby_preload()
+                .expect("install completed client preload");
+            assert!(Instant::now() < deadline, "client preload did not install");
+            thread::yield_now();
+        }
+        assert!(app.loading_state.is_some(), "pending GO resumes immediately");
+        assert!(app
+            .lobby_preload_artifact
+            .as_ref()
+            .and_then(|artifact| artifact.client.as_ref())
+            .is_some_and(|client| client.scenario.is_none()));
+
+        app.poll_loading()
+            .expect("activate the preloaded client scenario");
+        assert!(Arc::ptr_eq(
+            &expected_hud,
+            &app.active_game_graphics
+                .as_ref()
+                .expect("active client graphics")
+                .hud_graphics
+        ));
+        assert!(Arc::ptr_eq(
+            &expected_textures,
+            &app.material_texture_images
+        ));
+        assert!(Arc::ptr_eq(
+            &expected_render_info,
+            &app.material_render_info
+        ));
+        assert_eq!(commands.take_framed_status_acknowledgements(), vec![(go, 0)]);
+
+        app.clear_lobby_preload();
+        assert!(!combined_path.exists());
+    }
+
+    #[test]
+    fn lobby_preload_launch_failure_logs_red_without_error_sound_and_stays_retryable() {
+        let mut app = new_state_only_menu_app(320, 200);
+        install_test_classic_host_lobby(&mut app);
+        {
+            let lobby = app.classic_host_lobby.as_mut().unwrap();
+            lobby.preload = LobbyPreloadState::new(false);
+            assert!(!lobby.preload.synchronize(true, true));
+            lobby.controller.set_preload_button_state(true, true);
+        }
+        let sounds_before = app.ui_sound_log.len();
+
+        app.request_lobby_preload();
+
+        let lobby = app.classic_host_lobby.as_ref().unwrap();
+        assert!(lobby.preload.eligible);
+        assert!(lobby.preload.manual_button_present);
+        assert_eq!(app.ui_sound_log.len(), sounds_before);
+        assert_eq!(
+            lobby.controller.logs().last(),
+            Some(&LobbyLogLine {
+                text: "Preloading error.".to_string(),
+                color: [255, 31, 31, 255],
+            })
+        );
     }
 
     #[test]
