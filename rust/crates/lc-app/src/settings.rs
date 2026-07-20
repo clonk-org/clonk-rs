@@ -682,7 +682,11 @@ impl DisplayOptions {
             }
         };
         self.write_config(&mut config);
-        if let Err(err) = config.save(&config_path) {
+        if let Err(err) = crate::save_config_preserving_native_gamepads_enabled(
+            &config,
+            &config_path,
+            None,
+        ) {
             tracing::warn!(
                 error = %err,
                 path = %config_path.display(),

@@ -936,7 +936,7 @@ pub fn persist_activations(
     {
         fs::create_dir_all(parent)?;
     }
-    config.save(config_path)?;
+    crate::save_config_preserving_native_gamepads_enabled(&config, config_path, None)?;
     for refusal in &refusals {
         players[refusal.index].set_activated(false);
     }
