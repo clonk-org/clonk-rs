@@ -190,6 +190,9 @@ pub enum MenuAction {
     JoinPlayer(String),
     /// "TeamSel:<id>" (C4MainMenu.cpp:899-908).
     SelectTeam(i32),
+    /// "TeamSwitch:<id>" queues `CID_SetPlayerTeam`
+    /// (C4MainMenu.cpp:909-918).
+    SwitchTeam(i32),
     /// C4AbortGameDialog "Yes": `Game.Abort()` (C4GameDialogs.cpp:104-121).
     AbortConfirmed,
     /// C4AbortGameDialog "Restart": `Application.SetNextMission` + abort
@@ -538,22 +541,22 @@ impl IngameMenuState {
         self.player
     }
 
-    /// Initial `C4Player::ActivateMenuTeamSelection(false)` and
-    /// `C4MainMenu::Refill` for `C4MN_TeamSelection`
-    /// (C4Player.cpp:1762-1771; C4MainMenu.cpp:175-232).
-    ///
-    /// C++ resolves each team's `IconSpec`, then falls back to a colorized
-    /// crew for occupied teams or the team GUI icon for empty teams. The
-    /// current `MenuSymbol` renderer cannot carry an `IconSpec` plus its team
-    /// color, so every row uses that GUI-icon fallback until it can.
-    pub fn team_selection_menu(teams: &[TeamSelectionEntry]) -> Self {
+    fn team_menu(
+        teams: &[TeamSelectionEntry],
+        switching: bool,
+        return_to_main: bool,
+    ) -> Self {
         let items = teams
             .iter()
             .map(|team| {
                 MenuItem::new(
                     team.caption.clone(),
                     MenuSymbol::GuiIcon(ICO_TEAM),
-                    MenuAction::SelectTeam(team.id),
+                    if switching {
+                        MenuAction::SwitchTeam(team.id)
+                    } else {
+                        MenuAction::SelectTeam(team.id)
+                    },
                     Some(&format!("Join team {}", team.caption)),
                 )
             })
@@ -564,8 +567,34 @@ impl IngameMenuState {
             MenuSymbol::GuiIcon(ICO_TEAM),
             items,
             false,
-            None,
+            return_to_main.then_some(MenuAction::ActivateMain),
         )
+    }
+
+    /// Initial `C4Player::ActivateMenuTeamSelection(false)` and
+    /// `C4MainMenu::Refill` for `C4MN_TeamSelection`
+    /// (C4Player.cpp:1762-1771; C4MainMenu.cpp:175-232).
+    ///
+    /// C++ resolves each team's `IconSpec`, then falls back to a colorized
+    /// crew for occupied teams or the team GUI icon for empty teams. The
+    /// current `MenuSymbol` renderer cannot carry an `IconSpec` plus its team
+    /// color, so every row uses that GUI-icon fallback until it can.
+    pub fn team_selection_menu(teams: &[TeamSelectionEntry]) -> Self {
+        Self::team_menu(teams, false, false)
+    }
+
+    /// `ActivateMenuTeamSelection(true)` while the player is still in
+    /// `PS_TeamSelection`: keep `TeamSel:<id>` actions, but install the
+    /// back-to-main close command (C4Player.cpp:1762-1771).
+    pub fn team_selection_menu_from_main(teams: &[TeamSelectionEntry]) -> Self {
+        Self::team_menu(teams, false, true)
+    }
+
+    /// Mid-round `C4Player::ActivateMenuTeamSelection(true)`: the same team
+    /// rows dispatch `TeamSwitch:<id>`, and closing returns to the main page
+    /// (C4Player.cpp:1762-1771; C4MainMenu.cpp:175-232,909-918).
+    pub fn team_switch_menu(teams: &[TeamSelectionEntry]) -> Self {
+        Self::team_menu(teams, true, true)
     }
 
     /// `C4MainMenu::ActivateMain` (C4MainMenu.cpp:643-715). Returns `None`
@@ -2576,7 +2605,7 @@ mod tests {
     }
 
     #[test]
-    fn team_switch_entry_is_typed_instead_of_a_successful_no_op() {
+    fn team_switch_page_uses_switch_actions_and_returns_to_main() {
         let cond = MainMenuConditions {
             team_switch_allowed: true,
             ..MainMenuConditions::default()
@@ -2588,6 +2617,42 @@ mod tests {
             .find(|item| item.caption == "Select team")
             .expect("team entry");
         assert_eq!(team.action, MenuAction::ActivateTeamSelection);
+
+        let teams = vec![
+            TeamSelectionEntry {
+                id: 7,
+                caption: "Blue Team".to_string(),
+            },
+            TeamSelectionEntry {
+                id: -1,
+                caption: "New Team".to_string(),
+            },
+        ];
+        let initial_from_main = IngameMenuState::team_selection_menu_from_main(&teams);
+        assert_eq!(
+            initial_from_main.items()[0].action,
+            MenuAction::SelectTeam(7)
+        );
+        assert_eq!(
+            initial_from_main.close_action(),
+            Some(&MenuAction::ActivateMain)
+        );
+
+        let mut menu = IngameMenuState::team_switch_menu(&teams);
+        assert_eq!(menu.page(), MenuPage::TeamSelection);
+        assert!(!menu.is_permanent());
+        assert_eq!(menu.close_action(), Some(&MenuAction::ActivateMain));
+        assert_eq!(menu.items()[0].action, MenuAction::SwitchTeam(7));
+        assert_eq!(menu.items()[1].action, MenuAction::SwitchTeam(-1));
+
+        menu.set_selection(1);
+        assert!(matches!(
+            menu.handle_command(ControlCommand::MenuEnter, CommandKind::Press),
+            Some(MenuOutcome::Action {
+                action: MenuAction::SwitchTeam(-1),
+                close_menu: true,
+            })
+        ));
     }
 
     // Network client: no Save game (not host), Disconnect entry

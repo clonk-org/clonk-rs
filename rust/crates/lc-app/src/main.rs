@@ -12375,7 +12375,6 @@ enum ClassicStartupAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicIngameMenuChild {
-    TeamSelection,
     NewPlayer,
     NetworkSurrender,
     ClientDisconnect,
@@ -28669,14 +28668,10 @@ impl GameApp {
         Ok(())
     }
 
-    fn open_initial_team_selection(&mut self, owner: i32) {
-        if !self
-            .engine
-            .player(owner)
-            .is_some_and(|player| player.status() == lc_engine::PlayerStatus::TeamSelection)
-        {
-            return;
-        }
+    /// Ordered `C4MN_TeamSelection` / `C4MN_TeamSwitch` rows. Native shows
+    /// every configured team and adds `TEAMID_New` only when auto-generation
+    /// is enabled and no existing team is empty (C4MainMenu.cpp:175-232).
+    fn team_selection_entries(&self) -> Vec<TeamSelectionEntry> {
         let mut add_new_team = self.engine.auto_generate_teams();
         let mut entries = self
             .engine
@@ -28710,6 +28705,18 @@ impl GameApp {
                 caption: "New Team".to_string(),
             });
         }
+        entries
+    }
+
+    fn open_initial_team_selection(&mut self, owner: i32) {
+        if !self
+            .engine
+            .player(owner)
+            .is_some_and(|player| player.status() == lc_engine::PlayerStatus::TeamSelection)
+        {
+            return;
+        }
+        let entries = self.team_selection_entries();
         let existing = self
             .ingame_menu
             .get(owner)
@@ -28822,7 +28829,7 @@ impl GameApp {
     }
 
     /// `C4MainMenu::ActivateMain` conditions (C4MainMenu.cpp:643-715) from
-    /// the running app state. Team menu data is not ported yet.
+    /// the running app state.
     fn main_menu_conditions(&self) -> MainMenuConditions {
         self.main_menu_conditions_for(self.local_owner)
     }
@@ -28838,7 +28845,7 @@ impl GameApp {
             network_host: matches!(self.network_mode, Some(NetworkMode::Host(_))),
             network_has_clients: self.network.is_some(),
             is_fullscreen: true,
-            team_switch_allowed: false,
+            team_switch_allowed: self.engine.team_configuration().allow_team_switch,
         }
     }
 
@@ -29684,9 +29691,15 @@ impl GameApp {
                 let _ = self.apply_observer_target(selected);
             }
             MenuAction::ActivateTeamSelection => {
-                return Err(classic_ingame_menu_child_error(
-                    ClassicIngameMenuChild::TeamSelection,
-                ));
+                if let Some(status) = self.engine.player(player).map(lc_engine::Player::status) {
+                    let entries = self.team_selection_entries();
+                    let menu = if status == lc_engine::PlayerStatus::TeamSelection {
+                        IngameMenuState::team_selection_menu_from_main(&entries)
+                    } else {
+                        IngameMenuState::team_switch_menu(&entries)
+                    };
+                    self.ingame_menu.replace(player, Some(menu));
+                }
             }
             MenuAction::Abort => {
                 self.show_abort_dialog(player);
@@ -29888,6 +29901,39 @@ impl GameApp {
                         ),
                     ));
                     self.execute_init_scenario_player_control(player, team)?;
+                }
+            }
+            MenuAction::SwitchTeam(team) => {
+                // `TeamSwitch:<id>` closes its page before this dispatch and
+                // rechecks the live scenario flag. The queued control itself
+                // deliberately does not recheck it (C4MainMenu.cpp:909-918).
+                if !self.engine.team_configuration().allow_team_switch {
+                    return Ok(());
+                }
+                if self.network.is_some() {
+                    let tick = self.local_control_submission_tick();
+                    if let Some(Err(error)) = self
+                        .network
+                        .as_ref()
+                        .map(|network| network.submit_set_player_team(tick, player, team))
+                    {
+                        tracing::warn!(player, team, %error, "failed to queue team switch");
+                    }
+                } else {
+                    let by_client = self
+                        .engine
+                        .player(player)
+                        .map(|player| player.at_client().get())
+                        .unwrap_or(-1);
+                    let control = lc_engine::SetPlayerTeamControlData {
+                        team,
+                        player,
+                        by_client,
+                    };
+                    self.record_control_batch(std::slice::from_ref(
+                        &lc_engine::ControlPacket::SetPlayerTeam(control),
+                    ));
+                    let _ = self.engine.execute_set_player_team_control(&control)?;
                 }
             }
             MenuAction::Observe(target) => {
@@ -107510,27 +107556,157 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn unsupported_ingame_children_fail_without_status_or_substitute_pages() {
-        let mut app = new_menu_app(320, 200);
-        app.start_sandbox_scenario(FrontendScenario::fallback())
-            .expect("start explicit test sandbox");
-        let unsupported = [
-            (MenuAction::ActivateTeamSelection, "TeamSelection"),
-        ];
-        for (action, label) in unsupported {
-            app.ingame_menu.clear();
-            app.status_text.clear();
-            let error = app
-                .apply_ingame_menu_action(action)
-                .expect_err("unsupported child must fail typed");
-            assert!(matches!(
-                &error,
-                EngineError::ClassicMenuParityBoundary { .. }
-            ));
-            assert!(error.to_string().contains(label), "unexpected {error}");
-            assert!(app.ingame_menu.is_none());
-            assert!(app.status_text.is_empty());
-        }
+    fn main_menu_team_switch_reads_live_gate_and_dispatches_offline_control() {
+        let mut app = new_state_only_running_sandbox_app();
+        let owner = app.local_owner;
+        app.engine.set_teams(vec![
+            lc_engine::TeamInfo::new(1, "Red", 0x00f4_0000),
+            lc_engine::TeamInfo::new(2, "Blue", 0x0000_00f4),
+        ]);
+        app.engine
+            .player_mut(owner)
+            .expect("menu owner")
+            .set_team(Some(1));
+        app.snapshot = app.engine.snapshot();
+
+        let mut teams = app.engine.team_configuration();
+        teams.allow_team_switch = false;
+        app.engine.set_team_configuration(teams);
+        let conditions = app.main_menu_conditions();
+        assert!(!conditions.team_switch_allowed);
+        assert!(!IngameMenuState::main_menu(&conditions)
+            .expect("main menu")
+            .items()
+            .iter()
+            .any(|item| item.action == MenuAction::ActivateTeamSelection));
+
+        teams.allow_team_switch = true;
+        app.engine.set_team_configuration(teams);
+        assert!(app.main_menu_conditions().team_switch_allowed);
+
+        app.engine
+            .set_player_status(owner, PlayerStatus::TeamSelection)
+            .expect("put player back into initial team selection");
+        app.apply_ingame_menu_action(MenuAction::ActivateTeamSelection)
+            .expect("reopen initial selection from Main");
+        let initial = app.ingame_menu.get(owner).expect("initial team page");
+        assert_eq!(initial.close_action(), Some(&MenuAction::ActivateMain));
+        assert!(initial
+            .items()
+            .iter()
+            .all(|item| matches!(&item.action, MenuAction::SelectTeam(_))));
+        app.ingame_menu.clear();
+        app.engine
+            .set_player_status(owner, PlayerStatus::Active)
+            .expect("restore active player");
+
+        app.apply_ingame_menu_action(MenuAction::ActivateTeamSelection)
+            .expect("open team-switch page");
+        let menu = app.ingame_menu.get_mut(owner).expect("team-switch page");
+        assert_eq!(menu.close_action(), Some(&MenuAction::ActivateMain));
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| item.action.clone())
+                .collect::<Vec<_>>(),
+            [MenuAction::SwitchTeam(1), MenuAction::SwitchTeam(2)]
+        );
+        menu.set_selection(1);
+        let outcome = menu
+            .handle_command(ControlCommand::MenuEnter, CommandKind::Press)
+            .expect("select Blue");
+
+        app.execute_ingame_menu_outcome_for_player(owner, outcome)
+            .expect("execute offline team switch");
+
+        let player = app.engine.player(owner).expect("menu owner remains");
+        assert_eq!(player.status(), PlayerStatus::Active);
+        assert_eq!(player.team(), Some(2));
+        assert!(app.ingame_menu.get(owner).is_none());
+    }
+
+    #[test]
+    fn network_team_switch_rechecks_gate_then_queues_authenticated_control() {
+        let mut app = new_state_only_running_sandbox_app();
+        let primary = app.local_owner;
+        let primary_team = app.engine.player(primary).and_then(lc_engine::Player::team);
+        let owner = 17;
+        app.engine.set_teams(vec![
+            lc_engine::TeamInfo::new(1, "Red", 0x00f4_0000),
+            lc_engine::TeamInfo::new(2, "Blue", 0x0000_00f4),
+        ]);
+        app.engine
+            .register_player(PlayerConfig::new(owner, "Secondary"))
+            .expect("register secondary local player");
+        app.engine
+            .player_mut(owner)
+            .expect("secondary local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(7));
+        app.engine
+            .set_player_team(owner, Some(1))
+            .expect("put secondary player on Red");
+        app.snapshot = app.engine.snapshot();
+        let mut teams = app.engine.team_configuration();
+        teams.allow_team_switch = true;
+        app.engine.set_team_configuration(teams);
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+
+        app.apply_ingame_menu_action_for_player(owner, MenuAction::ActivateTeamSelection)
+            .expect("open first team-switch page");
+        let outcome = {
+            let menu = app.ingame_menu.get_mut(owner).expect("team-switch page");
+            menu.set_selection(1);
+            menu.handle_command(ControlCommand::MenuEnter, CommandKind::Press)
+                .expect("select Blue")
+        };
+        teams.allow_team_switch = false;
+        app.engine.set_team_configuration(teams);
+        app.execute_ingame_menu_outcome_for_player(owner, outcome)
+            .expect("disabled switch is a no-op");
+        assert!(commands
+            .take_submitted_internal_player_scripts()
+            .is_empty());
+        assert_eq!(app.engine.player(owner).and_then(lc_engine::Player::team), Some(1));
+        assert!(app.ingame_menu.get(owner).is_none());
+
+        teams.allow_team_switch = true;
+        app.engine.set_team_configuration(teams);
+        app.apply_ingame_menu_action_for_player(owner, MenuAction::ActivateTeamSelection)
+            .expect("reopen team-switch page");
+        let outcome = {
+            let menu = app.ingame_menu.get_mut(owner).expect("team-switch page");
+            menu.set_selection(1);
+            menu.handle_command(ControlCommand::MenuEnter, CommandKind::Press)
+                .expect("select Blue")
+        };
+        let tick = app.local_control_submission_tick();
+        app.execute_ingame_menu_outcome_for_player(owner, outcome)
+            .expect("queue enabled team switch");
+        let control = lc_engine::SetPlayerTeamControlData {
+            team: 2,
+            player: owner,
+            by_client: 7,
+        };
+        assert_eq!(
+            commands.take_submitted_internal_player_scripts(),
+            vec![(tick, lc_engine::ControlPacket::SetPlayerTeam(control))]
+        );
+        assert_eq!(
+            app.engine.player(owner).and_then(lc_engine::Player::team),
+            Some(1),
+            "submission waits for synchronized execution"
+        );
+
+        app.apply_ready_controls(tick, vec![NetworkControl::SetPlayerTeam(control)])
+            .expect("execute synchronized team switch");
+        assert_eq!(app.engine.player(owner).and_then(lc_engine::Player::team), Some(2));
+        assert_eq!(
+            app.engine.player(primary).and_then(lc_engine::Player::team),
+            primary_team,
+            "the primary local player is not substituted for the menu owner"
+        );
     }
 
     #[test]
@@ -127408,7 +127584,7 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn real_regicide_teamless_player_opens_initial_team_menu() {
+    fn real_regicide_opens_initial_team_menu_and_hides_disabled_switch() {
         // Regicide's custom active Teams.txt leaves the initial user
         // teamless. C4Player::Execute opens C4MN_TeamSelection with both
         // ordered teams before the player's ScenarioInit can run
@@ -127417,6 +127593,10 @@ ScenInfoArea=70,5,25,90
             real_installed_scenario_app("Knights.c4f/Regicide.c4s", "Regicide team chooser");
         wait_for_running(&mut app);
 
+        assert!(
+            !app.engine.team_configuration().allow_team_switch,
+            "Regicide's parsed Teams.txt keeps mid-round switching disabled"
+        );
         assert_eq!(
             app.engine
                 .player(app.local_owner)
@@ -127456,6 +127636,17 @@ ScenInfoArea=70,5,25,90
             "Regicide selection must leave the player with usable crew"
         );
         assert!(app.ingame_menu.is_none());
+
+        let owner = app.local_owner;
+        app.activate_ingame_main_menu_for_player(owner)
+            .expect("open post-selection main menu");
+        assert!(!app
+            .ingame_menu
+            .as_ref()
+            .expect("main menu")
+            .items()
+            .iter()
+            .any(|item| item.action == MenuAction::ActivateTeamSelection));
     }
 
     #[test]
