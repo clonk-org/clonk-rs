@@ -2108,6 +2108,7 @@ impl Scenario {
             graphics_groups,
             language_packs,
         };
+        let mut ignore_progress = |_: i32, _: &'static str| {};
         Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
             &group,
             &resolver,
@@ -2118,6 +2119,7 @@ impl Scenario {
             None,
             legacy_startup_player_count(),
             false,
+            &mut ignore_progress,
         )
     }
 
@@ -2211,7 +2213,37 @@ impl Scenario {
         S: AsRef<str>,
         M: AsRef<str>,
     {
-        Self::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count(
+        Self::load_from_group_with_languages_and_definition_selection_and_progress(
+            group,
+            resolver,
+            languages,
+            initial_modules,
+            fixed_modules,
+            definition_root,
+            |_, _| {},
+        )
+    }
+
+    /// Loads an already-opened scenario group and reports coarse legacy-load
+    /// milestones. JSON fixtures do not have C4Game loading milestones and
+    /// therefore do not invoke the callback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from_group_with_languages_and_definition_selection_and_progress<R, S, M, F>(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        initial_modules: &[M],
+        fixed_modules: Option<&[M]>,
+        definition_root: Option<&Path>,
+        report_progress: F,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+        F: FnMut(i32, &'static str),
+    {
+        Self::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_progress(
             group,
             resolver,
             languages,
@@ -2220,6 +2252,7 @@ impl Scenario {
             fixed_modules,
             definition_root,
             legacy_startup_player_count(),
+            report_progress,
         )
     }
 
@@ -2245,6 +2278,47 @@ impl Scenario {
         S: AsRef<str>,
         M: AsRef<str>,
     {
+        Self::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_progress(
+            group,
+            resolver,
+            languages,
+            random_seed,
+            initial_modules,
+            fixed_modules,
+            definition_root,
+            startup_player_count,
+            |_, _| {},
+        )
+    }
+
+    /// Loads an already-opened legacy scenario with the selected definition
+    /// vector and frozen startup-player count, reporting coarse C4Game-style
+    /// milestones. The callback deliberately stops after decoding the object
+    /// records (93); activation and progress 100 belong to the application
+    /// thread.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_progress<
+        R,
+        S,
+        M,
+        F,
+    >(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        initial_modules: &[M],
+        fixed_modules: Option<&[M]>,
+        definition_root: Option<&Path>,
+        startup_player_count: i32,
+        mut report_progress: F,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+        F: FnMut(i32, &'static str),
+    {
         let initial_modules = initial_modules
             .iter()
             .map(|module| normalize_definition_path(module.as_ref()))
@@ -2255,7 +2329,7 @@ impl Scenario {
                 .map(|module| normalize_definition_path(module.as_ref()))
                 .collect::<Vec<_>>()
         });
-        Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count(
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count_and_progress(
             group,
             resolver,
             languages,
@@ -2264,6 +2338,7 @@ impl Scenario {
             fixed_modules.as_deref(),
             definition_root,
             startup_player_count,
+            &mut report_progress,
         )
     }
 
@@ -2310,6 +2385,39 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
     {
+        let mut ignore_progress = |_: i32, _: &'static str| {};
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count_and_progress(
+            group,
+            resolver,
+            languages,
+            random_seed,
+            initial_definition_modules,
+            definition_modules,
+            selector_definition_root,
+            startup_player_count,
+            &mut ignore_progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count_and_progress<
+        R,
+        S,
+    >(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        initial_definition_modules: &[String],
+        definition_modules: Option<&[String]>,
+        selector_definition_root: Option<&Path>,
+        startup_player_count: i32,
+        report_progress: &mut dyn FnMut(i32, &'static str),
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
         let languages = languages.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
             group,
@@ -2321,6 +2429,7 @@ impl Scenario {
             selector_definition_root,
             startup_player_count,
             true,
+            report_progress,
         )
     }
 
@@ -2337,6 +2446,7 @@ impl Scenario {
         selector_definition_root: Option<&Path>,
         startup_player_count: i32,
         discover_folder_definitions: bool,
+        report_progress: &mut dyn FnMut(i32, &'static str),
     ) -> Result<Self, ScenarioError> {
         match Self::load_from_group(group) {
             Ok(scenario) => Ok(scenario),
@@ -2350,6 +2460,7 @@ impl Scenario {
                 selector_definition_root,
                 startup_player_count,
                 discover_folder_definitions,
+                report_progress,
             ),
             Err(err) => Err(err),
         }
@@ -2487,6 +2598,7 @@ impl Scenario {
         selector_definition_root: Option<&Path>,
         startup_player_count: i32,
         discover_folder_definitions: bool,
+        report_progress: &mut dyn FnMut(i32, &'static str),
     ) -> Result<Self, ScenarioError> {
         let mut manifest = parse_legacy_scenario_manifest(group)?;
         let language_packs = resolver.resolve_language_packs(group)?;
@@ -2504,6 +2616,7 @@ impl Scenario {
             &savegame_override,
             ScenarioSavegameDefinitionOverride::GameText { .. }
         );
+        report_progress(4, "Scenario manifest and components decoded");
 
         let skip_ids: HashSet<String> = manifest
             .core
@@ -2538,6 +2651,7 @@ impl Scenario {
             ),
         };
         let requested_definition_modules = definition_specs.to_vec();
+        report_progress(8, "Definition selection resolved");
         let definition_specs_to_resolve = if has_unresolved_savegame_definitions {
             &[][..]
         } else {
@@ -2675,6 +2789,7 @@ impl Scenario {
             DefinitionLoadStep::Definition(id) => retained_definition_ids.contains(id.as_str()),
             DefinitionLoadStep::Declarations { .. } | DefinitionLoadStep::SystemScripts(_) => true,
         });
+        report_progress(40, "Definition metadata and sources collected");
 
         let script = load_legacy_scenario_script(group, &scenario_components, languages)?;
         let scenario_system_scripts = load_scenario_system_scripts(
@@ -2683,17 +2798,21 @@ impl Scenario {
             scenario_origin.as_deref(),
             languages,
         )?;
+        report_progress(56, "Scenario script sources loaded");
         let map_callback_functions = scenario_map_callback_functions(
             script.as_ref(),
             &collected,
             &definition_load_steps,
             &scenario_system_scripts,
         )?;
+        report_progress(57, "Scenario callback names indexed");
         let mut classifier = build_map_pixel_classifier(group, resolver)?;
+        report_progress(58, "Material and texture-map data decoded");
         let material_library = classifier
             .as_ref()
             .and_then(MapPixelClassifier::material_library)
             .cloned();
+        report_progress(60, "Material library prepared");
         let mut post_init_map_callbacks =
             crate::map_creator_s2::PostInitMapCallbacks::default();
         let mut prepared_map_creator = None;
@@ -2709,7 +2828,7 @@ impl Scenario {
             &mut post_init_map_callbacks,
             &mut prepared_map_creator,
         )?;
-        let landscape_systems = load_legacy_landscape_systems(group)?;
+        report_progress(88, "Landscape data generated or decoded");
         if let (Some(runtime), Some(landscape)) = (runtime_landscape, landscape.as_mut()) {
             if is_savegame {
                 landscape.set_border_open(
@@ -2721,6 +2840,10 @@ impl Scenario {
             }
             landscape.set_modulation(runtime.mat_modulation);
         }
+        report_progress(89, "Landscape data finalized");
+        report_progress(90, "Loading landscape auxiliary data");
+        let landscape_systems =
+            load_legacy_landscape_systems_with_progress(group, report_progress)?;
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
         // (C4Player.cpp:481-570) — see Engine::join_player.
@@ -2732,6 +2855,7 @@ impl Scenario {
         } else {
             collect_legacy_objects(group, &collected)?
         };
+        report_progress(93, "Object records decoded");
         let (mut physics, gravity) = derive_legacy_physics(&manifest)?;
         if let Some(runtime) = runtime_landscape.filter(|_| is_savegame) {
             let physics = physics.get_or_insert_with(PhysicsSettings::default);
@@ -10621,18 +10745,28 @@ fn legacy_scenario_section_name(path: &Path) -> Result<Option<String>, ScenarioE
 fn load_legacy_landscape_systems(
     group: &Group,
 ) -> Result<ScenarioLandscapeSystems, ScenarioError> {
+    let mut ignore_progress = |_: i32, _: &'static str| {};
+    load_legacy_landscape_systems_with_progress(group, &mut ignore_progress)
+}
+
+fn load_legacy_landscape_systems_with_progress(
+    group: &Group,
+    report_progress: &mut dyn FnMut(i32, &'static str),
+) -> Result<ScenarioLandscapeSystems, ScenarioError> {
     let pxs = read_optional_legacy_entry(group, "PXS.c4b")?
         .map(|bytes| {
             crate::pxs::PxsSystem::from_c4b(&bytes)
                 .map_err(|error| ScenarioError::LegacyParse(error.to_string()))
         })
         .transpose()?;
+    report_progress(91, "PXS loading complete");
     let mass_movers = read_optional_legacy_entry(group, "MassMover.c4b")?
         .map(|bytes| {
             crate::mass_mover::MassMoverSet::from_c4b(&bytes)
                 .map_err(|error| ScenarioError::LegacyParse(error.to_string()))
         })
         .transpose()?;
+    report_progress(92, "Mass mover loading complete");
     Ok(ScenarioLandscapeSystems { pxs, mass_movers })
 }
 
@@ -18837,6 +18971,45 @@ global func Step(state, frame, random)
         .expect("write scenario core");
         std::fs::write(scenario_dir.join("Script.c"), scenario_script).expect("write script");
         scenario_dir
+    }
+
+    #[test]
+    fn l021_legacy_group_loading_reports_monotonic_nonempty_decode_status() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// scenario script\n");
+        let group = Group::open(&scenario_dir).expect("open legacy scenario group");
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let mut reported = Vec::new();
+
+        Scenario::load_from_group_with_languages_and_definition_selection_and_progress(
+            &group,
+            &resolver,
+            &["US"],
+            &[] as &[String],
+            None,
+            None,
+            |progress, log| reported.push((progress, log)),
+        )
+        .expect("legacy scenario loads with progress reporting");
+
+        let checkpoints = reported
+            .iter()
+            .map(|(progress, _)| *progress)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            checkpoints,
+            [4, 8, 40, 56, 57, 58, 60, 88, 89, 90, 91, 92, 93]
+        );
+        assert!(
+            checkpoints.windows(2).all(|pair| pair[0] <= pair[1]),
+            "loader progress must never regress: {checkpoints:?}"
+        );
+        assert!(
+            reported.iter().all(|(_, log)| !log.trim().is_empty()),
+            "every reported phase must carry visible loader text: {reported:?}"
+        );
     }
 
     #[test]

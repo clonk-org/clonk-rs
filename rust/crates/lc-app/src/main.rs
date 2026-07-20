@@ -691,16 +691,52 @@ fn read_optional_initial_network_game_source(
 }
 
 enum ScenarioLoadingEvent {
-    /// Exact raw C4Game progress/log state only. The current Rust scenario
-    /// worker does not yet own C4Game's internal milestones or LogBuffer and
-    /// therefore emits no LoaderFrame events; the screen legitimately keeps
-    /// its initial 0%/hidden-log state until that ownership is ported.
+    /// Monotonic, C4Game-numbered coarse progress paired with an
+    /// oldest-to-newest snapshot of Rust's phase-status history. The worker
+    /// stops below 100; only successful main-thread activation may publish the
+    /// terminal frame.
     LoaderFrame {
         progress: i32,
         log: Option<Vec<String>>,
     },
     RefreshResources,
     Finished(Result<Scenario, String>),
+}
+
+const SCENARIO_LOADING_LOG_CAPACITY: usize = 1_000;
+
+struct ScenarioLoadingReporter {
+    sender: mpsc::Sender<ScenarioLoadingEvent>,
+    last_progress: i32,
+    log: VecDeque<String>,
+}
+
+impl ScenarioLoadingReporter {
+    fn new(sender: mpsc::Sender<ScenarioLoadingEvent>) -> Self {
+        Self {
+            sender,
+            last_progress: 0,
+            log: VecDeque::new(),
+        }
+    }
+
+    fn report(&mut self, progress: i32, line: &'static str) {
+        self.last_progress = self.last_progress.max(progress.clamp(0, 99));
+        if !line.is_empty() {
+            if self.log.len() == SCENARIO_LOADING_LOG_CAPACITY {
+                self.log.pop_front();
+            }
+            self.log.push_back(line.to_string());
+        }
+        let _ = self.sender.send(ScenarioLoadingEvent::LoaderFrame {
+            progress: self.last_progress,
+            log: Some(self.log.iter().cloned().collect()),
+        });
+    }
+
+    fn send(&self, event: ScenarioLoadingEvent) {
+        let _ = self.sender.send(event);
+    }
 }
 
 struct PreparedGoLoadingState {
@@ -748,6 +784,8 @@ struct ScenarioLoadingState {
     refresh_requested: bool,
     receiver: Receiver<ScenarioLoadingEvent>,
     finished: bool,
+    last_progress: i32,
+    log: Vec<String>,
     prepared_go: Option<PreparedGoLoadingState>,
     offline_startup_players: Option<OfflineStartupPlayers>,
     /// Fresh local-round Parameters.RandomSeed, frozen before the async
@@ -771,6 +809,8 @@ impl ScenarioLoadingState {
             scenario,
             receiver,
             finished: false,
+            last_progress: 0,
+            log: Vec::new(),
             prepared_go: None,
             offline_startup_players: None,
             offline_random_seed: None,
@@ -805,6 +845,8 @@ impl ScenarioLoadingState {
             refresh_requested: false,
             receiver,
             finished: false,
+            last_progress: 0,
+            log: Vec::new(),
             prepared_go: Some(PreparedGoLoadingState {
                 status,
                 local_reached: false,
@@ -822,6 +864,22 @@ impl ScenarioLoadingState {
             offline_startup_players: None,
             offline_random_seed: None,
         }
+    }
+
+    fn accept_loader_frame(
+        &mut self,
+        progress: i32,
+        log: Option<Vec<String>>,
+    ) -> (i32, Option<Vec<String>>) {
+        self.last_progress = self.last_progress.max(progress.clamp(0, 100));
+        let replace_log = log.is_some();
+        if let Some(mut lines) = log {
+            if lines.len() > SCENARIO_LOADING_LOG_CAPACITY {
+                lines.drain(..lines.len() - SCENARIO_LOADING_LOG_CAPACITY);
+            }
+            self.log = lines;
+        }
+        (self.last_progress, replace_log.then(|| self.log.clone()))
     }
 }
 
@@ -20687,29 +20745,50 @@ fn load_scenario_with_definition_load(
     languages: &[String],
     definition_load: &ScenarioDefinitionLoad,
 ) -> Result<Scenario, ScenarioError> {
+    load_scenario_with_definition_load_and_progress(
+        path,
+        resolver,
+        languages,
+        definition_load,
+        |_, _| {},
+    )
+}
+
+fn load_scenario_with_definition_load_and_progress<F>(
+    path: &Path,
+    resolver: &InstallDefinitionResolver,
+    languages: &[String],
+    definition_load: &ScenarioDefinitionLoad,
+    mut progress: F,
+) -> Result<Scenario, ScenarioError>
+where
+    F: FnMut(i32, &'static str),
+{
     let group = open_group_path_for_folder_map(path)?;
     match definition_load {
         ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root,
-        } => Scenario::load_from_group_with_languages_and_definition_selection(
+        } => Scenario::load_from_group_with_languages_and_definition_selection_and_progress(
             &group,
             resolver,
             languages,
             &[] as &[String],
             Some(modules.as_slice()),
             definition_root.as_deref(),
+            &mut progress,
         ),
         ScenarioDefinitionLoad::Seed {
             modules,
             definition_root,
-        } => Scenario::load_from_group_with_languages_and_definition_selection(
+        } => Scenario::load_from_group_with_languages_and_definition_selection_and_progress(
             &group,
             resolver,
             languages,
             modules,
             None,
             definition_root.as_deref(),
+            &mut progress,
         ),
     }
 }
@@ -20739,12 +20818,35 @@ fn load_scenario_with_definition_load_and_seed_and_startup_player_count(
     random_seed: u64,
     startup_player_count: i32,
 ) -> Result<Scenario, ScenarioError> {
+    load_scenario_with_definition_load_and_seed_and_startup_player_count_and_progress(
+        path,
+        resolver,
+        languages,
+        definition_load,
+        random_seed,
+        startup_player_count,
+        |_, _| {},
+    )
+}
+
+fn load_scenario_with_definition_load_and_seed_and_startup_player_count_and_progress<F>(
+    path: &Path,
+    resolver: &InstallDefinitionResolver,
+    languages: &[String],
+    definition_load: &ScenarioDefinitionLoad,
+    random_seed: u64,
+    startup_player_count: i32,
+    mut progress: F,
+) -> Result<Scenario, ScenarioError>
+where
+    F: FnMut(i32, &'static str),
+{
     let group = open_group_path_for_folder_map(path)?;
     match definition_load {
         ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root,
-        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count(
+        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_progress(
             &group,
             resolver,
             languages,
@@ -20753,11 +20855,12 @@ fn load_scenario_with_definition_load_and_seed_and_startup_player_count(
             Some(modules.as_slice()),
             definition_root.as_deref(),
             startup_player_count,
+            &mut progress,
         ),
         ScenarioDefinitionLoad::Seed {
             modules,
             definition_root,
-        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count(
+        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_progress(
             &group,
             resolver,
             languages,
@@ -20766,6 +20869,7 @@ fn load_scenario_with_definition_load_and_seed_and_startup_player_count(
             None,
             definition_root.as_deref(),
             startup_player_count,
+            &mut progress,
         ),
     }
 }
@@ -38445,6 +38549,7 @@ impl GameApp {
                 let network_savegame =
                     prepared_go.is_some_and(|(_, _, network_savegame)| network_savegame);
                 self.finalize_network_loaded_scenario(network_savegame)?;
+                self.advance_scenario_loader(100, "Scenario activation complete");
                 self.loading_state = None;
                 self.pending_client_start_status = None;
                 self.mode = AppMode::Running;
@@ -67729,6 +67834,34 @@ impl GameApp {
             .prune_before(frame_i32.saturating_sub(SYNC_CHECK_HISTORY));
     }
 
+    fn apply_scenario_loader_frame(&mut self, progress: i32, log: Option<Vec<String>>) {
+        let Some(state) = self.loading_state.as_mut() else {
+            return;
+        };
+        let (progress, log) = state.accept_loader_frame(progress, log);
+        if let Some(loader) = self.loader_screen.as_mut() {
+            loader.update(LoaderUpdate::SetProgress(progress));
+            if let Some(lines) = log {
+                loader.update(LoaderUpdate::ReplaceLog(lines));
+            }
+        }
+    }
+
+    fn advance_scenario_loader(&mut self, progress: i32, line: &'static str) {
+        let mut log = self
+            .loading_state
+            .as_ref()
+            .map(|state| state.log.clone())
+            .unwrap_or_default();
+        if !line.is_empty() {
+            if log.len() == SCENARIO_LOADING_LOG_CAPACITY {
+                log.remove(0);
+            }
+            log.push(line.to_string());
+        }
+        self.apply_scenario_loader_frame(progress, Some(log));
+    }
+
     fn apply_pending_loading_resource_refresh(&mut self) -> Result<(), EngineError> {
         let Some(overrides) = self
             .loading_state
@@ -67777,12 +67910,7 @@ impl GameApp {
         {
             match event {
                 Ok(ScenarioLoadingEvent::LoaderFrame { progress, log }) => {
-                    if let Some(loader) = self.loader_screen.as_mut() {
-                        loader.update(LoaderUpdate::SetProgress(progress));
-                        if let Some(lines) = log {
-                            loader.update(LoaderUpdate::ReplaceLog(lines));
-                        }
-                    }
+                    self.apply_scenario_loader_frame(progress, log);
                 }
                 Ok(ScenarioLoadingEvent::RefreshResources) => {
                     if let Some(state) = self.loading_state.as_mut() {
@@ -67897,6 +68025,7 @@ impl GameApp {
                             }
                         }
                     } else {
+                        self.advance_scenario_loader(100, "Scenario activation complete");
                         self.loading_state = None;
                     }
                 }
@@ -76495,40 +76624,45 @@ impl GameApp {
             });
 
         thread::spawn(move || {
+            let mut reporter = ScenarioLoadingReporter::new(sender);
             let resolver = InstallDefinitionResolver::new(resolver_paths);
             let scenario_data = if let Some(preloaded_scenario) = preloaded_scenario {
+                reporter.report(93, "Scenario preload ready");
                 Ok(preloaded_scenario)
             } else {
                 match offline_startup_error.or(replay_startup_error) {
                     Some(error) => Err(error),
                     None => match (replay_startup, startup_player_count) {
                         (Some(replay), _) => {
-                            load_scenario_with_definition_load_and_seed_and_startup_player_count(
+                            load_scenario_with_definition_load_and_seed_and_startup_player_count_and_progress(
                                 &path_for_thread,
                                 &resolver,
                                 &languages,
                                 &definition_load,
                                 u64::from(replay.random_seed as u32),
                                 replay.startup_player_count,
+                                |progress, line| reporter.report(progress, line),
                             )
                             .map_err(|error| error.to_string())
                         }
                         (None, Some(startup_player_count)) => {
-                            load_scenario_with_definition_load_and_seed_and_startup_player_count(
+                            load_scenario_with_definition_load_and_seed_and_startup_player_count_and_progress(
                                 &path_for_thread,
                                 &resolver,
                                 &languages,
                                 &definition_load,
                                 offline_random_seed.unwrap_or(0),
                                 startup_player_count,
+                                |progress, line| reporter.report(progress, line),
                             )
                             .map_err(|error| error.to_string())
                         }
-                        (None, None) => load_scenario_with_definition_load(
+                        (None, None) => load_scenario_with_definition_load_and_progress(
                             &path_for_thread,
                             &resolver,
                             &languages,
                             &definition_load,
+                            |progress, line| reporter.report(progress, line),
                         )
                         .map_err(|error| error.to_string()),
                     },
@@ -76537,12 +76671,12 @@ impl GameApp {
 
             match scenario_data {
                 Ok(data) => {
-                    let _ = sender.send(ScenarioLoadingEvent::RefreshResources);
-                    let _ = sender.send(ScenarioLoadingEvent::Finished(Ok(data)));
+                    reporter.send(ScenarioLoadingEvent::RefreshResources);
+                    reporter.send(ScenarioLoadingEvent::Finished(Ok(data)));
                 }
                 Err(err) => {
                     let message = format!("Failed to load {}: {}", scenario_title, err);
-                    let _ = sender.send(ScenarioLoadingEvent::Finished(Err(message)));
+                    reporter.send(ScenarioLoadingEvent::Finished(Err(message)));
                 }
             }
         });
@@ -76573,6 +76707,11 @@ impl GameApp {
         self.recording_template = None;
         self.control_playback = None;
         self.deferred_network_savegame_recreation.clear();
+        let prepared_go = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .is_some();
         let path = scenario
             .path
             .clone()
@@ -76895,6 +77034,10 @@ impl GameApp {
             );
             return Err(scenario_activation_scenario_error(&scenario.title, err));
         }
+        self.advance_scenario_loader(
+            94,
+            "Definitions, scripts, landscape, and objects activated",
+        );
 
         let restored_music_enabled = prepared_initial_game_data
             .as_ref()
@@ -76939,6 +77082,7 @@ impl GameApp {
         if let Some(description) = scenario_data.description() {
             engine.show_scenario_intro(description);
         }
+        self.advance_scenario_loader(95, "Scenario activation state prepared");
 
         self.engine = engine;
         self.runtime_player_big_icons.clear();
@@ -76965,6 +77109,7 @@ impl GameApp {
                 tracing::warn!(%error, "failed to start C++-compatible recording");
             }
         }
+        self.advance_scenario_loader(96, "Game runtime installed");
         self.film_view_player = None;
         self.clear_physical_viewport_states();
         self.physical_viewports_authoritative = false;
@@ -76987,6 +77132,7 @@ impl GameApp {
         if let Some(audio) = self.audio.as_mut() {
             audio.reset_sfx();
         }
+        self.advance_scenario_loader(97, "Input and audio runtime initialized");
         if !network_game && !replay {
             if let Some(startup) = offline_startup_players.as_ref() {
                 let startup_player_count = startup.startup_player_count();
@@ -77152,6 +77298,9 @@ impl GameApp {
                 self.engine.set_local_players([self.local_owner]);
             }
         }
+        if !prepared_go {
+            self.advance_scenario_loader(98, "Players initialized");
+        }
 
         self.sky = scenario_data.sky().map(sky_render_state_from_config);
         self.snapshot = self.engine.snapshot();
@@ -77284,6 +77433,9 @@ impl GameApp {
                 audio.set_scenario_music_level(Some(restored_music_level));
             }
         }
+        if !prepared_go {
+            self.advance_scenario_loader(99, "Final game initialization complete");
+        }
         self.status_text.clear();
         Ok(())
     }
@@ -77317,6 +77469,8 @@ impl GameApp {
             .apply_gamma_now(&self.snapshot.environment.gamma);
         self.refresh_object_menu();
         self.refresh_focus();
+        self.advance_scenario_loader(98, "Network final initialization complete");
+        self.advance_scenario_loader(99, "Runtime presentation initialized");
         Ok(())
     }
 
@@ -120811,7 +120965,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn accepted_loading_refresh_finishes_running_and_activation_failure_restores_menu() {
+    fn l021_accepted_loading_reaches_100_only_after_successful_activation() {
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated accepted-refresh user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -120870,6 +121024,15 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("accept refresh and activation");
         assert_eq!(success.mode, AppMode::Running);
         assert!(success.loading_state.is_none());
+        assert_eq!(
+            success
+                .loader_screen
+                .as_ref()
+                .expect("loader retained")
+                .state()
+                .progress(),
+            100
+        );
         assert!(success.active_global_gui_overrides.is_empty());
         assert_eq!(
             success
@@ -120914,6 +121077,16 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(failure.loading_state.is_none());
         assert!(failure.active_global_gui_overrides.is_empty());
         assert!(failure.status_text.contains("missing a filesystem path"));
+        assert!(
+            failure
+                .loader_screen
+                .as_ref()
+                .expect("failed loader retained")
+                .state()
+                .progress()
+                < 100,
+            "failed activation must not publish the terminal loader frame"
+        );
     }
 
     #[test]
@@ -125427,7 +125600,7 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn app_loader_raw_progress_log_and_resource_refresh_are_live() {
+    fn l021_app_loader_keeps_progress_monotonic_and_retains_phase_status() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -125465,15 +125638,10 @@ ScenInfoArea=70,5,25,90
             HashMap::new(),
             receiver,
         ));
-        sender
-            .send(ScenarioLoadingEvent::LoaderFrame {
-                progress: 42,
-                log: Some(vec!["Exact log-buffer line".to_string()]),
-            })
-            .expect("progress");
-        sender
-            .send(ScenarioLoadingEvent::RefreshResources)
-            .expect("refresh");
+        let mut reporter = ScenarioLoadingReporter::new(sender);
+        reporter.report(42, "Exact phase-status line");
+        reporter.report(40, "Definition metadata and sources collected");
+        reporter.send(ScenarioLoadingEvent::RefreshResources);
         app.poll_loading().expect("poll progress");
         let state = app.loader_screen.as_ref().expect("loader").state();
         assert_eq!(state.progress(), 42);
@@ -125481,8 +125649,84 @@ ScenInfoArea=70,5,25,90
         assert!(matches!(
             state.log(),
             lc_frontend::loader_screen::LoaderLog::Visible(lines)
-                if lines.last().map(String::as_str) == Some("Exact log-buffer line")
+                if lines.last().map(String::as_str)
+                    == Some("Definition metadata and sources collected")
         ));
+    }
+
+    #[test]
+    fn l021_real_legacy_worker_updates_live_loader_through_activation() {
+        let user_data = tempdir().expect("isolated legacy-loader user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        configure_test_startup_participant(&paths, user_data.path());
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Loader parity".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize legacy-loader app");
+        wait_for_menu(&mut app);
+        let scenario = resolve_next_mission_scenario(
+            &app.scenario_catalog,
+            "Tutorial.c4f/Tutorial01.c4s",
+        )
+        .expect("shipped legacy Tutorial01");
+        assert!(
+            scenario
+                .path
+                .as_ref()
+                .expect("scenario path")
+                .join("Scenario.txt")
+                .is_file()
+        );
+
+        app.start_scenario(scenario)
+            .expect("start asynchronous legacy scenario");
+        wait_for_running_with_attempts(&mut app, 2_400);
+
+        let state = app
+            .loader_screen
+            .as_ref()
+            .expect("retained live loader")
+            .state();
+        assert_eq!(state.progress(), 100);
+        let lc_frontend::loader_screen::LoaderLog::Visible(lines) = state.log() else {
+            panic!("worker phase status must make the live loader log visible");
+        };
+        let mut previous = None;
+        for expected in [
+            "Scenario manifest and components decoded",
+            "Definition metadata and sources collected",
+            "Scenario script sources loaded",
+            "Landscape data generated or decoded",
+            "Object records decoded",
+            "Players initialized",
+            "Scenario activation complete",
+        ] {
+            let index = lines
+                .iter()
+                .position(|line| line == expected)
+                .unwrap_or_else(|| {
+                    panic!("missing cumulative loader status `{expected}`: {lines:?}")
+                });
+            if let Some(previous) = previous {
+                assert!(index > previous, "loader status order regressed: {lines:?}");
+            }
+            previous = Some(index);
+        }
     }
 
     #[test]
@@ -148644,7 +148888,7 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn client_go_combines_scenario_once_after_scenario_and_dynamic_complete() {
+    fn l021_client_go_combines_scenario_once_and_defers_100_until_final_init() {
         // RetrieveScenario waits for Parameters.Scenario and ResDynamic, merges
         // them into Combined<client>.c4s, then waits for ordinary GameRes files.
         // It does not acknowledge GO until InitGame reaches FinalInit
@@ -148754,6 +148998,17 @@ ScenInfoArea=70,5,25,90
         .expect("write local material fallback");
 
         let mut app = new_menu_app(320, 200);
+        app.loader_screen = Some(
+            LoaderScreen::new(
+                LoaderSelection::startup("Loader.png").expect("synthetic loader selection"),
+                ImageData::new(1, 1, vec![0, 0, 0, 0xff]),
+                app.assets
+                    .loader_resources()
+                    .expect("synthetic loader resources"),
+                LoaderState::initial("Client start"),
+            )
+            .expect("synthetic client loader"),
+        );
         let (manager, event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
@@ -148920,6 +149175,14 @@ ScenInfoArea=70,5,25,90
         assert!(matches!(app.mode, AppMode::Loading));
         app.poll_loading().expect("finish client InitGame phase");
         assert!(matches!(app.mode, AppMode::Loading));
+        assert!(
+            app.loader_screen
+                .as_ref()
+                .expect("client loader retained through GO wait")
+                .state()
+                .progress()
+                < 100
+        );
         assert!(app.network_start_wait.is_none());
         let client_wait = app
             .message_dialogs
@@ -149006,6 +149269,14 @@ ScenInfoArea=70,5,25,90
         app.process_network_events()
             .expect("complete client Network.FinalInit");
         assert!(matches!(app.mode, AppMode::Running));
+        assert_eq!(
+            app.loader_screen
+                .as_ref()
+                .expect("client loader retained after final init")
+                .state()
+                .progress(),
+            100
+        );
         assert!(app.loading_state.is_none());
         assert!(app.network_control_running);
         assert!(app.message_dialogs.iter().all(|dialog| !matches!(
@@ -152999,6 +153270,8 @@ protected func InputCallback(string answer, int player)
             refresh_requested: false,
             receiver,
             finished: false,
+            last_progress: 0,
+            log: Vec::new(),
             prepared_go: Some(PreparedGoLoadingState {
                 status: lc_network::NetworkStatus {
                     state: lc_network::NETWORK_STATE_GO,
@@ -173961,6 +174234,8 @@ func ControlDig() { dig_count = 1; return(1); }
             refresh_requested: false,
             receiver,
             finished: false,
+            last_progress: 0,
+            log: Vec::new(),
             prepared_go: Some(PreparedGoLoadingState {
                 status: lc_network::NetworkStatus {
                     state: lc_network::NETWORK_STATE_GO,
