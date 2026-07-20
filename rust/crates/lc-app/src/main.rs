@@ -46485,16 +46485,20 @@ impl GameApp {
                         .map(|dialog| dialog.network().validate_ports())
                         .unwrap_or(Ok(()));
                     match validation {
-                        Ok(()) => self.close_options_menu(),
+                        Ok(()) => self.close_options_menu()?,
                         Err(NetworkValidationError::TcpReferenceConflict) => {
-                            self.show_options_network_validation_error(
-                                "The TCP port and reference server port must be different.",
-                            )?;
+                            let message = self.runtime_resource_text(
+                                "IDS_NET_ERR_PORT_TCPREF",
+                                "TCP port and reference port must be set to different values between 1 and 65535!",
+                            );
+                            self.show_options_network_validation_error(&message)?;
                         }
                         Err(NetworkValidationError::UdpDiscoveryConflict) => {
-                            self.show_options_network_validation_error(
-                                "The UDP port and discovery port must be different.",
-                            )?;
+                            let message = self.runtime_resource_text(
+                                "IDS_NET_ERR_PORT_UDPDISC",
+                                "UDP port and discovery port must be set to different values between 1 and 65535!",
+                            );
+                            self.show_options_network_validation_error(&message)?;
                         }
                     }
                 }
@@ -47004,10 +47008,11 @@ impl GameApp {
     }
 
     fn show_options_network_validation_error(&mut self, message: &str) -> Result<(), EngineError> {
+        let caption = self.runtime_resource_text("IDS_ERR_CONFIG", "Configuration error");
         self.push_message_dialog(
             lc_frontend::message_dialog::MessageDialogState::regular_ok(
                 message,
-                "Network configuration error",
+                caption,
                 lc_frontend::message_dialog::MessageDialogIcon::ERROR,
             ),
             MessageDialogContinuation::None,
@@ -50719,13 +50724,38 @@ impl GameApp {
         self.status_text.clear();
     }
 
-    fn close_options_menu(&mut self) {
+    fn close_options_menu(&mut self) -> Result<(), EngineError> {
         let save_result = self.persist_open_options_config();
-        if let Some(Err(error)) = save_result {
+        self.close_options_menu_with_persist_result(save_result)
+    }
+
+    fn close_options_menu_with_persist_result(
+        &mut self,
+        save_result: Option<io::Result<()>>,
+    ) -> Result<(), EngineError> {
+        let feedback_result = if let Some(Err(error)) = save_result {
             tracing::warn!(error = %error, "failed to save options dialog settings");
-        }
+            let error = error.to_string();
+            let message = format_resource_string(
+                self.runtime_resource_text(
+                    "IDS_ERR_CONFSAVE",
+                    "Could not save configuration: %s",
+                ),
+                &[&error],
+            );
+            let caption = self.runtime_resource_text("IDS_ERR_CONFIG", "Configuration error");
+            let dialog = lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                message,
+                caption,
+                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+            );
+            self.push_message_dialog(dialog, MessageDialogContinuation::None)
+        } else {
+            Ok(())
+        };
         self.begin_startup_dialog_fade(StartupDialog::MainMenu);
         self.show_main_menu();
+        feedback_result
     }
 
     fn show_main_menu(&mut self) {
@@ -106038,7 +106068,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
-        use lc_frontend::message_dialog::MessageDialogResult;
+        use lc_frontend::message_dialog::{MessageDialogIcon, MessageDialogResult};
         use lc_frontend::startup_options_dlg::OptionsDlgAction;
         use lc_frontend::startup_options_network::{NetworkCheckboxId, NetworkPortId};
 
@@ -106052,10 +106082,16 @@ ScenInfoArea=70,5,25,90
         app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
             .expect("show TCP/reference validation");
         assert_eq!(app.startup_view, StartupView::Options);
-        assert!(app
+        let tcp_error = app
             .message_dialogs
             .last()
-            .is_some_and(|dialog| dialog.state.message().contains("TCP port")));
+            .expect("TCP/reference validation dialog");
+        assert_eq!(tcp_error.state.caption(), "Configuration error");
+        assert_eq!(
+            tcp_error.state.message(),
+            "TCP port and reference port must be set to different values between 1 and 65535!"
+        );
+        assert_eq!(tcp_error.state.icon(), MessageDialogIcon::ERROR);
         app.finish_message_dialog(MessageDialogResult::Ok)
             .expect("dismiss TCP error");
 
@@ -106068,10 +106104,16 @@ ScenInfoArea=70,5,25,90
         app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
             .expect("show UDP/discovery validation");
         assert_eq!(app.startup_view, StartupView::Options);
-        assert!(app
+        let udp_error = app
             .message_dialogs
             .last()
-            .is_some_and(|dialog| dialog.state.message().contains("UDP port")));
+            .expect("UDP/discovery validation dialog");
+        assert_eq!(udp_error.state.caption(), "Configuration error");
+        assert_eq!(
+            udp_error.state.message(),
+            "UDP port and discovery port must be set to different values between 1 and 65535!"
+        );
+        assert_eq!(udp_error.state.icon(), MessageDialogIcon::ERROR);
         app.finish_message_dialog(MessageDialogResult::Ok)
             .expect("dismiss UDP error");
 
@@ -106104,6 +106146,32 @@ ScenInfoArea=70,5,25,90
         }])
         .expect("hidden alternate-server notice");
         assert!(app.message_dialogs.is_empty());
+    }
+
+    #[test]
+    fn options_close_reports_disk_write_failure() {
+        use lc_frontend::message_dialog::MessageDialogIcon;
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_options_menu();
+        app.close_options_menu_with_persist_result(Some(Err(io::Error::new(
+            io::ErrorKind::Other,
+            "simulated config write failure",
+        ))))
+        .expect("show config save failure and close Options");
+
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        let error = app
+            .message_dialogs
+            .last()
+            .expect("config save failure dialog remains above the main menu");
+        assert_eq!(error.state.caption(), "Configuration error");
+        assert_eq!(
+            error.state.message(),
+            "Could not save configuration: simulated config write failure"
+        );
+        assert_eq!(error.state.icon(), MessageDialogIcon::ERROR);
+        assert!(matches!(error.continuation, MessageDialogContinuation::None));
     }
 
     #[test]
