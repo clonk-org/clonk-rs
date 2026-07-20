@@ -84,7 +84,9 @@ use lc_app::{
     publish_initial_configured_client_players, resolve_client_game_resources,
     resolve_client_scenario_resources, snapshot_configured_client_player_selection,
 };
-use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
+use lc_audio::{
+    AudioError, AudioSystem, ChannelId, MusicHandle, ResamplingMode, SoundHandle,
+};
 use lc_core::{std_config::Config, std_markup::Markup};
 use lc_engine::command::CommandId;
 use lc_engine::player_file::PlayerFile;
@@ -8364,6 +8366,11 @@ impl AudioContext {
         let music_control = Arc::new(std::sync::Mutex::new(MusicControlState::new(
             options.music_volume,
         )));
+        let resampling_mode = if options.prefer_linear_resampling {
+            ResamplingMode::Linear
+        } else {
+            ResamplingMode::Default
+        };
         #[cfg(test)]
         let audio_resources_enabled = options.sound_enabled
             || options.music_enabled
@@ -8371,12 +8378,12 @@ impl AudioContext {
             || options.menu_sound_enabled;
         #[cfg(test)]
         let system = if audio_resources_enabled {
-            AudioSystem::new_null(options.max_channels)
+            AudioSystem::new_null_with_resampling(options.max_channels, resampling_mode)
         } else {
-            AudioSystem::new_deferred_null(options.max_channels)
+            AudioSystem::new_deferred_null_with_resampling(options.max_channels, resampling_mode)
         };
         #[cfg(not(test))]
-        let system = AudioSystem::new(options.max_channels)?;
+        let system = AudioSystem::new_with_resampling(options.max_channels, resampling_mode)?;
         #[cfg(test)]
         let (resolver, music_resolver) = if audio_resources_enabled {
             (SoundResolver::new(), MusicResolver::discover())
@@ -97438,6 +97445,17 @@ func Award()
         bytes
     }
 
+    #[test]
+    fn l040_audio_context_selects_configured_linear_resampling() {
+        let audio = AudioContext::try_new(AudioOptions {
+            prefer_linear_resampling: true,
+            ..AudioOptions::default()
+        })
+        .expect("audio context");
+
+        assert_eq!(audio.system.resampling_mode(), ResamplingMode::Linear);
+    }
+
     fn test_audio_context_with_sound(
         duration_ms: u32,
     ) -> (tempfile::TempDir, AudioContext, SimulationSnapshot) {
@@ -132131,6 +132149,7 @@ ScenInfoArea=70,5,25,90
             720,
             AudioOptions {
                 max_channels: 37,
+                prefer_linear_resampling: false,
                 sound_enabled: false,
                 music_enabled: true,
                 menu_music_enabled: false,

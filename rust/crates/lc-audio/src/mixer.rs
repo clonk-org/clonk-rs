@@ -39,6 +39,21 @@ pub enum AudioError {
     InvalidChannel,
 }
 
+/// Selects the sample-rate converter used when decoded audio does not match
+/// the output device. `Default` leaves the backend's established choice in
+/// place; `Linear` explicitly pins the inexpensive two-point interpolator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResamplingMode {
+    Default,
+    Linear,
+}
+
+impl Default for ResamplingMode {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
 /// Unloads the mixer sound when the last `SoundHandle` clone drops.
 struct SoundHandleInner {
     mixer: Arc<AudioMixer>,
@@ -116,22 +131,43 @@ enum Backend {
 
 impl AudioSystem {
     pub fn new(max_channels: usize) -> Result<Self, AudioError> {
+        Self::new_with_resampling(max_channels, ResamplingMode::Default)
+    }
+
+    pub fn new_with_resampling(
+        max_channels: usize,
+        resampling_mode: ResamplingMode,
+    ) -> Result<Self, AudioError> {
         #[cfg(feature = "cpal")]
-        if let Ok((mixer, backend)) = CpalBackend::try_new(max_channels) {
+        if let Ok((mixer, backend)) = CpalBackend::try_new(max_channels, resampling_mode) {
             return Ok(Self {
                 mixer,
                 _backend: Backend::Cpal(backend),
             });
         }
 
-        Ok(Self::new_null(max_channels))
+        Ok(Self::new_null_with_resampling(
+            max_channels,
+            resampling_mode,
+        ))
     }
 
     /// Construct the same live mixer state without opening a platform audio
     /// device. The null backend advances playback in real time, making it
     /// suitable for deterministic tests and headless embedding.
     pub fn new_null(max_channels: usize) -> Self {
-        let mixer = Arc::new(AudioMixer::new(44_100, max_channels));
+        Self::new_null_with_resampling(max_channels, ResamplingMode::Default)
+    }
+
+    pub fn new_null_with_resampling(
+        max_channels: usize,
+        resampling_mode: ResamplingMode,
+    ) -> Self {
+        let mixer = Arc::new(AudioMixer::new_with_resampling(
+            44_100,
+            max_channels,
+            resampling_mode,
+        ));
         let backend = NullBackend::new(mixer.clone());
         Self {
             mixer,
@@ -144,7 +180,18 @@ impl AudioSystem {
     /// backend is dormant, and later playback has the same behavior as
     /// [`Self::new_null`].
     pub fn new_deferred_null(max_channels: usize) -> Self {
-        let mixer = Arc::new(AudioMixer::new(44_100, max_channels));
+        Self::new_deferred_null_with_resampling(max_channels, ResamplingMode::Default)
+    }
+
+    pub fn new_deferred_null_with_resampling(
+        max_channels: usize,
+        resampling_mode: ResamplingMode,
+    ) -> Self {
+        let mixer = Arc::new(AudioMixer::new_with_resampling(
+            44_100,
+            max_channels,
+            resampling_mode,
+        ));
         let backend = Arc::new(DeferredNullBackend::new(mixer.clone()));
         Self {
             mixer,
@@ -235,6 +282,10 @@ impl AudioSystem {
     pub fn mixer(&self) -> &Arc<AudioMixer> {
         &self.mixer
     }
+
+    pub fn resampling_mode(&self) -> ResamplingMode {
+        self.mixer.resampling_mode
+    }
 }
 
 #[cfg(feature = "cpal")]
@@ -279,7 +330,10 @@ fn cpal_output_format_priority(format: cpal::SampleFormat) -> Option<u8> {
 
 #[cfg(feature = "cpal")]
 impl CpalBackend {
-    fn try_new(max_channels: usize) -> Result<(Arc<AudioMixer>, Self), AudioError> {
+    fn try_new(
+        max_channels: usize,
+        resampling_mode: ResamplingMode,
+    ) -> Result<(Arc<AudioMixer>, Self), AudioError> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
         let host = cpal::default_host();
@@ -298,7 +352,11 @@ impl CpalBackend {
         let sample_format = config.sample_format();
         let stream_config = config.config();
 
-        let mixer = Arc::new(AudioMixer::new(sample_rate, max_channels));
+        let mixer = Arc::new(AudioMixer::new_with_resampling(
+            sample_rate,
+            max_channels,
+            resampling_mode,
+        ));
         let mix_i16 = mixer.clone();
         let mix_f32 = mixer.clone();
         let mix_u16 = mixer.clone();
@@ -448,6 +506,7 @@ pub struct AudioMixer {
     state: Arc<Mutex<MixerState>>,
     channel_finished: Arc<RwLock<Option<ChannelFinished>>>,
     sample_rate: u32,
+    resampling_mode: ResamplingMode,
 }
 
 struct MixerState {
@@ -506,6 +565,14 @@ unsafe impl Sync for ChannelFinished {}
 
 impl AudioMixer {
     pub fn new(sample_rate: u32, max_channels: usize) -> Self {
+        Self::new_with_resampling(sample_rate, max_channels, ResamplingMode::Default)
+    }
+
+    pub(crate) fn new_with_resampling(
+        sample_rate: u32,
+        max_channels: usize,
+        resampling_mode: ResamplingMode,
+    ) -> Self {
         let state = MixerState {
             sounds: HashMap::new(),
             music: HashMap::new(),
@@ -519,6 +586,7 @@ impl AudioMixer {
             state: Arc::new(Mutex::new(state)),
             channel_finished: Arc::new(RwLock::new(None)),
             sample_rate,
+            resampling_mode,
         }
     }
 
@@ -738,7 +806,12 @@ impl AudioMixer {
         let frames = if decoded.sample_rate == self.sample_rate || decoded.sample_rate == 0 {
             decoded.frames
         } else {
-            resample_frames(&decoded.frames, decoded.sample_rate, self.sample_rate)
+            resample_frames(
+                &decoded.frames,
+                decoded.sample_rate,
+                self.sample_rate,
+                self.resampling_mode,
+            )
         };
         Arc::new(AudioClip {
             frames: Arc::new(frames),
@@ -939,7 +1012,26 @@ impl ChannelPlayback {
     }
 }
 
-fn resample_frames(frames: &[[f32; 2]], source_rate: u32, target_rate: u32) -> Vec<[f32; 2]> {
+fn resample_frames(
+    frames: &[[f32; 2]],
+    source_rate: u32,
+    target_rate: u32,
+    mode: ResamplingMode,
+) -> Vec<[f32; 2]> {
+    match mode {
+        // The Rust backend's established converter is currently linear. Keep
+        // that backend default separate from the explicit selection so its
+        // quality can change without changing PreferLinearResampling=true.
+        ResamplingMode::Default => resample_frames_linear(frames, source_rate, target_rate),
+        ResamplingMode::Linear => resample_frames_linear(frames, source_rate, target_rate),
+    }
+}
+
+fn resample_frames_linear(
+    frames: &[[f32; 2]],
+    source_rate: u32,
+    target_rate: u32,
+) -> Vec<[f32; 2]> {
     if target_rate == 0 || source_rate == 0 || source_rate == target_rate {
         return frames.to_vec();
     }
@@ -991,6 +1083,24 @@ mod tests {
             }
         }
         cursor.into_inner()
+    }
+
+    #[test]
+    fn l040_explicit_linear_resampling_mode_uses_linear_interpolation() {
+        let frames = [[0.0, 0.0], [1.0, -1.0]];
+
+        assert_eq!(
+            resample_frames(&frames, 2, 4, ResamplingMode::Linear),
+            vec![[0.0, 0.0], [0.5, -0.5], [1.0, -1.0], [1.0, -1.0]]
+        );
+        assert_eq!(
+            AudioSystem::new_null_with_resampling(1, ResamplingMode::Linear).resampling_mode(),
+            ResamplingMode::Linear
+        );
+        assert_eq!(
+            AudioSystem::new_null(1).resampling_mode(),
+            ResamplingMode::Default
+        );
     }
 
     fn rms(samples: &[f32]) -> f64 {

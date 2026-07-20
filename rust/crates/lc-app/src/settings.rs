@@ -12,6 +12,7 @@ const MIN_RESOLUTION: u32 = 1;
 #[derive(Debug, Clone)]
 pub struct AudioOptions {
     pub max_channels: usize,
+    pub prefer_linear_resampling: bool,
     pub sound_enabled: bool,
     pub music_enabled: bool,
     pub menu_music_enabled: bool,
@@ -26,6 +27,7 @@ impl Default for AudioOptions {
     fn default() -> Self {
         Self {
             max_channels: DEFAULT_MAX_CHANNELS,
+            prefer_linear_resampling: false,
             sound_enabled: true,
             music_enabled: true,
             menu_music_enabled: true,
@@ -87,6 +89,12 @@ impl AudioOptions {
         if let Some(raw) = config.get_in(Some("Sound"), "MuteSoundCommand") {
             if let Some(parsed) = parse_bool(raw) {
                 self.mute_sound_command = parsed;
+            }
+        }
+
+        if let Some(raw) = config.get_in(Some("Sound"), "PreferLinearResampling") {
+            if let Some(parsed) = parse_bool(raw) {
+                self.prefer_linear_resampling = parsed;
             }
         }
 
@@ -231,6 +239,17 @@ mod tests {
     }
 
     #[test]
+    fn l040_audio_options_read_prefer_linear_resampling() {
+        let mut config = Config::new();
+        config.set_in(Some("Sound"), "PreferLinearResampling", "true");
+        let mut options = AudioOptions::default();
+
+        options.apply_config(&config);
+
+        assert!(options.prefer_linear_resampling);
+    }
+
+    #[test]
     fn audio_options_load_sound_command_mute_without_owning_its_persistence() {
         let mut config = Config::new();
         config.set_in(Some("Sound"), "MuteSoundCommand", "true");
@@ -261,6 +280,7 @@ mod tests {
         config.set_in(Some("General"), "Unrelated", "also-keep-me");
         let options = AudioOptions {
             max_channels: 999,
+            prefer_linear_resampling: true,
             sound_enabled: false,
             music_enabled: true,
             menu_music_enabled: false,
