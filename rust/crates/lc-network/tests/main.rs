@@ -9,6 +9,7 @@ mod initial_network_dynamic;
 mod initial_network_metadata;
 mod initial_network_parameters;
 mod legacy_control_cpp_diff;
+mod live_network_dynamic;
 mod local_resource_resolution;
 mod resource_file_store;
 mod resource_transfer_backend;

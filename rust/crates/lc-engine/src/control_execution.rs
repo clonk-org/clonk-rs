@@ -3050,6 +3050,34 @@ pub fn resolve_remote_embedded_player_data(
     join: &JoinPlayerControlData,
     info: &ControlPlayerInfoEntry,
 ) -> Result<RemoteEmbeddedPlayerData, ResolveRemoteEmbeddedPlayerDataError> {
+    resolve_remote_embedded_player_data_with_resolution(join, info, None)
+}
+
+/// Resolve a runtime-save player group against the already-loaded scenario's
+/// shared Strings.txt IDs and live object numbers. C++ denumerates these
+/// player values only after the scenario objects exist.
+pub fn resolve_remote_embedded_player_data_with_engine(
+    engine: &crate::Engine,
+    join: &JoinPlayerControlData,
+    info: &ControlPlayerInfoEntry,
+) -> Result<RemoteEmbeddedPlayerData, ResolveRemoteEmbeddedPlayerDataError> {
+    let resolution = crate::player_file::PersistedC4ValueResolution {
+        strings: engine.legacy_string_table_snapshot(),
+        object_numbers: engine
+            .objects
+            .iter()
+            .filter(|object| object.state.status != crate::ObjectStatus::Deleted)
+            .map(|object| object.id.as_u64())
+            .collect(),
+    };
+    resolve_remote_embedded_player_data_with_resolution(join, info, Some(&resolution))
+}
+
+fn resolve_remote_embedded_player_data_with_resolution(
+    join: &JoinPlayerControlData,
+    info: &ControlPlayerInfoEntry,
+    resolution: Option<&crate::player_file::PersistedC4ValueResolution>,
+) -> Result<RemoteEmbeddedPlayerData, ResolveRemoteEmbeddedPlayerDataError> {
     let JoinPlayerSource::Embedded(data) = &join.source else {
         return Err(ResolveRemoteEmbeddedPlayerDataError::ResourceBacked { info_id: info.id });
     };
@@ -3065,7 +3093,16 @@ pub fn resolve_remote_embedded_player_data(
         );
     }
     let label = std::path::PathBuf::from(join.filename.to_string_lossy().into_owned());
-    PlayerFile::load_from_bytes(label, data.clone())
+    let loaded = match resolution {
+        Some(resolution) => PlayerFile::load_from_bytes_with_portraits_and_value_resolution(
+            label,
+            data.clone(),
+            false,
+            resolution,
+        ),
+        None => PlayerFile::load_from_bytes_with_portraits(label, data.clone(), false),
+    };
+    loaded
         .map(RemoteEmbeddedPlayerData::PlayerFile)
         .map_err(
             |source| ResolveRemoteEmbeddedPlayerDataError::PlayerDataLoad {
@@ -7231,6 +7268,7 @@ mod tests {
             portraits: Default::default(),
         }];
         let file = PlayerFile {
+            info_core: Default::default(),
             name: "File Tyler".to_string(),
             score: 250,
             rounds: 11,

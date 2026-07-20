@@ -15,6 +15,8 @@ use crate::prepared_host_bootstrap::{
 pub struct NetworkHostPreparation {
     pub scenario_path: PathBuf,
     pub install_roots: Vec<PathBuf>,
+    pub definition_executable_path: String,
+    pub definition_path: String,
     pub languages: Vec<String>,
     pub language_packs: LanguagePacks,
     pub network_work_path: String,
@@ -44,6 +46,8 @@ impl NetworkHostPreparation {
             PreparedHostBootstrapSpec {
                 scenario_path: &self.scenario_path,
                 install_roots: &self.install_roots,
+                definition_executable_path: &self.definition_executable_path,
+                definition_path: &self.definition_path,
                 languages: &self.languages,
                 language_packs: &self.language_packs,
                 network_work_path: &self.network_work_path,

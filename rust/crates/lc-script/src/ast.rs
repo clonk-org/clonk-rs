@@ -35,6 +35,9 @@ pub struct VarDecl {
 pub struct Script {
     pub functions: Vec<Function>,
     pub var_decls: Vec<VarDecl>,    // Script-wide local/static declarations
+    /// Decoded literals in tokenizer order, retained for C4StringTable
+    /// registration independently of function-map iteration order.
+    pub string_literals: Vec<String>,
     pub includes: Vec<String>,      // List of included definition IDs
     /// `#appendto` targets (C++ `C4AulScript::Appends`, a LIST —
     /// C4AulParse.cpp:1485; scripts may carry several).
@@ -48,6 +51,7 @@ impl Script {
         Self {
             functions,
             var_decls: Vec::new(),
+            string_literals: Vec::new(),
             includes: Vec::new(),
             appends: Vec::new(),
             strict_level: None,
@@ -57,6 +61,7 @@ impl Script {
     pub fn with_directives(
         functions: Vec<Function>,
         var_decls: Vec<VarDecl>,
+        string_literals: Vec<String>,
         includes: Vec<String>,
         appends: Vec<AppendTo>,
         strict_level: Option<u8>,
@@ -64,6 +69,7 @@ impl Script {
         Self {
             functions,
             var_decls,
+            string_literals,
             includes,
             appends,
             strict_level,

@@ -139,7 +139,11 @@ fn lc_value_to_rust(value: &LcScriptValue) -> Result<Value, ()> {
     match value.kind {
         LcScriptValueKind::Nil => Ok(Value::Nil),
         LcScriptValueKind::Int => Ok(Value::Int(value.int_value)),
-        LcScriptValueKind::Bool => Ok(Value::Bool(value.bool_value)),
+        LcScriptValueKind::Bool => Ok(if value.object_id_value != 0 {
+            Value::from_c4_bool_data_raw(value.object_id_value as usize)
+        } else {
+            Value::Bool(value.bool_value)
+        }),
         LcScriptValueKind::String => {
             if value.string_value.is_null() {
                 return Err(());
@@ -200,6 +204,13 @@ fn rust_value_to_lc(value: &Value) -> LcScriptValue {
         Value::Bool(b) => LcScriptValue {
             kind: LcScriptValueKind::Bool,
             bool_value: *b,
+            ..LcScriptValue::default()
+        },
+        Value::RawBool(raw) => LcScriptValue {
+            kind: LcScriptValueKind::Bool,
+            int_value: *raw as u32 as i32,
+            bool_value: *raw != 0,
+            object_id_value: *raw as u64,
             ..LcScriptValue::default()
         },
         Value::String(s) => match CString::new(native_c_string_prefix(c4_string_bytes(s))) {

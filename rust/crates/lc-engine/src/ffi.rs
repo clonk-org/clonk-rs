@@ -695,6 +695,10 @@ impl RuntimeHandle {
                 }
             }
         };
+        let retained_player_info_core = file
+            .as_ref()
+            .map(crate::player_file::PlayerFile::exact_info_core)
+            .unwrap_or_default();
         // StartupPlayerCount: the number of players at game start
         // (C4GameParameters); approximated by the infos seen so far.
         let startup_player_count = self.player_infos.len().max(1) as i32;
@@ -772,17 +776,17 @@ impl RuntimeHandle {
                 auto_context_menu,
             }
         };
-        let outcome = match info.as_ref() {
-            Some(info) => self.engine.join_player_at_client_with_info(
+        let outcome = self
+            .engine
+            .join_player_with_profile_core(
                 config,
                 crate::PlayerAtClient::new(join.at_client),
-                info,
-            ),
-            None => self
-                .engine
-                .join_player_at_client(config, crate::PlayerAtClient::new(join.at_client)),
-        }
-        .map_err(|error| format!("join failed: {error}"))?;
+                "Local",
+                info.as_ref(),
+                crate::PlayerRuntimeControl::NONE,
+                retained_player_info_core,
+            )
+            .map_err(|error| format!("join failed: {error}"))?;
         if let Some(info) = self.player_infos.get_mut(&join.info_id) {
             // C4PlayerInfo::SetJoined only ORs Joined; a malformed/reused
             // Removed history entry keeps its other synchronized flags.

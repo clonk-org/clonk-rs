@@ -1197,6 +1197,7 @@ fn paths_identify_same_item(left: &Path, right: &Path) -> bool {
 }
 
 fn rewrite_player_core(original: Option<&[u8]>, player: &PlayerFile, comment: &str) -> Vec<u8> {
+    let exact_core = player.exact_info_core();
     let line_value = |value: &str| {
         value
             .chars()
@@ -1223,14 +1224,14 @@ fn rewrite_player_core(original: Option<&[u8]>, player: &PlayerFile, comment: &s
         ("ColorDw", (player.pref_color_dw & 0x00ff_ffff).to_string()),
         ("Position", player.pref_position.to_string()),
         ("Control", player.pref_control.to_string()),
-        ("Mouse", i32::from(player.pref_mouse).to_string()),
+        ("Mouse", exact_core.pref_mouse_value.to_string()),
         (
             "AutoStopControl",
-            i32::from(player.pref_control_style).to_string(),
+            exact_core.pref_control_style_value.to_string(),
         ),
         (
             "AutoContextMenu",
-            i32::from(player.pref_auto_context_menu).to_string(),
+            exact_core.pref_auto_context_menu_value.to_string(),
         ),
     ];
     let source = original
@@ -2006,6 +2007,36 @@ mod tests {
         assert_eq!(players[0].render_model.comment, "I'm new.");
         assert_eq!(players[0].render_model.portrait, Some(portrait));
         assert_eq!(players[0].render_model.big_icon, Some(icon));
+    }
+
+    #[test]
+    fn player_core_rewrite_preserves_noncanonical_integer_preferences() {
+        let player = PlayerFile {
+            info_core: lc_engine::player_file::PlayerInfoCoreState {
+                pref_mouse: true,
+                pref_mouse_value: 7,
+                pref_control_style: true,
+                pref_control_style_value: 2,
+                pref_auto_context_menu: true,
+                pref_auto_context_menu_value: -2,
+                ..lc_engine::player_file::PlayerInfoCoreState::default()
+            },
+            pref_mouse: true,
+            pref_control_style: true,
+            pref_auto_context_menu: true,
+            ..PlayerFile::default()
+        };
+
+        let rewritten = rewrite_player_core(None, &player, "");
+        for expected in [
+            b"Mouse=7\n".as_slice(),
+            b"AutoStopControl=2\n",
+            b"AutoContextMenu=-2\n",
+        ] {
+            assert!(rewritten
+                .windows(expected.len())
+                .any(|window| window == expected));
+        }
     }
 
     #[test]

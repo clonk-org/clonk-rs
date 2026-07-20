@@ -23,6 +23,7 @@ mod league;
 mod league_stream;
 mod league_round_results_packet;
 mod legacy;
+mod live_network_dynamic;
 mod lobby;
 mod local_resource_resolution;
 mod name_validation;
@@ -158,6 +159,10 @@ pub use league_round_results_packet::{
     decode_league_round_results_payload, encode_league_round_results_payload,
     LeagueRoundPlayerStatus, LeagueRoundResultsDecodeError, LeagueRoundResultsEncodeError,
     LeagueRoundResultsPacket, LeagueRoundResultsPlayer, PID_LEAGUE_ROUND_RESULTS,
+};
+pub use live_network_dynamic::{
+    compose_live_network_dynamic, LiveNetworkDynamic, LiveNetworkDynamicComponent,
+    LiveNetworkDynamicEntry, LiveNetworkDynamicError, LiveNetworkDynamicSpec,
 };
 pub use legacy::{
     aggregate_ready_batch, decode_control_entry_payload, decode_control_entry_prefix,

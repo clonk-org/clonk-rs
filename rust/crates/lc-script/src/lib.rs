@@ -13,9 +13,12 @@ pub use crate::debugger::DebuggerHooks;
 pub use crate::ast::{AppendTo, Function, TypeAnnotation};
 pub use crate::ast::{VarDecl, VarDeclKind};
 pub use crate::engine::{
-    new_global_slots, new_global_variables, register_global_declarations, Engine, GlobalSlots,
-    GlobalVariables, MethodReferenceDispatch, Script, ScriptFunctionResolution,
-    ScriptFunctionScope,
+    c4_string_registration_order, enumerate_c4_strings, new_global_slots, new_global_variables,
+    new_string_registrations, register_c4_literal_string, register_c4_string,
+    register_c4_value_strings, register_global_declarations, register_loaded_c4_string,
+    save_current_c4_string_enumeration, Engine, GlobalSlots, GlobalVariables,
+    MethodReferenceDispatch, Script, ScriptFunctionResolution, ScriptFunctionScope,
+    StringRegistrationLedger, StringRegistrations,
 };
 pub use crate::vm::{
     caller_host_identity, caller_is_temporary_script, caller_origin_strictness, caller_strictness,

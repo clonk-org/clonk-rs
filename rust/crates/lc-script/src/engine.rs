@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use indexmap::IndexMap;
+
 use crate::ast::{Function, Script as AstScript, VarDecl};
 use crate::debugger::DebuggerHooks;
 use crate::error::{ParseError, RuntimeError, ScriptError};
@@ -59,7 +61,7 @@ pub type GlobalCallContextHook = Arc<dyn Fn(bool) + Send + Sync>;
 /// C4AulScriptEngine::GlobalNamed): one shared table across every script
 /// host. Values live in cells so lvalues (x = .., x++, ...) write through.
 pub type GlobalVariables =
-    std::rc::Rc<std::cell::RefCell<HashMap<String, crate::vm::ValueCell>>>;
+    std::rc::Rc<std::cell::RefCell<IndexMap<String, crate::vm::ValueCell>>>;
 
 /// The engine-global numbered-variable table (`C4AulScriptEngine::Global`).
 /// It is separate from [`GlobalVariables`] because numeric slots and declared
@@ -74,7 +76,257 @@ pub type GlobalSlots =
 pub type LocalCellHook = std::rc::Rc<dyn Fn(&Value, &str) -> Option<crate::vm::ValueCell>>;
 
 pub fn new_global_variables() -> GlobalVariables {
-    std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()))
+    std::rc::Rc::new(std::cell::RefCell::new(IndexMap::new()))
+}
+
+/// One process-global `C4StringTable` registration ledger.
+///
+/// Native strings retain their previous `iEnumID` until the next explicit
+/// `EnumStrings` call. Scenario-section saves observe that old enumeration
+/// before object serialization assigns a new one, so registration order alone
+/// is not enough to reproduce their `Strings.txt` payload.
+#[derive(Clone, Debug, Default)]
+pub struct StringRegistrationLedger {
+    entries: Vec<StringRegistration>,
+}
+
+#[derive(Clone, Debug)]
+struct StringRegistration {
+    value: String,
+    /// Parser-owned strings survive with zero value references (`Hold`).
+    held: bool,
+    /// Strings created by `C4StringTable::Load` survive with zero references.
+    loaded: bool,
+    /// The value last assigned by `C4StringTable::EnumStrings`/`Load`.
+    enum_id: Option<i32>,
+}
+
+/// Registration/enumeration state shared by every script host in one game.
+pub type StringRegistrations =
+    std::rc::Rc<std::cell::RefCell<StringRegistrationLedger>>;
+
+fn c4_string_table_prefix(bytes: &[u8]) -> &[u8] {
+    // C4StringTable::{FindString,FindSaveString} use SEqual on `getData()`.
+    // This is intentionally narrower than C4Value string equality, which is
+    // length-aware through StdStrBuf::operator==.
+    &bytes[..bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len())]
+}
+
+fn c4_string_table_values_equal(left: &str, right: &str) -> bool {
+    let left = crate::value::c4_string_bytes(left);
+    let right = crate::value::c4_string_bytes(right);
+    c4_string_table_prefix(&left) == c4_string_table_prefix(&right)
+}
+
+fn c4_string_table_bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    c4_string_table_prefix(left) == c4_string_table_prefix(right)
+}
+
+pub fn new_string_registrations() -> StringRegistrations {
+    std::rc::Rc::new(std::cell::RefCell::new(StringRegistrationLedger::default()))
+}
+
+pub fn register_c4_string(
+    registrations: &std::cell::RefCell<StringRegistrationLedger>,
+    value: &str,
+) {
+    let mut registrations = registrations.borrow_mut();
+    if registrations
+        .entries
+        .iter()
+        .any(|candidate| crate::value::c4_strings_equal(&candidate.value, value))
+    {
+        return;
+    }
+    registrations.entries.push(StringRegistration {
+        value: value.to_owned(),
+        held: false,
+        loaded: false,
+        enum_id: None,
+    });
+}
+
+/// Register a parser-owned string. `C4AulParse` reuses the first equal table
+/// entry and sets its `Hold` flag rather than constructing a duplicate.
+pub fn register_c4_literal_string(
+    registrations: &std::cell::RefCell<StringRegistrationLedger>,
+    value: &str,
+) {
+    let mut registrations = registrations.borrow_mut();
+    if let Some(existing) = registrations
+        .entries
+        .iter_mut()
+        .find(|candidate| c4_string_table_values_equal(&candidate.value, value))
+    {
+        existing.held = true;
+        return;
+    }
+    registrations.entries.push(StringRegistration {
+        value: value.to_owned(),
+        held: true,
+        loaded: false,
+        enum_id: None,
+    });
+}
+
+/// Merge one `Strings.txt` line exactly as `C4StringTable::Load`: equal text
+/// reuses the existing registration and a repeated line overwrites its old ID.
+pub fn register_loaded_c4_string(
+    registrations: &std::cell::RefCell<StringRegistrationLedger>,
+    enum_id: i32,
+    value: &str,
+) {
+    let mut registrations = registrations.borrow_mut();
+    if let Some(existing) = registrations
+        .entries
+        .iter_mut()
+        .find(|candidate| c4_string_table_values_equal(&candidate.value, value))
+    {
+        existing.enum_id = Some(enum_id);
+        return;
+    }
+    registrations.entries.push(StringRegistration {
+        value: value.to_owned(),
+        held: false,
+        loaded: true,
+        enum_id: Some(enum_id),
+    });
+}
+
+/// Snapshot current table order for diagnostics and compatibility callers.
+pub fn c4_string_registration_order(
+    registrations: &std::cell::RefCell<StringRegistrationLedger>,
+) -> Vec<String> {
+    registrations
+        .borrow()
+        .entries
+        .iter()
+        .map(|entry| entry.value.clone())
+        .collect()
+}
+
+fn c4_string_is_referenced(value: &str, referenced: &[Vec<u8>]) -> bool {
+    let bytes = crate::value::c4_string_bytes(value);
+    referenced.iter().any(|candidate| candidate == &bytes)
+}
+
+/// Bytes emitted by `C4StringTable::Save` *without* enumerating first.
+///
+/// This is the native section-switch boundary: stale/non-negative enum IDs
+/// decide eligibility, while output still follows linked-list registration
+/// order. Dead runtime registrations do not participate in `FindSaveString`.
+pub fn save_current_c4_string_enumeration(
+    registrations: &std::cell::RefCell<StringRegistrationLedger>,
+    referenced: &[Vec<u8>],
+) -> Vec<Vec<u8>> {
+    let registrations = registrations.borrow();
+    let mut first_live = Vec::<Vec<u8>>::new();
+    let mut saved = Vec::new();
+    for entry in &registrations.entries {
+        let live = entry.loaded || c4_string_is_referenced(&entry.value, referenced);
+        if !live {
+            continue;
+        }
+        let bytes = crate::value::c4_string_bytes(&entry.value);
+        if first_live
+            .iter()
+            .any(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
+        {
+            continue;
+        }
+        first_live.push(bytes.clone());
+        if entry.enum_id.is_some() {
+            saved.push(bytes);
+        }
+    }
+    saved
+}
+
+/// Execute `C4StringTable::EnumStrings` and return values in their assigned-ID
+/// order. Unreferenced non-held runtime registrations are removed, so a later
+/// reconstruction of the same text appends after registrations that survived
+/// the death boundary.
+pub fn enumerate_c4_strings(
+    registrations: &std::cell::RefCell<StringRegistrationLedger>,
+    referenced: &[Vec<u8>],
+) -> Vec<Vec<u8>> {
+    let mut registrations = registrations.borrow_mut();
+
+    // Every live C4Value string necessarily owns a registration. Values may
+    // enter Rust engine state without passing through the VM, so recover such
+    // registrations at this same enumeration boundary in traversal order.
+    for bytes in referenced {
+        if registrations.entries.iter().any(|entry| {
+            crate::value::c4_string_bytes(&entry.value) == *bytes
+        }) {
+            continue;
+        }
+        registrations.entries.push(StringRegistration {
+            value: crate::value::c4_string_from_bytes(bytes),
+            held: false,
+            loaded: false,
+            enum_id: None,
+        });
+    }
+
+    let mut values = Vec::<Vec<u8>>::new();
+    let mut next_id = 0_i32;
+    for entry in &mut registrations.entries {
+        let live = entry.loaded || c4_string_is_referenced(&entry.value, referenced);
+        if !live {
+            entry.enum_id = None;
+            continue;
+        }
+        let bytes = crate::value::c4_string_bytes(&entry.value);
+        let enum_id = if let Some(index) = values
+            .iter()
+            .position(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
+        {
+            i32::try_from(index).unwrap_or(i32::MAX)
+        } else {
+            let enum_id = next_id;
+            next_id = next_id.saturating_add(1);
+            values.push(bytes);
+            enum_id
+        };
+        entry.enum_id = Some(enum_id);
+    }
+    registrations.entries.retain(|entry| {
+        entry.enum_id.is_some() || entry.held || entry.loaded
+    });
+    values
+}
+
+/// Register every string owned by a C4Value in construction/traversal order.
+/// The VM invokes this as expressions materialize; embedders also use it for
+/// values entering synchronized state without passing through the VM.
+pub fn register_c4_value_strings(
+    registrations: &std::cell::RefCell<StringRegistrationLedger>,
+    value: &Value,
+) {
+    match value {
+        Value::String(value) => register_c4_string(registrations, value),
+        Value::Array(values) => {
+            for value in values {
+                register_c4_value_strings(registrations, value);
+            }
+        }
+        Value::Proplist(values) => {
+            for (key, value) in values {
+                register_c4_value_strings(registrations, key);
+                register_c4_value_strings(registrations, value);
+            }
+        }
+        Value::Int(_)
+        | Value::Bool(_)
+        | Value::RawBool(_)
+        | Value::C4Id(_)
+        | Value::Object(_)
+        | Value::Nil => {}
+    }
 }
 
 pub fn new_global_slots() -> GlobalSlots {
@@ -144,6 +396,7 @@ pub struct Script {
     appends: Vec<crate::ast::AppendTo>,
     strict_level: Option<u8>,
     var_decls: Vec<VarDecl>, // Script-level variable declarations
+    string_literals: Vec<String>,
     parse_diagnostics: Vec<ParseError>,
 }
 
@@ -200,6 +453,7 @@ impl Script {
             appends: ast.appends,
             strict_level: ast.strict_level,
             var_decls: ast.var_decls,
+            string_literals: ast.string_literals,
             parse_diagnostics,
         }
     }
@@ -295,6 +549,11 @@ pub struct Engine {
     globals_consts: Option<GlobalVariables>,
     /// Cross-object LocalN cell supplier (see [`LocalCellHook`]).
     local_cell_hook: Option<LocalCellHook>,
+    /// Shared engine-global C4StringTable registration ledger.
+    string_registrations: Option<StringRegistrations>,
+    /// Literals retained by scripts already installed in this host. This lets
+    /// a late-attached game ledger recover the native link order.
+    string_literals: Vec<String>,
 }
 
 /// Ownership scope of a resolved script function. A global function is
@@ -338,6 +597,8 @@ impl Engine {
             globals_numbered: Some(new_global_slots()),
             globals_consts: None,
             local_cell_hook: None,
+            string_registrations: None,
+            string_literals: Vec::new(),
         }
     }
 
@@ -385,6 +646,12 @@ impl Engine {
     }
 
     pub fn add_script(&mut self, mut script: Script) {
+        if let Some(registrations) = &self.string_registrations {
+            for literal in &script.string_literals {
+                register_c4_literal_string(registrations, literal);
+            }
+        }
+        self.string_literals.extend(script.string_literals.iter().cloned());
         for function in script.functions.values_mut() {
             function.bind_source_host(self.host_identity);
             function.bind_global_link_host(self.host_identity);
@@ -430,6 +697,12 @@ impl Engine {
     /// declarations, even when registration is skipped because a relink is
     /// rebuilding an otherwise unchanged host.
     pub fn replace_script(&mut self, mut script: Script, register_declarations: bool) {
+        if let Some(registrations) = &self.string_registrations {
+            for literal in &script.string_literals {
+                register_c4_literal_string(registrations, literal);
+            }
+        }
+        self.string_literals.clone_from(&script.string_literals);
         for function in script.functions.values_mut() {
             function.bind_source_host(self.host_identity);
             function.bind_global_link_host(self.host_identity);
@@ -664,6 +937,16 @@ impl Engine {
         self.globals_consts = Some(table);
     }
 
+    /// Attach the game-global C4StringTable registration ledger. Existing
+    /// parsed literals are registered immediately; later scripts register as
+    /// they are installed and runtime values register through the VM.
+    pub fn set_string_registrations(&mut self, registrations: StringRegistrations) {
+        for literal in &self.string_literals {
+            register_c4_literal_string(&registrations, literal);
+        }
+        self.string_registrations = Some(registrations);
+    }
+
     /// Moves `static` declarations that were compiled BEFORE the table was
     /// attached out of the per-object locals and into the shared table
     /// (existing values persist).
@@ -713,7 +996,8 @@ impl Engine {
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref());
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref());
         vm.call(name, args).map_err(ScriptError::from)
     }
 
@@ -745,7 +1029,8 @@ impl Engine {
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref());
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref());
         let cells: Vec<crate::vm::ValueCell> =
             args.iter().cloned().map(crate::vm::value_cell).collect();
         let call_args = cells
@@ -784,7 +1069,8 @@ impl Engine {
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref());
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref());
         let cells: Vec<crate::vm::ValueCell> =
             args.iter().cloned().map(crate::vm::value_cell).collect();
         let call_args = cells
@@ -826,7 +1112,8 @@ impl Engine {
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref());
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref());
         let vm = if engine_global {
             vm.with_exact_global_link_lookup()
         } else {
@@ -877,6 +1164,7 @@ impl Engine {
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref())
         .with_this(this);
         let vm = if engine_global {
             vm.with_exact_global_link_lookup()
@@ -912,7 +1200,8 @@ impl Engine {
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
-        .with_local_cell_hook(self.local_cell_hook.as_ref());
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref());
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
     }
@@ -948,6 +1237,7 @@ impl Engine {
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref())
         .with_this(this);
         vm.call_with_cells(name, args, cells).map_err(ScriptError::from)
     }
@@ -983,6 +1273,7 @@ impl Engine {
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref())
         .with_this(this);
         vm.call_with_cells_preserving_caller(name, args, cells)
             .map_err(ScriptError::from)
@@ -1016,6 +1307,7 @@ impl Engine {
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref())
         .with_this(this);
         vm.call_reference_with_cells(name, args, cells)
             .map_err(ScriptError::from)
@@ -1049,6 +1341,7 @@ impl Engine {
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref())
         .with_this(this);
         vm.call_reference_with_cells_preserving_caller(name, args, cells)
             .map_err(ScriptError::from)
@@ -1079,6 +1372,7 @@ impl Engine {
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref())
         .with_this(this);
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
@@ -1131,6 +1425,7 @@ impl Engine {
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref())
         .with_this(this);
         vm.direct_exec_with_locals(source, local_vars, strict_level)
             .map_err(ScriptError::from)
@@ -1184,6 +1479,7 @@ impl Engine {
         .with_global_slots(self.globals_numbered.as_deref())
         .with_global_constants(self.globals_consts.as_deref())
         .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref())
         .with_this(this);
         vm.direct_exec_with_cells(source, cells, strict_level)
             .map_err(ScriptError::from)
@@ -1730,6 +2026,131 @@ mod tests {
         assert_eq!(
             engine.local_variable_names().collect::<Vec<_>>(),
             ["final_local"]
+        );
+    }
+
+    #[test]
+    fn global_names_and_strings_keep_native_link_and_construction_order() {
+        let globals = new_global_variables();
+        let strings = new_string_registrations();
+        let mut engine = Engine::new();
+        engine.set_global_variables(globals.clone());
+        engine.set_string_registrations(strings.clone());
+        engine
+            .load_script(
+                "static Zed, Alpha;\n\
+                 func Build() { return \"zeta\" .. \"alpha\"; }",
+            )
+            .expect("script loads");
+
+        assert_eq!(
+            globals.borrow().keys().map(String::as_str).collect::<Vec<_>>(),
+            ["Zed", "Alpha"]
+        );
+        assert_eq!(
+            c4_string_registration_order(&strings),
+            ["zeta".to_string(), "alpha".to_string()]
+        );
+        assert_eq!(
+            engine.call("Build", &[]).expect("string concatenates"),
+            Value::String("zetaalpha".to_string())
+        );
+        assert_eq!(
+            c4_string_registration_order(&strings),
+            [
+                "zeta".to_string(),
+                "alpha".to_string(),
+                "zetaalpha".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn string_table_preserves_stale_section_enumeration_until_objects_save() {
+        let strings = new_string_registrations();
+        register_loaded_c4_string(&strings, 0, "loaded");
+        register_c4_string(&strings, "runtime");
+        let referenced = [b"loaded".to_vec(), b"runtime".to_vec()];
+
+        assert_eq!(
+            save_current_c4_string_enumeration(&strings, &referenced),
+            [b"loaded".to_vec()]
+        );
+        assert_eq!(
+            enumerate_c4_strings(&strings, &referenced),
+            [b"loaded".to_vec(), b"runtime".to_vec()]
+        );
+        assert_eq!(
+            save_current_c4_string_enumeration(&strings, &referenced),
+            [b"loaded".to_vec(), b"runtime".to_vec()]
+        );
+    }
+
+    #[test]
+    fn dead_runtime_string_rebirth_appends_after_survivors() {
+        let strings = new_string_registrations();
+        register_c4_string(&strings, "first");
+        register_c4_string(&strings, "survivor");
+        assert_eq!(
+            enumerate_c4_strings(
+                &strings,
+                &[b"first".to_vec(), b"survivor".to_vec()],
+            ),
+            [b"first".to_vec(), b"survivor".to_vec()]
+        );
+
+        assert_eq!(
+            enumerate_c4_strings(&strings, &[b"survivor".to_vec()]),
+            [b"survivor".to_vec()]
+        );
+        register_c4_string(&strings, "first");
+        assert_eq!(
+            enumerate_c4_strings(
+                &strings,
+                &[b"first".to_vec(), b"survivor".to_vec()],
+            ),
+            [b"survivor".to_vec(), b"first".to_vec()]
+        );
+    }
+
+    #[test]
+    fn held_and_loaded_strings_survive_zero_reference_enumeration() {
+        let strings = new_string_registrations();
+        register_c4_literal_string(&strings, "literal");
+        register_loaded_c4_string(&strings, 0, "loaded");
+
+        assert_eq!(
+            enumerate_c4_strings(&strings, &[]),
+            [b"loaded".to_vec()]
+        );
+        assert_eq!(
+            c4_string_registration_order(&strings),
+            ["literal".to_string(), "loaded".to_string()]
+        );
+        assert_eq!(
+            enumerate_c4_strings(&strings, &[b"literal".to_vec()]),
+            [b"literal".to_vec(), b"loaded".to_vec()]
+        );
+    }
+
+    #[test]
+    fn string_table_enumeration_uses_the_first_nul_as_its_identity_boundary() {
+        let strings = new_string_registrations();
+        register_c4_string(&strings, "shared\0first suffix");
+        register_c4_string(&strings, "shared\0second suffix");
+        let referenced = [
+            b"shared\0first suffix".to_vec(),
+            b"shared\0second suffix".to_vec(),
+        ];
+
+        assert_eq!(
+            enumerate_c4_strings(&strings, &referenced),
+            [b"shared\0first suffix".to_vec()],
+            "FindSaveString gives both registrations the first live prefix-equivalent ID"
+        );
+        assert_eq!(
+            save_current_c4_string_enumeration(&strings, &referenced),
+            [b"shared\0first suffix".to_vec()]
         );
     }
 }

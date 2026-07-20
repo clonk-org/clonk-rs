@@ -1,3 +1,4 @@
+use crate::player_file::{PlayerInfoCoreState, PlayerLastRoundState};
 use crate::{DefinitionId, ObjectId, RgbColor, Vector2};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -285,6 +286,11 @@ pub struct PlayerState {
     pub team: Option<i32>,
     #[serde(default)]
     pub surrendered: bool,
+    /// Exact persisted `C4Player::Surrendered` integer. Gameplay uses the
+    /// boolean projection above, but the runtime compiler does not normalize
+    /// nonzero values when writing Game.txt again.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub surrendered_value: i32,
     /// Result flag projected from the linked `C4PlayerInfo::PIF_Won` state
     /// (`C4PlayerInfo.h:63,219-237`).
     #[serde(default, skip_serializing_if = "is_false")]
@@ -309,6 +315,11 @@ pub struct PlayerState {
     pub rounds_lost: i32,
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub total_playing_time: i32,
+    /// Exact external `C4PlayerInfoCore` retained alongside the in-round
+    /// `C4Player`. It owns profile-only fields such as comment, rank and
+    /// LastRound as well as the unassigned preferences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_info_core: Option<PlayerInfoCoreState>,
     #[serde(default)]
     pub value: i32,
     #[serde(default)]
@@ -352,6 +363,14 @@ pub struct PlayerState {
     /// enters serialized engine state.
     #[serde(skip)]
     pub view_target: Option<ObjectId>,
+    /// Independently saved `C4Player::ViewX/ViewY`. `None` is retained only
+    /// while reading older Rust snapshots that inferred these values from the
+    /// first presentation viewport; every live C4Player owns the scalars even
+    /// when no local C4Viewport exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_center: Option<Vector2>,
+    /// Process-local presentation viewports. Their camera centers are not the
+    /// persisted `C4Player::ViewX/ViewY` fields above.
     #[serde(default)]
     pub viewports: Vec<PlayerViewport>,
     /// Runtime-only `C4Viewport::ViewOffsX/Y` presentation displacement.
@@ -457,14 +476,25 @@ pub struct PlayerState {
     #[serde(default)]
     pub control: PlayerControlState,
     /// C4Player::ExtraData (C4ValueMapData) — the script-managed named
-    /// slots of Fn[Set/Get]PlrExtraData (C4Script.cpp:4692-4747). Only
-    /// nil/int/bool/id values store; insertion order preserved like the
-    /// C4ValueMapNames list.
+    /// slots of Fn[Set/Get]PlrExtraData (C4Script.cpp:4692-4747). The setter
+    /// validates ordinary script writes separately; loaded/runtime-save state
+    /// retains every serializable C4Value variant. Insertion order is the
+    /// C4ValueMapNames order.
     #[serde(default)]
     pub extra_data: Vec<(String, lc_script::Value)>,
 }
 
 impl PlayerState {
+    pub(crate) fn exact_surrendered_value(&self) -> i32 {
+        retained_runtime_flag_value(self.surrendered_value, self.surrendered)
+    }
+
+    pub(crate) fn exact_view_center(&self) -> Vector2 {
+        self.view_center
+            .or_else(|| self.viewports.first().map(|viewport| viewport.center))
+            .unwrap_or(Vector2::ZERO)
+    }
+
     pub(crate) fn exact_knowledge_entries(&self) -> Vec<(DefinitionId, i32)> {
         if self.knowledge_entries.is_empty() && !self.knowledge.is_empty() {
             self.knowledge.iter().cloned().map(|id| (id, 1)).collect()
@@ -707,10 +737,16 @@ pub struct PlayerControlState {
     /// (C4Player.cpp:2373; default 0 = classic, C4InfoCore.cpp:84).
     #[serde(default)]
     pub control_style: bool,
+    /// Exact persisted `C4Player::ControlStyle` integer.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub control_style_value: i32,
     /// Effective C4Player::AutoContextMenu preference after the scenario
     /// ForcedAutoContextMenu override (C4Player.cpp:2369-2375).
     #[serde(default)]
     pub auto_context_menu: bool,
+    /// Exact persisted `C4Player::AutoContextMenu` integer.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub auto_context_menu_value: i32,
     /// `CursorFlash` — frames the cursor arrow above the cursor clonk stays
     /// visible (C4Game::DrawCursors gate, C4Game.cpp:1863; set to 30 on
     /// cursor changes, decremented in C4Player::Execute, C4Player.cpp:242).
@@ -730,6 +766,31 @@ pub struct PlayerControlState {
     /// to AdjustCursorCommand.
     #[serde(default)]
     pub cursor_toggled: i32,
+}
+
+impl PlayerControlState {
+    pub(crate) fn exact_control_style_value(&self) -> i32 {
+        retained_runtime_flag_value(self.control_style_value, self.control_style)
+    }
+
+    pub(crate) fn exact_auto_context_menu_value(&self) -> i32 {
+        retained_runtime_flag_value(self.auto_context_menu_value, self.auto_context_menu)
+    }
+
+    pub(crate) fn reconcile_integer_flags(&mut self) {
+        self.control_style_value = self.exact_control_style_value();
+        self.auto_context_menu_value = self.exact_auto_context_menu_value();
+    }
+
+    pub(crate) fn set_control_style_value(&mut self, value: i32) {
+        self.control_style_value = value;
+        self.control_style = value != 0;
+    }
+
+    pub(crate) fn set_auto_context_menu_value(&mut self, value: i32) {
+        self.auto_context_menu_value = value;
+        self.auto_context_menu = value != 0;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -752,6 +813,7 @@ pub struct Player {
     status: PlayerStatus,
     team: Option<i32>,
     surrendered: bool,
+    surrendered_value: i32,
     won: bool,
     evaluated: bool,
     wealth: i32,
@@ -761,6 +823,7 @@ pub struct Player {
     rounds_won: i32,
     rounds_lost: i32,
     total_playing_time: i32,
+    player_info_core: Option<PlayerInfoCoreState>,
     /// `C4Player::GameJoinTime`: local runtime baseline, deliberately absent
     /// from PlayerState/save data (C4Player.h:78; C4Player.cpp:389-390).
     game_join_time: i32,
@@ -783,6 +846,9 @@ pub struct Player {
     view_cursor: Option<ObjectId>,
     captain: Option<ObjectId>,
     view_target: Option<ObjectId>,
+    /// Saved `C4Player::ViewX/ViewY`, independent of process-local viewports.
+    /// `None` exists only as a migration marker for old Rust snapshots.
+    view_center: Option<Vector2>,
     viewports: Vec<PlayerViewport>,
     view_offset: Vector2,
     view_wealth: i32,
@@ -853,6 +919,7 @@ impl Player {
             status: PlayerStatus::Active,
             team: None,
             surrendered: false,
+            surrendered_value: 0,
             won: false,
             evaluated: false,
             wealth: 0,
@@ -862,6 +929,7 @@ impl Player {
             rounds_won: 0,
             rounds_lost: 0,
             total_playing_time: 0,
+            player_info_core: None,
             game_join_time: 0,
             retire_delay: 0,
             value: 0,
@@ -879,6 +947,7 @@ impl Player {
             view_cursor: None,
             captain: None,
             view_target: None,
+            view_center: Some(Vector2::ZERO),
             viewports: Vec::new(),
             view_offset: Vector2::ZERO,
             view_wealth: 0,
@@ -1147,6 +1216,10 @@ impl Player {
         let magic = magic_entries.iter().map(|(id, _)| id.clone()).collect();
         let home_base_material_entries = ordered_entries_from_unsigned_map(&home_base_material);
         let home_base_production_entries = ordered_entries_from_unsigned_map(&home_base_production);
+        let view_center = viewports
+            .first()
+            .map(|viewport| viewport.center)
+            .unwrap_or(Vector2::ZERO);
         Self {
             id,
             player_info_id,
@@ -1158,6 +1231,7 @@ impl Player {
             status,
             team,
             surrendered,
+            surrendered_value: i32::from(surrendered),
             won: false,
             evaluated: false,
             wealth,
@@ -1167,6 +1241,7 @@ impl Player {
             rounds_won,
             rounds_lost,
             total_playing_time,
+            player_info_core: None,
             game_join_time: 0,
             retire_delay: 0,
             value,
@@ -1184,6 +1259,7 @@ impl Player {
             view_cursor: None,
             captain: None,
             view_target: None,
+            view_center: Some(view_center),
             viewports,
             view_offset: Vector2::ZERO,
             view_wealth: 0,
@@ -1238,6 +1314,7 @@ impl Player {
             status,
             team,
             surrendered,
+            surrendered_value,
             won,
             evaluated,
             wealth,
@@ -1247,6 +1324,7 @@ impl Player {
             rounds_won,
             rounds_lost,
             total_playing_time,
+            player_info_core,
             value,
             initial_value,
             value_gain,
@@ -1262,6 +1340,7 @@ impl Player {
             view_cursor,
             captain,
             view_target: _,
+            view_center,
             viewports,
             view_offset,
             view_wealth,
@@ -1294,9 +1373,11 @@ impl Player {
             show_control,
             hostility,
             hostility_entries,
-            control,
+            mut control,
             extra_data,
         } = state;
+        let surrendered_value = retained_runtime_flag_value(surrendered_value, surrendered);
+        control.reconcile_integer_flags();
         let knowledge_entries = if knowledge_entries.is_empty() && !knowledge.is_empty() {
             knowledge.into_iter().map(|id| (id, 1)).collect()
         } else {
@@ -1347,6 +1428,7 @@ impl Player {
             status,
             team,
             surrendered,
+            surrendered_value,
             won,
             evaluated,
             wealth,
@@ -1356,6 +1438,7 @@ impl Player {
             rounds_won,
             rounds_lost,
             total_playing_time,
+            player_info_core,
             game_join_time: 0,
             retire_delay: 0,
             value,
@@ -1373,6 +1456,7 @@ impl Player {
             view_cursor,
             captain,
             view_target: None,
+            view_center,
             viewports,
             view_offset,
             view_wealth,
@@ -1427,6 +1511,7 @@ impl Player {
             status: self.status,
             team: self.team,
             surrendered: self.surrendered,
+            surrendered_value: self.surrendered_value,
             won: self.won,
             evaluated: self.evaluated,
             wealth: self.wealth,
@@ -1436,6 +1521,7 @@ impl Player {
             rounds_won: self.rounds_won,
             rounds_lost: self.rounds_lost,
             total_playing_time: self.total_playing_time,
+            player_info_core: self.player_info_core.clone(),
             value: self.value,
             initial_value: self.initial_value,
             value_gain: self.value_gain,
@@ -1451,6 +1537,7 @@ impl Player {
             view_cursor: self.view_cursor,
             captain: self.captain,
             view_target: self.view_target,
+            view_center: self.view_center,
             viewports: self.viewports.clone(),
             view_offset: self.view_offset,
             view_wealth: self.view_wealth,
@@ -1518,6 +1605,18 @@ impl Player {
         self.player_info_id
     }
 
+    pub fn player_info_core(&self) -> Option<&PlayerInfoCoreState> {
+        self.player_info_core.as_ref()
+    }
+
+    /// Attach the exact profile core that produced this runtime player.
+    /// C4Player inherits C4PlayerInfoCore, so its ExtraData map is the same
+    /// object scripts query at runtime rather than a second retained copy.
+    pub fn set_player_info_core(&mut self, core: PlayerInfoCoreState) {
+        self.extra_data.clone_from(&core.extra_data);
+        self.player_info_core = Some(core);
+    }
+
     pub fn at_client(&self) -> PlayerAtClient {
         self.at_client
     }
@@ -1565,6 +1664,7 @@ impl Player {
     pub fn set_status(&mut self, status: PlayerStatus) {
         if matches!(status, PlayerStatus::Eliminated) {
             self.surrendered = false;
+            self.surrendered_value = 0;
         }
         self.status = status;
     }
@@ -1576,6 +1676,7 @@ impl Player {
             return false;
         }
         self.surrendered = false;
+        self.surrendered_value = 0;
         self.status = PlayerStatus::Eliminated;
         self.retire_delay = 60;
         true
@@ -1670,6 +1771,8 @@ impl Player {
         average_value_gain: i32,
         melee: bool,
         game_time: i32,
+        scenario_title: String,
+        unix_time: u32,
     ) -> Option<(i32, i32)> {
         if self.evaluated {
             return None;
@@ -1684,9 +1787,24 @@ impl Player {
             self.value_gain
         } else {
             average_value_gain
+        }
+        .max(0);
+        let final_score = settlement_score.wrapping_add(success_bonus);
+        let total_score = self.score.wrapping_add(final_score);
+        self.player_info_core
+            .get_or_insert_with(PlayerInfoCoreState::default)
+            .last_round = PlayerLastRoundState {
+            title: scenario_title,
+            date: unix_time,
+            duration: game_time,
+            won: i32::from(self.won),
+            score: settlement_score,
+            final_score,
+            total_score,
+            bonus: success_bonus,
+            level: 0,
         };
-        let final_score = settlement_score.max(0).wrapping_add(success_bonus);
-        self.score = self.score.wrapping_add(final_score);
+        self.score = total_score;
         self.rounds = self.rounds.wrapping_add(1);
         if self.won {
             self.rounds_won = self.rounds_won.wrapping_add(1);
@@ -1707,6 +1825,7 @@ impl Player {
             return;
         }
         self.surrendered = surrendered;
+        self.surrendered_value = i32::from(surrendered);
         if surrendered {
             self.status = PlayerStatus::Surrendered;
             self.retire_delay = 60;
@@ -2000,6 +2119,12 @@ impl Player {
         let min_y = view_height / 2 - border;
         let max_y = world_height + border - view_height / 2;
 
+        let view_center = self.view_center();
+        self.view_center = Some(Vector2::new(
+            bound_view_center(view_center.x.wrapping_add(delta.x), min_x, max_x),
+            bound_view_center(view_center.y.wrapping_add(delta.y), min_y, max_y),
+        ));
+
         for viewport in &mut self.viewports {
             viewport.center.x = bound_view_center(
                 viewport.center.x.wrapping_add(delta.x),
@@ -2049,6 +2174,9 @@ impl Player {
 
     pub(crate) fn update_view(&mut self, position: Option<Vector2>) {
         let focus = self.view_cursor.or(self.cursor);
+        if let Some(position) = position {
+            self.view_center = Some(position);
+        }
         if self.viewports.is_empty() {
             if let Some(position) = position {
                 self.viewports
@@ -2066,6 +2194,18 @@ impl Player {
 
     pub fn viewports(&self) -> &[PlayerViewport] {
         &self.viewports
+    }
+
+    /// Current `C4Player::ViewX/ViewY`, with the first logical viewport used
+    /// only to migrate snapshots written before the independent fields existed.
+    pub fn view_center(&self) -> Vector2 {
+        self.view_center
+            .or_else(|| self.viewports.first().map(|viewport| viewport.center))
+            .unwrap_or(Vector2::ZERO)
+    }
+
+    pub fn set_view_center(&mut self, center: Vector2) {
+        self.view_center = Some(center);
     }
 
     pub fn view_offset(&self) -> Vector2 {
@@ -2282,6 +2422,14 @@ fn is_false(value: &bool) -> bool {
 
 fn is_zero_i32(value: &i32) -> bool {
     *value == 0
+}
+
+fn retained_runtime_flag_value(raw: i32, enabled: bool) -> i32 {
+    if (raw != 0) == enabled {
+        raw
+    } else {
+        i32::from(enabled)
+    }
 }
 
 fn is_zero_vector(value: &Vector2) -> bool {
@@ -2903,6 +3051,33 @@ mod tests {
 
         player.clear_object_pointers(captain);
         assert_eq!(player.captain(), None);
+    }
+
+    #[test]
+    fn saved_view_center_restores_without_a_presentation_viewport() {
+        let saved = PlayerState {
+            id: 4,
+            view_center: Some(Vector2::new(321, -17)),
+            viewports: Vec::new(),
+            ..PlayerState::default()
+        };
+
+        let mut player = Player::from_state(saved.clone());
+        assert_eq!(player.view_center(), Vector2::new(321, -17));
+        assert!(player.viewports().is_empty());
+        player.update_view(None);
+        assert_eq!(player.to_state(), saved);
+
+        // Old Rust snapshots had only the presentation projection. Keep that
+        // migration fallback without making it authoritative for new saves.
+        let legacy = PlayerState {
+            id: 5,
+            viewports: vec![PlayerViewport::new(Vector2::new(44, 55))],
+            ..PlayerState::default()
+        };
+        let legacy = Player::from_state(legacy);
+        assert_eq!(legacy.view_center(), Vector2::new(44, 55));
+        assert_eq!(legacy.to_state().view_center, None);
     }
 
     #[test]

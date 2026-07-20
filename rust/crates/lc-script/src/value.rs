@@ -717,6 +717,15 @@ impl Equivalent<Value> for StringQuery<'_> {
 pub enum Value {
     Int(i32),
     Bool(bool),
+    /// A C4V_Bool whose pointer-width `C4V_Data` payload is not canonical 0/1.
+    ///
+    /// C++ casts change the type tag without normalizing the union payload, so
+    /// `CastBool(7)` is truthy and must remain `b7` when compiled into a live
+    /// save. On LP64, `CastBool(C4Id("4294967296"))` retains the high word too:
+    /// it is truthy even though its low `Data.Int` (and saved value) is zero.
+    /// Canonical Boolean values keep using [`Value::Bool`] so the public API
+    /// remains ergonomic.
+    RawBool(usize),
     String(#[serde(with = "c4_string_serde")] String),
     C4Id(#[serde(with = "c4_id_serde")] String),
     Object(u64),
@@ -730,6 +739,10 @@ impl PartialEq for Value {
         match (self, other) {
             (Self::Int(left), Self::Int(right)) => left == right,
             (Self::Bool(left), Self::Bool(right)) => left == right,
+            (Self::Bool(left), Self::RawBool(right)) | (Self::RawBool(right), Self::Bool(left)) => {
+                usize::from(*left) == *right
+            }
+            (Self::RawBool(left), Self::RawBool(right)) => left == right,
             (Self::String(left), Self::String(right)) => c4_strings_equal(left, right),
             (Self::C4Id(left), Self::C4Id(right)) => c4_id_raw(left) == c4_id_raw(right),
             (Self::Object(left), Self::Object(right)) => left == right,
@@ -762,6 +775,39 @@ impl From<&str> for Value {
 }
 
 impl Value {
+    /// Build a C4V_Bool from its raw `Data.Int` representation, retaining
+    /// noncanonical payloads while keeping 0 and 1 on the existing Bool API.
+    pub fn from_c4_bool_raw(raw: i32) -> Self {
+        Self::from_c4_bool_data_raw(raw as u32 as usize)
+    }
+
+    /// Retag one complete native `C4V_Data` payload as C4V_Bool.
+    pub fn from_c4_bool_data_raw(raw: usize) -> Self {
+        match raw {
+            0 => Self::Bool(false),
+            1 => Self::Bool(true),
+            raw => Self::RawBool(raw),
+        }
+    }
+
+    /// Return the exact C++ `Data.Int` payload for a C4V_Bool.
+    pub fn c4_bool_raw(&self) -> Option<i32> {
+        match self {
+            Self::Bool(value) => Some(i32::from(*value)),
+            Self::RawBool(value) => Some(*value as u32 as i32),
+            _ => None,
+        }
+    }
+
+    /// Return the complete pointer-width C++ `C4V_Data` payload for a bool.
+    pub fn c4_bool_data_raw(&self) -> Option<usize> {
+        match self {
+            Self::Bool(value) => Some(usize::from(*value)),
+            Self::RawBool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
     /// C4Script truthiness, matching C++ `C4Value::operator bool` (C4Value.h:185
     /// → `C4V_Data::operator bool`, :76): raw-nonzero on the `Data` union. For
     /// strings/arrays/proplists that is a *pointer*, so a non-nil one is truthy
@@ -770,6 +816,7 @@ impl Value {
     pub fn as_bool(&self) -> bool {
         match self {
             Value::Bool(b) => *b,
+            Value::RawBool(raw) => *raw != 0,
             Value::Int(i) => *i != 0,
             Value::String(_) => true,
             Value::C4Id(id) => c4_id_raw(id) != 0,
@@ -792,6 +839,7 @@ impl Value {
         match self {
             Value::Int(i) => Some(*i),
             Value::Bool(b) => Some(*b as i32),
+            Value::RawBool(raw) => Some(*raw as u32 as i32),
             Value::Nil => Some(0),
             _ => None,
         }
@@ -801,6 +849,7 @@ impl Value {
         match self {
             Value::Int(_) => "int",
             Value::Bool(_) => "bool",
+            Value::RawBool(_) => "bool",
             Value::String(_) => "string",
             Value::C4Id(_) => "id",
             Value::Object(_) => "object",
@@ -817,6 +866,13 @@ impl Value {
         match self {
             Value::Int(value) => c4_hash_typed(C4V_INT, hash_i32(*value)),
             Value::Bool(value) => c4_hash_typed(C4V_BOOL, *value as usize),
+            // std::hash<C4Value> hashes C4V_Bool through `_getBool()`, so
+            // the low Data.Int determines `_getBool()`. A high-word-only raw
+            // payload therefore hashes like false even though control-flow
+            // truth testing observes the complete union and treats it true.
+            Value::RawBool(value) => {
+                c4_hash_typed(C4V_BOOL, usize::from((*value as u32 as i32) != 0))
+            }
             Value::String(value) => c4_string_hash(value),
             Value::C4Id(value) => c4_hash_typed(C4V_C4ID, hash_i32(c4_id_raw(value) as i32)),
             Value::Object(id) => c4_hash_typed(C4V_C4OBJECT, *id as usize),
@@ -845,6 +901,7 @@ impl Value {
             Value::Nil => C4VType::Any,
             Value::Int(_) => C4VType::Int,
             Value::Bool(_) => C4VType::Bool,
+            Value::RawBool(_) => C4VType::Bool,
             Value::C4Id(_) => C4VType::C4Id,
             Value::Object(_) => C4VType::C4Object,
             Value::String(_) => C4VType::String,
@@ -1294,6 +1351,7 @@ impl fmt::Display for Value {
         match self {
             Value::Int(i) => write!(f, "{i}"),
             Value::Bool(b) => write!(f, "{b}"),
+            Value::RawBool(raw) => write!(f, "{}", *raw != 0),
             Value::String(s) => write!(f, "\"{}\"", s),
             Value::C4Id(id) => write!(f, "{}", c4_id_text(id)),
             Value::Object(id) => write!(f, "<object {id}>"),
@@ -1329,6 +1387,46 @@ impl fmt::Display for Value {
 #[cfg(test)]
 mod map_tests {
     use super::*;
+
+    #[test]
+    fn raw_bool_keeps_union_payload_but_hashes_native_truth_value() {
+        assert_eq!(Value::from_c4_bool_raw(0), Value::Bool(false));
+        assert_eq!(Value::from_c4_bool_raw(1), Value::Bool(true));
+
+        let seven = Value::from_c4_bool_raw(7);
+        let two = Value::from_c4_bool_raw(2);
+        assert_eq!(seven, Value::RawBool(7));
+        assert_eq!(seven.as_c4_int(), Some(7));
+        assert!(seven.as_bool());
+        assert_ne!(seven, two, "C4Value operator== compares raw union data");
+        assert_eq!(
+            seven.c4_value_hash(),
+            two.c4_value_hash(),
+            "std::hash<C4Value> hashes bool through _getBool()"
+        );
+        assert_eq!(seven.c4_value_hash(), Value::Bool(true).c4_value_hash());
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            let high_word = 1_usize << 32;
+            let wide = Value::from_c4_bool_data_raw(high_word);
+            assert!(wide.as_bool(), "control flow reads the complete C4V_Data");
+            assert_eq!(wide.as_c4_int(), Some(0), "_getInt reads Data.Int");
+            assert_eq!(wide.c4_bool_raw(), Some(0));
+            assert_eq!(wide.c4_bool_data_raw(), Some(high_word));
+            assert_eq!(
+                wide.c4_value_hash(),
+                Value::Bool(false).c4_value_hash(),
+                "native bool hashing reads _getBool from the low Data.Int"
+            );
+        }
+
+        let encoded = serde_json::to_string(&seven).expect("raw bool serializes");
+        assert_eq!(
+            serde_json::from_str::<Value>(&encoded).expect("raw bool deserializes"),
+            seven
+        );
+    }
 
     #[test]
     fn arbitrary_keys_coexist_with_string_properties_in_insertion_order() {

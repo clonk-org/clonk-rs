@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use indexmap::IndexMap;
+
 use crate::ast::{
     AccessLevel, AssignmentTarget, BinaryOp, Expr, ForInit, Function, NavigationOperation,
     Parameter, SafeNavigationStep, Stmt, TypeAnnotation, UnaryOp, VarDecl,
@@ -47,6 +49,7 @@ fn concat_string(value: &Value) -> Option<String> {
         Value::String(s) => Some(s.clone()),
         Value::Int(value) => Some(value.to_string()),
         Value::Bool(value) => Some(i32::from(*value).to_string()),
+        Value::RawBool(value) => Some((*value as u32 as i32).to_string()),
         Value::C4Id(value) => Some(c4_id_text(value)),
         _ => None,
     }
@@ -1367,6 +1370,7 @@ fn c4_raw_scalar(value: &Value) -> Option<u64> {
         // member, so negative integers retain a zero upper half on 64-bit.
         Value::Int(value) => Some(u64::from(*value as u32)),
         Value::Bool(value) => Some(u64::from(*value as u8)),
+        Value::RawBool(value) => Some(*value as u64),
         Value::C4Id(value) => Some(crate::value::c4_id_raw(value) as u64),
         Value::Object(0) => Some(0),
         Value::Object(_) | Value::String(_) | Value::Array(_) | Value::Proplist(_) => None,
@@ -1400,6 +1404,7 @@ fn c4_scalar_payload(value: &Value) -> Option<u64> {
         Value::Nil => Some(0),
         Value::Int(value) => Some(u64::from(*value as u32)),
         Value::Bool(value) => Some(u64::from(*value as u8)),
+        Value::RawBool(value) => Some(*value as u64),
         Value::C4Id(value) => Some(crate::value::c4_id_raw(value) as u64),
         Value::Object(0) => Some(0),
         _ => None,
@@ -1423,10 +1428,12 @@ fn c4_operator_equal(left: &Value, right: &Value) -> bool {
         // C4V_Any has Data == 0 and compares that union payload without a
         // right-tag check.
         Value::Nil => c4_scalar_payload(right) == Some(0),
-        Value::Int(left) => matches!(right, Value::Nil | Value::Int(_) | Value::Bool(_) | Value::C4Id(_))
+        Value::Int(left) => matches!(right, Value::Nil | Value::Int(_) | Value::Bool(_) | Value::RawBool(_) | Value::C4Id(_))
             && c4_scalar_payload(right) == Some(u64::from(*left as u32)),
-        Value::Bool(left) => matches!(right, Value::Nil | Value::Int(_) | Value::Bool(_))
+        Value::Bool(left) => matches!(right, Value::Nil | Value::Int(_) | Value::Bool(_) | Value::RawBool(_))
             && c4_scalar_payload(right) == Some(u64::from(*left as u8)),
+        Value::RawBool(left) => matches!(right, Value::Nil | Value::Int(_) | Value::Bool(_) | Value::RawBool(_))
+            && c4_scalar_payload(right) == Some(*left as u64),
         Value::C4Id(left) => matches!(right, Value::Nil | Value::Int(_) | Value::C4Id(_))
             && c4_scalar_payload(right) == Some(crate::value::c4_id_raw(left) as u64),
         Value::Object(left) => matches!(right, Value::Object(right) if left == right),
@@ -1447,7 +1454,10 @@ fn c4_typed_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Nil, Value::Nil) => true,
         (Value::Int(left), Value::Int(right)) => left == right,
-        (Value::Bool(left), Value::Bool(right)) => left == right,
+        (
+            left @ (Value::Bool(_) | Value::RawBool(_)),
+            right @ (Value::Bool(_) | Value::RawBool(_)),
+        ) => left.c4_bool_raw().map(|raw| raw != 0) == right.c4_bool_raw().map(|raw| raw != 0),
         (Value::C4Id(left), Value::C4Id(right)) => {
             crate::value::c4_id_raw(left) == crate::value::c4_id_raw(right)
         }
@@ -1560,15 +1570,17 @@ pub struct Vm<'a> {
     retain_global_call_context_for_host_paths: bool,
     /// The engine-global `static` table (GlobalNamed); resolved after
     /// locals, before global constants (C4AulParse.cpp:2836-2839).
-    globals_named: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
+    globals_named: Option<&'a std::cell::RefCell<IndexMap<String, ValueCell>>>,
     /// The engine-global numbered-variable table (`C4AulScriptEngine::Global`).
     globals_numbered: Option<&'a std::cell::RefCell<BTreeMap<i32, ValueCell>>>,
     /// The engine-global `static const` registry (GetGlobalConstant,
     /// C4Aul.cpp:494): script-declared constants shared across hosts,
     /// resolvable via the pre-#strict-2 `NAME()` call idiom.
-    globals_consts: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
+    globals_consts: Option<&'a std::cell::RefCell<IndexMap<String, ValueCell>>>,
     /// Cross-object LocalN cell supplier (crate::engine::LocalCellHook).
     local_cell_hook: Option<&'a crate::engine::LocalCellHook>,
+    string_registrations:
+        Option<&'a std::cell::RefCell<crate::engine::StringRegistrationLedger>>,
     /// Per-call provenance for persistent/global cells that store only the
     /// public value representation. Nested script calls share this VM/cache.
     cell_identities: RefCell<HashMap<usize, RawIdentityCell>>,
@@ -1602,6 +1614,7 @@ impl<'a> Vm<'a> {
             globals_numbered: None,
             globals_consts: None,
             local_cell_hook: None,
+            string_registrations: None,
             cell_identities: RefCell::new(HashMap::new()),
             constant_identities: RefCell::new(HashMap::new()),
         }
@@ -1675,7 +1688,7 @@ impl<'a> Vm<'a> {
 
     pub fn with_global_variables(
         mut self,
-        table: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
+        table: Option<&'a std::cell::RefCell<IndexMap<String, ValueCell>>>,
     ) -> Self {
         self.globals_named = table;
         self
@@ -1693,7 +1706,7 @@ impl<'a> Vm<'a> {
     /// C4Aul.cpp:494) consulted by the old-style constant-call idiom.
     pub fn with_global_constants(
         mut self,
-        table: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
+        table: Option<&'a std::cell::RefCell<IndexMap<String, ValueCell>>>,
     ) -> Self {
         self.globals_consts = table;
         self
@@ -1704,6 +1717,16 @@ impl<'a> Vm<'a> {
         hook: Option<&'a crate::engine::LocalCellHook>,
     ) -> Self {
         self.local_cell_hook = hook;
+        self
+    }
+
+    pub fn with_string_registrations(
+        mut self,
+        registrations: Option<
+            &'a std::cell::RefCell<crate::engine::StringRegistrationLedger>,
+        >,
+    ) -> Self {
+        self.string_registrations = registrations;
         self
     }
 
@@ -1782,7 +1805,7 @@ impl<'a> Vm<'a> {
         target: Option<Value>,
     ) -> ValueCell {
         let foreign = target.filter(|value| {
-            !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false))
+            !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0))
                 && *value != self.this_value
         });
         if let Some(target) = foreign {
@@ -1847,7 +1870,7 @@ impl<'a> Vm<'a> {
         target: Option<Value>,
     ) -> ValueCell {
         let foreign = target.filter(|value| {
-            !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false))
+            !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0))
                 && *value != self.this_value
         });
         if let Some(target) = foreign {
@@ -1892,6 +1915,7 @@ impl<'a> Vm<'a> {
         let index = match values.first().cloned().unwrap_or(Value::Nil) {
             Value::Int(index) => index,
             Value::Bool(flag) => i32::from(flag),
+            Value::RawBool(raw) => raw as u32 as i32,
             Value::Nil => 0,
             other => {
                 return Err(RuntimeError::new(format!(
@@ -1920,7 +1944,8 @@ impl<'a> Vm<'a> {
         let name = match value {
             Value::String(name) => name,
             Value::Nil => String::new(),
-            Value::Int(0) | Value::Bool(false) if env.strict_level.unwrap_or(0) < 3 => {
+            Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
+                if env.strict_level.unwrap_or(0) < 3 => {
                 String::new()
             }
             other => {
@@ -2312,6 +2337,7 @@ impl<'a> Vm<'a> {
             globals_named: self.globals_named,
             globals_numbered: self.globals_numbered,
             globals_consts: self.globals_consts,
+            string_registrations: self.string_registrations,
             local_cell_hook: self.local_cell_hook,
             cell_identities: RefCell::new(HashMap::new()),
             constant_identities: RefCell::new(HashMap::new()),
@@ -2967,7 +2993,24 @@ impl<'a> Vm<'a> {
         result
     }
 
+    fn register_runtime_value(&self, value: &Value) {
+        if let Some(registrations) = self.string_registrations {
+            crate::engine::register_c4_value_strings(registrations, value);
+        }
+    }
+
     fn evaluate(
+        &self,
+        expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        let value = self.evaluate_inner(expr, env, depth)?;
+        self.register_runtime_value(&value);
+        Ok(value)
+    }
+
+    fn evaluate_inner(
         &self,
         expr: &Expr,
         env: &mut Environment,
@@ -3212,6 +3255,7 @@ impl<'a> Vm<'a> {
                                         Value::Nil
                                             | Value::Int(0)
                                             | Value::Bool(false)
+                                            | Value::RawBool(0)
                                             | Value::Object(0)
                                     )
                                 })
@@ -3321,6 +3365,7 @@ impl<'a> Vm<'a> {
                                     Value::Int(index) => Ok(index),
                                     Value::Nil => Ok(0),
                                     Value::Bool(flag) => Ok(i32::from(flag)),
+                                    Value::RawBool(raw) => Ok(raw as u32 as i32),
                                     other => Err(RuntimeError::new(format!(
                                         "Par: index of type {}, int expected",
                                         other.type_name()
@@ -3590,6 +3635,17 @@ impl<'a> Vm<'a> {
     }
 
     fn evaluate_tracked(
+        &self,
+        expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<TrackedValue, RuntimeError> {
+        let tracked = self.evaluate_tracked_inner(expr, env, depth)?;
+        self.register_runtime_value(&tracked.value);
+        Ok(tracked)
+    }
+
+    fn evaluate_tracked_inner(
         &self,
         expr: &Expr,
         env: &mut Environment,
@@ -4120,6 +4176,7 @@ impl<'a> Vm<'a> {
             Value::Int(value) => Ok(value),
             Value::Nil => Ok(0),
             Value::Bool(flag) => Ok(i32::from(flag)),
+            Value::RawBool(raw) => Ok(raw as u32 as i32),
             other => Err(RuntimeError::new(format!(
                 "cannot {operation} non-integer value: {other:?}"
             ))),
@@ -4128,7 +4185,8 @@ impl<'a> Vm<'a> {
 
     fn fold_legacy_zero(value: Value, strict_level: Option<u8>) -> Value {
         match value {
-            Value::Int(0) | Value::Bool(false) if strict_level.unwrap_or(0) < 3 => Value::Nil,
+            Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
+                if strict_level.unwrap_or(0) < 3 => Value::Nil,
             value => value,
         }
     }
@@ -4568,7 +4626,10 @@ impl<'a> Vm<'a> {
                 Value::C4Id(id) => crate::value::c4_id_raw(id) == 0,
                 _ => false,
             };
-            let typed_falsy = matches!(&value, Value::Int(0) | Value::Bool(false));
+            let typed_falsy = matches!(
+                &value,
+                Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
+            );
             if canonical_nil || (strict.unwrap_or(0) < 3 && typed_falsy) {
                 return Ok(String::new());
             }
@@ -4751,6 +4812,7 @@ impl<'a> Vm<'a> {
         match args.get(index).map(CallArg::read).transpose()?.unwrap_or(Value::Nil) {
             Value::Int(value) => Ok(value),
             Value::Bool(value) => Ok(i32::from(value)),
+            Value::RawBool(value) => Ok(value as u32 as i32),
             Value::Nil => Ok(0),
             other => Err(RuntimeError::new(format!(
                 "call to \"{name}\" parameter {}: got \"{}\", but expected \"int\"!",
@@ -4767,7 +4829,11 @@ impl<'a> Vm<'a> {
         index: usize,
     ) -> Result<Option<Value>, RuntimeError> {
         match args.get(index).map(CallArg::read).transpose()?.unwrap_or(Value::Nil) {
-            Value::Nil | Value::Int(0) | Value::Bool(false) | Value::Object(0) => Ok(None),
+            Value::Nil
+            | Value::Int(0)
+            | Value::Bool(false)
+            | Value::RawBool(0)
+            | Value::Object(0) => Ok(None),
             value @ Value::Object(_) => Ok(Some(value)),
             other => Err(RuntimeError::new(format!(
                 "call to \"{name}\" parameter {}: got \"{}\", but expected \"object\"!",
@@ -4787,7 +4853,8 @@ impl<'a> Vm<'a> {
         match args.get(index).map(CallArg::read).transpose()?.unwrap_or(Value::Nil) {
             Value::String(value) => Ok(value),
             Value::Nil => Ok(String::new()),
-            Value::Int(0) | Value::Bool(false) if strict_level.unwrap_or(0) < 3 => {
+            Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
+                if strict_level.unwrap_or(0) < 3 => {
                 Ok(String::new())
             }
             other => Err(RuntimeError::new(format!(
@@ -5126,7 +5193,10 @@ impl<'a> Vm<'a> {
                 .set_local_tracked(args, Some(target), env, depth + 1)
                 .map(|tracked| tracked.value);
         }
-        if matches!(&target, Value::Nil | Value::Int(0) | Value::Bool(false))
+        if matches!(
+            &target,
+            Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
+        )
             || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
         {
             // Parse_Params emits every argument expression before AB_CALL or
@@ -5802,6 +5872,7 @@ impl<'a> Vm<'a> {
                             Value::Nil
                                 | Value::Int(0)
                                 | Value::Bool(false)
+                                | Value::RawBool(0)
                                 | Value::Object(0)
                         )
                     })
@@ -5826,6 +5897,7 @@ impl<'a> Vm<'a> {
                         Value::Int(index) => Ok(index),
                         Value::Nil => Ok(0),
                         Value::Bool(flag) => Ok(i32::from(flag)),
+                        Value::RawBool(raw) => Ok(raw as u32 as i32),
                         other => Err(RuntimeError::new(format!(
                             "Par: index of type {}, int expected",
                             other.type_name()
@@ -5931,7 +6003,10 @@ impl<'a> Vm<'a> {
                 let function = self.functions.get(method);
                 let evaluated_args =
                     self.build_call_args(Some(method), function, args, env, depth + 1)?;
-                if matches!(target, Value::Nil | Value::Int(0) | Value::Bool(false))
+                if matches!(
+                    target,
+                    Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
+                )
                     || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
                 {
                     return Err(RuntimeError::new("Object call: target is zero!"));
@@ -6506,6 +6581,7 @@ impl<'a> Vm<'a> {
             // C4Value.cpp:453-466,499-522).
             Value::Nil => Ok(0),
             Value::Bool(flag) => Ok(i32::from(flag)),
+            Value::RawBool(raw) => Ok(raw as u32 as i32),
             other => Err(RuntimeError::new(format!(
                 "{name} index must be an integer, got {}",
                 other.type_name()
@@ -6534,7 +6610,11 @@ impl<'a> Vm<'a> {
             .filter(|value| {
                 !matches!(
                     value,
-                    Value::Nil | Value::Int(0) | Value::Bool(false) | Value::Object(0)
+                    Value::Nil
+                        | Value::Int(0)
+                        | Value::Bool(false)
+                        | Value::RawBool(0)
+                        | Value::Object(0)
                 )
             })
             .or(default_target);
@@ -6925,6 +7005,30 @@ impl Environment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn wide_raw_bool_keeps_native_union_equality_and_low_word_bool_semantics() {
+        let raw = 1_usize << 32;
+        let wide_bool = Value::from_c4_bool_data_raw(raw);
+        let source_id = Value::C4Id(crate::value::c4_id_from_raw(raw));
+
+        assert!(c4_values_equal(&wide_bool, &source_id, Some(0), None, None));
+        assert!(!c4_values_equal(
+            &wide_bool,
+            &source_id,
+            Some(2),
+            None,
+            None
+        ));
+        assert!(c4_values_equal(
+            &wide_bool,
+            &Value::Bool(false),
+            Some(3),
+            None,
+            None
+        ));
+    }
     use crate::parser::Parser;
 
     fn execute_script(

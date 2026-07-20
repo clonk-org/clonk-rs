@@ -34137,6 +34137,51 @@ global func PreInitializePlayer(int player)
     }
 
     #[test]
+    fn player_lifecycle_profile_extra_data_is_visible_to_preinitialize() -> Result<(), EngineError> {
+        // C4Player::Init loads its inherited C4PlayerInfoCore before
+        // PreInitializePlayer, so GetPlrExtraData observes profile slots in the
+        // first callback (C4Player.cpp:267-284,323-347).
+        let script = r#"#strict 2
+static pre_profile_value;
+global func PreInitializePlayer(int player)
+{
+    pre_profile_value = GetPlrExtraData(player, "Loaded");
+    return 1;
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine.install_scenario_script_with_convention("Profile preinit", script, true)?;
+        let core = player_file::PlayerInfoCoreState {
+            extra_data: vec![("Loaded".to_string(), Value::Int(73))],
+            ..player_file::PlayerInfoCoreState::default()
+        };
+
+        let joined = engine
+            .join_player_with_profile_core(
+                lifecycle_join_config("Runtime name", Vec::new()),
+                PlayerAtClient::HOST,
+                "Local",
+                None,
+                PlayerRuntimeControl::NONE,
+                core,
+            )?
+            .number();
+
+        assert_eq!(
+            engine.snapshot().script_globals.named.get("pre_profile_value"),
+            Some(&Value::Int(73))
+        );
+        assert_eq!(
+            engine.player(joined).expect("joined player").player_info_core(),
+            Some(&player_file::PlayerInfoCoreState {
+                extra_data: vec![("Loaded".to_string(), Value::Int(73))],
+                ..player_file::PlayerInfoCoreState::default()
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
     fn player_lifecycle_restore_reapplies_autostop_to_inactive_crew() -> Result<(), EngineError> {
         // ApplyForcedControl clears buffered input whenever ControlStyle
         // changes and, when switching to AutoStop, clears ComDir on every
@@ -65202,6 +65247,20 @@ func OnOwnerChanged()
         assert_eq!(player.score, 415, "65 gain + 100 winner bonus");
         assert_eq!((player.rounds, player.rounds_won, player.rounds_lost), (12, 8, 4));
         assert_eq!(player.total_playing_time, 1_253);
+        let last_round = &player
+            .player_info_core
+            .as_ref()
+            .expect("evaluation creates the inherited player core")
+            .last_round;
+        assert_eq!(last_round.title, "Default Title");
+        assert!(last_round.date > 0);
+        assert_eq!(last_round.duration, 19);
+        assert_eq!(last_round.won, 1);
+        assert_eq!(last_round.score, 65);
+        assert_eq!(last_round.bonus, 100);
+        assert_eq!(last_round.final_score, 165);
+        assert_eq!(last_round.total_score, 415);
+        assert_eq!(last_round.level, 0);
         assert_eq!(
             first.round_results.goals,
             vec![DefinitionId::from("GOAL")]

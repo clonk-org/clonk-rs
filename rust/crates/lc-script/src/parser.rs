@@ -193,6 +193,7 @@ impl<'a> Parser<'a> {
         Ok(Script::with_directives(
             functions,
             std::mem::take(&mut self.script_var_decls),
+            self.lexer.take_string_literals(),
             includes,
             appends,
             strict_level,
@@ -351,6 +352,7 @@ impl<'a> Parser<'a> {
             Script::with_directives(
                 functions,
                 std::mem::take(&mut self.script_var_decls),
+                self.lexer.take_string_literals(),
                 includes,
                 appends,
                 strict_level,

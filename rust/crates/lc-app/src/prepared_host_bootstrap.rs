@@ -31,12 +31,12 @@ use lc_network::{
     HostGameReference, HostGameReferenceError, HostGameReferenceMetadata,
     HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
     HostInitialResourceSource, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
-    InitialNetworkMetadataError, JoinClientRegistrySnapshot, JoinDataC4Id, JoinDataIdListEntry,
-    JoinGameParametersEnvelope, JoinTeamListSnapshot, LeagueHttpTransportConfig,
-    LeagueStartResponse, NetworkAddress, NetworkGameReference, NetworkProtocol, NetworkStatus,
-    PlayerInfoListSnapshot, ResourceFileOwnership, CURRENT_GAME_BUILD, CURRENT_GAME_VERSION,
-    NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
-    NETWORK_STATE_PAUSE,
+    InitialNetworkMetadataError, InitialNetworkScenarioDefaults, JoinClientRegistrySnapshot,
+    JoinDataC4Id, JoinDataIdListEntry, JoinGameParametersEnvelope, JoinTeamListSnapshot,
+    LeagueHttpTransportConfig, LeagueStartResponse, NetworkAddress, NetworkGameReference,
+    NetworkProtocol, NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership,
+    CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, NETWORK_STATE_GO, NETWORK_STATE_INIT,
+    NETWORK_STATE_LOBBY, NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
 };
 use lc_resources::{decode_legacy_script_text, localize_script_source_with_components};
 use lc_resources::{Group, GroupError, LanguagePacks};
@@ -111,6 +111,10 @@ pub struct PreparedHostBootstrapSpec<'a> {
     pub scenario_path: &'a Path,
     /// Ordered assembled install roots. Earlier roots shadow later roots.
     pub install_roots: &'a [PathBuf],
+    /// Native `Config.General.ExePath`, including its trailing separator.
+    pub definition_executable_path: &'a str,
+    /// Native `Config.General.DefinitionPath` (relative or absolute).
+    pub definition_path: &'a str,
     /// Ordered legacy language fallbacks used while loading scenario-owned
     /// definitions and Teams.txt from `scenario_path`.
     pub languages: &'a [String],
@@ -252,6 +256,10 @@ impl Drop for PreparedTemporaryFiles {
 pub struct PreparedHostBootstrap {
     host_config: HostConfig,
     initial_game: InitialNetworkGameData,
+    /// Frozen `Game.C4S` defaults passed to every exact
+    /// `Game.Parameters.Save(group, &Game.C4S)` decompile, including later
+    /// runtime-join dynamics.
+    scenario_defaults: InitialNetworkScenarioDefaults,
     has_initial_game: bool,
     admission: PreparedHostAdmission,
     start_time: i32,
@@ -322,6 +330,10 @@ impl PreparedHostBootstrap {
     /// consume this frozen value rather than reopening a mutable source group.
     pub fn initial_game_data(&self) -> &InitialNetworkGameData {
         &self.initial_game
+    }
+
+    pub fn scenario_defaults(&self) -> &InitialNetworkScenarioDefaults {
+        &self.scenario_defaults
     }
 
     /// Whether host preparation found a readable, nonempty `Game.txt` in the
@@ -673,6 +685,7 @@ impl PreparedHostBootstrap {
         Self {
             host_config,
             initial_game: InitialNetworkGameData::default(),
+            scenario_defaults: InitialNetworkScenarioDefaults::default(),
             has_initial_game: false,
             admission: PreparedHostAdmission {
                 max_players: 8,
@@ -1259,6 +1272,8 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         scenario: &scenario,
         scenario_title: &scenario_title_c4,
         definition_modules: &definition_modules,
+        definition_executable_path: spec.definition_executable_path,
+        definition_path: spec.definition_path,
         scenario_origin: &scenario_origin,
         game: &game,
         original_game_text: original_game_text.as_deref(),
@@ -1427,6 +1442,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     Ok(PreparedHostBootstrap {
         host_config,
         initial_game: game,
+        scenario_defaults,
         has_initial_game: original_game_text.is_some(),
         admission: PreparedHostAdmission {
             max_players: i32::try_from(max_players)
@@ -1523,6 +1539,7 @@ mod definition_root_graphics_tests {
         PreparedHostBootstrap {
             host_config,
             initial_game: InitialNetworkGameData::default(),
+            scenario_defaults: InitialNetworkScenarioDefaults::default(),
             has_initial_game: false,
             admission: PreparedHostAdmission {
                 max_players: 8,
@@ -1920,47 +1937,87 @@ fn load_restore_player_infos(
     spec: &PreparedHostBootstrapSpec<'_>,
     old_style_game_text: Option<&[u8]>,
 ) -> Result<PlayerInfoListSnapshot, PrepareHostBootstrapError> {
-    let empty = || PlayerInfoListSnapshot {
-        last_player_id: 0,
-        clients: Vec::new(),
-    };
+    if let Some(restore_infos) =
+        load_save_player_infos_entry(group, spec.languages, spec.language_packs)?
+    {
+        return Ok(restore_infos);
+    }
 
+    Ok(old_style_game_text
+        .map(|source| load_old_style_restore_player_infos(group, spec, source))
+        .unwrap_or_else(empty_player_info_list))
+}
+
+/// Loads the restore list that `C4Game::InitPlayers` keeps local while a
+/// runtime network client recreates players from its combined scenario.
+///
+/// Unlike `C4GameParameters::Load`, this path has no old-style `Game.txt`
+/// fallback: `C4GameSaveNetwork(false)` always writes `SavePlayerInfos.txt`,
+/// and a missing/empty/malformed component leaves the temporary list empty.
+pub(crate) fn load_runtime_join_restore_player_infos(
+    group: &Group,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+) -> PlayerInfoListSnapshot {
+    match load_save_player_infos_entry(group, languages, language_packs) {
+        Ok(Some(restore_infos)) => restore_infos,
+        Ok(None) => empty_player_info_list(),
+        Err(error) => {
+            // InitPlayers intentionally ignores LocalRestorePlayerInfos.Load's
+            // return value. A failed component read therefore continues with
+            // the list that Load cleared before attempting the read.
+            tracing::warn!(%error, "ignoring unreadable runtime SavePlayerInfos.txt");
+            empty_player_info_list()
+        }
+    }
+}
+
+fn load_save_player_infos_entry(
+    group: &Group,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+) -> Result<Option<PlayerInfoListSnapshot>, PrepareHostBootstrapError> {
     let Some(source) = read_direct_entry(group, "SavePlayerInfos.txt")? else {
-        return Ok(old_style_game_text
-            .map(|source| load_old_style_restore_player_infos(group, spec, source))
-            .unwrap_or_else(empty));
+        return Ok(None);
     };
     // C4PlayerInfoList::Load treats an unreadable/empty group entry as an
     // absent list. The direct-entry read above has already distinguished a
     // genuine I/O error from this zero-byte legacy case.
     if source.is_empty() {
-        return Ok(empty());
+        return Ok(Some(empty_player_info_list()));
     }
 
     let loader_head = ScenarioLoaderHead::load_from_group_for_resource_registration(group)?;
-    let components = spec
-        .language_packs
-        .component_groups(group, Some(group), loader_head.origin());
+    let components = language_packs.component_groups(group, Some(group), loader_head.origin());
     // SavePlayerInfos is native-byte compiler data, not UTF-8 text. Route it
     // through C4Script's lossless private-use representation so undefined
     // Windows-1252 bytes survive localization unchanged.
     let source = lc_script::c4_string_from_bytes(&source);
-    let localized = localize_script_source_with_components(&components, &source, spec.languages)
+    let localized = localize_script_source_with_components(&components, &source, languages)
         .map_err(|source| PrepareHostBootstrapError::ScenarioEntry {
             entry: "SavePlayerInfos.txt",
             source,
         })?;
     let localized = lc_script::c4_string_bytes(&localized);
-    Ok(match lc_network::decode_player_info_list_ini(&localized) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            // Parameters::Load deliberately ignores C4PlayerInfoList::Load's
-            // false return after CompileFromBuf_LogWarn. The list was cleared
-            // before compilation, so hosting continues with no restore rows.
-            tracing::warn!(%error, "ignoring malformed SavePlayerInfos.txt");
-            empty()
-        }
-    })
+    Ok(Some(
+        match lc_network::decode_player_info_list_ini(&localized) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                // Parameters::Load deliberately ignores C4PlayerInfoList::Load's
+                // false return after CompileFromBuf_LogWarn. The list was cleared
+                // before compilation, so hosting continues with no restore rows.
+                tracing::warn!(%error, "ignoring malformed SavePlayerInfos.txt");
+                empty_player_info_list()
+            }
+        },
+    ))
+}
+
+fn empty_player_info_list() -> PlayerInfoListSnapshot {
+    PlayerInfoListSnapshot {
+        last_player_id: 0,
+        clients: Vec::new(),
+    }
 }
 
 /// `C4PlayerInfoList::LoadFromGameText` compatibility for savegames created

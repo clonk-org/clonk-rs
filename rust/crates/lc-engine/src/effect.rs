@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub enum EffectVarValue {
     Int(i32),
     Bool(bool),
+    /// A C4V_Bool retaining its complete pointer-width C++ `C4V_Data`.
+    RawBool(usize),
     String(#[serde(with = "lc_script::c4_string_serde")] String),
     /// A definition identifier is a distinct C4Value type from String.
     /// EffectVar must preserve that distinction because scripts may use a

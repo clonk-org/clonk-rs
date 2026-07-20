@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::legacy::{JoinDataIdListEntry, JoinGameParametersEnvelope};
 
 /// Scenario values used by `C4GameParameters::CompileFunc` as text defaults.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InitialNetworkScenarioDefaults {
     pub random_seed: i32,
     pub max_players: i32,

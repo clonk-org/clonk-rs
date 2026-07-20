@@ -28,6 +28,8 @@ pub mod fixtures;
 mod init_placement;
 mod input;
 #[doc(hidden)] pub mod landscape;
+mod live_c4_player;
+mod live_c4_save;
 mod map_creator;
 mod map_creator_s2;
 mod mass_mover;
@@ -42,8 +44,10 @@ pub mod particles;
 mod pathfinder;
 mod player;
 pub mod player_file;
+use player_file::PlayerInfoCoreState;
 pub mod pxs;
 mod record;
+mod runtime_join_player_restore;
 #[doc(hidden)] pub use lc_engine_core::rng;
 mod round_results;
 pub mod scenario;
@@ -101,6 +105,7 @@ pub use control::{
 pub use control_execution::{
     AdmittedPlayerTeamUpdate, assign_initial_host_player_teams, assign_initial_offline_player_teams,
     generate_default_initial_team, prepare_join_player_config, resolve_remote_embedded_player_data,
+    resolve_remote_embedded_player_data_with_engine,
     ControlClientRegistry, ControlClientState, ControlPlayerInfoRegistry,
     InitialHostTeamAssignmentOracle, JoinPlayerPreparation, PlayerInfoAdmission,
     PrepareJoinPlayerError, RemoteEmbeddedPlayerData, ResolveRemoteEmbeddedPlayerDataError,
@@ -113,6 +118,17 @@ pub use landscape::{
     BlastResult, CollisionResolution, Landscape, LandscapeCommand, LandscapeError,
     LandscapePersistenceError, LiquidColumn, LiquidSegment, LANDSCAPE_MODE_DYNAMIC,
     LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC, LANDSCAPE_MODE_UNDEFINED,
+};
+pub use live_c4_player::{
+    LiveC4PlayerError, LiveC4PlayerSaveOptions, serialize_live_c4_player,
+    serialize_live_c4_player_from_state, serialize_live_c4_player_state,
+    serialize_live_c4_player_with_options,
+    serialize_live_c4_player_with_options_and_enumeration,
+};
+pub use live_c4_save::{
+    LiveC4SaveComponentRef, LiveC4SaveComponents, LiveC4SaveEntry, LiveC4SaveEntryKind,
+    LiveC4SaveError, LiveC4SaveNamedComponent, LiveC4SaveSpec, LiveC4ValueEncodeError,
+    LiveC4ValueEnumeration,
 };
 pub use material::{Material, MaterialId, MaterialSet};
 pub use message::{
@@ -142,7 +158,11 @@ pub use record::{
     RCT_END, RCT_FRAME,
 };
 pub use round_results::{
-    LeagueRoundResultUpdate, RoundResultsNetworkResult, RoundResultsPlayerState, RoundResultsState,
+    LeagueRoundResultUpdate, RoundResultsNetworkResult, RoundResultsPlayerState,
+    RoundResultsPlayerStatus, RoundResultsState,
+};
+pub use runtime_join_player_restore::{
+    RestoredRuntimeJoinPlayer, RuntimeJoinPlayerRestoreError, RuntimeJoinPlayerSource,
 };
 pub use scenario::{
     InitialNetworkScenarioMetadata, InitialNetworkTeam, InitialNetworkTeamDistribution,
@@ -1112,6 +1132,14 @@ fn draw_transform_homogeneous_default() -> f32 {
     1.0
 }
 
+fn draw_transform_flip_dir_default() -> i32 {
+    1
+}
+
+fn draw_transform_flip_dir_is_default(flip_dir: &i32) -> bool {
+    *flip_dir == 1
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct DrawTransform {
     pub scale_x: f32,
@@ -1131,6 +1159,13 @@ pub struct DrawTransform {
         skip_serializing_if = "draw_transform_component_is_one"
     )]
     homogeneous: f32,
+    /// C4DrawTransform::FlipDir. The stored matrix already contains the
+    /// corresponding sign in mat[0], exactly like the native type.
+    #[serde(
+        default = "draw_transform_flip_dir_default",
+        skip_serializing_if = "draw_transform_flip_dir_is_default"
+    )]
+    flip_dir: i32,
 }
 
 impl DrawTransform {
@@ -1139,7 +1174,7 @@ impl DrawTransform {
     }
 
     pub fn is_identity(&self) -> bool {
-        self.matrix() == Self::identity().matrix()
+        self.matrix() == Self::identity().matrix() && self.flip_dir == 1
     }
 
     pub fn from_components(scale_x: f32, scale_y: f32, offset_x: f32, offset_y: f32) -> Self {
@@ -1149,6 +1184,12 @@ impl DrawTransform {
     }
 
     pub fn from_matrix(matrix: [f32; 9]) -> Self {
+        Self::from_matrix_with_flip_dir(matrix, 1)
+    }
+
+    /// Restores the already-flipped native matrix and its independent
+    /// FlipDir field from Objects.txt.
+    pub fn from_matrix_with_flip_dir(matrix: [f32; 9], flip_dir: i32) -> Self {
         Self {
             scale_x: matrix[0],
             shear_x: matrix[1],
@@ -1159,7 +1200,22 @@ impl DrawTransform {
             projective_x: matrix[6],
             projective_y: matrix[7],
             homogeneous: matrix[8],
+            flip_dir,
         }
+    }
+
+    pub fn flip_dir(&self) -> i32 {
+        self.flip_dir
+    }
+
+    /// C4DrawTransform::SetFlipDir: changing the logical flip also toggles
+    /// the x-axis matrix component already consumed by the renderer.
+    pub fn with_flip_dir(mut self, flip_dir: i32) -> Self {
+        if self.flip_dir != flip_dir {
+            self.flip_dir = flip_dir;
+            self.scale_x = -self.scale_x;
+        }
+        self
     }
 
     pub fn matrix(&self) -> [f32; 9] {
@@ -1182,7 +1238,7 @@ impl DrawTransform {
         let matrix = self.matrix();
         let rhs = delta.matrix();
 
-        Self::from_matrix([
+        Self::from_matrix_with_flip_dir([
             matrix[0] * rhs[0] + matrix[3] * rhs[1] + matrix[6] * rhs[2],
             matrix[1] * rhs[0] + matrix[4] * rhs[1] + matrix[7] * rhs[2],
             matrix[2] * rhs[0] + matrix[5] * rhs[1] + matrix[8] * rhs[2],
@@ -1192,7 +1248,7 @@ impl DrawTransform {
             matrix[0] * rhs[6] + matrix[3] * rhs[7] + matrix[6] * rhs[8],
             matrix[1] * rhs[6] + matrix[4] * rhs[7] + matrix[7] * rhs[8],
             matrix[2] * rhs[6] + matrix[5] * rhs[7] + matrix[8] * rhs[8],
-        ])
+        ], self.flip_dir)
     }
 }
 
@@ -1232,6 +1288,20 @@ mod draw_transform_tests {
             serde_json::from_str(&serialized).expect("draw transform deserializes");
 
         assert_eq!(decoded.matrix(), transform.matrix());
+        assert_eq!(decoded.flip_dir(), 1);
+    }
+
+    #[test]
+    fn flip_dir_and_projective_row_round_trip() {
+        let transform = DrawTransform::from_matrix_with_flip_dir(
+            [-1.0, 0.25, 3.0, 0.5, 2.0, 4.0, 0.01, 0.02, 0.75],
+            -1,
+        );
+        assert!(!transform.is_identity());
+        let encoded = serde_json::to_string(&transform).expect("transform serializes");
+        let decoded: DrawTransform =
+            serde_json::from_str(&encoded).expect("transform deserializes");
+        assert_eq!(decoded, transform);
     }
 }
 
@@ -2103,6 +2173,14 @@ fn is_default_crew_participation(value: &i32) -> bool {
 /// saved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrewInfoCoreFields {
+    /// Original `C4ObjectInfo::Filename`. A fresh network player group still
+    /// keeps this name because the attempted rename has no source entry.
+    #[serde(
+        default,
+        with = "lc_script::c4_string_serde",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub original_filename: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub portrait_file: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2114,15 +2192,39 @@ pub struct CrewInfoCoreFields {
     pub type_name: String,
     #[serde(default, skip_serializing_if = "i32_is_zero")]
     pub next_rank_exp: i32,
+    /// Loaded, decodable portrait/rank payloads retained for creation of a
+    /// fresh network `.c4p` group. C++ owns equivalent graphics surfaces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub portrait_png: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub portrait_overlay_png: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub portrait_bmp: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rank_png: Vec<u8>,
+    /// Reconstruction source for an owned portrait produced by
+    /// `SetPortrait(..., copy=true)`. Native C++ retains the copied surface;
+    /// Rust retains its immutable source until it is encoded for a save.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owned_portrait_source: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owned_portrait_name: String,
 }
 
 impl Default for CrewInfoCoreFields {
     fn default() -> Self {
         Self {
+            original_filename: String::new(),
             portrait_file: String::new(),
             next_rank_name: String::new(),
             type_name: default_crew_type_name(),
             next_rank_exp: 0,
+            portrait_png: Vec::new(),
+            portrait_overlay_png: Vec::new(),
+            portrait_bmp: Vec::new(),
+            rank_png: Vec::new(),
+            owned_portrait_source: String::new(),
+            owned_portrait_name: String::new(),
         }
     }
 }
@@ -2759,7 +2861,7 @@ impl Default for ShapeVertexBuffer {
 }
 
 impl ShapeVertexBuffer {
-    fn active_count(&self) -> usize {
+    pub(crate) fn active_count(&self) -> usize {
         usize::from(self.count).min(MAX_SHAPE_VERTICES)
     }
 
@@ -2775,8 +2877,12 @@ impl ShapeVertexBuffer {
         buffer
     }
 
-    fn active(&self) -> &[ObjectVertex] {
+    pub(crate) fn active(&self) -> &[ObjectVertex] {
         &self.slots[..self.active_count()]
+    }
+
+    pub(crate) fn slots(&self) -> &[ObjectVertex; MAX_SHAPE_VERTICES] {
+        &self.slots
     }
 
     fn active_vec(&self) -> Vec<ObjectVertex> {
@@ -4681,8 +4787,9 @@ pub struct ObjectState {
     /// — readers consume this field, never a fresh compute.
     #[serde(default)]
     pub ocf: u32,
-    /// C4Shape attach bookkeeping — see [`ShapeAttachRecord`]. Runtime
-    /// state, not part of Objects.txt.
+    /// C4Shape attach bookkeeping — see [`ShapeAttachRecord`]. Objects.txt
+    /// persists `iAttachX`/`iAttachY`/`iAttachVtx`; `AttachMat` itself is
+    /// runtime-only (C4Shape.cpp:511-514).
     #[serde(default, skip_serializing_if = "ShapeAttachRecord::is_unattached")]
     pub shape_attach: ShapeAttachRecord,
     /// `C4Object::Action.t_attach` as latched by ExecAction this frame
@@ -6250,6 +6357,12 @@ pub struct Object {
     pub definition_id: DefinitionId,
     #[doc(hidden)]
     pub state: ObjectState,
+    /// C4Object::Mass is a compiled cache, not a derived getter. Objects.txt
+    /// restores it verbatim (including zero) until a native UpdateMass path
+    /// runs. The contents snapshot lets runtime Enter/Exit invalidate a
+    /// parent's cache without disturbing load-time link denumeration.
+    compiled_mass: Option<i32>,
+    compiled_mass_contents: Vec<ObjectId>,
     /// C4Object::Unsorted is a transient, non-savegame flag. ChangeDef sets
     /// it without requesting a sweep; a later C4Object::Resort request (or
     /// Objects.Synchronize) clears it while remove/re-adding the main-list
@@ -6265,6 +6378,10 @@ pub struct Object {
     pub fixed_position: FixedVec2,
     #[doc(hidden)]
     pub fixed_velocity: FixedVec2,
+    /// C4Object::motion_x/motion_y: whole-pixel displacement accumulated by
+    /// DoMotion during the most recent DoMovement invocation.
+    #[doc(hidden)] pub motion_x: i32,
+    #[doc(hidden)] pub motion_y: i32,
     /// 16.16 fixed-point rotation accumulator (C++ `fix_r`, `C4Object.h:149`).
     /// `state.rotation` (whole degrees) is its `fixtoi` projection.
     #[doc(hidden)]
@@ -6461,10 +6578,14 @@ impl Object {
         Self {
             id,
             definition_id,
+            compiled_mass: None,
+            compiled_mass_contents: Vec::new(),
             unsorted: false,
             change_def_contents_sort: None,
             fixed_position,
             fixed_velocity,
+            motion_x: 0,
+            motion_y: 0,
             fixed_rotation,
             rotation_velocity: C4Fixed::ZERO,
             destroyed: matches!(state.status, ObjectStatus::Deleted),
@@ -6683,6 +6804,7 @@ impl Object {
     }
 
     fn set_construction(&mut self, construction: i32) {
+        self.compiled_mass = None;
         let previous_rect = self.current_shape_rect();
         let previous_construction = self.state.construction;
         self.state.construction = construction.clamp(0, FULL_CON);
@@ -6696,7 +6818,14 @@ impl Object {
         if !docon_refreshes_construction(previous_construction, self.state.construction) {
             return;
         }
+        self.compiled_mass = None;
         self.refresh_shape_after_state_change(previous_construction, previous_rect, true);
+    }
+
+    fn remember_compiled_mass_contents(&mut self) {
+        if self.compiled_mass.is_some() {
+            self.compiled_mass_contents = self.state.contents.clone();
+        }
     }
 
     #[doc(hidden)]
@@ -6756,6 +6885,9 @@ impl Object {
             !delta.construction_via_docon
                 || docon_refreshes_construction(previous_construction, construction.max(0))
         });
+        if delta.own_mass.is_some() || delta.change_def.is_some() || construction_refreshes_shape {
+            self.compiled_mass = None;
+        }
         let shape_changed =
             construction_refreshes_shape || delta.rotation.is_some() || delta.vertices.is_some();
         // Kill-trace mark BEFORE the energy write (C4Object.cpp:1351-1361)
@@ -6895,6 +7027,12 @@ impl Object {
         let Some(landscape) = landscape else {
             let previous_position = self.state.position;
             self.advance_fixed_position();
+            self.motion_x = self
+                .motion_x
+                .saturating_add(self.state.position.x - previous_position.x);
+            self.motion_y = self
+                .motion_y
+                .saturating_add(self.state.position.y - previous_position.y);
             return Ok(MovementStepOutcome {
                 no_attach: false,
                 redirect_yr: false,
@@ -6993,6 +7131,7 @@ impl Object {
             if !solid_mask_removed {
                 on_do_motion(self, landscape)?;
             }
+            self.motion_x = self.motion_x.saturating_add(next_x - self.state.position.x);
             self.state.position.x = next_x;
             solid_mask_removed = true;
         }
@@ -7055,6 +7194,7 @@ impl Object {
             if !solid_mask_removed {
                 on_do_motion(self, landscape)?;
             }
+            self.motion_y = self.motion_y.saturating_add(next_y - self.state.position.y);
             self.state.position.y = next_y;
             solid_mask_removed = true;
         }
@@ -7088,6 +7228,7 @@ impl Object {
             if !solid_mask_removed {
                 on_do_motion(self, landscape)?;
             }
+            self.motion_x = self.motion_x.saturating_add(next_x - self.state.position.x);
             self.state.position.x = next_x;
             solid_mask_removed = true;
         }
@@ -7109,6 +7250,7 @@ impl Object {
             if !solid_mask_removed {
                 on_do_motion(self, landscape)?;
             }
+            self.motion_y = self.motion_y.saturating_add(next_y - self.state.position.y);
             self.state.position.y = next_y;
             solid_mask_removed = true;
         }
@@ -7223,6 +7365,12 @@ impl Object {
             if !solid_mask_removed {
                 on_do_motion(self, landscape)?;
             }
+            self.motion_x = self
+                .motion_x
+                .saturating_add(candidate.x - self.state.position.x);
+            self.motion_y = self
+                .motion_y
+                .saturating_add(candidate.y - self.state.position.y);
             self.state.position = candidate;
 
             if override_x {
@@ -8401,6 +8549,10 @@ pub enum EngineError {
     DuplicateObjectId(ObjectId),
     #[error("invalid scenario-section landscape: {0}")]
     InvalidScenarioSectionLandscape(String),
+    #[error(transparent)]
+    RuntimeJoinPlayerRestore(#[from] RuntimeJoinPlayerRestoreError),
+    #[error("failed to persist scenario section `{section}`: {detail}")]
+    ScenarioSectionSave { section: String, detail: String },
 }
 
 #[derive(Debug, Error)]
@@ -8425,6 +8577,11 @@ pub struct SpawnConfig {
     pub custom_name: Option<String>,
     pub position: Vector2,
     pub velocity: Vector2,
+    /// Saved C4Object::motion_x/motion_y frame caches.
+    #[serde(default)]
+    pub motion_x: i32,
+    #[serde(default)]
+    pub motion_y: i32,
     /// Exact sub-pixel velocity: savegame `XDir`/`YDir` are serialized
     /// C4Fixed values (C4Object.cpp:2765-2766), not whole pixels. Takes
     /// precedence over `velocity` when present.
@@ -8433,8 +8590,12 @@ pub struct SpawnConfig {
     #[serde(default)]
     pub rotation: i32,
     /// None = the C4Object::Init rule (alive -> GetPhysical()->Energy,
-    /// else 0; C4Object.cpp:191-192). Some = explicit raw value (loader).
+    /// else 0; C4Object.cpp:191-192), unless native compiled-object defaults
+    /// are selected. Some = explicit raw value (loader).
     pub energy: Option<i32>,
+    /// Saved C4Object::Damage. None uses the fresh-object zero default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage: Option<i32>,
     /// Saved C4Object::NeedEnergy. New objects default to false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub need_energy: Option<bool>,
@@ -8451,6 +8612,15 @@ pub struct SpawnConfig {
     pub command_direction: CommandDirection,
     #[serde(default)]
     pub effects: Vec<EffectState>,
+    /// Saved temporary physical block and its ordered stack history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporary_physical: Option<PhysicalInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub physical_changes: Vec<(String, i32)>,
+    /// Saved raw breath counter; fresh and generic programmatic loaded objects
+    /// seed this from Physical.Breath, while native compiled records default 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breath: Option<i32>,
     #[serde(default)]
     pub vertices: Vec<ObjectVertex>,
     /// Exact saved C4Shape slot storage. Loaded Objects.txt may carry
@@ -8475,6 +8645,9 @@ pub struct SpawnConfig {
     /// construction; loaded objects compile the embedded shape verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape_fire_top: Option<i32>,
+    /// Saved C4Shape attachment coordinates. AttachMat itself is not compiled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_attach: Option<ShapeAttachRecord>,
     /// Explicit per-object `C4Object::Component` list. Loaded Objects.txt
     /// entries compile this verbatim (C4Object.cpp:2811); fresh objects use
     /// their definition components scaled to initial Con when absent.
@@ -8495,6 +8668,9 @@ pub struct SpawnConfig {
     pub controller: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
+    /// Saved C4Object::CrewDisabled bit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew_disabled: Option<bool>,
     /// Saved C4Object::PlrViewRange (`PlrViewRange=` in Objects.txt).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plr_view_range: Option<i32>,
@@ -8524,8 +8700,17 @@ pub struct SpawnConfig {
     /// Saved C4Object::ColorMod (`ColorMod=` in Objects.txt).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_modulation: Option<u32>,
+    /// Saved object graphics selection, draw transform, and overlay chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_graphics: Option<ObjectBaseGraphics>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_transform: Option<DrawTransform>,
     #[serde(default)]
     pub alive: Option<bool>,
+    /// Saved C4Object::Category. Native compiled records default to zero;
+    /// fresh and generic programmatic loaded objects use the definition.
     #[serde(default)]
     pub category: Option<i32>,
     /// `InLiquid` from Objects.txt (C4Object.cpp:2775, default false).
@@ -8556,6 +8741,39 @@ pub struct SpawnConfig {
     /// C4Object.cpp:2738).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timer: Option<i32>,
+    /// Saved script mass override and the compiled Mass cache. The cache is
+    /// authoritative after Objects.txt load until a native UpdateMass path;
+    /// a marked native compiled record installs zero when this is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_mass: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[doc(hidden)]
+    pub compiled_mass: Option<i32>,
+    /// Saved burning state. fire_caused_by is recovered from the Fire effect
+    /// because native Objects.txt does not carry a separate scalar field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_fire: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire_phase: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire_caused_by: Option<i32>,
+    /// Saved private C4Object bookkeeping fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attach_movement_frame: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_energy_loss_cause: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_collect_delay: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<i32>,
+    /// Parsed OCF is retained for format completeness, but loaded objects run
+    /// SetOCF after compilation and therefore replace it from restored state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[doc(hidden)]
+    pub compiled_ocf: Option<u32>,
+    /// Exact top-first C4Command linked-list state from [Commands].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_stack: Option<CommandStackSnapshot>,
     /// Per-object script locals (Objects.txt `LocalNamed=`,
     /// C4Object.cpp:2788) — loaded verbatim into ObjectState.local_vars.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -8563,9 +8781,18 @@ pub struct SpawnConfig {
     /// The object is LOADED (Objects.txt / savegame), not created:
     /// C4GameObjects::Load (C4GameObjects.cpp:535-618) only compiles and
     /// denumerates — Construction/Initialize fire for new objects only
-    /// (C4Object::Init).
+    /// (C4Object::Init). This selects the loaded-object lifecycle; omitted
+    /// scalar values keep the programmatic fixture fallbacks unless
+    /// [`Self::native_compiled_object_defaults`] is also set.
     #[serde(default)]
     pub loaded: bool,
+    /// Apply C4Object::CompileFunc's literal defaults for omitted Objects.txt
+    /// scalar fields: Category, Energy, Breath, and Mass all start at zero.
+    /// Scenario loading sets this together with [`Self::loaded`]; keeping the
+    /// marker separate lets programmatic callback-suppressed fixtures retain
+    /// definition-derived values when they do not model a compiled record.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub native_compiled_object_defaults: bool,
     /// Saved per-object SolidMask rect (Objects.txt SolidMask=; default
     /// keeps the definition mask, C4Object.cpp:2770).
     #[serde(default)]
@@ -8595,9 +8822,12 @@ impl SpawnConfig {
             custom_name: None,
             position: Vector2::ZERO,
             velocity: Vector2::ZERO,
+            motion_x: 0,
+            motion_y: 0,
             fixed_velocity: None,
             rotation: 0,
             energy: None,
+            damage: None,
             need_energy: None,
             magic_energy: None,
             construction: FULL_CON,
@@ -8605,17 +8835,22 @@ impl SpawnConfig {
             direction: Direction::default(),
             command_direction: CommandDirection::default(),
             effects: Vec::new(),
+            temporary_physical: None,
+            physical_changes: Vec::new(),
+            breath: None,
             vertices: Vec::new(),
             shape_vertices: None,
             owns_shape_vertices: None,
             shape_rect: None,
             contact_density: None,
             shape_fire_top: None,
+            shape_attach: None,
             components: None,
             component_order: None,
             owner: OWNER_NONE,
             controller: None,
             crew_member: None,
+            crew_disabled: None,
             plr_view_range: None,
             selected: None,
             status: None,
@@ -8626,6 +8861,9 @@ impl SpawnConfig {
             picture_rect: None,
             color: None,
             color_modulation: None,
+            base_graphics: None,
+            graphics_overlays: Vec::new(),
+            draw_transform: None,
             alive: None,
             category: None,
             in_liquid: None,
@@ -8635,8 +8873,20 @@ impl SpawnConfig {
             rotation_velocity: None,
             mobile: None,
             timer: None,
+            own_mass: None,
+            compiled_mass: None,
+            on_fire: None,
+            fire_phase: None,
+            fire_caused_by: None,
+            last_attach_movement_frame: None,
+            last_energy_loss_cause: None,
+            no_collect_delay: None,
+            base: None,
+            compiled_ocf: None,
+            command_stack: None,
             local_vars: HashMap::new(),
             loaded: false,
+            native_compiled_object_defaults: false,
             solid_mask: None,
             solid_mask_instance_sequence: None,
             initialized: false,
@@ -8696,6 +8946,14 @@ impl SpawnConfig {
 
     pub fn with_loaded(mut self, loaded: bool) -> Self {
         self.loaded = loaded;
+        self
+    }
+
+    /// Mark this configuration as a native compiled Objects.txt record.
+    /// Call together with [`Self::with_loaded`] to reproduce the complete
+    /// C4GameObjects::Load lifecycle.
+    pub fn with_native_compiled_object_defaults(mut self) -> Self {
+        self.native_compiled_object_defaults = true;
         self
     }
 
@@ -9657,6 +9915,52 @@ fn legacy_enumerated_object_reference_removes_the_compatibility_offset() {
     assert_eq!(missing, None);
 }
 
+#[cfg(test)]
+#[test]
+fn legacy_object_load_denumerates_every_object_pointer_wrapper() -> Result<(), EngineError> {
+    let mut engine = Engine::new();
+    engine.register_definition(Definition::from_script("PTRS", "Pointers", "")?)?;
+    let target = engine.spawn_object(
+        SpawnConfig::new("PTRS")
+            .with_id(ObjectId::new(42))
+            .with_loaded(true),
+    )?;
+    let source = engine.spawn_object(
+        SpawnConfig::new("PTRS")
+            .with_id(ObjectId::new(7))
+            .with_loaded(true),
+    )?;
+    let source_index = engine
+        .find_object_index(source)
+        .expect("source object remains present");
+    let legacy_target = ObjectId::new(1_000_000_042);
+    let source_state = &mut engine.objects[source_index].state;
+    source_state.action.target = Some(legacy_target);
+    source_state.action.target2 = Some(legacy_target);
+    source_state.container = Some(legacy_target);
+    source_state.layer = Some(legacy_target);
+    source_state.graphics_overlays.push(
+        ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Object)
+            .with_overlay_object(Some(legacy_target)),
+    );
+
+    engine.finish_legacy_object_load();
+
+    let source_index = engine
+        .find_object_index(source)
+        .expect("source object remains present");
+    let source_state = &engine.objects[source_index].state;
+    assert_eq!(source_state.action.target, Some(target));
+    assert_eq!(source_state.action.target2, Some(target));
+    assert_eq!(source_state.container, Some(target));
+    assert_eq!(source_state.layer, Some(target));
+    assert_eq!(
+        source_state.graphics_overlays[0].overlay_object,
+        Some(target)
+    );
+    Ok(())
+}
+
 fn denumerate_effect_value(value: &mut EffectVarValue, object_numbers: &HashSet<u64>) {
     match value {
         EffectVarValue::Object(id) if !object_numbers.contains(id) => {
@@ -9986,10 +10290,28 @@ pub fn object_visible_for_player(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedObject {
     pub snapshot: ObjectSnapshot,
+    /// Loaded C4Object::Mass cache. None means the object has already passed
+    /// through UpdateMass (or came from a legacy Rust snapshot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compiled_mass: Option<i32>,
     #[serde(default)]
     pub command_queue: Vec<QueuedCommand>,
     #[serde(default)]
     pub command_stack: CommandStackSnapshot,
+    #[serde(default)]
+    motion_x: i32,
+    #[serde(default)]
+    motion_y: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_attach_movement_frame: Option<u64>,
+    #[serde(default)]
+    no_collect_delay: i32,
+    #[serde(default, skip_serializing_if = "ShapeAttachRecord::is_unattached")]
+    shape_attach: ShapeAttachRecord,
+    #[serde(default, skip_serializing_if = "is_false")]
+    entrance_status: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    crew_disabled: bool,
     /// C4Object::SolidMask is savegame state, while pSolidMaskData and its
     /// material buffer are rebuilt after loading (C4Object.cpp:2797;
     /// C4Object.h:177-178).
@@ -10134,6 +10456,20 @@ pub struct EngineState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[doc(hidden)]
     pub team_configuration: Option<TeamConfiguration>,
+    /// Remaining C4TeamList::CompileFunc state not represented by the
+    /// script-queryable TeamConfiguration flags.
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    #[doc(hidden)]
+    pub team_last_team_id: i32,
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    #[doc(hidden)]
+    pub team_max_script_players: i32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[doc(hidden)]
+    pub team_script_player_names: Vec<u8>,
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    #[doc(hidden)]
+    pub team_random_team_count: i32,
     #[serde(default)]
     pub crew_selection: HashMap<i32, CrewSelectionState>,
     #[serde(default)]
@@ -10236,8 +10572,16 @@ impl EngineState {
         for object in &snapshot.objects {
             objects.push(PersistedObject {
                 snapshot: object.clone(),
+                compiled_mass: None,
                 command_queue: object.command_queue.clone(),
                 command_stack: object.command_stack.clone(),
+                motion_x: 0,
+                motion_y: 0,
+                last_attach_movement_frame: None,
+                no_collect_delay: 0,
+                shape_attach: ShapeAttachRecord::default(),
+                entrance_status: false,
+                crew_disabled: false,
                 solid_mask_override: None,
                 shape_vertices: None,
             });
@@ -10334,6 +10678,10 @@ impl EngineState {
             forced_auto_context_menu: None,
             teams: Vec::new(),
             team_configuration: None,
+            team_last_team_id: 0,
+            team_max_script_players: 0,
+            team_script_player_names: Vec::new(),
+            team_random_team_count: 0,
             crew_selection: snapshot.crew_selection.clone(),
             crew_roles: snapshot.crew_roles.clone(),
             crew_info_rosters: HashMap::new(),
@@ -16426,6 +16774,20 @@ pub struct ScenarioBatch {
 #[derive(Clone)]
 struct RuntimeScenarioSection {
     name: String,
+    /// True only for the implicit section backed by the scenario root group.
+    /// C++ distinguishes this through an empty C4ScenarioSection::Filename;
+    /// the visible section name may be anything, including a named `Main`.
+    source_is_scenario_root: bool,
+    /// Mirrors C4ScenarioSection::fModified. A section becomes save-worthy
+    /// only when a changing section switch persists its landscape or objects.
+    modified: bool,
+    landscape_modified: bool,
+    objects_modified: bool,
+    /// Raw temporary C4Group image created when this section was left.
+    /// Final C4GameSave copies this image unchanged instead of rebuilding it
+    /// from later string IDs, globals, or object state.
+    frozen_group: Option<Vec<u8>>,
+    source_group: Option<lc_resources::Group>,
     landscape: Option<Landscape>,
     landscape_systems: scenario::ScenarioLandscapeSystems,
     exact_landscape: bool,
@@ -16746,6 +17108,14 @@ pub struct Engine {
     /// resolve constants declared by OTHER scripts (MagiClonk's
     /// `MCLK_ComboExtraDataName()` running in the MAGE host).
     pub(crate) script_global_consts: lc_script::GlobalVariables,
+    /// Engine-global C4String registration order shared by every script host.
+    /// Runtime save enumeration filters this ledger to currently referenced
+    /// values before assigning Strings.txt IDs.
+    pub(crate) script_string_registrations: lc_script::StringRegistrations,
+    /// Exact zero-based `Strings.txt` enumeration from the scenario/save
+    /// group currently being loaded. Object state consumes it during parse;
+    /// embedded player files need the same IDs later in the restore pipeline.
+    legacy_string_table: HashMap<i32, String>,
     /// Every live script host in C4AulScriptEngine child order. Definition-pack
     /// System hosts are interleaved with definitions; scenario Script.c and
     /// its System.c4g hosts follow all definitions.
@@ -16920,6 +17290,9 @@ pub struct Engine {
     /// Deferred category resorts plus FnSetObjectOrder requests. Category
     /// work runs first; relative requests execute newest-first afterward.
     #[doc(hidden)] pub pending_object_order_commands: Vec<ObjectOrderCommand>,
+    /// Native `C4Game::fResortAnyObject`. This is deliberately independent
+    /// of ResortProc: relative and category-order requests do not set it.
+    resort_any_object: bool,
     /// Next `exec_list` slot during the live reverse-list walk. Insertions
     /// before this cursor have already missed the C++ iterator; insertions at
     /// or after it still execute this frame.
@@ -17002,6 +17375,12 @@ pub struct Engine {
     /// Complete live `Game.Teams` configuration. The team vector alone is
     /// insufficient to reconstruct Custom/Active/AutoGenerateTeams.
     team_configuration: TeamConfiguration,
+    /// Savegame-only C4TeamList compiler fields. These remain independent
+    /// from the live team vector and its seven script-queryable flags.
+    team_last_team_id: i32,
+    team_max_script_players: i32,
+    team_script_player_names: Vec<u8>,
+    team_random_team_count: i32,
     /// `C4TeamList::IsRuntimeJoinTeamChoice`: custom, active team lists
     /// postpone teamless user ScenarioInit until a team control executes.
     runtime_join_team_choice: bool,
@@ -17043,6 +17422,11 @@ pub struct Engine {
     /// Owning C4Player::CrewInfoList for each live object-info pointer.
     /// This is independent of C4Object::Owner and crew-list membership.
     crew_info_links: Rc<HashMap<ObjectId, CrewInfoLink>>,
+    /// Objects.txt rows awaiting C4GameObjects::AssignInfo in InitGameFinal.
+    /// A present `None` records a loaded object without an `Info=` line: it
+    /// can still need MakeCrewMember when a restored Player::Crew points at
+    /// it. This transient load ledger is intentionally absent from saves.
+    pending_legacy_object_infos: HashMap<ObjectId, Option<String>>,
     /// Runtime-only C4ObjectInfo::ControlCount, keyed by the stable roster
     /// pointer identity so it follows an info reattached to another object.
     crew_info_control_counts: HashMap<CrewInfoLink, i32>,
@@ -19043,6 +19427,8 @@ impl Engine {
             script_globals: lc_script::new_global_variables(),
             script_global_slots: lc_script::new_global_slots(),
             script_global_consts: lc_script::new_global_variables(),
+            script_string_registrations: lc_script::new_string_registrations(),
+            legacy_string_table: HashMap::new(),
             script_link_sources: Vec::new(),
             reloaded_global_definitions: Vec::new(),
             objects_generation: std::cell::Cell::new(1),
@@ -19098,6 +19484,7 @@ impl Engine {
             exec_list_insert_generation: 0,
             inactive_exec_list: Vec::new(),
             pending_object_order_commands: Vec::new(),
+            resort_any_object: false,
             exec_cursor: None,
             frame: 0,
             game_tick_delay_ms: Rc::new(std::cell::Cell::new(DEFAULT_GAME_TICK_DELAY_MS)),
@@ -19142,6 +19529,10 @@ impl Engine {
             forced_auto_context_menu: None,
             teams: Rc::new(Vec::new()),
             team_configuration: TeamConfiguration::default(),
+            team_last_team_id: 0,
+            team_max_script_players: 0,
+            team_script_player_names: Vec::new(),
+            team_random_team_count: 0,
             runtime_join_team_choice: false,
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
@@ -19157,6 +19548,7 @@ impl Engine {
             crew_object_infos: Rc::new(HashMap::new()),
             crew_ranks: Rc::new(HashMap::new()),
             crew_info_links: Rc::new(HashMap::new()),
+            pending_legacy_object_infos: HashMap::new(),
             crew_info_control_counts: HashMap::new(),
             team_home_base_rule: false,
             needed_material_strings: Rc::new(NeededMaterialStrings::default()),
@@ -19204,6 +19596,17 @@ impl Engine {
         self.control_rate = timing.control_rate;
     }
 
+    pub(crate) fn resort_any_object_pending(&self) -> bool {
+        self.resort_any_object
+            || self.pending_object_order_commands.iter().any(|command| {
+                matches!(
+                    command,
+                    ObjectOrderCommand::ResortObject(_)
+                        | ObjectOrderCommand::ResortUnsortedSweep
+                )
+            })
+    }
+
     /// Installs the exact runtime fields compiled from a network savegame.
     /// The caller must invoke this after the static scenario landscape,
     /// physics, weather and sky setup, but before definition scripts or
@@ -19249,12 +19652,7 @@ impl Engine {
             // transient section-load flag word is not part of Game.txt.
             self.last_scenario_section_flags = Some(0);
         }
-        self.pending_object_order_commands
-            .retain(|command| !matches!(command, ObjectOrderCommand::ResortUnsortedSweep));
-        if data.resort_any_object {
-            self.pending_object_order_commands
-                .push(ObjectOrderCommand::ResortUnsortedSweep);
-        }
+        self.resort_any_object = data.resort_any_object;
         self.next_mission = data.next_mission.clone();
         self.message_board_commands = data.message_board_commands.clone();
         self.scenario_script_go = data.script_go;
@@ -19483,8 +19881,24 @@ impl Engine {
 
     #[doc(hidden)]
     pub fn set_teams(&mut self, teams: Vec<TeamInfo>) {
+        self.team_last_team_id = self
+            .team_last_team_id
+            .max(teams.iter().map(|team| team.id).max().unwrap_or(0));
         self.teams = Rc::new(teams);
         self.recheck_runtime_team_memberships();
+    }
+
+    /// Installs the four non-queryable fields of C4TeamList::CompileFunc.
+    /// Network/bootstrap callers must apply this together with the team
+    /// registry and TeamConfiguration before the first synchronized save.
+    #[doc(hidden)]
+    pub fn set_initial_network_team_metadata(&mut self, metadata: &InitialNetworkTeamMetadata) {
+        self.team_last_team_id = metadata
+            .last_team_id
+            .max(metadata.teams.iter().map(|team| team.id).max().unwrap_or(0));
+        self.team_max_script_players = metadata.max_script_players;
+        self.team_script_player_names = metadata.script_player_names.as_bytes().to_vec();
+        self.team_random_team_count = metadata.random_team_count;
     }
 
     /// Reconciles the live C4Team player-info ID lists after a PlayerInfo
@@ -19658,17 +20072,47 @@ impl Engine {
         self.scenario_values = Rc::new(values);
     }
 
+    pub(crate) fn set_legacy_string_table(&mut self, strings: HashMap<i32, String>) {
+        let mut ids = strings.keys().copied().collect::<Vec<_>>();
+        ids.sort_unstable();
+        for id in ids {
+            if let Some(value) = strings.get(&id) {
+                lc_script::register_loaded_c4_string(
+                    &self.script_string_registrations,
+                    id,
+                    value,
+                );
+            }
+        }
+        self.legacy_string_table = strings;
+    }
+
+    pub(crate) fn legacy_string_table_snapshot(&self) -> HashMap<i32, String> {
+        self.legacy_string_table.clone()
+    }
+
     pub(crate) fn configure_scenario_sections(
         &mut self,
         sections: &[scenario::ScenarioSectionSpec],
     ) {
+        let root_section = sections
+            .first()
+            .map(|section| section.name.clone())
+            .unwrap_or_else(|| "main".to_string());
         self.scenario_sections = sections
             .iter()
-            .map(|section| {
+            .enumerate()
+            .map(|(index, section)| {
                 (
                     section.name.to_ascii_lowercase(),
                     RuntimeScenarioSection {
                         name: section.name.clone(),
+                        source_is_scenario_root: index == 0,
+                        modified: false,
+                        landscape_modified: false,
+                        objects_modified: false,
+                        frozen_group: None,
+                        source_group: section.source_group.clone(),
                         landscape: section.landscape.clone(),
                         landscape_systems: section.landscape_systems.clone(),
                         exact_landscape: section.exact_landscape,
@@ -19691,7 +20135,7 @@ impl Engine {
                 )
             })
             .collect();
-        self.current_scenario_section = "main".to_string();
+        self.current_scenario_section = root_section;
         self.last_scenario_section_flags = None;
     }
 
@@ -19739,6 +20183,7 @@ impl Engine {
             "Local".to_string(),
             ControlJoinPlayerSemantics::default(),
             runtime_control,
+            None,
         )
     }
 
@@ -19766,6 +20211,7 @@ impl Engine {
             "Local".to_string(),
             info.into(),
             runtime_control,
+            None,
         )
     }
 
@@ -19782,6 +20228,7 @@ impl Engine {
             "Local".to_string(),
             ControlJoinPlayerSemantics::default(),
             PlayerRuntimeControl::NONE,
+            None,
         )
     }
 
@@ -19799,6 +20246,7 @@ impl Engine {
             "Local".to_string(),
             info.into(),
             PlayerRuntimeControl::NONE,
+            None,
         )
     }
 
@@ -19818,6 +20266,7 @@ impl Engine {
             at_client_name.into(),
             info.into(),
             PlayerRuntimeControl::NONE,
+            None,
         )
     }
 
@@ -19839,6 +20288,32 @@ impl Engine {
             at_client_name.into(),
             info.into(),
             runtime_control,
+            None,
+        )
+    }
+
+    /// Player-file join boundary. C++ loads the inherited C4PlayerInfoCore,
+    /// including ExtraData, before InitControl and every initialization script
+    /// callback. Keeping the core outside JoinPlayerConfig lets synthetic test
+    /// joins retain their compact gameplay-only configuration while real file
+    /// joins install the exact profile at the same point as C++.
+    pub fn join_player_with_profile_core(
+        &mut self,
+        config: JoinPlayerConfig,
+        at_client: PlayerAtClient,
+        at_client_name: impl Into<String>,
+        info: Option<&ControlPlayerInfoEntry>,
+        runtime_control: PlayerRuntimeControl,
+        player_info_core: PlayerInfoCoreState,
+    ) -> Result<JoinPlayerOutcome, EngineError> {
+        self.join_player_at_client_with_semantics(
+            config,
+            at_client,
+            at_client_name.into(),
+            info.map(ControlJoinPlayerSemantics::from)
+                .unwrap_or_default(),
+            runtime_control,
+            Some(player_info_core),
         )
     }
 
@@ -19849,6 +20324,7 @@ impl Engine {
         at_client_name: String,
         semantics: ControlJoinPlayerSemantics,
         runtime_control: PlayerRuntimeControl,
+        player_info_core: Option<PlayerInfoCoreState>,
     ) -> Result<JoinPlayerOutcome, EngineError> {
         let has_valid_team = config
             .team
@@ -19862,6 +20338,7 @@ impl Engine {
                 semantics.no_elimination_check,
                 semantics.league_score,
                 semantics.league_progress_data.as_deref(),
+                player_info_core,
             )?;
             return Ok(JoinPlayerOutcome::AwaitingTeamSelection { number });
         }
@@ -19873,6 +20350,7 @@ impl Engine {
             semantics.no_elimination_check,
             semantics.league_score,
             semantics.league_progress_data.as_deref(),
+            player_info_core,
         );
         if let Some(player) = self.players.get_mut(&number) {
             player.set_script_player(semantics.script_player);
@@ -19923,6 +20401,7 @@ impl Engine {
             false,
             None,
             None,
+            None,
         )
     }
 
@@ -19935,6 +20414,7 @@ impl Engine {
         no_elimination_check: bool,
         league_score: Option<i32>,
         league_progress_data: Option<&[u8]>,
+        player_info_core: Option<PlayerInfoCoreState>,
     ) -> Result<i32, EngineError> {
         let number = self.register_joining_player(
             &config,
@@ -19944,6 +20424,7 @@ impl Engine {
             no_elimination_check,
             league_score,
             league_progress_data,
+            player_info_core,
         );
         self.player_mut(number)?
             .set_status(PlayerStatus::TeamSelection);
@@ -20018,18 +20499,14 @@ impl Engine {
         if !self.team_configuration.auto_generate_teams {
             return None;
         }
-        let id = self
-            .teams
-            .iter()
-            .map(|team| team.id)
-            .fold(0, i32::max)
-            .checked_add(1)?;
+        let id = self.team_last_team_id.checked_add(1)?;
         // Higher IDs require C++'s process-global SafeRandom color search.
         // Keep zero as an explicit unresolved marker rather than consuming
         // the lockstep RNG or inventing a color; callers do not apply zero
         // to the player while host-color transport remains open.
         let color = default_generated_team_color(id).unwrap_or(0);
         Rc::make_mut(&mut self.teams).push(TeamInfo::new(id, format!("Team {id}"), color));
+        self.team_last_team_id = id;
         Some(id)
     }
 
@@ -20083,6 +20560,7 @@ impl Engine {
         no_elimination_check: bool,
         league_score: Option<i32>,
         league_progress_data: Option<&[u8]>,
+        player_info_core: Option<PlayerInfoCoreState>,
     ) -> i32 {
         // C4PlayerList::GetFreeNumber: lowest unused player number.
         let number = self.next_player_number();
@@ -20128,16 +20606,44 @@ impl Engine {
             runtime_control.prefers_mouse,
         );
         player.set_control_style_preferences(config.control_style, config.auto_context_menu);
+        let mut player_info_core = player_info_core.unwrap_or_default();
+        player_info_core.score = config.score;
+        player_info_core.rounds = config.rounds;
+        player_info_core.rounds_won = config.rounds_won;
+        player_info_core.rounds_lost = config.rounds_lost;
+        player_info_core.total_playing_time = config.total_playing_time;
+        let preferred_control_style_value = if (player_info_core.pref_control_style_value != 0)
+            == config.control_style
+        {
+            player_info_core.pref_control_style_value
+        } else {
+            i32::from(config.control_style)
+        };
+        let preferred_auto_context_menu_value =
+            if (player_info_core.pref_auto_context_menu_value != 0) == config.auto_context_menu {
+                player_info_core.pref_auto_context_menu_value
+            } else {
+                i32::from(config.auto_context_menu)
+            };
+        player.set_player_info_core(player_info_core);
         // C4Player::InitControl (C4Player.cpp:1747, 2371-2380): flash both
         // markers and let ForcedControlStyle override the player preference.
         player.control.select_flash = 30;
         player.control.cursor_flash = 30;
-        let control_style = self.forced_control_style.unwrap_or(config.control_style);
+        let control_style_value = self
+            .forced_control_style
+            .map(i32::from)
+            .unwrap_or(preferred_control_style_value);
+        let control_style = control_style_value != 0;
         let activates_auto_stop = player.control.control_style != control_style && control_style;
-        player.control.control_style = control_style;
-        player.control.auto_context_menu = self
+        player.control.set_control_style_value(control_style_value);
+        let auto_context_menu_value = self
             .forced_auto_context_menu
-            .unwrap_or(config.auto_context_menu);
+            .map(i32::from)
+            .unwrap_or(preferred_auto_context_menu_value);
+        player
+            .control
+            .set_auto_context_menu_value(auto_context_menu_value);
         // The new player's CrewInfoList owns fresh runtime-only control
         // counters even when a departed player previously used this number.
         self.crew_info_control_counts
@@ -20152,7 +20658,7 @@ impl Engine {
         self.players_registered = true;
         self.crew_rosters.insert(number, config.crew.clone());
         self.crew_info_order
-            .insert(number, (0..config.crew.len()).collect());
+            .insert(number, (0..config.crew.len()).rev().collect());
         self.bootstrap_player_crew_from_union(number);
         self.sync_player_cursor(number);
         number
@@ -20288,15 +20794,32 @@ impl Engine {
                 runtime_control.preferred_control_set,
                 runtime_control.prefers_mouse,
             );
+            let preferred_control_style_value = player
+                .player_info_core()
+                .map(|core| core.pref_control_style_value)
+                .filter(|raw| (*raw != 0) == pref_control_style)
+                .unwrap_or_else(|| i32::from(pref_control_style));
+            let preferred_auto_context_menu_value = player
+                .player_info_core()
+                .map(|core| core.pref_auto_context_menu_value)
+                .filter(|raw| (*raw != 0) == pref_auto_context_menu)
+                .unwrap_or_else(|| i32::from(pref_auto_context_menu));
             player.set_control_style_preferences(pref_control_style, pref_auto_context_menu);
-            let control_style = forced_control_style.unwrap_or(pref_control_style);
-            let auto_context_menu = forced_auto_context_menu.unwrap_or(pref_auto_context_menu);
+            let control_style_value = forced_control_style
+                .map(i32::from)
+                .unwrap_or(preferred_control_style_value);
+            let control_style = control_style_value != 0;
+            let auto_context_menu_value = forced_auto_context_menu
+                .map(i32::from)
+                .unwrap_or(preferred_auto_context_menu_value);
             let changed = player.control.control_style != control_style;
             if changed {
                 player.control.last_com = crate::control::COM_NONE;
             }
-            player.control.control_style = control_style;
-            player.control.auto_context_menu = auto_context_menu;
+            player.control.set_control_style_value(control_style_value);
+            player
+                .control
+                .set_auto_context_menu_value(auto_context_menu_value);
             player.control.pressed_coms = 0;
             changed && control_style
         };
@@ -20431,6 +20954,7 @@ impl Engine {
     /// C4Game::InitGameFinal savegame phase: after every recreated player has
     /// rerun InitControl, FinalInit(false) executes in `C4PlayerList` order.
     pub fn finalize_restored_players(&mut self) -> Result<(), EngineError> {
+        self.assign_legacy_object_infos()?;
         let players = self.player_ids_in_order();
         for player in players {
             self.finalize_joining_player(player, false, true)?;
@@ -21436,8 +21960,12 @@ impl Engine {
         player.set_control_style_preferences(false, false);
         let control_style = self.forced_control_style.unwrap_or(false);
         let activates_auto_stop = player.control.control_style != control_style && control_style;
-        player.control.control_style = control_style;
-        player.control.auto_context_menu = self.forced_auto_context_menu.unwrap_or(false);
+        player
+            .control
+            .set_control_style_value(i32::from(control_style));
+        player.control.set_auto_context_menu_value(i32::from(
+            self.forced_auto_context_menu.unwrap_or(false),
+        ));
         // C4Player::InitControl flashes both markers at the join
         // (C4Player.cpp:1747).
         player.control.select_flash = 30;
@@ -21831,6 +22359,210 @@ impl Engine {
         }
     }
 
+    /// Retain one Objects.txt `Info=` token until players have been recreated.
+    /// C++ loads objects in InitGame, but binds their C4ObjectInfo pointers in
+    /// InitGameFinal after InitPlayers (C4Game.cpp:2699-2722).
+    pub(crate) fn remember_legacy_object_info(
+        &mut self,
+        object: ObjectId,
+        info_name: Option<String>,
+    ) {
+        self.pending_legacy_object_infos.insert(object, info_name);
+    }
+
+    /// C4GameObjects::AssignInfo + C4Object::AssignInfo. The main and
+    /// inactive lists are walked Last -> Prev; both Rust ledgers already use
+    /// that reverse-master order. Saved names select the first matching idle
+    /// roster entry irrespective of its original definition. Without a name,
+    /// or after a named miss, MakeCrewMember falls back to the highest-
+    /// experience idle entry for the object's current definition.
+    fn assign_legacy_object_infos(&mut self) -> Result<(), EngineError> {
+        if self.pending_legacy_object_infos.is_empty() || self.players.is_empty() {
+            return Ok(());
+        }
+
+        self.validate_object_player_references();
+        let mut order = self.exec_list.clone();
+        order.extend(self.inactive_exec_list.iter().copied());
+        let mut seen = HashSet::new();
+        order.retain(|object| seen.insert(*object));
+
+        for object_id in order {
+            let Some(info_name) = self.pending_legacy_object_infos.remove(&object_id) else {
+                continue;
+            };
+            let Some(object_index) = self.find_object_index(object_id) else {
+                continue;
+            };
+            if self.objects[object_index].state.status == ObjectStatus::Deleted
+                || self.crew_object_infos.contains_key(&object_id)
+            {
+                continue;
+            }
+            let owner = self.objects[object_index].state.owner;
+            let definition_id = self.objects[object_index].definition_id.clone();
+            let alive = self.objects[object_index].state.alive;
+            let Some(player) = self.players.get(&owner) else {
+                continue;
+            };
+            let already_in_crew = player.crew().contains(&object_id);
+            let named_assignment = !already_in_crew
+                && info_name.as_deref().is_some_and(|name| !name.is_empty());
+            if !already_in_crew && !named_assignment {
+                continue;
+            }
+            if !self
+                .definitions
+                .get(&definition_id)
+                .is_some_and(Definition::is_crew)
+            {
+                if already_in_crew {
+                    let crew = player
+                        .crew()
+                        .iter()
+                        .copied()
+                        .filter(|candidate| *candidate != object_id)
+                        .collect();
+                    if let Some(player) = self.players.get_mut(&owner) {
+                        player.set_crew(crew);
+                    }
+                }
+                continue;
+            }
+
+            let named_index = info_name.as_deref().and_then(|name| {
+                let roster = self.crew_rosters.get(&owner)?;
+                let fallback;
+                let roster_order = match self.crew_info_order.get(&owner) {
+                    Some(order) => order.as_slice(),
+                    None => {
+                        fallback = (0..roster.len()).collect::<Vec<_>>();
+                        fallback.as_slice()
+                    }
+                };
+                roster_order.iter().copied().find(|&index| {
+                    roster.get(index).is_some_and(|info| {
+                        info.name.eq_ignore_ascii_case(name)
+                            && info.participation != 0
+                            && !info.in_action
+                            && !info.has_died
+                    })
+                })
+            });
+
+            let recruited = if let Some(index) = named_index {
+                let (info_definition, rank, stored_rank_name) = {
+                    let info = &self.crew_rosters[&owner][index];
+                    (info.id.clone(), info.rank, info.rank_name.clone())
+                };
+                let rank_name = self.recruit_rank_name(
+                    &DefinitionId::from(info_definition.as_str()),
+                    rank,
+                    &stored_rank_name,
+                );
+                let info = &mut self.crew_rosters.get_mut(&owner).unwrap()[index];
+                info.in_action = true;
+                info.was_in_action = true;
+                info.in_action_time = self.game_time;
+                info.rank_name = rank_name;
+                Some((index, info.clone()))
+            } else {
+                self.recruit_crew_info(owner, definition_id.as_str())
+            };
+            let Some((roster_index, info)) = recruited else {
+                if already_in_crew {
+                    let crew = self.players[&owner]
+                        .crew()
+                        .iter()
+                        .copied()
+                        .filter(|candidate| *candidate != object_id)
+                        .collect();
+                    if let Some(player) = self.players.get_mut(&owner) {
+                        player.set_crew(crew);
+                    }
+                }
+                continue;
+            };
+
+            Rc::make_mut(&mut self.crew_object_infos).insert(
+                object_id,
+                CrewObjectInfo {
+                    definition_id: DefinitionId::from(info.id.as_str()),
+                    name: info.name.clone(),
+                    death_message: info.death_message.clone(),
+                    core: info.core.clone(),
+                    rank: info.rank,
+                    rank_name: info.rank_name.clone(),
+                    experience: info.experience,
+                    participation: info.participation,
+                    rounds: info.rounds,
+                    death_count: info.death_count,
+                    total_playing_time: info.total_playing_time,
+                    birthday: info.birthday,
+                    age: info.age,
+                    in_action_time: info.in_action_time,
+                    extra_data: info.extra_data.clone(),
+                    portraits: info.portraits.clone(),
+                },
+            );
+            Rc::make_mut(&mut self.crew_info_links).insert(
+                object_id,
+                CrewInfoLink {
+                    player_id: owner,
+                    roster_index,
+                },
+            );
+            Rc::make_mut(&mut self.crew_ranks).insert(object_id.as_u64(), info.rank);
+            if let Some(index) = self.find_object_index(object_id) {
+                self.objects[index].state.info_physical = Some(info.physical);
+                self.objects[index].state.crew_member = true;
+                if self.objects[index].state.plr_view_range == 0 {
+                    self.objects[index].state.plr_view_range = 500;
+                }
+                self.objects[index].state.controller = owner;
+            }
+            if !already_in_crew {
+                let mut crew = self.players[&owner].crew().to_vec();
+                let position = self.crew_insert_position(&crew, object_id);
+                crew.insert(position, object_id);
+                if let Some(player) = self.players.get_mut(&owner) {
+                    player.set_crew(crew);
+                }
+            }
+            self.actualize_object_fow_view_range(object_id);
+
+            // The nInfo branch rejects a dead loaded crew pointer after
+            // marking the roster entry. The Info link itself remains on the
+            // object; only player pointers and Crew membership are cleared.
+            if named_assignment && !alive {
+                if let Some(entry) = self
+                    .crew_rosters
+                    .get_mut(&owner)
+                    .and_then(|roster| roster.get_mut(roster_index))
+                {
+                    entry.has_died = true;
+                }
+                let removed_cursor = self.crew_cursor(owner) == Some(object_id);
+                if removed_cursor {
+                    if let Some(selection) = self.crew_selection.get_mut(&owner) {
+                        selection.set_cursor(None);
+                    }
+                }
+                if let Some(player) = self.players.get_mut(&owner) {
+                    player.clear_object_pointers(object_id);
+                }
+                self.remove_from_roles(owner, object_id);
+                if let Some(index) = self.find_object_index(object_id) {
+                    self.objects[index].state.crew_member = false;
+                }
+                if removed_cursor {
+                    self.player_adjust_cursor_command(owner)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// C4PlayerList::Retire evaluates an eliminated player exactly once
     /// before Remove broadcasts and erases the live player record
     /// (C4PlayerList.cpp:398-409; C4Player.cpp:930-970).
@@ -21883,21 +22615,30 @@ impl Engine {
         average_value_gain: i32,
     ) -> Result<Option<(i32, u32, i32, i32)>, EngineError> {
         let melee = self.scenario_values.is_melee();
+        let scenario_title = self.scenario_values.scenario_title().to_string();
+        let unix_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs() as u32);
         let evaluated = {
             let player = self
                 .players
                 .get_mut(&id)
                 .ok_or(EngineError::UnknownPlayer(id))?;
-            player
-                .evaluate(average_value_gain, melee, self.game_time)
-                .map(|(score_old, score_new)| {
-                    (
-                        player.player_info_id(),
-                        player.total_playing_time() as u32,
-                        score_old,
-                        score_new,
-                    )
-                })
+            let scores = player.evaluate(
+                average_value_gain,
+                melee,
+                self.game_time,
+                scenario_title,
+                unix_time,
+            );
+            scores.map(|(score_old, score_new)| {
+                (
+                    player.player_info_id(),
+                    player.total_playing_time() as u32,
+                    score_old,
+                    score_new,
+                )
+            })
         };
         if evaluated.is_some() {
             self.evaluate_player_crew_infos(id);
@@ -23900,6 +24641,7 @@ impl Engine {
         script.set_global_variables(self.script_globals.clone());
         script.set_global_slots(self.script_global_slots.clone());
         script.set_global_constants(self.script_global_consts.clone());
+        script.set_string_registrations(self.script_string_registrations.clone());
         script.set_global_functions(self.global_script_functions.clone());
         compat::register_host_functions(&mut script);
         script
@@ -25031,6 +25773,7 @@ impl Engine {
             host.set_global_variables(self.script_globals.clone());
             host.set_global_slots(self.script_global_slots.clone());
             host.set_global_constants(self.script_global_consts.clone());
+            host.set_string_registrations(self.script_string_registrations.clone());
             host.adopt_statics_into_globals();
         }
         let scenario_globals: Vec<(String, lc_script::Function)> = script
@@ -25122,6 +25865,7 @@ impl Engine {
     }
 
     pub fn initialize_scenario_script(&mut self) -> Result<Vec<ObjectId>, EngineError> {
+        self.assign_legacy_object_infos()?;
         let Some(c4_args) = self.scenario_script.as_ref().map(|script| script.c4_args) else {
             return Ok(Vec::new());
         };
@@ -25586,6 +26330,7 @@ impl Engine {
         }
 
         let (goals, fulfilled_goals) = self.evaluate_round_goals()?;
+        self.round_results.goal_counts = goals.iter().cloned().map(|goal| (goal, 1)).collect();
         self.round_results.goals = goals;
         self.round_results.fulfilled_goals = fulfilled_goals;
         // C4RoundResults::EvaluateGame writes playing time after all goal
@@ -27007,6 +27752,7 @@ impl Engine {
             script.set_global_variables(self.script_globals.clone());
             script.set_global_slots(self.script_global_slots.clone());
             script.set_global_constants(self.script_global_consts.clone());
+            script.set_string_registrations(self.script_string_registrations.clone());
             script.adopt_statics_into_globals();
         }
 
@@ -27165,6 +27911,7 @@ impl Engine {
                     script.set_global_variables(self.script_globals.clone());
                     script.set_global_slots(self.script_global_slots.clone());
                     script.set_global_constants(self.script_global_consts.clone());
+                    script.set_string_registrations(self.script_string_registrations.clone());
                     script.set_global_functions(self.global_script_functions.clone());
                     script.add_script(compiled.clone().without_static_declarations());
                     compat::register_host_functions(&mut script);
@@ -27258,6 +28005,7 @@ impl Engine {
                     engine.set_global_variables(self.script_globals.clone());
                     engine.set_global_slots(self.script_global_slots.clone());
                     engine.set_global_constants(self.script_global_consts.clone());
+                    engine.set_string_registrations(self.script_string_registrations.clone());
                     engine.add_script(script.without_static_declarations());
                     #[allow(clippy::arc_with_non_send_sync)] // single-threaded sharing
                     (Arc::new(engine), None, targets)
@@ -30431,15 +31179,18 @@ impl Engine {
                     let caused_by = match entry.vars().first() {
                         Some(EffectVarValue::Int(value)) => *value,
                         Some(EffectVarValue::Bool(flag)) => i32::from(*flag),
+                        Some(EffectVarValue::RawBool(value)) => *value as u32 as i32,
                         _ => 0,
                     };
-                    let blasted = matches!(
-                        entry.vars().get(1),
-                        Some(EffectVarValue::Bool(true))
-                    ) || matches!(
-                        entry.vars().get(1),
-                        Some(EffectVarValue::Int(value)) if *value != 0
-                    );
+                    let blasted = matches!(entry.vars().get(1), Some(EffectVarValue::Bool(true)))
+                        || matches!(
+                            entry.vars().get(1),
+                            Some(EffectVarValue::RawBool(value)) if (*value as u32 as i32) != 0
+                        )
+                        || matches!(
+                            entry.vars().get(1),
+                            Some(EffectVarValue::Int(value)) if *value != 0
+                        );
                     let incinerating = match entry.vars().get(2) {
                         Some(EffectVarValue::Object(id)) => Some(ObjectId::new(*id)),
                         _ => None,
@@ -31240,6 +31991,7 @@ impl Engine {
             owner,
             base,
             controller,
+            own_mass,
             crew_member,
             plr_view_range,
             crew_status_change,
@@ -31462,6 +32214,10 @@ impl Engine {
             }
             if let Some(base) = base {
                 object.state.base = base;
+            }
+            if let Some(own_mass) = own_mass {
+                object.state.own_mass = own_mass;
+                object.compiled_mass = None;
             }
             if let Some(crew_member) = crew_member {
                 object.state.crew_member = crew_member;
@@ -32856,6 +33612,7 @@ impl Engine {
                 delayed_docon_state
             {
                 if let Some(position) = resolved_position {
+                    self.objects[index].compiled_mass = None;
                     self.objects[index].state.construction = construction.max(0);
                     self.objects[index].refresh_shape_geometry();
                     self.objects[index].state.position = position;
@@ -33298,6 +34055,14 @@ impl Engine {
         ScriptGlobalState { numbered, named }
     }
 
+    pub(crate) fn script_global_name_order(&self) -> Vec<String> {
+        self.script_globals.borrow().keys().cloned().collect()
+    }
+
+    pub(crate) fn script_string_registration_order(&self) -> Vec<String> {
+        lc_script::c4_string_registration_order(&self.script_string_registrations)
+    }
+
     /// C4AulScriptEngine::DenumerateVariablePointers after every object has
     /// loaded (C4Aul.cpp:506-520; C4Game.cpp:2492): restore numbered slots,
     /// then map saved GlobalNamed values onto the declarations registered by
@@ -33320,10 +34085,9 @@ impl Engine {
             if !(0..1_000_000).contains(&index) {
                 continue;
             }
-            numbered.insert(
-                index,
-                lc_script::value_cell(denumerate_script_value(value, &object_numbers)),
-            );
+            let value = denumerate_script_value(value, &object_numbers);
+            lc_script::register_c4_value_strings(&self.script_string_registrations, &value);
+            numbered.insert(index, lc_script::value_cell(value));
         }
         drop(numbered);
 
@@ -33338,7 +34102,9 @@ impl Engine {
         }
         for (name, value) in &state.named {
             if let Some(cell) = named_cells.get(name) {
-                *cell.borrow_mut() = denumerate_script_value(value, &object_numbers);
+                let value = denumerate_script_value(value, &object_numbers);
+                lc_script::register_c4_value_strings(&self.script_string_registrations, &value);
+                *cell.borrow_mut() = value;
             }
         }
     }
@@ -33410,6 +34176,19 @@ impl Engine {
         }
     }
 
+    /// Snapshot used by C4GameSaveNetwork(false). Its preceding Synchronize
+    /// call passes `fSavePlayerFiles=false`, so C4Player::LocalSync does not add
+    /// the current Game.Time-GameJoinTime stint to the profile counter.
+    pub(crate) fn capture_state_for_network_save(&self) -> EngineState {
+        let mut state = self.capture_state();
+        for saved in &mut state.players {
+            if let Some(player) = self.players.get(&saved.id) {
+                saved.total_playing_time = player.total_playing_time();
+            }
+        }
+        state
+    }
+
     pub fn capture_state(&self) -> EngineState {
         let objects = self
             .objects
@@ -33421,8 +34200,18 @@ impl Engine {
                     .map(|definition| definition.action_library());
                 PersistedObject {
                     snapshot: object.snapshot(library),
+                    compiled_mass: self
+                        .find_object_index(object.id)
+                        .and_then(|index| self.valid_compiled_object_mass(index)),
                     command_queue: object.command_queue.iter().cloned().collect(),
                     command_stack: object.commands.snapshot(),
+                    motion_x: object.motion_x,
+                    motion_y: object.motion_y,
+                    last_attach_movement_frame: object.last_attach_movement_frame,
+                    no_collect_delay: object.state.no_collect_delay,
+                    shape_attach: object.state.shape_attach,
+                    entrance_status: object.state.entrance_status,
+                    crew_disabled: object.state.crew_disabled,
                     solid_mask_override: object.state.solid_mask_override,
                     shape_vertices: (!object
                         .state
@@ -33532,6 +34321,10 @@ impl Engine {
             forced_auto_context_menu: self.forced_auto_context_menu,
             teams: self.teams.as_ref().clone(),
             team_configuration: Some(self.team_configuration),
+            team_last_team_id: self.team_last_team_id,
+            team_max_script_players: self.team_max_script_players,
+            team_script_player_names: self.team_script_player_names.clone(),
+            team_random_team_count: self.team_random_team_count,
             crew_selection,
             crew_roles,
             crew_info_rosters: self.crew_rosters.clone(),
@@ -33683,6 +34476,8 @@ impl Engine {
         self.exec_list.clear();
         self.inactive_exec_list.clear();
         self.pending_object_order_commands.clear();
+        self.resort_any_object = false;
+        self.pending_legacy_object_infos.clear();
         self.exec_cursor = None;
         self.note_objects_changed();
         self.crew_rosters = state.crew_info_rosters.clone();
@@ -33852,9 +34647,9 @@ impl Engine {
                     // Objects.txt `Rotation` loads verbatim (C4Object.cpp:
                     // 2769); only the SetR host function normalizes.
                     rotation: snapshot.rotation,
-                    shape_attach: ShapeAttachRecord::default(),
+                    shape_attach: persisted.shape_attach,
                     t_attach: 0,
-                    no_collect_delay: 0,
+                    no_collect_delay: persisted.no_collect_delay,
                     // C4Object::CompileFunc persists Base verbatim
                     // (C4Object.cpp:2776); owner validation is a separate
                     // post-load pass (C4Object.cpp:3157-3162).
@@ -33899,7 +34694,7 @@ impl Engine {
                     crew_member: snapshot.crew_member,
                     plr_view_range: snapshot.plr_view_range,
                     selected: snapshot.selected,
-                    crew_disabled: false,
+                    crew_disabled: persisted.crew_disabled,
                     alive: snapshot.alive,
                     base_graphics: snapshot.base_graphics.clone(),
                     graphics_overlays: snapshot.graphics_overlays.clone(),
@@ -33917,7 +34712,7 @@ impl Engine {
                     temporary_physical: snapshot.temporary_physical,
                     physical_changes: snapshot.physical_changes.clone(),
                     breath: snapshot.breath,
-                    entrance_status: false,
+                    entrance_status: persisted.entrance_status,
                     menu: None,
                     color: snapshot.color,
                     color_modulation: snapshot.color_modulation,
@@ -33927,12 +34722,16 @@ impl Engine {
                 shape_template,
                 snapshot.own_vertices.clone(),
             );
+            object.compiled_mass = persisted.compiled_mass;
             if let Some(rect) = snapshot.current_shape {
                 object.shape_rect = Some(rect);
             }
             if let Some(fire_top) = snapshot.current_fire_top {
                 object.shape_fire_top = fire_top;
             }
+            object.motion_x = persisted.motion_x;
+            object.motion_y = persisted.motion_y;
+            object.last_attach_movement_frame = persisted.last_attach_movement_frame;
             // Restore authoritative sub-pixel state when the snapshot carried it
             // (whole-pixel objects fall back to the `itofix` set by `Object::new`).
             if let Some(fixed_position) = snapshot.fixed_position {
@@ -34227,6 +35026,12 @@ impl Engine {
         if let Some(configuration) = state.team_configuration {
             self.set_team_configuration(configuration);
         }
+        self.team_last_team_id = state
+            .team_last_team_id
+            .max(state.teams.iter().map(|team| team.id).max().unwrap_or(0));
+        self.team_max_script_players = state.team_max_script_players;
+        self.team_script_player_names = state.team_script_player_names.clone();
+        self.team_random_team_count = state.team_random_team_count;
         self.recheck_runtime_team_memberships();
         self.players_registered = !self.players.is_empty();
         self.next_mission = state.next_mission.clone();
@@ -35475,6 +36280,17 @@ impl Engine {
             .map(|object| object.id)
             .collect::<HashSet<_>>();
         pending.retain(|spawn| spawn.config.id.is_none_or(|id| !retained_ids.contains(&id)));
+        let contents_specs = pending
+            .iter()
+            .filter_map(|spawn| {
+                (!spawn.contents_handles.is_empty()).then(|| {
+                    (
+                        spawn.handle.clone(),
+                        spawn.contents_handles.clone(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
 
         let max_explicit_id = pending
             .iter()
@@ -35485,7 +36301,10 @@ impl Engine {
             self.next_object_id = self.next_object_id.max(max_id.saturating_add(1));
         }
 
-        let mut handles = HashMap::<String, ObjectId>::new();
+        let mut handles = retained_ids
+            .iter()
+            .map(|id| (id.as_u64().to_string(), *id))
+            .collect::<HashMap<String, ObjectId>>();
         while !pending.is_empty() {
             let ready = pending.iter().position(|spawn| {
                 spawn
@@ -35517,6 +36336,18 @@ impl Engine {
                 handles.insert(handle, id);
             }
         }
+        let contents_orders = contents_specs
+            .into_iter()
+            .filter_map(|(parent, children)| {
+                let parent = parent.and_then(|handle| handles.get(&handle).copied())?;
+                let children = children
+                    .iter()
+                    .filter_map(|handle| handles.get(handle).copied())
+                    .collect::<Vec<_>>();
+                Some((parent, children))
+            })
+            .collect::<Vec<_>>();
+        self.restore_legacy_contents_order(&contents_orders);
         self.finish_legacy_object_load();
         Ok(())
     }
@@ -35528,7 +36359,20 @@ impl Engine {
         preserve_ids: Vec<ObjectId>,
     ) -> Result<bool, EngineError> {
         let key = name.to_ascii_lowercase();
-        if !self.scenario_sections.contains_key(&key) {
+        let Some(target) = self.scenario_sections.get(&key) else {
+            return Ok(false);
+        };
+
+        // C4ScenarioSection::GetGroupfile can reopen an implicit scenario
+        // root only while it is named Main. A resumed network save may bind
+        // that implicit root to CurrentScenarioSection (for example Cave);
+        // it has neither a child Filename nor a group it can reopen after
+        // departure. EnsureTempStore, reached when either save flag is set,
+        // gives it the temporary group represented by frozen_group.
+        if target.source_is_scenario_root
+            && !target.name.eq_ignore_ascii_case("main")
+            && target.frozen_group.is_none()
+        {
             return Ok(false);
         }
 
@@ -35536,7 +36380,8 @@ impl Engine {
         let departing_pxs = self.pxs_system.clone();
         let departing_mass_movers = self.mass_movers.clone();
         let mut state = self.capture_state();
-        let changing_section = key != self.current_scenario_section.to_ascii_lowercase();
+        let departing_key = self.current_scenario_section.to_ascii_lowercase();
+        let changing_section = key != departing_key;
         let saved_landscape_systems =
             (changing_section && flags & 1 != 0).then(|| scenario::ScenarioLandscapeSystems {
                 pxs: self.pxs_system.to_c4b().map(|bytes| {
@@ -35548,6 +36393,8 @@ impl Engine {
                         .expect("an engine-produced MassMover component must reload")
                 }),
             });
+        let mut saved_section_landscape =
+            (changing_section && flags & 1 != 0).then(|| self.landscape_without_solid_masks());
         if changing_section && flags & 3 != 0 {
             let saved_objects = (flags & 2 != 0).then(|| {
                 state
@@ -35555,65 +36402,109 @@ impl Engine {
                     .iter()
                     .filter(|object| object.snapshot.status.is_active())
                     .filter(|object| !preserved.contains(&object.snapshot.id))
+                    .filter(|object| {
+                        !self.is_user_player_object_snapshot(&object.snapshot)
+                    })
                     .cloned()
                     .collect::<Vec<_>>()
             });
+            let saved_object_ids = saved_objects
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|object| object.snapshot.id)
+                .collect::<HashSet<_>>();
             let saved_order = (flags & 2 != 0)
                 .then(|| {
                     state
                         .object_order
                         .iter()
                         .copied()
-                        .filter(|id| !preserved.contains(id))
+                        .filter(|id| saved_object_ids.contains(id))
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            if let Some(current) = self
+            let mut current = self
                 .scenario_sections
-                .get_mut(&self.current_scenario_section.to_ascii_lowercase())
-            {
-                if flags & 1 != 0 {
-                    let mut saved_landscape = state.landscape.clone();
-                    if let Some(landscape) = saved_landscape
-                        .as_mut()
-                        .filter(|landscape| landscape.pixel_grid().is_some())
-                    {
-                        landscape
-                            .save_initial()
-                            .expect("a present section pixel grid can seed pInitial");
-                        landscape.clear_retained_map();
-                    }
-                    current.landscape = saved_landscape;
-                    current.exact_landscape = true;
-                    current.texmap_lookups.clear();
-                    current.resynthesize_static_map = false;
-                    current.s2_overload = None;
-                    current.map_creator = None;
-                    // A saved section landscape reloads as ExactLandscape;
-                    // C++ has no S2 creator or callback masks to replay.
-                    current.post_init_map_callbacks =
-                        map_creator_s2::PostInitMapCallbacks::default();
-                    if let Some(raster) = current
-                        .landscape
-                        .as_mut()
-                        .and_then(Landscape::raster_state_mut)
-                    {
-                        raster.set_map_creator(None);
-                    }
-                    current.scenario_values = self.scenario_values.as_ref().clone();
-                    current.base_reject_entrance_enabled =
-                        self.base_reject_entrance_enabled;
-                    current.base_extinguish_enabled = self.base_extinguish_enabled;
-                    current.environment = self.environment;
-                    current.landscape_systems = saved_landscape_systems
-                        .clone()
-                        .expect("landscape-save state captured above");
+                .get(&departing_key)
+                .cloned()
+                .expect("departing section remains registered");
+            current.modified = true;
+            if flags & 1 != 0 {
+                current.landscape_modified = true;
+                // C4GameObjects::RemoveSolidMasks runs before a section
+                // landscape is persisted. Keep the running raster intact
+                // and retain the same mask-free clone used by root saves.
+                current.landscape = saved_section_landscape
+                    .take()
+                    .expect("landscape-save state captured above");
+                if let Some(landscape) = current
+                    .landscape
+                    .as_mut()
+                    .filter(|landscape| landscape.pixel_grid().is_some())
+                {
+                    // Reloading a section recreates pInitial from the full
+                    // saved Surface8. Without this, the next SaveDiff would
+                    // compare against the pre-departure scenario baseline.
+                    landscape
+                        .save_initial()
+                        .expect("a present section pixel grid can seed pInitial");
                 }
-                if let Some(objects) = saved_objects {
-                    current.saved_objects = Some(objects);
-                    current.saved_object_order = saved_order;
+                current.exact_landscape = true;
+                current.texmap_lookups.clear();
+                current.resynthesize_static_map = false;
+                current.s2_overload = None;
+                current.map_creator = None;
+                // A saved section landscape reloads as ExactLandscape;
+                // C++ has no S2 creator or callback masks to replay.
+                current.post_init_map_callbacks =
+                    map_creator_s2::PostInitMapCallbacks::default();
+                if let Some(raster) = current
+                    .landscape
+                    .as_mut()
+                    .and_then(Landscape::raster_state_mut)
+                {
+                    raster.set_map_creator(None);
+                }
+                current.scenario_values = self.scenario_values.as_ref().clone();
+                current.base_reject_entrance_enabled =
+                    self.base_reject_entrance_enabled;
+                current.base_extinguish_enabled = self.base_extinguish_enabled;
+                current.environment = self.environment;
+                current.landscape_systems = saved_landscape_systems
+                    .clone()
+                    .expect("landscape-save state captured above");
+            }
+            if let Some(objects) = saved_objects {
+                current.objects_modified = true;
+                current.saved_objects = Some(objects);
+                current.saved_object_order = saved_order;
+            }
+
+            // Native LoadScenarioSection writes the departing categories to
+            // C4ScenarioSection's temporary group at this exact boundary.
+            // Preserve the packed image now; final C4GameSave merely copies
+            // it and must not observe any subsequent live-state changes.
+            let frozen_group = live_c4_save::freeze_scenario_section(
+                self,
+                &current,
+                flags & 1 != 0,
+                flags & 2 != 0,
+            )
+            .map_err(|error| EngineError::ScenarioSectionSave {
+                section: self.current_scenario_section.clone(),
+                detail: error.to_string(),
+            })?;
+            current.frozen_group = Some(frozen_group);
+            if flags & 1 != 0 {
+                // C4Landscape::Save writes a changed retained Map.bmp before
+                // the exact section is reloaded. Exact Init then owns no Map,
+                // so clear only the post-freeze in-memory representation.
+                if let Some(landscape) = current.landscape.as_mut() {
+                    landscape.clear_retained_map();
                 }
             }
+            self.scenario_sections.insert(departing_key, current);
         }
 
         let target = self
@@ -35954,6 +36845,26 @@ impl Engine {
         Ok(true)
     }
 
+    /// C4Object::IsUserPlayerObject: section object saves exclude user crew
+    /// and user flags, while script-player objects remain ordinary section
+    /// state. Membership is read from the player's exact crew list rather
+    /// than the definition's CrewMember capability bit.
+    fn is_user_player_object_snapshot(&self, object: &ObjectSnapshot) -> bool {
+        self.players.get(&object.owner).is_some_and(|player| {
+            !player.is_script_player()
+                && (object.definition_id.as_str() == "FLAG"
+                    || player.crew().contains(&object.id))
+        })
+    }
+
+    fn is_script_player_object_snapshot(&self, object: &ObjectSnapshot) -> bool {
+        self.players.get(&object.owner).is_some_and(|player| {
+            player.is_script_player()
+                && (object.definition_id.as_str() == "FLAG"
+                    || player.crew().contains(&object.id))
+        })
+    }
+
     fn apply_script_player_team(
         &mut self,
         player_id: i32,
@@ -35964,6 +36875,7 @@ impl Engine {
         synchronize_hostility: bool,
     ) -> Result<(), EngineError> {
         if let Some(generated_team) = generated_team {
+            self.team_last_team_id = self.team_last_team_id.max(generated_team.id);
             if !self
                 .teams
                 .iter()
@@ -37253,6 +38165,10 @@ impl Engine {
         definition_id: &DefinitionId,
         solid_mask_indices: &[usize],
     ) -> Result<ExecMovementOutcome, EngineError> {
+        // C4Object::DoMovement resets the displacement cache before any
+        // restriction, collision probe, or DoMotion call.
+        self.objects[idx].motion_x = 0;
+        self.objects[idx].motion_y = 0;
         // C4Object::DoMovement applies Def->NoHorizontalMove before DigFree
         // predicts its target and before the old dirs for Hit* are captured
         // (C4Movement.cpp:224-251).
@@ -41781,17 +42697,53 @@ impl Engine {
     /// force scaled against the target mass, facing from the current motion,
     /// xdir worked toward the push speed (close-enough-set), straightening
     /// for upright pushes, and the final Tick35 stuck probe.
-    /// The LIVE object mass (C4Object::UpdateMass, C4Object.cpp:497-505):
-    /// `max((Def->Mass + OwnMass) * Con / FullCon, 1)` plus the contents
-    /// mass unless NoComponentMass (OwnMass is unmodeled — Objects.txt
-    /// OwnMass loads are rare). The GoldRush coach carries ~30 items: its
-    /// pull dforce divides by ~747, not the def 150.
+    /// The LIVE object mass (C4Object::UpdateMass, C4Object.cpp:497-505).
+    /// Objects.txt compiles the cached Mass word verbatim; only native
+    /// UpdateMass paths replace it with the derived own-plus-contents value.
+    fn valid_compiled_object_mass(&self, index: usize) -> Option<i32> {
+        fn valid(engine: &Engine, index: usize, visiting: &mut HashSet<ObjectId>) -> bool {
+            let object = &engine.objects[index];
+            if object.compiled_mass.is_none()
+                || object.compiled_mass_contents.len() != object.state.contents.len()
+                || !object
+                    .compiled_mass_contents
+                    .iter()
+                    .all(|id| object.state.contents.contains(id))
+            {
+                return false;
+            }
+            if !visiting.insert(object.id) {
+                return true;
+            }
+            let valid = object.state.contents.iter().all(|content| {
+                engine
+                    .find_object_index(*content)
+                    .is_some_and(|index| valid(engine, index, visiting))
+            });
+            visiting.remove(&object.id);
+            valid
+        }
+
+        valid(self, index, &mut HashSet::new()).then_some(self.objects[index].compiled_mass?)
+    }
+
     fn effective_object_mass(&self, index: usize) -> i32 {
-        fn inner(engine: &Engine, index: usize, depth: usize) -> i32 {
+        fn inner(
+            engine: &Engine,
+            index: usize,
+            depth: usize,
+            visiting: &mut HashSet<ObjectId>,
+        ) -> i32 {
             if depth > 8 {
                 return 1;
             }
             let object = &engine.objects[index];
+            if let Some(mass) = engine.valid_compiled_object_mass(index) {
+                return mass;
+            }
+            if !visiting.insert(object.id) {
+                return 1;
+            }
             let (def_mass, no_component_mass) = engine
                 .definitions
                 .get(&object.definition_id)
@@ -41807,7 +42759,7 @@ impl Engine {
             if !no_component_mass {
                 for content in &object.state.contents {
                     if let Some(content_idx) = engine.find_object_index(*content) {
-                        let m = inner(engine, content_idx, depth + 1);
+                        let m = inner(engine, content_idx, depth + 1, visiting);
                         if depth == 0
                             && object.state.contents.len() > 20
                             && std::env::var("LC_MASSDBG").is_ok()
@@ -41822,9 +42774,10 @@ impl Engine {
                     }
                 }
             }
+            visiting.remove(&object.id);
             mass
         }
-        inner(self, index, 0)
+        inner(self, index, 0, &mut HashSet::new())
     }
 
     fn push_object(
@@ -43421,6 +44374,7 @@ impl Engine {
             .map(|value| match value {
                 EffectVarValue::Int(value) => *value,
                 EffectVarValue::Bool(value) => i32::from(*value),
+                EffectVarValue::RawBool(value) => *value as u32 as i32,
                 _ => 0,
             })
             .unwrap_or(self.objects[idx].state.fire_caused_by);
@@ -43605,6 +44559,9 @@ impl Engine {
         let entry_y = self.objects[idx].state.position.y;
         let entry_shape = self.objects[idx].current_shape_rect();
 
+        if refresh {
+            self.objects[idx].compiled_mass = None;
+        }
         self.objects[idx].state.construction = after;
         self.refresh_object_ocf(idx);
         if !refresh {
@@ -44318,6 +45275,10 @@ impl Engine {
     /// `C4Game::UpdateRules` caches C4RULE_FlagRemoveable from Def.Count
     /// for FGRV. Inactive and contained objects still contribute; only an
     /// assigned removal/deleted object no longer counts.
+    pub(crate) const fn cached_flag_removeable_rule(&self) -> bool {
+        self.flag_removeable
+    }
+
     pub(crate) fn refresh_flag_removeable_rule(&mut self) {
         self.flag_removeable = self.objects.iter().any(|object| {
             object.definition_id.as_str() == "FGRV"
@@ -45195,6 +46156,7 @@ impl Engine {
         let rotateable = definition.rotateable();
         let previous_rect = object.current_shape_rect();
         let previous_construction = object.state.construction;
+        object.compiled_mass = None;
         object.definition_id = new_def.to_string();
         object.solid_mask_instance_sequence = None;
         object.unsorted = true;
@@ -45746,7 +46708,10 @@ impl Engine {
     /// does not perform `SyncClearance`; `C4ControlSynchronize::Execute`
     /// invokes clearance only when its `SyncClear` flag is set, and does so
     /// after synchronization (`C4Control.cpp:537-543`).
-    fn game_synchronize(&mut self, save_player_files: bool) -> Result<(), EngineError> {
+    fn game_synchronize_before_network(
+        &mut self,
+        save_player_files: bool,
+    ) -> Result<(), EngineError> {
         // Objects.Synchronize resolves SetObjectOrder calls queued by
         // scenario/object initialization before InitPlayers (C4Game.cpp:3720;
         // C4GameObjects.cpp:250-260).
@@ -45779,6 +46744,10 @@ impl Engine {
                 "network synchronization requested local player-file persistence; app callback is not yet connected"
             );
         }
+        Ok(())
+    }
+
+    fn game_synchronize_after_network(&mut self) -> Result<(), EngineError> {
         // C4Game::Synchronize's tail: TransferZones.Synchronize()
         // broadcasts ~UpdateTransferZone to every active Game.Objects entry
         // AFTER the FixRandom re-fix (C4Game.cpp:3713-3714,3727-3729;
@@ -45813,17 +46782,105 @@ impl Engine {
         Ok(())
     }
 
-    /// Complete the list/sector half of `C4GameObjects::Load` before any
-    /// `InitializeDef` or environment-placement callback can query objects.
-    ///
-    /// `Objects.txt` is execution-order (the main list decompiles from Last
-    /// to First) and the compiler rebuilds the main list with `stReverse`.
-    /// C++ then walks that reconstructed main list through `UpdateFaces`,
-    /// which fills every sector's `ObjectShapes`, before `FixObjectOrder`
-    /// normalizes category brackets (C4ObjectList.cpp:498-530;
-    /// C4GameObjects.cpp:650-663). Loaded Rust objects enter sectors one at a
-    /// time in file order, so rebuild once from the reverse execution list at
-    /// the equivalent seam.
+    fn game_synchronize(&mut self, save_player_files: bool) -> Result<(), EngineError> {
+        self.game_synchronize_before_network(save_player_files)?;
+        self.game_synchronize_after_network()
+    }
+
+    /// Install the separately compiled C4ObjectList links once all numbered
+    /// objects exist, preserving the exact saved Contents order.
+    pub(crate) fn restore_legacy_contents_order(
+        &mut self,
+        orders: &[(ObjectId, Vec<ObjectId>)],
+    ) {
+        self.restore_legacy_object_links(&[], orders);
+    }
+
+    /// Two-phase `Contained`/`Contents` denumeration for Objects.txt. The
+    /// object graph is allowed to contain cycles; setting raw links after all
+    /// objects exist avoids the runtime Enter path's sequential constraint.
+    pub(crate) fn restore_legacy_object_links(
+        &mut self,
+        contained_links: &[(ObjectId, ObjectId)],
+        orders: &[(ObjectId, Vec<ObjectId>)],
+    ) {
+        let active = self
+            .objects
+            .iter()
+            .filter(|object| !object.destroyed && object.state.status != ObjectStatus::Deleted)
+            .map(|object| object.id)
+            .collect::<HashSet<_>>();
+
+        for &(child, parent) in contained_links {
+            if child != parent && active.contains(&child) && active.contains(&parent) {
+                if let Some(child_index) = self.find_object_index(child) {
+                    self.objects[child_index].state.container = Some(parent);
+                }
+            }
+        }
+
+        // C4ObjectList::DenumerateRead appends the saved links in their
+        // compiled order. Its duplicate repair keeps the final occurrence.
+        for (parent, children) in orders {
+            let mut seen = HashSet::new();
+            let mut normalized = children
+                .iter()
+                .rev()
+                .copied()
+                .filter(|child| *child != *parent && active.contains(child))
+                .filter(|child| seen.insert(*child))
+                .collect::<Vec<_>>();
+            normalized.reverse();
+            if let Some(parent_index) = self.find_object_index(*parent) {
+                self.objects[parent_index].state.contents = normalized;
+            }
+        }
+
+        // The saved Contents list is authoritative over a conflicting
+        // Contained pointer. Writer-produced saves are consistent, but this
+        // mirrors C4GameObjects::Load's repair pass for hand-edited files.
+        for (parent, _) in orders {
+            let Some(parent_index) = self.find_object_index(*parent) else {
+                continue;
+            };
+            let children = self.objects[parent_index].state.contents.clone();
+            for child in children {
+                if let Some(child_index) = self.find_object_index(child) {
+                    self.objects[child_index].state.container = Some(*parent);
+                }
+            }
+        }
+
+        // Conversely, a valid Contained pointer omitted from Contents is
+        // appended after the compiled list (C4GameObjects.cpp:605-611).
+        let contained = self
+            .objects
+            .iter()
+            .filter(|object| active.contains(&object.id))
+            .filter_map(|object| object.state.container.map(|parent| (object.id, parent)))
+            .collect::<Vec<_>>();
+        for (child, parent) in contained {
+            if !active.contains(&parent) {
+                if let Some(child_index) = self.find_object_index(child) {
+                    self.objects[child_index].state.container = None;
+                }
+                continue;
+            }
+            if let Some(parent_index) = self.find_object_index(parent) {
+                if !self.objects[parent_index].state.contents.contains(&child) {
+                    self.objects[parent_index].state.contents.push(child);
+                }
+            }
+        }
+        for object in &mut self.objects {
+            object.remember_compiled_mass_contents();
+        }
+    }
+
+    /// Complete the pointer/list/sector half of `C4GameObjects::Load` before
+    /// any `InitializeDef` or environment-placement callback can query
+    /// objects. Objects.txt is execution-order and C++ rebuilds its main list
+    /// with `stReverse`; rebuild sectors once at the equivalent seam.
     pub(crate) fn finish_legacy_object_load(&mut self) {
         // C4GameObjects::Load compiles every enumerated pointer as a number,
         // then calls C4Object::DenumeratePointers for the complete list before
@@ -45844,13 +46901,40 @@ impl Engine {
                 &mut object.state.action.target2,
                 &object_numbers,
             );
-            denumerate_object_reference(&mut object.state.layer, &object_numbers);
+            denumerate_legacy_enumerated_object_reference(
+                &mut object.state.layer,
+                &object_numbers,
+            );
+            denumerate_legacy_enumerated_object_reference(
+                &mut object.state.container,
+                &object_numbers,
+            );
             for value in object.state.local_vars.values_mut() {
                 *value = denumerate_script_value(value, &object_numbers);
             }
             for effect in &mut object.state.effects {
                 denumerate_effect(effect, &object_numbers);
             }
+            for overlay in &mut object.state.graphics_overlays {
+                denumerate_legacy_enumerated_object_reference(
+                    &mut overlay.overlay_object,
+                    &object_numbers,
+                );
+            }
+            object.commands.denumerate_object_references(&object_numbers);
+        }
+        let refreshed_ocf = self
+            .objects
+            .iter()
+            .map(|object| {
+                self.definitions
+                    .get(&object.definition_id)
+                    .map(|definition| definition.compute_ocf(&object.state))
+                    .unwrap_or(OCF_NORMAL)
+            })
+            .collect::<Vec<_>>();
+        for (object, ocf) in self.objects.iter_mut().zip(refreshed_ocf) {
+            object.state.ocf = ocf;
         }
         self.rebuild_sectors();
         self.fix_exec_list_order();
@@ -45863,8 +46947,31 @@ impl Engine {
         save_player_files: bool,
         sync_clearance: bool,
     ) -> Result<(), EngineError> {
+        self.execute_synchronize_control_before_network(save_player_files)?;
+        self.execute_synchronize_control_after_network(sync_clearance)
+    }
+
+    /// Execute `C4Game::Synchronize` through the point immediately before
+    /// `C4Network2::OnGameSynchronized`. A runtime network dynamic must be
+    /// captured after this returns and before
+    /// [`Self::execute_synchronize_control_after_network`] is called.
+    #[doc(hidden)]
+    pub fn execute_synchronize_control_before_network(
+        &mut self,
+        save_player_files: bool,
+    ) -> Result<(), EngineError> {
         self.surface_pending_runtime_flash_boundary()?;
-        self.game_synchronize(save_player_files)?;
+        self.game_synchronize_before_network(save_player_files)
+    }
+
+    /// Finish `C4Game::Synchronize` after the network callback, then apply
+    /// `C4ControlSynchronize::fSyncClearance` in native packet order.
+    #[doc(hidden)]
+    pub fn execute_synchronize_control_after_network(
+        &mut self,
+        sync_clearance: bool,
+    ) -> Result<(), EngineError> {
+        self.game_synchronize_after_network()?;
         if sync_clearance {
             self.game_sync_clearance();
         }
@@ -46631,7 +47738,7 @@ impl Engine {
     /// list is the C++ main list reversed, so Before/After are reversed too.
     #[doc(hidden)]
     pub fn execute_object_order_commands(&mut self) {
-        if self.pending_object_order_commands.is_empty() {
+        if self.pending_object_order_commands.is_empty() && !self.resort_any_object {
             return;
         }
         let commands = std::mem::take(&mut self.pending_object_order_commands);
@@ -46646,7 +47753,7 @@ impl Engine {
                 _ => None,
             })
             .collect();
-        let has_object_resorts = !resort_objects.is_empty()
+        self.resort_any_object |= !resort_objects.is_empty()
             || commands
                 .iter()
                 .any(|command| matches!(command, ObjectOrderCommand::ResortUnsortedSweep));
@@ -46665,8 +47772,9 @@ impl Engine {
             self.sort_exec_list_by_category();
         }
 
-        if has_object_resorts {
+        if self.resort_any_object {
             self.resort_all_unsorted();
+            self.resort_any_object = false;
         }
 
         // C4ObjResort nodes are pushed at the list head: newest first.
@@ -49161,6 +50269,13 @@ impl Engine {
         if let Some(container_index) = new.and_then(|id| self.find_object_index(id)) {
             self.refresh_object_ocf(container_index);
         }
+        if loaded {
+            for container_id in previous.into_iter().chain(new) {
+                if let Some(index) = self.find_object_index(container_id) {
+                    self.objects[index].remember_compiled_mass_contents();
+                }
+            }
+        }
 
         Ok(())
     }
@@ -50927,6 +52042,7 @@ impl Engine {
                 function,
                 caller,
                 tx,
+                tx_value,
                 tx_definition,
                 ty,
                 target2,
@@ -50938,9 +52054,10 @@ impl Engine {
                 let mut args = Vec::new();
                 args.push(object_reference_value(caller));
                 args.push(
-                    tx_definition
+                    tx_value
+                        .or_else(|| tx_definition
                         .map(Value::C4Id)
-                        .or_else(|| tx.map(Value::Int))
+                        .or_else(|| tx.map(Value::Int)))
                         .unwrap_or(Value::Nil),
                 );
                 let ty_value = Value::Int(ty.unwrap_or(0));
@@ -51077,14 +52194,15 @@ impl Engine {
         command: command::CommandView,
     ) -> Result<(), EngineError> {
         let args = vec![
-            Value::String(command.name),
+            Value::String(command.name.clone()),
             command
                 .target
                 .map(object_reference_value)
                 .unwrap_or(Value::Nil),
             command
-                .tx_definition
-                .map(Value::C4Id)
+                .tx_value
+                .clone()
+                .or_else(|| command.tx_definition.clone().map(Value::C4Id))
                 .or_else(|| command.tx.map(Value::Int))
                 .unwrap_or(Value::Nil),
             Value::Int(command.ty.unwrap_or(0)),
@@ -51092,11 +52210,13 @@ impl Engine {
                 .target2
                 .map(object_reference_value)
                 .unwrap_or(Value::Nil),
-            match command.data {
-                CommandData::Integer(value) => Value::Int(value),
-                CommandData::Text(value) => Value::String(value),
-                CommandData::None => Value::Nil,
-            },
+            command.legacy_data.map(Value::Int).unwrap_or_else(|| {
+                match &command.data {
+                    CommandData::Integer(value) => Value::Int(*value),
+                    CommandData::Text(value) => Value::String(value.clone()),
+                    CommandData::None => Value::Nil,
+                }
+            }),
         ];
         if let Some(index) = self
             .find_object_index(object_id)
@@ -51184,9 +52304,9 @@ impl Engine {
                             let args = vec![
                                 object_reference_value(actor_id),
                                 command
-                                    .tx_definition
+                                    .tx_value
                                     .clone()
-                                    .map(Value::C4Id)
+                                    .or_else(|| command.tx_definition.clone().map(Value::C4Id))
                                     .or_else(|| command.tx.map(Value::Int))
                                     .unwrap_or(Value::Nil),
                                 Value::Int(command.ty.unwrap_or(0)),
@@ -54480,9 +55600,12 @@ impl Engine {
             custom_name,
             position,
             velocity,
+            motion_x,
+            motion_y,
             fixed_velocity,
             rotation,
             energy,
+            damage,
             need_energy,
             magic_energy,
             construction,
@@ -54490,17 +55613,22 @@ impl Engine {
             direction,
             command_direction,
             effects,
+            temporary_physical,
+            physical_changes,
+            breath,
             vertices,
             shape_vertices: saved_shape_vertices,
             owns_shape_vertices,
             shape_rect: saved_shape_rect,
             contact_density,
             shape_fire_top,
+            shape_attach,
             components,
             component_order,
             owner,
             controller,
             crew_member,
+            crew_disabled,
             plr_view_range,
             selected,
             status,
@@ -54511,6 +55639,9 @@ impl Engine {
             picture_rect,
             color,
             color_modulation,
+            base_graphics,
+            graphics_overlays,
+            draw_transform,
             alive,
             category,
             in_liquid,
@@ -54520,8 +55651,20 @@ impl Engine {
             rotation_velocity,
             mobile,
             timer,
+            own_mass,
+            compiled_mass,
+            on_fire,
+            fire_phase,
+            fire_caused_by,
+            last_attach_movement_frame,
+            last_energy_loss_cause,
+            no_collect_delay,
+            base,
+            compiled_ocf: _compiled_ocf,
+            command_stack,
             local_vars,
             loaded,
+            native_compiled_object_defaults,
             solid_mask,
             solid_mask_instance_sequence,
             position_adjusted,
@@ -54622,9 +55765,11 @@ impl Engine {
             }
             None => self.next_object_id(),
         };
-        // Loaded C4Object::Category is compiled verbatim, including zero;
-        // only DefCore loading repairs a missing sort category
-        // (C4Object.cpp:2741; C4Def.cpp:226-232).
+        // Native C4Object::CompileFunc records start Category at zero; only
+        // DefCore loading repairs a missing sort category (C4Object.cpp:2741;
+        // C4Def.cpp:226-232). Programmatic loaded fixtures retain their
+        // historical definition fallback unless they opt into that compiler
+        // default explicitly.
         let initial_category = category
             .map(|value| {
                 if loaded {
@@ -54633,13 +55778,17 @@ impl Engine {
                     normalize_category(value, definition_category)
                 }
             })
-            .unwrap_or(definition_category);
+            .unwrap_or(if native_compiled_object_defaults {
+                0
+            } else {
+                definition_category
+            });
         let initial_alive = alive.unwrap_or(!loaded && initial_category & CATEGORY_LIVING != 0);
-        let definition_physical_energy = self
+        let definition_physical = self
             .definitions
             .get(&definition_id)
-            .map(|definition| definition.physical().energy)
-            .unwrap_or(0);
+            .map(|definition| *definition.physical())
+            .unwrap_or_default();
 
         // Init: an explicit controller wins, else the owner
         // (C4Object.cpp:162). Loaded objects skip Init and keep the
@@ -54801,21 +55950,23 @@ impl Engine {
                 // C4Object::Init stores its nr argument verbatim; script-level
                 // SetRotation is the separate path that normalizes to 0..359.
                 rotation,
-                shape_attach: ShapeAttachRecord::default(),
+                shape_attach: shape_attach.unwrap_or_default(),
                 t_attach: 0,
-                no_collect_delay: 0,
-                base: OWNER_NONE,
+                no_collect_delay: no_collect_delay.unwrap_or(0),
+                base: base.unwrap_or(OWNER_NONE),
                 // C4Object::Init: `if (Alive) Energy = GetPhysical()->Energy`
                 // (C4Object.cpp:192, raw C4MaxPhysical scale); at creation
                 // no info/temporary physical exists yet, so the def's
                 // physical applies. Loaded objects compile Energy= verbatim.
-                energy: energy.unwrap_or(if initial_alive {
-                    definition_physical_energy
+                energy: energy.unwrap_or(if native_compiled_object_defaults {
+                    0
+                } else if initial_alive {
+                    definition_physical.energy
                 } else {
                     0
                 }),
                 need_energy: need_energy.unwrap_or(false),
-                damage: 0,
+                damage: damage.unwrap_or(0),
                 // MagicEnergy compiles verbatim, default 0
                 // (C4Object.cpp:2768 / the C4Object ctor, :97).
                 magic_energy: magic_energy.unwrap_or(0),
@@ -54856,27 +56007,31 @@ impl Engine {
                 crew_member: initial_crew_member,
                 plr_view_range: plr_view_range.unwrap_or(0),
                 selected: selected.unwrap_or(false),
-                crew_disabled: false,
+                crew_disabled: crew_disabled.unwrap_or(false),
                 // C4Object::Init sets Alive only for C4D_Living categories
                 // (C4Object.cpp:191); loaded objects compile it with default
                 // false (C4Object.cpp:2756).
                 alive: initial_alive,
-                base_graphics: None,
-                graphics_overlays: Vec::new(),
-                draw_transform: None,
+                base_graphics,
+                graphics_overlays,
+                draw_transform,
                 local_vars,
                 in_liquid: in_liquid.unwrap_or(false),
                 mobile: false,
                 solid_mask_override: solid_mask,
                 timer: timer.unwrap_or(0),
-                own_mass: 0,
-                on_fire: false,
-                fire_phase: 0,
-                fire_caused_by: OWNER_NONE,
+                own_mass: own_mass.unwrap_or(0),
+                on_fire: on_fire.unwrap_or(false),
+                fire_phase: fire_phase.unwrap_or(0),
+                fire_caused_by: fire_caused_by.unwrap_or(OWNER_NONE),
                 info_physical: None,
-                temporary_physical: None,
-                physical_changes: Vec::new(),
-                breath: 0,
+                temporary_physical,
+                physical_changes,
+                breath: breath.unwrap_or(if native_compiled_object_defaults {
+                    0
+                } else {
+                    definition_physical.breath
+                }),
                 entrance_status: entrance_status.unwrap_or(false),
                 menu: None,
                 color: initial_color,
@@ -54888,6 +56043,20 @@ impl Engine {
             shape_template,
             own_shape_vertices,
         );
+        if native_compiled_object_defaults {
+            // C4Object::Clear seeds Mass=0 and CompileFunc overwrites it only
+            // when the naming is present.
+            object.compiled_mass = Some(compiled_mass.unwrap_or(0));
+        } else if let Some(compiled_mass) = compiled_mass {
+            object.compiled_mass = Some(compiled_mass);
+        }
+        object.motion_x = motion_x;
+        object.motion_y = motion_y;
+        object.last_attach_movement_frame = last_attach_movement_frame;
+        object.last_energy_loss_cause = last_energy_loss_cause.unwrap_or(OWNER_NONE);
+        if let Some(snapshot) = command_stack.as_ref() {
+            object.commands.restore_from_snapshot(snapshot);
+        }
         if let Some(rect) = saved_shape_rect {
             object.shape_rect = Some(rect);
             object.state.shape_override = Some(rect);
@@ -54952,7 +56121,7 @@ impl Engine {
         // load (C4GameObjects.cpp:600-604); rdir and fix stay untouched.
         // C++ compiles the object Category VERBATIM (no sort-bit
         // normalization at load), so the bit test uses the raw value.
-        if loaded && category.unwrap_or(definition_category) & CATEGORY_STATIC_BACK != 0 {
+        if loaded && initial_category & CATEGORY_STATIC_BACK != 0 {
             object.fixed_velocity = FixedVec2::ZERO;
             object.state.velocity = Vector2::ZERO;
         }
@@ -54968,12 +56137,6 @@ impl Engine {
                     || object.fixed_velocity.y.is_nonzero()
                     || object.rotation_velocity.is_nonzero()),
         );
-        // Breath fills from the physicals at birth (C4Object.cpp:193).
-        object.state.breath = self
-            .definitions
-            .get(&definition_id)
-            .map(|definition| definition.physical().breath)
-            .unwrap_or_default();
         object.ensure_material_capacity(self.materials.len());
         // C4Game::NewObject links the original definition/category into the
         // main list before Construction/Initialize run. A callback ChangeDef
@@ -54996,7 +56159,23 @@ impl Engine {
         }
 
         let mut effect_events = Vec::new();
-        if !effects.is_empty() {
+        if loaded {
+            // C4Effect::CompileFunc reconstructs the linked list without
+            // invoking Fx*Start callbacks. The serialized order is already
+            // the live order and must survive byte-for-byte reload semantics.
+            object.state.effects = effects;
+            // Old-style/bare OnFire saves with no effect list receive the
+            // callback-suppressed native Fire node during CompileFunc
+            // (C4Object.cpp:2878-2881).
+            if object.state.on_fire && object.state.effects.is_empty() {
+                let mut fire = EffectState::new(C4FX_FIRE)
+                    .with_priority(C4FX_FIRE_PRIORITY)
+                    .with_interval(C4FX_FIRE_TIMER_INTERVAL);
+                fire.number = 1;
+                fire.start_dispatched = true;
+                object.state.effects.push(fire);
+            }
+        } else if !effects.is_empty() {
             let commands: Vec<_> = effects.into_iter().map(EffectCommand::Add).collect();
             let mut initial_events = object.apply_effect_commands(&commands);
             effect_events.append(&mut initial_events);
@@ -58099,6 +59278,230 @@ mod l049_scenario_value_gain_regression {
 }
 
 #[cfg(test)]
+mod legacy_contents_order_regression {
+    use super::*;
+
+    #[test]
+    fn native_compiled_defaults_are_distinct_from_generic_loaded_fixtures() {
+        let mut engine = Engine::new();
+        let mut definition =
+            Definition::from_script("STAT", "Static", "").expect("fixture definition compiles");
+        definition.set_category(CATEGORY_STATIC_BACK);
+        definition.set_mass(100);
+        definition.set_physical(PhysicalInfo {
+            energy: 50_000,
+            breath: 30_000,
+            ..PhysicalInfo::default()
+        });
+        engine
+            .register_definition(definition)
+            .expect("fixture definition registers");
+
+        let fixed_velocity = FixedVec2::from_ints(7, -5);
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("STAT")
+                    .with_loaded(true)
+                    .with_native_compiled_object_defaults()
+                    .with_alive(true)
+                    .with_velocity(Vector2::new(7, -5))
+                    .with_fixed_velocity(fixed_velocity),
+            )
+            .expect("loaded object spawns");
+        let index = engine.find_object_index(object).expect("object exists");
+        assert_eq!(engine.objects[index].state.category, 0);
+        assert_eq!(engine.objects[index].state.energy, 0);
+        assert_eq!(engine.objects[index].state.breath, 0);
+        assert_eq!(engine.objects[index].compiled_mass, Some(0));
+        assert_eq!(engine.objects[index].fixed_velocity, fixed_velocity);
+
+        let fixture = engine
+            .spawn_object(
+                SpawnConfig::new("STAT")
+                    .with_loaded(true)
+                    .with_alive(true),
+            )
+            .expect("generic loaded fixture spawns");
+        let fixture = engine.find_object_index(fixture).expect("fixture exists");
+        assert_eq!(engine.objects[fixture].state.category, CATEGORY_STATIC_BACK);
+        assert_eq!(engine.objects[fixture].state.energy, 50_000);
+        assert_eq!(engine.objects[fixture].state.breath, 30_000);
+        assert_eq!(engine.objects[fixture].compiled_mass, None);
+    }
+
+    #[test]
+    fn compiled_contents_keep_saved_order_and_cpp_duplicate_repair() {
+        let mut engine = Engine::new();
+        for id in ["CONT", "ITEM"] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, id, "").expect("fixture definition compiles"),
+                )
+                .expect("fixture definition registers");
+        }
+        let parent = engine
+            .spawn_object(SpawnConfig::new("CONT").with_id(ObjectId::new(1)))
+            .expect("container spawns");
+        let first = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_id(ObjectId::new(2))
+                    .with_container(parent),
+            )
+            .expect("first content spawns");
+        let second = engine
+            .spawn_object(
+                SpawnConfig::new("ITEM")
+                    .with_id(ObjectId::new(3))
+                    .with_container(parent),
+            )
+            .expect("second content spawns");
+
+        engine.restore_legacy_contents_order(&[(parent, vec![second, first])]);
+        let parent_index = engine.find_object_index(parent).expect("container exists");
+        assert_eq!(engine.objects[parent_index].state.contents, [second, first]);
+
+        // C4GameObjects::Load removes the earlier link when it encounters a
+        // duplicate, leaving the final occurrence in its saved position.
+        engine.restore_legacy_contents_order(&[(parent, vec![second, first, second])]);
+        assert_eq!(engine.objects[parent_index].state.contents, [first, second]);
+    }
+
+    #[test]
+    fn deferred_legacy_containment_preserves_mutual_cycles() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("CYCL", "Cycle", "")
+                    .expect("fixture definition compiles"),
+            )
+            .expect("fixture definition registers");
+        let first = engine
+            .spawn_object(SpawnConfig::new("CYCL").with_id(ObjectId::new(1)))
+            .expect("first object spawns");
+        let second = engine
+            .spawn_object(SpawnConfig::new("CYCL").with_id(ObjectId::new(2)))
+            .expect("second object spawns");
+
+        engine.restore_legacy_object_links(&[(first, second), (second, first)], &[]);
+
+        let first_state = &engine.objects[engine.find_object_index(first).unwrap()].state;
+        let second_state = &engine.objects[engine.find_object_index(second).unwrap()].state;
+        assert_eq!(first_state.container, Some(second));
+        assert_eq!(second_state.container, Some(first));
+        assert_eq!(first_state.contents, [second]);
+        assert_eq!(second_state.contents, [first]);
+    }
+
+    #[test]
+    fn loaded_mass_cache_survives_subpercent_docon_until_update_mass() {
+        let mut engine = Engine::new();
+        let mut definition =
+            Definition::from_script("MASS", "Mass", "").expect("fixture definition compiles");
+        definition.set_mass(100);
+        engine
+            .register_definition(definition)
+            .expect("fixture definition registers");
+
+        let construction = FULL_CON / 2 + 10;
+        let mut config = SpawnConfig::new("MASS")
+            .with_loaded(true)
+            .with_construction(construction);
+        config.compiled_mass = Some(777);
+        let id = engine.spawn_object(config).expect("loaded object spawns");
+        let index = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.effective_object_mass(index), 777);
+
+        engine.do_con(index, 1).expect("subpercent DoCon succeeds");
+        assert_eq!(engine.effective_object_mass(index), 777);
+
+        engine
+            .do_con(index, FULL_CON / 100)
+            .expect("percent-crossing DoCon succeeds");
+        let expected = (100 * engine.objects[index].state.construction / FULL_CON).max(1);
+        assert_eq!(engine.effective_object_mass(index), expected);
+    }
+
+    #[test]
+    fn objects_info_name_binds_the_named_idle_crew_entry_after_players_exist() {
+        let mut engine = Engine::new();
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", "").expect("fixture definition compiles");
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("fixture definition registers");
+
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_id(ObjectId::new(17))
+                    .with_owner(0)
+                    .with_crew_member(false)
+                    .with_alive(true)
+                    .with_loaded(true),
+            )
+            .expect("loaded object spawns");
+        engine
+            .register_player(PlayerConfig::new(0, "Player"))
+            .expect("restored player registers");
+        let physical = PhysicalInfo {
+            energy: 77_000,
+            ..PhysicalInfo::default()
+        };
+        engine.crew_rosters.insert(
+            0,
+            vec![player_file::CrewInfo {
+                id: "OTHR".to_string(),
+                name: "Captain".to_string(),
+                death_message: String::new(),
+                core: CrewInfoCoreFields::default(),
+                rank: 3,
+                rank_name: "Captain".to_string(),
+                experience: 123,
+                rounds: 0,
+                physical,
+                death_count: 0,
+                total_playing_time: 0,
+                birthday: 0,
+                age: 0,
+                participation: 1,
+                in_action: false,
+                was_in_action: false,
+                in_action_time: 0,
+                has_died: false,
+                extra_data: Vec::new(),
+                portraits: CrewPortraitState::default(),
+            }],
+        );
+        engine.crew_info_order.insert(0, vec![0]);
+        engine.remember_legacy_object_info(object, Some("captain".to_string()));
+
+        engine
+            .initialize_scenario_script()
+            .expect("InitGameFinal AssignInfo succeeds");
+
+        let info = engine
+            .crew_object_info(object)
+            .expect("named roster info attaches");
+        assert_eq!(info.name, "Captain");
+        assert_eq!(info.definition_id.as_str(), "OTHR");
+        assert_eq!(engine.player(0).unwrap().crew(), [object]);
+        assert_eq!(
+            engine.crew_info_links.get(&object),
+            Some(&CrewInfoLink {
+                player_id: 0,
+                roster_index: 0,
+            })
+        );
+        let object = &engine.objects[engine.find_object_index(object).unwrap()];
+        assert_eq!(object.state.controller, 0);
+        assert_eq!(object.state.plr_view_range, 500);
+        assert_eq!(object.state.info_physical, Some(physical));
+    }
+}
+
+#[cfg(test)]
 mod network_stats_control_counts_regression {
     use super::*;
     use crate::player::CountedControlType;
@@ -58174,7 +59577,59 @@ mod player_list_order_regression {
             false,
             None,
             None,
+            None,
         )
+    }
+
+    fn crew_info(name: &str) -> player_file::CrewInfo {
+        player_file::CrewInfo {
+            id: "CLNK".to_string(),
+            name: name.to_string(),
+            death_message: String::new(),
+            core: CrewInfoCoreFields::default(),
+            rank: 0,
+            rank_name: "Clonk".to_string(),
+            experience: 0,
+            rounds: 0,
+            physical: PhysicalInfo::default(),
+            death_count: 0,
+            total_playing_time: 0,
+            birthday: 0,
+            age: 0,
+            participation: 1,
+            in_action: false,
+            was_in_action: false,
+            in_action_time: 0,
+            has_died: false,
+            extra_data: Vec::new(),
+            portraits: CrewPortraitState::default(),
+        }
+    }
+
+    #[test]
+    fn loaded_crew_info_list_prepends_group_entries_like_cpp() {
+        let mut engine = Engine::new();
+        let mut config = joining_player("Roster");
+        config.crew = vec![
+            crew_info("First in group"),
+            crew_info("Second in group"),
+            crew_info("Third in group"),
+        ];
+
+        let player = engine.register_joining_player(
+            &config,
+            PlayerAtClient::HOST,
+            "Local",
+            PlayerRuntimeControl::NONE,
+            false,
+            None,
+            None,
+            None,
+        );
+        let state = engine.capture_state();
+
+        assert_eq!(state.crew_info_order[&player], vec![2, 1, 0]);
+        assert_eq!(state.crew_info_rosters[&player][0].name, "First in group");
     }
 
     #[test]
@@ -65231,7 +66686,8 @@ mod scenario_section_random_regression {
     ) -> scenario::ScenarioSectionSpec {
         scenario::ScenarioSectionSpec {
             name: name.to_string(),
-            landscape: Some(Landscape::flat(width, 40)),
+            source_group: None,
+            landscape: Some(vehicle_section_landscape(width, 40)),
             landscape_systems: scenario::ScenarioLandscapeSystems::default(),
             exact_landscape: false,
             texmap_lookups: Vec::new(),
@@ -65268,6 +66724,7 @@ mod scenario_section_random_regression {
     fn vehicle_section(name: &str, landscape: Landscape) -> scenario::ScenarioSectionSpec {
         scenario::ScenarioSectionSpec {
             name: name.to_string(),
+            source_group: None,
             landscape: Some(landscape),
             landscape_systems: scenario::ScenarioLandscapeSystems::default(),
             exact_landscape: false,
@@ -65287,6 +66744,67 @@ mod scenario_section_random_regression {
         }
     }
 
+    fn resumed_non_main_root_engine() -> Engine {
+        let mut engine = Engine::with_seed(5);
+        engine.configure_scenario_sections(&[
+            section("Cave", 80, true),
+            section("Main", 120, true),
+        ]);
+        engine.set_landscape(vehicle_section_landscape(80, 40));
+        engine
+            .apply_initial_network_game_data(&InitialNetworkGameData {
+                current_scenario_section: "Cave".to_string(),
+                ..InitialNetworkGameData::default()
+            })
+            .expect("runtime-join section state applies");
+        engine
+    }
+
+    #[test]
+    fn resumed_non_main_implicit_root_cannot_reopen_after_unsaved_departure() {
+        let mut engine = resumed_non_main_root_engine();
+
+        assert!(
+            engine
+                .load_scenario_section("Main", 0, Vec::new())
+                .expect("named Main section loads")
+        );
+        assert_eq!(engine.debug_current_scenario_section(), "Main");
+        assert!(
+            !engine
+                .load_scenario_section("Cave", 0, Vec::new())
+                .expect("missing native group is an ordinary false result"),
+            "an implicit non-main root has no Filename for GetGroupfile"
+        );
+        assert_eq!(engine.debug_current_scenario_section(), "Main");
+        assert_eq!(engine.landscape().map(Landscape::width), Some(120));
+    }
+
+    #[test]
+    fn resumed_non_main_implicit_root_reopens_after_saved_departure() {
+        let mut engine = resumed_non_main_root_engine();
+
+        assert!(
+            engine
+                .load_scenario_section("Main", 3, Vec::new())
+                .expect("named Main section loads after freezing Cave")
+        );
+        assert!(
+            engine
+                .scenario_sections
+                .get("cave")
+                .is_some_and(|section| section.frozen_group.is_some()),
+            "C4S_SAVE_LANDSCAPE | C4S_SAVE_OBJECTS creates the temp group"
+        );
+        assert!(
+            engine
+                .load_scenario_section("Cave", 0, Vec::new())
+                .expect("frozen Cave section reloads")
+        );
+        assert_eq!(engine.debug_current_scenario_section(), "Cave");
+        assert_eq!(engine.landscape().map(Landscape::width), Some(80));
+    }
+
     #[test]
     fn section_landscape_init_refixes_the_exact_synced_rng_ledger() {
         let seed = 7;
@@ -65295,7 +66813,7 @@ mod scenario_section_random_regression {
             section("main", 100, true),
             section("next", 240, false),
         ]);
-        engine.set_landscape(Landscape::flat(100, 40));
+        engine.set_landscape(vehicle_section_landscape(100, 40));
 
         engine.rng.random(31);
         engine.rng.rnd3();
@@ -65515,6 +67033,58 @@ mod scenario_section_random_regression {
     }
 
     #[test]
+    fn saved_section_freezes_changed_map_before_exact_reload_discards_it() {
+        let mut texmap = RuntimeTexMapState::default();
+        texmap.densities[1] = 100;
+        texmap.material_names[1] = Some("Earth".to_owned());
+        let mut raster = LandscapeRasterState::new(1, 7, texmap);
+        raster.set_map(&lc_resources::bitmap::IndexedBitmap {
+            width: 2,
+            height: 2,
+            indices: vec![1; 4],
+        });
+        raster.set_map_changed();
+
+        let mut main = vehicle_section_landscape(4, 4);
+        main.set_raster_state(raster);
+        let next = vehicle_section_landscape(4, 4);
+        let mut engine = Engine::with_seed(24);
+        engine.configure_scenario_sections(&[
+            vehicle_section("main", main.clone()),
+            vehicle_section("next", next),
+        ]);
+        engine.set_landscape(main);
+
+        assert!(engine
+            .load_scenario_section("next", 1, Vec::new())
+            .expect("changed main landscape saves"));
+        let frozen = engine
+            .scenario_sections
+            .get("main")
+            .and_then(|section| section.frozen_group.clone())
+            .expect("departing main section freezes");
+        let group = lc_resources::Group::from_raw_memory(
+            std::path::PathBuf::from("Sectmain.c4g"),
+            frozen,
+        )
+        .expect("frozen section group opens");
+        assert!(
+            group.exists("Map.bmp"),
+            "C4Landscape::Save persists the changed retained map"
+        );
+
+        assert!(engine
+            .load_scenario_section("main", 0, Vec::new())
+            .expect("saved exact main reloads"));
+        let mut probe = lc_resources::MutableGroup::new("Probe.c4g");
+        assert!(!engine
+            .landscape()
+            .expect("reloaded exact landscape")
+            .save_changed_c4_map(engine.materials(), &mut probe)
+            .expect("post-reload map probe succeeds"));
+    }
+
+    #[test]
     fn empty_section_overload_retains_landscape_and_skips_second_init() {
         let mut main = Landscape::flat(8, 4);
         main.set_raster_state(LandscapeRasterState::new(
@@ -65660,7 +67230,7 @@ mod scenario_section_random_regression {
             section("main", 20, true),
             section("next", 20, true),
         ]);
-        engine.set_landscape(Landscape::flat(20, 40));
+        engine.set_landscape(vehicle_section_landscape(20, 40));
         assert!(engine.pxs_system.create_at(
             3,
             4,

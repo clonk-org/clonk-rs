@@ -27,6 +27,10 @@ pub struct InitialNetworkDynamicSpec<'a> {
     pub scenario: &'a Scenario,
     pub scenario_title: &'a str,
     pub definition_modules: &'a [String],
+    /// Native `Config.General.ExePath`, including its trailing separator.
+    pub definition_executable_path: &'a str,
+    /// Native `Config.General.DefinitionPath` (relative or absolute).
+    pub definition_path: &'a str,
     pub scenario_origin: &'a str,
     pub game: &'a InitialNetworkGameData,
     pub original_game_text: Option<&'a [u8]>,
@@ -96,6 +100,8 @@ pub fn compose_initial_network_dynamic(
     let scenario = spec.scenario.serialize_initial_network_scenario(
         spec.scenario_title,
         spec.definition_modules,
+        spec.definition_executable_path,
+        spec.definition_path,
         spec.scenario_origin,
     )?;
     group.add_file(SCENARIO_ENTRY, scenario.clone())?;

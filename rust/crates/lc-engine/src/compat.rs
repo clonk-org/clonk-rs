@@ -4388,6 +4388,7 @@ fn value_to_i32(value: &Value, function: &str, parameter: &str) -> Result<i32, R
         // C4Value.cpp FnCnvGuess / Bool->Int CnvOK).
         Value::Nil => Ok(0),
         Value::Bool(flag) => Ok(i32::from(*flag)),
+        Value::RawBool(raw) => Ok(*raw as u32 as i32),
         other => Err(RuntimeError::new(format!(
             "{}: expected integer for {}, got {}",
             function,
@@ -4422,24 +4423,36 @@ fn parse_command_request(
         None
     };
 
-    let (tx, tx_definition) = if args.len() > 2 {
+    let (tx, tx_definition, tx_value) = if args.len() > 2 {
         match &args[2] {
-            Value::Nil => (None, None),
+            Value::Nil => (None, None, (id == CommandId::Call).then_some(Value::Nil)),
             // Tx is a C4Value rather than C4ValueInt in all three C++
-            // wrappers. In legacy syntax ConvertTo(C4V_Int) leaves a C4ID's
-            // type tag intact, and C4CMD_Call forwards that tagged value to
-            // its script callback (C4Script.cpp:840-916).
+            // wrappers. Call uniquely skips ConvertTo(C4V_Int) and forwards
+            // arbitrary tagged values to its script callback. Legacy
+            // conversion also leaves a C4ID's tag intact.
             Value::C4Id(id) => {
                 let raw = cast_c4id_payload(id);
                 (
                     Some(raw as i32),
                     (raw != 0).then(|| lc_script::c4_id_from_raw(raw)),
+                    Some(Value::C4Id(id.clone())),
                 )
             }
-            other => (Some(value_to_i32(other, function, "Tx")?), None),
+            other if id == CommandId::Call => (
+                match other {
+                    Value::Int(value) => Some(*value),
+                    _ => None,
+                },
+                None,
+                Some(other.clone()),
+            ),
+            other => {
+                let value = value_to_i32(other, function, "Tx")?;
+                (Some(value), None, Some(Value::Int(value)))
+            }
         }
     } else {
-        (None, None)
+        (None, None, (id == CommandId::Call).then_some(Value::Nil))
     };
 
     let ty = if args.len() > 3 {
@@ -4467,13 +4480,6 @@ fn parse_command_request(
         .map(|value| value_to_i32(value, function, "update_interval"))
         .transpose()?
         .unwrap_or(0);
-    if update_interval < 0 {
-        return Err(RuntimeError::new(format!(
-            "{}: update interval must be >= 0",
-            function
-        )));
-    }
-    let update_interval = update_interval as u32;
 
     let data_value = args.get(data_slot).unwrap_or(&Value::Nil);
     let data = match (id, data_value) {
@@ -4517,6 +4523,7 @@ fn parse_command_request(
         .with_retries(retries)
         .with_mode(mode);
     request.tx_definition = tx_definition;
+    request.tx_value = tx_value;
     Ok(request)
 }
 
@@ -5318,9 +5325,8 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         }
         let view_center = player
-            .viewports
-            .first()
-            .map(|viewport| viewport.center)
+            .view_center
+            .or_else(|| player.viewports.first().map(|viewport| viewport.center))
             .or_else(|| {
                 player
                     .cursor
@@ -7374,6 +7380,8 @@ fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
         let mut portraits = info.portraits.clone();
         if name == "none" {
             portraits.current = None;
+            info.core.owned_portrait_source.clear();
+            info.core.owned_portrait_name.clear();
             if permanent {
                 portraits.permanent = CrewPermanentPortrait::ExplicitNone;
             }
@@ -7402,6 +7410,8 @@ fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
             {
                 // Relinking pCustomPortrait ignores both flags.
                 portraits.current = info.portraits.fallback.clone();
+                info.core.owned_portrait_source.clear();
+                info.core.owned_portrait_name.clear();
                 None
             } else {
                 let canonical_name = if name == "random" {
@@ -7431,11 +7441,15 @@ fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
                     canonical.clone()
                 };
                 let selected = if copy {
+                    info.core.owned_portrait_source = source.clone();
+                    info.core.owned_portrait_name = canonical_name.clone();
                     CrewPortrait {
                         source: None,
                         name: "custom".to_string(),
                     }
                 } else {
+                    info.core.owned_portrait_source.clear();
+                    info.core.owned_portrait_name.clear();
                     CrewPortrait {
                         source: Some(DefinitionId::from(source.as_str())),
                         name: canonical_name,
@@ -7450,6 +7464,8 @@ fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
         }
 
         info.portraits = portraits.clone();
+        let owned_portrait_source = info.core.owned_portrait_source.clone();
+        let owned_portrait_name = info.core.owned_portrait_name.clone();
         let Some(object) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
@@ -7463,6 +7479,8 @@ fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
                 .get_mut(&link)
             {
                 entry.portraits = portraits.clone();
+                entry.core.owned_portrait_source = owned_portrait_source;
+                entry.core.owned_portrait_name = owned_portrait_name;
             }
         }
         context.record_player_command(PlayerCommand::SetCrewInfoPortrait {
@@ -8533,6 +8551,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     let parameter_text = match &parameter {
         Value::Int(value) => value.to_string(),
         Value::Bool(flag) => if *flag { "true" } else { "false" }.to_string(),
+        Value::RawBool(raw) => ((*raw as u32 as i32) != 0).to_string(),
         Value::C4Id(_) => c4id_text_of(&parameter),
         Value::Object(number) => format!("Object({number})"),
         Value::String(text) => format!("\"{text}\""),
@@ -13171,6 +13190,7 @@ fn do_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
 fn value_to_bool(value: &Value, _function: &str, _parameter: &str) -> Result<bool, RuntimeError> {
     Ok(match value {
         Value::Bool(flag) => *flag,
+        Value::RawBool(raw) => (*raw as u32 as i32) != 0,
         Value::Int(int) => *int != 0,
         Value::Nil => false,
         Value::C4Id(id) => cast_c4id_payload(id) != 0,
@@ -13191,6 +13211,7 @@ fn parse_optional_i32(
         Some(Value::Nil) => Ok(None),
         Some(Value::Int(int)) => Ok(Some(*int)),
         Some(Value::Bool(flag)) => Ok(Some(i32::from(*flag))),
+        Some(Value::RawBool(raw)) => Ok(Some(*raw as u32 as i32)),
         Some(other) => Err(RuntimeError::new(format!(
             "{}: expected integer for {}, got {}",
             function,
@@ -13240,7 +13261,7 @@ fn parse_optional_string(
         // (C4AulExec.cpp:1364-1396): a literal 0/false in a string slot is
         // a null string, not a conversion error (GoldRush passes 0 for the
         // FindObjectOwner action).
-        Some(Value::Int(0)) | Some(Value::Bool(false)) => Ok(None),
+        Some(Value::Int(0)) | Some(Value::Bool(false)) | Some(Value::RawBool(0)) => Ok(None),
         Some(Value::String(text)) => Ok(Some(text.clone())),
         Some(other) => Err(RuntimeError::new(format!(
             "{}: expected string for {}, got {}",
@@ -15335,6 +15356,7 @@ fn value_to_data_string_with_context(
         Value::Int(i) => i.to_string(),
         Value::Bool(true) => "true".to_string(),
         Value::Bool(false) => "false".to_string(),
+        Value::RawBool(raw) => (*raw != 0).to_string(),
         Value::String(text) => format!("\"{text}\""),
         Value::C4Id(id) => lc_script::c4_id_text(id),
         Value::Object(id) => {
@@ -15395,6 +15417,7 @@ fn format_int_value(value: &Value, function: &str) -> Result<i32, RuntimeError> 
     match value {
         Value::Int(i) => Ok(*i),
         Value::Bool(flag) => Ok(if *flag { 1 } else { 0 }),
+        Value::RawBool(raw) => Ok(*raw as u32 as i32),
         Value::Nil => Ok(0),
         other => Err(RuntimeError::new(format!(
             "{function}: expected integer-compatible value for format placeholder, got {}",
@@ -16362,6 +16385,7 @@ fn get_type(args: &[Value]) -> Result<Value, RuntimeError> {
     let type_code = match value {
         Value::Int(_) => C4V_INT,
         Value::Bool(_) => C4V_BOOL,
+        Value::RawBool(_) => C4V_BOOL,
         Value::String(_) => C4V_STRING,
         Value::C4Id(_) => C4V_ID,
         Value::Object(_) => C4V_OBJECT,
@@ -16381,7 +16405,7 @@ fn cast_any(args: &[Value]) -> Result<Value, RuntimeError> {
         return Err(RuntimeError::new("CastAny expects at most 1 argument"));
     }
     Ok(match args.first().cloned().unwrap_or(Value::Nil) {
-        Value::Int(0) | Value::Bool(false) | Value::Nil => Value::Nil,
+        Value::Int(0) | Value::Bool(false) | Value::RawBool(0) | Value::Nil => Value::Nil,
         value => value,
     })
 }
@@ -16403,18 +16427,23 @@ fn render_cast_c4id(raw: i32) -> String {
     lc_script::c4_id_from_raw(raw as u32 as usize)
 }
 
-fn cast_stable_raw_i32(value: &Value, function: &str) -> Result<i32, RuntimeError> {
+fn cast_stable_data_raw(value: &Value, function: &str) -> Result<usize, RuntimeError> {
     match value {
-        Value::Int(raw) => Ok(*raw),
-        Value::Bool(flag) => Ok(i32::from(*flag)),
+        Value::Int(raw) => Ok(*raw as u32 as usize),
+        Value::Bool(flag) => Ok(usize::from(*flag)),
+        Value::RawBool(raw) => Ok(*raw),
         Value::Nil => Ok(0),
-        Value::C4Id(id) => Ok(cast_c4id_payload(id) as i32),
+        Value::C4Id(id) => Ok(cast_c4id_payload(id)),
         Value::Object(_) | Value::String(_) | Value::Array(_) | Value::Proplist(_) => {
             Err(RuntimeError::new(format!(
                 "{function}: pointer payload cannot be represented as a deterministic integer"
             )))
         }
     }
+}
+
+fn cast_stable_raw_i32(value: &Value, function: &str) -> Result<i32, RuntimeError> {
+    Ok(cast_stable_data_raw(value, function)? as u32 as i32)
 }
 
 /// `C4AulDefCastFunc<C4V_Any, C4V_Int>` (C4Script.cpp:6184-6195,
@@ -16426,15 +16455,14 @@ fn cast_int(args: &[Value]) -> Result<Value, RuntimeError> {
 /// `C4AulDefCastFunc<C4V_Any, C4V_Bool>`: pointer-backed values are nonzero
 /// in C++, while the scalar variants have deterministic raw payloads here.
 fn cast_bool(args: &[Value]) -> Result<Value, RuntimeError> {
-    let truthy = match cast_arg(args) {
-        Value::Int(raw) => *raw != 0,
-        Value::Bool(flag) => *flag,
-        Value::Nil => false,
-        Value::C4Id(id) => cast_c4id_payload(id) != 0,
-        Value::Object(id) => *id != 0,
-        Value::String(_) | Value::Array(_) | Value::Proplist(_) => true,
-    };
-    Ok(Value::Bool(truthy))
+    Ok(match cast_arg(args) {
+        Value::Int(raw) => Value::from_c4_bool_raw(*raw),
+        value @ (Value::Bool(_) | Value::RawBool(_)) => value.clone(),
+        Value::Nil => Value::Bool(false),
+        Value::C4Id(id) => Value::from_c4_bool_data_raw(cast_c4id_payload(id)),
+        Value::Object(id) => Value::Bool(*id != 0),
+        Value::String(_) | Value::Array(_) | Value::Proplist(_) => Value::Bool(true),
+    })
 }
 
 /// `C4AulDefCastFunc<C4V_Any, C4V_C4ID>`: zero becomes C4V_Any/null; numeric
@@ -16448,11 +16476,11 @@ fn cast_c4id(args: &[Value]) -> Result<Value, RuntimeError> {
             Value::C4Id(id.clone())
         });
     }
-    let raw = cast_stable_raw_i32(cast_arg(args), "CastC4ID")?;
+    let raw = cast_stable_data_raw(cast_arg(args), "CastC4ID")?;
     Ok(if raw == 0 {
         Value::Nil
     } else {
-        Value::C4Id(render_cast_c4id(raw))
+        Value::C4Id(lc_script::c4_id_from_raw(raw))
     })
 }
 
@@ -16485,10 +16513,15 @@ fn equal(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
     let result = match (args.first(), args.get(1)) {
         (Some(left), Some(right)) => left.c4_equals(right, 0)?,
         (Some(value), None) | (None, Some(value)) => match value.read()? {
-            Value::Nil | Value::Int(0) | Value::Bool(false) | Value::Object(0) => true,
+            Value::Nil
+            | Value::Int(0)
+            | Value::Bool(false)
+            | Value::RawBool(0)
+            | Value::Object(0) => true,
             Value::C4Id(id) => cast_c4id_payload(&id) == 0,
             Value::Int(_)
             | Value::Bool(true)
+            | Value::RawBool(_)
             | Value::Object(_)
             | Value::String(_)
             | Value::Array(_)
@@ -24412,6 +24445,7 @@ fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
             .map(|value| match value {
                 EffectVarValue::Int(value) => *value,
                 EffectVarValue::Bool(value) => i32::from(*value),
+                EffectVarValue::RawBool(value) => *value as u32 as i32,
                 _ => 0,
             })
             .unwrap_or(caused_by);
@@ -25491,8 +25525,8 @@ fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
                 .map(object_reference_value)
                 .unwrap_or(Value::Nil)),
             2 => Ok(view
-                .tx_definition
-                .map(Value::C4Id)
+                .tx_value
+                .or_else(|| view.tx_definition.map(Value::C4Id))
                 .or_else(|| view.tx.map(Value::Int))
                 .unwrap_or(Value::Nil)),
             3 => Ok(Value::Int(view.ty.unwrap_or(0))),
@@ -25500,10 +25534,15 @@ fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
                 .target2
                 .map(object_reference_value)
                 .unwrap_or(Value::Nil)),
-            5 => Ok(match view.data {
-                CommandData::Integer(data) if data != 0 => Value::Int(data),
-                _ => Value::Nil,
-            }),
+            5 => Ok(view
+                .legacy_data
+                .or_else(|| match view.data {
+                    CommandData::Integer(data) => Some(data),
+                    CommandData::Text(_) | CommandData::None => None,
+                })
+                .filter(|data| *data != 0)
+                .map(Value::Int)
+                .unwrap_or(Value::Nil)),
             _ => Ok(Value::Nil),
         }
     })
@@ -31043,6 +31082,22 @@ fn command_data_value(data: &CommandData) -> Value {
     }
 }
 
+fn command_view_tx_value(command: &CommandView) -> Value {
+    command
+        .tx_value
+        .clone()
+        .or_else(|| command.tx_definition.clone().map(Value::C4Id))
+        .or_else(|| command.tx.map(Value::Int))
+        .unwrap_or(Value::Nil)
+}
+
+fn command_view_data_value(command: &CommandView) -> Value {
+    command
+        .legacy_data
+        .map(Value::Int)
+        .unwrap_or_else(|| command_data_value(&command.data))
+}
+
 /// Host-preview twin of C4Command::Fail's ExecFail tail. ExecuteCommand runs
 /// inside a script VM call, so CallFailed/BuildNeedsMaterial and the ComDir
 /// stop must be visible before the next script instruction and before
@@ -31108,12 +31163,7 @@ fn preview_command_failure_feedback(
                 if !text.is_empty() {
                     let args = [
                         object_reference_value(actor),
-                        command
-                            .tx_definition
-                            .clone()
-                            .map(Value::C4Id)
-                            .or_else(|| command.tx.map(Value::Int))
-                            .unwrap_or(Value::Nil),
+                        command_view_tx_value(&command),
                         Value::Int(command.ty.unwrap_or(0)),
                         command
                             .target2
@@ -33228,22 +33278,18 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
 
     if let Some(command) = finished {
         let callback_args = [
-            Value::String(command.name),
+            Value::String(command.name.clone()),
             command
                 .target
                 .map(object_reference_value)
                 .unwrap_or(Value::Nil),
-            command
-                .tx_definition
-                .map(Value::C4Id)
-                .or_else(|| command.tx.map(Value::Int))
-                .unwrap_or(Value::Nil),
+            command_view_tx_value(&command),
             Value::Int(command.ty.unwrap_or(0)),
             command
                 .target2
                 .map(object_reference_value)
                 .unwrap_or(Value::Nil),
-            command_data_value(&command.data),
+            command_view_data_value(&command),
         ];
         if object_has_status(target) {
             if let Some(Err(error)) =
@@ -33347,9 +33393,11 @@ fn update_player_selection_toggle_status_host(player_id: i32) {
 
 fn native_set_command_tx(request: &CommandRequest) -> Value {
     request
-        .tx_definition
+        .tx_value
+        .clone()
+        .or_else(|| request.tx_definition
         .as_ref()
-        .map(|id| Value::C4Id(id.as_str().to_string()))
+        .map(|id| Value::C4Id(id.as_str().to_string())))
         .or_else(|| request.tx.map(Value::Int))
         .unwrap_or(Value::Int(0))
 }
@@ -37864,10 +37912,23 @@ fn set_obj_draw_transform(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         if overlay_id == 0 {
-            object.set_draw_transform(if resets_base { None } else { Some(transform) });
+            let current = object.draw_transform();
+            let flip_dir = current.map_or(1, |transform| transform.flip_dir());
+            if resets_base && flip_dir == 1 {
+                object.set_draw_transform(None);
+            } else {
+                object.set_draw_transform(Some(transform.with_flip_dir(flip_dir)));
+            }
             Ok(Value::Bool(true))
         } else {
-            let changed = object.set_overlay_transform(overlay_id, Some(transform));
+            let flip_dir = object
+                .overlay_transform(overlay_id)
+                .flatten()
+                .map_or(1, |transform| transform.flip_dir());
+            let changed = object.set_overlay_transform(
+                overlay_id,
+                Some(transform.with_flip_dir(flip_dir)),
+            );
             Ok(Value::Bool(changed))
         }
     })
@@ -38866,6 +38927,7 @@ fn push_reflected_c4value(
         Value::Nil => ("A", 0),
         Value::Int(value) => ("i", *value),
         Value::Bool(value) => ("b", i32::from(*value)),
+        Value::RawBool(value) => ("b", *value as u32 as i32),
         Value::C4Id(value) if cast_c4id_payload(value) == 0 => ("A", 0),
         Value::C4Id(value) => ("I", cast_c4id_payload(value) as i32),
         Value::Object(value) if *value == 0 => ("A", 0),
@@ -42298,6 +42360,7 @@ fn value_to_effect_var(value: &Value) -> EffectVarValue {
     match value {
         Value::Int(value) => EffectVarValue::Int(*value),
         Value::Bool(value) => EffectVarValue::Bool(*value),
+        Value::RawBool(value) => EffectVarValue::RawBool(*value),
         Value::String(value) => EffectVarValue::String(value.clone()),
         Value::C4Id(id) => EffectVarValue::C4Id(id.clone()),
         Value::Object(id) => EffectVarValue::Object(*id),
@@ -42320,6 +42383,7 @@ pub(crate) fn effect_var_to_value(value: &EffectVarValue) -> Value {
     match value {
         EffectVarValue::Int(value) => Value::Int(*value),
         EffectVarValue::Bool(value) => Value::Bool(*value),
+        EffectVarValue::RawBool(value) => Value::from_c4_bool_data_raw(*value),
         EffectVarValue::String(value) => Value::String(value.clone()),
         EffectVarValue::C4Id(id) => Value::C4Id(id.clone()),
         EffectVarValue::Object(id) => Value::Object(*id),
@@ -55914,6 +55978,11 @@ public func CastValues()
 {
     return [CastC4ID(1279546187), CastInt(KSDL), CastBool(0), CastBool(7), CastInt(true), CastInt(nil), CastC4ID(0), CastC4ID(CastInt(GetID()) + 201135119), CastBool(C4Id("4294967296")), CastInt(C4Id("4294967297")), CastC4ID(C4Id("4294967296")), CastInt(CastC4ID(65536))];
 }
+public func WideCastValues()
+{
+    var id = C4Id("4294967296"), boolean = CastBool(id);
+    return [boolean && true, CastInt(boolean), Equal(boolean, id), CastC4ID(boolean)];
+}
 public func MakePacked() { return CreateContents(CastC4ID(1279546187)); }
 public func MakeRacesOffset(object container)
 {
@@ -55959,6 +56028,15 @@ public func RejectConstruction(x, y, builder)
             .expect("builder spawns");
         let builder_index = engine.find_object_index(builder).expect("builder exists");
 
+        #[cfg(all(not(target_os = "windows"), target_pointer_width = "64"))]
+        let wide_bool = Value::from_c4_bool_data_raw(1_usize << 32);
+        #[cfg(not(all(not(target_os = "windows"), target_pointer_width = "64")))]
+        let wide_bool = Value::Bool(false);
+        #[cfg(all(not(target_os = "windows"), target_pointer_width = "64"))]
+        let wide_id = Value::C4Id(lc_script::c4_id_from_raw(1_usize << 32));
+        #[cfg(not(all(not(target_os = "windows"), target_pointer_width = "64")))]
+        let wide_id = Value::Nil;
+
         assert_eq!(
             engine
                 .call_object_function(builder_index, "CastValues", Vec::new())
@@ -55967,16 +56045,30 @@ public func RejectConstruction(x, y, builder)
                 Value::C4Id("KSDL".into()),
                 Value::Int(1_279_546_187),
                 Value::Bool(false),
-                Value::Bool(true),
+                Value::RawBool(7),
                 Value::Int(1),
                 Value::Int(0),
                 Value::Nil,
                 Value::C4Id("PWIP".into()),
-                Value::Bool(true),
+                wide_bool,
                 Value::Int(1),
-                Value::C4Id("4294967296".into()),
+                wide_id.clone(),
                 Value::Int(65_536),
             ])
+        );
+
+        #[cfg(all(not(target_os = "windows"), target_pointer_width = "64"))]
+        assert_eq!(
+            engine
+                .call_object_function(builder_index, "WideCastValues", Vec::new())
+                .expect("wide casts execute"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(0),
+                Value::Bool(true),
+                wide_id,
+            ]),
+            "truthiness reads all C4V_Data bits while CastInt reads the low word and retagging preserves the raw payload"
         );
 
         let created = engine
@@ -60631,7 +60723,8 @@ public func RejectConstruction(x, y, builder)
         // current player view coordinates (C4Player.cpp:1576-1577).
         let player = PlayerState {
             id: 0,
-            viewports: vec![PlayerViewport::new(Vector2::new(306, 271))],
+            view_center: Some(Vector2::new(306, 271)),
+            viewports: vec![PlayerViewport::new(Vector2::new(900, 901))],
             ..PlayerState::default()
         };
         let world = HostWorldContext::from_objects_with_players(
@@ -60787,9 +60880,9 @@ public func RejectConstruction(x, y, builder)
     #[test]
     fn get_player_val_view_coordinates_follow_the_cursor() {
         // In C4PVM_Cursor, C4Player::UpdateView copies the current cursor
-        // position into ViewX/ViewY (C4Player.cpp:1692-1704). The engine's
-        // sync state may not carry a presentation viewport, so the cursor
-        // remains the authoritative fallback used by Tutorial01's LENS.
+        // position into ViewX/ViewY (C4Player.cpp:1692-1704). Legacy Rust
+        // fixtures may carry neither the independent saved center nor a
+        // presentation viewport, so retain the cursor migration fallback.
         let cursor = ObjectId::new(42);
         let player = PlayerState {
             id: 0,
@@ -60985,7 +61078,9 @@ public func RejectConstruction(x, y, builder)
             last_com_down_double: 9,
             pressed_coms: 11,
             control_style: true,
+            control_style_value: 1,
             auto_context_menu: false,
+            auto_context_menu_value: 0,
             cursor_flash: 13,
             select_flash: 15,
             cursor_selection: 17,
@@ -68508,6 +68603,31 @@ func Probe(state) {
     }
 
     #[test]
+    fn add_command_preserves_a_negative_update_interval() {
+        // C4ValueInt and C4Command::UpdateInterval are signed. C++ stores
+        // this word verbatim; Execute only decrements values greater than
+        // zero (C4Script.cpp:871-892; C4Command.cpp:1545-1552).
+        let args = vec![
+            Value::String("Wait".into()),
+            Value::Nil,
+            Value::Int(0),
+            Value::Int(0),
+            Value::Nil,
+            Value::Int(-4),
+        ];
+        let (result, outcome) = with_object_host_context(|| add_command(&args));
+
+        assert_eq!(result.expect("AddCommand succeeds"), Value::Bool(true));
+        match &outcome.command_operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Wait);
+                assert_eq!(request.update_interval, -4);
+            }
+            other => panic!("expected PushFront operation, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn finish_command_rejects_missing_indices_and_uses_cpp_bool_coercion() {
         let (result, outcome) = with_object_host_context(|| {
             assert_eq!(
@@ -68728,10 +68848,12 @@ func Probe(state) {
             name: "MoveTo".into(),
             target: None,
             tx: Some(200),
+            tx_value: Some(Value::Int(200)),
             tx_definition: None,
             ty: Some(90),
             target2: None,
             data: CommandData::Integer(0),
+            legacy_data: None,
             finished: false,
         }]);
         let world = HostWorldContext::from_objects(vec![world_object]);

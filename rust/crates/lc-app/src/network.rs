@@ -2236,6 +2236,10 @@ pub enum NetworkEvent {
         waited_for: bool,
         ping_ms: i32,
     },
+    JoinDataNeeded {
+        client_id: ClientId,
+        current_control_tick: Tick,
+    },
     PlayerInfoUpdateRequest {
         origin: ClientId,
         request: lc_network::PlayerInfoUpdateRequest,
@@ -2400,6 +2404,19 @@ enum NetworkCommand {
     DisconnectRuntimeConnection {
         connection_id: u32,
         completion: Sender<std::result::Result<(), String>>,
+    },
+    PublishRuntimeDynamic {
+        dynamic: Box<lc_network::LiveNetworkDynamic>,
+        dynamic_tick: i32,
+        parameters: Box<lc_network::JoinGameParametersEnvelope>,
+        completion: Sender<std::result::Result<lc_engine::NetworkResourceCore, String>>,
+    },
+    RemoveRuntimeDynamic {
+        completion: Sender<std::result::Result<bool, String>>,
+    },
+    FailPendingJoinData {
+        reason: lc_engine::LegacyCString,
+        completion: Sender<std::result::Result<usize, String>>,
     },
     PublishPlayerResource {
         request: ClientPlayerResourceRequest,
@@ -2943,6 +2960,34 @@ impl NetworkManager {
         self.submit_decided_control(tick, set.into_control_packet(), sync)
     }
 
+    /// Queue one host-authored `CID_Synchronize` through `CDT_Sync`.
+    ///
+    /// The live host scheduler chooses the synchronized execution boundary;
+    /// `tick` is retained for deterministic command stubs and diagnostics.
+    pub fn submit_synchronize(
+        &self,
+        tick: Tick,
+        save_player_files: bool,
+        sync_clearance: bool,
+    ) -> Result<()> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!(
+                "only the network host may submit a synchronization control"
+            ));
+        }
+        let by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the synchronize-control wire field"))?;
+        self.submit_decided_control(
+            tick,
+            lc_engine::ControlPacket::Synchronize(lc_engine::SynchronizeControlData {
+                save_player_files,
+                sync_clearance,
+                by_client,
+            }),
+            true,
+        )
+    }
+
     pub fn submit_decided_script_control(
         &self,
         tick: Tick,
@@ -3226,6 +3271,62 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitLobbyCountdown(packet))
             .map_err(|_| anyhow!("network worker is not accepting lobby countdowns"))
+    }
+
+    pub fn publish_runtime_dynamic(
+        &self,
+        dynamic: lc_network::LiveNetworkDynamic,
+        dynamic_tick: i32,
+        parameters: lc_network::JoinGameParametersEnvelope,
+    ) -> Result<lc_engine::NetworkResourceCore> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!(
+                "only the network host may publish a runtime dynamic"
+            ));
+        }
+        let (completion, published) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::PublishRuntimeDynamic {
+                dynamic: Box::new(dynamic),
+                dynamic_tick,
+                parameters: Box::new(parameters),
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting runtime dynamics"))?;
+        published
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before publishing the runtime dynamic"))?
+            .map_err(|message| anyhow!(message))
+    }
+
+    pub fn remove_runtime_dynamic(&self) -> Result<bool> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!(
+                "only the network host may remove a runtime dynamic"
+            ));
+        }
+        let (completion, removed) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::RemoveRuntimeDynamic { completion })
+            .map_err(|_| anyhow!("network worker is not accepting runtime-dynamic removal"))?;
+        removed
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before removing the runtime dynamic"))?
+            .map_err(|message| anyhow!(message))
+    }
+
+    pub fn fail_pending_join_data(&self, reason: lc_engine::LegacyCString) -> Result<usize> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!("only the network host may fail pending JoinData"));
+        }
+        let (completion, failed) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::FailPendingJoinData { reason, completion })
+            .map_err(|_| anyhow!("network worker is not accepting pending JoinData failure"))?;
+        failed
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before failing pending JoinData"))?
+            .map_err(|message| anyhow!(message))
     }
 
     pub fn publish_client_player_resource(
@@ -5237,6 +5338,53 @@ async fn run_host_worker(
                             .map_err(|error| error.to_string());
                         let _ = completion.send(result);
                     }
+                    NetworkCommand::PublishRuntimeDynamic {
+                        dynamic,
+                        dynamic_tick,
+                        parameters,
+                        completion,
+                    } => {
+                        let result = await_host_operation_while_forwarding_events(
+                            host.publish_runtime_dynamic(*dynamic, dynamic_tick, *parameters),
+                            &mut host_events,
+                            local_owner,
+                            &event_tx,
+                            &telemetry_tx,
+                            &mut player_info_echo_provenance,
+                            &netpuncher_state,
+                        )
+                        .await?
+                        .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
+                    NetworkCommand::RemoveRuntimeDynamic { completion } => {
+                        let result = await_host_operation_while_forwarding_events(
+                            host.remove_runtime_dynamic(),
+                            &mut host_events,
+                            local_owner,
+                            &event_tx,
+                            &telemetry_tx,
+                            &mut player_info_echo_provenance,
+                            &netpuncher_state,
+                        )
+                        .await?
+                        .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
+                    NetworkCommand::FailPendingJoinData { reason, completion } => {
+                        let result = await_host_operation_while_forwarding_events(
+                            host.fail_pending_join_data(reason),
+                            &mut host_events,
+                            local_owner,
+                            &event_tx,
+                            &telemetry_tx,
+                            &mut player_info_echo_provenance,
+                            &netpuncher_state,
+                        )
+                        .await?
+                        .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
                     NetworkCommand::PublishPlayerResource {
                         request,
                         completion,
@@ -6066,9 +6214,14 @@ async fn handle_host_event(
         HostEvent::ClientConnectionFailed { client_id } => {
             let _ = event_tx.send(NetworkEvent::PeerConnectionFailed { client_id });
         }
-        HostEvent::JoinDataNeeded { .. } => {
-            // The app publishes a fresh synchronized dynamic through the host
-            // command path; the joining socket remains accepted meanwhile.
+        HostEvent::JoinDataNeeded {
+            client_id,
+            current_control_tick,
+        } => {
+            let _ = event_tx.send(NetworkEvent::JoinDataNeeded {
+                client_id,
+                current_control_tick,
+            });
         }
         HostEvent::UnhandledPacket {
             client_id,
@@ -6299,6 +6452,15 @@ async fn run_client_worker(
                         NetworkCommand::LeagueCheckPlayer { completion, .. } => {
                             let _ = completion.send(Err(unavailable));
                         }
+                        NetworkCommand::PublishRuntimeDynamic { completion, .. } => {
+                            let _ = completion.send(Err(unavailable));
+                        }
+                        NetworkCommand::RemoveRuntimeDynamic { completion } => {
+                            let _ = completion.send(Err(unavailable));
+                        }
+                        NetworkCommand::FailPendingJoinData { completion, .. } => {
+                            let _ = completion.send(Err(unavailable));
+                        }
                         NetworkCommand::PublishPlayerResource { completion, .. } => {
                             let _ = completion.send(Err(unavailable));
                         }
@@ -6419,6 +6581,21 @@ async fn run_client_worker(
                             .await
                             .map_err(|error| error.to_string());
                         let _ = completion.send(result);
+                    }
+                    NetworkCommand::PublishRuntimeDynamic { completion, .. } => {
+                        let _ = completion.send(Err(
+                            "client attempted to publish a host runtime dynamic".to_string(),
+                        ));
+                    }
+                    NetworkCommand::RemoveRuntimeDynamic { completion } => {
+                        let _ = completion.send(Err(
+                            "client attempted to remove a host runtime dynamic".to_string(),
+                        ));
+                    }
+                    NetworkCommand::FailPendingJoinData { completion, .. } => {
+                        let _ = completion.send(Err(
+                            "client attempted to fail host pending JoinData".to_string(),
+                        ));
                     }
                     NetworkCommand::PublishPlayerResource {
                         request,
@@ -7414,11 +7591,152 @@ mod tests {
         Arc::new(Mutex::new(NetworkNetpuncherState::default()))
     }
 
-    async fn reserve_tcp_and_udp_at_same_address() -> (
-        TcpListener,
-        tokio::net::UdpSocket,
-        SocketAddr,
-    ) {
+    fn runtime_dynamic_fixture() -> lc_network::LiveNetworkDynamic {
+        lc_network::LiveNetworkDynamic {
+            group_filename: "Runtime.c4s".to_string(),
+            maker: b"Host".to_vec(),
+            packed_bytes: vec![1, 2, 3],
+            file_size: 3,
+            file_crc: 0x1122_3344,
+            contents_crc: 0x5566_7788,
+            entries: Vec::new(),
+        }
+    }
+
+    fn join_parameters_fixture() -> lc_network::JoinGameParametersEnvelope {
+        HostConfig::default()
+            .initial_join_snapshot
+            .expect("default host JoinData")
+            .parameters
+    }
+
+    #[test]
+    fn synchronize_submission_uses_cpp_runtime_join_flags_and_sync_delivery() {
+        let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+
+        manager
+            .submit_synchronize(23, false, true)
+            .expect("queue runtime-join synchronization");
+
+        let Some(NetworkCommand::SubmitDecidedControl {
+            tick,
+            control:
+                lc_engine::ControlPacket::Synchronize(lc_engine::SynchronizeControlData {
+                    save_player_files,
+                    sync_clearance,
+                    by_client,
+                }),
+            sync,
+        }) = commands.command_rx.blocking_recv()
+        else {
+            panic!("expected one synchronized CID_Synchronize command");
+        };
+        assert_eq!(tick, 23);
+        assert!(!save_player_files);
+        assert!(sync_clearance);
+        assert_eq!(by_client, HOST_CLIENT_ID as i32);
+        assert!(sync);
+    }
+
+    #[test]
+    fn runtime_dynamic_manager_wrappers_forward_host_commands() {
+        let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        let dynamic = runtime_dynamic_fixture();
+        let parameters = join_parameters_fixture();
+        let published_core = lc_engine::NetworkResourceCore {
+            id: 41,
+            ..Default::default()
+        };
+        let reason = lc_engine::LegacyCString::from_bytes(b"dynamic failed".to_vec()).unwrap();
+        let expected_dynamic = dynamic.clone();
+        let expected_parameters = parameters.clone();
+        let expected_core = published_core.clone();
+        let expected_reason = reason.clone();
+        let responder = std::thread::spawn(move || {
+            match commands.command_rx.blocking_recv() {
+                Some(NetworkCommand::PublishRuntimeDynamic {
+                    dynamic,
+                    dynamic_tick,
+                    parameters,
+                    completion,
+                }) => {
+                    assert_eq!(*dynamic, expected_dynamic);
+                    assert_eq!(dynamic_tick, 23);
+                    assert_eq!(*parameters, expected_parameters);
+                    completion
+                        .send(Ok(expected_core))
+                        .expect("complete dynamic publication");
+                }
+                command => panic!("unexpected runtime-dynamic publication command: {command:?}"),
+            }
+            match commands.command_rx.blocking_recv() {
+                Some(NetworkCommand::RemoveRuntimeDynamic { completion }) => {
+                    completion.send(Ok(true)).expect("complete dynamic removal")
+                }
+                command => panic!("unexpected runtime-dynamic removal command: {command:?}"),
+            }
+            match commands.command_rx.blocking_recv() {
+                Some(NetworkCommand::FailPendingJoinData { reason, completion }) => {
+                    assert_eq!(reason, expected_reason);
+                    completion
+                        .send(Ok(2))
+                        .expect("complete pending JoinData failure");
+                }
+                command => panic!("unexpected pending JoinData command: {command:?}"),
+            }
+        });
+
+        assert_eq!(
+            manager
+                .publish_runtime_dynamic(dynamic, 23, parameters)
+                .expect("publish runtime dynamic"),
+            published_core
+        );
+        assert!(manager
+            .remove_runtime_dynamic()
+            .expect("remove runtime dynamic"));
+        assert_eq!(
+            manager
+                .fail_pending_join_data(reason)
+                .expect("fail pending JoinData"),
+            2
+        );
+        responder.join().expect("runtime-dynamic responder");
+    }
+
+    #[test]
+    fn runtime_dynamic_manager_wrappers_reject_client_role() {
+        let (manager, _event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+
+        assert!(manager
+            .publish_runtime_dynamic(runtime_dynamic_fixture(), 23, join_parameters_fixture())
+            .unwrap_err()
+            .to_string()
+            .contains("network host"));
+        assert!(manager
+            .remove_runtime_dynamic()
+            .unwrap_err()
+            .to_string()
+            .contains("network host"));
+        assert!(manager
+            .fail_pending_join_data(lc_engine::LegacyCString::default())
+            .unwrap_err()
+            .to_string()
+            .contains("network host"));
+        assert!(manager
+            .submit_synchronize(23, false, true)
+            .unwrap_err()
+            .to_string()
+            .contains("network host"));
+        assert!(matches!(
+            commands.command_rx.try_recv(),
+            Err(tokio_mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    async fn reserve_tcp_and_udp_at_same_address(
+    ) -> (TcpListener, tokio::net::UdpSocket, SocketAddr) {
         const MAX_ATTEMPTS: usize = 32;
 
         for attempt in 1..=MAX_ATTEMPTS {
@@ -7527,6 +7845,58 @@ mod tests {
         .expect("client event pump should release the blocked operation")
         .unwrap();
         assert_eq!(client_result, 9);
+    }
+
+    #[tokio::test]
+    async fn runtime_dynamic_host_operation_drains_join_events_under_pressure() {
+        let (host_event_tx, mut host_events) = tokio_mpsc::channel(1);
+        host_event_tx
+            .send(HostEvent::JoinDataNeeded {
+                client_id: 7,
+                current_control_tick: 23,
+            })
+            .await
+            .unwrap();
+        let blocked_host_event_tx = host_event_tx.clone();
+        let operation = async move {
+            blocked_host_event_tx
+                .send(HostEvent::SyncScheduled {
+                    control_tick: 23,
+                    controls: Vec::new(),
+                })
+                .await
+                .unwrap();
+            41
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(1);
+        let mut provenance = VecDeque::new();
+        let netpuncher_state = test_netpuncher_state();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            await_host_operation_while_forwarding_events(
+                operation,
+                &mut host_events,
+                0,
+                &event_tx,
+                &telemetry_tx,
+                &mut provenance,
+                &netpuncher_state,
+            ),
+        )
+        .await
+        .expect("runtime-dynamic command must not deadlock behind host events")
+        .unwrap();
+
+        assert_eq!(result, 41);
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            NetworkEvent::JoinDataNeeded {
+                client_id: 7,
+                current_control_tick: 23,
+            }
+        );
     }
 
     fn serve_one_league_record_upload() -> (
@@ -11183,6 +11553,35 @@ Message=Server says Andr\xe9\r\n\
         assert_eq!(
             event_rx.recv().expect("status event"),
             NetworkEvent::HostStatusChanged(status)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_join_data_request_is_forwarded_to_the_app() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut player_info_echo_provenance = VecDeque::new();
+
+        handle_host_event(
+            HostEvent::JoinDataNeeded {
+                client_id: 7,
+                current_control_tick: 23,
+            },
+            0,
+            &event_tx,
+            &telemetry_tx,
+            &mut player_info_echo_provenance,
+            &test_netpuncher_state(),
+        )
+        .await
+        .expect("forward runtime JoinData request");
+
+        assert_eq!(
+            event_rx.recv().expect("runtime JoinData event"),
+            NetworkEvent::JoinDataNeeded {
+                client_id: 7,
+                current_control_tick: 23,
+            }
         );
     }
 

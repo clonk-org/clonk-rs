@@ -663,6 +663,11 @@ pub fn run_replay_twice(
 
     for (expected, actual) in replay.checkpoints.iter().zip(&actual_checkpoints) {
         if expected != actual {
+            let actuals = actual_checkpoints
+                .iter()
+                .map(|checkpoint| format!("{}={}", checkpoint.frame, checkpoint.snapshot_hash))
+                .collect::<Vec<_>>()
+                .join(", ");
             let diff = SnapshotDiff {
                 entries: vec![SnapshotDiffEntry {
                     path: "/snapshot_hash".to_owned(),
@@ -672,8 +677,8 @@ pub fn run_replay_twice(
                 truncated: false,
             };
             let mut error = ReplayRunError::new(format!(
-                "checkpoint hash mismatch at frame {}: expected {}, actual {}",
-                expected.frame, expected.snapshot_hash, actual.snapshot_hash
+                "checkpoint hash mismatch at frame {}: expected {}, actual {}; actual checkpoints: [{}]",
+                expected.frame, expected.snapshot_hash, actual.snapshot_hash, actuals
             ));
             attach_replay_failure_artifacts(
                 &mut error,

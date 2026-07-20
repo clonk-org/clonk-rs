@@ -28,7 +28,15 @@ fn pristine_tutorial01_initial_dynamic_matches_cpp_component_oracle() {
     };
     let scenario = Scenario::load_from_path_with_seed(&scenario_path, &resolver, 424_242)
         .expect("pristine Tutorial01 loads");
-    let definitions = vec!["Objects.c4d".to_owned(), "Tutorial.c4f".to_owned()];
+    let definitions = vec![
+        content.join("Objects.c4d").to_string_lossy().into_owned(),
+        content.join("Tutorial.c4f").to_string_lossy().into_owned(),
+    ];
+    let definition_executable_path = format!(
+        "{}{sep}",
+        content.display(),
+        sep = std::path::MAIN_SEPARATOR
+    );
     let game = InitialNetworkGameData::default();
     let parameters = tutorial_parameters();
     let scenario_defaults = InitialNetworkScenarioDefaults {
@@ -47,6 +55,8 @@ fn pristine_tutorial01_initial_dynamic_matches_cpp_component_oracle() {
         scenario: &scenario,
         scenario_title: "A Clonk",
         definition_modules: &definitions,
+        definition_executable_path: &definition_executable_path,
+        definition_path: "",
         scenario_origin: "Tutorial.c4f/Tutorial01.c4s",
         game: &game,
         original_game_text: None,
@@ -116,6 +126,8 @@ fn savegame_runtime_sections_contribute_exact_game_entry_crc() {
         scenario: &scenario,
         scenario_title: "A Clonk",
         definition_modules: &definitions,
+        definition_executable_path: "",
+        definition_path: "",
         scenario_origin: "Tutorial.c4f/Tutorial01.c4s",
         game: &game,
         original_game_text: None,
@@ -153,6 +165,8 @@ fn composition_rejects_non_scenario_group_names_without_a_sort_fallback() {
         scenario: &scenario,
         scenario_title: "A Clonk",
         definition_modules: &definitions,
+        definition_executable_path: "",
+        definition_path: "",
         scenario_origin: "Tutorial.c4f/Tutorial01.c4s",
         game: &game,
         original_game_text: None,
@@ -191,6 +205,8 @@ fn composition_propagates_parameter_errors_without_building_a_partial_group() {
         scenario: &scenario,
         scenario_title: "A Clonk",
         definition_modules: &definitions,
+        definition_executable_path: "",
+        definition_path: "",
         scenario_origin: "Tutorial.c4f/Tutorial01.c4s",
         game: &game,
         original_game_text: None,
@@ -228,6 +244,8 @@ fn cpp_omits_game_entry_when_initial_game_component_is_all_default() {
         scenario: &scenario,
         scenario_title: "A Clonk",
         definition_modules: &definitions,
+        definition_executable_path: "",
+        definition_path: "",
         scenario_origin: "Tutorial.c4f/Tutorial01.c4s",
         game: &game,
         original_game_text: None,

@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::future::{poll_fn, Future};
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering},
@@ -751,6 +752,19 @@ pub enum HostCommand {
         control_tick: Tick,
     },
     PublishJoinSnapshot(Box<HostJoinSnapshot>),
+    PublishRuntimeDynamic {
+        dynamic: Box<crate::LiveNetworkDynamic>,
+        dynamic_tick: i32,
+        parameters: Box<crate::JoinGameParametersEnvelope>,
+        completion: oneshot::Sender<Result<lc_engine::NetworkResourceCore, String>>,
+    },
+    RemoveRuntimeDynamic {
+        completion: oneshot::Sender<Result<bool, String>>,
+    },
+    FailPendingJoinData {
+        reason: lc_engine::LegacyCString,
+        completion: oneshot::Sender<usize>,
+    },
     PublishPlayerResource {
         request: crate::ClientPlayerResourceRequest,
         completion: oneshot::Sender<Result<lc_engine::NetworkResourceCore, String>>,
@@ -993,6 +1007,59 @@ impl HostHandle {
             .send(HostCommand::PublishJoinSnapshot(Box::new(snapshot)))
             .await
             .map_err(|_| HostError::HostLoopGone)
+    }
+
+    /// Publishes the dynamic produced at a synchronized runtime-join save
+    /// boundary and wakes every accepted client still waiting for JoinData.
+    pub async fn publish_runtime_dynamic(
+        &self,
+        dynamic: crate::LiveNetworkDynamic,
+        dynamic_tick: i32,
+        parameters: crate::JoinGameParametersEnvelope,
+    ) -> Result<lc_engine::NetworkResourceCore, HostError> {
+        let (completion, published) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::PublishRuntimeDynamic {
+                dynamic: Box::new(dynamic),
+                dynamic_tick,
+                parameters: Box::new(parameters),
+                completion,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        published
+            .await
+            .map_err(|_| HostError::HostLoopGone)?
+            .map_err(HostError::Resource)
+    }
+
+    /// Clears the currently advertised runtime dynamic and schedules its
+    /// retained temporary resource for C++-style delayed cleanup.
+    pub async fn remove_runtime_dynamic(&self) -> Result<bool, HostError> {
+        let (completion, removed) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::RemoveRuntimeDynamic { completion })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        removed
+            .await
+            .map_err(|_| HostError::HostLoopGone)?
+            .map_err(HostError::Resource)
+    }
+
+    /// Emergency-removes every accepted client for which JoinData has not
+    /// been sent. Removal is a host-authored synchronized control, not a raw
+    /// transport close.
+    pub async fn fail_pending_join_data(
+        &self,
+        reason: lc_engine::LegacyCString,
+    ) -> Result<usize, HostError> {
+        let (completion, removed) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::FailPendingJoinData { reason, completion })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        removed.await.map_err(|_| HostError::HostLoopGone)
     }
 
     pub async fn publish_player_resource(
@@ -4913,6 +4980,262 @@ fn update_derived_resource_sources(
     }
 }
 
+const MAX_RUNTIME_DYNAMIC_SUFFIX: u32 = 999;
+
+struct PublishedRuntimeDynamic {
+    core: lc_engine::NetworkResourceCore,
+    previous_dynamic_id: Option<i32>,
+}
+
+fn publish_host_runtime_dynamic(
+    dynamic: crate::LiveNetworkDynamic,
+    dynamic_tick: i32,
+    parameters: crate::JoinGameParametersEnvelope,
+    state: &mut HostState,
+) -> Result<PublishedRuntimeDynamic, String> {
+    let current_tick = i32::try_from(state.coordinator.current_tick()).unwrap_or(i32::MAX);
+    if dynamic_tick < current_tick {
+        return Err(format!(
+            "runtime dynamic tick {dynamic_tick} is stale at host control tick {current_tick}"
+        ));
+    }
+    let network_directory = state
+        .config
+        .resource_directory
+        .clone()
+        .ok_or_else(|| "host has no network resource directory".to_string())?;
+    if state.resource_backend.is_none() {
+        return Err("host has no filesystem resource backend".to_string());
+    }
+
+    let resource_id = loop {
+        let candidate = state.resource_catalog.allocate_resource_id();
+        let occupied_by_backend = state
+            .resource_backend
+            .as_ref()
+            .is_some_and(|backend| backend.catalog().contains_resource(candidate));
+        if !occupied_by_backend {
+            break candidate;
+        }
+    };
+    let source_path = materialize_runtime_dynamic(&network_directory, &dynamic)?;
+    let wire_name = runtime_dynamic_wire_name(&dynamic.group_filename, &source_path)
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&source_path);
+        })?;
+    let core_spec = crate::HostResourceCoreSpec::new_with_raw_group_maker(
+        crate::HostResourceType::Dynamic,
+        resource_id,
+        wire_name,
+        state.config.group_maker.clone(),
+    );
+    let publication = crate::build_host_resource_core(&source_path, &network_directory, core_spec)
+        .map_err(|error| {
+            let _ = fs::remove_file(&source_path);
+            format!("runtime dynamic resource core failed: {error}")
+        })?;
+    if publication.core.file_size != dynamic.file_size
+        || publication.core.file_crc != dynamic.file_crc
+        || publication.core.contents_crc != dynamic.contents_crc
+        || publication.core.author.as_bytes() != dynamic.maker
+    {
+        discard_unregistered_runtime_dynamic(&publication, &source_path);
+        return Err(format!(
+            "runtime dynamic metadata differs: expected size/crc/contents/maker {}/{:08x}/{:08x}/{:?}, got {}/{:08x}/{:08x}/{:?}",
+            dynamic.file_size,
+            dynamic.file_crc,
+            dynamic.contents_crc,
+            dynamic.maker,
+            publication.core.file_size,
+            publication.core.file_crc,
+            publication.core.contents_crc,
+            publication.core.author.as_bytes(),
+        ));
+    }
+    let Some(standalone_path) = publication.standalone_path.clone() else {
+        discard_unregistered_runtime_dynamic(&publication, &source_path);
+        return Err("runtime dynamic resource is unexpectedly non-loadable".to_string());
+    };
+    let Some(ownership) = publication.standalone_ownership else {
+        discard_unregistered_runtime_dynamic(&publication, &source_path);
+        return Err("runtime dynamic resource has no standalone ownership".to_string());
+    };
+    let core = publication.core;
+    let registration = crate::ResourceRegistration::from_core(&core, true, false);
+    let backend = state
+        .resource_backend
+        .as_mut()
+        .ok_or_else(|| "host filesystem resource backend disappeared".to_string())?;
+    if let Err(error) =
+        backend.register_hosted_resource(core.clone(), &standalone_path, ownership, true)
+    {
+        let _ = fs::remove_file(&standalone_path);
+        if standalone_path != source_path {
+            let _ = fs::remove_file(&source_path);
+        }
+        return Err(format!(
+            "runtime dynamic resource registration failed: {error}"
+        ));
+    }
+    if !state.resource_catalog.register(registration) {
+        backend.remove_resource(resource_id);
+        return Err(format!(
+            "resource ID {resource_id} became occupied during runtime dynamic publication"
+        ));
+    }
+
+    let previous_dynamic_id = state.join_snapshot.as_ref().and_then(|snapshot| {
+        (snapshot.dynamic.resource_type == crate::HostResourceType::Dynamic as u8)
+            .then_some(snapshot.dynamic.id)
+    });
+    state.join_snapshot = Some(HostJoinSnapshot {
+        dynamic: core.clone(),
+        dynamic_tick,
+        parameters,
+    });
+    Ok(PublishedRuntimeDynamic {
+        core,
+        previous_dynamic_id,
+    })
+}
+
+fn remove_host_runtime_dynamic(state: &mut HostState) -> Result<bool, String> {
+    let Some(snapshot) = state.join_snapshot.as_mut() else {
+        return Ok(false);
+    };
+    if snapshot.dynamic.resource_type == lc_engine::NETWORK_RESOURCE_TYPE_NULL {
+        return Ok(false);
+    }
+    if snapshot.dynamic.resource_type != crate::HostResourceType::Dynamic as u8 {
+        return Err(format!(
+            "join snapshot resource {} has non-dynamic type {}",
+            snapshot.dynamic.id, snapshot.dynamic.resource_type
+        ));
+    }
+    let resource_id = snapshot.dynamic.id;
+    snapshot.dynamic = lc_engine::NetworkResourceCore::default();
+    snapshot.dynamic_tick = -1;
+    mark_host_resource_removed(resource_id, state);
+    Ok(true)
+}
+
+fn remove_stale_host_runtime_dynamic(state: &mut HostState) -> bool {
+    let current_tick = i32::try_from(state.coordinator.current_tick()).unwrap_or(i32::MAX);
+    let stale = state.join_snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.dynamic.resource_type == crate::HostResourceType::Dynamic as u8
+            && current_tick > snapshot.dynamic_tick
+    });
+    stale && remove_host_runtime_dynamic(state).unwrap_or(false)
+}
+
+fn mark_host_resource_removed(resource_id: i32, state: &mut HostState) {
+    state.resource_catalog.remove_resource(resource_id);
+    if let Some(backend) = state.resource_backend.as_mut() {
+        backend.remove_resource(resource_id);
+    }
+}
+
+fn advance_shadow_resource_catalog_timer(
+    catalog: &mut crate::ResourceCatalog,
+    now_seconds: u64,
+) {
+    // The filesystem backend owns transport effects whenever it exists, but
+    // the host also retains this catalog for union-ID allocation. Advance its
+    // removal clock without dispatching duplicate discovery/status traffic so
+    // IDs marked by `mark_host_resource_removed` are eventually reusable.
+    let _ = catalog.on_timer(now_seconds);
+}
+
+fn materialize_runtime_dynamic(
+    directory: &Path,
+    dynamic: &crate::LiveNetworkDynamic,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("could not create network resource directory: {error}"))?;
+    let filename = sanitized_runtime_dynamic_basename(&dynamic.group_filename);
+    let (stem, extension) = filename
+        .rfind('.')
+        .map(|dot| (&filename[..dot], &filename[dot..]))
+        .unwrap_or((&filename, ""));
+    for suffix in 1..=MAX_RUNTIME_DYNAMIC_SUFFIX {
+        let candidate = if suffix == 1 {
+            filename.clone()
+        } else {
+            format!("{stem}_{suffix}{extension}")
+        };
+        let path = directory.join(candidate);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(&dynamic.packed_bytes) {
+                    let _ = fs::remove_file(&path);
+                    return Err(format!("could not materialize runtime dynamic: {error}"));
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(format!("could not materialize runtime dynamic: {error}"));
+            }
+        }
+    }
+    Err("no free runtime dynamic filename from 1 through 999".to_string())
+}
+
+fn sanitized_runtime_dynamic_basename(filename: &str) -> String {
+    filename
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            name.bytes()
+                .map(|byte| match byte {
+                    b'a'..=b'z'
+                    | b'A'..=b'Z'
+                    | b'0'..=b'9'
+                    | b'.'
+                    | b'-'
+                    | b'_' => char::from(byte),
+                    _ => '_',
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| "Dynamic.c4s".to_string())
+}
+
+fn runtime_dynamic_wire_name(
+    template: &str,
+    materialized_path: &Path,
+) -> Result<lc_engine::LegacyCString, String> {
+    let basename = materialized_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "runtime dynamic path has no UTF-8 basename".to_string())?;
+    let prefix_length = template
+        .as_bytes()
+        .iter()
+        .rposition(|byte| matches!(byte, b'/' | b'\\'))
+        .map_or(0, |separator| separator + 1);
+    let mut wire_name = Vec::with_capacity(prefix_length + basename.len());
+    wire_name.extend_from_slice(&template.as_bytes()[..prefix_length]);
+    wire_name.extend_from_slice(basename.as_bytes());
+    lc_engine::LegacyCString::from_bytes(wire_name)
+        .ok_or_else(|| "runtime dynamic wire name contains a NUL".to_string())
+}
+
+fn discard_unregistered_runtime_dynamic(
+    publication: &crate::HostResourcePublication,
+    source_path: &Path,
+) {
+    if publication.standalone_ownership == Some(crate::ResourceFileOwnership::Temporary) {
+        if let Some(path) = publication.standalone_path.as_ref() {
+            let _ = fs::remove_file(path);
+        }
+    }
+    if publication.standalone_path.as_deref() != Some(source_path) {
+        let _ = fs::remove_file(source_path);
+    }
+}
+
 fn publish_host_player_resource(
     request: crate::ClientPlayerResourceRequest,
     state: &mut HostState,
@@ -5561,6 +5884,7 @@ async fn run_host(
                         reached_at,
                     } => {
                         state.control_tick_reached(tick, control_rate, reached_at);
+                        remove_stale_host_runtime_dynamic(&mut state);
                     }
                     HostCommand::ControlTickConsumed {
                         tick,
@@ -5607,6 +5931,40 @@ async fn run_host(
                     HostCommand::PublishJoinSnapshot(snapshot) => {
                         state.join_snapshot = Some(*snapshot);
                         publish_pending_join_data(&mut state).await;
+                    }
+                    HostCommand::PublishRuntimeDynamic {
+                        dynamic,
+                        dynamic_tick,
+                        parameters,
+                        completion,
+                    } => {
+                        match publish_host_runtime_dynamic(
+                            *dynamic,
+                            dynamic_tick,
+                            *parameters,
+                            &mut state,
+                        ) {
+                            Ok(publication) => {
+                                // A waiting joiner must receive the new core
+                                // before the superseded resource is hidden.
+                                publish_pending_join_data(&mut state).await;
+                                if let Some(resource_id) = publication.previous_dynamic_id {
+                                    mark_host_resource_removed(resource_id, &mut state);
+                                }
+                                let _ = completion.send(Ok(publication.core));
+                            }
+                            Err(error) => {
+                                let _ = completion.send(Err(error));
+                            }
+                        }
+                    }
+                    HostCommand::RemoveRuntimeDynamic { completion } => {
+                        let result = remove_host_runtime_dynamic(&mut state);
+                        let _ = completion.send(result);
+                    }
+                    HostCommand::FailPendingJoinData { reason, completion } => {
+                        let removed = fail_host_pending_join_data(reason, &mut state).await;
+                        let _ = completion.send(removed);
                     }
                     HostCommand::PublishPlayerResource {
                         request,
@@ -5758,6 +6116,10 @@ async fn run_host(
                         }
                         Err(error) => report_host_resource_error(error, &state).await,
                     }
+                    advance_shadow_resource_catalog_timer(
+                        &mut state.resource_catalog,
+                        now_seconds,
+                    );
                 } else {
                     let actions = state.resource_catalog.on_timer(now_seconds);
                     dispatch_host_resource_actions(actions, &mut state).await;
@@ -6192,7 +6554,7 @@ fn build_client_setup(
     let Some(client) = state.clients.get(&client_id) else {
         return Err(format!("accepted client {client_id} is missing"));
     };
-    if client.join_data_sent {
+    if client.join_data_sent || state.removing_clients.contains(&client_id) {
         return Ok(None);
     }
     let Some(mut snapshot) = state.join_snapshot.clone() else {
@@ -6309,12 +6671,21 @@ async fn emit_join_data_needed(client_id: ClientId, state: &mut HostState) {
         .await;
 }
 
-async fn publish_pending_join_data(state: &mut HostState) {
-    let pending = state
-        .clients
+fn pending_join_data_client_ids(
+    clients: &BTreeMap<ClientId, ClientConnection>,
+    removing_clients: &BTreeSet<ClientId>,
+) -> Vec<ClientId> {
+    clients
         .iter()
-        .filter_map(|(client_id, client)| (!client.join_data_sent).then_some(*client_id))
-        .collect::<Vec<_>>();
+        .filter_map(|(client_id, client)| {
+            (!client.join_data_sent && !removing_clients.contains(client_id))
+                .then_some(*client_id)
+        })
+        .collect()
+}
+
+async fn publish_pending_join_data(state: &mut HostState) {
+    let pending = pending_join_data_client_ids(&state.clients, &state.removing_clients);
     for client_id in pending {
         let setup = match build_client_setup(client_id, state) {
             Ok(Some(setup)) => setup,
@@ -7184,11 +7555,35 @@ async fn queue_disconnected_client_remove(
     core: &lc_engine::ClientCoreControlData,
     state: &mut HostState,
 ) {
+    let reason = lc_engine::LegacyCString::from_bytes(b"disconnected".to_vec())
+        .unwrap_or_default();
+    queue_host_client_remove(core, reason, state).await;
+}
+
+async fn fail_host_pending_join_data(
+    reason: lc_engine::LegacyCString,
+    state: &mut HostState,
+) -> usize {
+    let pending = pending_join_data_client_ids(&state.clients, &state.removing_clients)
+        .into_iter()
+        .filter_map(|client_id| state.clients.get(&client_id).map(|client| client.core.clone()))
+        .collect::<Vec<_>>();
+    let removed = pending.len();
+    for core in pending {
+        queue_host_client_remove(&core, reason.clone(), state).await;
+    }
+    removed
+}
+
+async fn queue_host_client_remove(
+    core: &lc_engine::ClientCoreControlData,
+    reason: lc_engine::LegacyCString,
+    state: &mut HostState,
+) {
     let Ok(data) = crate::encode_control_entry_payload(&lc_engine::ControlPacket::ClientRemove(
         lc_engine::ClientRemoveControlData {
             client_id: core.client_id,
-            reason: lc_engine::LegacyCString::from_bytes(b"disconnected".to_vec())
-                .unwrap_or_default(),
+            reason,
             by_client: 0,
         },
     )) else {
@@ -20747,6 +21142,126 @@ mod tests {
 
         client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_dynamic_expires_only_after_the_host_advances_past_its_tick() {
+        let directories = SessionResourceDirectories::new();
+        let mut config = HostConfig::default();
+        config.resource_directory = Some(directories.host.clone());
+        let parameters = config
+            .initial_join_snapshot
+            .as_ref()
+            .unwrap()
+            .parameters
+            .clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut host = start_host(listener, config).await.unwrap();
+        let mut events = host.take_event_receiver();
+
+        host.publish_runtime_dynamic(runtime_dynamic_for_session_test(), 0, parameters.clone())
+            .await
+            .unwrap();
+        host.control_tick_reached(0, 1, tokio::time::Instant::now())
+            .await
+            .unwrap();
+        assert!(
+            host.remove_runtime_dynamic().await.unwrap(),
+            "the dynamic must remain available at its exact control tick"
+        );
+
+        host.publish_runtime_dynamic(runtime_dynamic_for_session_test(), 0, parameters)
+            .await
+            .unwrap();
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x34))
+            .await
+            .unwrap();
+        wait_for_host_ready_tick(&mut events, 0).await;
+        host.control_tick_reached(1, 1, tokio::time::Instant::now())
+            .await
+            .unwrap();
+        assert!(
+            !host.remove_runtime_dynamic().await.unwrap(),
+            "the host must automatically remove a dynamic once current tick is greater"
+        );
+
+        host.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn shadow_catalog_reclaims_removed_runtime_dynamic_registration() {
+        let mut catalog = crate::ResourceCatalog::new(HOST_CLIENT_ID as i32);
+        let registration = crate::ResourceRegistration {
+            resource_id: 41,
+            chunk_count: 1,
+            binary_compatible: true,
+            loading: false,
+        };
+        assert!(catalog.register(registration));
+
+        // Establish the same nonzero request epoch used by the live resource
+        // timer, then mark the runtime resource through RemoveDynamic.
+        advance_shadow_resource_catalog_timer(&mut catalog, 1);
+        assert!(catalog.remove_resource(registration.resource_id));
+        advance_shadow_resource_catalog_timer(
+            &mut catalog,
+            1 + crate::resource_catalog::RESOURCE_DELETE_TIME_SECONDS,
+        );
+        assert!(catalog.contains_resource(registration.resource_id));
+
+        advance_shadow_resource_catalog_timer(
+            &mut catalog,
+            2 + crate::resource_catalog::RESOURCE_DELETE_TIME_SECONDS,
+        );
+        assert!(!catalog.contains_resource(registration.resource_id));
+        assert!(
+            catalog.register(registration),
+            "the retired runtime ID must be reusable after delayed cleanup"
+        );
+    }
+
+    #[test]
+    fn pending_join_data_excludes_clients_already_marked_for_removal() {
+        let mut clients = BTreeMap::new();
+        let mut receivers = Vec::new();
+        for (client_id, join_data_sent) in [(7, false), (8, false), (9, true)] {
+            let (outbound, receiver) = HostOutboundSender::channel(1);
+            receivers.push(receiver);
+            clients.insert(
+                client_id,
+                ClientConnection {
+                    outbound,
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: client_id as i32,
+                        ..Default::default()
+                    },
+                    peer_addr: "127.0.0.1:1111".parse().unwrap(),
+                    join_data_sent,
+                    join_data_needed_emitted: false,
+                },
+            );
+        }
+        let removing_clients = BTreeSet::from([8]);
+
+        assert_eq!(
+            pending_join_data_client_ids(&clients, &removing_clients),
+            vec![7],
+            "a synchronized ClientRemove must suppress later JoinData publication"
+        );
+    }
+
+    fn runtime_dynamic_for_session_test() -> crate::LiveNetworkDynamic {
+        crate::compose_live_network_dynamic(crate::LiveNetworkDynamicSpec {
+            group_filename: "DynRuntime.c4s".to_string(),
+            maker: b"Host".to_vec(),
+            parameters: b"[Parameters]\r\nControlRate=1\r\n".to_vec(),
+            scenario: b"[Head]\r\nSaveGame=1\r\nNetworkGame=1\r\n".to_vec(),
+            components: vec![crate::LiveNetworkDynamicComponent::File {
+                name: "Game.txt".to_string(),
+                payload: b"[Game]\r\nControlTick=0\r\n".to_vec(),
+            }],
+        })
+        .unwrap()
     }
 
     #[tokio::test(start_paused = true)]

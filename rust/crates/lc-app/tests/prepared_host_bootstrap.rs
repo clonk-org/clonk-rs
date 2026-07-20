@@ -36,6 +36,8 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     let prepared = prepare_host_bootstrap(PreparedHostBootstrapSpec {
         scenario_path: &scenario_path,
         install_roots: &install_roots,
+        definition_executable_path: "",
+        definition_path: "",
         languages: &languages,
         language_packs: &language_packs,
         network_directory: network.path(),
@@ -992,6 +994,8 @@ fn native_host_metadata_and_player_filename_prepare_as_c4_bytes() {
     let prepared = prepare_host_bootstrap(PreparedHostBootstrapSpec {
         scenario_path: &fixture.scenario_path,
         install_roots: &fixture.install_roots,
+        definition_executable_path: "",
+        definition_path: "",
         languages: &languages,
         language_packs: &language_packs,
         network_directory: fixture.network.path(),
@@ -1340,6 +1344,8 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
         PreparedHostBootstrapSpec {
             scenario_path: &scenario_path,
             install_roots: &install_roots,
+            definition_executable_path: "",
+            definition_path: "",
             languages: &languages,
             language_packs: &language_packs,
             network_directory: network.path(),
@@ -1786,6 +1792,8 @@ fn prepare_typed_with_names_and_league_impl(
     prepare_host_bootstrap(PreparedHostBootstrapSpec {
         scenario_path: &fixture.scenario_path,
         install_roots: &fixture.install_roots,
+        definition_executable_path: "",
+        definition_path: "",
         languages: &languages,
         language_packs: &language_packs,
         network_directory: fixture.network.path(),

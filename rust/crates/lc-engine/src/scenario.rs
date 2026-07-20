@@ -32,9 +32,10 @@ use crate::{
     DefinitionActionGraphics, DefinitionComponent, DefinitionId, DefinitionPicture,
     DefinitionPictureImage, DefinitionRect, DefinitionSpriteImage, Direction, EffectState,
     EffectVarValue, Engine, EngineError, EnvironmentSettings, Landscape, LegacyCString,
-    MovementProfile, ObjectId, ObjectStatus, PhysicsSettings, RgbColor, ScoreboardState,
-    ScriptGlobalState, SkyFrame, SkyParallaxMode, SkySettings, SpawnConfig, TeamInfo, Vector2,
-    FULL_CON, LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC,
+    MovementProfile, ObjectId, ObjectStatus, PhysicsSettings, RgbColor, RoundResultsState,
+    ScoreboardState, ScriptGlobalState, SkyFrame, SkyParallaxMode, SkySettings, SpawnConfig,
+    TeamInfo, Vector2, FULL_CON, LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT,
+    LANDSCAPE_MODE_STATIC,
 };
 use crate::action::is_builtin_idle_name;
 
@@ -72,6 +73,8 @@ pub enum ScenarioError {
     LegacyObjectsEncoding,
     #[error("invalid legacy objects data: {0}")]
     LegacyObjectsParse(String),
+    #[error("invalid legacy round results data: {0}")]
+    LegacyRoundResultsParse(String),
     #[error("legacy map `Map.bmp` could not be decoded: {source}")]
     LegacyMapDecode {
         #[source]
@@ -218,12 +221,23 @@ struct DefinitionActions {
 pub(crate) struct ScenarioSpawn {
     pub(crate) handle: Option<String>,
     pub(crate) container_handle: Option<String>,
+    /// Separately compiled C4ObjectList links, in exact First -> Next order.
+    pub(crate) contents_handles: Vec<String>,
+    /// C4Object::nInfo from `Info=`. Binding this name to player-owned crew
+    /// metadata happens after the corresponding player files are restored.
+    pub(crate) info_name: Option<String>,
     pub(crate) config: SpawnConfig,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ScenarioSectionSpec {
     pub(crate) name: String,
+    /// Original section payload retained for C4ScenarioSection::EnsureTempStore.
+    /// The implicit main section points at the scenario root and is filtered
+    /// to C4FLS_Section when it first becomes modified; named sections retain
+    /// their complete child group so files outside the two saved categories
+    /// survive a landscape-only or objects-only switch.
+    pub(crate) source_group: Option<Group>,
     pub(crate) landscape: Option<Landscape>,
     pub(crate) landscape_systems: ScenarioLandscapeSystems,
     pub(crate) exact_landscape: bool,
@@ -431,6 +445,10 @@ pub struct Scenario {
     /// The C4Aul string enumeration loaded from `Strings.txt`. Compiled
     /// Globals/GlobalNamed/effect variables refer to these integer IDs.
     legacy_string_table: HashMap<i32, String>,
+    /// `RoundResults.txt` compiled after InitControl and before pointer
+    /// denumeration. A missing component retains C4RoundResults::Init's
+    /// scenario-melee default.
+    round_results: RoundResultsState,
     /// The `[Landscape] Gravity` C4SVal — evaluated through the synced
     /// ledger at apply time (C4Landscape::ScenarioInit, C4Landscape.cpp:66).
     gravity: LegacyC4SVal,
@@ -2493,13 +2511,21 @@ impl Scenario {
         &self,
         scenario_title: &str,
         definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
         scenario_origin: &str,
     ) -> Result<Vec<u8>, ScenarioError> {
         self.legacy_core
             .as_ref()
             .map(|core| {
-                core.initial_network_save(scenario_title, definition_modules, scenario_origin)
-                    .serialize()
+                core.initial_network_save(
+                    scenario_title,
+                    definition_modules,
+                    definition_executable_path,
+                    definition_path,
+                    scenario_origin,
+                )
+                .serialize()
             })
             .ok_or(ScenarioError::InitialNetworkScenarioUnsupported)
     }
@@ -2516,13 +2542,21 @@ impl Scenario {
         &self,
         record_title: &str,
         definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
         scenario_origin: &str,
     ) -> Result<Vec<u8>, ScenarioError> {
         self.legacy_core
             .as_ref()
             .map(|core| {
-                core.initial_record_save(record_title, definition_modules, scenario_origin)
-                    .serialize()
+                core.initial_record_save(
+                    record_title,
+                    definition_modules,
+                    definition_executable_path,
+                    definition_path,
+                    scenario_origin,
+                )
+                .serialize()
             })
             .ok_or(ScenarioError::InitialRecordScenarioUnsupported)
     }
@@ -2607,6 +2641,7 @@ impl Scenario {
             language_packs.component_groups(group, Some(group), scenario_origin.as_deref());
         let is_savegame = manifest.core.head.save_game != 0;
         let runtime_landscape = load_runtime_landscape_data(group, is_savegame)?;
+        let runtime_current_section = load_runtime_current_scenario_section(group)?;
         // Exact old saves replace the normal definition vector from Game.txt.
         // Discover that boundary before trying to resolve Scenario.txt modules:
         // those modules may intentionally no longer exist.
@@ -2848,6 +2883,11 @@ impl Scenario {
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
         // (C4Player.cpp:481-570) — see Engine::join_player.
         let legacy_string_table = load_legacy_string_table(group)?;
+        let converted_core = manifest.core.after_load_conversion();
+        let round_results = load_legacy_round_results(
+            group,
+            legacy_game_is_melee_after_conversion(&converted_core.game),
+        )?;
         let initial_spawns = if has_unresolved_savegame_definitions {
             // Object IDs cannot be decoded truthfully until the legacy
             // DefinitionFiles text has been interpreted by a runtime loader.
@@ -2883,6 +2923,7 @@ impl Scenario {
             classifier.as_mut(),
             random_seed,
             startup_player_count,
+            &runtime_current_section,
             &landscape,
             &landscape_systems,
             &initial_spawns,
@@ -2950,6 +2991,7 @@ impl Scenario {
             physics,
             runtime_landscape,
             legacy_string_table,
+            round_results,
             gravity,
             environment: Some(environment),
             weather_init: Some(weather_init),
@@ -3282,6 +3324,11 @@ impl Scenario {
             .map(InitialNetworkRuntimeState::parse)
             .transpose()?;
         engine.clear_scenario_script();
+        // The same scenario-level C4StringTable is used by Objects.txt and
+        // by embedded player-file ExtraData restored later in this startup
+        // pipeline. Publish the exact enumeration before either consumer can
+        // bind runtime state.
+        engine.set_legacy_string_table(self.legacy_string_table.clone());
         // C4Scenario::Load/ConvertGoals and C4Landscape::Init have completed
         // before any definition/scenario initialization callback can query
         // Game.C4S. Reset on every apply so a reused Engine cannot retain the
@@ -3315,6 +3362,9 @@ impl Scenario {
         // C4SPlrStart outlives scenario load: ScenarioInit reads it when a
         // player joins (C4Player.cpp:670-777).
         engine.set_player_starts(self.player_starts.clone());
+        if let Ok(metadata) = self.initial_network_team_metadata() {
+            engine.set_initial_network_team_metadata(&metadata);
+        }
         engine.set_teams(team_registry_override.unwrap_or_else(|| self.teams.clone()));
         // Game.Teams retains all seven script-queryable values. A missing or
         // zero-byte Teams.txt uses the scenario-derived C4TeamList defaults;
@@ -3339,14 +3389,15 @@ impl Scenario {
         } else {
             engine.clear_landscape();
         }
-        let main_landscape_systems = self
+        // The first section is the root world. In an exact save that may be
+        // a non-Main current section; a retained SectMain child is inactive.
+        let root_landscape_systems = self
             .scenario_sections
-            .iter()
-            .find(|section| section.name.eq_ignore_ascii_case("main"))
+            .first()
             .map(|section| section.landscape_systems.clone())
             .unwrap_or_default();
         engine.load_scenario_landscape_systems(
-            &main_landscape_systems,
+            &root_landscape_systems,
             self.landscape.is_some() || self.scenario_sections.is_empty(),
         );
 
@@ -3631,6 +3682,25 @@ impl Scenario {
         // System.c4g that C++ deliberately loaded last.
 
         let mut pending = self.initial_spawns.clone();
+        let legacy_contents_handles = pending
+            .iter()
+            .filter(|spawn| !spawn.contents_handles.is_empty())
+            .filter_map(|spawn| {
+                spawn
+                    .handle
+                    .clone()
+                    .map(|parent| (parent, spawn.contents_handles.clone()))
+            })
+            .collect::<Vec<_>>();
+        let legacy_contained_handles = pending
+            .iter()
+            .filter_map(|spawn| {
+                Some((
+                    spawn.handle.clone()?,
+                    spawn.container_handle.clone()?,
+                ))
+            })
+            .collect::<Vec<_>>();
         let mut handles: HashMap<String, ObjectId> = HashMap::new();
         let mut created = Vec::with_capacity(pending.len() + 4);
 
@@ -3650,6 +3720,25 @@ impl Scenario {
             }
         }
 
+        if self.legacy_core.is_some() {
+            // C4GameObjects::Load constructs every object first and only
+            // then denumerates Contained/Contents pointers. Spawn the rows
+            // without runtime Enter semantics so mutual containment remains
+            // representable and callbacks cannot observe a partial graph.
+            for spawn in pending.drain(..) {
+                let info_name = spawn.info_name;
+                let mut config = spawn.config;
+                config.container = None;
+                let id = engine.spawn_object(config)?;
+                engine.remember_legacy_object_info(id, info_name);
+                if let Some(handle) = spawn.handle {
+                    if handles.insert(handle.clone(), id).is_some() {
+                        return Err(ScenarioError::DuplicateHandle(handle));
+                    }
+                }
+                created.push(id);
+            }
+        } else {
         while !pending.is_empty() {
             let mut progress = false;
             let mut idx = 0;
@@ -3729,10 +3818,36 @@ impl Scenario {
                 }
             }
         }
+        }
 
         if self.legacy_core.is_some() {
+            let contents_orders = legacy_contents_handles
+                .into_iter()
+                .filter_map(|(parent, children)| {
+                    handles.get(&parent).copied().map(|parent| {
+                        let children = children
+                            .into_iter()
+                            .filter_map(|child| handles.get(&child).copied())
+                            .collect();
+                        (parent, children)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let contained_links = legacy_contained_handles
+                .into_iter()
+                .filter_map(|(child, parent)| {
+                    Some((*handles.get(&child)?, *handles.get(&parent)?))
+                })
+                .collect::<Vec<_>>();
+            engine.restore_legacy_object_links(&contained_links, &contents_orders);
             engine.finish_legacy_object_load();
         }
+
+        // C4Game::InitGame loads RoundResults.txt after InitControl and all
+        // objects, but before script/global-effect pointer denumeration. The
+        // result structure contains no object pointers of its own; installing
+        // the compiled state here preserves that exact lifetime boundary.
+        engine.round_results = self.round_results.clone();
 
         if let Some(runtime) = initial_network_runtime.take() {
             let object_numbers = engine
@@ -4067,6 +4182,8 @@ impl Scenario {
             spawns.push(ScenarioSpawn {
                 handle,
                 container_handle,
+                contents_handles: Vec::new(),
+                info_name: None,
                 config: spawn,
             });
         }
@@ -4125,6 +4242,7 @@ impl Scenario {
             physics,
             runtime_landscape: None,
             legacy_string_table: HashMap::new(),
+            round_results: RoundResultsState::default(),
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment,
             weather_init: None,
@@ -4181,7 +4299,7 @@ const BASEFUNC_DEFAULT: i32 = 0xffff;
 const BASE_REGENERATE_ENERGY_PRICE: i32 = 5;
 const DEFAULT_FOW_RESOLUTION: i32 = 64;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyIdEntry {
     id: String,
     count: Option<i32>,
@@ -4189,7 +4307,7 @@ struct LegacyIdEntry {
 
 type LegacyIdList = Vec<LegacyIdEntry>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyNameEntry {
     name: String,
     count: Option<i32>,
@@ -4197,7 +4315,7 @@ struct LegacyNameEntry {
 
 type LegacyNameList = Vec<LegacyNameEntry>;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyScenarioCore {
     head: LegacyHead,
     definitions: LegacyDefinitions,
@@ -4210,7 +4328,7 @@ struct LegacyScenarioCore {
     environment: LegacyEnvironment,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyHead {
     icon: i32,
     title: String,
@@ -4271,7 +4389,7 @@ impl Default for LegacyHead {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyDefinitions {
     local_only: bool,
     allow_user_change: bool,
@@ -4282,7 +4400,7 @@ struct LegacyDefinitions {
     skip_defs: LegacyIdList,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyRealism {
     construction_needs_material: bool,
     structures_need_energy: bool,
@@ -4307,7 +4425,7 @@ impl Default for LegacyRealism {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyGame {
     mode: i32,
     elimination: i32,
@@ -4342,7 +4460,7 @@ impl Default for LegacyGame {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyPlayer {
     standard_crew: Option<String>,
     clonks: LegacyC4SVal,
@@ -4463,7 +4581,7 @@ impl PlayerStart {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyLandscape {
     exact_landscape: bool,
     vegetation: LegacyIdList,
@@ -4538,7 +4656,7 @@ impl Default for LegacyLandscape {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyWeather {
     climate: LegacyC4SVal,
     start_season: LegacyC4SVal,
@@ -4565,7 +4683,7 @@ impl Default for LegacyWeather {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyDisasters {
     meteorite: LegacyC4SVal,
     volcano: LegacyC4SVal,
@@ -4582,13 +4700,13 @@ impl Default for LegacyDisasters {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyAnimals {
     free_life: LegacyIdList,
     earth_nest: LegacyIdList,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyEnvironment {
     objects: LegacyIdList,
 }
@@ -4606,15 +4724,15 @@ pub(crate) enum ScenarioValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct ScenarioValueEntry {
-    name: String,
-    values: Vec<ScenarioValue>,
+pub(crate) struct ScenarioValueEntry {
+    pub(crate) name: String,
+    pub(crate) values: Vec<ScenarioValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct ScenarioValueSection {
-    name: String,
-    entries: Vec<ScenarioValueEntry>,
+pub(crate) struct ScenarioValueSection {
+    pub(crate) name: String,
+    pub(crate) entries: Vec<ScenarioValueEntry>,
 }
 
 /// The fully defaulted `C4Scenario::CompileFunc` view retained at runtime for
@@ -4624,7 +4742,11 @@ struct ScenarioValueSection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[doc(hidden)]
 pub struct ScenarioValueStore {
-    sections: Vec<ScenarioValueSection>,
+    pub(crate) sections: Vec<ScenarioValueSection>,
+    #[serde(default)]
+    core: LegacyScenarioCore,
+    #[serde(default)]
+    section_head_defaults: Option<[i32; 2]>,
 }
 
 impl Default for ScenarioValueStore {
@@ -4638,6 +4760,42 @@ impl Default for ScenarioValueStore {
 }
 
 impl ScenarioValueStore {
+    fn with_section_head_defaults(mut self, context: &LegacyHead) -> Self {
+        self.section_head_defaults = Some([
+            context.forced_auto_context_menu,
+            context.forced_control_style,
+        ]);
+        self
+    }
+
+    pub(crate) fn serialize_runtime_network_save(
+        &self,
+        scenario_title: &str,
+        definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
+        scenario_origin: &str,
+    ) -> Vec<u8> {
+        self.core
+            .runtime_network_save(
+                scenario_title,
+                definition_modules,
+                definition_executable_path,
+                definition_path,
+                scenario_origin,
+            )
+            .serialize()
+    }
+
+    pub(crate) fn serialize_section_save(&self, force_exact: bool) -> Vec<u8> {
+        self.core
+            .serialize_section(force_exact, self.section_head_defaults)
+    }
+
+    pub(crate) fn no_sky(&self) -> bool {
+        self.core.landscape.no_sky
+    }
+
     #[cfg(test)]
     pub(crate) fn with_film_for_test(film: i32) -> Self {
         let mut core = LegacyScenarioCore::default();
@@ -4664,6 +4822,13 @@ impl ScenarioValueStore {
     pub(crate) fn with_landscape_push_pull_for_test(enabled: bool) -> Self {
         let mut core = LegacyScenarioCore::default();
         core.game.realism.landscape_push_pull = i32::from(enabled);
+        Self::from_runtime_core(&core, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_no_sky_for_test(enabled: bool) -> Self {
+        let mut core = LegacyScenarioCore::default();
+        core.landscape.no_sky = enabled;
         Self::from_runtime_core(&core, false)
     }
 
@@ -4991,7 +5156,11 @@ impl ScenarioValueStore {
             entries: vec![Self::entry("Objects", Self::ids(&core.environment.objects))],
         });
 
-        Self { sections }
+        Self {
+            sections,
+            core: core.clone(),
+            section_head_defaults: None,
+        }
     }
 
     /// Project the state visible to scripts after C4Scenario::Load,
@@ -5060,6 +5229,13 @@ impl ScenarioValueStore {
         match self.get("FoWRes", Some("Landscape"), 0) {
             Some(ScenarioValue::Int(value)) => *value,
             _ => crate::DEFAULT_FOW_RESOLUTION,
+        }
+    }
+
+    pub(crate) fn scenario_title(&self) -> &str {
+        match self.get("Title", Some("Head"), 0) {
+            Some(ScenarioValue::String(title)) => title,
+            _ => "",
         }
     }
 
@@ -6118,6 +6294,7 @@ impl LegacyEnvironment {
 }
 
 const CURRENT_SCENARIO_VERSION: [i32; 4] = [4, 9, 11, 0];
+const C4_MAX_TITLE: usize = 512;
 
 impl LegacyScenarioCore {
     /// Returns the fully loaded C4Scenario state without mutating the retained
@@ -6134,6 +6311,8 @@ impl LegacyScenarioCore {
         &self,
         scenario_title: &str,
         definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
         scenario_origin: &str,
     ) -> Self {
         let mut saved = self.after_load_conversion();
@@ -6143,7 +6322,11 @@ impl LegacyScenarioCore {
         // (C4GameSave.cpp:58-64).
         saved.head.version[..CURRENT_SCENARIO_VERSION.len()]
             .copy_from_slice(&CURRENT_SCENARIO_VERSION);
-        saved.head.title = scenario_title.to_owned();
+        // SCopy(..., C4MaxTitle) copies the native C string through the first
+        // NUL and keeps at most C4MaxTitle bytes (C4GameSave.cpp:84;
+        // C4Strings.cpp:67-81).
+        saved.head.title =
+            truncate_legacy_c4_string(scenario_title.to_owned(), C4_MAX_TITLE);
         saved.head.mission_access.clear();
         // SaveCore resets NetworkGame before the save specialization applies
         // its own flags. NetworkRuntimeJoin is deliberately retained here.
@@ -6152,7 +6335,11 @@ impl LegacyScenarioCore {
 
         // C4SDefinitions::SetModules replaces the list and derives LocalOnly
         // from whether it is empty (C4Scenario.cpp:461-478).
-        saved.definitions.definitions = definition_modules.to_vec();
+        saved.definitions.definitions = set_legacy_definition_modules(
+            definition_modules,
+            definition_executable_path,
+            definition_path,
+        );
         saved.definitions.local_only = definition_modules.is_empty();
 
         // GetSaveOrigin retains an existing origin; only an empty origin is
@@ -6176,10 +6363,17 @@ impl LegacyScenarioCore {
         &self,
         scenario_title: &str,
         definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
         scenario_origin: &str,
     ) -> Self {
-        let mut saved =
-            self.initial_save_core(scenario_title, definition_modules, scenario_origin);
+        let mut saved = self.initial_save_core(
+            scenario_title,
+            definition_modules,
+            definition_executable_path,
+            definition_path,
+            scenario_origin,
+        );
         saved.head.network_game = true;
         saved.head.network_runtime_join = false;
         saved
@@ -6189,13 +6383,106 @@ impl LegacyScenarioCore {
         &self,
         record_title: &str,
         definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
         scenario_origin: &str,
     ) -> Self {
-        let mut saved =
-            self.initial_save_core(record_title, definition_modules, scenario_origin);
+        let mut saved = self.initial_save_core(
+            record_title,
+            definition_modules,
+            definition_executable_path,
+            definition_path,
+            scenario_origin,
+        );
         saved.head.replay = 1;
         saved.head.icon = 29;
         saved
+    }
+
+    fn runtime_network_save(
+        &self,
+        scenario_title: &str,
+        definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
+        scenario_origin: &str,
+    ) -> Self {
+        let mut saved = self.clone();
+        saved.head.version[..CURRENT_SCENARIO_VERSION.len()]
+            .copy_from_slice(&CURRENT_SCENARIO_VERSION);
+        saved.head.title =
+            truncate_legacy_c4_string(scenario_title.to_owned(), C4_MAX_TITLE);
+        saved.head.no_initialize = 1;
+        saved.head.save_game = 1;
+        saved.head.network_game = true;
+        saved.head.network_runtime_join = true;
+        saved.head.mission_access.clear();
+        saved.head.forced_gfx_mode = 1;
+        saved.definitions.definitions = set_legacy_definition_modules(
+            definition_modules,
+            definition_executable_path,
+            definition_path,
+        );
+        saved.definitions.reflected_definitions = None;
+        saved.definitions.local_only = definition_modules.is_empty();
+        if saved.head.origin.as_deref().is_none_or(str::is_empty) {
+            saved.head.origin = (!scenario_origin.is_empty())
+                .then(|| normalize_legacy_path(scenario_origin));
+        }
+        saved
+    }
+
+    fn serialize_section(
+        &self,
+        force_exact: bool,
+        head_defaults: Option<[i32; 2]>,
+    ) -> Vec<u8> {
+        let mut writer = LegacyScenarioIniWriter::default();
+        let [context_menu_default, control_style_default] = head_defaults.unwrap_or([
+            self.head.forced_auto_context_menu,
+            self.head.forced_control_style,
+        ]);
+        let mut head = Vec::new();
+        push_value(&mut head, "NoInitialize", self.head.no_initialize, 0);
+        push_value(&mut head, "RandomSeed", self.head.random_seed, 0);
+        push_value(
+            &mut head,
+            "ForcedAutoContextMenu",
+            self.head.forced_auto_context_menu,
+            context_menu_default,
+        );
+        push_value(
+            &mut head,
+            "ForcedAutoStopControl",
+            self.head.forced_control_style,
+            control_style_default,
+        );
+        writer.push_section("Head", head);
+
+        let mut game = serialize_legacy_game(&self.game);
+        game.retain(|(name, _)| *name != "ValueOverloads");
+        writer.push_section("Game", game);
+        for index in 0..MAX_PLAYER_STARTS {
+            let player = self.players.get(index).cloned().unwrap_or_default();
+            writer.push_section(
+                &format!("Player{}", index + 1),
+                serialize_legacy_player(&player),
+            );
+        }
+        let mut landscape = self.landscape.clone();
+        landscape.exact_landscape |= force_exact;
+        writer.push_section(
+            "Landscape",
+            serialize_legacy_landscape(&landscape, self.uses_new_landscape_defaults()),
+        );
+        writer.push_section("Animals", serialize_legacy_animals(&self.animals));
+        writer.push_section("Weather", serialize_legacy_weather(&self.weather));
+        writer.push_section("Disasters", serialize_legacy_disasters(&self.disasters));
+        writer.push_section(
+            "Environment",
+            serialize_legacy_environment(&self.environment),
+        );
+        writer.finish()
     }
 
     fn serialize(&self) -> Vec<u8> {
@@ -6213,7 +6500,10 @@ impl LegacyScenarioCore {
                 serialize_legacy_player(&player),
             );
         }
-        writer.push_section("Landscape", serialize_legacy_landscape(&self.landscape));
+        writer.push_section(
+            "Landscape",
+            serialize_legacy_landscape(&self.landscape, self.uses_new_landscape_defaults()),
+        );
         writer.push_section("Animals", serialize_legacy_animals(&self.animals));
         writer.push_section("Weather", serialize_legacy_weather(&self.weather));
         writer.push_section("Disasters", serialize_legacy_disasters(&self.disasters));
@@ -6222,6 +6512,10 @@ impl LegacyScenarioCore {
             serialize_legacy_environment(&self.environment),
         );
         writer.finish()
+    }
+
+    fn uses_new_landscape_defaults(&self) -> bool {
+        self.head.version[0] == 0 || self.head.version >= [4, 6, 5, 0, 0]
     }
 }
 
@@ -6509,7 +6803,10 @@ fn serialize_legacy_player(player: &LegacyPlayer) -> LegacyIniFields {
     fields
 }
 
-fn serialize_legacy_landscape(landscape: &LegacyLandscape) -> LegacyIniFields {
+fn serialize_legacy_landscape(
+    landscape: &LegacyLandscape,
+    shade_materials_default: bool,
+) -> LegacyIniFields {
     let mut fields = Vec::new();
     // C4SLandscape::CompileFunc (C4Scenario.cpp:336-370). SaveCore has
     // already set a current engine version, so ShadeMaterials defaults true.
@@ -6638,7 +6935,7 @@ fn serialize_legacy_landscape(landscape: &LegacyLandscape) -> LegacyIniFields {
         &mut fields,
         "ShadeMaterials",
         landscape.shade_materials,
-        true,
+        shade_materials_default,
     );
     fields
 }
@@ -6798,6 +7095,39 @@ fn normalize_legacy_path(path: &str) -> String {
     } else {
         path.replace('/', "\\")
     }
+}
+
+/// `C4SDefinitions::SetModules`: normalize the platform spelling used by the
+/// active process, then strip ExePath and DefinitionPath in that exact order.
+/// Native compares the requested prefix length case-insensitively and does
+/// not require a component boundary (C4Scenario.cpp:461-478).
+fn set_legacy_definition_modules(
+    modules: &[String],
+    executable_path: &str,
+    definition_path: &str,
+) -> Vec<String> {
+    let executable_path = lc_script::c4_string_bytes(&normalize_legacy_path(executable_path));
+    let definition_path = lc_script::c4_string_bytes(&normalize_legacy_path(definition_path));
+
+    modules
+        .iter()
+        .map(|module| {
+            let normalized = normalize_legacy_path(module);
+            let mut bytes = lc_script::c4_string_bytes(&normalized);
+            for prefix in [&executable_path, &definition_path] {
+                if !prefix.is_empty()
+                    && bytes.len() >= prefix.len()
+                    && bytes[..prefix.len()]
+                        .iter()
+                        .zip(prefix.iter())
+                        .all(|(left, right)| left.eq_ignore_ascii_case(right))
+                {
+                    bytes.drain(..prefix.len());
+                }
+            }
+            lc_script::c4_string_from_bytes(&bytes)
+        })
+        .collect()
 }
 
 impl LegacyScenarioCore {
@@ -7680,7 +8010,7 @@ fn parse_c4sval_std(value: &str) -> Option<i32> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LegacyC4SVal {
     pub std: i32,
     pub rnd: i32,
@@ -8503,6 +8833,35 @@ fn load_runtime_landscape_data(
     })
 }
 
+fn load_runtime_current_scenario_section(group: &Group) -> Result<String, ScenarioError> {
+    let current = try_read_group_file_case_insensitive(group, "Game.txt")?
+        .map(|bytes| crate::parse_initial_network_game_data(&bytes).current_scenario_section)
+        .unwrap_or_default();
+    Ok(if current.is_empty() {
+        "main".to_string()
+    } else {
+        current
+    })
+}
+
+fn load_legacy_round_results(
+    group: &Group,
+    melee: bool,
+) -> Result<RoundResultsState, ScenarioError> {
+    let Some(source) = try_read_group_file_case_insensitive(group, "RoundResults.txt")? else {
+        // C4Game calls RoundResults.Init when the component is absent. Init
+        // changes only this scenario-derived default on a freshly-cleared
+        // game instance (C4Game.cpp:2477-2486; C4RoundResults.cpp:240-245).
+        return Ok(RoundResultsState {
+            hide_settlement_score: melee,
+            ..RoundResultsState::default()
+        });
+    };
+
+    RoundResultsState::from_legacy_ini(&source, melee)
+        .map_err(ScenarioError::LegacyRoundResultsParse)
+}
+
 fn parse_legacy_game_parameter_overrides(
     source: &str,
     defaults: &ScenarioGameParameterValues,
@@ -9109,9 +9468,13 @@ fn truncate_legacy_string(value: String, max_bytes: usize) -> String {
 }
 
 fn truncate_legacy_c4_string(value: String, max_bytes: usize) -> String {
-    let mut bytes = lc_script::c4_string_bytes(&value);
-    bytes.truncate(max_bytes);
-    lc_script::c4_string_from_bytes(&bytes)
+    let bytes = lc_script::c4_string_bytes(&value);
+    let visible_len = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len())
+        .min(max_bytes);
+    lc_script::c4_string_from_bytes(&bytes[..visible_len])
 }
 
 fn parse_std_string(raw: &str) -> String {
@@ -10785,6 +11148,7 @@ fn load_legacy_scenario_sections(
     classifier: Option<&mut MapPixelClassifier>,
     random_seed: u64,
     startup_player_count: i32,
+    root_section_name: &str,
     main_landscape: &Option<Landscape>,
     main_landscape_systems: &ScenarioLandscapeSystems,
     main_objects: &[ScenarioSpawn],
@@ -10800,7 +11164,12 @@ fn load_legacy_scenario_sections(
         ..LandscapeGameData::default()
     });
     let mut sections = vec![ScenarioSectionSpec {
-        name: "main".to_string(),
+        // An exact save stores the live current section in the root and
+        // identifies it through Game.CurrentScenarioSection. `SectMain.c4g`
+        // is then a distinct departed section when the current one is not
+        // Main (C4GameSave::SaveScenarioSections).
+        name: root_section_name.to_string(),
+        source_group: Some(group.clone()),
         landscape: main_landscape.clone(),
         landscape_systems: main_landscape_systems.clone(),
         exact_landscape: main_manifest.core.landscape.exact_landscape,
@@ -10820,7 +11189,8 @@ fn load_legacy_scenario_sections(
         scenario_values: ScenarioValueStore::from_runtime_core(
             &main_manifest.core,
             has_sky_surface,
-        ),
+        )
+        .with_section_head_defaults(&main_manifest.core.head),
         base_reject_entrance_enabled: (main_manifest.core.game.realism.base_functionality
             & BASEFUNC_REJECT_ENTRANCE)
             != 0,
@@ -10835,7 +11205,9 @@ fn load_legacy_scenario_sections(
         let Some(name) = legacy_scenario_section_name(&entry.relative_path)? else {
             continue;
         };
-        if !name.eq_ignore_ascii_case("main") {
+        // The root always wins a stale duplicate. Unlike the old hard-coded
+        // Main filter, this retains SectMain when another section is current.
+        if !name.eq_ignore_ascii_case(root_section_name) {
             discovered.push((name, entry.relative_path));
         }
     }
@@ -10893,11 +11265,15 @@ fn load_legacy_scenario_sections(
                 .is_some_and(|state| state.map().is_some() && state.map_creator().is_none());
         let objects = collect_legacy_objects(&section_group, definitions)?;
         let environment = derive_legacy_environment(manifest)?;
-        let scenario_values =
-            ScenarioValueStore::from_runtime_core(&manifest.core, has_sky_surface);
+        let scenario_values = ScenarioValueStore::from_runtime_core(
+            &manifest.core,
+            has_sky_surface,
+        )
+        .with_section_head_defaults(&main_manifest.core.head);
         let has_s2_overload = prepared_map_creator.is_some() && s2_source.is_some();
         sections.push(ScenarioSectionSpec {
             name,
+            source_group: Some(section_group),
             landscape,
             landscape_systems,
             exact_landscape: manifest.core.landscape.exact_landscape,
@@ -11067,13 +11443,25 @@ struct LegacyObjectRecord {
     number: Option<u64>,
     /// C4Object::CustomName (`Name=`, C4Object.cpp:2749-2760).
     custom_name: Option<String>,
+    /// Player-owned C4ObjectInfo lookup name (`Info=`).
+    info_name: Option<String>,
     status: Option<ObjectStatus>,
     owner: Option<i32>,
     /// C4Object::Controller, compiled verbatim with default NO_OWNER
     /// (C4Object.cpp:2739).
     controller: Option<i32>,
+    /// Kill attribution cached by C4Object (`LastEngLossPlr=`).
+    last_energy_loss_cause: Option<i32>,
     x: Option<i32>,
     y: Option<i32>,
+    motion_x: Option<i32>,
+    motion_y: Option<i32>,
+    /// The frame of the most recent solid-attachment movement. Native uses
+    /// -1 as its compile default; retain the signed word until spawn wiring
+    /// converts it to the engine's optional frame representation.
+    last_attach_movement_frame: Option<i32>,
+    no_collect_delay: Option<i32>,
+    base: Option<i32>,
     /// Saved velocity is C4Fixed (C4Object.cpp:2765-2766), float-encoded
     /// in real content (`XDir=f...`).
     xdir: Option<crate::math::C4Fixed>,
@@ -11119,6 +11507,15 @@ struct LegacyObjectRecord {
     own_vertices: Option<bool>,
     /// Saved live C4Shape::ContactDensity (C4Shape.cpp:495-510).
     contact_density: Option<i32>,
+    shape_attach_x: Option<i32>,
+    shape_attach_y: Option<i32>,
+    shape_attach_vertex: Option<i32>,
+    own_mass: Option<i32>,
+    /// C4Object::Mass is compiled independently of OwnMass. C++ currently
+    /// refreshes derived mass on later construction changes, not as part of
+    /// Objects.txt parsing, so keep the serialized cache available.
+    mass: Option<i32>,
+    damage: Option<i32>,
     energy: Option<i32>,
     /// C4Object::NeedEnergy (`NeedEnergy=`, C4Object.cpp:2805).
     need_energy: Option<bool>,
@@ -11128,9 +11525,14 @@ struct LegacyObjectRecord {
     magic_energy: Option<i32>,
     construction: Option<i32>,
     alive: Option<bool>,
+    breath: Option<i32>,
+    fire_phase: Option<i32>,
+    on_fire: Option<bool>,
     in_liquid: Option<bool>,
     /// C4Object::EntranceStatus (`EntranceStatus=`, C4Object.cpp:2803).
     entrance_status: Option<bool>,
+    physical_temporary: Option<bool>,
+    ocf: Option<u32>,
     category: Option<i32>,
     direction: Option<Direction>,
     command_direction: Option<CommandDirection>,
@@ -11155,10 +11557,137 @@ struct LegacyObjectRecord {
     color_modulation: Option<u32>,
     /// C4Object::PictureRect (`Picture=`, C4Object.cpp:2798).
     picture_rect: Option<DefinitionRect>,
+    plr_view_range: Option<i32>,
+    crew_disabled: Option<bool>,
+    base_graphics: Option<crate::ObjectBaseGraphics>,
+    draw_transform: Option<crate::DrawTransform>,
+    effects: Option<Vec<SerializedEffectState>>,
+    graphics_overlays: Option<Vec<SerializedObjectGraphicsOverlay>>,
+    temporary_physical: Option<crate::PhysicalInfo>,
+    physical_changes: Vec<(String, i32)>,
+    commands: BTreeMap<usize, SerializedLegacyCommand>,
     /// Saved C4Object::Component (`Component=WOOD=5;METL=1;`).
     components: Option<Vec<(DefinitionId, i32)>>,
     contained: Option<u64>,
     contents: Vec<u64>,
+}
+
+/// Object references inside a graphics overlay are denumerated only after
+/// all Objects.txt rows have been accepted. Keep the raw signed number here
+/// while parsing, just like [`SerializedC4Value::ObjectNumber`].
+#[derive(Debug, Clone, PartialEq)]
+struct SerializedObjectGraphicsOverlay {
+    id: i32,
+    mode: crate::GraphicsOverlayMode,
+    definition: Option<DefinitionId>,
+    graphics_name: Option<String>,
+    action: Option<String>,
+    blit_mode: u32,
+    phase: i32,
+    transform: crate::DrawTransform,
+    color_modulation: u32,
+    overlay_object: i32,
+}
+
+/// Exact C4Command::CompileFunc projection. Integer flags intentionally remain
+/// integers: the native fields are int32 words and old saves may contain
+/// non-canonical truthy values. The parser also accepts the native `$1` and
+/// unversioned layouts; all versions resolve into this current representation.
+#[derive(Debug, Clone, PartialEq)]
+struct SerializedLegacyCommand {
+    name: String,
+    tx: SerializedC4Value,
+    ty: i32,
+    target: i32,
+    target2: i32,
+    data: i32,
+    update_interval: i32,
+    evaluated: i32,
+    path_checked: i32,
+    finished: i32,
+    failures: i32,
+    retries: i32,
+    permit: i32,
+    base_mode: i32,
+    text: String,
+}
+
+fn denumerate_legacy_object_number(raw: i32, object_numbers: &HashSet<u64>) -> Option<ObjectId> {
+    let number = if (1_000_000_000..=1_001_000_000).contains(&raw) {
+        raw - 1_000_000_000
+    } else {
+        raw
+    };
+    u64::try_from(number)
+        .ok()
+        .filter(|number| *number != 0 && object_numbers.contains(number))
+        .map(ObjectId::new)
+}
+
+impl SerializedObjectGraphicsOverlay {
+    fn resolve(self, object_numbers: &HashSet<u64>) -> crate::ObjectGraphicsOverlay {
+        crate::ObjectGraphicsOverlay {
+            id: self.id,
+            mode: self.mode,
+            definition: self.definition,
+            graphics_name: self.graphics_name,
+            action: self.action,
+            phase: self.phase,
+            blit_mode: self.blit_mode,
+            color_modulation: self.color_modulation,
+            overlay_object: denumerate_legacy_object_number(
+                self.overlay_object,
+                object_numbers,
+            ),
+            transform: Some(self.transform),
+        }
+    }
+}
+
+impl SerializedLegacyCommand {
+    fn resolve(
+        self,
+        _line: usize,
+        resolution: &SerializedC4ValueResolution<'_>,
+    ) -> Result<crate::command::LegacyCommandSave, ScenarioError> {
+        let is_call = self.name == "Call";
+        let tx_value = self.tx.resolve(resolution);
+        let (tx, tx_definition) = match &tx_value {
+            lc_script::Value::Nil => (None, None),
+            lc_script::Value::Int(value) => (Some(*value), None),
+            lc_script::Value::C4Id(value) => (None, Some(value.clone())),
+            _ => (None, None),
+        };
+        Ok(crate::command::LegacyCommandSave {
+            view: crate::command::CommandView {
+                name: self.name,
+                target: denumerate_legacy_object_number(
+                    self.target,
+                    resolution.object_numbers,
+                ),
+                tx,
+                tx_value: Some(tx_value),
+                tx_definition,
+                ty: Some(self.ty),
+                target2: denumerate_legacy_object_number(
+                    self.target2,
+                    resolution.object_numbers,
+                ),
+                data: crate::command::CommandData::Integer(self.data),
+                legacy_data: is_call.then_some(self.data),
+                finished: self.finished != 0,
+            },
+            update_interval: self.update_interval,
+            evaluated: self.evaluated != 0,
+            path_checked: self.path_checked != 0,
+            finished: self.finished != 0,
+            failures: self.failures,
+            retries: self.retries,
+            permit: self.permit,
+            base_mode: self.base_mode,
+            text: self.text,
+        })
+    }
 }
 
 impl LegacyObjectRecord {
@@ -11171,29 +11700,97 @@ impl LegacyObjectRecord {
 
     fn apply_property(&mut self, key: &str, value: &str) -> Result<(), ScenarioError> {
         let key = key.trim();
-        let normalized_key = key.to_ascii_lowercase();
-        // StdCompilerINIRead naming is exact-case. Keep the older generic
-        // object parser behavior outside this motion-state slice, but do not
-        // let a misspelled movement key alter state that C++ leaves at its
-        // compile default.
-        let exact_motion_key = match normalized_key.as_str() {
-            "x" => Some("X"),
-            "y" => Some("Y"),
-            "xdir" => Some("XDir"),
-            "ydir" => Some("YDir"),
-            "fixx" => Some("FixX"),
-            "fixy" => Some("FixY"),
-            "fixr" => Some("FixR"),
-            "rdir" => Some("RDir"),
-            "mobile" => Some("Mobile"),
-            "rotation" => Some("Rotation"),
-            _ => None,
+        // StdCompilerINIRead looks up naming nodes byte-for-byte. Map only
+        // the exact spellings used by C4Object::CompileFunc; a wrong-case
+        // line is an unused naming and leaves the compile default intact.
+        let normalized_key = match key {
+            "id" => "id",
+            "Name" => "name",
+            "Number" => "number",
+            "Status" => "status",
+            "Info" => "info",
+            "Owner" => "owner",
+            "Timer" => "timer",
+            "Controller" => "controller",
+            "LastEngLossPlr" => "lastenglossplr",
+            "Category" => "category",
+            "X" => "x",
+            "Y" => "y",
+            "Rotation" => "rotation",
+            "MotionX" => "motionx",
+            "MotionY" => "motiony",
+            "LastSolidAtchFrame" => "lastsolidatchframe",
+            "NoCollectDelay" => "nocollectdelay",
+            "Base" => "base",
+            "Size" => "size",
+            "OwnMass" => "ownmass",
+            "Mass" => "mass",
+            "Damage" => "damage",
+            "Energy" => "energy",
+            "MagicEnergy" => "magicenergy",
+            "Alive" => "alive",
+            "Breath" => "breath",
+            "FirePhase" => "firephase",
+            "Color" => "color",
+            "ColorDw" => "colordw",
+            "Locals" => "locals",
+            "FixX" => "fixx",
+            "FixY" => "fixy",
+            "FixR" => "fixr",
+            "XDir" => "xdir",
+            "YDir" => "ydir",
+            "RDir" => "rdir",
+            "Width" => "width",
+            "Height" => "height",
+            "Offset" => "offset",
+            "Vertices" => "vertices",
+            "VertexX" => "vertexx",
+            "VertexY" => "vertexy",
+            "VertexCNAT" => "vertexcnat",
+            "VertexFriction" => "vertexfriction",
+            "ContactDensity" => "contactdensity",
+            "FireTop" => "firetop",
+            "AttachX" => "attachx",
+            "AttachY" => "attachy",
+            "AttachVtx" => "attachvtx",
+            "OwnVertices" => "ownvertices",
+            "SolidMask" => "solidmask",
+            "Picture" => "picture",
+            "Mobile" => "mobile",
+            "Selected" => "selected",
+            "OnFire" => "onfire",
+            "InLiquid" => "inliquid",
+            "EntranceStatus" => "entrancestatus",
+            "PhysicalTemporary" => "physicaltemporary",
+            "NeedEnergy" => "needenergy",
+            "OCF" => "ocf",
+            "Action" => "action",
+            "Dir" => "dir",
+            "ComDir" => "comdir",
+            "ActionTime" => "actiontime",
+            "ActionData" => "actiondata",
+            "Phase" => "phase",
+            "PhaseDelay" => "phasedelay",
+            "Contained" => "contained",
+            "ActionTarget1" => "actiontarget1",
+            "ActionTarget2" => "actiontarget2",
+            "Component" => "component",
+            "Contents" => "contents",
+            "PlrViewRange" => "plrviewrange",
+            "Visibility" => "visibility",
+            "LocalNamed" => "localnamed",
+            "ColorMod" => "colormod",
+            "BlitMode" => "blitmode",
+            "CrewDisabled" => "crewdisabled",
+            "Layer" => "layer",
+            "Graphics" => "graphics",
+            "DrawTransform" => "drawtransform",
+            "Effects" => "effects",
+            "GfxOverlay" => "gfxoverlay",
+            _ => return Ok(()),
         };
-        if exact_motion_key.is_some_and(|expected| key != expected) {
-            return Ok(());
-        }
         let trimmed_value = value.trim();
-        match normalized_key.as_str() {
+        match normalized_key {
             "id" => {
                 self.id = Some(trimmed_value.to_string());
             }
@@ -11214,6 +11811,13 @@ impl LegacyObjectRecord {
             }
             "name" => {
                 self.custom_name = parse_legacy_object_name(trimmed_value, self.line)?;
+            }
+            "info" => {
+                // nInfo is compiled through RCT_All: leading horizontal
+                // whitespace is skipped, but the remainder of the physical
+                // line (including `//` and trailing spaces) is data.
+                let whole_line = value.trim_start_matches([' ', '\t']);
+                self.info_name = (!whole_line.is_empty()).then(|| whole_line.to_string());
             }
             "status" => {
                 let raw = parse_i32(trimmed_value).map_err(|err| {
@@ -11247,6 +11851,13 @@ impl LegacyObjectRecord {
                 })?;
                 self.controller = Some(controller);
             }
+            "lastenglossplr" => {
+                self.last_energy_loss_cause = Some(parse_object_i32(
+                    trimmed_value,
+                    self.line,
+                    "LastEngLossPlr",
+                )?);
+            }
             "x" => {
                 self.x = Some(parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
@@ -11262,6 +11873,39 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?);
+            }
+            "motionx" => {
+                self.motion_x = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid MotionX `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "motiony" => {
+                self.motion_y = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid MotionY `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "lastsolidatchframe" => {
+                self.last_attach_movement_frame = Some(parse_object_i32(
+                    trimmed_value,
+                    self.line,
+                    "LastSolidAtchFrame",
+                )?);
+            }
+            "nocollectdelay" => {
+                self.no_collect_delay = Some(parse_object_i32(
+                    trimmed_value,
+                    self.line,
+                    "NoCollectDelay",
+                )?);
+            }
+            "base" => {
+                self.base = Some(parse_object_i32(trimmed_value, self.line, "Base")?);
             }
             "xdir" => {
                 self.xdir = Some(parse_c4fixed(trimmed_value).map_err(|err| {
@@ -11412,6 +12056,36 @@ impl LegacyObjectRecord {
                     ))
                 })?);
             }
+            "attachx" => {
+                self.shape_attach_x = Some(parse_object_i32(
+                    trimmed_value,
+                    self.line,
+                    "AttachX",
+                )?);
+            }
+            "attachy" => {
+                self.shape_attach_y = Some(parse_object_i32(
+                    trimmed_value,
+                    self.line,
+                    "AttachY",
+                )?);
+            }
+            "attachvtx" => {
+                self.shape_attach_vertex = Some(parse_object_i32(
+                    trimmed_value,
+                    self.line,
+                    "AttachVtx",
+                )?);
+            }
+            "ownmass" => {
+                self.own_mass = Some(parse_object_i32(trimmed_value, self.line, "OwnMass")?);
+            }
+            "mass" => {
+                self.mass = Some(parse_object_i32(trimmed_value, self.line, "Mass")?);
+            }
+            "damage" => {
+                self.damage = Some(parse_object_i32(trimmed_value, self.line, "Damage")?);
+            }
             "energy" => {
                 self.energy = Some(parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
@@ -11419,6 +12093,16 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?);
+            }
+            "breath" => {
+                self.breath = Some(parse_object_i32(trimmed_value, self.line, "Breath")?);
+            }
+            "firephase" => {
+                self.fire_phase = Some(parse_object_i32(
+                    trimmed_value,
+                    self.line,
+                    "FirePhase",
+                )?);
             }
             "needenergy" => {
                 let need_energy = parse_bool(trimmed_value).ok_or_else(|| {
@@ -11438,6 +12122,9 @@ impl LegacyObjectRecord {
                 })?;
                 self.selected = Some(selected);
             }
+            "onfire" => {
+                self.on_fire = Some(parse_object_bool(trimmed_value, self.line, "OnFire")?);
+            }
             // C4Object::MagicEnergy compiles verbatim with default 0
             // (C4Object.cpp:2768) — Drachenfels' wizards carry it.
             "magicenergy" => {
@@ -11451,7 +12138,7 @@ impl LegacyObjectRecord {
             // C++ saves Con under the key "Size" (C4Object::CompileFunc,
             // C4Object.cpp:2763); the GoldRush bushes carry Size=25610
             // and grow toward FullCon from there.
-            "con" | "size" => {
+            "size" => {
                 let value = parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
                         "Objects.txt line {}: invalid Con `{}` ({})",
@@ -11494,6 +12181,16 @@ impl LegacyObjectRecord {
                     ))
                 })?;
                 self.entrance_status = Some(entrance_status);
+            }
+            "physicaltemporary" => {
+                self.physical_temporary = Some(parse_object_bool(
+                    trimmed_value,
+                    self.line,
+                    "PhysicalTemporary",
+                )?);
+            }
+            "ocf" => {
+                self.ocf = Some(parse_object_u32(trimmed_value, self.line, "OCF")?);
             }
             "category" => {
                 self.category = Some(parse_i32(trimmed_value).map_err(|err| {
@@ -11598,31 +12295,25 @@ impl LegacyObjectRecord {
                 })?);
             }
             "blitmode" => {
-                let value = parse_u64(trimmed_value).map_err(|err| {
-                    ScenarioError::LegacyObjectsParse(format!(
-                        "Objects.txt line {}: invalid BlitMode `{}` ({})",
-                        self.line, trimmed_value, err
-                    ))
-                })?;
-                self.blit_mode = Some(value as u32);
+                self.blit_mode = Some(parse_object_u32(
+                    trimmed_value,
+                    self.line,
+                    "BlitMode",
+                )?);
             }
             "color" | "colordw" => {
-                let value = parse_u64(trimmed_value).map_err(|err| {
-                    ScenarioError::LegacyObjectsParse(format!(
-                        "Objects.txt line {}: invalid ColorDw `{}` ({})",
-                        self.line, trimmed_value, err
-                    ))
-                })?;
-                self.color = Some(value as u32);
+                self.color = Some(parse_object_u32(
+                    trimmed_value,
+                    self.line,
+                    "ColorDw",
+                )?);
             }
             "colormod" => {
-                let value = parse_u64(trimmed_value).map_err(|err| {
-                    ScenarioError::LegacyObjectsParse(format!(
-                        "Objects.txt line {}: invalid ColorMod `{}` ({})",
-                        self.line, trimmed_value, err
-                    ))
-                })?;
-                self.color_modulation = Some(value as u32);
+                self.color_modulation = Some(parse_object_u32(
+                    trimmed_value,
+                    self.line,
+                    "ColorMod",
+                )?);
             }
             "picture" => {
                 let values = parse_i32_list(trimmed_value, self.line, "Picture")?;
@@ -11636,6 +12327,43 @@ impl LegacyObjectRecord {
                 self.picture_rect = Some(DefinitionRect::new(
                     values[0], values[1], values[2], values[3],
                 ));
+            }
+            "plrviewrange" => {
+                self.plr_view_range = Some(parse_object_i32(
+                    trimmed_value,
+                    self.line,
+                    "PlrViewRange",
+                )?);
+            }
+            "crewdisabled" => {
+                self.crew_disabled = Some(parse_object_bool(
+                    trimmed_value,
+                    self.line,
+                    "CrewDisabled",
+                )?);
+            }
+            "graphics" => {
+                self.base_graphics = Some(parse_legacy_object_graphics(
+                    trimmed_value,
+                    self.line,
+                    "Graphics",
+                )?);
+            }
+            "drawtransform" => {
+                self.draw_transform = Some(parse_legacy_draw_transform(
+                    trimmed_value,
+                    self.line,
+                    "DrawTransform",
+                )?);
+            }
+            "effects" => {
+                self.effects = Some(parse_legacy_object_effects(trimmed_value, self.line)?);
+            }
+            "gfxoverlay" => {
+                self.graphics_overlays = Some(parse_legacy_graphics_overlays(
+                    trimmed_value,
+                    self.line,
+                )?);
             }
             "component" => {
                 self.components = Some(parse_legacy_object_components(trimmed_value, self.line)?);
@@ -11675,6 +12403,85 @@ impl LegacyObjectRecord {
         Ok(())
     }
 
+    fn begin_physical_section(&mut self) {
+        self.temporary_physical
+            .get_or_insert_with(crate::PhysicalInfo::default);
+    }
+
+    fn apply_physical_property(
+        &mut self,
+        key: &str,
+        value: &str,
+        line: usize,
+    ) -> Result<(), ScenarioError> {
+        let key = key.trim();
+        let value = value.trim();
+        if key == "Changes" {
+            self.physical_changes = parse_legacy_physical_changes(value, line)?;
+            return Ok(());
+        }
+
+        let physical = self
+            .temporary_physical
+            .get_or_insert_with(crate::PhysicalInfo::default);
+        let parsed = match key {
+            "Energy" | "Breath" | "Walk" | "Jump" | "Scale" | "Hangle" | "Dig"
+            | "Swim" | "Throw" | "Push" | "Fight" | "Magic" | "Float" | "CanScale"
+            | "CanHangle" | "CanDig" | "CanConstruct" | "CanChop" | "CanFly"
+            | "CorrosionResist" | "BreatheWater" => {
+                parse_object_i32(value, line, key)?
+            }
+            // Unknown names are not consumed by C4PhysicalInfo::CompileFunc.
+            _ => return Ok(()),
+        };
+        match key {
+            "Energy" => physical.energy = parsed,
+            "Breath" => physical.breath = parsed,
+            "Walk" => physical.walk = parsed,
+            "Jump" => physical.jump = parsed,
+            "Scale" => physical.scale = parsed,
+            "Hangle" => physical.hangle = parsed,
+            "Dig" => physical.dig = parsed,
+            "Swim" => physical.swim = parsed,
+            "Throw" => physical.throw = parsed,
+            "Push" => physical.push = parsed,
+            "Fight" => physical.fight = parsed,
+            "Magic" => physical.magic = parsed,
+            "Float" => physical.float = parsed,
+            "CanScale" => physical.can_scale = parsed,
+            "CanHangle" => physical.can_hangle = parsed,
+            "CanDig" => physical.can_dig = parsed,
+            "CanConstruct" => physical.can_construct = parsed,
+            "CanChop" => physical.can_chop = parsed,
+            "CanFly" => physical.can_fly = parsed,
+            "CorrosionResist" => physical.corrosion_resist = parsed,
+            "BreatheWater" => physical.breathe_water = parsed,
+            _ => unreachable!("all recognized physical names are assigned"),
+        }
+        Ok(())
+    }
+
+    fn apply_command_property(
+        &mut self,
+        key: &str,
+        value: &str,
+        line: usize,
+    ) -> Result<(), ScenarioError> {
+        let key = key.trim();
+        let Some(index) = key.strip_prefix("Command") else {
+            return Ok(());
+        };
+        let Ok(index) = index.parse::<usize>() else {
+            return Ok(());
+        };
+        if index == 0 || key != format!("Command{index}") {
+            return Ok(());
+        }
+        let command = parse_legacy_object_command(value, line)?;
+        self.commands.insert(index, command);
+        Ok(())
+    }
+
     fn into_spawn(
         self,
         definition_ids: &HashSet<&str>,
@@ -11685,11 +12492,18 @@ impl LegacyObjectRecord {
             id,
             number,
             custom_name,
+            info_name,
             status,
             owner,
             controller,
+            last_energy_loss_cause,
             x,
             y,
+            motion_x,
+            motion_y,
+            last_attach_movement_frame,
+            no_collect_delay,
+            base,
             xdir,
             ydir,
             fix_x,
@@ -11713,14 +12527,25 @@ impl LegacyObjectRecord {
             shape_fire_top,
             own_vertices,
             contact_density,
+            shape_attach_x,
+            shape_attach_y,
+            shape_attach_vertex,
+            own_mass,
+            mass,
+            damage,
             energy,
             need_energy,
             selected,
             magic_energy,
             construction,
             alive,
+            breath,
+            fire_phase,
+            on_fire,
             in_liquid,
             entrance_status,
+            physical_temporary,
+            ocf,
             category,
             direction,
             command_direction,
@@ -11737,9 +12562,18 @@ impl LegacyObjectRecord {
             color,
             color_modulation,
             picture_rect,
+            plr_view_range,
+            crew_disabled,
+            base_graphics,
+            draw_transform,
+            effects,
+            graphics_overlays,
+            temporary_physical,
+            physical_changes,
+            commands,
             components,
             contained,
-            contents: _,
+            contents,
         } = self;
 
         let id = id.ok_or_else(|| {
@@ -11775,7 +12609,8 @@ impl LegacyObjectRecord {
             .with_id(ObjectId::new(number))
             // Objects.txt entries are LOADED, not created: no
             // Construction/Initialize (C4GameObjects.cpp:535-618).
-            .with_loaded(true);
+            .with_loaded(true)
+            .with_native_compiled_object_defaults();
         let offset = shape_offset.unwrap_or_default();
         config = config
             .with_shape_rect(crate::DefinitionRect::new(
@@ -11786,6 +12621,8 @@ impl LegacyObjectRecord {
             ))
             .with_shape_fire_top(shape_fire_top.unwrap_or(0));
         config = config.with_position(Vector2::new(x.unwrap_or(0), y.unwrap_or(0)));
+        config.motion_x = motion_x.unwrap_or(0);
+        config.motion_y = motion_y.unwrap_or(0);
         if let Some(custom_name) = custom_name {
             config = config.with_custom_name(custom_name);
         }
@@ -11812,6 +12649,89 @@ impl LegacyObjectRecord {
         }
         if let Some(contact_density) = contact_density {
             config = config.with_contact_density(contact_density);
+        }
+        config.damage = damage;
+        config.breath = breath;
+        config.own_mass = own_mass;
+        config.compiled_mass = mass;
+        config.on_fire = on_fire;
+        config.fire_phase = fire_phase;
+        config.last_attach_movement_frame = last_attach_movement_frame
+            .and_then(|frame| u64::try_from(frame).ok());
+        config.last_energy_loss_cause = last_energy_loss_cause;
+        config.no_collect_delay = no_collect_delay;
+        config.base = base;
+        config.compiled_ocf = ocf;
+        config.crew_disabled = crew_disabled;
+        config.plr_view_range = plr_view_range;
+        config.base_graphics = base_graphics;
+        config.draw_transform = draw_transform;
+        config.graphics_overlays = graphics_overlays
+            .unwrap_or_default()
+            .into_iter()
+            .map(|overlay| overlay.resolve(value_resolution.object_numbers))
+            .collect();
+        if shape_attach_x.is_some()
+            || shape_attach_y.is_some()
+            || shape_attach_vertex.is_some()
+        {
+            config.shape_attach = Some(crate::ShapeAttachRecord {
+                // AttachMat is deliberately not compiled by C4Shape.
+                mat_valid: false,
+                mat_vehicle: false,
+                x: shape_attach_x.unwrap_or(0),
+                y: shape_attach_y.unwrap_or(0),
+                vtx: shape_attach_vertex.unwrap_or(0),
+            });
+        }
+
+        let resolved_effects = effects
+            .unwrap_or_default()
+            .into_iter()
+            .map(|effect| effect.resolve(value_resolution))
+            .collect::<Vec<_>>();
+        config.fire_caused_by = Some(
+            resolved_effects
+                .iter()
+                .find(|effect| effect.name == crate::C4FX_FIRE)
+                .and_then(|effect| effect.vars.get(1))
+                .and_then(|value| match value {
+                    EffectVarValue::Int(value) => Some(*value),
+                    EffectVarValue::Bool(value) => Some(i32::from(*value)),
+                    EffectVarValue::RawBool(value) => Some(*value as u32 as i32),
+                    _ => None,
+                })
+                .unwrap_or(crate::OWNER_NONE),
+        );
+        config.effects = resolved_effects;
+
+        if physical_temporary.unwrap_or(false) {
+            config.temporary_physical = Some(temporary_physical.unwrap_or_default());
+            config.physical_changes = physical_changes;
+        }
+
+        let mut commands = commands.into_iter().peekable();
+        let mut expected_command = 1usize;
+        let mut resolved_commands = Vec::new();
+        while commands
+            .peek()
+            .is_some_and(|(index, _)| *index == expected_command)
+        {
+            let (_, command) = commands.next().expect("peeked command exists");
+            resolved_commands.push(command.resolve(line, value_resolution)?);
+            expected_command += 1;
+        }
+        if !resolved_commands.is_empty() {
+            config.command_stack = Some(
+                crate::command::CommandStackSnapshot::from_legacy_save_commands(
+                    resolved_commands,
+                )
+                .map_err(|error| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {line}: invalid [Commands] stack ({error:?})"
+                    ))
+                })?,
+            );
         }
 
         if xdir.is_some() || ydir.is_some() {
@@ -11916,9 +12836,9 @@ impl LegacyObjectRecord {
         if let Some(magic_energy) = magic_energy {
             config = config.with_magic_energy(magic_energy);
         }
-        if let Some(construction) = construction {
-            config = config.with_construction(construction);
-        }
+        // C4Object::Clear initializes Con to zero before compilation;
+        // Objects.txt omits Size only when that exact zero is intended.
+        config = config.with_construction(construction.unwrap_or(0));
         if let Some(alive) = alive {
             config = config.with_alive(alive);
         }
@@ -11969,6 +12889,11 @@ impl LegacyObjectRecord {
         Ok(Some(ScenarioSpawn {
             handle: Some(number.to_string()),
             container_handle: contained.map(|value| value.to_string()),
+            contents_handles: contents
+                .into_iter()
+                .map(|value| value.to_string())
+                .collect(),
+            info_name,
             config,
         }))
     }
@@ -12040,46 +12965,77 @@ fn build_action_state(
     Some(state)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyObjectParseSection {
+    Object,
+    Physical,
+    Commands,
+    Other,
+}
+
 fn parse_legacy_objects(text: &str) -> Result<Vec<LegacyObjectRecord>, ScenarioError> {
     let mut records = Vec::new();
     let mut current: Option<LegacyObjectRecord> = None;
+    let mut section = LegacyObjectParseSection::Other;
 
     for (index, raw_line) in text.lines().enumerate() {
-        let mut line = raw_line.trim_start_matches('\u{feff}').trim();
-        if line.is_empty() {
+        // StdCompilerINIRead does not have an inline-comment syntax. In
+        // particular, `//` inside RCT_All values (Info and command Text) is
+        // ordinary persisted data. Retain the right-hand end of every line.
+        let line = raw_line
+            .trim_start_matches('\u{feff}')
+            .trim_start_matches([' ', '\t']);
+        if line.trim().is_empty() {
             continue;
         }
-        if let Some(stripped) = line.split_once("//") {
-            line = stripped.0.trim_end();
-        }
-        if line.is_empty() || line.starts_with(';') {
+        if line.starts_with("//") || line.starts_with(';') {
             continue;
         }
-        if line.starts_with('[') && line.ends_with(']') {
-            let section_name = &line[1..line.len() - 1];
-            // Only [Object] sections create new object records
-            // Skip subsections like [Physical], [Commands], etc.
-            if section_name.eq_ignore_ascii_case("Object") {
+        let structural_line = line.trim_end();
+        if structural_line.starts_with('[') && structural_line.ends_with(']') {
+            let section_name = &structural_line[1..structural_line.len() - 1];
+            // Only [Object] creates a row. Nested naming environments belong
+            // to that row and must route their properties to their own
+            // compiler instead of falling through to C4Object::CompileFunc.
+            if section_name == "Object" {
                 if let Some(record) = current.take() {
                     records.push(record);
                 }
                 current = Some(LegacyObjectRecord::new(index + 1));
+                section = LegacyObjectParseSection::Object;
+            } else if section_name == "Physical" {
+                if let Some(record) = current.as_mut() {
+                    record.begin_physical_section();
+                }
+                section = LegacyObjectParseSection::Physical;
+            } else if section_name == "Commands" {
+                section = LegacyObjectParseSection::Commands;
+            } else {
+                section = LegacyObjectParseSection::Other;
             }
-            // Skip subsections - they're optional property overrides we don't use
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
 
-        let record = current.as_mut().ok_or_else(|| {
-            ScenarioError::LegacyObjectsParse(format!(
-                "Objects.txt line {}: encountered property `{}` outside of an [Object] section",
-                index + 1,
-                key.trim()
-            ))
-        })?;
-        record.apply_property(key, value)?;
+        match section {
+            LegacyObjectParseSection::Object => {
+                let record = current.as_mut().expect("Object section creates a record");
+                record.apply_property(key, value)?;
+            }
+            LegacyObjectParseSection::Physical => {
+                if let Some(record) = current.as_mut() {
+                    record.apply_physical_property(key, value, index + 1)?;
+                }
+            }
+            LegacyObjectParseSection::Commands => {
+                if let Some(record) = current.as_mut() {
+                    record.apply_command_property(key, value, index + 1)?;
+                }
+            }
+            LegacyObjectParseSection::Other => {}
+        }
     }
 
     if let Some(record) = current.take() {
@@ -12087,6 +13043,343 @@ fn parse_legacy_objects(text: &str) -> Result<Vec<LegacyObjectRecord>, ScenarioE
     }
 
     Ok(records)
+}
+
+fn object_property_error(line: usize, key: &str, value: &str, detail: &str) -> ScenarioError {
+    ScenarioError::LegacyObjectsParse(format!(
+        "Objects.txt line {line}: invalid {key} `{value}` ({detail})"
+    ))
+}
+
+fn parse_object_i32(value: &str, line: usize, key: &str) -> Result<i32, ScenarioError> {
+    parse_i32(value).map_err(|error| object_property_error(line, key, value, &error))
+}
+
+fn parse_object_u32(value: &str, line: usize, key: &str) -> Result<u32, ScenarioError> {
+    // StdCompilerINIRead reads unsigned fields through strtoul and then
+    // stores the low uint32 word. In particular, older Objects.txt files
+    // spell high-bit OCF/colour values as signed decimal numbers. Preserve
+    // those bits instead of rejecting the leading minus sign.
+    parse_std_u32(value)
+        .ok_or_else(|| object_property_error(line, key, value, "invalid uint32 value"))
+}
+
+fn parse_object_bool(value: &str, line: usize, key: &str) -> Result<bool, ScenarioError> {
+    parse_bool(value)
+        .ok_or_else(|| object_property_error(line, key, value, "expected a boolean value"))
+}
+
+fn parse_legacy_object_graphics(
+    value: &str,
+    line: usize,
+    key: &str,
+) -> Result<crate::ObjectBaseGraphics, ScenarioError> {
+    let Some((definition, graphics_name)) = value.split_once("::") else {
+        return Err(object_property_error(
+            line,
+            key,
+            value,
+            "expected DEFN::GraphicsName",
+        ));
+    };
+    let definition = definition.trim();
+    if lc_script::c4_string_bytes(definition).len() != 4
+        || lc_script::c4_id_raw(definition) == 0
+    {
+        return Err(object_property_error(
+            line,
+            key,
+            value,
+            "definition id must contain exactly four native C4 bytes",
+        ));
+    }
+    let graphics_name = graphics_name.trim();
+    Ok(crate::ObjectBaseGraphics {
+        definition: definition.to_string(),
+        graphics_name: (!graphics_name.is_empty()).then(|| graphics_name.to_string()),
+        // C4DefGraphicsAdapt contains only the definition/name pair. The
+        // object's independent BlitMode field is compiled elsewhere.
+        blit_mode: 0,
+    })
+}
+
+fn parse_legacy_draw_transform(
+    value: &str,
+    line: usize,
+    key: &str,
+) -> Result<crate::DrawTransform, ScenarioError> {
+    let fields = split_outside_delimiter(value, ',');
+    if !(7..=10).contains(&fields.len()) {
+        return Err(object_property_error(
+            line,
+            key,
+            value,
+            &format!(
+                "expected six affine values, FlipDir, and up to three projective values; found {} fields",
+                fields.len()
+            ),
+        ));
+    }
+    let mut matrix = [0.0_f32; 9];
+    matrix[8] = 1.0;
+    for (index, field) in fields.iter().take(6).enumerate() {
+        matrix[index] = field.trim().parse::<f32>().map_err(|error| {
+            object_property_error(
+                line,
+                key,
+                value,
+                &format!("invalid matrix component {}: {error}", index + 1),
+            )
+        })?;
+    }
+    let flip_dir = parse_object_i32(fields[6].trim(), line, key)?;
+    for (offset, field) in fields.iter().skip(7).enumerate() {
+        matrix[6 + offset] = field.trim().parse::<f32>().map_err(|error| {
+            object_property_error(
+                line,
+                key,
+                value,
+                &format!("invalid projective component {}: {error}", offset + 1),
+            )
+        })?;
+    }
+    Ok(crate::DrawTransform::from_matrix_with_flip_dir(
+        matrix, flip_dir,
+    ))
+}
+
+fn parse_legacy_graphics_overlays(
+    value: &str,
+    line: usize,
+) -> Result<Vec<SerializedObjectGraphicsOverlay>, ScenarioError> {
+    split_outside_delimiter(value, ';')
+        .into_iter()
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| parse_legacy_graphics_overlay(entry, line))
+        .collect()
+}
+
+fn parse_legacy_graphics_overlay(
+    value: &str,
+    line: usize,
+) -> Result<SerializedObjectGraphicsOverlay, ScenarioError> {
+    let fields = split_outside_delimiter(value, ',');
+    if !(7..=9).contains(&fields.len()) {
+        return Err(object_property_error(
+            line,
+            "GfxOverlay",
+            value,
+            &format!("expected 7 to 9 fields, found {}", fields.len()),
+        ));
+    }
+    let graphics = fields[1].trim();
+    let graphics = if graphics.is_empty() {
+        None
+    } else {
+        Some(parse_legacy_object_graphics(
+            graphics,
+            line,
+            "GfxOverlay graphics",
+        )?)
+    };
+    let mode_value = parse_object_i32(fields[2].trim(), line, "GfxOverlay mode")?;
+    let mode = crate::GraphicsOverlayMode::from_script_value(mode_value).ok_or_else(|| {
+        object_property_error(
+            line,
+            "GfxOverlay mode",
+            fields[2].trim(),
+            "unsupported graphics-overlay mode",
+        )
+    })?;
+    let transform = fields[6]
+        .trim()
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| {
+            object_property_error(
+                line,
+                "GfxOverlay transform",
+                fields[6].trim(),
+                "expected a parenthesized draw transform",
+            )
+        })?;
+    Ok(SerializedObjectGraphicsOverlay {
+        id: parse_object_i32(fields[0].trim(), line, "GfxOverlay id")?,
+        mode,
+        definition: graphics.as_ref().map(|graphics| graphics.definition.clone()),
+        graphics_name: graphics.and_then(|graphics| graphics.graphics_name),
+        action: (!fields[3].trim().is_empty()).then(|| fields[3].trim().to_string()),
+        blit_mode: parse_object_u32(fields[4].trim(), line, "GfxOverlay blit mode")?,
+        phase: parse_object_i32(fields[5].trim(), line, "GfxOverlay phase")?,
+        transform: parse_legacy_draw_transform(transform, line, "GfxOverlay transform")?,
+        color_modulation: if fields.len() >= 8 {
+            parse_object_u32(fields[7].trim(), line, "GfxOverlay color modulation")?
+        } else {
+            0x00ff_ffff
+        },
+        overlay_object: if fields.len() >= 9 {
+            parse_object_i32(fields[8].trim(), line, "GfxOverlay object")?
+        } else {
+            0
+        },
+    })
+}
+
+fn parse_legacy_physical_changes(
+    value: &str,
+    line: usize,
+) -> Result<Vec<(String, i32)>, ScenarioError> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (name, previous) = entry.split_once('=').ok_or_else(|| {
+                object_property_error(
+                    line,
+                    "Physical Changes",
+                    entry,
+                    "expected PhysicalName=PreviousValue",
+                )
+            })?;
+            let name = name.trim();
+            if !is_legacy_physical_name(name) {
+                return Err(object_property_error(
+                    line,
+                    "Physical Changes",
+                    entry,
+                    "unknown physical name",
+                ));
+            }
+            Ok((
+                name.to_string(),
+                parse_object_i32(previous.trim(), line, "Physical Changes")?,
+            ))
+        })
+        .collect()
+}
+
+fn is_legacy_physical_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Energy"
+            | "Breath"
+            | "Walk"
+            | "Jump"
+            | "Scale"
+            | "Hangle"
+            | "Dig"
+            | "Swim"
+            | "Throw"
+            | "Push"
+            | "Fight"
+            | "Magic"
+            | "Float"
+            | "CanScale"
+            | "CanHangle"
+            | "CanDig"
+            | "CanConstruct"
+            | "CanChop"
+            | "CanFly"
+            | "CorrosionResist"
+            | "BreatheWater"
+    )
+}
+
+fn parse_legacy_object_command(
+    value: &str,
+    line: usize,
+) -> Result<SerializedLegacyCommand, ScenarioError> {
+    let value = value.trim_start();
+    let (version, payload) = if let Some(versioned) = value.strip_prefix('$') {
+        let (version, payload) = versioned.split_once(',').ok_or_else(|| {
+            object_property_error(
+                line,
+                "Command",
+                value,
+                "versioned command is missing its first separator",
+            )
+        })?;
+        let version = parse_object_i32(version.trim(), line, "Command version")?;
+        (version, payload)
+    } else {
+        (0, value)
+    };
+
+    // Version zero has no BaseMode field. Versions one and later do. The
+    // final RCT_All text field may itself contain commas, so cap the split at
+    // the layout's exact field count.
+    let field_count = if version > 0 { 15 } else { 14 };
+    let fields = split_outside_delimiter_limit(payload, ',', field_count);
+    if fields.len() != field_count {
+        return Err(object_property_error(
+            line,
+            "Command",
+            value,
+            &format!(
+                "command version {version} requires {field_count} payload fields, found {}",
+                fields.len()
+            ),
+        ));
+    }
+    let name = fields[0].trim();
+    if crate::command::CommandId::from_name(name).is_none() {
+        return Err(object_property_error(
+            line,
+            "Command name",
+            name,
+            "unknown C4 command",
+        ));
+    }
+    let integer = |index: usize, label: &str| {
+        parse_object_i32(fields[index].trim(), line, label)
+    };
+    let base_mode = if version > 0 {
+        integer(13, "Command BaseMode")?
+    } else {
+        0
+    };
+    let text_index = if version > 0 { 14 } else { 13 };
+    let mut text = fields[text_index].to_string();
+    // C4Command::CompileFunc's compatibility repair for old layouts.
+    if version < 2 && text == "0" {
+        text.clear();
+    }
+    Ok(SerializedLegacyCommand {
+        name: name.to_string(),
+        tx: parse_serialized_c4value(fields[1].trim(), line)?,
+        ty: integer(2, "Command Ty")?,
+        target: integer(3, "Command Target")?,
+        target2: integer(4, "Command Target2")?,
+        data: integer(5, "Command Data")?,
+        update_interval: integer(6, "Command UpdateInterval")?,
+        evaluated: integer(7, "Command Evaluated")?,
+        path_checked: integer(8, "Command PathChecked")?,
+        finished: integer(9, "Command Finished")?,
+        failures: integer(10, "Command Failures")?,
+        retries: integer(11, "Command Retries")?,
+        permit: integer(12, "Command Permit")?,
+        base_mode,
+        // RCT_All consumes the complete remaining field, including commas.
+        text,
+    })
+}
+
+fn parse_legacy_object_effects(
+    value: &str,
+    line: usize,
+) -> Result<Vec<SerializedEffectState>, ScenarioError> {
+    split_outside_delimiter(value, ',')
+        .into_iter()
+        .map(str::trim)
+        .filter(|effect| !effect.is_empty())
+        .map(|effect| {
+            parse_serialized_effect_state(effect, line).map_err(|detail| {
+                object_property_error(line, "Effects", effect, detail.as_str())
+            })
+        })
+        .collect()
 }
 
 /// C4Object::CustomName uses StdCompiler's escaped-string adapter. Modern
@@ -12243,7 +13536,7 @@ struct SerializedScriptGlobalState {
     named: Vec<(String, SerializedC4Value)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 struct SerializedEffectState {
     number: i32,
     name: String,
@@ -12585,6 +13878,17 @@ fn parse_initial_network_effect(serialized: &str) -> Result<SerializedEffectStat
             "[Effects] GlobalEffects `{serialized}`: {detail}"
         ))
     };
+    parse_serialized_effect_state(serialized, 1).map_err(error)
+}
+
+/// Shared C4Effect::CompileFunc decoder for global and per-object chains.
+/// Its variables remain serialized until all object numbers and Strings.txt
+/// entries are available for the native denumeration pass.
+fn parse_serialized_effect_state(
+    serialized: &str,
+    line: usize,
+) -> Result<SerializedEffectState, String> {
+    let error = |detail: String| format!("effect `{serialized}`: {detail}");
     let open = serialized
         .find('(')
         .ok_or_else(|| error("missing `(`".to_string()))?;
@@ -12623,7 +13927,7 @@ fn parse_initial_network_effect(serialized: &str) -> Result<SerializedEffectStat
             .strip_prefix('[')
             .and_then(|value| value.strip_suffix(']'))
             .ok_or_else(|| error(format!("invalid effect variable list `{tail}`")))?;
-        parse_local_slots(inner, 1).map_err(|parse_error| error(parse_error.to_string()))?
+        parse_local_slots(inner, line).map_err(|parse_error| error(parse_error.to_string()))?
     };
     Ok(SerializedEffectState {
         name: name.to_string(),
@@ -12696,6 +14000,7 @@ fn effect_var_from_value(value: lc_script::Value) -> EffectVarValue {
     match value {
         Value::Int(value) => EffectVarValue::Int(value),
         Value::Bool(value) => EffectVarValue::Bool(value),
+        Value::RawBool(value) => EffectVarValue::RawBool(value),
         Value::String(value) => EffectVarValue::String(value),
         Value::C4Id(value) => EffectVarValue::C4Id(value),
         Value::Object(value) => EffectVarValue::Object(value),
@@ -12712,7 +14017,7 @@ fn effect_var_from_value(value: lc_script::Value) -> EffectVarValue {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 enum SerializedC4Value {
     Value(lc_script::Value),
     /// Untyped legacy C4V_Any word. Values in the old enumerated-pointer
@@ -12972,6 +14277,38 @@ fn split_outside_delimiter(text: &str, delimiter: char) -> Vec<&str> {
     parts
 }
 
+/// `splitn`, but separators nested in the C4Value/transform bracket pairs do
+/// not count. The unsplit tail is needed for C4Command::Text (RCT_All), which
+/// may itself contain commas.
+fn split_outside_delimiter_limit(text: &str, delimiter: char, limit: usize) -> Vec<&str> {
+    if limit <= 1 {
+        return vec![text];
+    }
+    let mut parts = Vec::with_capacity(limit);
+    let mut square_depth = 0usize;
+    let mut round_depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '[' => square_depth += 1,
+            ']' => square_depth = square_depth.saturating_sub(1),
+            '(' => round_depth += 1,
+            ')' => round_depth = round_depth.saturating_sub(1),
+            ch if ch == delimiter
+                && square_depth == 0
+                && round_depth == 0
+                && parts.len() + 1 < limit =>
+            {
+                parts.push(&text[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
 /// One serialized C4Value (C4Value::CompileFunc, C4Value.cpp:717-800 +
 /// GetC4VID :368-394): `A`=any (zero reads nil; old pointer-range words
 /// denumerate before remaining nonzero values guess int), `i`=int, `b`=bool,
@@ -12999,12 +14336,13 @@ fn parse_serialized_c4value(
     match type_char {
         'A' => Ok(SerializedC4Value::Any(int_payload()?)),
         'i' => Ok(SerializedC4Value::Value(Value::Int(int_payload()?))),
-        'b' => Ok(SerializedC4Value::Value(Value::Bool(int_payload()? != 0))),
+        'b' => Ok(SerializedC4Value::Value(Value::from_c4_bool_raw(
+            int_payload()?,
+        ))),
         'o' | 'O' => Ok(SerializedC4Value::ObjectNumber(int_payload()?)),
-        'I' => Ok(SerializedC4Value::Value(match int_payload()? {
-            0 => Value::Nil,
-            raw => Value::C4Id(lc_script::c4_id_from_raw(raw as isize as usize)),
-        })),
+        'I' => Ok(SerializedC4Value::Value(Value::C4Id(
+            lc_script::c4_id_from_raw(int_payload()? as isize as usize),
+        ))),
         'a' => {
             let inner = payload
                 .strip_prefix('[')
@@ -15259,6 +16597,8 @@ global func Step(state, frame, random)
             .serialize_initial_network_scenario(
                 "A Clonk",
                 &definitions,
+                "",
+                "",
                 "Tutorial.c4f/Tutorial01.c4s",
             )
             .expect("legacy initial network scenario serializes");
@@ -15270,13 +16610,83 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn game_save_title_uses_cpp_native_c_string_copy_semantics() {
+        let core = LegacyScenarioCore::default();
+        let mut capped_bytes = vec![0x80];
+        capped_bytes.extend(std::iter::repeat_n(b'A', 510));
+        capped_bytes.extend_from_slice(&[0xff, b'Z']);
+        let capped_title = lc_script::c4_string_from_bytes(&capped_bytes);
+
+        for saved in [
+            core.initial_network_save(&capped_title, &[], "", "", ""),
+            core.initial_record_save(&capped_title, &[], "", "", ""),
+            core.runtime_network_save(&capped_title, &[], "", "", ""),
+        ] {
+            assert_eq!(
+                lc_script::c4_string_bytes(&saved.head.title),
+                capped_bytes[..C4_MAX_TITLE],
+                "SCopy counts native bytes, including non-UTF-8 bytes"
+            );
+        }
+
+        let nul_title = lc_script::c4_string_from_bytes(b"Visible\0Hidden");
+        for saved in [
+            core.initial_network_save(&nul_title, &[], "", "", ""),
+            core.initial_record_save(&nul_title, &[], "", "", ""),
+            core.runtime_network_save(&nul_title, &[], "", "", ""),
+        ] {
+            assert_eq!(
+                lc_script::c4_string_bytes(&saved.head.title),
+                b"Visible",
+                "SCopy stops at the first native NUL"
+            );
+        }
+    }
+
+    #[test]
+    fn game_save_set_modules_strips_cpp_paths_in_order() {
+        let core = LegacyScenarioCore::default();
+        let modules = vec![
+            "/OPT/GAME/Objects.c4d".to_owned(),
+            "/opt/game/Definitions/Pack.c4d".to_owned(),
+            "definitions\\Already.c4d".to_owned(),
+            "Relative\\Keep.c4d".to_owned(),
+        ];
+        let separator = std::path::MAIN_SEPARATOR;
+        let expected = vec![
+            "Objects.c4d".to_owned(),
+            "Pack.c4d".to_owned(),
+            "Already.c4d".to_owned(),
+            format!("Relative{separator}Keep.c4d"),
+        ];
+
+        for saved in [
+            core.initial_network_save("Title", &modules, "/opt/game/", "Definitions/", ""),
+            core.initial_record_save("Title", &modules, "/opt/game/", "Definitions/", ""),
+            core.runtime_network_save("Title", &modules, "/opt/game/", "Definitions/", ""),
+        ] {
+            assert_eq!(saved.definitions.definitions, expected);
+        }
+
+        assert_eq!(
+            set_legacy_definition_modules(
+                &["/CUSTOM/Defs/Outside.c4d".to_owned()],
+                "/opt/game/",
+                "/custom/defs/",
+            ),
+            vec!["Outside.c4d".to_owned()],
+            "an absolute DefinitionPath is still checked after ExePath"
+        );
+    }
+
+    #[test]
     fn initial_network_scenario_rejects_json_without_faking_a_legacy_core() {
         // C4GameSaveNetwork serializes C4Scenario; a JSON-only Rust fixture
         // has no C++ C4Scenario equivalent to save (C4GameSave.cpp:58-108).
         let scenario = json_scenario_without_legacy_core();
 
         let error = scenario
-            .serialize_initial_network_scenario("JSON", &[], "JSON.c4s")
+            .serialize_initial_network_scenario("JSON", &[], "", "", "JSON.c4s")
             .expect_err("JSON scenarios must not fabricate Scenario.txt");
 
         assert!(matches!(
@@ -15301,6 +16711,8 @@ global func Step(state, frame, random)
             .serialize_initial_record_scenario(
                 "007 Test [362]",
                 &["Objects.c4d".to_owned(), "Folder.c4f".to_owned()],
+                "",
+                "",
                 "Fallback.c4s",
             )
             .expect("legacy initial record scenario serializes");
@@ -15339,7 +16751,7 @@ global func Step(state, frame, random)
             "[Head]\nNetworkGame=true\nMissionAccess=MISS\n\n[Game]\nStructNeedEnergy=0\n",
         );
         let actual = scenario
-            .serialize_initial_record_scenario("Record", &[], "Folder\\Game.c4s")
+            .serialize_initial_record_scenario("Record", &[], "", "", "Folder\\Game.c4s")
             .expect("legacy initial record scenario serializes");
         let actual = String::from_utf8(actual).expect("Scenario.txt is UTF-8");
 
@@ -15351,7 +16763,7 @@ global func Step(state, frame, random)
         assert!(!actual.contains("MissionAccess="));
 
         let error = json_scenario_without_legacy_core()
-            .serialize_initial_record_scenario("JSON", &[], "JSON.c4s")
+            .serialize_initial_record_scenario("JSON", &[], "", "", "JSON.c4s")
             .expect_err("JSON scenarios must not fabricate record Scenario.txt");
         assert!(matches!(
             error,
@@ -15980,6 +17392,8 @@ RandomTeamCount=2
             .serialize_initial_network_scenario(
                 "Converted",
                 &["Objects.c4d".to_owned()],
+                "",
+                "",
                 "Converted.c4s",
             )
             .expect("legacy initial network scenario serializes");
@@ -16021,7 +17435,7 @@ RandomTeamCount=2
         );
 
         let actual = scenario
-            .serialize_initial_network_scenario("New", &[], "Fallback.c4s")
+            .serialize_initial_network_scenario("New", &[], "", "", "Fallback.c4s")
             .expect("legacy initial network scenario serializes");
 
         assert_eq!(
@@ -18607,6 +20021,8 @@ global func Step(state, frame, random)
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
                 container_handle: None,
+                contents_handles: Vec::new(),
+                info_name: None,
                 config: SpawnConfig::new("Mover"),
             }],
             landscape: None,
@@ -18616,6 +20032,7 @@ global func Step(state, frame, random)
             physics: None,
             runtime_landscape: None,
             legacy_string_table: HashMap::new(),
+            round_results: RoundResultsState::default(),
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment: None,
             weather_init: None,
@@ -18737,6 +20154,8 @@ global func Step(state, frame, random)
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
                 container_handle: None,
+                contents_handles: Vec::new(),
+                info_name: None,
                 config: SpawnConfig::new("Mover").with_owner(1),
             }],
             landscape: None,
@@ -18746,6 +20165,7 @@ global func Step(state, frame, random)
             physics: None,
             runtime_landscape: None,
             legacy_string_table: HashMap::new(),
+            round_results: RoundResultsState::default(),
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment: None,
             weather_init: None,
@@ -18978,6 +20398,99 @@ global func Step(state, frame, random)
         .expect("write scenario core");
         std::fs::write(scenario_dir.join("Script.c"), scenario_script).expect("write script");
         scenario_dir
+    }
+
+    #[test]
+    fn combined_runtime_group_restores_live_round_results_component() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        std::fs::write(
+            scenario_dir.join("RoundResults.txt"),
+            concat!(
+                "[RoundResults]\r\n",
+                "Goals=GOOD=0\r\n",
+                "PlayingTime=73\r\n",
+                "CustomEvaluationStrings=\"saved\\ntext\"\r\n\r\n",
+                "  [PlayerInfos]\r\n\r\n",
+                "    [Player]\r\n",
+                "    ID=17\r\n",
+                "    SettlementScoreOld=40\r\n",
+                "    SettlementScoreNew=52\r\n",
+                "    LeagueProgressData=\"progress\\200\"\r\n",
+                "    Status=Won\r\n",
+                "NetResult=\"server detail\"\r\n",
+                "NetResult=LeagueOK\r\n",
+            ),
+        )
+        .expect("write live RoundResults.txt");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
+            .expect("combined runtime scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("runtime scenario applies");
+
+        let restored = engine.capture_state().round_results;
+        assert_eq!(restored.goal_counts, vec![("GOOD".to_owned(), 0)]);
+        assert_eq!(restored.goals, vec!["GOOD".to_owned()]);
+        assert_eq!(restored.playing_time_seconds, 73);
+        assert_eq!(restored.custom_evaluation_strings, "saved\ntext");
+        assert_eq!(
+            restored.network_result,
+            Some(crate::RoundResultsNetworkResult::LeagueOk)
+        );
+        assert_eq!(restored.network_result_message, b"server detail");
+        assert_eq!(restored.players.len(), 1);
+        assert_eq!(restored.players[0].player_info_id, 17);
+        assert_eq!(restored.players[0].score_new, Some(52));
+        assert_eq!(
+            restored.players[0].league_progress_data.as_deref(),
+            Some(&b"progress\x80"[..])
+        );
+        assert_eq!(
+            restored.players[0].status,
+            crate::RoundResultsPlayerStatus::Won
+        );
+    }
+
+    #[test]
+    fn missing_round_results_component_uses_cpp_melee_default() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        let source = std::fs::read_to_string(scenario_dir.join("Scenario.txt"))
+            .expect("read scenario core");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            format!("{source}\n[Game]\nGoals=MELE=1\n"),
+        )
+        .expect("write melee core");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
+            .expect("melee scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("melee scenario applies");
+        assert!(engine.capture_state().round_results.hide_settlement_score);
+    }
+
+    #[test]
+    fn malformed_round_results_component_fails_combined_group_load() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        std::fs::write(scenario_dir.join("RoundResults.txt"), b"[Wrong]\r\n")
+            .expect("write malformed results");
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+
+        assert!(matches!(
+            Scenario::load_from_path_with(&scenario_dir, &resolver),
+            Err(ScenarioError::LegacyRoundResultsParse(_))
+        ));
     }
 
     #[test]
@@ -24014,12 +25527,7 @@ public func ActualizePhase(pClonk)
             scoreboard.cell(1, 1).map(crate::ScoreboardCell::value),
             Some(42)
         );
-        assert!(engine.pending_object_order_commands.iter().any(|command| {
-            matches!(
-                command,
-                crate::compat::ObjectOrderCommand::ResortUnsortedSweep
-            )
-        }));
+        assert!(engine.resort_any_object_pending());
 
         // A missing Game.txt skips C4Game::Compile altogether. Network GO
         // still has to stage InitSystem/C4Weather::Default state; otherwise
@@ -25396,7 +26904,64 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
-    fn legacy_object_motion_property_names_are_exact_case() {
+    fn legacy_unsigned_object_words_accept_signed_cpp_spellings() {
+        let mut records = parse_legacy_objects(
+            "[Object]\nid=GOOD\nNumber=1\nOCF=-1\nColorDw=-2\nColorMod=-3\nBlitMode=-4\n",
+        )
+        .expect("signed uint32 spellings preserve their bit patterns");
+        let record = records.remove(0);
+        assert_eq!(record.ocf, Some((-1_i32) as u32));
+        assert_eq!(record.color, Some((-2_i32) as u32));
+        assert_eq!(record.color_modulation, Some((-3_i32) as u32));
+        assert_eq!(record.blit_mode, Some((-4_i32) as u32));
+    }
+
+    #[test]
+    fn legacy_command_versions_follow_cpp_field_layouts() {
+        // Shipped 4.9 scenarios use `$1`: it already carries BaseMode, but
+        // retains the pre-v2 compatibility rule that textual `0` is empty.
+        let version_one = parse_legacy_object_command(
+            "$1,MoveTo,i517,177,0,0,0,0,1,0,0,0,0,0,1,0",
+            7,
+        )
+        .expect("shipped $1 command parses");
+        assert_eq!(version_one.name, "MoveTo");
+        assert_eq!(
+            version_one.tx,
+            SerializedC4Value::Value(lc_script::Value::Int(517))
+        );
+        assert_eq!(version_one.ty, 177);
+        assert_eq!(version_one.evaluated, 1);
+        assert_eq!(version_one.base_mode, 1);
+        assert!(version_one.text.is_empty());
+
+        let unversioned = parse_legacy_object_command(
+            "MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0",
+            8,
+        )
+        .expect("unversioned command parses");
+        assert_eq!(unversioned.base_mode, 0);
+        assert!(unversioned.text.is_empty());
+
+        let explicit_zero = parse_legacy_object_command(
+            "$0,MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0",
+            9,
+        )
+        .expect("explicit version zero command parses");
+        assert_eq!(explicit_zero.base_mode, 0);
+        assert!(explicit_zero.text.is_empty());
+
+        let version_two = parse_legacy_object_command(
+            "$2,MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0,0",
+            10,
+        )
+        .expect("current command parses");
+        assert_eq!(version_two.base_mode, 0);
+        assert_eq!(version_two.text, "0");
+    }
+
+    #[test]
+    fn legacy_object_property_and_section_names_are_exact_case() {
         let mut wrong_case = parse_legacy_objects(
             "[Object]\nid=GOOD\nNumber=1\nx=9\ny=10\nxdir=F1\nYDIR=F2\nFixx=F3\nfixY=F4\nFIXR=F5\nRdir=F6\nmobile=true\nrotation=7\n",
         )
@@ -25428,6 +26993,35 @@ public func ActualizePhase(pClonk)
         assert_eq!(exact.rdir.map(crate::math::C4Fixed::val), Some(6));
         assert_eq!(exact.mobile, Some(true));
         assert_eq!(exact.rotation, Some(7));
+
+        let wrong_object = parse_legacy_objects(
+            "[object]\nid=GOOD\nNumber=1\n[Object]\nid=GOOD\nNumber=2\nowner=7\nEnergy=4\nENERGY=9\n[Commands]\nCommand01=$2,Wait,A0,0,0,0,0,0,0,0,0,0,0,0,0,\n",
+        )
+        .expect("unknown-case naming environments are ignored");
+        assert_eq!(wrong_object.len(), 1);
+        assert_eq!(wrong_object[0].number, Some(2));
+        assert_eq!(wrong_object[0].owner, None);
+        assert_eq!(wrong_object[0].energy, Some(4));
+        assert!(wrong_object[0].commands.is_empty());
+    }
+
+    #[test]
+    fn legacy_object_rct_all_values_preserve_slashes_and_trailing_spaces() {
+        let mut records = parse_legacy_objects(concat!(
+            "[Object]\n",
+            "id=GOOD\n",
+            "Number=1\n",
+            "Info=Captain // veteran  \n",
+            "[Commands]\n",
+            "Command1=$2,Call,A0,0,0,0,0,0,0,0,0,0,0,0,0,Foo//Bar  \n",
+        ))
+        .expect("RCT_All values parse");
+        let record = records.remove(0);
+        assert_eq!(record.info_name.as_deref(), Some("Captain // veteran  "));
+        assert_eq!(
+            record.commands.get(&1).map(|command| command.text.as_str()),
+            Some("Foo//Bar  ")
+        );
     }
 
     #[test]
@@ -25441,6 +27035,195 @@ public func ActualizePhase(pClonk)
                 ("NEGA".to_owned(), -3),
             ]
         );
+    }
+
+    #[test]
+    fn live_objects_txt_parser_retains_full_object_and_nested_state() {
+        let source = concat!(
+            "[Object]\n",
+            "id=GOOD\n",
+            "Number=1\n",
+            "Info=Captain\n",
+            "LastEngLossPlr=8\n",
+            "LastSolidAtchFrame=77\n",
+            "NoCollectDelay=9\n",
+            "Base=2\n",
+            "OwnMass=11\n",
+            "Mass=29\n",
+            "Damage=23\n",
+            "Breath=41\n",
+            "FirePhase=3\n",
+            "AttachX=12\n",
+            "AttachY=-4\n",
+            "AttachVtx=2\n",
+            "OnFire=true\n",
+            "PhysicalTemporary=true\n",
+            "OCF=31\n",
+            "PlrViewRange=444\n",
+            "CrewDisabled=true\n",
+            "Graphics=GOOD::Alternate\n",
+            "DrawTransform=1,0,0,0,1,0,1\n",
+            "Effects=Fire(4,100,8,1,0,NONE)[3;i3,i7,S0]\n",
+            "GfxOverlay=7,GOOD::Alternate,6,,132,4,(1,0,0,0,1,0,1),11259375,2\n",
+            "Contents=3;2;3\n",
+            "[Physical]\n",
+            "Energy=50\n",
+            "Breath=60\n",
+            "Walk=70\n",
+            "Changes=Walk=10,Energy=20,Walk=30\n",
+            // This is not an Object-section property and must not overwrite
+            // the parent object's Damage=23.
+            "Damage=999\n",
+            "[Commands]\n",
+            "Command1=$2,Call,a[3;i7,S0,I0],0,2,0,23,5,1,0,0,2,3,0,1,raw,text\n",
+            // Native stores this signed word verbatim. A negative interval
+            // skips the lifetime countdown but does not reject the command.
+            "Command2=$2,MoveTo,i12,-3,2,0,7,-4,0,1,0,0,1,0,0,\n",
+            // C4Command::Tx is a tagged C4Value for every command. Runtime
+            // command code observes a nonnumeric value as zero, but the
+            // original value remains part of the exact save projection.
+            "Command3=$2,Wait,a[2;i4,i5],0,0,0,0,0,0,0,0,0,0,0,0,\n",
+            // Likewise, a stray nested key cannot leak into [Object].
+            "Damage=1000\n",
+            "[Object]\n",
+            "id=GOOD\n",
+            "Number=2\n",
+        );
+
+        let mut records = parse_legacy_objects(source).expect("live Objects.txt parses");
+        assert_eq!(records.len(), 2);
+        let first = records.remove(0);
+        assert_eq!(first.info_name.as_deref(), Some("Captain"));
+        assert_eq!(first.damage, Some(23));
+        assert_eq!(first.contents, vec![3, 2, 3]);
+        assert_eq!(
+            first.physical_changes,
+            vec![
+                ("Walk".to_string(), 10),
+                ("Energy".to_string(), 20),
+                ("Walk".to_string(), 30),
+            ]
+        );
+        let physical = first
+            .temporary_physical
+            .as_ref()
+            .expect("[Physical] was captured");
+        assert_eq!((physical.energy, physical.breath, physical.walk), (50, 60, 70));
+        assert_eq!(first.commands.len(), 3);
+        assert_eq!(
+            first.commands.get(&1).expect("Command1").text,
+            "raw,text"
+        );
+        assert_eq!(first.draw_transform, Some(crate::DrawTransform::identity()));
+        assert!(matches!(
+            first
+                .effects
+                .as_ref()
+                .and_then(|effects| effects.first())
+                .and_then(|effect| effect.vars.get(2)),
+            Some(SerializedC4Value::StringTableIndex(0))
+        ));
+
+        let definition_ids = HashSet::from(["GOOD"]);
+        let object_numbers = HashSet::from([1_u64, 2]);
+        let strings = HashMap::from([(0, "saved text".to_string())]);
+        let resolution = SerializedC4ValueResolution {
+            object_numbers: &object_numbers,
+            strings: &strings,
+        };
+        let spawn = first
+            .into_spawn(&definition_ids, &resolution)
+            .expect("record converts")
+            .expect("known definition spawns");
+        assert_eq!(spawn.info_name.as_deref(), Some("Captain"));
+        assert_eq!(spawn.contents_handles, ["3", "2", "3"]);
+        let config = spawn.config;
+        assert_eq!(config.last_energy_loss_cause, Some(8));
+        assert_eq!(config.last_attach_movement_frame, Some(77));
+        assert_eq!(config.no_collect_delay, Some(9));
+        assert_eq!(config.base, Some(2));
+        assert_eq!(config.own_mass, Some(11));
+        assert_eq!(config.compiled_mass, Some(29));
+        assert_eq!(config.damage, Some(23));
+        assert_eq!(config.breath, Some(41));
+        assert_eq!(config.fire_phase, Some(3));
+        assert_eq!(config.on_fire, Some(true));
+        assert_eq!(config.fire_caused_by, Some(7));
+        assert_eq!(config.compiled_ocf, Some(31));
+        assert_eq!(config.plr_view_range, Some(444));
+        assert_eq!(config.crew_disabled, Some(true));
+        assert_eq!(
+            config.shape_attach,
+            Some(crate::ShapeAttachRecord {
+                mat_valid: false,
+                mat_vehicle: false,
+                x: 12,
+                y: -4,
+                vtx: 2,
+            })
+        );
+        assert_eq!(
+            config
+                .base_graphics
+                .as_ref()
+                .and_then(|graphics| graphics.graphics_name.as_deref()),
+            Some("Alternate")
+        );
+        assert_eq!(config.draw_transform, Some(crate::DrawTransform::identity()));
+        let overlay = config.graphics_overlays.first().expect("overlay restored");
+        assert_eq!(overlay.id, 7);
+        assert_eq!(overlay.overlay_object, Some(ObjectId::new(2)));
+        assert_eq!(overlay.transform, Some(crate::DrawTransform::identity()));
+        assert_eq!(
+            config.effects[0].vars[2],
+            EffectVarValue::String("saved text".to_string())
+        );
+        let temporary = config
+            .temporary_physical
+            .as_ref()
+            .expect("temporary physical restored");
+        assert_eq!((temporary.energy, temporary.breath, temporary.walk), (50, 60, 70));
+        assert_eq!(config.physical_changes.len(), 3);
+        let command_stack = config.command_stack.as_ref().expect("commands restored");
+        assert_eq!(command_stack.command_names(), ["Call", "MoveTo", "Wait"]);
+        let commands = command_stack.command_views();
+        assert_eq!(commands[0].target, Some(ObjectId::new(2)));
+        assert_eq!(
+            commands[0].tx_value,
+            Some(lc_script::Value::Array(vec![
+                lc_script::Value::Int(7),
+                lc_script::Value::String("saved text".to_string()),
+                lc_script::Value::C4Id(lc_script::c4_id_from_raw(0)),
+            ]))
+        );
+        assert_eq!(commands[0].legacy_data, Some(23));
+        assert_eq!(
+            commands[0].data,
+            crate::command::CommandData::Text("raw,text".to_string())
+        );
+        assert_eq!(commands[1].tx, Some(12));
+        assert_eq!(commands[1].ty, Some(-3));
+        assert_eq!(command_stack.legacy_save_commands()[1].update_interval, -4);
+        assert_eq!(
+            commands[2].tx_value,
+            Some(lc_script::Value::Array(vec![
+                lc_script::Value::Int(4),
+                lc_script::Value::Int(5),
+            ]))
+        );
+
+        let defaulted = records
+            .remove(0)
+            .into_spawn(&definition_ids, &resolution)
+            .expect("minimal record converts")
+            .expect("known definition spawns")
+            .config;
+        assert!(defaulted.loaded);
+        assert!(defaulted.native_compiled_object_defaults);
+        assert_eq!(defaulted.energy, None);
+        assert_eq!(defaulted.breath, None);
+        assert_eq!(defaulted.category, None);
+        assert_eq!(defaulted.compiled_mass, None);
     }
 
     #[test]
@@ -25556,6 +27339,11 @@ public func ActualizePhase(pClonk)
         scenario
             .apply(&mut engine)
             .expect("legacy scenario applies");
+        assert_eq!(
+            engine.debug_exec_order(),
+            [ObjectId::new(100), ObjectId::new(101)],
+            "Objects.txt file order is the native Last-to-Prev execution order"
+        );
 
         let box_snapshot = engine
             .object_snapshot(ObjectId::new(100))
@@ -26079,6 +27867,14 @@ public func ActualizePhase(pClonk)
         };
 
         assert_eq!(
+            parse_serialized_c4value("b7", 1)
+                .expect("raw C4V_Bool parses")
+                .resolve(&resolution),
+            lc_script::Value::RawBool(7),
+            "C4Value bool parsing retains the Data.Int payload"
+        );
+
+        assert_eq!(
             parse_serialized_c4value("A1000000007", 1)
                 .expect("legacy any parses")
                 .resolve(&resolution),
@@ -26317,9 +28113,10 @@ public func ActualizePhase(pClonk)
         );
         assert_eq!(
             locals.get("none"),
-            Some(&lc_script::Value::Nil),
-            "C4ID_None remains falsey instead of becoming the truthy text NONE"
+            Some(&lc_script::Value::C4Id(lc_script::c4_id_from_raw(0))),
+            "C4ID_None preserves its tag while remaining falsey"
         );
+        assert!(!locals.get("none").expect("I0 local exists").as_bool());
         assert_eq!(
             locals.get("aSpells"),
             Some(&lc_script::Value::Array(vec![
@@ -26984,17 +28781,20 @@ public func ActualizePhase(pClonk)
         //     dirs but never moves; the frame-10 pulse wipes them.
         // 82: rotating: Rotation=90, FixR = 90.25 deg (F5914624),
         //     RDir = raw 6554 (~0.1 deg/frame).
+        // Category and Size are compiled object fields, not definition
+        // fallbacks. Omitting Category would make FixObjectOrder repair the
+        // rows to StaticBack (and SyncClearance would correctly zero XDir).
         std::fs::write(
             scenario_dir.join("Objects.txt"),
-            "[Object]\nid=GOOD\nNumber=80\nStatus=1\nX=15\nY=5\n\
+            "[Object]\nid=GOOD\nNumber=80\nStatus=1\nCategory=16\nSize=100000\nX=15\nY=5\n\
              FixX=F999424\nFixY=F327680\nXDir=f1060320051\nMobile=1\n\n\
-             [Object]\nid=GOOD\nNumber=81\nStatus=1\nX=25\nY=5\n\
+             [Object]\nid=GOOD\nNumber=81\nStatus=1\nCategory=16\nSize=100000\nX=25\nY=5\n\
              FixX=F1654784\nFixY=F327680\nXDir=F45875\n\n\
-             [Object]\nid=GOOD\nNumber=82\nStatus=1\nX=35\nY=5\n\
+             [Object]\nid=GOOD\nNumber=82\nStatus=1\nCategory=16\nSize=100000\nX=35\nY=5\n\
              Rotation=90\nFixR=F5914624\nRDir=F6554\nMobile=1\n\n\
-             [Object]\nid=GOOD\nNumber=83\nStatus=2\nX=45\nY=5\n\
+             [Object]\nid=GOOD\nNumber=83\nStatus=2\nCategory=16\nSize=100000\nX=45\nY=5\n\
              FixX=F2965504\nFixY=F327680\nRotation=12\nFixR=F802816\nXDir=F45875\nMobile=1\n\n\
-             [Object]\nid=GOOD\nNumber=84\nStatus=2\nX=55\nY=5\n",
+             [Object]\nid=GOOD\nNumber=84\nStatus=2\nCategory=16\nSize=100000\nX=55\nY=5\n",
         )
         .expect("write objects");
 
@@ -27535,6 +29335,93 @@ public func ActualizePhase(pClonk)
         assert_eq!(
             values.get("ValueOverloads", Some("Game"), 0),
             Some(&ScenarioValue::C4Id("FISH".to_string()))
+        );
+    }
+
+    #[test]
+    fn exact_save_binds_root_to_current_section_and_retains_departed_main() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "#strict\n");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Current cave\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Weather]\nWind=11,0,11,11\n",
+        )
+        .expect("write root current-section core");
+        std::fs::write(
+            scenario_dir.join("Game.txt"),
+            "[Game]\nCurrentScenarioSection=Cave\n",
+        )
+        .expect("write current section identity");
+
+        let departed_main = scenario_dir.join("SectMain.c4g");
+        std::fs::create_dir_all(&departed_main).expect("departed Main group");
+        std::fs::write(
+            departed_main.join("Scenario.txt"),
+            "[Weather]\nWind=22,0,22,22\n",
+        )
+        .expect("write departed Main state");
+
+        // SaveScenarioSections deletes the current child. If a malformed or
+        // hand-edited group retains one anyway, root state still wins.
+        let stale_cave = scenario_dir.join("SectCave.c4g");
+        std::fs::create_dir_all(&stale_cave).expect("stale Cave group");
+        std::fs::write(
+            stale_cave.join("Scenario.txt"),
+            "[Weather]\nWind=99,0,99,99\n",
+        )
+        .expect("write stale current-section child");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        assert_eq!(
+            scenario
+                .scenario_sections
+                .iter()
+                .map(|section| section.name.to_ascii_lowercase())
+                .collect::<Vec<_>>(),
+            vec!["cave", "main"],
+            "root is current Cave, SectMain remains an inactive section"
+        );
+
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        // This fixture has no map resources, so install the real Surface8
+        // that every native running landscape owns before exercising
+        // C4S_SAVE_LANDSCAPE on both departures.
+        let mut surface8 = Landscape::flat(100, 100);
+        surface8.set_pixel_grid(crate::landscape::PixelGrid::new(
+            100,
+            100,
+            vec![0; 10_000],
+            vec![0],
+            vec![None],
+            vec![None],
+        ));
+        engine.set_landscape(surface8);
+        assert_eq!(engine.debug_current_scenario_section(), "Cave");
+        assert_eq!(
+            engine.scenario_values.get("Wind", Some("Weather"), 0),
+            Some(&ScenarioValue::Int(11)),
+            "stale SectCave must not replace root Cave"
+        );
+
+        assert!(engine
+            .load_scenario_section("Main", 3, Vec::new())
+            .expect("departed Main loads"));
+        assert_eq!(
+            engine.scenario_values.get("Wind", Some("Weather"), 0),
+            Some(&ScenarioValue::Int(22))
+        );
+        assert!(engine
+            .load_scenario_section("Cave", 3, Vec::new())
+            .expect("root Cave reloads"));
+        assert_eq!(
+            engine.scenario_values.get("Wind", Some("Weather"), 0),
+            Some(&ScenarioValue::Int(11))
         );
     }
 
@@ -30130,7 +32017,8 @@ mod game_start_sync {
     // empty, so records without Action= stay ActIdle (no def default:
     // C++ has no such concept). GoldRush oracle: TRE2 #3 (no Action=,
     // FixY 28px below Y) sits at (204,258) Idle in C++; PLM1 #42 keeps
-    // Action=Breeze Phase=18.
+    // Action=Breeze Phase=18. Saved active rows carry Size=FullCon; omitting
+    // it compiles Con=0 and correctly forces even a resolved action to Idle.
     #[test]
     fn loaded_objects_sync_clearance_and_action_rules_like_cpp() {
         let dir = tempdir().expect("tempdir");
@@ -30138,9 +32026,9 @@ mod game_start_sync {
         write_palm_def(&defs);
         write_scenario(
             dir.path(),
-            "[Object]\nid=PALM\nNumber=3\nCategory=1\nX=204\nY=258\nFixX=f1129054208\nFixY=f1133445120\n\n\
-             [Object]\nid=PALM\nNumber=42\nCategory=1\nX=981\nY=280\nAction=Breeze\nDir=1\nActionTime=694\nPhase=18\nPhaseDelay=4\nYDir=f1149998051\n\n\
-             [Object]\nid=PALM\nNumber=43\nCategory=1\nX=100\nY=100\nAction=Stand\nPhase=2\n",
+            "[Object]\nid=PALM\nNumber=3\nCategory=1\nSize=100000\nX=204\nY=258\nFixX=f1129054208\nFixY=f1133445120\n\n\
+             [Object]\nid=PALM\nNumber=42\nCategory=1\nSize=100000\nX=981\nY=280\nAction=Breeze\nDir=1\nActionTime=694\nPhase=18\nPhaseDelay=4\nYDir=f1149998051\n\n\
+             [Object]\nid=PALM\nNumber=43\nCategory=1\nSize=100000\nX=100\nY=100\nAction=Stand\nPhase=2\n",
         );
         let (engine, _) = load(dir.path());
 
@@ -30198,10 +32086,10 @@ mod game_start_sync {
         .expect("script");
         write_scenario(
             dir.path(),
-            "[Object]\nid=LOAD\nNumber=100\nCategory=16\nX=10\nY=20\nFixX=F999424\nFixY=F1327104\nAction=Passive\nActionTime=-7\nPhase=-2\nPhaseDelay=-3\nActionData=41\n\n\
-             [Object]\nid=LOAD\nNumber=101\nCategory=16\nAction=Attached\nActionTime=-8\nPhase=-4\nPhaseDelay=-5\nActionData=42\n\n\
-             [Object]\nid=LOAD\nNumber=102\nCategory=16\nX=30\nY=40\nFixX=F2015232\nFixY=F2654208\nAction=Missing\nActionTime=-9\nPhase=-6\nPhaseDelay=-7\nActionData=43\n\n\
-             [Object]\nid=LOAD\nNumber=103\nCategory=16\nCon=50000\nAction=Attached\nActionTime=-10\nPhase=-8\nPhaseDelay=-9\nActionData=44\n",
+            "[Object]\nid=LOAD\nNumber=100\nCategory=16\nSize=100000\nX=10\nY=20\nFixX=F999424\nFixY=F1327104\nAction=Passive\nActionTime=-7\nPhase=-2\nPhaseDelay=-3\nActionData=41\n\n\
+             [Object]\nid=LOAD\nNumber=101\nCategory=16\nSize=100000\nAction=Attached\nActionTime=-8\nPhase=-4\nPhaseDelay=-5\nActionData=42\n\n\
+             [Object]\nid=LOAD\nNumber=102\nCategory=16\nSize=100000\nX=30\nY=40\nFixX=F2015232\nFixY=F2654208\nAction=Missing\nActionTime=-9\nPhase=-6\nPhaseDelay=-7\nActionData=43\n\n\
+             [Object]\nid=LOAD\nNumber=103\nCategory=16\nSize=50000\nAction=Attached\nActionTime=-10\nPhase=-8\nPhaseDelay=-9\nActionData=44\n",
         );
 
         let resolver = ProbeResolver {
@@ -30325,8 +32213,8 @@ mod game_start_sync {
         write_scenario(
             dir.path(),
             &format!(
-                "[Object]\nid=LOAD\nNumber=100\nCategory=16\nX=10\nY=20\nFixX=F999424\nFixY=F1327104\nAction={matching_name}TRAILING\n\n\
-                 [Object]\nid=LOAD\nNumber=101\nCategory=16\nX=30\nY=40\nFixX=F2015232\nFixY=F2654208\nAction={unresolved_name}TRAILING\n"
+                "[Object]\nid=LOAD\nNumber=100\nCategory=16\nSize=100000\nX=10\nY=20\nFixX=F999424\nFixY=F1327104\nAction={matching_name}TRAILING\n\n\
+                 [Object]\nid=LOAD\nNumber=101\nCategory=16\nSize=100000\nX=30\nY=40\nFixX=F2015232\nFixY=F2654208\nAction={unresolved_name}TRAILING\n"
             ),
         );
 
@@ -30704,7 +32592,7 @@ mod game_start_sync {
 
         write_scenario(
             dir.path(),
-            "[Object]\nid=CANN\nNumber=439\nCategory=16\nX=100\nY=100\nAction=Stand\n",
+            "[Object]\nid=CANN\nNumber=439\nCategory=16\nSize=100000\nX=100\nY=100\nAction=Stand\n",
         );
         let (engine, _) = load(dir.path());
 

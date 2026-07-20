@@ -57,10 +57,10 @@ impl Default for LandscapeGameData {
 /// runtime values would change `Game.txt` bytes and the C4Group contents CRC.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InitialNetworkCompiledSections {
-    script_engine: Option<Vec<u8>>,
-    sky: Option<Vec<u8>>,
-    effects: Option<Vec<u8>>,
-    scoreboard: Option<Vec<u8>>,
+    pub(crate) script_engine: Option<Vec<u8>>,
+    pub(crate) sky: Option<Vec<u8>>,
+    pub(crate) effects: Option<Vec<u8>>,
+    pub(crate) scoreboard: Option<Vec<u8>>,
 }
 
 /// Runtime fields that cannot be installed without changing the saved C++
@@ -206,6 +206,13 @@ impl InitialNetworkGameData {
             return Err(UnsupportedInitialNetworkGameState::Scoreboard.into());
         }
 
+        Self::from_engine_live(engine)
+    }
+
+    /// Capture the scalar `C4Game::CompileFunc` fields while a live-save
+    /// caller supplies typed Script/Sky/Effects/Scoreboard blocks itself.
+    pub(crate) fn from_engine_live(engine: &Engine) -> Result<Self, InitialNetworkGameError> {
+
         let frame = i32::try_from(engine.frame).map_err(|_| {
             InitialNetworkGameError::IntegerOutOfRange {
                 field: "Frame",
@@ -227,10 +234,10 @@ impl InitialNetworkGameData {
         if engine.construction_needs_material {
             rules |= 2;
         }
-        if engine.objects.iter().any(|object| {
-            object.definition_id.eq_ignore_ascii_case("FGRV")
-                && object.state.status.to_script_value() != 0
-        }) {
+        // Game.Rules is a cached C4Game field. C4Game::UpdateRules refreshes
+        // FGRV only on frame one and Tick255; a save between those refreshes
+        // must retain the cached bit rather than re-counting live objects.
+        if engine.cached_flag_removeable_rule() {
             rules |= 4;
         }
         if engine.structures_snow_in {
@@ -263,7 +270,7 @@ impl InitialNetworkGameData {
                 .is_some()
                 .then(|| engine.current_scenario_section.clone())
                 .unwrap_or_default(),
-            resort_any_object: !engine.pending_object_order_commands.is_empty(),
+            resort_any_object: engine.resort_any_object_pending(),
             music_enabled: false,
             music_level: i32::from(engine.music_level()),
             next_mission: engine.next_mission.clone(),
@@ -1513,6 +1520,38 @@ mod tests {
     }
 
     #[test]
+    fn resort_any_object_ignores_unrelated_resort_proc_nodes() {
+        use crate::compat::ObjectOrderCommand;
+
+        let mut engine = Engine::new();
+        engine
+            .pending_object_order_commands
+            .push(ObjectOrderCommand::SetRelative {
+                relative_to: crate::ObjectId::new(1),
+                object: crate::ObjectId::new(2),
+                after: false,
+            });
+        engine
+            .pending_object_order_commands
+            .push(ObjectOrderCommand::SortByCategory);
+        assert!(
+            !InitialNetworkGameData::from_engine_live(&engine)
+                .expect("relative/category ResortProc captures")
+                .resort_any_object,
+            "ResortAnyObj serializes only C4Game::fResortAnyObject"
+        );
+
+        engine
+            .pending_object_order_commands
+            .push(ObjectOrderCommand::ResortUnsortedSweep);
+        assert!(
+            InitialNetworkGameData::from_engine_live(&engine)
+                .expect("native resort trigger captures")
+                .resort_any_object
+        );
+    }
+
+    #[test]
     fn clean_source_rule_payload_uses_map_and_command_compilers() {
         let data = InitialNetworkGameData::default();
 
@@ -1937,6 +1976,53 @@ mod tests {
         assert_eq!(
             InitialNetworkGameData::for_initial_record(&engine).landscape,
             InitialNetworkGameData::from_engine(&engine).unwrap().landscape
+        );
+    }
+
+    #[test]
+    fn live_capture_retains_true_cached_flag_rule_after_fgrv_disappears() {
+        let mut state = Engine::new().capture_state();
+        state.flag_removeable = true;
+        let mut engine = Engine::new();
+        engine
+            .restore_state(&state)
+            .expect("cached rule state restores");
+
+        assert!(engine.objects.is_empty(), "fixture has no current FGRV");
+        assert_eq!(
+            InitialNetworkGameData::from_engine_live(&engine)
+                .expect("cached-rule engine captures")
+                .rules
+                & 4,
+            4,
+            "a save before UpdateRules must retain the cached true bit"
+        );
+    }
+
+    #[test]
+    fn live_capture_retains_false_cached_flag_rule_after_fgrv_appears() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                crate::Definition::from_script("FGRV", "Flag-removal rule", "")
+                    .expect("fixture definition compiles"),
+            )
+            .expect("fixture definition registers");
+        engine
+            .spawn_object(crate::SpawnConfig::new("FGRV"))
+            .expect("fixture FGRV spawns");
+
+        assert!(
+            !engine.capture_state().flag_removeable,
+            "the cached bit remains false until UpdateRules"
+        );
+        assert_eq!(
+            InitialNetworkGameData::from_engine_live(&engine)
+                .expect("cached-rule engine captures")
+                .rules
+                & 4,
+            0,
+            "a save before UpdateRules must retain the cached false bit"
         );
     }
 

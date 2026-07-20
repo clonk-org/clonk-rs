@@ -20,7 +20,7 @@ const SOURCE_PIPE_DEFINITION: &str = "SPIP";
 const DRAIN_PIPE_DEFINITION: &str = "DPIP";
 const CONNECT_ACTION: &str = "Connect";
 const CONKIT_DEFINITION: &str = "CNKT";
-const ACQUIRE_REQUEST_INTERVAL: u32 = 50;
+const ACQUIRE_REQUEST_INTERVAL: i32 = 50;
 const COMMAND_FLAG_ENTER_PUSH_TARGET: i32 = 0b10;
 const COMMAND_FLAG_MOVE_TO_NO_POS_ADJUST: i32 = 0b1;
 const COMMAND_FLAG_MOVE_TO_PUSH_TARGET: i32 = 0b10;
@@ -630,10 +630,12 @@ mod tests {
             name: id.to_name().to_owned(),
             target,
             tx: None,
+            tx_value: None,
             tx_definition: None,
             ty: None,
             target2: None,
             data: CommandData::None,
+            legacy_data: None,
             finished: false,
         }
     }
@@ -2546,6 +2548,80 @@ mod tests {
             Some(10),
             "Data wins even when an interval is present"
         );
+
+        let negative_data =
+            CommandRequest::new(CommandId::Wait).with_data(CommandData::Integer(-7));
+        assert_eq!(
+            WaitState::from_request(&negative_data).remaining,
+            Some(-7),
+            "native Wait installs signed nonzero Data verbatim"
+        );
+
+        let negative_tx = CommandRequest::new(CommandId::Wait).with_tx(Some(-9));
+        assert_eq!(
+            WaitState::from_request(&negative_tx).remaining,
+            Some(-9),
+            "native Wait installs signed nonzero Tx verbatim"
+        );
+    }
+
+    #[test]
+    fn negative_wait_intervals_survive_evaluation_execution_and_snapshot_restore() {
+        let actor = snapshot_with_id(52);
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+
+        let mut direct = CommandStack::new();
+        direct
+            .push_front(CommandRequest::new(CommandId::Wait).with_update_interval(-4))
+            .expect("Wait queues");
+        assert_eq!(
+            direct.step(&ctx).expect("direct Wait evaluates").status,
+            CommandStatus::Running
+        );
+        assert_eq!(direct.legacy_save_commands()[0].update_interval, -4);
+        assert_eq!(
+            direct.step(&ctx).expect("direct Wait executes").status,
+            CommandStatus::Running
+        );
+        assert_eq!(direct.snapshot().commands[0].update_interval, Some(-4));
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Wait)
+                    .with_update_interval(-4)
+                    .with_data(CommandData::Integer(-7)),
+            )
+            .expect("Wait queues");
+
+        let evaluation = stack.step(&ctx).expect("Wait evaluates");
+        assert_eq!(evaluation.status, CommandStatus::Running);
+        assert_eq!(
+            stack.legacy_save_commands()[0].update_interval,
+            -7,
+            "InitEvaluation replaces the raw interval with signed Data"
+        );
+
+        let execution = stack.step(&ctx).expect("negative Wait executes");
+        assert_eq!(execution.status, CommandStatus::Running);
+        assert_eq!(stack.legacy_save_commands()[0].update_interval, -7);
+
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands[0].update_interval, Some(-7));
+        let mut restored = CommandStack::new();
+        restored.restore_from_snapshot(&snapshot);
+        assert_eq!(restored.legacy_save_commands()[0].update_interval, -7);
+        assert_eq!(
+            restored
+                .step(&ctx)
+                .expect("restored negative Wait executes")
+                .status,
+            CommandStatus::Running
+        );
+        assert_eq!(restored.legacy_save_commands()[0].update_interval, -7);
     }
 
     #[test]
@@ -9946,7 +10022,10 @@ mod tests {
             &CommandRequest::new(CommandId::Call)
                 .with_target(Some(target_id))
                 .with_target2(Some(target2_id))
-                .with_tx(Some(42))
+                .with_tx_value(lc_script::Value::Array(vec![
+                    lc_script::Value::Int(42),
+                    lc_script::Value::String("tagged".into()),
+                ]))
                 .with_ty(Some(7))
                 .with_data(CommandData::Text("ControlCall".into())),
         )
@@ -9964,6 +10043,7 @@ mod tests {
                 function,
                 caller,
                 tx,
+                tx_value,
                 tx_definition,
                 ty,
                 target2,
@@ -9972,7 +10052,14 @@ mod tests {
                 assert_eq!(*object_id, target_id);
                 assert_eq!(function, "ControlCall");
                 assert_eq!(*caller, builder_id);
-                assert_eq!(*tx, Some(42));
+                assert_eq!(*tx, None);
+                assert_eq!(
+                    tx_value,
+                    &Some(lc_script::Value::Array(vec![
+                        lc_script::Value::Int(42),
+                        lc_script::Value::String("tagged".into()),
+                    ]))
+                );
                 assert!(tx_definition.is_none());
                 assert_eq!(*ty, Some(7));
                 assert_eq!(*target2, Some(target2_id));
@@ -10503,6 +10590,7 @@ mod tests {
                 function,
                 caller,
                 tx,
+                tx_value,
                 tx_definition,
                 ty,
                 target2,
@@ -10512,6 +10600,7 @@ mod tests {
                 assert_eq!(function, "ControlTransfer");
                 assert_eq!(*caller, actor_id);
                 assert_eq!(*tx, Some(42));
+                assert_eq!(tx_value, &Some(lc_script::Value::Int(42)));
                 assert!(tx_definition.is_none());
                 assert_eq!(*ty, Some(-5));
                 assert!(target2.is_none());
@@ -15531,6 +15620,49 @@ mod tests {
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Failed);
     }
+
+    #[test]
+    fn legacy_compiled_command_restores_live_fields_and_executes() {
+        let saved = LegacyCommandSave {
+            view: CommandView {
+                name: "MoveTo".into(),
+                target: None,
+                tx: Some(100),
+                tx_value: Some(lc_script::Value::Int(100)),
+                tx_definition: None,
+                ty: Some(100),
+                target2: None,
+                data: CommandData::Integer(0),
+                legacy_data: None,
+                finished: false,
+            },
+            update_interval: -4,
+            evaluated: true,
+            path_checked: true,
+            finished: false,
+            failures: 0,
+            retries: 3,
+            permit: 0,
+            base_mode: CommandMode::Sub.to_i32(),
+            text: String::new(),
+        };
+        let snapshot = CommandStackSnapshot::from_legacy_save_commands(vec![saved.clone()])
+            .expect("legacy command compiles");
+        let projected = snapshot.legacy_save_commands();
+        assert_eq!(projected, [saved]);
+
+        let mut stack = CommandStack::new();
+        stack.restore_from_snapshot(&snapshot);
+        let mut actor = snapshot_with_id(1);
+        actor.position = Vector2::new(100, 100);
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 1);
+        let result = stack.execute_front(&ctx).expect("restored MoveTo executes");
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(stack.legacy_save_commands()[0].update_interval, -4);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -15551,6 +15683,15 @@ impl CommandMode {
             _ => None,
         }
     }
+
+    pub(crate) const fn to_i32(self) -> i32 {
+        match self {
+            Self::SilentSub => 0,
+            Self::Base => 1,
+            Self::SilentBase => 2,
+            Self::Sub => 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15566,13 +15707,21 @@ pub struct CommandRequest {
     pub target: Option<ObjectId>,
     pub target2: Option<ObjectId>,
     pub tx: Option<i32>,
+    /// Exact tagged C4Command::Tx. Integer/C4ID mirrors remain above/below
+    /// for the many command implementations that consume those projections;
+    /// Call forwards this complete value verbatim to script.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_value: Option<lc_script::Value>,
     /// C4Command::Tx is a tagged C4Value. Most commands use its integer
     /// payload, but Call must preserve a C4ID tag for script parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tx_definition: Option<DefinitionId>,
     pub ty: Option<i32>,
     pub data: CommandData,
-    pub update_interval: u32,
+    /// Raw signed `C4Command::UpdateInterval`. Native accepts negative
+    /// values from script and compiled saves; `Execute` decrements only
+    /// strictly positive values, so non-positive words remain verbatim.
+    pub update_interval: i32,
     /// C4Command::Evaluated as initialized by C4Object::AddCommand's
     /// fInitEvaluation parameter. Pathfinder waypoints are the only
     /// commands created with evaluation already complete.
@@ -15589,6 +15738,7 @@ impl CommandRequest {
             target: None,
             target2: None,
             tx: None,
+            tx_value: None,
             tx_definition: None,
             ty: None,
             data: CommandData::None,
@@ -15611,13 +15761,28 @@ impl CommandRequest {
 
     pub fn with_tx(mut self, tx: Option<i32>) -> Self {
         self.tx = tx;
+        self.tx_value = tx.map(lc_script::Value::Int);
         self.tx_definition = None;
         self
     }
 
     pub fn with_tx_definition(mut self, definition_id: DefinitionId) -> Self {
         self.tx = definition_id_to_c4id(&definition_id);
+        self.tx_value = Some(lc_script::Value::C4Id(definition_id.clone()));
         self.tx_definition = Some(definition_id);
+        self
+    }
+
+    pub fn with_tx_value(mut self, value: lc_script::Value) -> Self {
+        self.tx = match &value {
+            lc_script::Value::Int(value) => Some(*value),
+            _ => None,
+        };
+        self.tx_definition = match &value {
+            lc_script::Value::C4Id(definition) => Some(definition.clone()),
+            _ => None,
+        };
+        self.tx_value = Some(value);
         self
     }
 
@@ -15631,7 +15796,7 @@ impl CommandRequest {
         self
     }
 
-    pub fn with_update_interval(mut self, interval: u32) -> Self {
+    pub fn with_update_interval(mut self, interval: i32) -> Self {
         self.update_interval = interval;
         self
     }
@@ -15649,6 +15814,27 @@ impl CommandRequest {
     pub fn with_mode(mut self, mode: CommandMode) -> Self {
         self.mode = mode;
         self
+    }
+}
+
+/// Typed command helpers retain several historical positive counters that
+/// predate the shared raw `ActiveCommand::update_interval`. They are not the
+/// persisted C4Command word; convert explicitly so a negative raw interval
+/// never wraps to a huge unsigned duration.
+const fn positive_helper_interval(interval: i32) -> u32 {
+    if interval > 0 {
+        interval as u32
+    } else {
+        0
+    }
+}
+
+const fn positive_helper_interval_or_one(interval: i32) -> u32 {
+    let interval = positive_helper_interval(interval);
+    if interval == 0 {
+        1
+    } else {
+        interval
     }
 }
 
@@ -15970,6 +16156,8 @@ pub enum CommandEvent {
         caller: ObjectId,
         tx: Option<i32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        tx_value: Option<lc_script::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         tx_definition: Option<DefinitionId>,
         ty: Option<i32>,
         target2: Option<ObjectId>,
@@ -16200,10 +16388,15 @@ pub struct CommandSnapshot {
     mode: CommandMode,
     retries: i32,
     failures: i32,
+    /// Generic C4Command::Evaluated flag. Command-specific state retains
+    /// the special InitEvaluation transitions; this field covers every
+    /// ordinary command after its first Execute.
+    #[serde(default)]
+    evaluated: bool,
     /// C4Command::UpdateInterval after the most recent Execute. Kept on
     /// the stack entry because it is shared by every command kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    update_interval: Option<u32>,
+    update_interval: Option<i32>,
     /// The creating request — the base of the FnGetCommand element view
     /// (persisted so restored stacks keep their elements; pre-existing
     /// saves without it degrade to name-only views).
@@ -16221,6 +16414,7 @@ impl PartialEq for CommandSnapshot {
             && self.mode == other.mode
             && self.retries == other.retries
             && self.failures == other.failures
+            && self.evaluated == other.evaluated
             && self.update_interval == other.update_interval
             && self.request == other.request
             && self.finished == other.finished
@@ -16235,6 +16429,7 @@ impl CommandSnapshot {
             mode: entry.mode,
             retries: entry.retries,
             failures: entry.failures,
+            evaluated: entry.evaluated,
             update_interval: Some(entry.update_interval),
             request: entry.request.clone(),
             finished: entry.finished,
@@ -16254,13 +16449,37 @@ pub struct CommandView {
     pub name: String,
     pub target: Option<ObjectId>,
     pub tx: Option<i32>,
+    /// Exact tagged Tx for Call/GetCommand/save projection. Older snapshots
+    /// reconstruct it from the integer/C4ID mirrors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_value: Option<lc_script::Value>,
     pub tx_definition: Option<DefinitionId>,
     pub ty: Option<i32>,
     pub target2: Option<ObjectId>,
     pub data: CommandData,
+    /// Independent C4Command::Data word when `data` carries Call's function
+    /// Text. Native Call stores both fields; script APIs normally seed zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_data: Option<i32>,
     /// Whether C4Command::Finished is set while the entry remains linked.
     #[serde(default, skip_serializing_if = "crate::is_false")]
     pub finished: bool,
+}
+
+/// Complete C4Command::CompileFunc projection used by Objects.txt saves.
+/// Unlike CommandView, this includes native scheduler and retry state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LegacyCommandSave {
+    pub(crate) view: CommandView,
+    pub(crate) update_interval: i32,
+    pub(crate) evaluated: bool,
+    pub(crate) path_checked: bool,
+    pub(crate) finished: bool,
+    pub(crate) failures: i32,
+    pub(crate) retries: i32,
+    pub(crate) permit: i32,
+    pub(crate) base_mode: i32,
+    pub(crate) text: String,
 }
 
 /// The failed command fields frozen before its script feedback can mutate
@@ -16284,16 +16503,63 @@ impl CommandView {
             name,
             target: request.and_then(|request| request.target),
             tx: request.and_then(|request| request.tx),
+            tx_value: request.and_then(|request| {
+                request.tx_value.clone().or_else(|| {
+                    request
+                        .tx_definition
+                        .as_ref()
+                        .map(|value| lc_script::Value::C4Id(value.clone()))
+                        .or_else(|| request.tx.map(lc_script::Value::Int))
+                })
+            }),
             tx_definition: request.and_then(|request| request.tx_definition.clone()),
             ty: request.and_then(|request| request.ty),
             target2: request.and_then(|request| request.target2),
             data: request
                 .map(|request| request.data.clone())
                 .unwrap_or(CommandData::None),
+            legacy_data: None,
             finished,
         };
         state.apply_live_overrides(&mut view);
         view
+    }
+}
+
+fn legacy_command_save(
+    view: CommandView,
+    request: Option<&CommandRequest>,
+    state: &CommandState,
+    update_interval: i32,
+    evaluated: bool,
+    finished: bool,
+    failures: i32,
+    retries: i32,
+    mode: CommandMode,
+) -> LegacyCommandSave {
+    let text = match (&view.data, state.id()) {
+        (CommandData::Text(text), Some(CommandId::Call)) => text.clone(),
+        _ => String::new(),
+    };
+    LegacyCommandSave {
+        view,
+        update_interval,
+        evaluated: state.legacy_evaluated(evaluated),
+        path_checked: state.legacy_path_checked(),
+        finished,
+        failures,
+        retries,
+        // Permit is initialized to zero and has no writer anywhere in the
+        // classic engine. Keep the explicit slot in the save projection.
+        permit: 0,
+        base_mode: mode.to_i32(),
+        text: request
+            .filter(|request| request.id == CommandId::Call)
+            .and_then(|request| match &request.data {
+                CommandData::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or(text),
     }
 }
 
@@ -16355,6 +16621,114 @@ impl CommandStackSnapshot {
                 )
             })
             .collect()
+    }
+
+    pub(crate) fn legacy_save_commands(&self) -> Vec<LegacyCommandSave> {
+        self.commands
+            .iter()
+            .map(|command| {
+                let view = CommandView::from_entry(
+                    command
+                        .state
+                        .id()
+                        .map(CommandId::to_name)
+                        .unwrap_or("None")
+                        .to_string(),
+                    command.request.as_ref(),
+                    &command.state,
+                    command.finished.is_some(),
+                );
+                legacy_command_save(
+                    view,
+                    command.request.as_ref(),
+                    &command.state,
+                    command.update_interval.unwrap_or_else(|| {
+                        command.request.as_ref().map_or_else(
+                            || {
+                                i32::try_from(command.state.legacy_update_interval())
+                                    .unwrap_or(i32::MAX)
+                            },
+                            |request| request.update_interval,
+                        )
+                    }),
+                    command.evaluated,
+                    command.finished.is_some(),
+                    command.failures,
+                    command.retries,
+                    command.mode,
+                )
+            })
+            .collect()
+    }
+
+    /// Rebuild the live typed command stack from the fields emitted by
+    /// `C4Command::CompileFunc`. Object pointers are still enumerated here;
+    /// `Engine::finish_legacy_object_load` resolves them after all objects
+    /// have materialized, just like C4GameObjects::Load.
+    pub(crate) fn from_legacy_save_commands(
+        commands: Vec<LegacyCommandSave>,
+    ) -> Result<Self, CommandError> {
+        let mut snapshots = Vec::with_capacity(commands.len());
+        for command in commands {
+            let id = CommandId::from_name(&command.view.name).ok_or(CommandError::Unsupported)?;
+            let mode =
+                CommandMode::from_i32(command.base_mode).ok_or(CommandError::Unsupported)?;
+            let data = if id == CommandId::Call {
+                CommandData::Text(command.text.clone())
+            } else {
+                command.view.data.clone()
+            };
+            let request = CommandRequest {
+                id,
+                target: command.view.target,
+                target2: command.view.target2,
+                tx: command.view.tx.or_else(|| {
+                    command
+                        .view
+                        .tx_definition
+                        .as_deref()
+                        .and_then(definition_id_to_c4id)
+                }),
+                tx_value: command.view.tx_value.clone().or_else(|| {
+                    command
+                        .view
+                        .tx_definition
+                        .as_ref()
+                        .map(|value| lc_script::Value::C4Id(value.clone()))
+                        .or_else(|| command.view.tx.map(lc_script::Value::Int))
+                }),
+                tx_definition: command.view.tx_definition.clone(),
+                ty: command.view.ty,
+                data,
+                update_interval: command.update_interval,
+                evaluated: command.evaluated,
+                retries: command.retries,
+                mode,
+            };
+            let mut active = ActiveCommand::from_request(request)?;
+            if let CommandState::Call(state) = &mut active.state {
+                state.legacy_data = command.view.legacy_data.unwrap_or_else(|| {
+                    match command.view.data {
+                        CommandData::Integer(value) => value,
+                        CommandData::Text(_) | CommandData::None => 0,
+                    }
+                });
+            }
+            active.retries = command.retries;
+            active.failures = command.failures;
+            active.evaluated = command.evaluated;
+            active.update_interval = command.update_interval;
+            active.finished = command.finished.then_some(CommandStatus::Completed);
+            active
+                .state
+                .restore_legacy_evaluation(command.evaluated, command.path_checked);
+            snapshots.push(CommandSnapshot::new(&active));
+        }
+        Ok(Self {
+            commands: snapshots,
+            next_instance_id: 0,
+            detached_grab_attempts: Vec::new(),
+        })
     }
 }
 
@@ -16596,6 +16970,36 @@ impl CommandStack {
                     entry.request.as_ref(),
                     &entry.state,
                     entry.finished.is_some(),
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn legacy_save_commands(&self) -> Vec<LegacyCommandSave> {
+        self.entries
+            .iter()
+            .map(|entry| {
+                let view = CommandView::from_entry(
+                    entry
+                        .state
+                        .id()
+                        .map(CommandId::to_name)
+                        .unwrap_or("None")
+                        .to_string(),
+                    entry.request.as_ref(),
+                    &entry.state,
+                    entry.finished.is_some(),
+                );
+                legacy_command_save(
+                    view,
+                    entry.request.as_ref(),
+                    &entry.state,
+                    entry.update_interval,
+                    entry.evaluated,
+                    entry.finished.is_some(),
+                    entry.failures,
+                    entry.retries,
+                    entry.mode,
                 )
             })
             .collect()
@@ -16889,6 +17293,9 @@ impl CommandStack {
             if let Some(request) = &mut entry.request {
                 changed |= clear_matching_object_reference(&mut request.target, removed);
                 changed |= clear_matching_object_reference(&mut request.target2, removed);
+                if let Some(value) = &mut request.tx_value {
+                    changed |= clear_value_object_reference(value, removed);
+                }
             }
             changed |= entry.state.clear_object_reference(removed);
         }
@@ -18403,7 +18810,7 @@ impl MoveToState {
             },
             evaluated: request.evaluated,
             path_checked: false,
-            update_interval: request.update_interval,
+            update_interval: positive_helper_interval(request.update_interval),
             tolerance: 5,
             last_direction: CommandDirection::Stop,
             stop_continuation: None,
@@ -19048,7 +19455,7 @@ impl EnterState {
         Ok(Self {
             target: request.target,
             push_target,
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
         })
     }
 
@@ -19176,7 +19583,7 @@ struct ExitState {
 impl ExitState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
         Ok(Self {
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             evaluated: request.evaluated,
             activation_pending: 0,
         })
@@ -19618,7 +20025,7 @@ impl ConstructState {
             target2: request.target2,
             definition_id,
             site,
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             spawn_requested: false,
             construction_id: None,
             script_pending: false,
@@ -20145,6 +20552,7 @@ impl TransferState {
                 function: "ControlTransfer".into(),
                 caller: ctx.object.id,
                 tx: self.tx,
+                tx_value: self.tx.map(lc_script::Value::Int),
                 tx_definition: None,
                 ty: self.ty,
                 target2: None,
@@ -20170,7 +20578,7 @@ impl ChopState {
         let target = request.target.ok_or(CommandError::Unsupported)?;
         Ok(Self {
             target,
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
         })
     }
 
@@ -20318,7 +20726,7 @@ impl DigState {
         };
         Ok(Self {
             target: Vector2::new(tx, ty),
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             dig_out_material,
             ungrab_requested: false,
             exit_requested: false,
@@ -20528,7 +20936,7 @@ impl GrabState {
             target,
             offset_x: request.tx.unwrap_or(0),
             offset_y: request.ty.unwrap_or(0),
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             reject_pending: false,
             target_cleared: request.target.is_none(),
         })
@@ -20634,7 +21042,7 @@ impl ActivateState {
             container: request.target2,
             definition_id,
             remaining,
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             exit_requested: false,
             enter_requested: false,
         })
@@ -20884,7 +21292,7 @@ impl PushToState {
             container: request.target2,
             tx: request.tx,
             ty: request.ty,
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             evaluation_pending: !request.evaluated,
         })
     }
@@ -21044,7 +21452,7 @@ struct UnGrabState {
 impl UnGrabState {
     fn from_request(request: &CommandRequest) -> Self {
         Self {
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             completion_pending: false,
         }
     }
@@ -21111,9 +21519,10 @@ impl JumpState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct WaitState {
-    /// Effective duration chosen from Data, Tx, then UpdateInterval. The
-    /// active command installs Data/Tx overrides during InitEvaluation.
-    remaining: Option<u32>,
+    /// Effective signed interval chosen from Data, Tx, then UpdateInterval.
+    /// The active command installs Data/Tx overrides during InitEvaluation;
+    /// negative values remain negative and therefore skip the countdown.
+    remaining: Option<i32>,
     #[serde(default)]
     evaluation_pending: bool,
     /// Data and Tx overwrite UpdateInterval after its ordinary pre-evaluation
@@ -21127,9 +21536,9 @@ impl WaitState {
         // C4CMD_Wait InitEvaluation (C4Command.cpp:1659-1663): a nonzero
         // Data overrides the update interval, else a nonzero Tx does.
         let (interval, evaluation_overrides_interval) = match request.data {
-            CommandData::Integer(data) if data != 0 => (data.max(0) as u32, true),
+            CommandData::Integer(data) if data != 0 => (data, true),
             _ => match request.tx {
-                Some(tx) if tx != 0 => (tx.max(0) as u32, true),
+                Some(tx) if tx != 0 => (tx, true),
                 _ => (request.update_interval, false),
             },
         };
@@ -21184,7 +21593,7 @@ impl PutState {
             requested_item: request.target2,
             definition_id: command_data_to_definition_id(&request.data),
             remaining_count: request.tx.unwrap_or(0),
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             put_ty: request.ty.unwrap_or(0),
             put_pending: false,
         })
@@ -21461,7 +21870,7 @@ impl DropState {
         Self {
             requested_item: request.target,
             target_position,
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             delegated_put: false,
             delegated_container: None,
             completion_pending: false,
@@ -21667,7 +22076,7 @@ impl GetState {
             remaining,
             jump_tx,
             jump_ty: request.ty.unwrap_or(0),
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             enter_pending: false,
         })
     }
@@ -22062,7 +22471,7 @@ struct RetryState {
 impl RetryState {
     fn from_request(request: &CommandRequest) -> Self {
         Self {
-            remaining: request.update_interval.max(1),
+            remaining: positive_helper_interval_or_one(request.update_interval),
         }
     }
 
@@ -22081,7 +22490,7 @@ impl FollowState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
         Ok(Self {
             target: request.target,
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
         })
     }
 
@@ -22184,7 +22593,7 @@ impl ThrowState {
             target: request.target,
             tx: request.tx,
             ty: request.ty,
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             put_take_pending: false,
             continuations: Vec::new(),
         })
@@ -22413,7 +22822,7 @@ impl AttackState {
         let target = request.target.ok_or(CommandError::Unsupported)?;
         Ok(Self {
             target,
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
         })
     }
 
@@ -22466,11 +22875,23 @@ struct CallState {
     target: ObjectId,
     function: String,
     tx: Option<i32>,
+    /// Exact C4Value payload. `tx`/`tx_definition` are compatibility
+    /// projections for older snapshots and non-Call command consumers.
+    #[serde(default = "default_call_tx_value")]
+    tx_value: lc_script::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tx_definition: Option<DefinitionId>,
     ty: Option<i32>,
     target2: Option<ObjectId>,
+    /// C4Command::Data is independent of Call's `Text` function name.
+    /// Script-created calls initialize it to zero; Objects.txt restores it.
+    #[serde(default)]
+    legacy_data: i32,
     executed: bool,
+}
+
+fn default_call_tx_value() -> lc_script::Value {
+    lc_script::Value::Nil
 }
 
 impl CallState {
@@ -22484,9 +22905,21 @@ impl CallState {
             target,
             function,
             tx: request.tx,
+            tx_value: request
+                .tx_value
+                .clone()
+                .or_else(|| {
+                    request
+                        .tx_definition
+                        .as_ref()
+                        .map(|value| lc_script::Value::C4Id(value.clone()))
+                })
+                .or_else(|| request.tx.map(lc_script::Value::Int))
+                .unwrap_or(lc_script::Value::Nil),
             tx_definition: request.tx_definition.clone(),
             ty: request.ty,
             target2: request.target2,
+            legacy_data: 0,
             executed: false,
         })
     }
@@ -22518,6 +22951,7 @@ impl CallState {
             function: self.function.clone(),
             caller: ctx.object.id,
             tx: self.tx,
+            tx_value: Some(self.tx_value.clone()),
             tx_definition: self.tx_definition.clone(),
             ty: self.ty,
             target2: self.target2,
@@ -22729,7 +23163,7 @@ impl AcquireState {
             ignore_container: request.target2,
             range_x,
             range_y,
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             buy_requested: false,
             last_buy_request: None,
             script_pending: false,
@@ -22953,7 +23387,7 @@ impl SellState {
             target: request.target,
             preferred: request.target2,
             remaining: request.tx.unwrap_or(0),
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             last_enter_request: None,
             evaluation_pending: false,
         })
@@ -23074,7 +23508,7 @@ impl BuyState {
         Ok(Self {
             definition_id,
             target: request.target,
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
             remaining_count: request.tx.unwrap_or(0),
             evaluation_pending: false,
         })
@@ -23188,7 +23622,7 @@ impl HomeState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
         Ok(Self {
             target: request.target,
-            update_interval: request.update_interval.max(1),
+            update_interval: positive_helper_interval_or_one(request.update_interval),
         })
     }
 
@@ -23598,6 +24032,35 @@ impl CommandState {
         }
     }
 
+    fn legacy_evaluated(&self, generic: bool) -> bool {
+        match self {
+            CommandState::MoveTo(state) => state.evaluated,
+            CommandState::Exit(state) => state.evaluated,
+            CommandState::PushTo(state) => !state.evaluation_pending,
+            CommandState::Wait(state) => !state.evaluation_pending,
+            CommandState::Acquire(state) => !state.evaluation_pending,
+            _ => generic,
+        }
+    }
+
+    fn legacy_path_checked(&self) -> bool {
+        matches!(self, CommandState::MoveTo(state) if state.path_checked)
+    }
+
+    fn restore_legacy_evaluation(&mut self, evaluated: bool, path_checked: bool) {
+        match self {
+            CommandState::MoveTo(state) => {
+                state.evaluated = evaluated;
+                state.path_checked = path_checked;
+            }
+            CommandState::Exit(state) => state.evaluated = evaluated,
+            CommandState::PushTo(state) => state.evaluation_pending = !evaluated,
+            CommandState::Wait(state) => state.evaluation_pending = !evaluated,
+            CommandState::Acquire(state) => state.evaluation_pending = !evaluated,
+            _ => {}
+        }
+    }
+
     /// Child-command latches are meaningful only while that child sits
     /// above its parent. Whenever the parent itself executes, the child has
     /// completed, failed, or could not be pushed (for example StackFull), so
@@ -23671,6 +24134,12 @@ impl CommandState {
                 view.target = state.target;
                 view.target2 = state.preferred;
                 view.tx = (state.remaining != 0).then_some(state.remaining);
+            }
+            CommandState::Call(state) => {
+                view.tx = state.tx;
+                view.tx_value = Some(state.tx_value.clone());
+                view.tx_definition = state.tx_definition.clone();
+                view.legacy_data = Some(state.legacy_data);
             }
             _ => {}
         }
@@ -23772,7 +24241,10 @@ impl CommandState {
                 clear(&mut state.target) | clear(&mut state.fallback_container)
             }
             CommandState::Throw(state) => clear(&mut state.target),
-            CommandState::Call(state) => clear(&mut state.target2),
+            CommandState::Call(state) => {
+                clear(&mut state.target2)
+                    | clear_value_object_reference(&mut state.tx_value, removed)
+            }
             CommandState::Acquire(state) => {
                 clear(&mut state.target) | clear(&mut state.ignore_container)
             }
@@ -23799,7 +24271,9 @@ impl CommandState {
             CommandState::Grab(state) => state.update_interval,
             CommandState::Throw(state) => state.update_interval,
             CommandState::UnGrab(state) => state.update_interval,
-            CommandState::Wait(state) => state.remaining.unwrap_or(0),
+            CommandState::Wait(state) => {
+                positive_helper_interval(state.remaining.unwrap_or(0))
+            }
             CommandState::Put(state) => state.update_interval,
             CommandState::Drop(state) => state.update_interval,
             CommandState::Get(state) => state.update_interval,
@@ -23833,6 +24307,35 @@ fn clear_matching_object_reference(reference: &mut Option<ObjectId>, removed: Ob
     }
 }
 
+fn clear_value_object_reference(value: &mut lc_script::Value, removed: ObjectId) -> bool {
+    match value {
+        lc_script::Value::Object(id) if ObjectId::new(*id) == removed => {
+            *value = lc_script::Value::Nil;
+            true
+        }
+        lc_script::Value::Array(values) => values.iter_mut().fold(false, |changed, value| {
+            clear_value_object_reference(value, removed) | changed
+        }),
+        lc_script::Value::Proplist(entries) => {
+            let previous = std::mem::take(entries);
+            let mut changed = false;
+            for (mut key, mut value) in previous {
+                if matches!(&key, lc_script::Value::Object(id) if ObjectId::new(*id) == removed)
+                    || matches!(&value, lc_script::Value::Object(id) if ObjectId::new(*id) == removed)
+                {
+                    changed = true;
+                    continue;
+                }
+                changed |= clear_value_object_reference(&mut key, removed);
+                changed |= clear_value_object_reference(&mut value, removed);
+                entries.insert_key(key, value);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ActiveCommand {
     #[serde(skip)]
@@ -23841,9 +24344,12 @@ struct ActiveCommand {
     mode: CommandMode,
     retries: i32,
     failures: i32,
+    /// Generic C4Command::Evaluated flag for commands whose typed state does
+    /// not otherwise need to retain the InitEvaluation latch.
+    evaluated: bool,
     /// C4Command::UpdateInterval: a per-front-execution lifetime, not a
     /// wall-clock polling cadence (C4Command.cpp:1545-1552).
-    update_interval: u32,
+    update_interval: i32,
     /// The creating request, the FnGetCommand element-view base
     /// (C4Script.cpp:926-945); persisted through CommandSnapshot so
     /// restored stacks keep their elements.
@@ -23915,6 +24421,7 @@ impl ActiveCommand {
             mode: request.mode,
             retries: request.retries.max(0),
             failures: 0,
+            evaluated: request.evaluated,
             update_interval,
             request: Some(request),
             finished: None,
@@ -23928,6 +24435,7 @@ impl ActiveCommand {
             mode,
             retries,
             failures,
+            evaluated,
             update_interval,
             request,
             finished,
@@ -23937,10 +24445,10 @@ impl ActiveCommand {
                 state,
                 CommandState::MoveTo(_) | CommandState::Wait(_) | CommandState::Retry(_)
             ) {
-                state.legacy_update_interval()
+                i32::try_from(state.legacy_update_interval()).unwrap_or(i32::MAX)
             } else {
                 request.as_ref().map_or_else(
-                    || state.legacy_update_interval(),
+                    || i32::try_from(state.legacy_update_interval()).unwrap_or(i32::MAX),
                     |request| request.update_interval,
                 )
             }
@@ -23951,6 +24459,7 @@ impl ActiveCommand {
             mode,
             retries,
             failures,
+            evaluated,
             update_interval: remaining,
             request,
             finished,
@@ -23992,6 +24501,10 @@ impl ActiveCommand {
                 return CommandStepResult::completed(None);
             }
         }
+
+        // C4Command::InitEvaluation sets this for every command, including
+        // commands with no special evaluation body.
+        self.evaluated = true;
 
         // C4Command::InitEvaluation runs after the interval decrement and
         // consumes the Execute without invoking the command handler.

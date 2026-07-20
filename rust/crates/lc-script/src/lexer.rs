@@ -16,6 +16,10 @@ pub struct Lexer<'a> {
     just_saw_cr: bool,
     strict_level: u8,
     diagnostics: Vec<ParseError>,
+    /// Successfully decoded string literals in lexer encounter order. C++
+    /// registers these with C4StringTable while linking the script, before
+    /// any of the values are evaluated.
+    string_literals: Vec<String>,
     input_is_c4_bytes: bool,
 }
 
@@ -34,6 +38,7 @@ impl<'a> Lexer<'a> {
             just_saw_cr: false,
             strict_level: 0,
             diagnostics: Vec::new(),
+            string_literals: Vec::new(),
             input_is_c4_bytes: false,
         }
     }
@@ -51,6 +56,10 @@ impl<'a> Lexer<'a> {
 
     pub(crate) fn take_diagnostics(&mut self) -> Vec<ParseError> {
         std::mem::take(&mut self.diagnostics)
+    }
+
+    pub(crate) fn take_string_literals(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.string_literals)
     }
 
     pub fn next_token(&mut self) -> Result<Token, ParseError> {
@@ -777,15 +786,13 @@ impl<'a> Lexer<'a> {
         while let Some((_, ch, char_line, char_column)) = self.bump_char() {
             match ch {
                 '"' => {
-                    return Ok(Token::new(
-                        TokenKind::String(if value_is_canonical_bytes || self.input_is_c4_bytes {
+                    let value = if value_is_canonical_bytes || self.input_is_c4_bytes {
                             c4_string_from_bytes(&c4_string_bytes(&value))
                         } else {
                             c4_string_from_literal(value)
-                        }),
-                        line,
-                        column,
-                    ));
+                        };
+                    self.string_literals.push(value.clone());
+                    return Ok(Token::new(TokenKind::String(value), line, column));
                 }
                 _ if (if self.input_is_c4_bytes {
                     c4_string_byte_len(&value)

@@ -3,17 +3,32 @@
 //! C4ObjectInfoList.cpp:56-83). The join pipeline consumes this to mirror
 //! `C4Player::Load` (C4Player.cpp:1089-1107).
 
+use std::collections::{HashMap, HashSet};
+
 use lc_resources::{Group, PhysicalInfo};
 use serde::{Deserialize, Serialize};
 
 use crate::scenario::ScenarioError;
 use crate::{
-    CrewInfoCoreFields, CrewPermanentPortrait, CrewPortrait, CrewPortraitState, DefinitionId,
-    bounded_crew_portrait_file, bounded_loaded_crew_type_name,
+    bounded_crew_portrait_file, bounded_loaded_crew_type_name, CrewInfoCoreFields,
+    CrewPermanentPortrait, CrewPortrait, CrewPortraitState, DefinitionId,
 };
+
+/// C4StringTable IDs and live object numbers used when denumerating an
+/// embedded runtime player's ExtraData. These are scenario-wide in native
+/// C++; the player child group deliberately carries no private Strings.txt.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PersistedC4ValueResolution {
+    pub strings: HashMap<i32, String>,
+    pub object_numbers: HashSet<u64>,
+}
 
 fn is_zero_i32(value: &i32) -> bool {
     *value == 0
+}
+
+fn is_one_i32(value: &i32) -> bool {
+    *value == 1
 }
 
 fn is_false(value: &bool) -> bool {
@@ -22,6 +37,153 @@ fn is_false(value: &bool) -> bool {
 
 fn default_crew_rank_name() -> String {
     "Clonk".to_string()
+}
+
+fn default_player_name() -> String {
+    "Neuling".to_string()
+}
+
+fn default_player_rank_name() -> String {
+    // C4PlayerInfoCore::Default uses the built-in German fallback when no
+    // process-local C4RankSystem is supplied. The localized compile default
+    // is only relevant while omitting the field on write.
+    "Rang".to_string()
+}
+
+fn default_pref_color_dw() -> u32 {
+    0xff
+}
+
+fn default_pref_mouse() -> bool {
+    true
+}
+
+fn default_pref_mouse_value() -> i32 {
+    1
+}
+
+/// Exact persisted `C4RoundResult` nested below `[LastRound]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PlayerLastRoundState {
+    #[serde(
+        default,
+        with = "lc_script::c4_string_serde",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub date: u32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub duration: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub won: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub score: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub final_score: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub total_score: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub bonus: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub level: i32,
+}
+
+fn u32_is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+/// Complete `C4PlayerInfoCore` retained independently from the live
+/// `C4Player` fields. In C++ this object owns profile identity/preferences
+/// that cannot be reconstructed from the assigned in-round color or slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerInfoCoreState {
+    #[serde(default = "default_player_name", with = "lc_script::c4_string_serde")]
+    pub pref_name: String,
+    #[serde(default, with = "lc_script::c4_string_serde")]
+    pub comment: String,
+    #[serde(default)]
+    pub rank: i32,
+    #[serde(
+        default = "default_player_rank_name",
+        with = "lc_script::c4_string_serde"
+    )]
+    pub rank_name: String,
+    #[serde(default)]
+    pub score: i32,
+    #[serde(default)]
+    pub rounds: i32,
+    #[serde(default)]
+    pub rounds_won: i32,
+    #[serde(default)]
+    pub rounds_lost: i32,
+    #[serde(default)]
+    pub total_playing_time: i32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_data: Vec<(String, lc_script::Value)>,
+    #[serde(default)]
+    pub pref_color: i32,
+    #[serde(default = "default_pref_color_dw")]
+    pub pref_color_dw: u32,
+    #[serde(default)]
+    pub pref_color2_dw: u32,
+    #[serde(default)]
+    pub pref_control: i32,
+    #[serde(default)]
+    pub pref_control_style: bool,
+    /// Exact persisted `PrefControlStyle` integer. Runtime consumers use the
+    /// boolean projection above, but C4PlayerInfoCore stores and recompiles the
+    /// original `int32_t` value.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub pref_control_style_value: i32,
+    #[serde(default)]
+    pub pref_auto_context_menu: bool,
+    /// Exact post-load `PrefAutoContextMenu` integer. An omitted `-1` compiler
+    /// default has already inherited `PrefControlStyle` at this boundary.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub pref_auto_context_menu_value: i32,
+    #[serde(default)]
+    pub pref_position: i32,
+    #[serde(default = "default_pref_mouse")]
+    pub pref_mouse: bool,
+    /// Exact persisted `PrefMouse` integer; nonzero values remain enabled but
+    /// are not normalized to one when C++ writes the core again.
+    #[serde(
+        default = "default_pref_mouse_value",
+        skip_serializing_if = "is_one_i32"
+    )]
+    pub pref_mouse_value: i32,
+    #[serde(default)]
+    pub last_round: PlayerLastRoundState,
+}
+
+impl Default for PlayerInfoCoreState {
+    fn default() -> Self {
+        Self {
+            pref_name: default_player_name(),
+            comment: String::new(),
+            rank: 0,
+            rank_name: default_player_rank_name(),
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            extra_data: Vec::new(),
+            pref_color: 0,
+            pref_color_dw: default_pref_color_dw(),
+            pref_color2_dw: 0,
+            pref_control: 0,
+            pref_control_style: false,
+            pref_control_style_value: 0,
+            pref_auto_context_menu: false,
+            pref_auto_context_menu_value: 0,
+            pref_position: 0,
+            pref_mouse: true,
+            pref_mouse_value: 1,
+            last_round: PlayerLastRoundState::default(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -148,8 +310,10 @@ impl ObjectInfoIniTree {
 }
 
 fn projected_object_info_value(value: &str) -> String {
-    let value = value.split_once("//").map_or(value, |(prefix, _)| prefix);
-    value.trim().to_string()
+    // StdCompilerINIRead::ReadString(RCT_All) skips only spaces and tabs
+    // immediately after `=`. Everything else through the physical line end,
+    // including trailing whitespace and `//`, is string data.
+    value.trim_start_matches([' ', '\t']).to_string()
 }
 
 /// One crew-roster entry: C4ObjectInfoCore (C4InfoCore.cpp:526-548) with
@@ -228,15 +392,40 @@ impl CrewInfo {
     /// Loads one `*.c4i` crew group, including its embedded custom-portrait
     /// state, with the same parser used by [`PlayerFile::load`].
     pub fn load(group: &Group) -> Result<Self, ScenarioError> {
-        let bytes = group.read_file("ObjectInfo.txt")?;
-        let source = lc_script::c4_string_from_bytes(&bytes);
-        Ok(Self::from_object_info_source(
-            &source,
-            custom_portrait_loads(group),
-        ))
+        Self::load_with_filename(group, &[], true, None)
     }
 
-    fn from_object_info_source(source: &str, has_custom_portrait: bool) -> Self {
+    fn load_with_filename(
+        group: &Group,
+        filename: &[u8],
+        load_unnamed_portrait: bool,
+        value_resolution: Option<&PersistedC4ValueResolution>,
+    ) -> Result<Self, ScenarioError> {
+        let bytes = group.read_file("ObjectInfo.txt")?;
+        let source = lc_script::c4_string_from_bytes(&bytes);
+        let assets = load_crew_portrait_assets(group);
+        let mut info =
+            Self::from_object_info_source(
+                &source,
+                assets.loaded,
+                load_unnamed_portrait,
+                value_resolution,
+            );
+        info.core.original_filename = lc_script::c4_string_from_bytes(filename);
+        if load_unnamed_portrait || info.core.portrait_file == "custom" {
+            info.core.portrait_png = assets.png;
+            info.core.portrait_overlay_png = assets.overlay_png;
+            info.core.portrait_bmp = assets.bmp;
+        }
+        Ok(info)
+    }
+
+    fn from_object_info_source(
+        source: &str,
+        has_custom_portrait: bool,
+        load_unnamed_portrait: bool,
+        value_resolution: Option<&PersistedC4ValueResolution>,
+    ) -> Self {
         let tree = ObjectInfoIniTree::parse(source);
         let object_info = tree.first_named_child(0, "ObjectInfo");
         let physical_section = object_info.and_then(|index| tree.followed_root_physical(index));
@@ -286,7 +475,12 @@ impl CrewInfo {
         let mut portrait_file = entry(object_info, "PortraitFile")
             .map(|name| bounded_crew_portrait_file(&name))
             .unwrap_or_default();
-        let portraits = loaded_portrait_state(&id, &mut portrait_file, has_custom_portrait);
+        let portraits = loaded_portrait_state(
+            &id,
+            &mut portrait_file,
+            has_custom_portrait,
+            load_unnamed_portrait,
+        );
         let death_message = object_info
             .and_then(|parent| tree.value(parent, "DeathMessage"))
             .map(|value| value.trim_start_matches([' ', '\t']).to_string())
@@ -298,14 +492,19 @@ impl CrewInfo {
             death_message,
             core: CrewInfoCoreFields {
                 portrait_file,
-                next_rank_name: entry(object_info, "NextRankName").unwrap_or_default(),
+                next_rank_name: entry(object_info, "NextRankName")
+                    .map(|value| decode_escaped_ini_string(&value))
+                    .unwrap_or_default(),
                 type_name: entry(object_info, "TypeName")
                     .map(|name| bounded_loaded_crew_type_name(&name))
                     .unwrap_or_else(|| "Clonk".to_string()),
                 next_rank_exp: int("NextRankExp", 0),
+                ..CrewInfoCoreFields::default()
             },
             rank,
-            rank_name: entry(object_info, "RankName").unwrap_or_else(default_crew_rank_name),
+            rank_name: entry(object_info, "RankName")
+                .map(|value| decode_escaped_ini_string(&value))
+                .unwrap_or_else(default_crew_rank_name),
             experience: int("Experience", 0),
             rounds: int("Rounds", 0),
             physical,
@@ -318,7 +517,11 @@ impl CrewInfo {
             was_in_action: false,
             in_action_time: 0,
             has_died: false,
-            extra_data: Vec::new(),
+            extra_data: entry(object_info, "ExtraData")
+                .and_then(|value| {
+                    parse_persisted_value_map(&value, value_resolution).ok()
+                })
+                .unwrap_or_default(),
             portraits,
         }
     }
@@ -343,6 +546,7 @@ fn loaded_portrait_state(
     own_definition: &str,
     portrait_file: &mut String,
     has_custom_portrait: bool,
+    load_unnamed_portrait: bool,
 ) -> CrewPortraitState {
     let custom = || CrewPortrait {
         source: None,
@@ -362,7 +566,7 @@ fn loaded_portrait_state(
         portrait_file.clear();
         return CrewPortraitState::default();
     }
-    if portrait_file.is_empty() && has_custom_portrait {
+    if portrait_file.is_empty() && has_custom_portrait && load_unnamed_portrait {
         // The legacy import path owns the current graphics directly and
         // writes "custom" into PortraitFile, but does not create
         // pCustomPortrait. Permanent GetPortrait therefore evaluates that
@@ -412,6 +616,10 @@ fn evaluate_portrait_string(spec: &str, own_definition: &str) -> CrewPortrait {
 /// the crew roster in group order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerFile {
+    /// Complete retained player core. The long-standing flat fields below
+    /// remain the join projection and override their corresponding values in
+    /// [`PlayerFile::exact_info_core`] so synthetic callers stay compatible.
+    pub info_core: PlayerInfoCoreState,
     /// `[Player] Name` (default "Neuling").
     pub name: String,
     /// `[Player] Score`, the persistent settlement score
@@ -455,6 +663,7 @@ pub struct PlayerFile {
 impl Default for PlayerFile {
     fn default() -> Self {
         Self {
+            info_core: PlayerInfoCoreState::default(),
             name: "Neuling".to_string(),
             score: 0,
             rounds: 0,
@@ -475,6 +684,37 @@ impl Default for PlayerFile {
 }
 
 impl PlayerFile {
+    /// Return the authoritative core with compatibility projection fields
+    /// folded back in. This mirrors the single inherited C++ core after its
+    /// live counters/preferences have been changed by callers.
+    pub fn exact_info_core(&self) -> PlayerInfoCoreState {
+        let mut core = self.info_core.clone();
+        core.pref_name = self.name.clone();
+        core.score = self.score;
+        core.rounds = self.rounds;
+        core.rounds_won = self.rounds_won;
+        core.rounds_lost = self.rounds_lost;
+        core.total_playing_time = self.total_playing_time;
+        core.pref_color = self.pref_color;
+        core.pref_color_dw = self.pref_color_dw;
+        core.pref_color2_dw = self.pref_color2_dw;
+        core.pref_position = self.pref_position;
+        core.pref_control = self.pref_control;
+        core.pref_mouse = self.pref_mouse;
+        if (core.pref_mouse_value != 0) != self.pref_mouse {
+            core.pref_mouse_value = i32::from(self.pref_mouse);
+        }
+        core.pref_control_style = self.pref_control_style;
+        if (core.pref_control_style_value != 0) != self.pref_control_style {
+            core.pref_control_style_value = i32::from(self.pref_control_style);
+        }
+        core.pref_auto_context_menu = self.pref_auto_context_menu;
+        if (core.pref_auto_context_menu_value != 0) != self.pref_auto_context_menu {
+            core.pref_auto_context_menu_value = i32::from(self.pref_auto_context_menu);
+        }
+        core
+    }
+
     /// `C4PlayerInfoCore::GetPrefColorValue`: use the 24-bit ColorDw when
     /// nonzero, otherwise map the indexed legacy color with the stock table.
     pub fn normalized_preferred_color(&self) -> u32 {
@@ -499,68 +739,154 @@ impl PlayerFile {
     }
 
     pub fn load(group: &Group) -> Result<Self, ScenarioError> {
+        Self::load_with_portraits(group, true)
+    }
+
+    /// The C4Player::Init remote-player path still resolves explicit portrait
+    /// specs/custom payloads but does not adopt an otherwise unnamed embedded
+    /// portrait (C4ObjectInfo.cpp:79-151).
+    pub fn load_with_portraits(
+        group: &Group,
+        load_unnamed_portraits: bool,
+    ) -> Result<Self, ScenarioError> {
+        Self::load_with_portraits_and_optional_value_resolution(
+            group,
+            load_unnamed_portraits,
+            None,
+        )
+    }
+
+    pub fn load_with_portraits_and_value_resolution(
+        group: &Group,
+        load_unnamed_portraits: bool,
+        value_resolution: &PersistedC4ValueResolution,
+    ) -> Result<Self, ScenarioError> {
+        Self::load_with_portraits_and_optional_value_resolution(
+            group,
+            load_unnamed_portraits,
+            Some(value_resolution),
+        )
+    }
+
+    fn load_with_portraits_and_optional_value_resolution(
+        group: &Group,
+        load_unnamed_portraits: bool,
+        value_resolution: Option<&PersistedC4ValueResolution>,
+    ) -> Result<Self, ScenarioError> {
         let core_bytes = group.read_file("Player.txt")?;
         // Player core strings remain native C4 bytes until a presentation
         // consumer decodes them.
         let core_text = lc_script::c4_string_from_bytes(&core_bytes);
-        let sections = parse_ini_sections(&core_text);
+        let tree = ObjectInfoIniTree::parse(&core_text);
         let entry = |section: &str, key: &str| -> Option<String> {
-            sections
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case(section))
-                .and_then(|(_, entries)| {
-                    entries
-                        .iter()
-                        .find(|(entry_key, _)| entry_key.eq_ignore_ascii_case(key))
-                        .map(|(_, value)| value.clone())
-                })
+            tree.first_named_child(0, section)
+                .and_then(|section| tree.value(section, key))
+                .map(projected_object_info_value)
         };
         let int = |section: &str, key: &str, default: i32| -> i32 {
             entry(section, key)
                 .and_then(|value| parse_leading_i32(&value))
                 .unwrap_or(default)
         };
-        let exact_int = |section: &str, key: &str, default: i32| -> i32 {
-            sections
-                .iter()
-                .find(|(name, _)| name == section)
-                .and_then(|(_, entries)| {
-                    entries
-                        .iter()
-                        .find(|(entry_key, _)| entry_key == key)
-                        .map(|(_, value)| value)
-                })
-                .and_then(|value| parse_leading_i32(value))
-                .unwrap_or(default)
-        };
 
         let mut crew = Vec::new();
-        collect_crew(group, &mut crew)?;
-        let pref_control_style = int("Preferences", "AutoStopControl", 0) != 0;
-        let pref_auto_context_menu = match int("Preferences", "AutoContextMenu", -1) {
-            -1 => pref_control_style,
-            value => value != 0,
+        collect_crew(
+            group,
+            &mut crew,
+            load_unnamed_portraits,
+            value_resolution,
+        )?;
+        let pref_control_style_value = int("Preferences", "AutoStopControl", 0);
+        let pref_control_style = pref_control_style_value != 0;
+        let pref_auto_context_menu_value = match int("Preferences", "AutoContextMenu", -1) {
+            -1 => pref_control_style_value,
+            value => value,
         };
+        let pref_auto_context_menu = pref_auto_context_menu_value != 0;
 
-        Ok(Self {
-            name: entry("Player", "Name").unwrap_or_else(|| "Neuling".to_string()),
+        let mut pref_name = bounded_player_string(
+            &entry("Player", "Name").unwrap_or_else(default_player_name),
+            30,
+        );
+        lc_core::std_markup::Markup::strip_markup(&mut pref_name);
+        let pref_color = int("Preferences", "Color", 0);
+        let pref_color_dw_raw = entry("Preferences", "ColorDw")
+            .and_then(|value| parse_leading_i32(&value))
+            .map(|value| value as u32)
+            .unwrap_or(0xff);
+        let pref_color_dw = if pref_color_dw_raw == 0 {
+            preferred_color_from_index(pref_color)
+        } else {
+            pref_color_dw_raw & 0x00ff_ffff
+        };
+        let pref_color2_dw =
+            int("Preferences", "AlternateColorDw", 0) as u32 & 0x00ff_ffff;
+        let pref_position = int("Preferences", "Position", 0);
+        let pref_control = int("Preferences", "Control", 1);
+        let pref_mouse_value = int("Preferences", "Mouse", 1);
+        let pref_mouse = pref_mouse_value != 0;
+        let info_core = PlayerInfoCoreState {
+            pref_name: pref_name.clone(),
+            comment: bounded_player_string(&entry("Player", "Comment").unwrap_or_default(), 256),
+            rank: int("Player", "Rank", 0),
+            // English is the canonical resource language for headless Rust
+            // serialization. A present localized value remains verbatim.
+            rank_name: bounded_player_string(
+                &entry("Player", "RankName").unwrap_or_else(|| "Rank".to_string()),
+                30,
+            ),
             score: int("Player", "Score", 0),
             rounds: int("Player", "Rounds", 0),
             rounds_won: int("Player", "RoundsWon", 0),
             rounds_lost: int("Player", "RoundsLost", 0),
             total_playing_time: int("Player", "TotalPlayingTime", 0),
-            pref_color: int("Preferences", "Color", 0),
-            pref_color_dw: entry("Preferences", "ColorDw")
-                .and_then(|value| parse_leading_i32(&value))
-                .map(|value| value as u32)
-                .unwrap_or(0xff),
-            pref_color2_dw: exact_int("Preferences", "AlternateColorDw", 0) as u32 & 0x00ff_ffff,
-            pref_position: int("Preferences", "Position", 0),
-            pref_control: exact_int("Preferences", "Control", 1),
-            pref_mouse: exact_int("Preferences", "Mouse", 1) != 0,
+            extra_data: entry("Player", "ExtraData")
+                .map(|value| parse_persisted_value_map(&value, value_resolution))
+                .transpose()?
+                .unwrap_or_default(),
+            pref_color,
+            pref_color_dw,
+            pref_color2_dw,
+            pref_control,
+            pref_control_style,
+            pref_control_style_value,
+            pref_auto_context_menu,
+            pref_auto_context_menu_value,
+            pref_position,
+            pref_mouse,
+            pref_mouse_value,
+            last_round: PlayerLastRoundState {
+                title: entry("LastRound", "Title")
+                    .map(|title| decode_escaped_ini_string(&title))
+                    .unwrap_or_default(),
+                date: int("LastRound", "Date", 0) as u32,
+                duration: int("LastRound", "Duration", 0),
+                won: int("LastRound", "Won", 0),
+                score: int("LastRound", "Score", 0),
+                final_score: int("LastRound", "FinalScore", 0),
+                total_score: int("LastRound", "TotalScore", 0),
+                bonus: int("LastRound", "Bonus", 0),
+                level: int("LastRound", "Level", 0),
+            },
+        };
+
+        Ok(Self {
+            name: pref_name,
+            score: info_core.score,
+            rounds: info_core.rounds,
+            rounds_won: info_core.rounds_won,
+            rounds_lost: info_core.rounds_lost,
+            total_playing_time: info_core.total_playing_time,
+            pref_color,
+            pref_color_dw,
+            pref_color2_dw,
+            pref_position,
+            pref_control,
+            pref_mouse,
             pref_control_style,
             pref_auto_context_menu,
             crew,
+            info_core,
         })
     }
 
@@ -573,11 +899,39 @@ impl PlayerFile {
         let group = Group::from_memory(path, data)?;
         Self::load(&group)
     }
+
+    pub fn load_from_bytes_with_portraits(
+        path: std::path::PathBuf,
+        data: Vec<u8>,
+        load_unnamed_portraits: bool,
+    ) -> Result<Self, ScenarioError> {
+        let group = Group::from_memory(path, data)?;
+        Self::load_with_portraits(&group, load_unnamed_portraits)
+    }
+
+    pub fn load_from_bytes_with_portraits_and_value_resolution(
+        path: std::path::PathBuf,
+        data: Vec<u8>,
+        load_unnamed_portraits: bool,
+        value_resolution: &PersistedC4ValueResolution,
+    ) -> Result<Self, ScenarioError> {
+        let group = Group::from_memory(path, data)?;
+        Self::load_with_portraits_and_value_resolution(
+            &group,
+            load_unnamed_portraits,
+            value_resolution,
+        )
+    }
 }
 
 /// `C4ObjectInfoList::Load` (C4ObjectInfoList.cpp:56-83): all `*.c4i`
 /// child groups in entry order, then recursion into remaining subgroups.
-fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioError> {
+fn collect_crew(
+    group: &Group,
+    crew: &mut Vec<CrewInfo>,
+    load_unnamed_portraits: bool,
+    value_resolution: Option<&PersistedC4ValueResolution>,
+) -> Result<(), ScenarioError> {
     let mut subgroups = Vec::new();
     for entry in group.entries()? {
         if std::env::var("LC_C4P_DEBUG").is_ok() {
@@ -590,24 +944,29 @@ fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioE
         let child = if group.is_directory() {
             group.open_child(&entry.relative_path)
         } else {
-            group
-                .read_entry_bytes_exact(&entry)
-                .and_then(|bytes| {
-                    Group::from_raw_memory(path_from_group_name_bytes(&entry.name_bytes), bytes)
-                })
+            group.read_entry_bytes_exact(&entry).and_then(|bytes| {
+                Group::from_raw_memory(path_from_group_name_bytes(&entry.name_bytes), bytes)
+            })
         };
         let Ok(child) = child else {
             continue;
         };
         if is_info {
-            if let Ok(info) = CrewInfo::load(&child) {
+            if let Ok(info) =
+                CrewInfo::load_with_filename(
+                    &child,
+                    &entry.name_bytes,
+                    load_unnamed_portraits,
+                    value_resolution,
+                )
+            {
                 crew.push(info);
             }
         }
         subgroups.push(child);
     }
     for child in subgroups {
-        collect_crew(&child, crew)?;
+        collect_crew(&child, crew, load_unnamed_portraits, value_resolution)?;
     }
     Ok(())
 }
@@ -625,9 +984,17 @@ fn path_from_group_name_bytes(bytes: &[u8]) -> std::path::PathBuf {
     std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
-fn custom_portrait_loads(group: &Group) -> bool {
+#[derive(Default)]
+struct LoadedCrewPortraitAssets {
+    loaded: bool,
+    png: Vec<u8>,
+    overlay_png: Vec<u8>,
+    bmp: Vec<u8>,
+}
+
+fn load_crew_portrait_assets(group: &Group) -> LoadedCrewPortraitAssets {
     let Ok(entries) = group.entries() else {
-        return false;
+        return LoadedCrewPortraitAssets::default();
     };
     let find = |name: &str| {
         entries.iter().find(|entry| {
@@ -639,62 +1006,44 @@ fn custom_portrait_loads(group: &Group) -> bool {
                     .eq_ignore_ascii_case(name)
         })
     };
-    let decode = |entry: &lc_resources::GroupEntry, format| {
-        group
-            .read_entry_bytes_exact(entry)
-            .ok()
-            .and_then(|bytes| image::load_from_memory_with_format(&bytes, format).ok())
+    let read_decode = |entry: &lc_resources::GroupEntry, format| {
+        let bytes = group.read_entry_bytes_exact(entry).ok()?;
+        let decoded = image::load_from_memory_with_format(&bytes, format).ok()?;
+        Some((bytes, decoded))
     };
 
     // C4DefGraphics::LoadGraphics tries an existing PNG first and does not
     // fall back to the old BMP when that PNG is corrupt.
-    let base = if let Some(png) = find("Portrait.png") {
-        decode(png, image::ImageFormat::Png)
+    let (png, bmp, base) = if let Some(png) = find("Portrait.png") {
+        let Some((bytes, decoded)) = read_decode(png, image::ImageFormat::Png) else {
+            return LoadedCrewPortraitAssets::default();
+        };
+        (bytes, Vec::new(), decoded)
     } else {
-        find("Portrait.bmp").and_then(|bmp| decode(bmp, image::ImageFormat::Bmp))
+        let Some((bytes, decoded)) =
+            find("Portrait.bmp").and_then(|bmp| read_decode(bmp, image::ImageFormat::Bmp))
+        else {
+            return LoadedCrewPortraitAssets::default();
+        };
+        (Vec::new(), bytes, decoded)
     };
-    let Some(base) = base else {
-        return false;
-    };
-    if let Some(overlay) = find("PortraitOverlay.png") {
-        let Some(overlay) = decode(overlay, image::ImageFormat::Png) else {
-            return false;
+    let overlay_png = if let Some(overlay) = find("PortraitOverlay.png") {
+        let Some((bytes, overlay)) = read_decode(overlay, image::ImageFormat::Png) else {
+            return LoadedCrewPortraitAssets::default();
         };
         if overlay.width() != base.width() || overlay.height() != base.height() {
-            return false;
+            return LoadedCrewPortraitAssets::default();
         }
+        bytes
+    } else {
+        Vec::new()
+    };
+    LoadedCrewPortraitAssets {
+        loaded: true,
+        png,
+        overlay_png,
+        bmp,
     }
-    true
-}
-
-/// Minimal legacy INI reader: ordered sections of ordered key/value pairs,
-/// `;`/`#`/`//` comments stripped (StdCompilerINIRead tolerances).
-fn parse_ini_sections(text: &str) -> Vec<(String, Vec<(String, String)>)> {
-    let mut sections: Vec<(String, Vec<(String, String)>)> = Vec::new();
-    for raw_line in text.lines() {
-        let mut line = raw_line.trim_start_matches('\u{feff}').trim();
-        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
-            continue;
-        }
-        if let Some(idx) = line.find("//") {
-            line = line[..idx].trim_end();
-            if line.is_empty() {
-                continue;
-            }
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            let name = line[1..line.len() - 1].trim().to_string();
-            sections.push((name, Vec::new()));
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if let Some((_, entries)) = sections.last_mut() {
-            entries.push((key.trim().to_string(), value.trim().to_string()));
-        }
-    }
-    sections
 }
 
 /// StdCompilerINIRead numbers parse strtol-style: leading integer, trailing
@@ -722,6 +1071,359 @@ fn parse_leading_i32(value: &str) -> Option<i32> {
     trimmed[..end].parse::<i64>().ok().map(|v| v as i32)
 }
 
+fn bounded_player_string(value: &str, max_bytes: usize) -> String {
+    let mut bytes = lc_script::c4_string_bytes(value);
+    if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+        bytes.truncate(nul);
+    }
+    bytes.truncate(max_bytes);
+    lc_script::c4_string_from_bytes(&bytes)
+}
+
+fn preferred_color_from_index(index: i32) -> u32 {
+    const PLAYER_COLORS: [u32; 12] = [
+        0x0000e8, 0xf40000, 0x00c800, 0xfcf41c, 0xc48444, 0x784830, 0xa04400, 0xf08050, 0x848484,
+        0xffffff, 0x0094f8, 0xbc00c0,
+    ];
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| PLAYER_COLORS.get(index))
+        .copied()
+        .unwrap_or(0xaaaaaa)
+}
+
+fn parse_persisted_value_map(
+    encoded: &str,
+    resolution: Option<&PersistedC4ValueResolution>,
+) -> Result<Vec<(String, lc_script::Value)>, ScenarioError> {
+    let (count, payload) = encoded
+        .split_once(';')
+        .map_or((encoded, None), |(count, payload)| (count, Some(payload)));
+    let count = parse_leading_i32(count).unwrap_or(0);
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let count = usize::try_from(count).map_err(|_| {
+        ScenarioError::LegacyParse(format!("negative C4ValueMapData count `{count}`"))
+    })?;
+    if count > 1_000_000 {
+        return Err(ScenarioError::LegacyParse(format!(
+            "C4ValueMapData count `{count}` exceeds C4Value MaxSize"
+        )));
+    }
+    let payload = payload.ok_or_else(|| {
+        ScenarioError::LegacyParse(format!(
+            "C4ValueMapData declares {count} entries without a payload"
+        ))
+    })?;
+    let mut parser = PersistedC4ValueParser::new(payload, resolution);
+    let mut entries = Vec::with_capacity(count);
+    for index in 0..count {
+        if index != 0 {
+            parser.expect(b',')?;
+        }
+        let name = parser.take_until(b'=')?.trim().to_string();
+        parser.expect(b'=')?;
+        let value = parser.value()?;
+        entries.push((name, value));
+    }
+    Ok(entries)
+}
+
+struct PersistedC4ValueParser<'a> {
+    input: &'a [u8],
+    position: usize,
+    resolution: Option<&'a PersistedC4ValueResolution>,
+}
+
+fn persistent_any_fallback(number: i32) -> lc_script::Value {
+    if number == 0 {
+        return lc_script::Value::Nil;
+    }
+    let raw = number as u32;
+    if raw >= 10_000
+        && raw
+            .to_le_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+    {
+        lc_script::Value::C4Id(lc_script::c4_id_from_raw(raw as usize))
+    } else {
+        lc_script::Value::Int(number)
+    }
+}
+
+impl<'a> PersistedC4ValueParser<'a> {
+    fn new(input: &'a str, resolution: Option<&'a PersistedC4ValueResolution>) -> Self {
+        Self {
+            input: input.as_bytes(),
+            position: 0,
+            resolution,
+        }
+    }
+
+    fn error(&self, detail: impl Into<String>) -> ScenarioError {
+        ScenarioError::LegacyParse(format!(
+            "invalid persistent C4Value at byte {}: {}",
+            self.position,
+            detail.into()
+        ))
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self
+            .input
+            .get(self.position)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            self.position += 1;
+        }
+    }
+
+    fn expect(&mut self, expected: u8) -> Result<(), ScenarioError> {
+        self.skip_whitespace();
+        if self.input.get(self.position) != Some(&expected) {
+            return Err(self.error(format!("expected `{}`", char::from(expected))));
+        }
+        self.position += 1;
+        Ok(())
+    }
+
+    fn take_until(&mut self, delimiter: u8) -> Result<&'a str, ScenarioError> {
+        let start = self.position;
+        let Some(relative) = self.input[start..]
+            .iter()
+            .position(|byte| *byte == delimiter)
+        else {
+            return Err(self.error(format!("expected `{}`", char::from(delimiter))));
+        };
+        self.position += relative;
+        std::str::from_utf8(&self.input[start..self.position])
+            .map_err(|_| self.error("non-UTF-8 compiler token"))
+    }
+
+    fn integer(&mut self) -> Result<i32, ScenarioError> {
+        self.skip_whitespace();
+        let start = self.position;
+        if matches!(self.input.get(self.position), Some(b'+' | b'-')) {
+            self.position += 1;
+        }
+        let digit_start = self.position;
+        while self
+            .input
+            .get(self.position)
+            .is_some_and(u8::is_ascii_digit)
+        {
+            self.position += 1;
+        }
+        if self.position == digit_start {
+            return Err(self.error("expected signed integer"));
+        }
+        let value = std::str::from_utf8(&self.input[start..self.position])
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .map(|value| value as i32)
+            .ok_or_else(|| self.error("invalid signed integer"))?;
+        self.skip_whitespace();
+        Ok(value)
+    }
+
+    fn count(&mut self) -> Result<usize, ScenarioError> {
+        let value = self.integer()?;
+        let count = usize::try_from(value)
+            .map_err(|_| self.error(format!("negative element count `{value}`")))?;
+        if count > 1_000_000 {
+            return Err(self.error(format!("element count `{count}` exceeds C4Value MaxSize")));
+        }
+        Ok(count)
+    }
+
+    fn value(&mut self) -> Result<lc_script::Value, ScenarioError> {
+        self.value_with_direct_object_status()
+            .map(|(value, _)| value)
+    }
+
+    fn value_with_direct_object_status(
+        &mut self,
+    ) -> Result<(lc_script::Value, bool), ScenarioError> {
+        self.skip_whitespace();
+        let kind = *self
+            .input
+            .get(self.position)
+            .ok_or_else(|| self.error("missing value type"))?;
+        self.position += 1;
+        match kind {
+            b'A' => {
+                let value = self.integer()?;
+                if (1_000_000_000..=1_001_000_000).contains(&value) {
+                    let number = u64::try_from(value - 1_000_000_000).ok();
+                    if let Some(number) = number.filter(|number| {
+                        self.resolution.is_some_and(|resolution| {
+                            resolution.object_numbers.contains(number)
+                        })
+                    }) {
+                        Ok((lc_script::Value::Object(number), false))
+                    } else {
+                        Ok((persistent_any_fallback(value), false))
+                    }
+                } else {
+                    Ok((persistent_any_fallback(value), false))
+                }
+            }
+            b'i' => self
+                .integer()
+                .map(|value| (lc_script::Value::Int(value), false)),
+            b'b' => self
+                .integer()
+                .map(|value| (lc_script::Value::from_c4_bool_raw(value), false)),
+            b'I' => self.integer().map(|value| {
+                (
+                    lc_script::Value::C4Id(lc_script::c4_id_from_raw(
+                        value as isize as usize,
+                    )),
+                    false,
+                )
+            }),
+            b'S' => {
+                let id = self.integer()?;
+                let value = self
+                    .resolution
+                    .and_then(|resolution| resolution.strings.get(&id))
+                    .cloned()
+                    .map(lc_script::Value::String)
+                    .unwrap_or(lc_script::Value::Nil);
+                Ok((value, false))
+            }
+            b'o' | b'O' => {
+                let mut number = self.integer()?;
+                if number >= 1_000_000_000 {
+                    number -= 1_000_000_000;
+                }
+                let number = u64::try_from(number).ok();
+                let value = number
+                    .filter(|number| {
+                        self.resolution.is_some_and(|resolution| {
+                            resolution.object_numbers.contains(number)
+                        })
+                    })
+                    .map(lc_script::Value::Object);
+                let missing = value.is_none();
+                Ok((value.unwrap_or(lc_script::Value::Nil), missing))
+            }
+            b'a' => {
+                self.expect(b'[')?;
+                let count = self.count()?;
+                self.expect(b';')?;
+                let mut values = Vec::with_capacity(count);
+                for index in 0..count {
+                    self.skip_whitespace();
+                    if self.input.get(self.position) == Some(&b']') {
+                        break;
+                    }
+                    if index != 0 {
+                        self.expect(b',')?;
+                    }
+                    values.push(self.value()?);
+                }
+                values.resize(count, lc_script::Value::Nil);
+                self.expect(b']')?;
+                Ok((lc_script::Value::Array(values), false))
+            }
+            b'm' => {
+                self.expect(b'[')?;
+                let count = self.count()?;
+                self.expect(b';')?;
+                let mut values = Vec::with_capacity(count);
+                for index in 0..count {
+                    if index != 0 {
+                        self.expect(b';')?;
+                    }
+                    let (key, missing_key_object) = self.value_with_direct_object_status()?;
+                    self.expect(b'=')?;
+                    let (value, missing_value_object) =
+                        self.value_with_direct_object_status()?;
+                    if !missing_key_object && !missing_value_object {
+                        values.push((key, value));
+                    }
+                }
+                self.expect(b']')?;
+                Ok((lc_script::Value::Proplist(values.into_iter().collect()), false))
+            }
+            _ => Err(self.error(format!("unknown value type `{}`", char::from(kind)))),
+        }
+    }
+
+}
+
+/// `StdStrBuf` values are escaped while fixed-size C strings are not. The
+/// reader accepts an unquoted legacy fallback just like StdCompiler.
+fn decode_escaped_ini_string(value: &str) -> String {
+    let trimmed = value.trim_start_matches([' ', '\t']);
+    let Some(inner) = trimmed.strip_prefix('"') else {
+        return trimmed.to_string();
+    };
+    let input = lc_script::c4_string_bytes(inner);
+    let mut output = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == b'"' {
+            break;
+        }
+        if input[index] != b'\\' {
+            output.push(input[index]);
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let Some(&escape) = input.get(index) else {
+            break;
+        };
+        index += 1;
+        match escape {
+            b'a' => output.push(0x07),
+            b'b' => output.push(0x08),
+            b'f' => output.push(0x0c),
+            b'n' => output.push(b'\n'),
+            b'r' => output.push(b'\r'),
+            b't' => output.push(b'\t'),
+            b'v' => output.push(0x0b),
+            b'\'' => output.push(b'\''),
+            b'"' => output.push(b'"'),
+            b'\\' => output.push(b'\\'),
+            b'?' => output.push(b'?'),
+            b'x' => {
+                let start = index;
+                let mut hexadecimal = 0_u32;
+                while let Some(next) = input.get(index).copied() {
+                    let Some(digit) = (next as char).to_digit(16) else {
+                        break;
+                    };
+                    hexadecimal = hexadecimal.wrapping_mul(16).wrapping_add(digit);
+                    index += 1;
+                }
+                if index == start {
+                    output.push(b'x');
+                } else {
+                    output.push(hexadecimal as u8);
+                }
+            }
+            digit @ b'0'..=b'7' => {
+                let mut octal = u32::from(digit - b'0');
+                while let Some(&next @ b'0'..=b'7') = input.get(index) {
+                    octal = octal.wrapping_mul(8).wrapping_add(u32::from(next - b'0'));
+                    index += 1;
+                }
+                output.push(octal as u8);
+            }
+            other => output.push(other),
+        }
+    }
+    if let Some(nul) = output.iter().position(|byte| *byte == 0) {
+        output.truncate(nul);
+    }
+    lc_script::c4_string_from_bytes(&output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +1442,41 @@ mod tests {
     }
 
     #[test]
+    fn persistent_value_map_resolves_nested_scenario_values() {
+        let resolution = PersistedC4ValueResolution {
+            strings: HashMap::from([
+                (0, "first".to_string()),
+                (1, "second".to_string()),
+                (2, "key".to_string()),
+            ]),
+            object_numbers: HashSet::from([42]),
+        };
+
+        assert_eq!(
+            parse_persisted_value_map(
+                "1;Complex=a[3;S1,O42,m[1;S2=S0]]",
+                Some(&resolution),
+            )
+            .unwrap(),
+            vec![(
+                "Complex".to_string(),
+                lc_script::Value::Array(vec![
+                    lc_script::Value::String("second".to_string()),
+                    lc_script::Value::Object(42),
+                    lc_script::Value::Proplist(
+                        [(
+                            lc_script::Value::String("key".to_string()),
+                            lc_script::Value::String("first".to_string()),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    ),
+                ]),
+            )]
+        );
+    }
+
+    #[test]
     fn loads_player_core_and_crew_roster_like_cpp() {
         // C4Player::Load (C4Player.cpp:1089-1107): C4PlayerInfoCore from
         // Player.txt (C4InfoCore.cpp:148-177) and the crew info list from
@@ -750,7 +1487,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("player dir");
         std::fs::write(
             root.join("Player.txt"),
-            "[Player]\nName=Tyler\nRank=3\nScore=250\nRounds=11\nRoundsWon=7\nRoundsLost=4\nTotalPlayingTime=1234\n\n[Preferences]\nColor=4\nColorDw=12345678\nAlternateColorDw=4289449455\nPosition=2\nControl=3\nMouse=0\nAutoStopControl=1\n",
+            "[Player]\nName=Tyler\nComment=Profile comment\nRank=3\nRankName=Veteran\nScore=250\nRounds=11\nRoundsWon=7\nRoundsLost=4\nTotalPlayingTime=1234\nExtraData=3;Flag=b1,Raw=b7,Badge=I1145851719\n\n[Preferences]\nColor=4\nColorDw=12345678\nAlternateColorDw=4289449455\nPosition=2\nControl=3\nMouse=0\nAutoStopControl=1\n\n[LastRound]\nTitle=\"Deep \\\"Mine\\\"\\n\"\nDate=4294967294\nDuration=77\nWon=1\nScore=8\nFinalScore=108\nTotalScore=358\nBonus=100\nLevel=2\n",
         )
         .expect("write core");
 
@@ -775,8 +1512,33 @@ mod tests {
         // C4PlayerInfoCore::CompileFunc stores both values in [Player]
         // (C4InfoCore.cpp:148-161).
         assert_eq!(player.score, 250);
-        assert_eq!((player.rounds, player.rounds_won, player.rounds_lost), (11, 7, 4));
+        assert_eq!(
+            (player.rounds, player.rounds_won, player.rounds_lost),
+            (11, 7, 4)
+        );
         assert_eq!(player.total_playing_time, 1_234);
+        assert_eq!(player.info_core.comment, "Profile comment");
+        assert_eq!(player.info_core.rank, 3);
+        assert_eq!(player.info_core.rank_name, "Veteran");
+        assert_eq!(
+            player.info_core.extra_data,
+            vec![
+                ("Flag".to_string(), lc_script::Value::Bool(true)),
+                ("Raw".to_string(), lc_script::Value::RawBool(7)),
+                (
+                    "Badge".to_string(),
+                    lc_script::Value::C4Id("GOLD".to_string())
+                ),
+            ]
+        );
+        assert_eq!(player.info_core.last_round.title, "Deep \"Mine\"\n");
+        assert_eq!(player.info_core.last_round.date, 4_294_967_294);
+        assert_eq!(player.info_core.last_round.duration, 77);
+        assert_eq!(player.info_core.last_round.won, 1);
+        assert_eq!(player.info_core.last_round.final_score, 108);
+        assert_eq!(player.info_core.last_round.total_score, 358);
+        assert_eq!(player.info_core.last_round.bonus, 100);
+        assert_eq!(player.info_core.last_round.level, 2);
         assert_eq!(player.pref_color, 4);
         assert_eq!(player.pref_color_dw, 12345678);
         assert_eq!(player.pref_color2_dw, 0x00ab_cdef);
@@ -800,6 +1562,7 @@ mod tests {
         assert_eq!(wipf.rank, 2);
         assert_eq!(wipf.rank_name, "Lieutenant");
         assert_eq!(wipf.core.portrait_file, "TRPR::Captain");
+        assert_eq!(wipf.core.original_filename, "Wipf.c4i");
         assert_eq!(wipf.core.next_rank_name, "Captain");
         assert_eq!(wipf.core.type_name, "Cowboy");
         assert_eq!(wipf.core.next_rank_exp, 5_196);
@@ -821,7 +1584,10 @@ mod tests {
             .fallback
             .as_ref()
             .expect("saved portrait spec evaluates");
-        assert_eq!(portrait.source.as_ref().map(DefinitionId::as_str), Some("TRPR"));
+        assert_eq!(
+            portrait.source.as_ref().map(DefinitionId::as_str),
+            Some("TRPR")
+        );
         assert_eq!(portrait.name, "Captain");
         assert_eq!(wipf.portraits.current.as_ref(), Some(portrait));
         assert_eq!(
@@ -841,7 +1607,14 @@ mod tests {
         assert_eq!(zorro.id, "TRPR");
         assert_eq!(zorro.rank, 0, "Rank defaults to 0");
         assert_eq!(zorro.rank_name, "Clonk", "RankName defaults to Clonk");
-        assert_eq!(zorro.core, CrewInfoCoreFields::default());
+        assert_eq!(zorro.core.original_filename, "Zorro.c4i");
+        assert_eq!(
+            CrewInfoCoreFields {
+                original_filename: String::new(),
+                ..zorro.core.clone()
+            },
+            CrewInfoCoreFields::default()
+        );
         assert_eq!(zorro.death_count, 0, "DeathCount defaults to 0");
         assert_eq!((zorro.birthday, zorro.age), (0, 0));
         assert_eq!(zorro.participation, 1, "Participation defaults to 1");
@@ -883,6 +1656,8 @@ mod tests {
         let wrong_section = CrewInfo::from_object_info_source(
             "[objectinfo]\nid=WRONG\nName=Wrong\nNextRankExp=77\n[Physical]\nWalk=90000\n",
             false,
+            true,
+            None,
         );
         assert!(wrong_section.id.is_empty());
         assert_eq!(wrong_section.name, "Clonk");
@@ -892,6 +1667,8 @@ mod tests {
         let wrong_values = CrewInfo::from_object_info_source(
             "[ObjectInfo]\nid=CASE\nnextrankexp=77\n[Physical]\nwalk=90000\n",
             false,
+            true,
+            None,
         );
         assert_eq!(wrong_values.id, "CASE");
         assert_eq!(wrong_values.core.next_rank_exp, 0);
@@ -900,6 +1677,8 @@ mod tests {
         let wrong_physical_section = CrewInfo::from_object_info_source(
             "[ObjectInfo]\nid=CASE\n[physical]\nWalk=90000\n",
             false,
+            true,
+            None,
         );
         assert_eq!(wrong_physical_section.physical.walk, 0);
     }
@@ -926,6 +1705,8 @@ mod tests {
              [Physical]\n\
              Jump=444\n",
             false,
+            true,
+            None,
         );
 
         assert_eq!(info.id, "FIRST");
@@ -970,7 +1751,7 @@ mod tests {
                 111,
             ),
         ] {
-            let info = CrewInfo::from_object_info_source(source, false);
+            let info = CrewInfo::from_object_info_source(source, false, true, None);
             assert_eq!(info.physical.walk, expected_walk, "{label}");
         }
     }
@@ -992,15 +1773,13 @@ mod tests {
             std::fs::create_dir_all(&group).expect("crew group");
             std::fs::write(
                 group.join("ObjectInfo.txt"),
-                format!(
-                    "[ObjectInfo]\nid=CLNK\nName={crew_name}\nPortraitFile={portrait_file}\n"
-                ),
+                format!("[ObjectInfo]\nid=CLNK\nName={crew_name}\nPortraitFile={portrait_file}\n"),
             )
             .expect("write crew core");
             if let Some(image_name) = image_name {
                 image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
                     .save(group.join(image_name))
-                .expect("write custom portrait image");
+                    .expect("write custom portrait image");
             }
         }
         let corrupt = root.join("CorruptPng.c4i");
@@ -1062,7 +1841,10 @@ mod tests {
             .fallback
             .as_ref()
             .expect("synthesized PortraitFile fallback exists");
-        assert_eq!(fallback.source.as_ref().map(DefinitionId::as_str), Some("CLNK"));
+        assert_eq!(
+            fallback.source.as_ref().map(DefinitionId::as_str),
+            Some("CLNK")
+        );
         assert_eq!(fallback.name, "custom");
         assert_eq!(embedded.core.portrait_file, "custom");
 
@@ -1075,6 +1857,28 @@ mod tests {
             assert_eq!(info.portraits, CrewPortraitState::default());
             assert!(info.core.portrait_file.is_empty());
         }
+
+        let group = Group::open(&root).expect("reopen player group");
+        let remote = PlayerFile::load_with_portraits(&group, false)
+            .expect("remote player file loads");
+        let explicit = remote
+            .crew
+            .iter()
+            .find(|info| info.name == "Valid custom")
+            .expect("explicit custom portrait remains loadable remotely");
+        assert_eq!(explicit.core.portrait_file, "custom");
+        assert!(!explicit.core.portrait_png.is_empty());
+        assert!(explicit.portraits.current.is_some());
+
+        let unnamed = remote
+            .crew
+            .iter()
+            .find(|info| info.name == "Embedded custom")
+            .expect("unnamed embedded portrait crew remains present");
+        assert!(unnamed.core.portrait_file.is_empty());
+        assert!(unnamed.core.portrait_png.is_empty());
+        assert!(unnamed.core.portrait_bmp.is_empty());
+        assert_eq!(unnamed.portraits, CrewPortraitState::default());
     }
 
     #[test]
@@ -1190,6 +1994,49 @@ mod tests {
 
         assert_eq!(player.pref_control, 4);
         assert!(!player.pref_mouse);
+    }
+
+    #[test]
+    fn player_core_keeps_raw_strings_and_noncanonical_integer_preferences() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("Exact.c4p");
+        std::fs::create_dir_all(&root).expect("player dir");
+        std::fs::write(
+            root.join("Player.txt"),
+            "[Player]\nName=Value // not a comment  \nComment=Keep trailing  \nExtraData=1;Zero=I0\n\n[Preferences]\nAutoStopControl=2\nAutoContextMenu=-2\nMouse=7\n",
+        )
+        .expect("write core");
+
+        let player = PlayerFile::load_from_path(&root).expect("player file loads");
+
+        assert_eq!(player.name, "Value // not a comment  ");
+        assert_eq!(player.info_core.comment, "Keep trailing  ");
+        assert_eq!(player.info_core.pref_control_style_value, 2);
+        assert_eq!(player.info_core.pref_auto_context_menu_value, -2);
+        assert_eq!(player.info_core.pref_mouse_value, 7);
+        assert!(player.pref_control_style);
+        assert!(player.pref_auto_context_menu);
+        assert!(player.pref_mouse);
+        assert_eq!(
+            player.info_core.extra_data,
+            vec![(
+                "Zero".to_string(),
+                lc_script::Value::C4Id(lc_script::c4_id_from_raw(0)),
+            )]
+        );
+    }
+
+    #[test]
+    fn object_rank_names_use_stdstrbuf_escaping() {
+        let info = CrewInfo::from_object_info_source(
+            "[ObjectInfo]\nRankName=\"Lieutenant \\\"A\\\"\"\nNextRankName=\"Captain\\nTwo\" trailing\n",
+            false,
+            true,
+            None,
+        );
+
+        assert_eq!(info.rank_name, "Lieutenant \"A\"");
+        assert_eq!(info.core.next_rank_name, "Captain\nTwo");
     }
 
     #[test]

@@ -1,0 +1,1575 @@
+//! C++-format live player files embedded by `C4GameSaveNetwork(false)`.
+//!
+//! `C4PlayerList::Save` creates a fresh `.c4p`, asks `C4Player::Save` for
+//! `Player.txt` and every saved `C4ObjectInfo`, and finally applies
+//! `C4FLS_Player`.  This module performs that operation from synchronized
+//! engine state without passing through the private Rust JSON save format.
+
+use std::collections::HashSet;
+
+use lc_resources::{MutableGroup, MutableGroupError, PhysicalInfo};
+use thiserror::Error;
+
+use crate::player_file::{CrewInfo, PlayerInfoCoreState};
+use crate::{Engine, EngineState, LiveC4ValueEncodeError, LiveC4ValueEnumeration, PlayerState};
+
+const C4FLS_PLAYER: &str = "Player.txt|Portrait.png|Portrait.bmp|*.c4i";
+const C4FLS_OBJECT: &str = "ObjectInfo.txt|Portrait.png|Portrait.bmp";
+
+#[derive(Debug, Error)]
+pub enum LiveC4PlayerError {
+    #[error("live C4 player {0} does not exist")]
+    PlayerNotFound(i32),
+    #[error("{scope} extra-data name `{name}` is not a C4 identifier")]
+    InvalidExtraDataName { scope: &'static str, name: String },
+    #[error("failed to encode {scope} extra-data slot `{name}`: {source}")]
+    ExtraDataValue {
+        scope: &'static str,
+        name: String,
+        #[source]
+        source: LiveC4ValueEncodeError,
+    },
+    #[error("{scope} has {count} extra-data slots, exceeding C4's signed count")]
+    TooManyExtraDataEntries { scope: &'static str, count: usize },
+    #[error("cannot encode retained {asset} image: {detail}")]
+    ImageEncoding { asset: &'static str, detail: String },
+    #[error(
+        "crew `{crew}` owns a copied/custom portrait surface without retained pixels or a reconstruction source"
+    )]
+    UnreconstructablePortrait { crew: String },
+    #[error(transparent)]
+    Group(#[from] MutableGroupError),
+}
+
+/// Process-local C4Config inputs consulted by C4ObjectInfo::Save and the
+/// localized C4PlayerInfoCore compiler default.
+#[derive(Debug, Clone, Copy)]
+pub struct LiveC4PlayerSaveOptions<'a> {
+    pub add_new_crew_portraits: bool,
+    pub save_default_portraits: bool,
+    pub player_rank_name_default: &'a str,
+}
+
+impl<'a> Default for LiveC4PlayerSaveOptions<'a> {
+    fn default() -> Self {
+        Self {
+            add_new_crew_portraits: true,
+            save_default_portraits: true,
+            player_rank_name_default: "Rank",
+        }
+    }
+}
+
+/// Serialize one live runtime player into the small `.c4p` child group used
+/// by a non-initial `C4GameSaveNetwork` dynamic.
+///
+/// The live-engine overload also mirrors `C4ObjectInfoCore::Save(pDefs)` by
+/// refreshing custom current/next-rank text from the loaded definition list.
+pub fn serialize_live_c4_player(
+    engine: &Engine,
+    player_number: i32,
+    filename: &[u8],
+    maker: &[u8],
+) -> Result<MutableGroup, LiveC4PlayerError> {
+    serialize_live_c4_player_with_options(
+        engine,
+        player_number,
+        filename,
+        maker,
+        LiveC4PlayerSaveOptions::default(),
+    )
+}
+
+pub fn serialize_live_c4_player_with_options(
+    engine: &Engine,
+    player_number: i32,
+    filename: &[u8],
+    maker: &[u8],
+    options: LiveC4PlayerSaveOptions<'_>,
+) -> Result<MutableGroup, LiveC4PlayerError> {
+    let state = engine.capture_state_for_network_save();
+    let player = state
+        .players
+        .iter()
+        .find(|player| player.id == player_number)
+        .ok_or(LiveC4PlayerError::PlayerNotFound(player_number))?;
+    let enumeration = local_player_value_enumeration(&state, player);
+    serialize_live_c4_player_with_options_and_enumeration(
+        engine,
+        player_number,
+        filename,
+        maker,
+        options,
+        &enumeration,
+    )
+}
+
+/// Serialize with the C4StringTable enumeration produced by the enclosing
+/// live scenario save. Native C++ enumerates once, then reuses those `S<n>`
+/// IDs while writing every embedded player and crew group.
+pub fn serialize_live_c4_player_with_options_and_enumeration(
+    engine: &Engine,
+    player_number: i32,
+    filename: &[u8],
+    maker: &[u8],
+    options: LiveC4PlayerSaveOptions<'_>,
+    enumeration: &LiveC4ValueEnumeration,
+) -> Result<MutableGroup, LiveC4PlayerError> {
+    let state = engine.capture_state_for_network_save();
+    let player = state
+        .players
+        .iter()
+        .find(|player| player.id == player_number)
+        .ok_or(LiveC4PlayerError::PlayerNotFound(player_number))?;
+    serialize_player_group(
+        &state,
+        player,
+        filename,
+        maker,
+        options,
+        enumeration,
+        |info| {
+            materialize_live_portrait(engine, info, options)?;
+            if let Some(definition) = engine.definition(&info.id) {
+                crate::update_custom_rank_fields(
+                    &mut info.rank_name,
+                    &mut info.core,
+                    info.rank,
+                    definition.rank_names(),
+                    definition.rank_base(),
+                );
+                info.core.rank_png =
+                    render_live_rank_symbol(engine, &info.id, info.rank)?.unwrap_or_default();
+            } else {
+                info.core.rank_png.clear();
+            }
+            Ok(())
+        },
+    )
+}
+
+/// Serialize a player selected by number from an already synchronized engine
+/// snapshot.  Definition metadata is not present in `EngineState`, so the
+/// snapshot's retained custom-rank fields are emitted verbatim.
+pub fn serialize_live_c4_player_from_state(
+    state: &EngineState,
+    player_number: i32,
+    filename: &[u8],
+    maker: &[u8],
+) -> Result<MutableGroup, LiveC4PlayerError> {
+    let player = state
+        .players
+        .iter()
+        .find(|player| player.id == player_number)
+        .ok_or(LiveC4PlayerError::PlayerNotFound(player_number))?;
+    serialize_live_c4_player_state(state, player, filename, maker)
+}
+
+/// Serialize an explicit runtime-player snapshot.  The caller may use this
+/// when it already resolved the C4PlayerInfo/restore-info association.
+pub fn serialize_live_c4_player_state(
+    state: &EngineState,
+    player: &PlayerState,
+    filename: &[u8],
+    maker: &[u8],
+) -> Result<MutableGroup, LiveC4PlayerError> {
+    let enumeration = local_player_value_enumeration(state, player);
+    serialize_player_group(
+        state,
+        player,
+        filename,
+        maker,
+        LiveC4PlayerSaveOptions::default(),
+        &enumeration,
+        |_| Ok(()),
+    )
+}
+
+fn local_player_value_enumeration(
+    state: &EngineState,
+    player: &PlayerState,
+) -> LiveC4ValueEnumeration {
+    fn collect(value: &lc_script::Value, strings: &mut Vec<String>) {
+        match value {
+            lc_script::Value::String(value) => strings.push(value.clone()),
+            lc_script::Value::Array(values) => {
+                for value in values {
+                    collect(value, strings);
+                }
+            }
+            lc_script::Value::Proplist(values) => {
+                for (key, value) in values {
+                    collect(key, strings);
+                    collect(value, strings);
+                }
+            }
+            lc_script::Value::Nil
+            | lc_script::Value::Int(_)
+            | lc_script::Value::Bool(_)
+            | lc_script::Value::RawBool(_)
+            | lc_script::Value::C4Id(_)
+            | lc_script::Value::Object(_) => {}
+        }
+    }
+
+    let mut strings = Vec::new();
+    for (_, value) in &player.extra_data {
+        collect(value, &mut strings);
+    }
+    if let Some(roster) = state.crew_info_rosters.get(&player.id) {
+        for info in roster {
+            for (_, value) in &info.extra_data {
+                collect(value, &mut strings);
+            }
+        }
+    }
+    LiveC4ValueEnumeration::from_strings_in_id_order(strings)
+}
+
+fn serialize_player_group(
+    state: &EngineState,
+    player: &PlayerState,
+    filename: &[u8],
+    maker: &[u8],
+    options: LiveC4PlayerSaveOptions<'_>,
+    enumeration: &LiveC4ValueEnumeration,
+    mut refresh_rank: impl FnMut(&mut CrewInfo) -> Result<(), LiveC4PlayerError>,
+) -> Result<MutableGroup, LiveC4PlayerError> {
+    let mut group = MutableGroup::new_bytes(filename.to_vec());
+    group.set_maker_bytes(maker);
+    group.add_file(
+        "Player.txt",
+        serialize_player_core(player, options.player_rank_name_default, enumeration)?,
+    )?;
+
+    let roster = state
+        .crew_info_rosters
+        .get(&player.id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let order = normalized_roster_order(state, player.id, roster.len());
+    let mut used_filenames = Vec::<Vec<u8>>::with_capacity(roster.len());
+
+    // C4ObjectInfoList::Save walks GetLast()/GetPrevious(): the inverse of
+    // its First->Next traversal.  This matters before sorting because the
+    // first stripped-name collision keeps the unnumbered filename.
+    for &index in order.iter().rev() {
+        let mut info = roster[index].clone();
+        refresh_rank(&mut info)?;
+        let child_name = retained_or_unique_crew_filename(&info, &used_filenames);
+        let mut child = MutableGroup::new_bytes(child_name.clone());
+        child.set_maker_bytes(maker);
+        child.add_file("ObjectInfo.txt", serialize_object_info(&info, enumeration)?)?;
+        add_retained_portrait_files(&mut child, &info)?;
+        child.sort(C4FLS_OBJECT);
+        group.add_child_bytes(child_name.clone(), child)?;
+        used_filenames.push(child_name);
+    }
+
+    group.sort(C4FLS_PLAYER);
+    Ok(group)
+}
+
+fn normalized_roster_order(state: &EngineState, player: i32, roster_len: usize) -> Vec<usize> {
+    let mut seen = HashSet::with_capacity(roster_len);
+    let mut order = state
+        .crew_info_order
+        .get(&player)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|index| *index < roster_len && seen.insert(*index))
+        .collect::<Vec<_>>();
+    order.extend((0..roster_len).filter(|index| seen.insert(*index)));
+    order
+}
+
+fn retained_or_unique_crew_filename(info: &CrewInfo, used: &[Vec<u8>]) -> Vec<u8> {
+    let retained = c4_c_string_bytes(&info.core.original_filename, usize::MAX);
+    if !retained.is_empty()
+        && !used
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(&retained))
+    {
+        retained
+    } else {
+        unique_crew_filename(&info.name, used)
+    }
+}
+
+fn add_retained_portrait_files(
+    child: &mut MutableGroup,
+    info: &CrewInfo,
+) -> Result<(), LiveC4PlayerError> {
+    if !info.core.portrait_png.is_empty() {
+        child.add_file("Portrait.png", info.core.portrait_png.clone())?;
+        if !info.core.portrait_overlay_png.is_empty() {
+            child.add_file(
+                "PortraitOverlay.png",
+                info.core.portrait_overlay_png.clone(),
+            )?;
+        }
+    } else if !info.core.portrait_bmp.is_empty() {
+        // A fresh C4ObjectInfo group writes an owned legacy BMP surface back
+        // through C4Portrait::SavePNG.
+        let decoded =
+            image::load_from_memory_with_format(&info.core.portrait_bmp, image::ImageFormat::Bmp)
+                .map_err(|error| LiveC4PlayerError::ImageEncoding {
+                asset: "crew portrait",
+                detail: error.to_string(),
+            })?;
+        child.add_file(
+            "Portrait.png",
+            encode_dynamic_png(decoded, "crew portrait")?,
+        )?;
+        if !info.core.portrait_overlay_png.is_empty() {
+            child.add_file(
+                "PortraitOverlay.png",
+                info.core.portrait_overlay_png.clone(),
+            )?;
+        }
+    }
+    if !info.core.rank_png.is_empty() {
+        child.add_file("Rank.png", info.core.rank_png.clone())?;
+    }
+    Ok(())
+}
+
+fn materialize_live_portrait(
+    engine: &Engine,
+    info: &mut CrewInfo,
+    options: LiveC4PlayerSaveOptions<'_>,
+) -> Result<(), LiveC4PlayerError> {
+    use crate::CrewPermanentPortrait;
+
+    if !options.save_default_portraits {
+        clear_portrait_payload(info);
+        return Ok(());
+    }
+
+    match info.portraits.permanent.clone() {
+        CrewPermanentPortrait::ExplicitNone => {
+            clear_portrait_payload(info);
+            info.core.portrait_file = "none".to_string();
+        }
+        CrewPermanentPortrait::Assigned(portrait) => {
+            if let Some(source) = portrait.source.as_ref() {
+                clear_portrait_payload(info);
+                materialize_definition_portrait(engine, info, source.as_str(), &portrait.name)?;
+                info.core.portrait_file = if source.as_str() == info.id {
+                    portrait.name
+                } else {
+                    format!("{}::{}", source.as_str(), portrait.name)
+                };
+            } else {
+                // Owned graphics either came from a loaded custom payload or
+                // from SetPortrait(copy=true), for which Rust retains the
+                // immutable source in CrewInfoCoreFields.
+                if info.core.portrait_png.is_empty()
+                    && info.core.portrait_bmp.is_empty()
+                    && !info.core.owned_portrait_source.is_empty()
+                {
+                    let source = info.core.owned_portrait_source.clone();
+                    let name = info.core.owned_portrait_name.clone();
+                    materialize_definition_portrait(engine, info, &source, &name)?;
+                }
+                if info.core.portrait_png.is_empty() && info.core.portrait_bmp.is_empty() {
+                    return Err(LiveC4PlayerError::UnreconstructablePortrait {
+                        crew: info.name.clone(),
+                    });
+                }
+                info.core.portrait_file = "custom".to_string();
+            }
+        }
+        CrewPermanentPortrait::Absent => {
+            if !options.add_new_crew_portraits {
+                clear_portrait_payload(info);
+                return Ok(());
+            }
+            if info.core.portrait_png.is_empty() && info.core.portrait_bmp.is_empty() {
+                if let Some(portrait) = info.portraits.current.clone() {
+                    if let Some(source) = portrait.source {
+                        materialize_definition_portrait(
+                            engine,
+                            info,
+                            source.as_str(),
+                            &portrait.name,
+                        )?;
+                    } else if !info.core.owned_portrait_source.is_empty() {
+                        let source = info.core.owned_portrait_source.clone();
+                        let name = info.core.owned_portrait_name.clone();
+                        materialize_definition_portrait(engine, info, &source, &name)?;
+                        if info.core.portrait_png.is_empty() && info.core.portrait_bmp.is_empty() {
+                            return Err(LiveC4PlayerError::UnreconstructablePortrait {
+                                crew: info.name.clone(),
+                            });
+                        }
+                    } else {
+                        return Err(LiveC4PlayerError::UnreconstructablePortrait {
+                            crew: info.name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn clear_portrait_payload(info: &mut CrewInfo) {
+    info.core.portrait_png.clear();
+    info.core.portrait_overlay_png.clear();
+    info.core.portrait_bmp.clear();
+}
+
+fn materialize_definition_portrait(
+    engine: &Engine,
+    info: &mut CrewInfo,
+    source: &str,
+    name: &str,
+) -> Result<(), LiveC4PlayerError> {
+    let image = engine
+        .definition_named_portrait_graphics_image(source, name)
+        .or_else(|| {
+            (name.eq_ignore_ascii_case("portrait1") || name.is_empty())
+                .then(|| engine.definition_portrait_graphics_image(source))
+                .flatten()
+        });
+    let Some(image) = image else {
+        return Ok(());
+    };
+    let (png, overlay) = encode_definition_image(image, "definition portrait")?;
+    info.core.portrait_png = png;
+    info.core.portrait_overlay_png = overlay.unwrap_or_default();
+    info.core.portrait_bmp.clear();
+    Ok(())
+}
+
+fn encode_definition_image(
+    image: crate::DefinitionPictureImage,
+    asset: &'static str,
+) -> Result<(Vec<u8>, Option<Vec<u8>>), LiveC4PlayerError> {
+    let width = image.width();
+    let height = image.height();
+    let png = encode_rgba_png(width, height, &image.pixels(), asset)?;
+    let overlay = image.color_mask().and_then(|mask| {
+        let pixels = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
+        if mask.len() == pixels * 4 {
+            Some(mask.to_vec())
+        } else if mask.len() == pixels {
+            let mut rgba = Vec::with_capacity(pixels * 4);
+            for &coverage in mask.iter() {
+                rgba.extend_from_slice(&[coverage, coverage, coverage, coverage]);
+            }
+            Some(rgba)
+        } else {
+            None
+        }
+    });
+    let overlay = overlay
+        .map(|pixels| encode_rgba_png(width, height, &pixels, "portrait overlay"))
+        .transpose()?;
+    Ok((png, overlay))
+}
+
+fn encode_rgba_png(
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    asset: &'static str,
+) -> Result<Vec<u8>, LiveC4PlayerError> {
+    let image = image::RgbaImage::from_raw(width, height, pixels.to_vec()).ok_or_else(|| {
+        LiveC4PlayerError::ImageEncoding {
+            asset,
+            detail: format!(
+                "{}x{} RGBA surface has {} bytes",
+                width,
+                height,
+                pixels.len()
+            ),
+        }
+    })?;
+    encode_dynamic_png(image::DynamicImage::ImageRgba8(image), asset)
+}
+
+fn encode_dynamic_png(
+    image: image::DynamicImage,
+    asset: &'static str,
+) -> Result<Vec<u8>, LiveC4PlayerError> {
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut cursor, image::ImageOutputFormat::Png)
+        .map_err(|error| LiveC4PlayerError::ImageEncoding {
+            asset,
+            detail: error.to_string(),
+        })?;
+    Ok(cursor.into_inner())
+}
+
+fn render_live_rank_symbol(
+    engine: &Engine,
+    definition: &str,
+    rank: i32,
+) -> Result<Option<Vec<u8>>, LiveC4PlayerError> {
+    let Some(strip) = engine.definition_rank_symbols_image(definition) else {
+        return Ok(None);
+    };
+    let Some(base_count) = engine.definition_rank_symbol_count(definition) else {
+        return Ok(None);
+    };
+    let size = strip.height();
+    if size == 0 || base_count == 0 {
+        return Ok(None);
+    }
+    let total_count = strip.width() / size;
+    if total_count == 0 {
+        return Ok(None);
+    }
+    let rank = rank.max(0) as u32;
+    let mut base_phase = rank % base_count;
+    let mut extension_phase = None;
+    let mut use_captain = false;
+    if rank / base_count != 0 {
+        let requested = rank / base_count - 1 + base_count;
+        if total_count > base_count {
+            let phase = requested.min(total_count - 1);
+            if requested >= total_count {
+                base_phase = base_count - 1;
+            }
+            extension_phase = Some(phase);
+        } else {
+            use_captain = true;
+        }
+    }
+
+    let strip_image =
+        image::RgbaImage::from_raw(strip.width(), strip.height(), strip.pixels().to_vec())
+            .ok_or_else(|| LiveC4PlayerError::ImageEncoding {
+                asset: "rank symbol",
+                detail: "definition rank strip has an invalid RGBA size".to_string(),
+            })?;
+    let x = base_phase.saturating_mul(size);
+    let mut output = image::imageops::crop_imm(&strip_image, x, 0, size, size).to_image();
+    if let Some(extension_phase) = extension_phase {
+        let extension = image::imageops::crop_imm(
+            &strip_image,
+            extension_phase.saturating_mul(size),
+            0,
+            size,
+            size,
+        )
+        .to_image();
+        overlay_rank_extension(&mut output, &extension);
+    } else if use_captain {
+        const CAPTAIN_PNG: &[u8] = include_bytes!("../../../../planet/Graphics.c4g/Captain.png");
+        let captain = image::load_from_memory_with_format(CAPTAIN_PNG, image::ImageFormat::Png)
+            .map_err(|error| LiveC4PlayerError::ImageEncoding {
+                asset: "captain rank extension",
+                detail: error.to_string(),
+            })?
+            .into_rgba8();
+        overlay_rank_extension(&mut output, &captain);
+    }
+    encode_dynamic_png(image::DynamicImage::ImageRgba8(output), "rank symbol").map(Some)
+}
+
+fn overlay_rank_extension(base: &mut image::RgbaImage, extension: &image::RgbaImage) {
+    let width = base.width().saturating_mul(2) / 3;
+    let height = base.height().saturating_mul(2) / 3;
+    let extension = image::imageops::resize(
+        extension,
+        width.max(1),
+        height.max(1),
+        image::imageops::FilterType::Nearest,
+    );
+    image::imageops::overlay(base, &extension, 0, 0);
+}
+
+fn serialize_player_core(
+    player: &PlayerState,
+    rank_name_default: &str,
+    enumeration: &LiveC4ValueEnumeration,
+) -> Result<Vec<u8>, LiveC4PlayerError> {
+    let mut core = player
+        .player_info_core
+        .clone()
+        .unwrap_or_else(|| fallback_player_info_core(player));
+    // These fields live in the inherited C4PlayerInfoCore and continue to be
+    // changed by the active C4Player. The runtime snapshot is authoritative.
+    core.score = player.score;
+    core.rounds = player.rounds;
+    core.rounds_won = player.rounds_won;
+    core.rounds_lost = player.rounds_lost;
+    core.total_playing_time = player.total_playing_time;
+    core.extra_data.clone_from(&player.extra_data);
+
+    let mut player_lines = Vec::new();
+    push_c4_string(&mut player_lines, "Name", &core.pref_name, "Neuling", 30);
+    push_c4_string(&mut player_lines, "Comment", &core.comment, "", 256);
+    push_i32(&mut player_lines, "Rank", core.rank, 0);
+    push_c4_string(
+        &mut player_lines,
+        "RankName",
+        &core.rank_name,
+        rank_name_default,
+        30,
+    );
+    push_i32(&mut player_lines, "Score", core.score, 0);
+    push_i32(&mut player_lines, "Rounds", core.rounds, 0);
+    push_i32(&mut player_lines, "RoundsWon", core.rounds_won, 0);
+    push_i32(&mut player_lines, "RoundsLost", core.rounds_lost, 0);
+    push_i32(
+        &mut player_lines,
+        "TotalPlayingTime",
+        core.total_playing_time,
+        0,
+    );
+    if !core.extra_data.is_empty() {
+        player_lines.push(named_value_map_line(
+            "ExtraData",
+            &core.extra_data,
+            "player",
+            enumeration,
+        )?);
+    }
+
+    let mut preference_lines = Vec::new();
+    push_i32(&mut preference_lines, "Color", core.pref_color, 0);
+    push_u32(&mut preference_lines, "ColorDw", core.pref_color_dw, 0xff);
+    push_u32(
+        &mut preference_lines,
+        "AlternateColorDw",
+        core.pref_color2_dw,
+        0,
+    );
+    push_i32(&mut preference_lines, "Control", core.pref_control, 1);
+    push_i32(
+        &mut preference_lines,
+        "AutoStopControl",
+        retained_preference_value(core.pref_control_style_value, core.pref_control_style),
+        0,
+    );
+    // The compiler default is -1 ("inherit AutoStopControl"), but a loaded
+    // C4PlayerInfoCore resolves that sentinel to a concrete zero/one before
+    // it can be saved again.  Therefore this line is intentionally present
+    // even when the effective preference is false.
+    push_i32(
+        &mut preference_lines,
+        "AutoContextMenu",
+        retained_preference_value(
+            core.pref_auto_context_menu_value,
+            core.pref_auto_context_menu,
+        ),
+        -1,
+    );
+    push_i32(&mut preference_lines, "Position", core.pref_position, 0);
+    push_i32(
+        &mut preference_lines,
+        "Mouse",
+        retained_preference_value(core.pref_mouse_value, core.pref_mouse),
+        1,
+    );
+
+    let last = &core.last_round;
+    let mut last_round_lines = Vec::new();
+    if !last.title.is_empty() {
+        push_escaped_c4_string(&mut last_round_lines, "Title", &last.title);
+    }
+    push_u32(&mut last_round_lines, "Date", last.date, 0);
+    push_i32(&mut last_round_lines, "Duration", last.duration, 0);
+    push_i32(&mut last_round_lines, "Won", last.won, 0);
+    push_i32(&mut last_round_lines, "Score", last.score, 0);
+    push_i32(&mut last_round_lines, "FinalScore", last.final_score, 0);
+    push_i32(&mut last_round_lines, "TotalScore", last.total_score, 0);
+    push_i32(&mut last_round_lines, "Bonus", last.bonus, 0);
+    push_i32(&mut last_round_lines, "Level", last.level, 0);
+
+    Ok(write_ini_sections([
+        ("Player", player_lines),
+        ("Preferences", preference_lines),
+        ("LastRound", last_round_lines),
+    ]))
+}
+
+fn fallback_player_info_core(player: &PlayerState) -> PlayerInfoCoreState {
+    PlayerInfoCoreState {
+        score: player.score,
+        rounds: player.rounds,
+        rounds_won: player.rounds_won,
+        rounds_lost: player.rounds_lost,
+        total_playing_time: player.total_playing_time,
+        extra_data: player.extra_data.clone(),
+        ..PlayerInfoCoreState::default()
+    }
+}
+
+fn serialize_object_info(
+    info: &CrewInfo,
+    enumeration: &LiveC4ValueEnumeration,
+) -> Result<Vec<u8>, LiveC4PlayerError> {
+    let mut object_lines = Vec::new();
+    let definition = lc_script::c4_id_text(&info.id);
+    if lc_script::c4_id_raw(&info.id) != 0 {
+        push_bytes(
+            &mut object_lines,
+            "id",
+            lc_script::c4_string_bytes(&definition),
+        );
+    }
+    push_c4_string(&mut object_lines, "Name", &info.name, "Clonk", 30);
+    push_c4_string(
+        &mut object_lines,
+        "DeathMessage",
+        &info.death_message,
+        "",
+        75,
+    );
+    push_c4_string(
+        &mut object_lines,
+        "PortraitFile",
+        &info.core.portrait_file,
+        "",
+        36,
+    );
+    push_i32(&mut object_lines, "Rank", info.rank, 0);
+    push_escaped_c4_string_default(&mut object_lines, "RankName", &info.rank_name, "Clonk");
+    push_escaped_c4_string_default(
+        &mut object_lines,
+        "NextRankName",
+        &info.core.next_rank_name,
+        "",
+    );
+    push_c4_string(
+        &mut object_lines,
+        "TypeName",
+        &info.core.type_name,
+        "Clonk",
+        31,
+    );
+    push_i32(&mut object_lines, "Participation", info.participation, 1);
+    push_i32(&mut object_lines, "Experience", info.experience, 0);
+    push_i32(&mut object_lines, "NextRankExp", info.core.next_rank_exp, 0);
+    push_i32(&mut object_lines, "Rounds", info.rounds, 0);
+    push_i32(&mut object_lines, "DeathCount", info.death_count, 0);
+    push_i32(&mut object_lines, "Birthday", info.birthday, 0);
+    push_i32(
+        &mut object_lines,
+        "TotalPlayingTime",
+        info.total_playing_time,
+        0,
+    );
+    push_i32(&mut object_lines, "Age", info.age, 0);
+    if !info.extra_data.is_empty() {
+        object_lines.push(named_value_map_line(
+            "ExtraData",
+            &info.extra_data,
+            "crew",
+            enumeration,
+        )?);
+    }
+
+    let physical_lines = physical_lines(&info.physical);
+    Ok(write_ini_sections([
+        ("ObjectInfo", object_lines),
+        ("Physical", physical_lines),
+    ]))
+}
+
+fn physical_lines(physical: &PhysicalInfo) -> Vec<Vec<u8>> {
+    let mut lines = Vec::new();
+    for (name, value) in [
+        ("Energy", physical.energy),
+        ("Breath", physical.breath),
+        ("Walk", physical.walk),
+        ("Jump", physical.jump),
+        ("Scale", physical.scale),
+        ("Hangle", physical.hangle),
+        ("Dig", physical.dig),
+        ("Swim", physical.swim),
+        ("Throw", physical.throw),
+        ("Push", physical.push),
+        ("Fight", physical.fight),
+        ("Magic", physical.magic),
+        ("Float", physical.float),
+        ("CanScale", physical.can_scale),
+        ("CanHangle", physical.can_hangle),
+        ("CanDig", physical.can_dig),
+        ("CanConstruct", physical.can_construct),
+        ("CanChop", physical.can_chop),
+        ("CanFly", physical.can_fly),
+        ("CorrosionResist", physical.corrosion_resist),
+        ("BreatheWater", physical.breathe_water),
+    ] {
+        push_i32(&mut lines, name, value, 0);
+    }
+    lines
+}
+
+fn named_value_map_line(
+    key: &str,
+    entries: &[(String, lc_script::Value)],
+    scope: &'static str,
+    enumeration: &LiveC4ValueEnumeration,
+) -> Result<Vec<u8>, LiveC4PlayerError> {
+    let count =
+        i32::try_from(entries.len()).map_err(|_| LiveC4PlayerError::TooManyExtraDataEntries {
+            scope,
+            count: entries.len(),
+        })?;
+    let mut line = format!("{key}={count}").into_bytes();
+    if entries.is_empty() {
+        return Ok(line);
+    }
+    line.push(b';');
+    for (index, (name, value)) in entries.iter().enumerate() {
+        let name_bytes = c4_c_string_bytes(name, usize::MAX);
+        if !name_bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-'))
+        {
+            return Err(LiveC4PlayerError::InvalidExtraDataName {
+                scope,
+                name: name.clone(),
+            });
+        }
+        if index != 0 {
+            line.push(b',');
+        }
+        line.extend_from_slice(&name_bytes);
+        line.push(b'=');
+        let encoded = enumeration.encode_value(value).map_err(|source| {
+            LiveC4PlayerError::ExtraDataValue {
+                scope,
+                name: name.clone(),
+                source,
+            }
+        })?;
+        line.extend_from_slice(encoded.as_bytes());
+    }
+    Ok(line)
+}
+
+fn push_i32(lines: &mut Vec<Vec<u8>>, name: &str, value: i32, default: i32) {
+    if value != default {
+        lines.push(format!("{name}={value}").into_bytes());
+    }
+}
+
+fn push_u32(lines: &mut Vec<Vec<u8>>, name: &str, value: u32, default: u32) {
+    if value != default {
+        lines.push(format!("{name}={value}").into_bytes());
+    }
+}
+
+fn retained_preference_value(raw: i32, enabled: bool) -> i32 {
+    if (raw != 0) == enabled {
+        raw
+    } else {
+        i32::from(enabled)
+    }
+}
+
+fn push_c4_string(
+    lines: &mut Vec<Vec<u8>>,
+    name: &str,
+    value: &str,
+    default: &str,
+    max_bytes: usize,
+) {
+    let value = c4_c_string_bytes(value, max_bytes);
+    // StdStringAdapt's fixed buffer is already bounded, but its default is a
+    // separate C string and is compared at full length. This matters for a
+    // localized default longer than the destination array (notably RankName).
+    let default = c4_c_string_bytes(default, usize::MAX);
+    if value != default {
+        push_bytes(lines, name, value);
+    }
+}
+
+fn push_bytes(lines: &mut Vec<Vec<u8>>, name: &str, value: Vec<u8>) {
+    let mut line = Vec::with_capacity(name.len() + 1 + value.len());
+    line.extend_from_slice(name.as_bytes());
+    line.push(b'=');
+    line.extend_from_slice(&value);
+    lines.push(line);
+}
+
+fn push_escaped_c4_string(lines: &mut Vec<Vec<u8>>, name: &str, value: &str) {
+    let bytes = c4_c_string_bytes(value, usize::MAX);
+    let mut escaped = Vec::with_capacity(bytes.len() + 2);
+    escaped.push(b'"');
+    let mut previous_was_numeric_escape = false;
+    for byte in bytes {
+        let printable = (b' '..=b'~').contains(&byte);
+        if printable
+            && byte != b'\\'
+            && byte != b'"'
+            && !(previous_was_numeric_escape && byte.is_ascii_digit())
+        {
+            escaped.push(byte);
+            previous_was_numeric_escape = false;
+            continue;
+        }
+        previous_was_numeric_escape = false;
+        match byte {
+            0x07 => escaped.extend_from_slice(b"\\a"),
+            0x08 => escaped.extend_from_slice(b"\\b"),
+            0x0c => escaped.extend_from_slice(b"\\f"),
+            b'\n' => escaped.extend_from_slice(b"\\n"),
+            b'\r' => escaped.extend_from_slice(b"\\r"),
+            b'\t' => escaped.extend_from_slice(b"\\t"),
+            0x0b => escaped.extend_from_slice(b"\\v"),
+            b'"' => escaped.extend_from_slice(b"\\\""),
+            b'\\' => escaped.extend_from_slice(b"\\\\"),
+            byte => {
+                escaped.push(b'\\');
+                escaped.extend_from_slice(format!("{byte:o}").as_bytes());
+                previous_was_numeric_escape = true;
+            }
+        }
+    }
+    escaped.push(b'"');
+    push_bytes(lines, name, escaped);
+}
+
+fn push_escaped_c4_string_default(
+    lines: &mut Vec<Vec<u8>>,
+    name: &str,
+    value: &str,
+    default: &str,
+) {
+    // StdStrBuf default comparison is length-aware, even though the INI
+    // writer subsequently stops at the first NUL via strlen.
+    if lc_script::c4_string_bytes(value) != lc_script::c4_string_bytes(default) {
+        push_escaped_c4_string(lines, name, value);
+    }
+}
+
+fn c4_c_string_bytes(value: &str, max_bytes: usize) -> Vec<u8> {
+    let mut bytes = lc_script::c4_string_bytes(value);
+    if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+        bytes.truncate(nul);
+    }
+    bytes.truncate(max_bytes);
+    bytes
+}
+
+fn write_ini_sections<const N: usize>(sections: [(&str, Vec<Vec<u8>>); N]) -> Vec<u8> {
+    let mut output = Vec::new();
+    for (name, lines) in sections {
+        if lines.is_empty() {
+            continue;
+        }
+        if !output.is_empty() {
+            output.extend_from_slice(b"\r\n");
+        }
+        output.push(b'[');
+        output.extend_from_slice(name.as_bytes());
+        output.extend_from_slice(b"]\r\n");
+        for line in lines {
+            output.extend_from_slice(&line);
+            output.extend_from_slice(b"\r\n");
+        }
+    }
+    output
+}
+
+fn unique_crew_filename(name: &str, used: &[Vec<u8>]) -> Vec<u8> {
+    let mut filename = make_filename_from_title(name);
+    filename.extend_from_slice(b".c4i");
+    while used
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&filename))
+    {
+        filename.truncate(filename.len().saturating_sub(b".c4i".len()));
+        let digit_start = filename
+            .iter()
+            .rposition(|byte| !byte.is_ascii_digit())
+            .map_or(0, |index| index + 1);
+        let number = std::str::from_utf8(&filename[digit_start..])
+            .ok()
+            .and_then(|digits| digits.parse::<i32>().ok())
+            .unwrap_or(0)
+            .wrapping_add(1);
+        filename.truncate(digit_start);
+        filename.extend_from_slice(number.to_string().as_bytes());
+        filename.extend_from_slice(b".c4i");
+    }
+    filename
+}
+
+fn make_filename_from_title(title: &str) -> Vec<u8> {
+    const STRIP: &[u8] = b"!\"\xa7%&/=?+*#:;<>\\.";
+    // C4ObjectInfo::Save receives the fixed C4MaxName-sized Name field, not
+    // an unbounded source string.
+    let title = c4_c_string_bytes(title, 30);
+    let mut filename = Vec::with_capacity(title.len());
+    for byte in title {
+        let whitespace = matches!(byte, b' ' | b'\t' | b'\r' | b'\n');
+        let strip = if whitespace {
+            filename.is_empty()
+        } else {
+            STRIP.contains(&byte)
+        };
+        if !strip {
+            filename.push(byte);
+        }
+    }
+    while filename
+        .last()
+        .is_some_and(|byte| matches!(*byte, b' ' | b'\t' | b'\r' | b'\n'))
+    {
+        filename.pop();
+    }
+    if filename.is_empty() {
+        filename.extend_from_slice(b"unnamed");
+    }
+    filename
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_core_uses_cpp_field_order_and_compile_defaults() {
+        let mut player = PlayerState::default();
+        player.name = "Runtime name".to_string();
+        player.score = 9;
+        player.rounds = 4;
+        player.rounds_won = 3;
+        player.rounds_lost = 1;
+        player.total_playing_time = 77;
+        player.extra_data = vec![
+            ("Key".to_string(), lc_script::Value::Int(12)),
+            ("Flag".to_string(), lc_script::Value::Bool(false)),
+        ];
+        player.player_info_core = Some(PlayerInfoCoreState {
+            pref_name: "Ala Kadabra".to_string(),
+            comment: "Ready".to_string(),
+            rank: 2,
+            rank_name: "Captain".to_string(),
+            pref_color: 3,
+            pref_color_dw: 0x12_34_56,
+            pref_color2_dw: 0x65_43_21,
+            pref_control: 0,
+            pref_control_style: true,
+            pref_auto_context_menu: false,
+            pref_position: 4,
+            pref_mouse: false,
+            last_round: crate::player_file::PlayerLastRoundState {
+                title: "Mine \"A\"\n".to_string(),
+                date: 123,
+                duration: 50,
+                won: 1,
+                score: 7,
+                final_score: 8,
+                total_score: 17,
+                bonus: 1,
+                level: 3,
+            },
+            ..PlayerInfoCoreState::default()
+        });
+
+        assert_eq!(
+            serialize_player_core(&player, "Rank", &LiveC4ValueEnumeration::default()).unwrap(),
+            b"[Player]\r\nName=Ala Kadabra\r\nComment=Ready\r\nRank=2\r\nRankName=Captain\r\nScore=9\r\nRounds=4\r\nRoundsWon=3\r\nRoundsLost=1\r\nTotalPlayingTime=77\r\nExtraData=2;Key=i12,Flag=b0\r\n\r\n[Preferences]\r\nColor=3\r\nColorDw=1193046\r\nAlternateColorDw=6636321\r\nControl=0\r\nAutoStopControl=1\r\nAutoContextMenu=0\r\nPosition=4\r\nMouse=0\r\n\r\n[LastRound]\r\nTitle=\"Mine \\\"A\\\"\\n\"\r\nDate=123\r\nDuration=50\r\nWon=1\r\nScore=7\r\nFinalScore=8\r\nTotalScore=17\r\nBonus=1\r\nLevel=3\r\n"
+        );
+    }
+
+    #[test]
+    fn fileless_player_core_keeps_cpp_defaults_instead_of_runtime_identity() {
+        let player = PlayerState {
+            name: "Runtime script alias".to_string(),
+            color_index: Some(9),
+            control_set: 7,
+            score: 12,
+            ..PlayerState::default()
+        };
+
+        let serialized = serialize_player_core(&player, "Rank", &LiveC4ValueEnumeration::default())
+            .expect("player core serializes");
+        assert!(!serialized
+            .windows(b"Runtime script alias".len())
+            .any(|window| window == b"Runtime script alias"));
+        assert!(!serialized.starts_with(b"Name="));
+        assert!(!serialized
+            .windows(b"\r\nName=".len())
+            .any(|window| window == b"\r\nName="));
+        assert!(serialized
+            .windows(b"RankName=Rang".len())
+            .any(|window| window == b"RankName=Rang"));
+        assert!(serialized
+            .windows(b"Score=12".len())
+            .any(|window| window == b"Score=12"));
+        assert!(serialized
+            .windows(b"Control=0".len())
+            .any(|window| window == b"Control=0"));
+        assert!(!serialized
+            .windows(b"Control=7".len())
+            .any(|window| window == b"Control=7"));
+    }
+
+    #[test]
+    fn object_info_serializes_core_physical_and_extra_data_in_cpp_order() {
+        let info = CrewInfo {
+            id: "CLNK".to_string(),
+            name: "Veteran".to_string(),
+            death_message: "Gone".to_string(),
+            core: crate::CrewInfoCoreFields {
+                portrait_file: "custom".to_string(),
+                next_rank_name: "Captain".to_string(),
+                type_name: "Clonk".to_string(),
+                next_rank_exp: 5_196,
+                ..crate::CrewInfoCoreFields::default()
+            },
+            rank: 2,
+            rank_name: "Lieutenant".to_string(),
+            experience: 900,
+            rounds: 6,
+            physical: PhysicalInfo {
+                energy: 80_000,
+                walk: 35_000,
+                can_dig: 1,
+                ..PhysicalInfo::default()
+            },
+            death_count: 7,
+            total_playing_time: 17_999,
+            birthday: 123,
+            age: 7,
+            participation: 1,
+            in_action: true,
+            was_in_action: true,
+            in_action_time: 50,
+            has_died: false,
+            extra_data: vec![(
+                "Badge".to_string(),
+                lc_script::Value::C4Id("GOLD".to_string()),
+            )],
+            portraits: crate::CrewPortraitState::default(),
+        };
+
+        assert_eq!(
+            serialize_object_info(&info, &LiveC4ValueEnumeration::default()).unwrap(),
+            b"[ObjectInfo]\r\nid=CLNK\r\nName=Veteran\r\nDeathMessage=Gone\r\nPortraitFile=custom\r\nRank=2\r\nRankName=\"Lieutenant\"\r\nNextRankName=\"Captain\"\r\nExperience=900\r\nNextRankExp=5196\r\nRounds=6\r\nDeathCount=7\r\nBirthday=123\r\nTotalPlayingTime=17999\r\nAge=7\r\nExtraData=1;Badge=I1145851719\r\n\r\n[Physical]\r\nEnergy=80000\r\nWalk=35000\r\nCanDig=1\r\n"
+        );
+    }
+
+    #[test]
+    fn fresh_player_group_round_trips_nondefault_core_and_retained_crew_assets() {
+        let mut player = PlayerState {
+            id: 7,
+            name: "Runtime alias".to_string(),
+            score: 44,
+            rounds: 5,
+            rounds_won: 4,
+            rounds_lost: 1,
+            total_playing_time: 600,
+            extra_data: vec![(
+                "Live".to_string(),
+                lc_script::Value::Array(vec![
+                    lc_script::Value::String("second".to_string()),
+                    lc_script::Value::Object(42),
+                    lc_script::Value::Proplist(lc_script::ValueMap::from([(
+                        lc_script::Value::String("key".to_string()),
+                        lc_script::Value::String("first".to_string()),
+                    )])),
+                ]),
+            )],
+            player_info_core: Some(PlayerInfoCoreState {
+                pref_name: "Profile name".to_string(),
+                comment: "Comment".to_string(),
+                rank: 3,
+                rank_name: "Major".to_string(),
+                pref_color: 5,
+                pref_color_dw: 0x11_22_33,
+                pref_color2_dw: 0x44_55_66,
+                pref_control: 6,
+                pref_control_style: true,
+                pref_auto_context_menu: true,
+                pref_position: 2,
+                pref_mouse: false,
+                last_round: crate::player_file::PlayerLastRoundState {
+                    title: "Round one".to_string(),
+                    date: 42,
+                    duration: 300,
+                    won: 1,
+                    score: 10,
+                    final_score: 110,
+                    total_score: 144,
+                    bonus: 100,
+                    level: 0,
+                },
+                ..PlayerInfoCoreState::default()
+            }),
+            ..PlayerState::default()
+        };
+        // The runtime fields are the inherited C4PlayerInfoCore counters and
+        // deliberately override stale retained values.
+        player.score = 44;
+
+        let portrait = encode_rgba_png(1, 1, &[1, 2, 3, 255], "test portrait").unwrap();
+        let crew = CrewInfo {
+            id: "CLNK".to_string(),
+            name: "Renamed Hero".to_string(),
+            death_message: String::new(),
+            core: crate::CrewInfoCoreFields {
+                original_filename: "Old Hero.c4i".to_string(),
+                portrait_file: "custom".to_string(),
+                portrait_png: portrait.clone(),
+                ..crate::CrewInfoCoreFields::default()
+            },
+            rank: 1,
+            rank_name: "Private".to_string(),
+            experience: 20,
+            rounds: 2,
+            physical: PhysicalInfo::default(),
+            death_count: 0,
+            total_playing_time: 10,
+            birthday: 11,
+            age: 0,
+            participation: 1,
+            in_action: false,
+            was_in_action: false,
+            in_action_time: 0,
+            has_died: false,
+            extra_data: vec![(
+                "Crew".to_string(),
+                lc_script::Value::String("crew value".to_string()),
+            )],
+            portraits: crate::CrewPortraitState::default(),
+        };
+
+        let mut state = Engine::new().capture_state();
+        state.players.push(player.clone());
+        state.crew_info_rosters.insert(player.id, vec![crew]);
+        state.crew_info_order.insert(player.id, vec![0]);
+        let group =
+            serialize_live_c4_player_state(&state, &player, b"Profile.c4p", b"Test Maker").unwrap();
+        let packed = group.pack_raw().unwrap();
+        let reopened =
+            lc_resources::Group::from_memory(std::path::PathBuf::from("Profile.c4p"), packed)
+                .unwrap();
+        let resolution = crate::player_file::PersistedC4ValueResolution {
+            strings: std::collections::HashMap::from([
+                (0, "second".to_string()),
+                (1, "key".to_string()),
+                (2, "first".to_string()),
+                (3, "crew value".to_string()),
+            ]),
+            object_numbers: std::collections::HashSet::from([42]),
+        };
+        let loaded = crate::player_file::PlayerFile::load_with_portraits_and_value_resolution(
+            &reopened,
+            true,
+            &resolution,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.name, "Profile name");
+        assert_eq!(loaded.info_core.comment, "Comment");
+        assert_eq!(loaded.info_core.rank, 3);
+        assert_eq!(loaded.info_core.rank_name, "Major");
+        assert_eq!(loaded.score, 44);
+        assert_eq!(loaded.info_core.extra_data, player.extra_data);
+        assert_eq!(loaded.pref_color, 5);
+        assert_eq!(loaded.pref_color_dw, 0x11_22_33);
+        assert_eq!(loaded.pref_color2_dw, 0x44_55_66);
+        assert_eq!(loaded.info_core.last_round.total_score, 144);
+        assert_eq!(loaded.crew.len(), 1);
+        assert_eq!(loaded.crew[0].core.original_filename, "Old Hero.c4i");
+        assert_eq!(loaded.crew[0].core.portrait_png, portrait);
+        assert_eq!(
+            loaded.crew[0].extra_data,
+            vec![(
+                "Crew".to_string(),
+                lc_script::Value::String("crew value".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn filename_generation_matches_cpp_stripping_and_collision_numbering() {
+        let first = unique_crew_filename("  A.l! ice ", &[]);
+        let second = unique_crew_filename("Alice", std::slice::from_ref(&first));
+        let third = unique_crew_filename("Alice1", &[first.clone(), second.clone()]);
+
+        assert_eq!(first, b"Al ice.c4i");
+        assert_eq!(second, b"Alice.c4i");
+        assert_eq!(third, b"Alice1.c4i");
+
+        let collision = unique_crew_filename("A.l! ice", &[first]);
+        assert_eq!(collision, b"Al ice1.c4i");
+    }
+
+    #[test]
+    fn c4_value_map_keeps_native_types_and_signed_ids() {
+        let entries = vec![
+            ("nil".to_string(), lc_script::Value::Nil),
+            ("int".to_string(), lc_script::Value::Int(-7)),
+            ("bool".to_string(), lc_script::Value::Bool(true)),
+            ("raw_bool".to_string(), lc_script::Value::RawBool(7)),
+            (
+                "id".to_string(),
+                lc_script::Value::C4Id(lc_script::c4_id_from_raw(0xffff_fffe)),
+            ),
+            (
+                "zero_id".to_string(),
+                lc_script::Value::C4Id(lc_script::c4_id_from_raw(0)),
+            ),
+        ];
+        assert_eq!(
+            named_value_map_line(
+                "ExtraData",
+                &entries,
+                "test",
+                &LiveC4ValueEnumeration::default(),
+            )
+            .unwrap(),
+            b"ExtraData=6;nil=A0,int=i-7,bool=b1,raw_bool=b7,id=I-2,zero_id=I0"
+        );
+    }
+
+    #[test]
+    fn c4_value_map_reuses_scenario_ids_for_nested_live_values() {
+        let enumeration = LiveC4ValueEnumeration::from_strings_in_id_order([
+            "first".to_string(),
+            "second".to_string(),
+            "key".to_string(),
+        ]);
+        let entries = vec![(
+            "Complex".to_string(),
+            lc_script::Value::Array(vec![
+                lc_script::Value::String("second".to_string()),
+                lc_script::Value::Object(42),
+                lc_script::Value::Proplist(lc_script::ValueMap::from([(
+                    lc_script::Value::String("key".to_string()),
+                    lc_script::Value::String("first".to_string()),
+                )])),
+            ]),
+        )];
+
+        assert_eq!(
+            named_value_map_line("ExtraData", &entries, "test", &enumeration).unwrap(),
+            b"ExtraData=1;Complex=a[3;S1,O42,m[1;S2=S0]]"
+        );
+    }
+
+    #[test]
+    fn player_core_preserves_noncanonical_integer_preferences() {
+        let player = PlayerState {
+            player_info_core: Some(PlayerInfoCoreState {
+                pref_control_style: true,
+                pref_control_style_value: 2,
+                pref_auto_context_menu: true,
+                pref_auto_context_menu_value: -2,
+                pref_mouse: true,
+                pref_mouse_value: 7,
+                ..PlayerInfoCoreState::default()
+            }),
+            ..PlayerState::default()
+        };
+
+        let serialized = serialize_player_core(&player, "Rank", &LiveC4ValueEnumeration::default())
+            .expect("player core serializes");
+        assert!(serialized
+            .windows(b"AutoStopControl=2".len())
+            .any(|window| { window == b"AutoStopControl=2" }));
+        assert!(serialized
+            .windows(b"AutoContextMenu=-2".len())
+            .any(|window| { window == b"AutoContextMenu=-2" }));
+        assert!(serialized
+            .windows(b"Mouse=7".len())
+            .any(|window| window == b"Mouse=7"));
+    }
+
+    #[test]
+    fn player_rank_name_uses_the_process_local_compile_default() {
+        let player = PlayerState {
+            player_info_core: Some(PlayerInfoCoreState {
+                rank_name: "Dienstgrad".to_string(),
+                ..PlayerInfoCoreState::default()
+            }),
+            ..PlayerState::default()
+        };
+
+        let localized =
+            serialize_player_core(&player, "Dienstgrad", &LiveC4ValueEnumeration::default())
+                .expect("localized player core serializes");
+        assert!(!localized
+            .windows(b"RankName=".len())
+            .any(|window| window == b"RankName="));
+
+        let english = serialize_player_core(&player, "Rank", &LiveC4ValueEnumeration::default())
+            .expect("English-default player core serializes");
+        assert!(english
+            .windows(b"RankName=Dienstgrad".len())
+            .any(|window| window == b"RankName=Dienstgrad"));
+    }
+
+    #[test]
+    fn overlong_localized_rank_default_is_not_truncated_for_comparison() {
+        let bounded = "R".repeat(30);
+        let localized_default = format!("{bounded} suffix");
+        let player = PlayerState {
+            player_info_core: Some(PlayerInfoCoreState {
+                rank_name: bounded.clone(),
+                ..PlayerInfoCoreState::default()
+            }),
+            ..PlayerState::default()
+        };
+
+        let serialized = serialize_player_core(
+            &player,
+            &localized_default,
+            &LiveC4ValueEnumeration::default(),
+        )
+        .expect("player core serializes");
+        let expected = format!("RankName={bounded}\r\n");
+        assert!(serialized
+            .windows(expected.len())
+            .any(|window| window == expected.as_bytes()));
+    }
+
+    #[test]
+    fn stdstrbuf_defaults_compare_past_the_first_nul_before_writing() {
+        let info = CrewInfo {
+            id: "CLNK".to_string(),
+            name: "Nul rank".to_string(),
+            death_message: String::new(),
+            rank_name: "Clonk\0retained suffix".to_string(),
+            core: crate::CrewInfoCoreFields {
+                next_rank_name: "\0retained suffix".to_string(),
+                ..crate::CrewInfoCoreFields::default()
+            },
+            rank: 0,
+            experience: 0,
+            rounds: 0,
+            physical: PhysicalInfo::default(),
+            death_count: 0,
+            total_playing_time: 0,
+            birthday: 0,
+            age: 0,
+            participation: 1,
+            in_action: false,
+            was_in_action: false,
+            in_action_time: 0,
+            has_died: false,
+            extra_data: Vec::new(),
+            portraits: crate::CrewPortraitState::default(),
+        };
+
+        let serialized = serialize_object_info(&info, &LiveC4ValueEnumeration::default())
+            .expect("crew core serializes");
+        assert!(serialized
+            .windows(b"RankName=\"Clonk\"\r\n".len())
+            .any(|window| window == b"RankName=\"Clonk\"\r\n"));
+        assert!(serialized
+            .windows(b"NextRankName=\"\"\r\n".len())
+            .any(|window| window == b"NextRankName=\"\"\r\n"));
+    }
+
+    #[test]
+    fn generated_crew_filename_uses_the_bounded_c4_name_field() {
+        let bounded = "A".repeat(30);
+        let overlong = format!("{bounded}B and ignored");
+        let expected = format!("{bounded}.c4i").into_bytes();
+        assert_eq!(unique_crew_filename(&overlong, &[]), expected);
+    }
+
+    #[test]
+    fn portrait_save_options_match_cpp_new_portrait_gates() {
+        fn retained_custom() -> CrewInfo {
+            CrewInfo {
+                id: "CLNK".to_string(),
+                name: "Portrait owner".to_string(),
+                death_message: String::new(),
+                core: crate::CrewInfoCoreFields {
+                    portrait_file: "custom".to_string(),
+                    portrait_png: vec![1, 2, 3],
+                    portrait_overlay_png: vec![4, 5, 6],
+                    portrait_bmp: vec![7, 8, 9],
+                    ..crate::CrewInfoCoreFields::default()
+                },
+                rank: 0,
+                rank_name: "Clonk".to_string(),
+                experience: 0,
+                rounds: 0,
+                physical: PhysicalInfo::default(),
+                death_count: 0,
+                total_playing_time: 0,
+                birthday: 0,
+                age: 0,
+                participation: 1,
+                in_action: false,
+                was_in_action: false,
+                in_action_time: 0,
+                has_died: false,
+                extra_data: Vec::new(),
+                portraits: crate::CrewPortraitState::default(),
+            }
+        }
+
+        let engine = Engine::new();
+        let mut save_disabled = retained_custom();
+        materialize_live_portrait(
+            &engine,
+            &mut save_disabled,
+            LiveC4PlayerSaveOptions {
+                save_default_portraits: false,
+                ..LiveC4PlayerSaveOptions::default()
+            },
+        )
+        .expect("disabled portrait save is valid");
+        assert_eq!(save_disabled.core.portrait_file, "custom");
+        assert!(save_disabled.core.portrait_png.is_empty());
+        assert!(save_disabled.core.portrait_overlay_png.is_empty());
+        assert!(save_disabled.core.portrait_bmp.is_empty());
+
+        let mut add_disabled = retained_custom();
+        materialize_live_portrait(
+            &engine,
+            &mut add_disabled,
+            LiveC4PlayerSaveOptions {
+                add_new_crew_portraits: false,
+                ..LiveC4PlayerSaveOptions::default()
+            },
+        )
+        .expect("disabled default-portrait addition is valid");
+        assert_eq!(add_disabled.core.portrait_file, "custom");
+        assert!(add_disabled.core.portrait_png.is_empty());
+
+        let mut explicit_none = retained_custom();
+        explicit_none.portraits.permanent = crate::CrewPermanentPortrait::ExplicitNone;
+        materialize_live_portrait(
+            &engine,
+            &mut explicit_none,
+            LiveC4PlayerSaveOptions {
+                add_new_crew_portraits: false,
+                ..LiveC4PlayerSaveOptions::default()
+            },
+        )
+        .expect("an explicit pending portrait bypasses AddNewCrewPortraits");
+        assert_eq!(explicit_none.core.portrait_file, "none");
+        assert!(explicit_none.core.portrait_png.is_empty());
+    }
+
+    #[test]
+    fn network_player_save_does_not_project_the_current_playing_stint() {
+        let mut engine = Engine::new();
+        engine.game_time = 90;
+        engine
+            .register_player(
+                crate::PlayerConfig::new(0, "Profile")
+                    .with_player_info_id(1)
+                    .with_total_playing_time(40),
+            )
+            .expect("player registers");
+        engine.player_mut(0).expect("player").set_game_join_time(10);
+
+        let ordinary = engine.capture_state();
+        assert_eq!(ordinary.players[0].total_playing_time, 120);
+        let network = engine.capture_state_for_network_save();
+        assert_eq!(network.players[0].total_playing_time, 40);
+    }
+}

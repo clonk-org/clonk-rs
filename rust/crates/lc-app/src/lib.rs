@@ -353,6 +353,7 @@ mod tests {
         let wire_name = LegacyCString::from_bytes(b"Players/\x80lice.c4p".to_vec())
             .expect("fixture wire name is NUL-free");
         let player_file = PlayerFile {
+            info_core: Default::default(),
             name: "Alice".to_string(),
             score: 0,
             rounds: 0,
@@ -441,6 +442,7 @@ mod tests {
             "/installed/Players/Runtime.c4p",
             wire_name.clone(),
             PlayerFile {
+                info_core: Default::default(),
                 name: "Runtime".to_string(),
                 score: 0,
                 rounds: 0,
@@ -513,6 +515,7 @@ mod tests {
         // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:357-395;
         // src/C4Network2Players.cpp:78-136).
         let player = |name: &str| PlayerFile {
+            info_core: Default::default(),
             name: name.to_string(),
             score: 0,
             rounds: 0,
@@ -601,6 +604,7 @@ mod tests {
         // src/C4Strings.cpp:104-108;
         // src/C4Application.cpp:118-121; src/C4Group.cpp:924-935).
         let player_file = |name: &str| PlayerFile {
+            info_core: Default::default(),
             name: name.to_string(),
             score: 0,
             rounds: 0,

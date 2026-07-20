@@ -1,0 +1,3949 @@
+//! Typed C4 components captured at the synchronized runtime-join boundary.
+//!
+//! This is deliberately a component serializer, not a group writer. The
+//! application owns `SavePlayerInfos`, embedded small player groups and final
+//! C4Group metadata because those values are coupled to its player-info and
+//! network-resource registries.
+
+use std::collections::HashMap;
+use std::io::Cursor;
+use std::path::PathBuf;
+
+use image::{DynamicImage, ImageOutputFormat, Rgba, RgbaImage};
+use lc_resources::bitmap::{BitmapError, IndexedBitmap};
+use lc_resources::{Group, GroupError, MutableGroup, MutableGroupError};
+use lc_script::Value;
+use thiserror::Error;
+
+use crate::command::{CommandData, LegacyCommandSave};
+use crate::effect::{EffectState, EffectVarValue};
+use crate::network_game_data::{
+    serialize_initial_network_game, InitialNetworkCompiledSections, InitialNetworkGameData,
+    InitialNetworkGameError,
+};
+use crate::player::{PlayerState, PlayerStatus};
+use crate::round_results::{
+    RoundResultsNetworkResult, RoundResultsPlayerStatus, RoundResultsState,
+};
+use crate::scenario::ScenarioValueStore;
+use crate::sky::{SkyFrame, SkyParallaxMode};
+use crate::{
+    Engine, Object, ObjectId, ObjectStatus, PhysicalInfo, ScoreboardState, TeamConfiguration,
+    TeamInfo, LANDSCAPE_MODE_EXACT,
+};
+
+/// Application-owned inputs that are not synchronized engine state.
+#[derive(Debug, Clone, Copy)]
+pub struct LiveC4SaveSpec<'a> {
+    pub title: &'a str,
+    pub definition_modules: &'a [String],
+    /// Native `Config.General.ExePath`, including its trailing separator.
+    pub definition_executable_path: &'a str,
+    /// Native `Config.General.DefinitionPath` (relative or absolute).
+    pub definition_path: &'a str,
+    pub origin: &'a str,
+    /// `Application.MusicSystem::IsMusicEnabled`; the playlist and level are
+    /// engine state, while this process-local switch is not.
+    pub music_enabled: bool,
+    /// Compatibility input retained while app call sites migrate. Exact
+    /// network saves use `C4GameSaveNetwork::GetKeepTitle() == false`, so
+    /// this value is deliberately ignored.
+    #[doc(hidden)]
+    pub modified_title: Option<LiveC4SaveComponentRef<'a>>,
+    /// `Game.Info`, only when its C4ComponentHost is marked Modified.
+    pub modified_info_txt: Option<&'a [u8]>,
+    /// `Game.Script`, only when its C4ComponentHost is marked Modified.
+    pub modified_script_c: Option<&'a [u8]>,
+}
+
+/// Borrowed modified component supplied by the application component host.
+#[derive(Debug, Clone, Copy)]
+pub struct LiveC4SaveComponentRef<'a> {
+    pub name: &'a str,
+    pub payload: &'a [u8],
+}
+
+/// Owned file or raw child-group payload with its final component name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveC4SaveNamedComponent {
+    pub name: String,
+    pub payload: Vec<u8>,
+}
+
+/// Whether an ordered component is a root file or a raw nested C4Group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveC4SaveEntryKind {
+    File,
+    ChildGroup,
+}
+
+/// Borrowed ordered view used by the network dynamic composer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveC4SaveEntry<'a> {
+    pub name: &'a str,
+    pub payload: &'a [u8],
+    pub kind: LiveC4SaveEntryKind,
+}
+
+/// Components represented by synchronized `lc-engine` state.
+///
+/// `None` has C4GameSave's delete/omit meaning. `material_group`, when
+/// present, is the raw uncompressed image stored for the `Material.c4g`
+/// child entry, not a standalone gzip-wrapped group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveC4SaveComponents {
+    pub scenario_txt: Vec<u8>,
+    /// Always `None` for exact runtime-network saves.
+    #[doc(hidden)]
+    pub title_txt: Option<LiveC4SaveNamedComponent>,
+    pub game_txt: Vec<u8>,
+    pub objects_txt: Vec<u8>,
+    pub strings_txt: Option<Vec<u8>>,
+    /// Final C4StringTable enumeration shared with subsequently serialized
+    /// embedded player/crew ExtraData. C++ enumerates once before saving the
+    /// scenario and then reuses those IDs in C4PlayerList::Save.
+    pub value_enumeration: LiveC4ValueEnumeration,
+    pub landscape_bmp: Option<Vec<u8>>,
+    pub landscape_png: Option<Vec<u8>>,
+    pub diff_landscape_bmp: Option<Vec<u8>>,
+    pub map_bmp: Option<Vec<u8>>,
+    pub material_group: Option<Vec<u8>>,
+    pub mat_map_txt: Vec<u8>,
+    pub pxs_c4b: Option<Vec<u8>>,
+    pub mass_mover_c4b: Option<Vec<u8>>,
+    pub teams_txt: Option<Vec<u8>>,
+    pub round_results_txt: Option<Vec<u8>>,
+    pub info_txt: Option<Vec<u8>>,
+    pub script_c: Option<Vec<u8>>,
+    /// Modified non-current `Sect*.c4g` images, in case-folded section-name
+    /// order. Each payload is a raw uncompressed nested C4Group image.
+    pub scenario_sections: Vec<LiveC4SaveNamedComponent>,
+}
+
+/// Immutable C4StringTable ID assignment for one synchronized live save.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveC4ValueEnumeration {
+    values: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LiveC4ValueEncodeError {
+    #[error("C4 string `{0}` was not included in the synchronized Strings.txt enumeration")]
+    MissingString(String),
+}
+
+impl LiveC4ValueEnumeration {
+    /// Reconstruct an immutable C4StringTable enumeration from Strings.txt
+    /// line order. Each entry's position is its persisted `S<n>` ID.
+    pub fn from_strings_in_id_order(values: impl IntoIterator<Item = String>) -> Self {
+        let mut enumeration = Self::default();
+        for value in values {
+            let bytes = lc_script::c4_string_bytes(&value);
+            if !enumeration
+                .values
+                .iter()
+                .any(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
+            {
+                enumeration.values.push(bytes);
+            }
+        }
+        enumeration
+    }
+
+    pub fn encode_value(&self, value: &Value) -> Result<String, LiveC4ValueEncodeError> {
+        encode_value_by(value, &mut |value| {
+            let bytes = lc_script::c4_string_bytes(value);
+            self.values
+                .iter()
+                .position(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
+                .map(|index| i32::try_from(index).unwrap_or(i32::MAX))
+                .ok_or_else(|| LiveC4ValueEncodeError::MissingString(value.to_owned()))
+        })
+    }
+
+    pub fn strings_txt(&self) -> Option<Vec<u8>> {
+        LegacyStringTable {
+            values: self.values.clone(),
+        }
+        .encoded()
+    }
+}
+
+impl LiveC4SaveComponents {
+    /// Final `C4FLS_Scenario` order, including Scenario.txt. Optional entries
+    /// are absent rather than represented by empty payloads.
+    pub fn entries(&self) -> Vec<LiveC4SaveEntry<'_>> {
+        let mut entries = vec![file_entry("Scenario.txt", &self.scenario_txt)];
+        push_optional_file(&mut entries, "Info.txt", self.info_txt.as_deref());
+        entries.push(file_entry("Game.txt", &self.game_txt));
+        push_optional_file(&mut entries, "Teams.txt", self.teams_txt.as_deref());
+        for section in &self.scenario_sections {
+            entries.push(LiveC4SaveEntry {
+                name: &section.name,
+                payload: &section.payload,
+                kind: LiveC4SaveEntryKind::ChildGroup,
+            });
+        }
+        if let Some(payload) = self.material_group.as_deref() {
+            entries.push(LiveC4SaveEntry {
+                name: "Material.c4g",
+                payload,
+                kind: LiveC4SaveEntryKind::ChildGroup,
+            });
+        }
+        entries.push(file_entry("MatMap.txt", &self.mat_map_txt));
+        push_optional_file(&mut entries, "Landscape.bmp", self.landscape_bmp.as_deref());
+        push_optional_file(&mut entries, "Landscape.png", self.landscape_png.as_deref());
+        push_optional_file(
+            &mut entries,
+            "DiffLandscape.bmp",
+            self.diff_landscape_bmp.as_deref(),
+        );
+        push_optional_file(&mut entries, "Map.bmp", self.map_bmp.as_deref());
+        push_optional_file(&mut entries, "PXS.c4b", self.pxs_c4b.as_deref());
+        push_optional_file(
+            &mut entries,
+            "MassMover.c4b",
+            self.mass_mover_c4b.as_deref(),
+        );
+        push_optional_file(&mut entries, "Strings.txt", self.strings_txt.as_deref());
+        entries.push(file_entry("Objects.txt", &self.objects_txt));
+        push_optional_file(
+            &mut entries,
+            "RoundResults.txt",
+            self.round_results_txt.as_deref(),
+        );
+        push_optional_file(&mut entries, "Script.c", self.script_c.as_deref());
+        entries
+    }
+
+    /// Merge app-owned SavePlayerInfos/player groups into the same final
+    /// component view. C4Group Close performs the authoritative scenario
+    /// sort; this helper supplies the otherwise-missing insertion surface.
+    pub fn entries_with_app_owned<'a>(
+        &'a self,
+        save_player_infos: Option<&'a [u8]>,
+        player_groups: &'a [LiveC4SaveEntry<'a>],
+    ) -> Vec<LiveC4SaveEntry<'a>> {
+        let mut entries = self.entries();
+        push_optional_file(&mut entries, "SavePlayerInfos.txt", save_player_infos);
+        entries.extend_from_slice(player_groups);
+        entries
+    }
+}
+
+fn file_entry<'a>(name: &'a str, payload: &'a [u8]) -> LiveC4SaveEntry<'a> {
+    LiveC4SaveEntry {
+        name,
+        payload,
+        kind: LiveC4SaveEntryKind::File,
+    }
+}
+
+fn push_optional_file<'a>(
+    entries: &mut Vec<LiveC4SaveEntry<'a>>,
+    name: &'a str,
+    payload: Option<&'a [u8]>,
+) {
+    if let Some(payload) = payload {
+        entries.push(file_entry(name, payload));
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum LiveC4SaveError {
+    #[error("failed to serialize live Game.txt: {0}")]
+    Game(#[from] InitialNetworkGameError),
+    #[error("live save requires a retained landscape")]
+    MissingLandscape,
+    #[error("live save requires an exact Surface8 pixel grid")]
+    MissingPixelGrid,
+    #[error("failed to encode a landscape bitmap: {0}")]
+    Bitmap(#[from] BitmapError),
+    #[error("failed to encode Landscape.png: {0}")]
+    Png(#[from] image::ImageError),
+    #[error("failed to serialize live landscape state: {0}")]
+    Landscape(#[from] crate::LandscapePersistenceError),
+    #[error("failed to compose a temporary C4Group: {0}")]
+    GroupWrite(#[from] MutableGroupError),
+    #[error("failed to inspect a temporary C4Group: {0}")]
+    GroupRead(#[from] GroupError),
+}
+
+impl Engine {
+    /// Capture every live C4 component owned by the simulation at the native
+    /// `C4Network2::OnGameSynchronized` boundary.
+    ///
+    /// The caller must invoke this after
+    /// `execute_synchronize_control_before_network(false)` and before
+    /// `execute_synchronize_control_after_network(true)`.
+    pub fn serialize_live_c4_save(
+        &self,
+        spec: LiveC4SaveSpec<'_>,
+    ) -> Result<LiveC4SaveComponents, LiveC4SaveError> {
+        let state = self.capture_state();
+        // C4Game::SaveRuntimeData enumerates the process-global C4StringTable
+        // before any component is decompiled. Registration order, rather than
+        // the later save traversal, therefore determines every `S<n>` ID.
+        // Filter out dead registrations exactly as C4StringTable::EnumStrings
+        // does, but include values in player groups saved after the scenario.
+        let referenced_strings = collect_live_referenced_strings(self, &state);
+        let mut strings = LegacyStringTable::from_enumerated_values(
+            lc_script::enumerate_c4_strings(&self.script_string_registrations, &referenced_strings),
+        );
+        // C4GameSave::SaveRuntimeData writes Strings.txt immediately after
+        // EnumStrings and before Objects.Save performs its second enumeration.
+        let value_enumeration = strings.enumeration();
+        let strings_txt = strings.encoded();
+        let scenario_txt = serialize_scenario(&self.scenario_values, spec);
+
+        let mut game = InitialNetworkGameData::from_engine_live(self)?;
+        game.music_enabled = spec.music_enabled;
+        game.compiled_sections = InitialNetworkCompiledSections {
+            script_engine: serialize_script_globals(
+                &state.script_globals,
+                &self.script_global_name_order(),
+                game.script_go,
+                game.script_counter,
+                &mut strings,
+            ),
+            sky: state.sky.as_ref().and_then(serialize_sky),
+            effects: serialize_effects(&state.global_effects, &mut strings),
+            scoreboard: serialize_scoreboard(&state.scoreboard),
+        };
+        let player_sections = serialize_players(&state.players, &mut strings);
+        let game_txt = append_runtime_player_sections(
+            serialize_initial_network_game(&game, None)?.unwrap_or_default(),
+            &player_sections,
+        );
+
+        let objects_txt = serialize_objects(self, &mut strings);
+        let scenario_sections = serialize_scenario_sections(self, &mut strings)?;
+        let landscape = serialize_landscape(self)?;
+
+        Ok(LiveC4SaveComponents {
+            scenario_txt,
+            title_txt: None,
+            game_txt,
+            objects_txt,
+            strings_txt,
+            value_enumeration,
+            landscape_bmp: landscape.landscape_bmp,
+            landscape_png: landscape.landscape_png,
+            diff_landscape_bmp: landscape.diff_landscape_bmp,
+            map_bmp: landscape.map_bmp,
+            material_group: landscape.material_group,
+            mat_map_txt: landscape.mat_map_txt,
+            pxs_c4b: self.pxs_system.to_c4b(),
+            mass_mover_c4b: state.mass_movers.to_c4b(),
+            teams_txt: serialize_teams(
+                &state.teams,
+                state.team_configuration.unwrap_or(self.team_configuration),
+                state.team_last_team_id,
+                state.team_max_script_players,
+                &state.team_script_player_names,
+                state.team_random_team_count,
+            ),
+            round_results_txt: serialize_round_results(
+                &state.round_results,
+                self.scenario_values.is_melee(),
+            ),
+            info_txt: spec.modified_info_txt.map(<[u8]>::to_vec),
+            script_c: spec.modified_script_c.map(<[u8]>::to_vec),
+            scenario_sections,
+        })
+    }
+}
+
+#[derive(Default, Clone)]
+struct LegacyStringTable {
+    values: Vec<Vec<u8>>,
+}
+
+fn c4_string_table_prefix(bytes: &[u8]) -> &[u8] {
+    &bytes[..bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len())]
+}
+
+// C4StringTable looks entries up with SEqual, so enumeration identity and the
+// serialized Strings.txt payload both stop at the first C-string NUL.
+fn c4_string_table_bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    c4_string_table_prefix(left) == c4_string_table_prefix(right)
+}
+
+impl LegacyStringTable {
+    fn from_enumerated_values(values: Vec<Vec<u8>>) -> Self {
+        Self { values }
+    }
+
+    fn from_registration_order(registrations: &[String], referenced: &[Vec<u8>]) -> Self {
+        let mut table = Self::default();
+        for value in registrations {
+            let bytes = lc_script::c4_string_bytes(value);
+            if referenced.iter().any(|candidate| candidate == &bytes) {
+                table.push_unique(bytes);
+            }
+        }
+        for value in referenced {
+            table.push_unique(value.clone());
+        }
+        table
+    }
+
+    fn push_unique(&mut self, bytes: Vec<u8>) {
+        if !self
+            .values
+            .iter()
+            .any(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
+        {
+            self.values.push(bytes);
+        }
+    }
+
+    fn id_for(&mut self, value: &str) -> i32 {
+        let bytes = lc_script::c4_string_bytes(value);
+        if let Some(index) = self
+            .values
+            .iter()
+            .position(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
+        {
+            return i32::try_from(index).unwrap_or(i32::MAX);
+        }
+        let id = i32::try_from(self.values.len()).unwrap_or(i32::MAX);
+        self.values.push(bytes);
+        id
+    }
+
+    fn encoded(&self) -> Option<Vec<u8>> {
+        if self.values.is_empty() {
+            return None;
+        }
+        let mut output = Vec::new();
+        for mut value in self.values.clone() {
+            let c_string_len = c4_string_table_prefix(&value).len();
+            value.truncate(c_string_len);
+            value.retain(|byte| *byte != b'\n');
+            for byte in &mut value {
+                if *byte == b'\r' {
+                    *byte = b'|';
+                }
+            }
+            output.extend_from_slice(&value);
+            output.extend_from_slice(b"\r\n");
+        }
+        Some(output)
+    }
+
+    fn finish(self) -> Option<Vec<u8>> {
+        self.encoded()
+    }
+
+    fn enumeration(&self) -> LiveC4ValueEnumeration {
+        LiveC4ValueEnumeration {
+            values: self.values.clone(),
+        }
+    }
+}
+
+fn collect_live_referenced_strings(engine: &Engine, state: &crate::EngineState) -> Vec<Vec<u8>> {
+    fn push_string(strings: &mut Vec<Vec<u8>>, value: &str) {
+        let bytes = lc_script::c4_string_bytes(value);
+        if !strings.iter().any(|candidate| candidate == &bytes) {
+            strings.push(bytes);
+        }
+    }
+
+    fn collect_value(strings: &mut Vec<Vec<u8>>, item: &Value) {
+        match item {
+            Value::String(text) => push_string(strings, text),
+            Value::Array(values) => {
+                for item in values {
+                    collect_value(strings, item);
+                }
+            }
+            Value::Proplist(values) => {
+                for (key, item) in values {
+                    collect_value(strings, key);
+                    collect_value(strings, item);
+                }
+            }
+            Value::Nil
+            | Value::Int(_)
+            | Value::Bool(_)
+            | Value::RawBool(_)
+            | Value::C4Id(_)
+            | Value::Object(_) => {}
+        }
+    }
+
+    fn effect_value(strings: &mut Vec<Vec<u8>>, value: &EffectVarValue) {
+        match value {
+            EffectVarValue::String(value) => push_string(strings, value),
+            EffectVarValue::Array(values) => {
+                for item in values {
+                    effect_value(strings, item);
+                }
+            }
+            EffectVarValue::Proplist(values) => {
+                for (key, item) in values {
+                    collect_value(strings, key);
+                    effect_value(strings, item);
+                }
+            }
+            EffectVarValue::Nil
+            | EffectVarValue::Int(_)
+            | EffectVarValue::Bool(_)
+            | EffectVarValue::RawBool(_)
+            | EffectVarValue::C4Id(_)
+            | EffectVarValue::Object(_) => {}
+        }
+    }
+
+    fn effects(strings: &mut Vec<Vec<u8>>, effects: &[EffectState]) {
+        for effect in effects {
+            for item in &effect.vars {
+                effect_value(strings, item);
+            }
+        }
+    }
+
+    fn object_values(strings: &mut Vec<Vec<u8>>, object: &crate::PersistedObject) {
+        for item in object.snapshot.local_vars.values() {
+            collect_value(strings, item);
+        }
+        effects(strings, &object.snapshot.effects);
+        for command in object.command_stack.legacy_save_commands() {
+            if let Some(value) = command.view.tx_value.as_ref() {
+                collect_value(strings, value);
+            }
+        }
+    }
+
+    fn spawn_values(strings: &mut Vec<Vec<u8>>, spawn: &crate::SpawnConfig) {
+        for item in spawn.local_vars.values() {
+            collect_value(strings, item);
+        }
+        effects(strings, &spawn.effects);
+        if let Some(commands) = spawn.command_stack.as_ref() {
+            for command in commands.legacy_save_commands() {
+                if let Some(value) = command.view.tx_value.as_ref() {
+                    collect_value(strings, value);
+                }
+            }
+        }
+    }
+
+    let mut strings = Vec::new();
+    // Strings read from Strings.txt are live C4StringTable registrations even
+    // when no current value references them. C++ EnumStrings therefore keeps
+    // them enumerable on the next live save.
+    let loaded_strings = engine.legacy_string_table_snapshot();
+    let mut loaded_ids = loaded_strings.keys().copied().collect::<Vec<_>>();
+    loaded_ids.sort_unstable();
+    for id in loaded_ids {
+        if let Some(value) = loaded_strings.get(&id) {
+            push_string(&mut strings, value);
+        }
+    }
+    // Static constants are C4Values owned by C4AulScriptEngine and participate
+    // in the same process-global string enumeration as mutable globals.
+    let constant_cells = engine
+        .script_global_consts
+        .borrow()
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for cell in constant_cells {
+        collect_value(&mut strings, &cell.borrow());
+    }
+    for item in state.script_globals.numbered.values() {
+        collect_value(&mut strings, item);
+    }
+    for item in state.script_globals.named.values() {
+        collect_value(&mut strings, item);
+    }
+    effects(&mut strings, &state.global_effects);
+    for object in &state.objects {
+        object_values(&mut strings, object);
+    }
+    for player in &state.players {
+        for (_, item) in &player.extra_data {
+            collect_value(&mut strings, item);
+        }
+        if let Some(roster) = state.crew_info_rosters.get(&player.id) {
+            for info in roster {
+                for (_, item) in &info.extra_data {
+                    collect_value(&mut strings, item);
+                }
+            }
+        }
+    }
+    for section in engine.scenario_sections.values() {
+        // A departed section owns a frozen Strings.txt/Objects.txt pair.
+        // Its removed objects no longer hold C4String references in the live
+        // table and must not leak their private values into the root save.
+        if !section.modified || section.frozen_group.is_some() {
+            continue;
+        }
+        if let Some(objects) = section.saved_objects.as_deref() {
+            for object in objects {
+                object_values(&mut strings, object);
+            }
+        } else {
+            for spawn in &section.initial_objects {
+                spawn_values(&mut strings, &spawn.config);
+            }
+        }
+    }
+    strings
+}
+
+#[derive(Default)]
+struct TextComponentWriter {
+    output: Vec<u8>,
+}
+
+impl TextComponentWriter {
+    fn section(&mut self, indent: usize, name: &str) {
+        if !self.output.is_empty() {
+            self.output.extend_from_slice(b"\r\n");
+        }
+        self.output.extend(std::iter::repeat_n(b' ', indent));
+        self.output.push(b'[');
+        self.output.extend_from_slice(name.as_bytes());
+        self.output.extend_from_slice(b"]\r\n");
+    }
+
+    fn field(&mut self, indent: usize, name: &str, value: impl AsRef<str>) {
+        self.output.extend(std::iter::repeat_n(b' ', indent));
+        self.output.extend_from_slice(name.as_bytes());
+        self.output.push(b'=');
+        self.output
+            .extend_from_slice(&lc_script::c4_string_bytes(value.as_ref()));
+        self.output.extend_from_slice(b"\r\n");
+    }
+
+    fn field_bytes(&mut self, indent: usize, name: &str, value: &[u8]) {
+        self.output.extend(std::iter::repeat_n(b' ', indent));
+        self.output.extend_from_slice(name.as_bytes());
+        self.output.push(b'=');
+        self.output.extend_from_slice(value);
+        self.output.extend_from_slice(b"\r\n");
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.output
+    }
+}
+
+fn quote_ini(value: &str) -> String {
+    lc_script::c4_string_from_bytes(&quote_ini_bytes(&lc_script::c4_string_bytes(value)))
+}
+
+fn quote_ini_bytes(value: &[u8]) -> Vec<u8> {
+    // StdCompilerINIWrite::StringN uses strlen even for std::string-backed
+    // adapters. Match that C-string boundary before applying RCT_Escaped.
+    let value = &value[..value
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(value.len())];
+    let mut output = Vec::with_capacity(value.len().saturating_add(2));
+    output.push(b'"');
+    let mut last_was_numeric_escape = false;
+    for &byte in value {
+        if !(b' '..=b'~').contains(&byte)
+            || byte == b'\\'
+            || byte == b'"'
+            || (last_was_numeric_escape && byte.is_ascii_digit())
+        {
+            last_was_numeric_escape = false;
+            match byte {
+                0x07 => output.extend_from_slice(b"\\a"),
+                0x08 => output.extend_from_slice(b"\\b"),
+                0x0c => output.extend_from_slice(b"\\f"),
+                b'\n' => output.extend_from_slice(b"\\n"),
+                b'\r' => output.extend_from_slice(b"\\r"),
+                b'\t' => output.extend_from_slice(b"\\t"),
+                0x0b => output.extend_from_slice(b"\\v"),
+                b'"' => output.extend_from_slice(b"\\\""),
+                b'\\' => output.extend_from_slice(b"\\\\"),
+                _ => {
+                    output.push(b'\\');
+                    output.extend_from_slice(format!("{byte:o}").as_bytes());
+                    last_was_numeric_escape = true;
+                }
+            }
+        } else {
+            output.push(byte);
+            last_was_numeric_escape = false;
+        }
+    }
+    output.push(b'"');
+    output
+}
+
+fn object_number(id: Option<ObjectId>) -> i32 {
+    id.and_then(|id| i32::try_from(id.as_u64()).ok())
+        .unwrap_or(0)
+}
+
+fn encode_value_by<E>(
+    value: &Value,
+    id_for: &mut impl FnMut(&str) -> Result<i32, E>,
+) -> Result<String, E> {
+    match value {
+        Value::Nil => Ok("A0".to_owned()),
+        Value::Int(value) => Ok(format!("i{value}")),
+        Value::Bool(value) => Ok(format!("b{}", i32::from(*value))),
+        Value::RawBool(value) => Ok(format!("b{}", *value as u32 as i32)),
+        Value::String(value) => Ok(format!("S{}", id_for(value)?)),
+        Value::C4Id(value) => {
+            let raw = lc_script::c4_id_raw(value) as u32 as i32;
+            Ok(format!("I{raw}"))
+        }
+        Value::Object(value) => Ok(format!("O{}", i32::try_from(*value).unwrap_or(0))),
+        Value::Array(values) => {
+            let values = values
+                .iter()
+                .map(|value| encode_value_by(value, id_for))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!("a[{};{}]", values.len(), values.join(",")))
+        }
+        Value::Proplist(values) => {
+            let values = values
+                .iter()
+                .map(|(key, value)| {
+                    Ok(format!(
+                        "{}={}",
+                        encode_value_by(key, id_for)?,
+                        encode_value_by(value, id_for)?
+                    ))
+                })
+                .collect::<Result<Vec<_>, E>>()?;
+            Ok(format!("m[{};{}]", values.len(), values.join(";")))
+        }
+    }
+}
+
+fn encode_value(value: &Value, strings: &mut LegacyStringTable) -> String {
+    encode_value_by(value, &mut |value| {
+        Ok::<_, std::convert::Infallible>(strings.id_for(value))
+    })
+    .expect("infallible mutable string-table enumeration")
+}
+
+fn encode_effect_value(value: &EffectVarValue, strings: &mut LegacyStringTable) -> String {
+    match value {
+        EffectVarValue::Nil => "A0".to_owned(),
+        EffectVarValue::Int(value) => format!("i{value}"),
+        EffectVarValue::Bool(value) => format!("b{}", i32::from(*value)),
+        EffectVarValue::RawBool(value) => format!("b{}", *value as u32 as i32),
+        EffectVarValue::String(value) => format!("S{}", strings.id_for(value)),
+        EffectVarValue::C4Id(value) => {
+            let raw = lc_script::c4_id_raw(value) as u32 as i32;
+            format!("I{raw}")
+        }
+        EffectVarValue::Object(value) => format!("O{}", i32::try_from(*value).unwrap_or(0)),
+        EffectVarValue::Array(values) => format!(
+            "a[{};{}]",
+            values.len(),
+            values
+                .iter()
+                .map(|value| encode_effect_value(value, strings))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        EffectVarValue::Proplist(values) => format!(
+            "m[{};{}]",
+            values.len(),
+            values
+                .iter()
+                .map(|(key, value)| format!(
+                    "{}={}",
+                    encode_value(key, strings),
+                    encode_effect_value(value, strings)
+                ))
+                .collect::<Vec<_>>()
+                .join(";")
+        ),
+    }
+}
+
+fn serialize_scenario(values: &ScenarioValueStore, spec: LiveC4SaveSpec<'_>) -> Vec<u8> {
+    values.serialize_runtime_network_save(
+        spec.title,
+        spec.definition_modules,
+        spec.definition_executable_path,
+        spec.definition_path,
+        spec.origin,
+    )
+}
+
+fn serialize_script_globals(
+    globals: &crate::ScriptGlobalState,
+    named_order: &[String],
+    go: bool,
+    counter: i32,
+    strings: &mut LegacyStringTable,
+) -> Option<Vec<u8>> {
+    let mut writer = TextComponentWriter::default();
+    writer.section(0, "Script");
+    if go {
+        writer.field(0, "Go", "true");
+    }
+    if counter != 0 {
+        writer.field(0, "Counter", counter.to_string());
+    }
+    if let Some((&last, _)) = globals.numbered.last_key_value() {
+        let size = usize::try_from(last.saturating_add(1)).unwrap_or(0);
+        let values = (0..size)
+            .map(|index| {
+                globals
+                    .numbered
+                    .get(&(index as i32))
+                    .map_or_else(|| "A0".to_owned(), |value| encode_value(value, strings))
+            })
+            .collect::<Vec<_>>();
+        writer.field(0, "Globals", format!("{size};{}", values.join(",")));
+    }
+    if !globals.named.is_empty() {
+        // C4ValueMapNames is append-only and the script linker adds static
+        // declarations in link order. The BTreeMap snapshot is only a value
+        // lookup; alphabetic traversal here would renumber GlobalNamed.
+        let mut emitted = std::collections::HashSet::new();
+        let mut values = Vec::with_capacity(globals.named.len());
+        for name in named_order {
+            if let Some(value) = globals.named.get(name) {
+                emitted.insert(name.as_str());
+                values.push(format!("{name}={}", encode_value(value, strings)));
+            }
+        }
+        // Retain compatibility with old Rust snapshots whose names predate
+        // the runtime declaration-order ledger.
+        for (name, value) in &globals.named {
+            if emitted.insert(name.as_str()) {
+                values.push(format!("{name}={}", encode_value(value, strings)));
+            }
+        }
+        writer.field(
+            0,
+            "GlobalNamed",
+            format!("{};{}", values.len(), values.join(",")),
+        );
+    }
+    let output = writer.finish();
+    (output.as_slice() != b"[Script]\r\n").then_some(output)
+}
+
+fn append_runtime_player_sections(mut game_txt: Vec<u8>, player_sections: &[u8]) -> Vec<u8> {
+    if player_sections.is_empty() {
+        return game_txt;
+    }
+    // Runtime C4Game::CompileFunc decompiles C4PlayerList in the same pass,
+    // so StdCompiler contributes the ordinary single blank section separator.
+    // The initial-save `original_game_text` compatibility path adds two extra
+    // CRLF pairs and must not be used here.
+    if !game_txt.is_empty() {
+        if !game_txt.ends_with(b"\r\n") {
+            game_txt.extend_from_slice(b"\r\n");
+        }
+        game_txt.extend_from_slice(b"\r\n");
+    }
+    game_txt.extend_from_slice(player_sections);
+    game_txt
+}
+
+fn serialize_sky(sky: &SkyFrame) -> Option<Vec<u8>> {
+    let mut writer = TextComponentWriter::default();
+    let fixed = sky.fixed.unwrap_or([
+        crate::math::ftofix(sky.offset_x).val(),
+        crate::math::ftofix(sky.offset_y).val(),
+        crate::math::ftofix(sky.settings.base_xdir).val(),
+        crate::math::ftofix(sky.settings.base_ydir).val(),
+    ]);
+    let modulation = sky.settings.modulation.unwrap_or(0x00ff_ffff);
+    let par_mode = match sky.settings.parallax_mode {
+        SkyParallaxMode::Fixed => 0,
+        SkyParallaxMode::Wind => 1,
+        SkyParallaxMode::Parallax => 2,
+    };
+    let back_enabled = sky.settings.back_color.is_some();
+    let nondefault = fixed != [0; 4]
+        || modulation != 0x00ff_ffff
+        || sky.settings.parallax_x != 10
+        || sky.settings.parallax_y != 10
+        || par_mode != 0
+        || sky.settings.back_color_raw != 0
+        || back_enabled;
+    if !nondefault {
+        return None;
+    }
+    writer.section(0, "Sky");
+    field_i32(&mut writer, 0, "X", fixed[0], 0);
+    field_i32(&mut writer, 0, "Y", fixed[1], 0);
+    field_i32(&mut writer, 0, "XDir", fixed[2], 0);
+    field_i32(&mut writer, 0, "YDir", fixed[3], 0);
+    field_u32(&mut writer, 0, "Modulation", modulation, 0x00ff_ffff);
+    field_i32(&mut writer, 0, "ParX", sky.settings.parallax_x, 10);
+    field_i32(&mut writer, 0, "ParY", sky.settings.parallax_y, 10);
+    field_i32(&mut writer, 0, "ParMode", par_mode, 0);
+    field_i32(
+        &mut writer,
+        0,
+        "BackClr",
+        sky.settings.back_color_raw as i32,
+        0,
+    );
+    field_bool(&mut writer, 0, "BackClrEnabled", back_enabled, false);
+    Some(writer.finish())
+}
+
+fn serialize_effect_chain(effects: &[EffectState], strings: &mut LegacyStringTable) -> String {
+    effects
+        .iter()
+        .map(|effect| {
+            let command_id = effect.command_id.as_deref().unwrap_or("NONE");
+            let vars = effect
+                .vars
+                .iter()
+                .map(|value| encode_effect_value(value, strings))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut encoded = format!(
+                "{}({},{},{},{},{},{})",
+                effect.name,
+                effect.number,
+                effect.priority,
+                effect.timer,
+                effect.interval,
+                effect.command_target.unwrap_or(0),
+                command_id,
+            );
+            if !effect.vars.is_empty() {
+                encoded.push_str(&format!("[{};{}]", effect.vars.len(), vars));
+            }
+            encoded
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn serialize_effects(effects: &[EffectState], strings: &mut LegacyStringTable) -> Option<Vec<u8>> {
+    if effects.is_empty() {
+        return None;
+    }
+    let mut writer = TextComponentWriter::default();
+    writer.section(0, "Effects");
+    writer.field(0, "GlobalEffects", serialize_effect_chain(effects, strings));
+    Some(writer.finish())
+}
+
+fn serialize_scoreboard(scoreboard: &ScoreboardState) -> Option<Vec<u8>> {
+    if scoreboard.is_default() {
+        return None;
+    }
+    let mut writer = TextComponentWriter::default();
+    writer.section(0, "Scoreboard");
+    field_i32(
+        &mut writer,
+        0,
+        "Rows",
+        i32::try_from(scoreboard.row_count()).unwrap_or(i32::MAX),
+        0,
+    );
+    field_i32(
+        &mut writer,
+        0,
+        "Cols",
+        i32::try_from(scoreboard.column_count()).unwrap_or(i32::MAX),
+        0,
+    );
+    field_i32(&mut writer, 0, "DlgShow", scoreboard.show_count(), 0);
+    for row in 0..scoreboard.row_count() {
+        for column in 0..scoreboard.column_count() {
+            let Some(cell) = scoreboard.cell(row, column) else {
+                continue;
+            };
+            writer.field(
+                0,
+                &format!("Cell{column}_{row}String"),
+                quote_ini(cell.text().unwrap_or_default()),
+            );
+            writer.field(
+                0,
+                &format!("Cell{column}_{row}Value"),
+                cell.value().to_string(),
+            );
+        }
+    }
+    Some(writer.finish())
+}
+
+fn encode_id_list(entries: impl IntoIterator<Item = (String, i32)>) -> String {
+    entries
+        .into_iter()
+        .map(|(id, count)| format!("{id}={count}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn encode_object_list(entries: &[ObjectId]) -> String {
+    entries
+        .iter()
+        .map(|id| i32::try_from(id.as_u64()).unwrap_or(0).to_string())
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn serialize_players(players: &[PlayerState], _strings: &mut LegacyStringTable) -> Vec<u8> {
+    let mut writer = TextComponentWriter::default();
+    for player in players {
+        writer.section(0, &format!("Player{}", player.player_info_id));
+        let status = match player.status {
+            PlayerStatus::Inactive => 0,
+            PlayerStatus::Active | PlayerStatus::Eliminated | PlayerStatus::Surrendered => 1,
+            PlayerStatus::TeamSelection => 2,
+            PlayerStatus::TeamSelectionPending => 3,
+        };
+        field_i32(&mut writer, 0, "Status", status, 0);
+        field_i32(&mut writer, 0, "AtClient", player.at_client.get(), -1);
+        let at_client_name = player.at_client_name.as_deref().unwrap_or("Local");
+        if at_client_name != "Local" {
+            writer.field(0, "AtClientName", at_client_name);
+        }
+        field_i32(&mut writer, 0, "Index", player.id, -1);
+        field_i32(&mut writer, 0, "ID", player.player_info_id, 0);
+        field_i32(
+            &mut writer,
+            0,
+            "Eliminated",
+            i32::from(matches!(
+                player.status,
+                PlayerStatus::Eliminated | PlayerStatus::Surrendered
+            )),
+            0,
+        );
+        field_i32(
+            &mut writer,
+            0,
+            "Surrendered",
+            player.exact_surrendered_value(),
+            0,
+        );
+        field_bool(&mut writer, 0, "Evaluated", player.evaluated, false);
+        field_i32(
+            &mut writer,
+            0,
+            "Color",
+            player.color_index.unwrap_or(-1),
+            -1,
+        );
+        let color = player
+            .color
+            .map(|color| {
+                (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+            })
+            .unwrap_or(0);
+        field_u32(&mut writer, 0, "ColorDw", color, 0);
+        field_i32(&mut writer, 0, "Control", player.control_set, 0);
+        field_i32(&mut writer, 0, "MouseControl", player.mouse_control, 0);
+        field_i32(
+            &mut writer,
+            0,
+            "AutoContextMenu",
+            player.control.exact_auto_context_menu_value(),
+            0,
+        );
+        field_i32(
+            &mut writer,
+            0,
+            "AutoStopControl",
+            player.control.exact_control_style_value(),
+            0,
+        );
+        field_i32(
+            &mut writer,
+            0,
+            "Position",
+            player.position_index.unwrap_or(-1),
+            0,
+        );
+        field_i32(&mut writer, 0, "ViewMode", player.view_mode, 0);
+        let view = player.exact_view_center();
+        field_i32(&mut writer, 0, "ViewX", view.x, 0);
+        field_i32(&mut writer, 0, "ViewY", view.y, 0);
+        field_i32(&mut writer, 0, "ViewWealth", player.view_wealth, 0);
+        field_i32(&mut writer, 0, "ViewValue", player.view_value, 0);
+        field_bool(&mut writer, 0, "FogOfWar", player.fog_of_war, false);
+        field_bool(
+            &mut writer,
+            0,
+            "ForceFogOfWar",
+            player.force_fog_of_war,
+            false,
+        );
+        field_bool(&mut writer, 0, "ShowStartup", player.show_startup, false);
+        field_i32(&mut writer, 0, "ShowControl", player.show_control, 0);
+        field_i32(
+            &mut writer,
+            0,
+            "ShowControlPos",
+            player.show_control_position,
+            0,
+        );
+        field_i32(&mut writer, 0, "Wealth", player.wealth, 0);
+        field_i32(&mut writer, 0, "Points", player.points, 0);
+        field_i32(&mut writer, 0, "Value", player.value, 0);
+        field_i32(&mut writer, 0, "InitialValue", player.initial_value, 0);
+        field_i32(&mut writer, 0, "ValueGain", player.value_gain, 0);
+        field_i32(
+            &mut writer,
+            0,
+            "ObjectsOwned",
+            player.objects_owned as i32,
+            0,
+        );
+        let hostility = player.exact_hostility_entries();
+        if !hostility.is_empty() {
+            writer.field(
+                0,
+                "Hostile",
+                encode_id_list(
+                    hostility
+                        .into_iter()
+                        .map(|(id, count)| (id.to_string(), count)),
+                ),
+            );
+        }
+        field_i32(
+            &mut writer,
+            0,
+            "ProductionDelay",
+            player.production_delay as i32,
+            0,
+        );
+        field_i32(
+            &mut writer,
+            0,
+            "ProductionUnit",
+            player.production_unit as i32,
+            0,
+        );
+        field_i32(&mut writer, 0, "SelectCount", player.select_count, 0);
+        field_i32(
+            &mut writer,
+            0,
+            "SelectFlash",
+            player.control.select_flash,
+            0,
+        );
+        field_i32(
+            &mut writer,
+            0,
+            "CursorFlash",
+            player.control.cursor_flash,
+            0,
+        );
+        field_object(&mut writer, 0, "Cursor", player.cursor);
+        field_object(&mut writer, 0, "ViewCursor", player.view_cursor);
+        field_object(&mut writer, 0, "Captain", player.captain);
+        field_i32(
+            &mut writer,
+            0,
+            "LastCom",
+            i32::from(player.control.last_com),
+            0,
+        );
+        field_i32(
+            &mut writer,
+            0,
+            "LastComDel",
+            player.control.last_com_delay,
+            0,
+        );
+        field_i32(
+            &mut writer,
+            0,
+            "PressedComs",
+            player.control.pressed_coms,
+            0,
+        );
+        field_i32(
+            &mut writer,
+            0,
+            "LastComDownDouble",
+            player.control.last_com_down_double,
+            0,
+        );
+        field_i32(
+            &mut writer,
+            0,
+            "CursorSelection",
+            player.control.cursor_selection,
+            0,
+        );
+        field_i32(
+            &mut writer,
+            0,
+            "CursorToggled",
+            player.control.cursor_toggled,
+            0,
+        );
+        field_i32(&mut writer, 0, "MessageStatus", player.message_status, 0);
+        if !player.message_buf.is_empty() {
+            writer.field(0, "MessageBuf", &player.message_buf);
+        }
+        for (name, entries) in [
+            (
+                "HomeBaseMaterial",
+                player.exact_home_base_material_entries(),
+            ),
+            (
+                "HomeBaseProduction",
+                player.exact_home_base_production_entries(),
+            ),
+            ("Knowledge", player.exact_knowledge_entries()),
+            ("Magic", player.exact_magic_entries()),
+        ] {
+            if !entries.is_empty() {
+                writer.field(0, name, encode_id_list(entries));
+            }
+        }
+        if !player.crew.is_empty() {
+            writer.field(0, "Crew", encode_object_list(&player.crew));
+        }
+        field_i32(&mut writer, 0, "CrewCreated", player.crew_created, 0);
+        if let Some(query) = player.message_board_queries.first() {
+            writer.field(
+                0,
+                "MsgBoardQueries",
+                format!(
+                    "({},{},{})",
+                    object_number(query.target),
+                    quote_ini(&query.prompt),
+                    i32::from(query.uppercase)
+                ),
+            );
+        }
+    }
+    writer.finish()
+}
+
+fn serialize_objects(engine: &Engine, strings: &mut LegacyStringTable) -> Vec<u8> {
+    fn serialize_list(
+        engine: &Engine,
+        ids: impl IntoIterator<Item = ObjectId>,
+        strings: &mut LegacyStringTable,
+    ) -> Vec<u8> {
+        let mut writer = TextComponentWriter::default();
+        for id in ids {
+            let Some(index) = engine.find_object_index(id) else {
+                continue;
+            };
+            let object = &engine.objects[index];
+            if object.destroyed || object.state.status == ObjectStatus::Deleted {
+                continue;
+            }
+            serialize_object(
+                &mut writer,
+                engine,
+                object,
+                engine.effective_object_mass(index),
+                engine
+                    .crew_object_infos
+                    .get(&object.id)
+                    .map(|info| info.name.as_str()),
+                strings,
+            );
+        }
+        writer.finish()
+    }
+
+    // C4ObjectList decompiles Last -> Prev. `exec_list` is already that
+    // reversed master-list view (index zero executes/saves first).
+    let mut output = serialize_list(engine, engine.exec_list.iter().copied(), strings);
+    // C4GameObjects::Save always decompiles the inactive list for runtime
+    // saves and inserts this separator even when that list is empty.
+    output.extend_from_slice(b"\r\n");
+    output.extend_from_slice(&serialize_list(
+        engine,
+        engine.inactive_exec_list.iter().copied(),
+        strings,
+    ));
+    output
+}
+
+fn serialize_object(
+    writer: &mut TextComponentWriter,
+    engine: &Engine,
+    object: &Object,
+    mass: i32,
+    info_name: Option<&str>,
+    strings: &mut LegacyStringTable,
+) {
+    let state = &object.state;
+    writer.section(0, "Object");
+    writer.field(0, "id", &object.definition_id);
+    if let Some(name) = state.custom_name.as_deref().filter(|name| !name.is_empty()) {
+        writer.field(0, "Name", quote_ini(name));
+    }
+    writer.field(0, "Number", object.id.to_string());
+    if state.status != ObjectStatus::Normal {
+        writer.field(0, "Status", state.status.to_script_value().to_string());
+    }
+    if let Some(info_name) = info_name {
+        serialize_object_info_name(writer, info_name);
+    }
+    field_i32(writer, 0, "Owner", state.owner, -1);
+    field_i32(writer, 0, "Timer", state.timer, 0);
+    field_i32(writer, 0, "Controller", state.controller, -1);
+    field_i32(
+        writer,
+        0,
+        "LastEngLossPlr",
+        object.last_energy_loss_cause,
+        -1,
+    );
+    field_i32(writer, 0, "Category", state.category, 0);
+    field_i32(writer, 0, "X", state.position.x, 0);
+    field_i32(writer, 0, "Y", state.position.y, 0);
+    field_i32(writer, 0, "Rotation", state.rotation, 0);
+    field_i32(writer, 0, "MotionX", object.motion_x, 0);
+    field_i32(writer, 0, "MotionY", object.motion_y, 0);
+    if let Some(frame) = object.last_attach_movement_frame {
+        writer.field(
+            0,
+            "LastSolidAtchFrame",
+            i32::try_from(frame).unwrap_or(i32::MAX).to_string(),
+        );
+    }
+    field_i32(writer, 0, "NoCollectDelay", state.no_collect_delay, 0);
+    field_i32(writer, 0, "Base", state.base, -1);
+    field_i32(writer, 0, "Size", state.construction, 0);
+    field_i32(writer, 0, "OwnMass", state.own_mass, 0);
+    field_i32(writer, 0, "Mass", mass, 0);
+    field_i32(writer, 0, "Damage", state.damage, 0);
+    field_i32(writer, 0, "Energy", state.energy, 0);
+    field_i32(writer, 0, "MagicEnergy", state.magic_energy, 0);
+    field_bool(writer, 0, "Alive", state.alive, false);
+    field_i32(writer, 0, "Breath", state.breath, 0);
+    field_i32(writer, 0, "FirePhase", state.fire_phase, 0);
+    if state.color != 0 {
+        writer.field(0, "Color", state.color.to_string());
+        writer.field(0, "ColorDw", state.color.to_string());
+    }
+
+    let numbered_size = state
+        .local_vars
+        .keys()
+        .filter_map(|name| name.strip_prefix("__local_")?.parse::<usize>().ok())
+        .max()
+        .map_or(0, |index| index.saturating_add(1));
+    if numbered_size != 0 {
+        let values = (0..numbered_size)
+            .map(|index| {
+                state
+                    .local_vars
+                    .get(&format!("__local_{index}"))
+                    .map_or_else(|| "A0".to_owned(), |value| encode_value(value, strings))
+            })
+            .collect::<Vec<_>>();
+        writer.field(0, "Locals", format!("{numbered_size};{}", values.join(",")));
+    }
+
+    field_fixed(writer, 0, "FixX", object.fixed_position.x.val());
+    field_fixed(writer, 0, "FixY", object.fixed_position.y.val());
+    field_fixed(writer, 0, "FixR", object.fixed_rotation.val());
+    field_fixed(writer, 0, "XDir", object.fixed_velocity.x.val());
+    field_fixed(writer, 0, "YDir", object.fixed_velocity.y.val());
+    field_fixed(writer, 0, "RDir", object.rotation_velocity.val());
+
+    if let Some(rect) = object.shape_rect {
+        field_i32(writer, 0, "Width", rect.width, 0);
+        field_i32(writer, 0, "Height", rect.height, 0);
+        if rect.x != 0 || rect.y != 0 {
+            let offset = if rect.y == 0 {
+                rect.x.to_string()
+            } else {
+                format!("{},{}", rect.x, rect.y)
+            };
+            writer.field(0, "Offset", offset);
+        }
+    }
+    field_i32(
+        writer,
+        0,
+        "Vertices",
+        i32::try_from(state.shape_vertices.active_count()).unwrap_or(30),
+        0,
+    );
+    let slots = state.shape_vertices.slots();
+    serialize_trimmed_shape_slots(writer, "VertexX", slots.iter().map(|vertex| vertex.x));
+    serialize_trimmed_shape_slots(writer, "VertexY", slots.iter().map(|vertex| vertex.y));
+    // C4Shape::VtxCNAT is an int32_t array. Runtime contact flags use the
+    // same bits through u32, so cast back to the native signed spelling.
+    serialize_trimmed_shape_slots(
+        writer,
+        "VertexCNAT",
+        slots.iter().map(|vertex| vertex.cnat as i32),
+    );
+    serialize_trimmed_shape_slots(
+        writer,
+        "VertexFriction",
+        slots.iter().map(|vertex| vertex.friction),
+    );
+    field_i32(writer, 0, "ContactDensity", state.contact_density, 50);
+    field_i32(writer, 0, "FireTop", object.shape_fire_top, 0);
+    field_i32(writer, 0, "AttachX", state.shape_attach.x, 0);
+    field_i32(writer, 0, "AttachY", state.shape_attach.y, 0);
+    field_i32(writer, 0, "AttachVtx", state.shape_attach.vtx, 0);
+    field_bool(
+        writer,
+        0,
+        "OwnVertices",
+        object.own_shape_vertices.is_some(),
+        false,
+    );
+    let definition_solid_mask = engine
+        .definition(&object.definition_id)
+        .and_then(crate::Definition::solid_mask);
+    if let Some(mask) = state
+        .solid_mask_override
+        .filter(|mask| Some(*mask) != definition_solid_mask)
+    {
+        writer.field(
+            0,
+            "SolidMask",
+            format!(
+                "{},{},{},{},{},{}",
+                mask.x, mask.y, mask.width, mask.height, mask.target_x, mask.target_y
+            ),
+        );
+    }
+    let picture = state.picture_rect;
+    writer.field(
+        0,
+        "Picture",
+        format!(
+            "{},{},{},{}",
+            picture.x, picture.y, picture.width, picture.height
+        ),
+    );
+    field_bool(writer, 0, "Mobile", state.mobile, false);
+    field_bool(writer, 0, "Selected", state.selected, false);
+    field_bool(writer, 0, "OnFire", state.on_fire, false);
+    field_bool(writer, 0, "InLiquid", state.in_liquid, false);
+    field_bool(writer, 0, "EntranceStatus", state.entrance_status, false);
+    field_bool(
+        writer,
+        0,
+        "PhysicalTemporary",
+        state.temporary_physical.is_some(),
+        false,
+    );
+    field_bool(writer, 0, "NeedEnergy", state.need_energy, false);
+    if state.ocf != 0 {
+        writer.field(0, "OCF", state.ocf.to_string());
+    }
+    if !state.action.compiled_name().is_empty() {
+        writer.field(0, "Action", state.action.compiled_name());
+    }
+    field_i32(writer, 0, "Dir", state.direction.to_script_value(), 0);
+    field_i32(
+        writer,
+        0,
+        "ComDir",
+        state.command_direction.to_script_value(),
+        0,
+    );
+    field_i32(writer, 0, "ActionTime", state.action.time, 0);
+    field_i32(writer, 0, "ActionData", state.action.data, 0);
+    field_i32(writer, 0, "Phase", state.action.phase, 0);
+    field_i32(writer, 0, "PhaseDelay", state.action.ticks, 0);
+    field_object(writer, 0, "Contained", state.container);
+    field_object(writer, 0, "ActionTarget1", state.action.target);
+    field_object(writer, 0, "ActionTarget2", state.action.target2);
+    if !state.component_order.is_empty() {
+        writer.field(
+            0,
+            "Component",
+            encode_id_list(
+                state
+                    .component_order
+                    .iter()
+                    .map(|id| (id.clone(), state.components.get(id).copied().unwrap_or(0))),
+            ),
+        );
+    }
+    if !state.contents.is_empty() {
+        writer.field(0, "Contents", encode_object_list(&state.contents));
+    }
+    field_i32(writer, 0, "PlrViewRange", state.plr_view_range, 0);
+    field_i32(writer, 0, "Visibility", state.visibility, 0);
+    let named_locals = engine
+        .definition(&object.definition_id)
+        .map(|definition| {
+            definition
+                .script
+                .local_variable_names()
+                .map(|name| {
+                    let encoded = state
+                        .local_vars
+                        .get(name)
+                        .map_or_else(|| "A0".to_owned(), |value| encode_value(value, strings));
+                    (name.to_owned(), encoded)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !named_locals.is_empty() {
+        writer.field(
+            0,
+            "LocalNamed",
+            format!(
+                "{};{}",
+                named_locals.len(),
+                named_locals
+                    .into_iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        );
+    } else {
+        writer.field(0, "LocalNamed", "0");
+    }
+    if state.color_modulation != 0 {
+        writer.field(0, "ColorMod", state.color_modulation.to_string());
+    }
+    if state.blit_mode != 0 {
+        writer.field(0, "BlitMode", state.blit_mode.to_string());
+    }
+    field_bool(writer, 0, "CrewDisabled", state.crew_disabled, false);
+    field_object(writer, 0, "Layer", state.layer);
+    if let Some(graphics) = state.base_graphics.as_ref().filter(|graphics| {
+        graphics.definition != object.definition_id
+            || graphics
+                .graphics_name
+                .as_deref()
+                .is_some_and(|name| !name.is_empty())
+    }) {
+        writer.field(
+            0,
+            "Graphics",
+            format!(
+                "{}::{}",
+                graphics.definition,
+                graphics.graphics_name.as_deref().unwrap_or_default()
+            ),
+        );
+    }
+    if let Some(transform) = state.draw_transform {
+        writer.field(0, "DrawTransform", serialize_draw_transform(transform));
+    }
+    if !state.effects.is_empty() {
+        writer.field(
+            0,
+            "Effects",
+            serialize_effect_chain(&state.effects, strings),
+        );
+    }
+    if !state.graphics_overlays.is_empty() {
+        writer.field(
+            0,
+            "GfxOverlay",
+            state
+                .graphics_overlays
+                .iter()
+                .map(serialize_graphics_overlay)
+                .collect::<Vec<_>>()
+                .join(";"),
+        );
+    }
+    if let Some(physical) = state.temporary_physical.as_ref() {
+        writer.section(2, "Physical");
+        serialize_physical(writer, 2, physical, &state.physical_changes);
+    }
+    let commands = object.commands.legacy_save_commands();
+    if !commands.is_empty() {
+        writer.section(2, "Commands");
+        for (command_index, command) in commands.iter().enumerate() {
+            writer.field(
+                2,
+                &format!("Command{}", command_index + 1),
+                serialize_command(command, strings),
+            );
+        }
+    }
+}
+
+fn serialize_object_info_name(writer: &mut TextComponentWriter, name: &str) {
+    writer.field(0, "Info", name);
+}
+
+fn serialize_trimmed_shape_slots(
+    writer: &mut TextComponentWriter,
+    name: &str,
+    values: impl IntoIterator<Item = i32>,
+) {
+    let mut values = values.into_iter().collect::<Vec<_>>();
+    while values.last() == Some(&0) {
+        values.pop();
+    }
+    if !values.is_empty() {
+        writer.field(
+            0,
+            name,
+            values
+                .into_iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+}
+
+fn field_i32(
+    writer: &mut TextComponentWriter,
+    indent: usize,
+    name: &str,
+    value: i32,
+    default: i32,
+) {
+    if value != default {
+        writer.field(indent, name, value.to_string());
+    }
+}
+
+fn field_fixed(writer: &mut TextComponentWriter, indent: usize, name: &str, raw_value: i32) {
+    if raw_value != 0 {
+        writer.field(indent, name, format!("F{raw_value}"));
+    }
+}
+
+fn field_u32(
+    writer: &mut TextComponentWriter,
+    indent: usize,
+    name: &str,
+    value: u32,
+    default: u32,
+) {
+    if value != default {
+        writer.field(indent, name, value.to_string());
+    }
+}
+
+fn field_bool(
+    writer: &mut TextComponentWriter,
+    indent: usize,
+    name: &str,
+    value: bool,
+    default: bool,
+) {
+    if value != default {
+        writer.field(indent, name, if value { "true" } else { "false" });
+    }
+}
+
+fn field_object(
+    writer: &mut TextComponentWriter,
+    indent: usize,
+    name: &str,
+    value: Option<ObjectId>,
+) {
+    let value = object_number(value);
+    if value != 0 {
+        writer.field(indent, name, value.to_string());
+    }
+}
+
+fn serialize_graphics_overlay(overlay: &crate::ObjectGraphicsOverlay) -> String {
+    let graphics = overlay
+        .definition
+        .as_ref()
+        .map_or_else(String::new, |definition| {
+            format!(
+                "{}::{}",
+                definition,
+                overlay.graphics_name.as_deref().unwrap_or_default()
+            )
+        });
+    let transform = serialize_draw_transform(
+        overlay
+            .transform
+            .unwrap_or_else(crate::DrawTransform::identity),
+    );
+    format!(
+        "{},{},{},{},{},{},({}),{},{}",
+        overlay.id,
+        graphics,
+        overlay.mode as i32,
+        overlay.action.as_deref().unwrap_or_default(),
+        overlay.blit_mode,
+        overlay.phase,
+        transform,
+        overlay.color_modulation,
+        object_number(overlay.overlay_object)
+    )
+}
+
+fn serialize_draw_transform(transform: crate::DrawTransform) -> String {
+    let matrix = transform.matrix();
+    let mut values = matrix[..6]
+        .iter()
+        .map(|value| format_legacy_float(*value))
+        .collect::<Vec<_>>();
+    values.push(transform.flip_dir().to_string());
+    if matrix[6] != 0.0 || matrix[7] != 0.0 || matrix[8] != 1.0 {
+        values.extend(matrix[6..].iter().map(|value| format_legacy_float(*value)));
+    }
+    values.join(",")
+}
+
+fn format_legacy_float(value: f32) -> String {
+    if value.is_nan() {
+        return "nan".to_owned();
+    }
+    if value == f32::INFINITY {
+        return "inf".to_owned();
+    }
+    if value == f32::NEG_INFINITY {
+        return "-inf".to_owned();
+    }
+
+    // fmt::sprintf("%g", float) uses six significant digits and selects
+    // exponent notation after rounding when the exponent is below -4 or at
+    // least the precision. Rust exposes fixed/scientific precision rather
+    // than printf's significant-digit mode, so derive both from the rounded
+    // six-digit scientific spelling.
+    let scientific = format!("{value:.5e}");
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("Rust scientific formatting always contains an exponent");
+    let exponent = exponent
+        .parse::<i32>()
+        .expect("Rust scientific exponent is an integer");
+    if exponent < -4 || exponent >= 6 {
+        let mantissa = trim_decimal_zeroes(mantissa);
+        let sign = if exponent < 0 { '-' } else { '+' };
+        return format!("{mantissa}e{sign}{:02}", exponent.unsigned_abs());
+    }
+
+    let fractional_digits = usize::try_from((5 - exponent).max(0)).unwrap_or(0);
+    trim_decimal_zeroes(&format!("{value:.fractional_digits$}"))
+}
+
+fn trim_decimal_zeroes(value: &str) -> String {
+    let Some(decimal) = value.find('.') else {
+        return value.to_owned();
+    };
+    let mut end = value.len();
+    while end > decimal + 1 && value.as_bytes()[end - 1] == b'0' {
+        end -= 1;
+    }
+    if end == decimal + 1 {
+        end = decimal;
+    }
+    value[..end].to_owned()
+}
+
+fn serialize_command(command: &LegacyCommandSave, strings: &mut LegacyStringTable) -> String {
+    let tx = command.view.tx_value.as_ref().map_or_else(
+        || {
+            command.view.tx_definition.as_ref().map_or_else(
+                || {
+                    command
+                        .view
+                        .tx
+                        .map_or_else(|| "A0".to_owned(), |value| format!("i{value}"))
+                },
+                |definition| format!("I{}", lc_script::c4_id_raw(definition) as u32 as i32),
+            )
+        },
+        |value| encode_value(value, strings),
+    );
+    let data = command
+        .view
+        .legacy_data
+        .unwrap_or_else(|| match &command.view.data {
+            CommandData::Integer(value) => *value,
+            CommandData::Text(_) if command.view.name == "Call" => 0,
+            CommandData::Text(value) => lc_script::c4_id_raw(value) as u32 as i32,
+            CommandData::None => 0,
+        });
+    format!(
+        "$2,{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        command.view.name,
+        tx,
+        command.view.ty.unwrap_or(0),
+        object_number(command.view.target),
+        object_number(command.view.target2),
+        data,
+        command.update_interval,
+        i32::from(command.evaluated),
+        i32::from(command.path_checked),
+        i32::from(command.finished),
+        command.failures,
+        command.retries,
+        command.permit,
+        command.base_mode,
+        command.text,
+    )
+}
+
+fn serialize_physical(
+    writer: &mut TextComponentWriter,
+    indent: usize,
+    physical: &PhysicalInfo,
+    changes: &[(String, i32)],
+) {
+    for (name, value) in [
+        ("Energy", physical.energy),
+        ("Breath", physical.breath),
+        ("Walk", physical.walk),
+        ("Jump", physical.jump),
+        ("Scale", physical.scale),
+        ("Hangle", physical.hangle),
+        ("Dig", physical.dig),
+        ("Swim", physical.swim),
+        ("Throw", physical.throw),
+        ("Push", physical.push),
+        ("Fight", physical.fight),
+        ("Magic", physical.magic),
+        ("Float", physical.float),
+        ("CanScale", physical.can_scale),
+        ("CanHangle", physical.can_hangle),
+        ("CanDig", physical.can_dig),
+        ("CanConstruct", physical.can_construct),
+        ("CanChop", physical.can_chop),
+        ("CanFly", physical.can_fly),
+        ("CorrosionResist", physical.corrosion_resist),
+        ("BreatheWater", physical.breathe_water),
+    ] {
+        field_i32(writer, indent, name, value, 0);
+    }
+    if !changes.is_empty() {
+        writer.field(
+            indent,
+            "Changes",
+            changes
+                .iter()
+                .map(|(name, previous)| format!("{name}={previous}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+}
+
+enum SerializedScenarioSection {
+    Frozen(LiveC4SaveNamedComponent),
+    Rebuilt {
+        name: String,
+        group: MutableGroup,
+        objects_txt: Option<Vec<u8>>,
+    },
+}
+
+/// Materialize the same temporary group that C4Game::LoadScenarioSection
+/// creates while leaving a section. The packed bytes are retained on the
+/// section and copied unchanged by the later root save.
+pub(super) fn freeze_scenario_section(
+    engine: &Engine,
+    section: &crate::RuntimeScenarioSection,
+    write_landscape: bool,
+    write_objects: bool,
+) -> Result<Vec<u8>, LiveC4SaveError> {
+    let group_name = format!("Sect{}.c4g", section.name);
+    let mut group = if let Some(payload) = section.frozen_group.as_ref() {
+        let source = Group::from_raw_memory(PathBuf::from(&group_name), payload.clone())?;
+        MutableGroup::from_group(&source)?
+    } else {
+        extract_scenario_section_group(section, &group_name)?
+    };
+
+    if write_landscape {
+        write_scenario_section_landscape(engine, section, &mut group)?;
+    }
+    if write_objects {
+        group.remove_entry("Strings.txt");
+        group.remove_entry("Objects.txt");
+
+        let state = engine.capture_state();
+        let referenced_strings = collect_live_referenced_strings(engine, &state);
+        // LoadScenarioSection calls Strings.Save before Objects.Save. The
+        // latter starts by calling EnumStrings, so the section's Strings.txt
+        // intentionally reflects the previous enumeration while Objects.txt
+        // consumes the newly assigned IDs.
+        let saved_string_values = lc_script::save_current_c4_string_enumeration(
+            &engine.script_string_registrations,
+            &referenced_strings,
+        );
+        let saved_strings = LegacyStringTable::from_enumerated_values(saved_string_values);
+        let mut strings =
+            LegacyStringTable::from_enumerated_values(lc_script::enumerate_c4_strings(
+                &engine.script_string_registrations,
+                &referenced_strings,
+            ));
+        let objects_txt = if let Some(objects) = section.saved_objects.as_deref() {
+            serialize_persisted_objects(engine, objects, &section.saved_object_order, &mut strings)
+        } else {
+            serialize_initial_section_objects(engine, &section.initial_objects, &mut strings)
+        };
+        if let Some(payload) = saved_strings.encoded() {
+            group.add_file("Strings.txt", payload)?;
+        }
+        group.add_file("Objects.txt", objects_txt)?;
+    }
+
+    Ok(group.pack_raw()?)
+}
+
+fn extract_scenario_section_group(
+    section: &crate::RuntimeScenarioSection,
+    group_name: &str,
+) -> Result<MutableGroup, LiveC4SaveError> {
+    let Some(source) = section.source_group.as_ref() else {
+        return Ok(MutableGroup::new(group_name));
+    };
+    if !section.source_is_scenario_root {
+        return Ok(MutableGroup::from_group(source)?);
+    }
+
+    // The implicit C4ScenarioSection has an empty Filename regardless of its
+    // visible name. EnsureTempStore does not rewrite the packed root scenario
+    // into its section child: it creates a fresh temp group and extracts only
+    // C4FLS_Section entries into it. Named sections retain their full group,
+    // even when one happens to be called Main.
+    let mut extracted = MutableGroup::new(group_name);
+    for entry in source.entries()? {
+        if entry.is_directory || !is_main_section_component_bytes(&entry.name_bytes) {
+            continue;
+        }
+        let payload = source.read_entry_bytes_exact(&entry)?;
+        extracted.add_file_bytes_with_metadata(
+            entry.name_bytes,
+            payload,
+            entry.time,
+            entry.executable,
+        )?;
+    }
+    Ok(extracted)
+}
+
+fn write_scenario_section_landscape(
+    engine: &Engine,
+    section: &crate::RuntimeScenarioSection,
+    group: &mut MutableGroup,
+) -> Result<(), LiveC4SaveError> {
+    remove_section_landscape_components(group);
+    let has_exact_landscape = section.landscape.is_some();
+    group.add_file(
+        "Scenario.txt",
+        serialize_section_scenario(&section.scenario_values, has_exact_landscape),
+    )?;
+    // C4Sky::Save removes C4CFN_Sky when the section scenario requests
+    // NoSky. This is independent of whether an exact landscape is present.
+    if section.scenario_values.no_sky() {
+        for name in ["Sky.bmp", "Sky.png", "Sky.jpeg", "Sky.jpg"] {
+            group.remove_entry(name);
+        }
+    }
+    if let Some(landscape) = section.landscape.as_ref() {
+        let grid = landscape
+            .pixel_grid()
+            .ok_or(LiveC4SaveError::MissingPixelGrid)?;
+        let bitmap = IndexedBitmap {
+            width: grid.width(),
+            height: grid.height(),
+            indices: grid.bytes().to_vec(),
+        };
+        let mut palette = [[0_u8; 3]; 256];
+        for (index, slot) in palette.iter_mut().enumerate() {
+            *slot = landscape.surface8_palette_entry(index as u8).0;
+        }
+        group.add_file("Landscape.bmp", bitmap.encode_with_palette(&palette)?)?;
+        group.add_file("Landscape.png", encode_landscape_png(landscape)?)?;
+        landscape.save_changed_c4_map(engine.materials(), group)?;
+        landscape.save_c4_textures(group)?;
+    }
+    if let Some(payload) = section
+        .landscape_systems
+        .pxs
+        .as_ref()
+        .and_then(crate::pxs::PxsSystem::to_c4b)
+    {
+        group.add_file("PXS.c4b", payload)?;
+    }
+    if let Some(payload) = section
+        .landscape_systems
+        .mass_movers
+        .as_ref()
+        .and_then(crate::mass_mover::MassMoverSet::to_c4b)
+    {
+        group.add_file("MassMover.c4b", payload)?;
+    }
+    Ok(())
+}
+
+fn serialize_scenario_sections(
+    engine: &Engine,
+    strings: &mut LegacyStringTable,
+) -> Result<Vec<LiveC4SaveNamedComponent>, LiveC4SaveError> {
+    let current = engine.current_scenario_section.to_ascii_lowercase();
+    let mut sections = engine
+        .scenario_sections
+        .values()
+        .filter(|section| section.modified && section.name.to_ascii_lowercase() != current)
+        .collect::<Vec<_>>();
+    sections.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    let mut serialized = Vec::with_capacity(sections.len());
+    for section in sections {
+        let group_name = format!("Sect{}.c4g", section.name);
+        if let Some(payload) = section.frozen_group.as_ref() {
+            serialized.push(SerializedScenarioSection::Frozen(
+                LiveC4SaveNamedComponent {
+                    name: group_name,
+                    payload: payload.clone(),
+                },
+            ));
+            continue;
+        }
+        // The implicit root uses a fresh C4FLS_Section extraction; named
+        // subsections retain their complete source group outside replaced
+        // categories, independently of the visible section name.
+        let mut group = extract_scenario_section_group(section, &group_name)?;
+
+        // A generated section has no source group to extract, so synthesize
+        // both categories. Loaded sections replace exactly the categories
+        // requested by the changing section switch and retain the other one.
+        let write_landscape = section.landscape_modified || section.source_group.is_none();
+        let write_objects = section.objects_modified || section.source_group.is_none();
+
+        if write_landscape {
+            write_scenario_section_landscape(engine, section, &mut group)?;
+        }
+
+        let objects_txt = write_objects.then(|| {
+            if let Some(objects) = section.saved_objects.as_deref() {
+                serialize_persisted_objects(engine, objects, &section.saved_object_order, strings)
+            } else {
+                serialize_initial_section_objects(engine, &section.initial_objects, strings)
+            }
+        });
+        if write_objects {
+            group.remove_entry("Strings.txt");
+            group.remove_entry("Objects.txt");
+        }
+        serialized.push(SerializedScenarioSection::Rebuilt {
+            name: group_name,
+            group,
+            objects_txt,
+        });
+    }
+
+    // C4ScenarioSection::Save passes the one game-global string table to
+    // every section object save. Encode it only after all section objects
+    // have enumerated their values so every emitted section sees the same
+    // final ID mapping.
+    let strings_txt = strings.encoded();
+    serialized
+        .into_iter()
+        .map(|section| match section {
+            SerializedScenarioSection::Frozen(section) => Ok(section),
+            SerializedScenarioSection::Rebuilt {
+                name,
+                mut group,
+                objects_txt,
+            } => {
+                if let Some(objects_txt) = objects_txt {
+                    if let Some(payload) = strings_txt.clone() {
+                        group.add_file("Strings.txt", payload)?;
+                    }
+                    group.add_file("Objects.txt", objects_txt)?;
+                }
+                Ok(LiveC4SaveNamedComponent {
+                    name,
+                    payload: group.pack_raw()?,
+                })
+            }
+        })
+        .collect()
+}
+
+fn is_main_section_component_bytes(name: &[u8]) -> bool {
+    [
+        "Scenario.txt",
+        "Game.txt",
+        "Landscape.bmp",
+        "Landscape.png",
+        "Sky.bmp",
+        "Sky.png",
+        "Sky.jpeg",
+        "Sky.jpg",
+        "PXS.c4b",
+        "MassMover.c4b",
+        "CtrlRec.c4b",
+        "Strings.txt",
+        "Objects.txt",
+    ]
+    .iter()
+    .any(|candidate| name.eq_ignore_ascii_case(candidate.as_bytes()))
+}
+
+fn remove_section_landscape_components(group: &mut MutableGroup) {
+    for name in [
+        "Scenario.txt",
+        "Landscape.bmp",
+        "Landscape.png",
+        "PXS.c4b",
+        "MassMover.c4b",
+    ] {
+        group.remove_entry(name);
+    }
+}
+
+fn serialize_section_scenario(values: &ScenarioValueStore, force_exact: bool) -> Vec<u8> {
+    values.serialize_section_save(force_exact)
+}
+
+fn serialize_persisted_objects(
+    engine: &Engine,
+    persisted: &[crate::PersistedObject],
+    saved_order: &[ObjectId],
+    strings: &mut LegacyStringTable,
+) -> Vec<u8> {
+    let objects = persisted
+        .iter()
+        .filter_map(|object| restored_section_object(engine, object))
+        .collect::<Vec<_>>();
+    let by_id = objects
+        .iter()
+        .enumerate()
+        .map(|(index, object)| (object.id, index))
+        .collect::<HashMap<_, _>>();
+    let snapshots = persisted
+        .iter()
+        .map(|object| (object.snapshot.id, &object.snapshot))
+        .collect::<HashMap<_, _>>();
+    let mut emitted = std::collections::HashSet::new();
+    let mut writer = TextComponentWriter::default();
+    for id in saved_order
+        .iter()
+        .chain(objects.iter().map(|object| &object.id))
+    {
+        if !emitted.insert(*id) {
+            continue;
+        }
+        let Some(&index) = by_id.get(id) else {
+            continue;
+        };
+        let object = &objects[index];
+        if object.destroyed || object.state.status != ObjectStatus::Normal {
+            continue;
+        }
+        let Some(snapshot) = snapshots.get(id).copied() else {
+            continue;
+        };
+        if engine.is_user_player_object_snapshot(snapshot) {
+            continue;
+        }
+        let mass = section_object_mass(engine, &objects, index, 0);
+        let info_name = engine
+            .is_script_player_object_snapshot(snapshot)
+            .then(|| engine.crew_object_infos.get(&object.id))
+            .flatten()
+            .map(|info| info.name.as_str());
+        serialize_object(&mut writer, engine, object, mass, info_name, strings);
+    }
+    writer.finish()
+}
+
+fn restored_section_object(engine: &Engine, persisted: &crate::PersistedObject) -> Option<Object> {
+    let snapshot = &persisted.snapshot;
+    let definition = engine.definitions.get(&snapshot.definition_id)?;
+    let shape_template = crate::ObjectShapeTemplate::new(
+        definition.shape_vertices().to_vec(),
+        definition.shape_rect(),
+        definition.fire_top(),
+        definition.stretch_growth(),
+        definition.rotateable(),
+    )
+    .with_line(definition.line());
+    let mut object = Object::new(
+        snapshot.id,
+        snapshot.definition_id.clone(),
+        crate::ObjectState {
+            custom_name: snapshot.custom_name.clone(),
+            position: snapshot.position,
+            velocity: snapshot.velocity,
+            script_fixed_position: None,
+            script_fixed_velocity: None,
+            script_rotation_velocity: snapshot.rotation_velocity,
+            script_fixed_rotation: snapshot.fixed_rotation,
+            rotation: snapshot.rotation,
+            energy: snapshot.energy,
+            need_energy: snapshot.need_energy,
+            damage: snapshot.damage,
+            magic_energy: snapshot.magic_energy,
+            magic_capacity: snapshot.magic_capacity,
+            construction: snapshot.construction,
+            action: snapshot.action.clone(),
+            direction: snapshot.direction,
+            command_direction: snapshot.command_direction,
+            effects: snapshot.effects.clone(),
+            vertices: snapshot.vertices.clone(),
+            shape_vertices: persisted
+                .shape_vertices
+                .clone()
+                .unwrap_or_else(|| crate::ShapeVertexBuffer::from_active(&snapshot.vertices)),
+            contact_density: snapshot.contact_density,
+            container: snapshot.container,
+            layer: snapshot.layer,
+            visibility: snapshot.visibility,
+            blit_mode: snapshot.blit_mode,
+            contents: snapshot.contents.clone(),
+            contents_link_generation: 0,
+            components: snapshot.components.clone(),
+            component_order: snapshot.component_order.clone(),
+            status: snapshot.status,
+            owner: snapshot.owner,
+            controller: snapshot.controller,
+            category: snapshot.category,
+            crew_member: snapshot.crew_member,
+            plr_view_range: snapshot.plr_view_range,
+            selected: snapshot.selected,
+            crew_disabled: persisted.crew_disabled,
+            alive: snapshot.alive,
+            base_graphics: snapshot.base_graphics.clone(),
+            graphics_overlays: snapshot.graphics_overlays.clone(),
+            draw_transform: snapshot.draw_transform,
+            local_vars: snapshot.local_vars.clone(),
+            in_liquid: snapshot.in_liquid,
+            mobile: snapshot.mobile,
+            solid_mask_override: persisted.solid_mask_override,
+            timer: snapshot.timer,
+            own_mass: snapshot.own_mass,
+            on_fire: snapshot.on_fire,
+            fire_phase: snapshot.fire_phase,
+            fire_caused_by: snapshot.fire_caused_by,
+            info_physical: snapshot.info_physical,
+            temporary_physical: snapshot.temporary_physical,
+            physical_changes: snapshot.physical_changes.clone(),
+            breath: snapshot.breath,
+            entrance_status: persisted.entrance_status,
+            menu: None,
+            color: snapshot.color,
+            color_modulation: snapshot.color_modulation,
+            picture_rect: snapshot.picture_rect,
+            shape_override: snapshot.current_shape,
+            ocf: snapshot.ocf,
+            shape_attach: persisted.shape_attach,
+            t_attach: 0,
+            no_collect_delay: persisted.no_collect_delay,
+            base: snapshot.base,
+        },
+        shape_template,
+        snapshot.own_vertices.clone(),
+    );
+    object.compiled_mass = persisted.compiled_mass;
+    object.compiled_mass_contents = snapshot.contents.clone();
+    if let Some(rect) = snapshot.current_shape {
+        object.shape_rect = Some(rect);
+    }
+    if let Some(fire_top) = snapshot.current_fire_top {
+        object.shape_fire_top = fire_top;
+    }
+    object.motion_x = persisted.motion_x;
+    object.motion_y = persisted.motion_y;
+    object.last_attach_movement_frame = persisted.last_attach_movement_frame;
+    if let Some(value) = snapshot.fixed_position {
+        object.fixed_position = value;
+    }
+    if let Some(value) = snapshot.fixed_velocity {
+        object.fixed_velocity = value;
+    }
+    if let Some(value) = snapshot.fixed_rotation {
+        object.fixed_rotation = value;
+    }
+    if let Some(value) = snapshot.rotation_velocity {
+        object.rotation_velocity = value;
+    }
+    object.last_energy_loss_cause = snapshot.last_energy_loss_cause;
+    object
+        .commands
+        .restore_from_snapshot(&persisted.command_stack);
+    Some(object)
+}
+
+fn serialize_initial_section_objects(
+    engine: &Engine,
+    spawns: &[crate::scenario::ScenarioSpawn],
+    strings: &mut LegacyStringTable,
+) -> Vec<u8> {
+    let objects = spawns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, spawn)| section_spawn_object(engine, &spawn.config, index))
+        .collect::<Vec<_>>();
+    let mut writer = TextComponentWriter::default();
+    for (index, object) in objects.iter().enumerate().rev() {
+        let mass = section_object_mass(engine, &objects, index, 0);
+        serialize_object(&mut writer, engine, object, mass, None, strings);
+    }
+    writer.finish()
+}
+
+fn section_spawn_object(
+    engine: &Engine,
+    config: &crate::SpawnConfig,
+    index: usize,
+) -> Option<Object> {
+    let definition = engine.definitions.get(&config.definition_id)?;
+    let id = config
+        .id
+        .unwrap_or_else(|| ObjectId::new(u64::try_from(index).unwrap_or(0).saturating_add(1)));
+    let shape_template = crate::ObjectShapeTemplate::new(
+        definition.shape_vertices().to_vec(),
+        definition.shape_rect(),
+        definition.fire_top(),
+        definition.stretch_growth(),
+        definition.rotateable(),
+    )
+    .with_line(definition.line());
+    let vertices = config
+        .shape_vertices
+        .as_ref()
+        .map(crate::ShapeVertexBuffer::active_vec)
+        .unwrap_or_else(|| config.vertices.clone());
+    let shape_vertices = config
+        .shape_vertices
+        .clone()
+        .unwrap_or_else(|| crate::ShapeVertexBuffer::from_active(&vertices));
+    let components = config.components.clone().unwrap_or_default();
+    let component_order = config.component_order.clone().unwrap_or_default();
+    let mut object = Object::new(
+        id,
+        config.definition_id.clone(),
+        crate::ObjectState {
+            custom_name: config.custom_name.clone(),
+            position: config.position,
+            velocity: config.velocity,
+            script_fixed_position: None,
+            script_fixed_velocity: None,
+            script_rotation_velocity: config.rotation_velocity,
+            script_fixed_rotation: config.fixed_rotation,
+            rotation: config.rotation,
+            energy: config.energy.unwrap_or(0),
+            need_energy: config.need_energy.unwrap_or(false),
+            damage: 0,
+            magic_energy: config.magic_energy.unwrap_or(0),
+            magic_capacity: 0,
+            construction: config.construction,
+            action: config
+                .action
+                .clone()
+                .unwrap_or_else(|| crate::ActionState::new(String::new())),
+            direction: config.direction,
+            command_direction: config.command_direction,
+            effects: config.effects.clone(),
+            vertices,
+            shape_vertices,
+            contact_density: config.contact_density.unwrap_or(50),
+            container: config.container,
+            layer: config.layer,
+            visibility: config.visibility.unwrap_or(0),
+            blit_mode: config.blit_mode.unwrap_or(0),
+            contents: Vec::new(),
+            contents_link_generation: 0,
+            components,
+            component_order,
+            status: config.status.unwrap_or_default(),
+            owner: config.owner,
+            controller: config.controller.unwrap_or(-1),
+            category: config.category.unwrap_or(0),
+            crew_member: config.crew_member.unwrap_or(false),
+            plr_view_range: config.plr_view_range.unwrap_or(0),
+            selected: config.selected.unwrap_or(false),
+            crew_disabled: false,
+            alive: config.alive.unwrap_or(false),
+            base_graphics: None,
+            graphics_overlays: Vec::new(),
+            draw_transform: None,
+            local_vars: config.local_vars.clone(),
+            in_liquid: config.in_liquid.unwrap_or(false),
+            mobile: config.mobile.unwrap_or(false),
+            solid_mask_override: config.solid_mask,
+            timer: config.timer.unwrap_or(0),
+            own_mass: 0,
+            on_fire: false,
+            fire_phase: 0,
+            fire_caused_by: -1,
+            info_physical: None,
+            temporary_physical: None,
+            physical_changes: Vec::new(),
+            breath: 0,
+            entrance_status: config.entrance_status.unwrap_or(false),
+            menu: None,
+            color: config.color.unwrap_or(0),
+            color_modulation: config.color_modulation.unwrap_or(0),
+            picture_rect: config.picture_rect.unwrap_or_default(),
+            shape_override: config.shape_rect,
+            ocf: 0,
+            shape_attach: crate::ShapeAttachRecord::default(),
+            t_attach: 0,
+            no_collect_delay: 0,
+            base: -1,
+        },
+        shape_template,
+        config
+            .owns_shape_vertices
+            .unwrap_or(false)
+            .then(|| config.vertices.clone()),
+    );
+    if config.loaded {
+        object.compiled_mass = Some(config.compiled_mass.unwrap_or(0));
+        object.compiled_mass_contents = object.state.contents.clone();
+    }
+    object.motion_x = config.motion_x;
+    object.motion_y = config.motion_y;
+    if let Some(rect) = config.shape_rect {
+        object.shape_rect = Some(rect);
+    }
+    if let Some(fire_top) = config.shape_fire_top {
+        object.shape_fire_top = fire_top;
+    }
+    if let Some(value) = config.fixed_position {
+        object.fixed_position = value;
+    }
+    if let Some(value) = config.fixed_velocity {
+        object.fixed_velocity = value;
+    }
+    if let Some(value) = config.fixed_rotation {
+        object.fixed_rotation = value;
+    }
+    if let Some(value) = config.rotation_velocity {
+        object.rotation_velocity = value;
+    }
+    Some(object)
+}
+
+fn section_object_mass(engine: &Engine, objects: &[Object], index: usize, depth: usize) -> i32 {
+    if depth > 8 {
+        return 1;
+    }
+    let object = &objects[index];
+    if let Some(mass) = object.compiled_mass {
+        return mass;
+    }
+    let (definition_mass, no_component_mass) = engine
+        .definitions
+        .get(&object.definition_id)
+        .map(|definition| (definition.mass(), definition.no_component_mass()))
+        .unwrap_or((0, false));
+    let mut mass = ((definition_mass + object.state.own_mass)
+        .saturating_mul(object.state.construction)
+        / crate::FULL_CON)
+        .max(1);
+    if !no_component_mass {
+        for content in &object.state.contents {
+            if let Some(content_index) = objects.iter().position(|object| object.id == *content) {
+                mass += section_object_mass(engine, objects, content_index, depth + 1);
+            }
+        }
+    }
+    mass
+}
+
+struct SerializedLandscape {
+    landscape_bmp: Option<Vec<u8>>,
+    landscape_png: Option<Vec<u8>>,
+    diff_landscape_bmp: Option<Vec<u8>>,
+    map_bmp: Option<Vec<u8>>,
+    material_group: Option<Vec<u8>>,
+    mat_map_txt: Vec<u8>,
+}
+
+fn serialize_landscape(engine: &Engine) -> Result<SerializedLandscape, LiveC4SaveError> {
+    let landscape = engine
+        .landscape_without_solid_masks()
+        .ok_or(LiveC4SaveError::MissingLandscape)?;
+    let mut scratch = MutableGroup::new("Runtime.c4s");
+
+    if landscape.mode() == LANDSCAPE_MODE_EXACT {
+        let grid = landscape
+            .pixel_grid()
+            .ok_or(LiveC4SaveError::MissingPixelGrid)?;
+        let bitmap = IndexedBitmap {
+            width: grid.width(),
+            height: grid.height(),
+            indices: grid.bytes().to_vec(),
+        };
+        let mut palette = [[0_u8; 3]; 256];
+        for (index, slot) in palette.iter_mut().enumerate() {
+            *slot = landscape.surface8_palette_entry(index as u8).0;
+        }
+        scratch.add_file("Landscape.bmp", bitmap.encode_with_palette(&palette)?)?;
+        scratch.add_file("Landscape.png", encode_landscape_png(&landscape)?)?;
+        engine.save_changed_c4_landscape_map(&mut scratch)?;
+        engine.save_c4_landscape_textures(&mut scratch)?;
+    } else {
+        // SyncSynchronized is exact as a game save, but a non-exact source
+        // landscape follows C4Landscape::SaveDiff with fSyncSave=false.
+        engine.save_c4_landscape_diff(&mut scratch, false)?;
+    }
+    engine.materials.save_enumeration(&mut scratch)?;
+
+    let packed = scratch.pack_raw()?;
+    let group = Group::from_raw_memory(PathBuf::from("Runtime.c4s"), packed)?;
+    Ok(SerializedLandscape {
+        landscape_bmp: read_optional_group_entry(&group, "Landscape.bmp")?,
+        landscape_png: read_optional_group_entry(&group, "Landscape.png")?,
+        diff_landscape_bmp: read_optional_group_entry(&group, "DiffLandscape.bmp")?,
+        map_bmp: read_optional_group_entry(&group, "Map.bmp")?,
+        material_group: read_optional_group_entry_raw(&group, "Material.c4g")?,
+        mat_map_txt: group.read_file("MatMap.txt")?,
+    })
+}
+
+fn encode_landscape_png(landscape: &crate::Landscape) -> Result<Vec<u8>, image::ImageError> {
+    let grid = landscape
+        .pixel_grid()
+        .expect("the live save checked the Surface8 grid");
+    let mut image = RgbaImage::new(grid.width(), grid.height());
+    for y in 0..grid.height() {
+        for x in 0..grid.width() {
+            let pixel = if let Some(color) = landscape.surface32_pixel_at(x as i32, y as i32) {
+                Rgba([
+                    ((color >> 16) & 0xff) as u8,
+                    ((color >> 8) & 0xff) as u8,
+                    (color & 0xff) as u8,
+                    255_u8.wrapping_sub((color >> 24) as u8),
+                ])
+            } else {
+                let index = grid.byte_at(x as i32, y as i32).unwrap_or(0);
+                let (rgb, transparency, _) = landscape.surface8_palette_entry(index);
+                Rgba([rgb[0], rgb[1], rgb[2], 255_u8.wrapping_sub(transparency)])
+            };
+            image.put_pixel(x, y, pixel);
+        }
+    }
+    let mut output = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image).write_to(&mut output, ImageOutputFormat::Png)?;
+    Ok(output.into_inner())
+}
+
+fn read_optional_group_entry(group: &Group, name: &str) -> Result<Option<Vec<u8>>, GroupError> {
+    if group.exists(name) {
+        group.read_file(name).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn read_optional_group_entry_raw(group: &Group, name: &str) -> Result<Option<Vec<u8>>, GroupError> {
+    if group.exists(name) {
+        group.read_entry_bytes(name).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn serialize_teams(
+    teams: &[TeamInfo],
+    configuration: TeamConfiguration,
+    last_team_id: i32,
+    max_script_players: i32,
+    script_player_names: &[u8],
+    random_team_count: i32,
+) -> Option<Vec<u8>> {
+    let script_player_names = &script_player_names[..script_player_names
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(script_player_names.len())];
+    let has_compiled_value = configuration.active != true
+        || configuration.custom != true
+        || configuration.allow_hostility_change
+        || configuration.allow_team_switch
+        || configuration.auto_generate_teams
+        || last_team_id != 0
+        || configuration.distribution != 0
+        || configuration.team_colors
+        || max_script_players != 0
+        || !script_player_names.is_empty()
+        || random_team_count != 0
+        || !teams.is_empty();
+    // C4TeamList::Save still creates Teams.txt, but INI naming sections are
+    // lazy: the all-default list decompiles to a zero-byte component.
+    if !has_compiled_value {
+        return Some(Vec::new());
+    }
+    let mut writer = TextComponentWriter::default();
+    writer.section(0, "Teams");
+    field_bool(&mut writer, 0, "Active", configuration.active, true);
+    field_bool(&mut writer, 0, "Custom", configuration.custom, true);
+    field_bool(
+        &mut writer,
+        0,
+        "AllowHostilityChange",
+        configuration.allow_hostility_change,
+        false,
+    );
+    field_bool(
+        &mut writer,
+        0,
+        "AllowTeamSwitch",
+        configuration.allow_team_switch,
+        false,
+    );
+    field_bool(
+        &mut writer,
+        0,
+        "AutoGenerateTeams",
+        configuration.auto_generate_teams,
+        false,
+    );
+    field_i32(&mut writer, 0, "LastTeamID", last_team_id, 0);
+    let distribution = match configuration.distribution {
+        0 => "Free",
+        1 => "Host",
+        2 => "None",
+        3 => "Random",
+        4 => "RandomInv",
+        _ => "Free",
+    };
+    if distribution != "Free" {
+        writer.field(0, "TeamDistribution", distribution);
+    }
+    field_bool(
+        &mut writer,
+        0,
+        "TeamColors",
+        configuration.team_colors,
+        false,
+    );
+    field_i32(&mut writer, 0, "MaxScriptPlayers", max_script_players, 0);
+    if !script_player_names.is_empty() {
+        writer.field_bytes(
+            0,
+            "ScriptPlayerNames",
+            &quote_ini_bytes(script_player_names),
+        );
+    }
+    field_i32(&mut writer, 0, "RandomTeamCount", random_team_count, 0);
+    for team in teams {
+        writer.section(2, "Team");
+        field_i32(&mut writer, 2, "id", team.id, 0);
+        if !team.name.is_empty() {
+            writer.field(2, "Name", &team.name);
+        }
+        field_i32(&mut writer, 2, "PlrStartIndex", team.player_start_index, 0);
+        if !team.player_ids.is_empty() {
+            writer.field(2, "PlayerCount", team.player_ids.len().to_string());
+            writer.field(
+                2,
+                "Players",
+                team.player_ids
+                    .iter()
+                    .map(i32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        if team.color != 0 {
+            writer.field(2, "Color", team.color.to_string());
+        }
+        if let Some(icon) = team.icon_spec.as_deref().filter(|icon| !icon.is_empty()) {
+            writer.field(2, "IconSpec", quote_ini(icon));
+        }
+        field_i32(&mut writer, 2, "MaxPlayer", team.max_players, 0);
+    }
+    Some(writer.finish())
+}
+
+fn serialize_round_results(results: &RoundResultsState, melee: bool) -> Option<Vec<u8>> {
+    if results.goal_counts.is_empty()
+        && results.goals.is_empty()
+        && results.playing_time_seconds == 0
+        && results.hide_settlement_score == melee
+        && results.custom_evaluation_strings.is_empty()
+        && results.league_performance == 0
+        && results.players.is_empty()
+        && results.network_result_message.is_empty()
+        && results.network_result.is_none()
+    {
+        return None;
+    }
+    let mut writer = TextComponentWriter::default();
+    writer.section(0, "RoundResults");
+    if !results.goal_counts.is_empty() || !results.goals.is_empty() {
+        writer.field(
+            0,
+            "Goals",
+            encode_id_list(if results.goal_counts.is_empty() {
+                results
+                    .goals
+                    .iter()
+                    .cloned()
+                    .map(|goal| (goal, 1))
+                    .collect::<Vec<_>>()
+            } else {
+                results.goal_counts.clone()
+            }),
+        );
+    }
+    if results.playing_time_seconds != 0 {
+        writer.field(0, "PlayingTime", results.playing_time_seconds.to_string());
+    }
+    if results.hide_settlement_score != melee {
+        field_bool(
+            &mut writer,
+            0,
+            "HideSettlementScore",
+            results.hide_settlement_score,
+            melee,
+        );
+    }
+    if !results.custom_evaluation_strings.is_empty() {
+        writer.field(
+            0,
+            "CustomEvaluationStrings",
+            quote_ini(&results.custom_evaluation_strings),
+        );
+    }
+    field_i32(
+        &mut writer,
+        0,
+        "LeaguePerformance",
+        results.league_performance,
+        0,
+    );
+    if !results.players.is_empty() {
+        writer.section(2, "PlayerInfos");
+        for player in &results.players {
+            writer.section(4, "Player");
+            field_i32(&mut writer, 4, "ID", player.player_info_id, 0);
+            if player.total_playing_time != 0 {
+                writer.field(4, "TotalPlayingTime", player.total_playing_time.to_string());
+            }
+            field_i32(&mut writer, 4, "SettlementScoreOld", player.score_old, -1);
+            field_i32(
+                &mut writer,
+                4,
+                "SettlementScoreNew",
+                player.score_new.unwrap_or(-1),
+                -1,
+            );
+            field_i32(&mut writer, 4, "Score", player.league_score_new, -1);
+            field_i32(&mut writer, 4, "GameScore", player.league_score_gain, -1);
+            field_i32(&mut writer, 4, "Rank", player.league_rank_new, 0);
+            field_i32(
+                &mut writer,
+                4,
+                "RankSymbol",
+                player.league_rank_symbol_new,
+                0,
+            );
+            if let Some(progress) = player.league_progress_data.as_deref() {
+                writer.field_bytes(4, "LeagueProgressData", &quote_ini_bytes(progress));
+            }
+            match player.status {
+                RoundResultsPlayerStatus::Unknown => {}
+                RoundResultsPlayerStatus::Lost => writer.field(4, "Status", "Lost"),
+                RoundResultsPlayerStatus::Won => writer.field(4, "Status", "Won"),
+            }
+        }
+    }
+    if !results.network_result_message.is_empty() {
+        writer.field_bytes(
+            0,
+            "NetResult",
+            &quote_ini_bytes(&results.network_result_message),
+        );
+    }
+    if let Some(result) = results.network_result {
+        writer.field(
+            0,
+            "NetResult",
+            match result {
+                RoundResultsNetworkResult::LeagueOk => "LeagueOK",
+                RoundResultsNetworkResult::LeagueError => "LeagueError",
+                RoundResultsNetworkResult::NetworkError => "NetError",
+            },
+        );
+    }
+    Some(writer.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn section_spec(
+        name: &str,
+        source_group: Option<Group>,
+    ) -> crate::scenario::ScenarioSectionSpec {
+        crate::scenario::ScenarioSectionSpec {
+            name: name.to_owned(),
+            source_group,
+            landscape: None,
+            landscape_systems: crate::scenario::ScenarioLandscapeSystems::default(),
+            exact_landscape: false,
+            texmap_lookups: Vec::new(),
+            resynthesize_static_map: false,
+            map_creator: None,
+            s2_overload: None,
+            gravity: crate::scenario::LegacyC4SVal::new(100, 0, 10, 200),
+            post_init_map_callbacks: crate::map_creator_s2::PostInitMapCallbacks::default(),
+            keep_map_creator: false,
+            no_initialize: false,
+            objects: Vec::new(),
+            scenario_values: ScenarioValueStore::default(),
+            base_reject_entrance_enabled: true,
+            base_extinguish_enabled: true,
+            environment: crate::EnvironmentSettings::default(),
+        }
+    }
+
+    #[test]
+    fn section_landscape_save_requires_a_native_surface8_plane() {
+        let mut spec = section_spec("main", None);
+        spec.landscape = Some(crate::Landscape::flat(2, 2));
+        let mut engine = Engine::new();
+        engine.configure_scenario_sections(&[spec]);
+        let section = engine.scenario_sections.get("main").unwrap();
+
+        assert!(matches!(
+            freeze_scenario_section(&engine, section, true, false),
+            Err(LiveC4SaveError::MissingPixelGrid)
+        ));
+    }
+
+    #[test]
+    fn temporary_physical_changes_preserve_order_and_duplicates() {
+        let mut writer = TextComponentWriter::default();
+        writer.section(0, "Physical");
+        serialize_physical(
+            &mut writer,
+            0,
+            &PhysicalInfo::default(),
+            &[
+                ("Walk".to_owned(), 10),
+                ("Energy".to_owned(), 20),
+                ("Walk".to_owned(), 30),
+            ],
+        );
+        assert_eq!(
+            writer.finish(),
+            b"[Physical]\r\nChanges=Walk=10,Energy=20,Walk=30\r\n"
+        );
+    }
+
+    #[test]
+    fn scoreboard_emits_the_required_empty_string_for_every_cell() {
+        let scoreboard = ScoreboardState::from_compiled_cells(
+            1,
+            2,
+            0,
+            vec![(None, 7), (Some(String::new()), -3)],
+        )
+        .expect("rectangular scoreboard");
+        assert_eq!(
+            serialize_scoreboard(&scoreboard).expect("nondefault scoreboard"),
+            b"[Scoreboard]\r\nRows=1\r\nCols=2\r\nCell0_0String=\"\"\r\nCell0_0Value=7\r\nCell1_0String=\"\"\r\nCell1_0Value=-3\r\n"
+        );
+    }
+
+    #[test]
+    fn escaped_strings_match_std_compiler_for_controls_octal_and_nul() {
+        assert_eq!(
+            quote_ini_bytes(&[
+                0x07, 0x08, 0x0c, b'\n', b'\r', b'\t', 0x0b, b'"', b'\\', 0x01, b'7', 0x80, 0,
+                b'X',
+            ]),
+            b"\"\\a\\b\\f\\n\\r\\t\\v\\\"\\\\\\1\\67\\200\""
+        );
+    }
+
+    #[test]
+    fn native_booleans_use_canonical_words() {
+        let mut writer = TextComponentWriter::default();
+        field_bool(&mut writer, 0, "Enabled", true, false);
+        field_bool(&mut writer, 0, "Disabled", false, true);
+        assert_eq!(writer.finish(), b"Enabled=true\r\nDisabled=false\r\n");
+    }
+
+    #[test]
+    fn raw_byte_fields_write_the_field_name_exactly_once() {
+        let mut writer = TextComponentWriter::default();
+        writer.field_bytes(2, "NetResult", b"\"raw\\200\"");
+        assert_eq!(writer.finish(), b"  NetResult=\"raw\\200\"\r\n");
+    }
+
+    #[test]
+    fn strings_txt_uses_cpp_first_nul_identity_and_payload_truncation() {
+        let mut strings = LegacyStringTable::default();
+        assert_eq!(strings.id_for("shared\0first suffix"), 0);
+        assert_eq!(strings.id_for("shared\0second suffix"), 0);
+        assert_eq!(strings.id_for("other\0suffix"), 1);
+        assert_eq!(strings.encoded().unwrap(), b"shared\r\nother\r\n");
+
+        let enumeration = strings.enumeration();
+        assert_eq!(
+            enumeration
+                .encode_value(&Value::String("shared\0later suffix".to_owned()))
+                .unwrap(),
+            "S0"
+        );
+    }
+
+    #[test]
+    fn c4value_booleans_retain_noncanonical_union_payloads() {
+        assert_eq!(
+            encode_value(&Value::RawBool(7), &mut LegacyStringTable::default()),
+            "b7"
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            let raw = 1_usize << 32;
+            assert_eq!(
+                encode_value(
+                    &Value::from_c4_bool_data_raw(raw),
+                    &mut LegacyStringTable::default()
+                ),
+                "b0",
+                "C4Value::CompileFunc persists only the low Data.Int"
+            );
+            assert_eq!(
+                encode_effect_value(
+                    &EffectVarValue::RawBool(raw),
+                    &mut LegacyStringTable::default()
+                ),
+                "b0",
+                "effect values use the same C4Value compiler boundary"
+            );
+        }
+        assert_eq!(
+            encode_effect_value(
+                &EffectVarValue::RawBool((-3_i32) as u32 as usize),
+                &mut LegacyStringTable::default()
+            ),
+            "b-3"
+        );
+    }
+
+    #[test]
+    fn strings_and_named_globals_keep_native_registration_and_declaration_order() {
+        let referenced = ["alpha", "zeta"]
+            .into_iter()
+            .map(lc_script::c4_string_bytes)
+            .collect::<Vec<_>>();
+        let mut strings = LegacyStringTable::from_registration_order(
+            &["zeta".to_string(), "dead".to_string(), "alpha".to_string()],
+            &referenced,
+        );
+        let globals = crate::ScriptGlobalState {
+            numbered: Default::default(),
+            named: std::collections::BTreeMap::from([
+                ("Alpha".to_string(), Value::String("alpha".to_string())),
+                ("Zed".to_string(), Value::String("zeta".to_string())),
+            ]),
+        };
+
+        assert_eq!(
+            serialize_script_globals(
+                &globals,
+                &["Zed".to_string(), "Alpha".to_string()],
+                false,
+                0,
+                &mut strings,
+            )
+            .unwrap(),
+            b"[Script]\r\nGlobalNamed=2;Zed=S0,Alpha=S1\r\n"
+        );
+        assert_eq!(strings.encoded().unwrap(), b"zeta\r\nalpha\r\n");
+    }
+
+    #[test]
+    fn loaded_table_and_static_const_strings_remain_enumerable() {
+        let mut engine = Engine::new();
+        engine.set_legacy_string_table(HashMap::from([
+            (1, "loaded one".to_string()),
+            (0, "loaded zero".to_string()),
+        ]));
+        engine.script_global_consts.borrow_mut().insert(
+            "SavedConst".to_string(),
+            lc_script::value_cell(Value::Array(vec![Value::String(
+                "constant value".to_string(),
+            )])),
+        );
+
+        let state = engine.capture_state();
+        let referenced = collect_live_referenced_strings(&engine, &state);
+        let strings = LegacyStringTable::from_registration_order(
+            &engine.script_string_registration_order(),
+            &referenced,
+        );
+        assert_eq!(
+            strings.encoded().unwrap(),
+            b"loaded zero\r\nloaded one\r\nconstant value\r\n"
+        );
+    }
+
+    #[test]
+    fn default_script_state_omits_the_empty_naming_section() {
+        assert_eq!(
+            serialize_script_globals(
+                &crate::ScriptGlobalState::default(),
+                &[],
+                false,
+                0,
+                &mut LegacyStringTable::default(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_players_use_the_normal_compiler_section_separator() {
+        assert_eq!(
+            append_runtime_player_sections(
+                b"[Game]\r\nTime=1\r\n".to_vec(),
+                b"[Player1]\r\nStatus=1\r\n",
+            ),
+            b"[Game]\r\nTime=1\r\n\r\n[Player1]\r\nStatus=1\r\n"
+        );
+    }
+
+    #[test]
+    fn draw_transform_uses_printf_g_and_preserves_identity_presence() {
+        assert_eq!(
+            serialize_draw_transform(crate::DrawTransform::identity()),
+            "1,0,0,0,1,0,1"
+        );
+        for (value, expected) in [
+            (1.234_567_8, "1.23457"),
+            (0.000_123_456_78, "0.000123457"),
+            (0.000_012_345_678, "1.23457e-05"),
+            (1_234_567.0, "1.23457e+06"),
+            (999_999.9, "1e+06"),
+            (-0.0, "-0"),
+        ] {
+            assert_eq!(format_legacy_float(value), expected, "value {value:?}");
+        }
+    }
+
+    #[test]
+    fn command_compile_func_uses_cpp_comma_separators() {
+        let command = LegacyCommandSave {
+            view: crate::command::CommandView {
+                name: "MoveTo".to_owned(),
+                target: Some(ObjectId::new(41)),
+                tx: Some(12),
+                tx_value: Some(Value::Int(12)),
+                tx_definition: None,
+                ty: Some(-3),
+                target2: Some(ObjectId::new(42)),
+                data: CommandData::Integer(7),
+                legacy_data: None,
+                finished: true,
+            },
+            update_interval: 5,
+            evaluated: true,
+            path_checked: false,
+            finished: true,
+            failures: 2,
+            retries: 3,
+            permit: 0,
+            base_mode: 1,
+            text: "raw,text".to_owned(),
+        };
+        let mut strings = LegacyStringTable::default();
+        assert_eq!(
+            serialize_command(&command, &mut strings),
+            "$2,MoveTo,i12,-3,41,42,7,5,1,0,1,2,3,0,1,raw,text"
+        );
+    }
+
+    #[test]
+    fn call_command_preserves_tagged_tx_and_independent_data_word() {
+        let command = LegacyCommandSave {
+            view: crate::command::CommandView {
+                name: "Call".to_owned(),
+                target: Some(ObjectId::new(41)),
+                tx: None,
+                tx_value: Some(Value::Array(vec![
+                    Value::String("payload".to_owned()),
+                    Value::C4Id(lc_script::c4_id_from_raw(0)),
+                ])),
+                tx_definition: None,
+                ty: Some(-3),
+                target2: Some(ObjectId::new(42)),
+                data: CommandData::Text("DoThing".to_owned()),
+                legacy_data: Some(37),
+                finished: false,
+            },
+            update_interval: 5,
+            evaluated: true,
+            path_checked: false,
+            finished: false,
+            failures: 0,
+            retries: 3,
+            permit: 0,
+            base_mode: 1,
+            text: "DoThing".to_owned(),
+        };
+        let mut strings = LegacyStringTable::default();
+        assert_eq!(
+            serialize_command(&command, &mut strings),
+            "$2,Call,a[2;S0,I0],-3,41,42,37,5,1,0,0,0,3,0,1,DoThing"
+        );
+        assert_eq!(strings.values, vec![b"payload".to_vec()]);
+    }
+
+    #[test]
+    fn runtime_objects_keep_the_native_inactive_list_separator() {
+        assert_eq!(
+            serialize_objects(&Engine::new(), &mut LegacyStringTable::default()),
+            b"\r\n"
+        );
+    }
+
+    #[test]
+    fn object_saves_follow_the_already_reversed_exec_ledgers() {
+        fn numbers(bytes: &[u8]) -> Vec<u64> {
+            String::from_utf8_lossy(bytes)
+                .lines()
+                .filter_map(|line| line.strip_prefix("Number=")?.parse().ok())
+                .collect()
+        }
+
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                crate::Definition::from_script("ORDR", "Order", "")
+                    .expect("fixture definition compiles"),
+            )
+            .expect("fixture definition registers");
+        let ids = (0..5)
+            .map(|_| {
+                engine
+                    .spawn_object(crate::SpawnConfig::new("ORDR"))
+                    .expect("fixture object spawns")
+            })
+            .collect::<Vec<_>>();
+
+        // Both vectors are Last -> Prev already. Saving must consume them
+        // directly; reversing here would invert native execution order.
+        engine.exec_list = vec![ids[2], ids[0], ids[1]];
+        engine.inactive_exec_list = vec![ids[4], ids[3]];
+        for id in &ids[3..] {
+            let index = engine
+                .find_object_index(*id)
+                .expect("inactive object exists");
+            engine.objects[index].state.status = ObjectStatus::Inactive;
+        }
+        assert_eq!(
+            numbers(&serialize_objects(
+                &engine,
+                &mut LegacyStringTable::default()
+            )),
+            [ids[2], ids[0], ids[1], ids[4], ids[3]]
+                .into_iter()
+                .map(ObjectId::as_u64)
+                .collect::<Vec<_>>()
+        );
+
+        let state = engine.capture_state();
+        assert_eq!(
+            numbers(&serialize_persisted_objects(
+                &engine,
+                &state.objects,
+                &state.object_order,
+                &mut LegacyStringTable::default(),
+            )),
+            [ids[2], ids[0], ids[1]]
+                .into_iter()
+                .map(ObjectId::as_u64)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn vertex_cnat_preserves_signed_bits_through_text_round_trip() {
+        let mut definition =
+            crate::Definition::from_script("CNAT", "Contact", "").expect("definition compiles");
+        definition.set_shape_vertices(vec![crate::ObjectVertex::new(0, 0).with_cnat(u32::MAX)]);
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .spawn_object(crate::SpawnConfig::new("CNAT"))
+            .expect("fixture object spawns");
+
+        let text = String::from_utf8(serialize_objects(
+            &engine,
+            &mut LegacyStringTable::default(),
+        ))
+        .expect("Objects.txt is UTF-8");
+        let serialized = text
+            .lines()
+            .find_map(|line| line.strip_prefix("VertexCNAT="))
+            .expect("nonzero CNAT is serialized");
+        assert_eq!(serialized, "-1");
+        assert_eq!(
+            serialized.parse::<i32>().expect("native signed field") as u32,
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn c4fixed_fields_use_raw_f_syntax_and_elide_zero() {
+        let mut writer = TextComponentWriter::default();
+        field_fixed(&mut writer, 0, "FixX", 0);
+        field_fixed(&mut writer, 0, "XDir", 65_536);
+        field_fixed(&mut writer, 0, "RDir", -32_768);
+        assert_eq!(writer.finish(), b"XDir=F65536\r\nRDir=F-32768\r\n");
+    }
+
+    #[test]
+    fn runtime_scenario_uses_cpp_defaults_and_network_save_adjustments() {
+        let modules = vec!["/OPT/GAME/Definitions/Objects.c4d".to_owned()];
+        let bytes = serialize_scenario(
+            &ScenarioValueStore::default(),
+            LiveC4SaveSpec {
+                title: "Runtime title",
+                definition_modules: &modules,
+                definition_executable_path: "/opt/game/",
+                definition_path: "Definitions/",
+                origin: "Folder\\Scenario.c4s",
+                music_enabled: true,
+                modified_title: None,
+                modified_info_txt: None,
+                modified_script_c: None,
+            },
+        );
+        for expected in [
+            b"Title=Runtime title\r\n".as_slice(),
+            b"Version=4,9,11\r\n",
+            b"SaveGame=1\r\n",
+            b"NoInitialize=1\r\n",
+            b"NetworkGame=true\r\n",
+            b"NetworkRuntimeJoin=true\r\n",
+            b"ForcedGfxMode=1\r\n",
+            b"Origin=Folder/Scenario.c4s\r\n",
+            b"Definitions=\"Objects.c4d\"\r\n",
+        ] {
+            assert!(bytes
+                .windows(expected.len())
+                .any(|window| window == expected));
+        }
+        assert!(!bytes
+            .windows(b"Icon=18".len())
+            .any(|window| window == b"Icon=18"));
+        assert!(!bytes
+            .windows(b"MaxPlayer=12".len())
+            .any(|window| window == b"MaxPlayer=12"));
+    }
+
+    #[test]
+    fn modified_main_section_replaces_only_objects_and_filters_to_c4fls_section() {
+        let mut source = MutableGroup::new("Source.c4s");
+        source.set_maker("Root Scenario Maker");
+        source
+            .add_file("Scenario.txt", b"original scenario".to_vec())
+            .unwrap();
+        source
+            .add_file("Game.txt", b"original game".to_vec())
+            .unwrap();
+        source
+            .add_file("Sky.png", b"original sky".to_vec())
+            .unwrap();
+        source
+            .add_file("CtrlRec.c4b", b"original control".to_vec())
+            .unwrap();
+        source
+            .add_file("Strings.txt", b"old string".to_vec())
+            .unwrap();
+        source
+            .add_file("Objects.txt", b"old object".to_vec())
+            .unwrap();
+        source
+            .add_file("Custom.bin", b"not a main section component".to_vec())
+            .unwrap();
+        let source =
+            Group::from_raw_memory(PathBuf::from("Source.c4s"), source.pack_raw().unwrap())
+                .unwrap();
+
+        let mut engine = Engine::new();
+        engine.configure_scenario_sections(&[section_spec("main", Some(source))]);
+        engine.current_scenario_section = "elsewhere".to_owned();
+        let section = engine.scenario_sections.get_mut("main").unwrap();
+        section.modified = true;
+        section.objects_modified = true;
+        section.saved_objects = Some(Vec::new());
+
+        let serialized =
+            serialize_scenario_sections(&engine, &mut LegacyStringTable::default()).unwrap();
+        assert_eq!(serialized.len(), 1);
+        let group =
+            Group::from_raw_memory(PathBuf::from("Sectmain.c4g"), serialized[0].payload.clone())
+                .unwrap();
+        assert_eq!(
+            group.read_file("Scenario.txt").unwrap(),
+            b"original scenario"
+        );
+        assert_eq!(group.read_file("Game.txt").unwrap(), b"original game");
+        assert_eq!(group.read_file("Sky.png").unwrap(), b"original sky");
+        assert_eq!(group.read_file("CtrlRec.c4b").unwrap(), b"original control");
+        assert_eq!(group.read_file("Objects.txt").unwrap(), b"");
+        assert_eq!(group.maker(), Some("New C4Group"));
+        assert!(!group.exists("Strings.txt"));
+        assert!(!group.exists("Custom.bin"));
+    }
+
+    #[test]
+    fn no_sky_section_save_deletes_inherited_sky_components() {
+        let mut source = MutableGroup::new("Sectnight.c4g");
+        source
+            .add_file("Scenario.txt", b"old scenario".to_vec())
+            .unwrap();
+        source.add_file("Sky.bmp", b"old bitmap".to_vec()).unwrap();
+        source.add_file("Sky.png", b"old png".to_vec()).unwrap();
+        source.add_file("Sky.jpeg", b"old jpeg".to_vec()).unwrap();
+        source.add_file("Sky.jpg", b"old jpg".to_vec()).unwrap();
+        let source =
+            Group::from_raw_memory(PathBuf::from("Sectnight.c4g"), source.pack_raw().unwrap())
+                .unwrap();
+
+        let mut spec = section_spec("night", Some(source));
+        spec.scenario_values = ScenarioValueStore::with_no_sky_for_test(true);
+        let mut engine = Engine::new();
+        engine.configure_scenario_sections(&[spec]);
+        engine.current_scenario_section = "elsewhere".to_owned();
+        let section = engine.scenario_sections.get_mut("night").unwrap();
+        section.modified = true;
+        section.landscape_modified = true;
+
+        let serialized =
+            serialize_scenario_sections(&engine, &mut LegacyStringTable::default()).unwrap();
+        let group = Group::from_raw_memory(
+            PathBuf::from("Sectnight.c4g"),
+            serialized[0].payload.clone(),
+        )
+        .unwrap();
+        for name in ["Sky.bmp", "Sky.png", "Sky.jpeg", "Sky.jpg"] {
+            assert!(!group.exists(name), "{name} survived NoSky section save");
+        }
+    }
+
+    #[test]
+    fn section_switch_freezes_the_departing_group_before_the_root_save() {
+        let mut main = MutableGroup::new("Source.c4s");
+        main.add_file("Scenario.txt", b"main scenario".to_vec())
+            .unwrap();
+        main.add_file("Strings.txt", b"old string\r\n".to_vec())
+            .unwrap();
+        main.add_file("Objects.txt", b"old object".to_vec())
+            .unwrap();
+        main.add_file("Custom.bin", b"not a section component".to_vec())
+            .unwrap();
+        let main =
+            Group::from_raw_memory(PathBuf::from("Source.c4s"), main.pack_raw().unwrap()).unwrap();
+        let mut next = MutableGroup::new("Sectnext.c4g");
+        next.add_file("Scenario.txt", b"next scenario".to_vec())
+            .unwrap();
+        let next = Group::from_raw_memory(PathBuf::from("Sectnext.c4g"), next.pack_raw().unwrap())
+            .unwrap();
+
+        let mut engine = Engine::new();
+        engine.configure_scenario_sections(&[
+            section_spec("main", Some(main)),
+            section_spec("next", Some(next)),
+        ]);
+        assert!(engine
+            .load_scenario_section("next", 2, Vec::new())
+            .expect("section switch succeeds"));
+        let frozen = engine
+            .scenario_sections
+            .get("main")
+            .and_then(|section| section.frozen_group.clone())
+            .expect("departing main group freezes");
+
+        // Prove final serialization is a byte copy, not a reconstruction
+        // from the mutable retained section model.
+        let section = engine.scenario_sections.get_mut("main").unwrap();
+        section.source_group = None;
+        section.saved_objects = None;
+        section.initial_objects.clear();
+        section.landscape_modified = true;
+        let serialized =
+            serialize_scenario_sections(&engine, &mut LegacyStringTable::default()).unwrap();
+        assert_eq!(serialized.len(), 1);
+        assert_eq!(serialized[0].payload, frozen);
+
+        let group = Group::from_raw_memory(PathBuf::from("Sectmain.c4g"), frozen).unwrap();
+        assert_eq!(group.read_file("Objects.txt").unwrap(), b"");
+        assert!(!group.exists("Custom.bin"));
+    }
+
+    #[test]
+    fn non_main_named_implicit_root_freeze_extracts_only_section_components() {
+        let mut source = MutableGroup::new("Source.c4s");
+        source.set_maker("Root Scenario Maker");
+        source
+            .add_file("Scenario.txt", b"root scenario".to_vec())
+            .unwrap();
+        source
+            .add_file("Custom.bin", b"root-only payload".to_vec())
+            .unwrap();
+        let source =
+            Group::from_raw_memory(PathBuf::from("Source.c4s"), source.pack_raw().unwrap())
+                .unwrap();
+
+        let mut engine = Engine::new();
+        engine.configure_scenario_sections(&[section_spec("Cave", Some(source))]);
+        let section = engine.scenario_sections.get("cave").unwrap();
+        let frozen = freeze_scenario_section(&engine, section, false, false).unwrap();
+        let group = Group::from_raw_memory(PathBuf::from("SectCave.c4g"), frozen).unwrap();
+
+        assert_eq!(group.read_file("Scenario.txt").unwrap(), b"root scenario");
+        assert!(!group.exists("Custom.bin"));
+        assert_eq!(group.maker(), Some("New C4Group"));
+    }
+
+    #[test]
+    fn named_main_section_freeze_preserves_its_complete_source_group() {
+        let mut root = MutableGroup::new("Source.c4s");
+        root.add_file("Scenario.txt", b"root scenario".to_vec())
+            .unwrap();
+        let root =
+            Group::from_raw_memory(PathBuf::from("Source.c4s"), root.pack_raw().unwrap()).unwrap();
+
+        let mut named_main = MutableGroup::new("SectMain.c4g");
+        named_main.set_maker("Named Section Maker");
+        named_main
+            .add_file("Scenario.txt", b"named main scenario".to_vec())
+            .unwrap();
+        named_main
+            .add_file("Custom.bin", b"named section payload".to_vec())
+            .unwrap();
+        let named_main = Group::from_raw_memory(
+            PathBuf::from("SectMain.c4g"),
+            named_main.pack_raw().unwrap(),
+        )
+        .unwrap();
+
+        let mut engine = Engine::new();
+        engine.configure_scenario_sections(&[
+            section_spec("Cave", Some(root)),
+            section_spec("Main", Some(named_main)),
+        ]);
+        let section = engine.scenario_sections.get("main").unwrap();
+        let frozen = freeze_scenario_section(&engine, section, false, false).unwrap();
+        let group = Group::from_raw_memory(PathBuf::from("SectMain.c4g"), frozen).unwrap();
+
+        assert_eq!(
+            group.read_file("Scenario.txt").unwrap(),
+            b"named main scenario"
+        );
+        assert_eq!(
+            group.read_file("Custom.bin").unwrap(),
+            b"named section payload"
+        );
+        assert_eq!(group.maker(), Some("Named Section Maker"));
+    }
+
+    #[test]
+    fn section_switch_saves_strings_before_object_reenumeration() {
+        let mut main = MutableGroup::new("Source.c4s");
+        main.add_file("Scenario.txt", b"main scenario".to_vec())
+            .unwrap();
+        let main =
+            Group::from_raw_memory(PathBuf::from("Source.c4s"), main.pack_raw().unwrap()).unwrap();
+        let mut next = MutableGroup::new("Sectnext.c4g");
+        next.add_file("Scenario.txt", b"next scenario".to_vec())
+            .unwrap();
+        let next = Group::from_raw_memory(PathBuf::from("Sectnext.c4g"), next.pack_raw().unwrap())
+            .unwrap();
+
+        let mut engine = Engine::new();
+        engine.set_legacy_string_table(HashMap::from([(0, "loaded".to_owned())]));
+        engine.script_global_consts.borrow_mut().insert(
+            "RuntimeValue".to_owned(),
+            lc_script::value_cell(Value::String("created later".to_owned())),
+        );
+        engine.configure_scenario_sections(&[
+            section_spec("main", Some(main)),
+            section_spec("next", Some(next)),
+        ]);
+
+        assert!(engine
+            .load_scenario_section("next", 2, Vec::new())
+            .expect("section switch succeeds"));
+        let frozen = engine
+            .scenario_sections
+            .get("main")
+            .and_then(|section| section.frozen_group.clone())
+            .expect("departing main group freezes");
+        let group = Group::from_raw_memory(PathBuf::from("Sectmain.c4g"), frozen).unwrap();
+
+        // LoadScenarioSection saves the table while the runtime string still
+        // has iEnumID=-1. Objects.Save enumerates it only after this payload.
+        assert_eq!(group.read_file("Strings.txt").unwrap(), b"loaded\r\n");
+        let referenced = collect_live_referenced_strings(&engine, &engine.capture_state());
+        assert_eq!(
+            lc_script::save_current_c4_string_enumeration(
+                &engine.script_string_registrations,
+                &referenced,
+            ),
+            [b"loaded".to_vec(), b"created later".to_vec()]
+        );
+    }
+
+    #[test]
+    fn inactive_section_values_do_not_pollute_the_live_string_table() {
+        let mut inactive = section_spec("inactive", None);
+        inactive.objects.push(crate::scenario::ScenarioSpawn {
+            handle: None,
+            container_handle: None,
+            contents_handles: Vec::new(),
+            info_name: None,
+            config: crate::SpawnConfig::new("TEST").with_local_vars(HashMap::from([(
+                "value".to_owned(),
+                Value::String("section-only".to_owned()),
+            )])),
+        });
+        let mut engine = Engine::new();
+        engine.configure_scenario_sections(&[inactive]);
+
+        let strings = collect_live_referenced_strings(&engine, &engine.capture_state());
+        assert!(!strings.iter().any(|value| value == b"section-only"));
+
+        // While freezing a modified section, its objects temporarily
+        // participate in enumeration; after it owns a frozen group they do
+        // not participate in the root save again.
+        let section = engine.scenario_sections.get_mut("inactive").unwrap();
+        section.modified = true;
+        let strings = collect_live_referenced_strings(&engine, &engine.capture_state());
+        assert!(strings.iter().any(|value| value == b"section-only"));
+        engine
+            .scenario_sections
+            .get_mut("inactive")
+            .unwrap()
+            .frozen_group = Some(Vec::new());
+        let strings = collect_live_referenced_strings(&engine, &engine.capture_state());
+        assert!(!strings.iter().any(|value| value == b"section-only"));
+    }
+
+    #[test]
+    fn player_whole_line_strings_are_raw_not_quoted() {
+        let player = PlayerState {
+            id: -1,
+            at_client_name: Some("client name \"raw\"".to_owned()),
+            message_buf: " message \\ raw ".to_owned(),
+            ..PlayerState::default()
+        };
+        let bytes = serialize_players(&[player], &mut LegacyStringTable::default());
+        assert!(bytes
+            .windows(b"AtClientName=client name \"raw\"\r\n".len())
+            .any(|window| window == b"AtClientName=client name \"raw\"\r\n"));
+        assert!(bytes
+            .windows(b"MessageBuf= message \\ raw \r\n".len())
+            .any(|window| window == b"MessageBuf= message \\ raw \r\n"));
+    }
+
+    #[test]
+    fn runtime_player_serializes_saved_view_center_independently_of_viewports() {
+        let no_viewport = PlayerState {
+            id: 1,
+            view_center: Some(crate::Vector2::new(321, 654)),
+            ..PlayerState::default()
+        };
+        let conflicting_viewport = PlayerState {
+            id: 2,
+            view_center: Some(crate::Vector2::new(777, 888)),
+            viewports: vec![crate::PlayerViewport::new(crate::Vector2::new(11, 22))],
+            ..PlayerState::default()
+        };
+
+        let bytes = serialize_players(
+            &[no_viewport, conflicting_viewport],
+            &mut LegacyStringTable::default(),
+        );
+        for expected in [
+            b"ViewX=321\r\n".as_slice(),
+            b"ViewY=654\r\n".as_slice(),
+            b"ViewX=777\r\n".as_slice(),
+            b"ViewY=888\r\n".as_slice(),
+        ] {
+            assert!(bytes
+                .windows(expected.len())
+                .any(|window| window == expected));
+        }
+        assert!(!bytes
+            .windows(b"ViewX=11\r\n".len())
+            .any(|window| window == b"ViewX=11\r\n"));
+        assert!(!bytes
+            .windows(b"ViewY=22\r\n".len())
+            .any(|window| window == b"ViewY=22\r\n"));
+    }
+
+    #[test]
+    fn runtime_player_emits_show_startup_exactly_once() {
+        let player = PlayerState {
+            show_startup: true,
+            ..PlayerState::default()
+        };
+        let bytes = serialize_players(&[player], &mut LegacyStringTable::default());
+        assert_eq!(
+            bytes
+                .windows(b"ShowStartup=true\r\n".len())
+                .filter(|window| *window == b"ShowStartup=true\r\n")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn runtime_player_integer_flags_survive_without_boolean_normalization() {
+        let state = PlayerState {
+            player_info_id: 7,
+            surrendered: true,
+            surrendered_value: -2,
+            evaluated: true,
+            control: crate::PlayerControlState {
+                auto_context_menu: true,
+                auto_context_menu_value: 7,
+                control_style: true,
+                control_style_value: -3,
+                ..crate::PlayerControlState::default()
+            },
+            ..PlayerState::default()
+        };
+
+        let restored = crate::Player::from_state(state).to_state();
+        assert_eq!(restored.surrendered_value, -2);
+        assert_eq!(restored.control.auto_context_menu_value, 7);
+        assert_eq!(restored.control.control_style_value, -3);
+
+        let bytes = serialize_players(&[restored], &mut LegacyStringTable::default());
+        for expected in [
+            b"Surrendered=-2\r\n".as_slice(),
+            b"Evaluated=true\r\n",
+            b"AutoContextMenu=7\r\n",
+            b"AutoStopControl=-3\r\n",
+        ] {
+            assert!(bytes
+                .windows(expected.len())
+                .any(|window| window == expected));
+        }
+    }
+
+    #[test]
+    fn runtime_player_signed_counters_preserve_high_bits() {
+        let player = PlayerState {
+            objects_owned: u32::MAX,
+            production_delay: 0x8000_0000,
+            production_unit: 0xffff_fffe,
+            ..PlayerState::default()
+        };
+        let text = String::from_utf8(serialize_players(
+            &[player],
+            &mut LegacyStringTable::default(),
+        ))
+        .expect("Game.txt player section is UTF-8");
+
+        for (name, expected, original) in [
+            ("ObjectsOwned", "-1", u32::MAX),
+            ("ProductionDelay", "-2147483648", 0x8000_0000),
+            ("ProductionUnit", "-2", 0xffff_fffe),
+        ] {
+            let prefix = format!("{name}=");
+            let serialized = text
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix.as_str()))
+                .unwrap_or_else(|| panic!("{name} is serialized"));
+            assert_eq!(serialized, expected);
+            assert_eq!(
+                serialized.parse::<i32>().expect("native signed field") as u32,
+                original
+            );
+        }
+    }
+
+    #[test]
+    fn object_info_name_uses_the_raw_whole_line_adapter() {
+        let mut writer = TextComponentWriter::default();
+        serialize_object_info_name(&mut writer, "Sir Clonk \"III\"");
+        assert_eq!(writer.finish(), b"Info=Sir Clonk \"III\"\r\n");
+    }
+
+    #[test]
+    fn round_result_buffers_use_escaped_strings_but_result_enum_does_not() {
+        let results = RoundResultsState {
+            goal_counts: vec![("ZERO".to_owned(), 0), ("DEBT".to_owned(), -2)],
+            network_result: Some(RoundResultsNetworkResult::LeagueError),
+            network_result_message: b"bad \\\"line\n\x80".to_vec(),
+            players: vec![crate::round_results::RoundResultsPlayerState {
+                status: RoundResultsPlayerStatus::Won,
+                player_info_id: 7,
+                league_progress_data: Some(b"p\\\"\r\n\x81".to_vec()),
+                ..crate::round_results::RoundResultsPlayerState::default()
+            }],
+            ..RoundResultsState::default()
+        };
+        let bytes = serialize_round_results(&results, false).expect("nonempty results");
+        assert!(bytes
+            .windows(b"Goals=ZERO=0;DEBT=-2\r\n".len())
+            .any(|window| window == b"Goals=ZERO=0;DEBT=-2\r\n"));
+        assert!(bytes
+            .windows(b"LeagueProgressData=\"p\\\\\\\"\\r\\n\\201\"\r\n".len())
+            .any(|window| window == b"LeagueProgressData=\"p\\\\\\\"\\r\\n\\201\"\r\n"));
+        assert!(bytes
+            .windows(b"Status=Won\r\n".len())
+            .any(|window| window == b"Status=Won\r\n"));
+        assert!(bytes
+            .windows(b"NetResult=\"bad \\\\\\\"line\\n\\200\"\r\nNetResult=LeagueError\r\n".len())
+            .any(|window| {
+                window == b"NetResult=\"bad \\\\\\\"line\\n\\200\"\r\nNetResult=LeagueError\r\n"
+            }));
+    }
+
+    #[test]
+    fn round_results_emptiness_uses_only_compiled_fields_and_melee_default() {
+        let fulfilled_only = RoundResultsState {
+            fulfilled_goals: vec!["SCRG".to_owned()],
+            ..RoundResultsState::default()
+        };
+        assert_eq!(serialize_round_results(&fulfilled_only, false), None);
+
+        let melee_override = RoundResultsState::default();
+        assert_eq!(
+            serialize_round_results(&melee_override, true).unwrap(),
+            b"[RoundResults]\r\nHideSettlementScore=false\r\n"
+        );
+    }
+
+    #[test]
+    fn section_object_filter_skips_user_crew_but_keeps_script_crew() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                crate::Definition::from_script("CLNK", "Crew", "")
+                    .expect("fixture definition compiles"),
+            )
+            .expect("fixture definition registers");
+        engine
+            .register_player(crate::PlayerConfig::new(1, "User"))
+            .expect("user registers");
+        engine
+            .register_player(crate::PlayerConfig::new(2, "Script"))
+            .expect("script player registers");
+        engine
+            .player_mut(2)
+            .expect("script player")
+            .set_script_player(true);
+        let user_object = engine
+            .spawn_object(crate::SpawnConfig::new("CLNK").with_owner(1))
+            .expect("user crew spawns");
+        let script_object = engine
+            .spawn_object(crate::SpawnConfig::new("CLNK").with_owner(2))
+            .expect("script crew spawns");
+        engine
+            .player_mut(1)
+            .expect("user")
+            .set_crew(vec![user_object]);
+        engine
+            .player_mut(2)
+            .expect("script player")
+            .set_crew(vec![script_object]);
+        let state = engine.capture_state();
+        let bytes = serialize_persisted_objects(
+            &engine,
+            &state.objects,
+            &state.object_order,
+            &mut LegacyStringTable::default(),
+        );
+        let user_number = format!("Number={user_object}\r\n");
+        let script_number = format!("Number={script_object}\r\n");
+        assert!(!bytes
+            .windows(user_number.len())
+            .any(|window| window == user_number.as_bytes()));
+        assert!(bytes
+            .windows(script_number.len())
+            .any(|window| window == script_number.as_bytes()));
+    }
+
+    #[test]
+    fn section_object_snapshot_retains_every_private_compiler_field() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                crate::Definition::from_script("ROCK", "Rock", "")
+                    .expect("fixture definition compiles"),
+            )
+            .expect("fixture definition registers");
+        let id = engine
+            .spawn_object(crate::SpawnConfig::new("ROCK"))
+            .expect("fixture object spawns");
+        let index = engine.find_object_index(id).expect("object exists");
+        let object = &mut engine.objects[index];
+        object.state.no_collect_delay = 9;
+        object.state.entrance_status = true;
+        object.state.crew_disabled = true;
+        object.state.shape_attach = crate::ShapeAttachRecord {
+            mat_valid: true,
+            mat_vehicle: false,
+            x: 12,
+            y: -3,
+            vtx: 2,
+        };
+        object.last_attach_movement_frame = Some(77);
+
+        let state = engine.capture_state();
+        let bytes = serialize_persisted_objects(
+            &engine,
+            &state.objects,
+            &state.object_order,
+            &mut LegacyStringTable::default(),
+        );
+        for expected in [
+            b"LastSolidAtchFrame=77\r\n".as_slice(),
+            b"NoCollectDelay=9\r\n",
+            b"AttachX=12\r\n",
+            b"AttachY=-3\r\n",
+            b"AttachVtx=2\r\n",
+            b"EntranceStatus=true\r\n",
+            b"CrewDisabled=true\r\n",
+        ] {
+            assert!(bytes
+                .windows(expected.len())
+                .any(|window| window == expected));
+        }
+    }
+
+    #[test]
+    fn section_object_writer_uses_the_loaded_mass_cache() {
+        let mut definition =
+            crate::Definition::from_script("MASS", "Mass", "").expect("definition compiles");
+        definition.set_mass(100);
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let mut config = crate::SpawnConfig::new("MASS").with_loaded(true);
+        config.compiled_mass = Some(777);
+        engine.spawn_object(config).expect("loaded object spawns");
+
+        let state = engine.capture_state();
+        let bytes = serialize_persisted_objects(
+            &engine,
+            &state.objects,
+            &state.object_order,
+            &mut LegacyStringTable::default(),
+        );
+        assert!(bytes
+            .windows(b"Mass=777\r\n".len())
+            .any(|window| window == b"Mass=777\r\n"));
+    }
+
+    #[test]
+    fn object_writer_omits_pointer_defaults_but_keeps_real_overrides() {
+        let default_mask = crate::DefinitionTargetRect::new(0, 0, 4, 3, 1, 2);
+        let mut definition =
+            crate::Definition::from_script("MASK", "Mask", "").expect("definition compiles");
+        definition.set_solid_mask(Some(default_mask));
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(crate::SpawnConfig::new("MASK"))
+            .expect("object spawns");
+        let index = engine.find_object_index(id).expect("object exists");
+        engine.objects[index].state.custom_name = Some(String::new());
+        engine.objects[index].state.solid_mask_override = Some(default_mask);
+        engine.objects[index].state.base_graphics = Some(crate::ObjectBaseGraphics {
+            definition: "MASK".to_owned(),
+            graphics_name: None,
+            blit_mode: 0,
+        });
+
+        let defaults = String::from_utf8(serialize_objects(
+            &engine,
+            &mut LegacyStringTable::default(),
+        ))
+        .expect("Objects.txt is UTF-8");
+        assert!(!defaults.lines().any(|line| line.starts_with("Name=")));
+        assert!(!defaults.lines().any(|line| line.starts_with("SolidMask=")));
+        assert!(!defaults.lines().any(|line| line.starts_with("Graphics=")));
+
+        engine.objects[index].state.custom_name = Some("Named".to_owned());
+        engine.objects[index].state.solid_mask_override =
+            Some(crate::DefinitionTargetRect::new(1, 0, 4, 3, 1, 2));
+        engine.objects[index].state.base_graphics = Some(crate::ObjectBaseGraphics {
+            definition: "MASK".to_owned(),
+            graphics_name: Some("Alternate".to_owned()),
+            blit_mode: 0,
+        });
+        let overrides = String::from_utf8(serialize_objects(
+            &engine,
+            &mut LegacyStringTable::default(),
+        ))
+        .expect("Objects.txt is UTF-8");
+        assert!(overrides.lines().any(|line| line == "Name=\"Named\""));
+        assert!(overrides.lines().any(|line| line.starts_with("SolidMask=")));
+        assert_eq!(
+            overrides.lines().find(|line| line.starts_with("Graphics=")),
+            Some("Graphics=MASK::Alternate")
+        );
+    }
+
+    #[test]
+    fn teams_emit_retained_compiler_metadata_with_escaped_script_names() {
+        let bytes = serialize_teams(
+            &[],
+            TeamConfiguration::default(),
+            9,
+            3,
+            b"Bot\\\"One\n\x80",
+            -2,
+        )
+        .expect("team list serializes");
+        assert!(bytes
+            .windows(b"LastTeamID=9\r\n".len())
+            .any(|window| window == b"LastTeamID=9\r\n"));
+        assert!(bytes
+            .windows(b"MaxScriptPlayers=3\r\nScriptPlayerNames=\"Bot\\\\\\\"One\\n\\200\"\r\nRandomTeamCount=-2\r\n".len())
+            .any(|window| {
+                window
+                    == b"MaxScriptPlayers=3\r\nScriptPlayerNames=\"Bot\\\\\\\"One\\n\\200\"\r\nRandomTeamCount=-2\r\n"
+            }));
+    }
+
+    #[test]
+    fn all_default_team_list_is_a_present_zero_byte_component() {
+        let compiler_defaults = TeamConfiguration {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            distribution: 0,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            team_colors: false,
+        };
+        assert_eq!(
+            serialize_teams(&[], compiler_defaults, 0, 0, b"", 0),
+            Some(Vec::new())
+        );
+    }
+}
