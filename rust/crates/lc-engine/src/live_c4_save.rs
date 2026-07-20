@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use image::{DynamicImage, ImageOutputFormat, Rgba, RgbaImage};
 use lc_resources::bitmap::{BitmapError, IndexedBitmap};
 use lc_resources::{Group, GroupError, MutableGroup, MutableGroupError};
-use lc_script::Value;
+use lc_script::{C4StringValue, Value};
 use thiserror::Error;
 
 use crate::command::{CommandData, LegacyCommandSave};
@@ -232,29 +232,40 @@ pub enum LiveC4ValueEncodeError {
 impl LiveC4ValueEnumeration {
     /// Reconstruct an immutable C4StringTable enumeration from Strings.txt
     /// line order. Each entry's position is its persisted `S<n>` ID.
-    pub fn from_strings_in_id_order(values: impl IntoIterator<Item = String>) -> Self {
+    pub fn from_strings_in_id_order<T>(values: impl IntoIterator<Item = T>) -> Self
+    where
+        T: Into<C4StringValue>,
+    {
         let mut enumeration = Self::default();
         for value in values {
+            let value = value.into();
             let bytes = lc_script::c4_string_bytes(&value);
-            if !enumeration
+            let enum_id = if let Some(index) = enumeration
                 .values
                 .iter()
-                .any(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
+                .position(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
             {
+                i32::try_from(index).unwrap_or(i32::MAX)
+            } else {
+                let enum_id = i32::try_from(enumeration.values.len()).unwrap_or(i32::MAX);
                 enumeration.values.push(bytes);
-            }
+                enum_id
+            };
+            value.set_enum_id(enum_id);
         }
         enumeration
     }
 
     pub fn encode_value(&self, value: &Value) -> Result<String, LiveC4ValueEncodeError> {
         encode_value_by(value, &mut |value| {
+            let enum_id = value.enum_id();
             let bytes = lc_script::c4_string_bytes(value);
-            self.values
-                .iter()
-                .position(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
-                .map(|index| i32::try_from(index).unwrap_or(i32::MAX))
-                .ok_or_else(|| LiveC4ValueEncodeError::MissingString(value.to_owned()))
+            usize::try_from(enum_id)
+                .ok()
+                .and_then(|index| self.values.get(index))
+                .filter(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
+                .map(|_| enum_id)
+                .ok_or_else(|| LiveC4ValueEncodeError::MissingString(value.to_string()))
         })
     }
 
@@ -276,7 +287,7 @@ impl LiveC4SaveComponents {
         }
         push_optional_file(&mut entries, "Info.txt", self.info_txt.as_deref());
         if !self.game_txt.is_empty() {
-        entries.push(file_entry("Game.txt", &self.game_txt));
+            entries.push(file_entry("Game.txt", &self.game_txt));
         }
         push_optional_file(&mut entries, "Teams.txt", self.teams_txt.as_deref());
         for section in &self.scenario_sections {
@@ -294,7 +305,7 @@ impl LiveC4SaveComponents {
             });
         }
         if !self.mat_map_txt.is_empty() {
-        entries.push(file_entry("MatMap.txt", &self.mat_map_txt));
+            entries.push(file_entry("MatMap.txt", &self.mat_map_txt));
         }
         push_optional_file(&mut entries, "Landscape.bmp", self.landscape_bmp.as_deref());
         push_optional_file(&mut entries, "Landscape.png", self.landscape_png.as_deref());
@@ -413,11 +424,11 @@ impl Engine {
         let scenario_txt = serialize_scenario_for_policy(&self.scenario_values, spec, policy);
 
         let script_engine = serialize_script_globals(
-                &state.script_globals,
-                &self.script_global_name_order(),
+            &state.script_globals,
+            &self.script_global_name_order(),
             self.scenario_script_go,
             self.scenario_script_counter,
-                &mut strings,
+            &mut strings,
         );
         let effects = serialize_effects(&state.global_effects, &mut strings);
         let game_txt = if policy.is_exact() {
@@ -425,14 +436,14 @@ impl Engine {
             game.music_enabled = spec.music_enabled;
             game.compiled_sections = InitialNetworkCompiledSections {
                 script_engine,
-            sky: state.sky.as_ref().and_then(serialize_sky),
+                sky: state.sky.as_ref().and_then(serialize_sky),
                 effects,
-            scoreboard: serialize_scoreboard(&state.scoreboard),
-        };
-        let player_sections = serialize_players(&state.players, &mut strings);
+                scoreboard: serialize_scoreboard(&state.scoreboard),
+            };
+            let player_sections = serialize_players(&state.players, &mut strings);
             append_runtime_player_sections(
-            serialize_initial_network_game(&game, None)?.unwrap_or_default(),
-            &player_sections,
+                serialize_initial_network_game(&game, None)?.unwrap_or_default(),
+                &player_sections,
             )
         } else {
             serialize_non_exact_game(script_engine, effects)
@@ -535,20 +546,6 @@ impl LegacyStringTable {
         Self { values }
     }
 
-    fn from_registration_order(registrations: &[String], referenced: &[Vec<u8>]) -> Self {
-        let mut table = Self::default();
-        for value in registrations {
-            let bytes = lc_script::c4_string_bytes(value);
-            if referenced.iter().any(|candidate| candidate == &bytes) {
-                table.push_unique(bytes);
-            }
-        }
-        for value in referenced {
-            table.push_unique(value.clone());
-        }
-        table
-    }
-
     fn push_unique(&mut self, bytes: Vec<u8>) {
         if !self
             .values
@@ -577,6 +574,14 @@ impl LegacyStringTable {
         if self.values.is_empty() {
             return None;
         }
+        // C4StringTable::Save calculates the C4Group entry size before it
+        // removes embedded line feeds. The normalized payload is therefore
+        // followed by one unused byte for every removed LF. Native leaves
+        // bytes beyond the first terminating NUL unspecified; zero-fill that
+        // tail so the observable allocation length remains deterministic.
+        let encoded_size = self.values.iter().fold(0_usize, |size, value| {
+            size.saturating_add(c4_string_table_prefix(value).len().saturating_add(2))
+        });
         let mut output = Vec::new();
         for mut value in self.values.clone() {
             let c_string_len = c4_string_table_prefix(&value).len();
@@ -590,6 +595,7 @@ impl LegacyStringTable {
             output.extend_from_slice(&value);
             output.extend_from_slice(b"\r\n");
         }
+        output.resize(encoded_size, 0);
         Some(output)
     }
 
@@ -604,15 +610,17 @@ impl LegacyStringTable {
     }
 }
 
-fn collect_live_referenced_strings(engine: &Engine, state: &crate::EngineState) -> Vec<Vec<u8>> {
-    fn push_string(strings: &mut Vec<Vec<u8>>, value: &str) {
-        let bytes = lc_script::c4_string_bytes(value);
-        if !strings.iter().any(|candidate| candidate == &bytes) {
-            strings.push(bytes);
+fn collect_live_referenced_strings(
+    engine: &Engine,
+    state: &crate::EngineState,
+) -> Vec<C4StringValue> {
+    fn push_string(strings: &mut Vec<C4StringValue>, value: &C4StringValue) {
+        if !strings.iter().any(|candidate| candidate.ptr_eq(value)) {
+            strings.push(value.clone());
         }
     }
 
-    fn collect_value(strings: &mut Vec<Vec<u8>>, item: &Value) {
+    fn collect_value(strings: &mut Vec<C4StringValue>, item: &Value) {
         match item {
             Value::String(text) => push_string(strings, text),
             Value::Array(values) => {
@@ -625,6 +633,9 @@ fn collect_live_referenced_strings(engine: &Engine, state: &crate::EngineState) 
                     collect_value(strings, key);
                     collect_value(strings, item);
                 }
+                for item in values.hidden_values() {
+                    collect_value(strings, item);
+                }
             }
             Value::Nil
             | Value::Int(_)
@@ -635,7 +646,7 @@ fn collect_live_referenced_strings(engine: &Engine, state: &crate::EngineState) 
         }
     }
 
-    fn effect_value(strings: &mut Vec<Vec<u8>>, value: &EffectVarValue) {
+    fn effect_value(strings: &mut Vec<C4StringValue>, value: &EffectVarValue) {
         match value {
             EffectVarValue::String(value) => push_string(strings, value),
             EffectVarValue::Array(values) => {
@@ -646,7 +657,10 @@ fn collect_live_referenced_strings(engine: &Engine, state: &crate::EngineState) 
             EffectVarValue::Proplist(values) => {
                 for (key, item) in values {
                     collect_value(strings, key);
-                    effect_value(strings, item);
+                    collect_value(strings, item);
+                }
+                for item in values.hidden_values() {
+                    collect_value(strings, item);
                 }
             }
             EffectVarValue::Nil
@@ -658,7 +672,7 @@ fn collect_live_referenced_strings(engine: &Engine, state: &crate::EngineState) 
         }
     }
 
-    fn effects(strings: &mut Vec<Vec<u8>>, effects: &[EffectState]) {
+    fn effects(strings: &mut Vec<C4StringValue>, effects: &[EffectState]) {
         for effect in effects {
             for item in &effect.vars {
                 effect_value(strings, item);
@@ -666,7 +680,7 @@ fn collect_live_referenced_strings(engine: &Engine, state: &crate::EngineState) 
         }
     }
 
-    fn object_values(strings: &mut Vec<Vec<u8>>, object: &crate::PersistedObject) {
+    fn object_values(strings: &mut Vec<C4StringValue>, object: &crate::PersistedObject) {
         for item in object.snapshot.local_vars.values() {
             collect_value(strings, item);
         }
@@ -678,7 +692,7 @@ fn collect_live_referenced_strings(engine: &Engine, state: &crate::EngineState) 
         }
     }
 
-    fn spawn_values(strings: &mut Vec<Vec<u8>>, spawn: &crate::SpawnConfig) {
+    fn spawn_values(strings: &mut Vec<C4StringValue>, spawn: &crate::SpawnConfig) {
         for item in spawn.local_vars.values() {
             collect_value(strings, item);
         }
@@ -693,17 +707,6 @@ fn collect_live_referenced_strings(engine: &Engine, state: &crate::EngineState) 
     }
 
     let mut strings = Vec::new();
-    // Strings read from Strings.txt are live C4StringTable registrations even
-    // when no current value references them. C++ EnumStrings therefore keeps
-    // them enumerable on the next live save.
-    let loaded_strings = engine.legacy_string_table_snapshot();
-    let mut loaded_ids = loaded_strings.keys().copied().collect::<Vec<_>>();
-    loaded_ids.sort_unstable();
-    for id in loaded_ids {
-        if let Some(value) = loaded_strings.get(&id) {
-            push_string(&mut strings, value);
-        }
-    }
     // Static constants are C4Values owned by C4AulScriptEngine and participate
     // in the same process-global string enumeration as mutable globals.
     let constant_cells = engine
@@ -848,7 +851,7 @@ fn object_number(id: Option<ObjectId>) -> i32 {
 
 fn encode_value_by<E>(
     value: &Value,
-    id_for: &mut impl FnMut(&str) -> Result<i32, E>,
+    id_for: &mut impl FnMut(&C4StringValue) -> Result<i32, E>,
 ) -> Result<String, E> {
     match value {
         Value::Nil => Ok("A0".to_owned()),
@@ -884,9 +887,13 @@ fn encode_value_by<E>(
     }
 }
 
-fn encode_value(value: &Value, strings: &mut LegacyStringTable) -> String {
+fn encode_value(value: &Value, _strings: &mut LegacyStringTable) -> String {
+    encode_value_with_current_string_ids(value)
+}
+
+pub(crate) fn encode_value_with_current_string_ids(value: &Value) -> String {
     encode_value_by(value, &mut |value| {
-        Ok::<_, std::convert::Infallible>(strings.id_for(value))
+        Ok::<_, std::convert::Infallible>(value.enum_id())
     })
     .expect("infallible mutable string-table enumeration")
 }
@@ -897,7 +904,7 @@ fn encode_effect_value(value: &EffectVarValue, strings: &mut LegacyStringTable) 
         EffectVarValue::Int(value) => format!("i{value}"),
         EffectVarValue::Bool(value) => format!("b{}", i32::from(*value)),
         EffectVarValue::RawBool(value) => format!("b{}", *value as u32 as i32),
-        EffectVarValue::String(value) => format!("S{}", strings.id_for(value)),
+        EffectVarValue::String(value) => format!("S{}", value.enum_id()),
         EffectVarValue::C4Id(value) => {
             let raw = lc_script::c4_id_raw(value) as u32 as i32;
             format!("I{raw}")
@@ -920,7 +927,7 @@ fn encode_effect_value(value: &EffectVarValue, strings: &mut LegacyStringTable) 
                 .map(|(key, value)| format!(
                     "{}={}",
                     encode_value(key, strings),
-                    encode_effect_value(value, strings)
+                    encode_value(value, strings)
                 ))
                 .collect::<Vec<_>>()
                 .join(";")
@@ -940,11 +947,11 @@ fn serialize_scenario_for_policy(
     match policy {
         LiveC4SavePolicy::Scenario { .. } => values.serialize_runtime_scenario_save(),
         LiveC4SavePolicy::Savegame { target_group_name } => values.serialize_runtime_savegame(
-        spec.title,
-        spec.definition_modules,
-        spec.definition_executable_path,
-        spec.definition_path,
-        spec.origin,
+            spec.title,
+            spec.definition_modules,
+            spec.definition_executable_path,
+            spec.definition_path,
+            spec.origin,
             savegame_icon(target_group_name),
         ),
         LiveC4SavePolicy::Record => values.serialize_runtime_record_save(
@@ -2099,7 +2106,6 @@ pub(super) fn freeze_scenario_section(
         write_scenario_section_landscape(engine, section, &mut group)?;
     }
     if write_objects {
-        group.remove_entry("Strings.txt");
         group.remove_entry("Objects.txt");
 
         let state = engine.capture_state();
@@ -2124,6 +2130,7 @@ pub(super) fn freeze_scenario_section(
             serialize_initial_section_objects(engine, &section.initial_objects, &mut strings)
         };
         if let Some(payload) = saved_strings.encoded() {
+            group.remove_entry("Strings.txt");
             group.add_file("Strings.txt", payload)?;
         }
         group.add_file("Objects.txt", objects_txt)?;
@@ -2759,7 +2766,7 @@ fn serialize_landscape_for_policy(
         engine.save_c4_landscape_textures(&mut scratch)?;
     }
     if saves_auxiliary_systems {
-    engine.materials.save_enumeration(&mut scratch)?;
+        engine.materials.save_enumeration(&mut scratch)?;
     }
 
     let packed = scratch.pack_raw()?;
@@ -3177,12 +3184,33 @@ mod tests {
         assert_eq!(strings.id_for("other\0suffix"), 1);
         assert_eq!(strings.encoded().unwrap(), b"shared\r\nother\r\n");
 
-        let enumeration = strings.enumeration();
+        let enumerated = C4StringValue::from("shared\0first suffix");
+        let enumeration = LiveC4ValueEnumeration::from_strings_in_id_order([
+            enumerated.clone(),
+            C4StringValue::from("other\0suffix"),
+        ]);
         assert_eq!(
             enumeration
-                .encode_value(&Value::String("shared\0later suffix".to_owned()))
+                .encode_value(&Value::String(enumerated))
                 .unwrap(),
             "S0"
+        );
+        assert!(
+            enumeration
+                .encode_value(&Value::String(C4StringValue::from("shared\0later suffix",)))
+                .is_err(),
+            "equal C-string text does not confer another C4String's enum identity"
+        );
+    }
+
+    #[test]
+    fn strings_txt_retains_cpp_pre_normalization_allocation_length() {
+        let strings = LegacyStringTable::from_enumerated_values(vec![b"a\nb".to_vec()]);
+
+        assert_eq!(
+            strings.encoded().expect("nonempty string table"),
+            b"ab\r\n\0",
+            "C++ allocates from the original length before deleting LF"
         );
     }
 
@@ -3223,19 +3251,22 @@ mod tests {
 
     #[test]
     fn strings_and_named_globals_keep_native_registration_and_declaration_order() {
-        let referenced = ["alpha", "zeta"]
-            .into_iter()
-            .map(lc_script::c4_string_bytes)
-            .collect::<Vec<_>>();
-        let mut strings = LegacyStringTable::from_registration_order(
-            &["zeta".to_string(), "dead".to_string(), "alpha".to_string()],
-            &referenced,
+        let registrations = lc_script::new_string_registrations();
+        let zeta = C4StringValue::from("zeta");
+        let dead = C4StringValue::from("dead");
+        let alpha = C4StringValue::from("alpha");
+        lc_script::register_c4_string(&registrations, &zeta);
+        lc_script::register_c4_string(&registrations, &dead);
+        lc_script::register_c4_string(&registrations, &alpha);
+        drop(dead);
+        let mut strings = LegacyStringTable::from_enumerated_values(
+            lc_script::enumerate_c4_strings(&registrations, &[alpha.clone(), zeta.clone()]),
         );
         let globals = crate::ScriptGlobalState {
             numbered: Default::default(),
             named: std::collections::BTreeMap::from([
-                ("Alpha".to_string(), Value::String("alpha".to_string())),
-                ("Zed".to_string(), Value::String("zeta".to_string())),
+                ("Alpha".to_string(), Value::String(alpha)),
+                ("Zed".to_string(), Value::String(zeta)),
             ]),
         };
 
@@ -3263,19 +3294,48 @@ mod tests {
         engine.script_global_consts.borrow_mut().insert(
             "SavedConst".to_string(),
             lc_script::value_cell(Value::Array(vec![Value::String(
-                "constant value".to_string(),
+                "constant value".to_string().into(),
             )])),
         );
 
         let state = engine.capture_state();
         let referenced = collect_live_referenced_strings(&engine, &state);
-        let strings = LegacyStringTable::from_registration_order(
-            &engine.script_string_registration_order(),
+        let strings = LegacyStringTable::from_enumerated_values(lc_script::enumerate_c4_strings(
+            &engine.script_string_registrations,
             &referenced,
-        );
+        ));
         assert_eq!(
             strings.encoded().unwrap(),
             b"loaded zero\r\nloaded one\r\nconstant value\r\n"
+        );
+    }
+
+    #[test]
+    fn effect_map_hidden_slots_keep_strings_live_for_root_enumeration() {
+        let mut engine = Engine::new();
+        engine.set_legacy_string_table(HashMap::from([(0, "hidden effect string".to_owned())]));
+        let hidden = lc_script::resolve_c4_string(&engine.script_string_registrations, 0)
+            .expect("loaded string resolves into the effect map");
+        let mut map = lc_script::ValueMap::new();
+        map.recycle_value_slot(Value::String(hidden));
+        engine
+            .global_effects
+            .push(EffectState::new("HiddenMap").with_vars(vec![EffectVarValue::Proplist(map)]));
+
+        let state = engine.capture_state();
+        let referenced = collect_live_referenced_strings(&engine, &state);
+        let mut strings = LegacyStringTable::from_enumerated_values(
+            lc_script::enumerate_c4_strings(&engine.script_string_registrations, &referenced),
+        );
+        assert_eq!(
+            strings.encoded().as_deref(),
+            Some(b"hidden effect string\r\n".as_slice())
+        );
+        let effects = serialize_effects(&state.global_effects, &mut strings)
+            .expect("the effect component is present");
+        assert!(
+            String::from_utf8_lossy(&effects).contains("m[0;]"),
+            "hidden slots affect lifetime but are not visible serialized entries"
         );
     }
 
@@ -3372,13 +3432,14 @@ mod tests {
 
     #[test]
     fn call_command_preserves_tagged_tx_and_independent_data_word() {
+        let payload = C4StringValue::from("payload");
         let command = LegacyCommandSave {
             view: crate::command::CommandView {
                 name: "Call".to_owned(),
                 target: Some(ObjectId::new(41)),
                 tx: None,
                 tx_value: Some(Value::Array(vec![
-                    Value::String("payload".to_owned()),
+                    Value::String(payload.clone()),
                     Value::C4Id(lc_script::c4_id_from_raw(0)),
                 ])),
                 tx_definition: None,
@@ -3399,6 +3460,22 @@ mod tests {
             text: "DoThing".to_owned(),
         };
         let mut strings = LegacyStringTable::default();
+        assert_eq!(
+            serialize_command(&command, &mut strings),
+            "$2,Call,a[2;S-1,I0],-3,41,42,37,5,1,0,0,0,3,0,1,DoThing",
+            "C4Value::CompileFunc writes a runtime string's current -1 enum ID verbatim"
+        );
+        assert!(
+            strings.values.is_empty(),
+            "serialization does not enumerate"
+        );
+
+        let registrations = lc_script::new_string_registrations();
+        lc_script::register_c4_string(&registrations, &payload);
+        strings = LegacyStringTable::from_enumerated_values(lc_script::enumerate_c4_strings(
+            &registrations,
+            std::slice::from_ref(&payload),
+        ));
         assert_eq!(
             serialize_command(&command, &mut strings),
             "$2,Call,a[2;S0,I0],-3,41,42,37,5,1,0,0,0,3,0,1,DoThing"
@@ -3953,7 +4030,7 @@ mod tests {
         engine.set_legacy_string_table(HashMap::from([(0, "loaded".to_owned())]));
         engine.script_global_consts.borrow_mut().insert(
             "RuntimeValue".to_owned(),
-            lc_script::value_cell(Value::String("created later".to_owned())),
+            lc_script::value_cell(Value::String("created later".to_owned().into())),
         );
         engine.configure_scenario_sections(&[
             section_spec("main", Some(main)),
@@ -3984,6 +4061,24 @@ mod tests {
     }
 
     #[test]
+    fn section_string_save_noop_preserves_existing_component() {
+        let mut main = MutableGroup::new("Source.c4s");
+        main.add_file("Scenario.txt", b"main scenario".to_vec())
+            .unwrap();
+        main.add_file("Strings.txt", b"stale\r\n".to_vec()).unwrap();
+        let main =
+            Group::from_raw_memory(PathBuf::from("Source.c4s"), main.pack_raw().unwrap()).unwrap();
+
+        let mut engine = Engine::new();
+        engine.configure_scenario_sections(&[section_spec("main", Some(main))]);
+        let section = engine.scenario_sections.get("main").unwrap();
+        let frozen = freeze_scenario_section(&engine, section, false, true).unwrap();
+        let group = Group::from_raw_memory(PathBuf::from("Sectmain.c4g"), frozen).unwrap();
+
+        assert_eq!(group.read_file("Strings.txt").unwrap(), b"stale\r\n");
+    }
+
+    #[test]
     fn inactive_section_values_do_not_pollute_the_live_string_table() {
         let mut inactive = section_spec("inactive", None);
         inactive.objects.push(crate::scenario::ScenarioSpawn {
@@ -3993,14 +4088,14 @@ mod tests {
             info_name: None,
             config: crate::SpawnConfig::new("TEST").with_local_vars(HashMap::from([(
                 "value".to_owned(),
-                Value::String("section-only".to_owned()),
+                Value::String("section-only".to_owned().into()),
             )])),
         });
         let mut engine = Engine::new();
         engine.configure_scenario_sections(&[inactive]);
 
         let strings = collect_live_referenced_strings(&engine, &engine.capture_state());
-        assert!(!strings.iter().any(|value| value == b"section-only"));
+        assert!(!strings.iter().any(|value| value.as_ref() == "section-only"));
 
         // While freezing a modified section, its objects temporarily
         // participate in enumeration; after it owns a frozen group they do
@@ -4008,14 +4103,14 @@ mod tests {
         let section = engine.scenario_sections.get_mut("inactive").unwrap();
         section.modified = true;
         let strings = collect_live_referenced_strings(&engine, &engine.capture_state());
-        assert!(strings.iter().any(|value| value == b"section-only"));
+        assert!(strings.iter().any(|value| value.as_ref() == "section-only"));
         engine
             .scenario_sections
             .get_mut("inactive")
             .unwrap()
             .frozen_group = Some(Vec::new());
         let strings = collect_live_referenced_strings(&engine, &engine.capture_state());
-        assert!(!strings.iter().any(|value| value == b"section-only"));
+        assert!(!strings.iter().any(|value| value.as_ref() == "section-only"));
     }
 
     #[test]

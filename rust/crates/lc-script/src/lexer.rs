@@ -16,9 +16,8 @@ pub struct Lexer<'a> {
     just_saw_cr: bool,
     strict_level: u8,
     diagnostics: Vec<ParseError>,
-    /// Successfully decoded string literals in lexer encounter order. C++
-    /// registers these with C4StringTable while linking the script, before
-    /// any of the values are evaluated.
+    /// Held string operands in encounter order. The lexer contributes quoted
+    /// literals and the parser adds identifier-backed map/property keys.
     string_literals: Vec<String>,
     input_is_c4_bytes: bool,
     /// C4Aul's `Shift(..., false)` recognizes one leading `*` without
@@ -69,6 +68,27 @@ impl<'a> Lexer<'a> {
 
     pub(crate) fn take_string_literals(&mut self) -> Vec<String> {
         std::mem::take(&mut self.string_literals)
+    }
+
+    /// Record a C4String operand synthesized from an identifier by the
+    /// parser (map keys and property access). Native C4Aul registers these at
+    /// link time just like quoted literals.
+    pub(crate) fn record_string_operand(&mut self, value: String) {
+        self.string_literals.push(value);
+    }
+
+    /// Static-constant strings are tokenized with C4Aul's `Ref` policy, not
+    /// `Hold`. The parser calls this after recognizing that declaration so
+    /// the value can instead be registered through its owning GlobalConsts
+    /// C4Value.
+    pub(crate) fn discard_last_string_operand(&mut self, value: &str) {
+        if let Some(index) = self
+            .string_literals
+            .iter()
+            .rposition(|candidate| candidate == value)
+        {
+            self.string_literals.remove(index);
+        }
     }
 
     pub fn next_token(&mut self) -> Result<Token, ParseError> {
@@ -839,10 +859,10 @@ impl<'a> Lexer<'a> {
             match ch {
                 '"' => {
                     let value = if value_is_canonical_bytes || self.input_is_c4_bytes {
-                            c4_string_from_bytes(&c4_string_bytes(&value))
-                        } else {
-                            c4_string_from_literal(value)
-                        };
+                        c4_string_from_bytes(&c4_string_bytes(&value))
+                    } else {
+                        c4_string_from_literal(value)
+                    };
                     self.string_literals.push(value.clone());
                     return Ok(Token::new(TokenKind::String(value), line, column));
                 }

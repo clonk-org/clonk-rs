@@ -38,8 +38,10 @@ pub struct VarDecl {
 pub struct Script {
     pub functions: Vec<Function>,
     pub var_decls: Vec<VarDecl>,    // Script-wide local/static declarations
-    /// Decoded literals in tokenizer order, retained for C4StringTable
-    /// registration independently of function-map iteration order.
+    /// Held C4String operands in parser encounter order: quoted literals plus
+    /// identifier-backed map/property keys. Static-constant strings are
+    /// excluded because C4Aul registers those through a referenced GlobalConst
+    /// value rather than granting parser Hold.
     pub string_literals: Vec<String>,
     pub includes: Vec<String>,      // List of included definition IDs
     /// `#appendto` targets (C++ `C4AulScript::Appends`, a LIST —

@@ -100,7 +100,7 @@ fn shipped_revaluation_newgfx_branch_executes() {
                 vec![
                     Value::Object(target.as_u64()),
                     Value::Object(spell.as_u64()),
-                    Value::String("unused".to_owned()),
+                    Value::String("unused".to_owned().into()),
                 ],
             )
             .expect("shipped IsNewgfx branch executes without an unknown-function error"),

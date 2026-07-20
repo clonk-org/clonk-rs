@@ -371,18 +371,18 @@ protected func GetCustomComponents(builder)
             )
             .expect("needed-material probe runs"),
         Value::Array(vec![
-            Value::String("Builder needs|no more material.".to_owned()),
-            Value::String("Builder needs|no more material.".to_owned()),
-            Value::String("Nordwerk|needs|1x Stein|2x Bauholz|1x |1x MISS".to_owned()),
-            Value::String("Dynamic|needs|2x Metall|1x Bauholz".to_owned()),
-            Value::String("Dynamic|needs|1x Stein".to_owned()),
-            Value::String("Dynamic|needs|3x Bauholz".to_owned()),
-            Value::String("Leading needs|no more material.".to_owned()),
-            Value::String("Empty custom needs|no more material.".to_owned()),
-            Value::String("Non-array|needs|2x Stein".to_owned()),
-            Value::String("Dynamic|needs|1x Bauholz".to_owned()),
-            Value::String("Dynamic needs|no more material.".to_owned()),
-            Value::String("Dynamic needs|no more material.".to_owned()),
+            Value::String("Builder needs|no more material.".to_owned().into()),
+            Value::String("Builder needs|no more material.".to_owned().into()),
+            Value::String("Nordwerk|needs|1x Stein|2x Bauholz|1x |1x MISS".to_owned().into()),
+            Value::String("Dynamic|needs|2x Metall|1x Bauholz".to_owned().into()),
+            Value::String("Dynamic|needs|1x Stein".to_owned().into()),
+            Value::String("Dynamic|needs|3x Bauholz".to_owned().into()),
+            Value::String("Leading needs|no more material.".to_owned().into()),
+            Value::String("Empty custom needs|no more material.".to_owned().into()),
+            Value::String("Non-array|needs|2x Stein".to_owned().into()),
+            Value::String("Dynamic|needs|1x Bauholz".to_owned().into()),
+            Value::String("Dynamic needs|no more material.".to_owned().into()),
+            Value::String("Dynamic needs|no more material.".to_owned().into()),
         ])
     );
 
@@ -399,9 +399,11 @@ protected func GetCustomComponents(builder)
             )
             .expect("localized needed-material probe runs"),
         Value::Array(vec![
-            Value::String("Builder braucht kein|weiteres Baumaterial.".to_owned()),
+            Value::String("Builder braucht kein|weiteres Baumaterial.".to_owned().into()),
             Value::String(
-                "Nordwerk|braucht noch|1x Stein|2x Bauholz|1x |1x MISS".to_owned(),
+                "Nordwerk|braucht noch|1x Stein|2x Bauholz|1x |1x MISS"
+                    .to_owned()
+                    .into(),
             ),
         ])
     );
@@ -468,7 +470,7 @@ func Read()
             Value::Int(-2),
             Value::Int(-5),
             Value::Int(-7),
-            Value::String("Signed|needs|3x Positive|3x Negative".to_owned()),
+            Value::String("Signed|needs|3x Positive|3x Negative".to_owned().into()),
         ])
     );
     let snapshot = engine.object_snapshot(object).expect("signed snapshot");
@@ -498,7 +500,7 @@ func Read()
             Value::Int(-2),
             Value::Int(-5),
             Value::Int(-7),
-            Value::String("Signed|needs|3x Positive|3x Negative".to_owned()),
+            Value::String("Signed|needs|3x Positive|3x Negative".to_owned().into()),
         ])
     );
 }
@@ -561,6 +563,6 @@ protected func GetCustomComponents(builder)
         engine
             .call_object_function(index, "JoinRemoveAndRead", Vec::new())
             .expect("removal-time query runs"),
-        Value::String("Crew|needs|1x Stein".to_owned())
+        Value::String("Crew|needs|1x Stein".to_owned().into())
     );
 }

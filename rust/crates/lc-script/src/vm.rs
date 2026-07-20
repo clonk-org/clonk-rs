@@ -17,8 +17,8 @@ use crate::engine::{
 };
 use crate::error::RuntimeError;
 use crate::value::{
-    c4_id_text, c4_string_bytes, c4_string_from_bytes, c4_strings_equal, C4VType, Literal, Value,
-    ValueMap,
+    c4_id_text, c4_string_bytes, c4_string_from_bytes, c4_strings_equal, C4StringValue, C4VType,
+    Literal, Value, ValueMap,
 };
 
 /// Maximum script call-stack depth, matching C++ `MAX_CONTEXT_STACK`
@@ -48,7 +48,7 @@ fn maybe_grow<R>(f: impl FnOnce() -> R) -> R {
 /// integers, booleans and C4IDs have a string representation here.
 fn concat_string(value: &Value) -> Option<String> {
     match value {
-        Value::String(s) => Some(s.clone()),
+        Value::String(s) => Some(s.to_string()),
         Value::Int(value) => Some(value.to_string()),
         Value::Bool(value) => Some(i32::from(*value).to_string()),
         Value::RawBool(value) => Some((*value as u32 as i32).to_string()),
@@ -572,8 +572,8 @@ fn current_caller_context() -> Option<ScriptCallerContext> {
 
 #[derive(Clone, Debug)]
 pub(crate) enum RawIdentity {
-    /// Parser literals share the engine string table entry for equal text.
-    InternedString(String),
+    /// String values carry their native shared C4String pointer directly.
+    String(C4StringValue),
     /// Runtime strings and newly evaluated containers own distinct pointers.
     Heap(Rc<HeapIdentity>),
 }
@@ -611,7 +611,7 @@ impl HeapIdentity {
                 .get(array_index(index).ok()?)
                 .and_then(Option::as_ref),
             (Self::Proplist(identities), PathSegment::Property(key)) => identities
-                .get(&Value::String(key.clone()))
+                .get(&Value::String(key.clone().into()))
                 .and_then(Option::as_ref),
             (Self::Proplist(identities), PathSegment::Index(key)) => {
                 identities.get(key).and_then(Option::as_ref)
@@ -667,7 +667,7 @@ impl HeapIdentity {
                     },
                 };
                 let key = match segment {
-                    PathSegment::Property(key) => Value::String(key.clone()),
+                    PathSegment::Property(key) => Value::String(key.clone().into()),
                     PathSegment::Index(key) => key.clone(),
                 };
                 let Some(child) = entries.get_key(&key) else {
@@ -690,17 +690,24 @@ impl HeapIdentity {
 
 impl RawIdentity {
     fn runtime(value: &Value) -> Option<Self> {
-        matches!(
-            value,
-            Value::String(_) | Value::Array(_) | Value::Proplist(_)
-        )
-        .then(|| Self::Heap(Rc::new(HeapIdentity::opaque_for(value))))
+        match value {
+            Value::String(value) => Some(Self::String(value.clone())),
+            Value::Array(_) | Value::Proplist(_) => {
+                Some(Self::Heap(Rc::new(HeapIdentity::opaque_for(value))))
+            }
+            Value::Nil
+            | Value::Int(_)
+            | Value::Bool(_)
+            | Value::RawBool(_)
+            | Value::C4Id(_)
+            | Value::Object(_) => None,
+        }
     }
 
     fn identity_at(&self, segment: &PathSegment) -> Option<Self> {
         match self {
             Self::Heap(identity) => identity.identity_at(segment),
-            Self::InternedString(_) => None,
+            Self::String(_) => None,
         }
     }
 
@@ -713,7 +720,7 @@ impl RawIdentity {
         for segment in segments {
             current = match current {
                 Self::Heap(identity) => identity.identity_ref_at(segment)?,
-                Self::InternedString(_) => return None,
+                Self::String(_) => return None,
             };
         }
         Some(current)
@@ -744,9 +751,7 @@ impl RawIdentity {
 impl PartialEq for RawIdentity {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (RawIdentity::InternedString(left), RawIdentity::InternedString(right)) => {
-                c4_strings_equal(left, right)
-            }
+            (RawIdentity::String(left), RawIdentity::String(right)) => left.ptr_eq(right),
             (RawIdentity::Heap(left), RawIdentity::Heap(right)) => Rc::ptr_eq(left, right),
             _ => false,
         }
@@ -772,10 +777,8 @@ impl TrackedValue {
     }
 
     fn literal(value: Value, literal: &Literal) -> Self {
-        let identity = match literal {
-            Literal::String(text) => Some(RawIdentity::InternedString(text.clone())),
-            _ => None,
-        };
+        let _ = literal;
+        let identity = Self::runtime_identity(&value);
         Self { value, identity }
     }
 
@@ -1158,7 +1161,7 @@ fn string_index(text: &str, index: &Value) -> Result<Value, RuntimeError> {
     else {
         return Ok(Value::Nil);
     };
-    Ok(Value::String(c4_string_from_bytes(&[*byte])))
+    Ok(Value::String(c4_string_from_bytes(&[*byte]).into()))
 }
 
 fn read_path(value: &Value, segments: &[PathSegment]) -> Result<Value, RuntimeError> {
@@ -1582,8 +1585,10 @@ pub struct Vm<'a> {
     globals_consts: Option<&'a std::cell::RefCell<IndexMap<String, ValueCell>>>,
     /// Cross-object LocalN cell supplier (crate::engine::LocalCellHook).
     local_cell_hook: Option<&'a crate::engine::LocalCellHook>,
-    string_registrations:
-        Option<&'a std::cell::RefCell<crate::engine::StringRegistrationLedger>>,
+    string_registrations: Option<&'a crate::engine::StringRegistrationLedger>,
+    /// Fallback literal interning for direct VM fixtures without a Script
+    /// engine's shared C4StringTable.
+    literal_strings: Rc<RefCell<HashMap<Vec<u8>, C4StringValue>>>,
     /// Per-call provenance for persistent/global cells that store only the
     /// public value representation. Nested script calls share this VM/cache.
     cell_identities: RefCell<HashMap<usize, RawIdentityCell>>,
@@ -1619,6 +1624,7 @@ impl<'a> Vm<'a> {
             globals_consts: None,
             local_cell_hook: None,
             string_registrations: None,
+            literal_strings: Rc::new(RefCell::new(HashMap::new())),
             cell_identities: RefCell::new(HashMap::new()),
             constant_identities: RefCell::new(HashMap::new()),
         }
@@ -1734,9 +1740,7 @@ impl<'a> Vm<'a> {
 
     pub fn with_string_registrations(
         mut self,
-        registrations: Option<
-            &'a std::cell::RefCell<crate::engine::StringRegistrationLedger>,
-        >,
+        registrations: Option<&'a crate::engine::StringRegistrationLedger>,
     ) -> Self {
         self.string_registrations = registrations;
         self
@@ -1770,15 +1774,7 @@ impl<'a> Vm<'a> {
     fn read_tracked_named_cell(&self, name: &str, cell: &ValueCell) -> TrackedValue {
         let value = cell.borrow().clone();
         let identity = self.identity_for_cell(cell);
-        let is_script_constant = self
-            .global_constant_cell(name)
-            .is_some_and(|constant| Rc::ptr_eq(&constant, cell));
-        if !is_script_constant {
-            return self.read_tracked_cell(cell);
-        }
-        if let Value::String(text) = &value {
-            *identity.borrow_mut() = Some(RawIdentity::InternedString(text.clone()));
-        }
+        let _ = name;
         let tracked_identity = identity.borrow().clone();
         TrackedValue {
             value,
@@ -1954,7 +1950,7 @@ impl<'a> Vm<'a> {
         }
         let value = values.first().cloned().unwrap_or(Value::Nil);
         let name = match value {
-            Value::String(name) => name,
+            Value::String(name) => name.into_string(),
             Value::Nil => String::new(),
             Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
                 if env.strict_level.unwrap_or(0) < 3 => {
@@ -2349,6 +2345,7 @@ impl<'a> Vm<'a> {
             globals_numbered: self.globals_numbered,
             globals_consts: self.globals_consts,
             string_registrations: self.string_registrations,
+            literal_strings: self.literal_strings.clone(),
             local_cell_hook: self.local_cell_hook,
             cell_identities: RefCell::new(HashMap::new()),
             constant_identities: RefCell::new(HashMap::new()),
@@ -4372,7 +4369,7 @@ impl<'a> Vm<'a> {
                         .iter()
                         .map(|value| match value {
                             Value::Int(value) => value.to_string(),
-                            Value::String(value) => value.clone(),
+                            Value::String(value) => value.to_string(),
                             other => format!("{other:?}"),
                         })
                         .collect::<Vec<_>>()
@@ -4396,7 +4393,7 @@ impl<'a> Vm<'a> {
                         .iter()
                         .map(|value| match value {
                             Value::Int(value) => value.to_string(),
-                            Value::String(value) => value.clone(),
+                            Value::String(value) => value.to_string(),
                             other => format!("{other:?}"),
                         })
                         .collect::<Vec<_>>()
@@ -4453,11 +4450,27 @@ impl<'a> Vm<'a> {
         value
     }
 
+    fn literal_string(&self, value: &str) -> C4StringValue {
+        if let Some(registrations) = self.string_registrations {
+            return crate::engine::register_c4_literal_string(registrations, value);
+        }
+        let mut key = c4_string_bytes(value);
+        if let Some(nul) = key.iter().position(|byte| *byte == 0) {
+            key.truncate(nul);
+        }
+        if let Some(existing) = self.literal_strings.borrow().get(&key) {
+            return existing.clone();
+        }
+        let value = C4StringValue::new(value.to_owned());
+        self.literal_strings.borrow_mut().insert(key, value.clone());
+        value
+    }
+
     fn literal_value(&self, literal: &Literal, strict_level: Option<u8>) -> Value {
         let value = match literal {
             Literal::Int(i) => Value::Int(*i),
             Literal::Bool(b) => Value::Bool(*b),
-            Literal::String(s) => Value::String(s.clone()),
+            Literal::String(s) => Value::String(self.literal_string(s)),
             Literal::C4Id(id) if crate::value::c4_id_raw(id) == 0 => Value::Nil,
             Literal::C4Id(id) => Value::C4Id(id.clone()),
             Literal::Nil => Value::Nil,
@@ -4795,7 +4808,7 @@ impl<'a> Vm<'a> {
                 })?;
                 let mut bytes = c4_string_bytes(&left);
                 bytes.extend(c4_string_bytes(&right));
-                Ok(Value::String(c4_string_from_bytes(&bytes)))
+                Ok(Value::String(c4_string_from_bytes(&bytes).into()))
             }
         }
     }
@@ -4888,7 +4901,7 @@ impl<'a> Vm<'a> {
                 return Ok(String::new());
             }
             match value {
-                Value::String(text) => Ok(text),
+                Value::String(text) => Ok(text.into_string()),
                 Value::Nil => Ok(String::new()),
                 other => Err(RuntimeError::new(format!(
                     "operator \"{symbol}\" {side} side: got \"{}\", but expected \"string\"!",
@@ -5105,7 +5118,7 @@ impl<'a> Vm<'a> {
         strict_level: Option<u8>,
     ) -> Result<String, RuntimeError> {
         match args.get(index).map(CallArg::read).transpose()?.unwrap_or(Value::Nil) {
-            Value::String(value) => Ok(value),
+            Value::String(value) => Ok(value.into_string()),
             Value::Nil => Ok(String::new()),
             Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
                 if strict_level.unwrap_or(0) < 3 => {
@@ -5480,7 +5493,7 @@ impl<'a> Vm<'a> {
                 }
                 let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
                 dispatch_args.push(target.clone());
-                dispatch_args.push(Value::String(name.to_string()));
+                dispatch_args.push(Value::String(name.to_string().into()));
                 dispatch_args.push(Value::Bool(failsafe));
                 for arg in &evaluated_args {
                     dispatch_args.push(arg.read()?);
@@ -5805,7 +5818,7 @@ impl<'a> Vm<'a> {
                         .iter()
                         .map(|v| match v {
                             Value::Int(n) => n.to_string(),
-                            Value::String(s) => s.clone(),
+                            Value::String(s) => s.to_string(),
                             _ => format!("{:?}", v),
                         })
                         .collect::<Vec<_>>()
@@ -5853,7 +5866,7 @@ impl<'a> Vm<'a> {
                 }
                 let object_id = match object_value {
                     Value::Int(n) => n.to_string(),
-                    Value::String(s) => s.clone(),
+                    Value::String(s) => s.to_string(),
                     _ => format!("{:?}", object_value),
                 };
 
@@ -5866,7 +5879,7 @@ impl<'a> Vm<'a> {
                     .iter()
                     .map(|v| match v {
                         Value::Int(n) => n.to_string(),
-                        Value::String(s) => s.clone(),
+                        Value::String(s) => s.to_string(),
                         _ => format!("{:?}", v),
                     })
                     .collect::<Vec<_>>()
@@ -6082,7 +6095,7 @@ impl<'a> Vm<'a> {
                         .iter()
                         .map(|value| match value {
                             Value::Int(value) => value.to_string(),
-                            Value::String(value) => value.clone(),
+                            Value::String(value) => value.to_string(),
                             other => format!("{other:?}"),
                         })
                         .collect::<Vec<_>>()
@@ -6260,7 +6273,7 @@ impl<'a> Vm<'a> {
                 let object_value = self.evaluate(object, env, depth + 1)?;
                 let object_id = match object_value {
                     Value::Int(value) => value.to_string(),
-                    Value::String(value) => value,
+                    Value::String(value) => value.into_string(),
                     other => format!("{other:?}"),
                 };
                 let arg_values = args
@@ -6271,7 +6284,7 @@ impl<'a> Vm<'a> {
                     .iter()
                     .map(|value| match value {
                         Value::Int(value) => value.to_string(),
-                        Value::String(value) => value.clone(),
+                        Value::String(value) => value.to_string(),
                         other => format!("{other:?}"),
                     })
                     .collect::<Vec<_>>()
@@ -6314,7 +6327,7 @@ impl<'a> Vm<'a> {
                     {
                         let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
                         dispatch_args.push(target);
-                        dispatch_args.push(Value::String(method.clone()));
+                        dispatch_args.push(Value::String(method.clone().into()));
                         dispatch_args.push(Value::Bool(false));
                         for arg in &evaluated_args {
                             dispatch_args.push(arg.read()?);
@@ -7543,7 +7556,7 @@ mod tests {
 
         assert_eq!(
             engine
-                .call("VarN", &[Value::String("x".to_string())])
+                .call("VarN", &[Value::String("x".to_string().into())])
                 .expect("a direct VarN dispatch is not an unknown-function error"),
             Value::Nil
         );
@@ -7810,16 +7823,16 @@ mod tests {
         let source = "func Probe(string code) { return eval(code); }";
         let code = c4_string_from_bytes(&[b'\"', 0xff, b'\"']);
         assert_eq!(
-            execute_script(source, "Probe", &[Value::String(code)])
+            execute_script(source, "Probe", &[Value::String(code.into())])
                 .expect("projected source evaluates"),
-            Value::String(c4_string_from_bytes(&[0xff]))
+            Value::String(c4_string_from_bytes(&[0xff]).into())
         );
 
         assert_eq!(
             execute_script(
                 source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"1\0+1"))],
+                &[Value::String(c4_string_from_bytes(b"1\0+1").into())],
             )
             .expect("NUL-terminated source evaluates its prefix"),
             Value::Int(1)
@@ -7828,7 +7841,7 @@ mod tests {
             execute_script(
                 source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"\"open\0\""))],
+                &[Value::String(c4_string_from_bytes(b"\"open\0\"").into())],
             )
             .expect("a literal truncated by NUL is a DirectExec parse failure"),
             Value::Nil
@@ -7838,7 +7851,7 @@ mod tests {
             execute_script(
                 source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"1\x1f+1"))],
+                &[Value::String(c4_string_from_bytes(b"1\x1f+1").into())],
             )
             .expect("all C++ control-byte whitespace is skipped"),
             Value::Int(2)
@@ -7847,7 +7860,7 @@ mod tests {
             execute_script(
                 source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"1\xc2\xa0+1"))],
+                &[Value::String(c4_string_from_bytes(b"1\xc2\xa0+1").into())],
             )
             .expect("non-ASCII whitespace is a DirectExec parse failure"),
             Value::Nil
@@ -7856,7 +7869,7 @@ mod tests {
             execute_script(
                 source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"\"a\nb\""))],
+                &[Value::String(c4_string_from_bytes(b"\"a\nb\"").into())],
             )
             .expect("a raw newline in a string is a DirectExec parse failure"),
             Value::Nil
@@ -7865,7 +7878,7 @@ mod tests {
             execute_script(
                 source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"true\xc3\xbf"))],
+                &[Value::String(c4_string_from_bytes(b"true\xc3\xbf").into())],
             )
             .expect("the non-ASCII source byte causes a DirectExec parse failure"),
             Value::Nil
@@ -7874,7 +7887,7 @@ mod tests {
             execute_script(
                 source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"1//comment\r+1"))],
+                &[Value::String(c4_string_from_bytes(b"1//comment\r+1").into())],
             )
             .expect("a carriage return ends a C++ line comment"),
             Value::Int(2)
@@ -7888,7 +7901,7 @@ mod tests {
         let var_decls = Vec::new();
         let vm = Vm::new(&functions, &host_functions, &var_decls, None);
         let source = c4_string_from_bytes(&[b'\"', 0xff, b'\"']);
-        let expected = Value::String(c4_string_from_bytes(&[0xff]));
+        let expected = Value::String(c4_string_from_bytes(&[0xff]).into());
 
         let (value, _) = vm
             .direct_exec_with_locals(&source, &HashMap::new(), None)
@@ -8039,9 +8052,9 @@ mod tests {
         assert_eq!(
             execute_script(source, "Test", &[]).expect("ordered map foreach runs"),
             Value::Array(vec![
-                Value::String("secondfirstthird".to_string()),
+                Value::String("secondfirstthird".to_string().into()),
                 Value::Int(36),
-                Value::String("third".to_string()),
+                Value::String("third".to_string().into()),
                 Value::Int(3),
             ])
         );
@@ -8068,9 +8081,9 @@ mod tests {
             }
         "#;
         let expected = Value::Array(vec![
-            Value::String("b".to_string()),
+            Value::String("b".to_string().into()),
             Value::Int(2),
-            Value::String("a".to_string()),
+            Value::String("a".to_string().into()),
             Value::Int(4),
         ]);
 

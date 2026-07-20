@@ -100,7 +100,7 @@ protected func Probe()
         Value::Array(vec![
             Value::Int(8),
             Value::Int(8),
-            Value::String("unchanged".to_string()),
+            Value::String("unchanged".to_string().into()),
             Value::Nil,
         ])
     );
@@ -182,7 +182,7 @@ protected func Probe()
         Value::Array(vec![
             Value::Int(3),
             Value::Int(3),
-            Value::String("unchanged".to_string()),
+            Value::String("unchanged".to_string().into()),
             Value::Nil,
             Value::Int(3),
         ])

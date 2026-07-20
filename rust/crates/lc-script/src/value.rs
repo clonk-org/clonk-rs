@@ -1,6 +1,9 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::ops::Deref;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 
 use indexmap::{Equivalent, IndexMap};
 
@@ -76,6 +79,181 @@ pub fn c4_string_byte_len(value: &str) -> usize {
             }
         })
         .sum()
+}
+
+/// One native `C4String` identity.
+///
+/// Copies share the native pointer's mutable `iEnumID`; separately created
+/// runtime strings retain distinct pointer identity even when their bytes are
+/// equal. Textual C4Value equality and hashing deliberately ignore that
+/// identity.
+#[derive(Clone)]
+pub struct C4StringValue(Arc<C4StringValueInner>);
+
+pub(crate) struct C4StringValueInner {
+    value: String,
+    enum_id: AtomicI32,
+}
+
+impl C4StringValue {
+    /// Construct a fresh, unenumerated runtime string.
+    pub fn new(value: String) -> Self {
+        Self::loaded(value, -1)
+    }
+
+    /// Construct a string with an existing native enumeration ID.
+    pub fn loaded(value: String, enum_id: i32) -> Self {
+        Self(Arc::new(C4StringValueInner {
+            value,
+            enum_id: AtomicI32::new(enum_id),
+        }))
+    }
+
+    pub fn enum_id(&self) -> i32 {
+        self.0.enum_id.load(Ordering::Relaxed)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0.value
+    }
+
+    /// Set the shared enumeration ID. Public serializers use this when they
+    /// perform a self-contained native string-table enumeration.
+    #[doc(hidden)]
+    pub fn set_enum_id(&self, enum_id: i32) {
+        self.0.enum_id.store(enum_id, Ordering::Relaxed);
+    }
+
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub fn into_string(self) -> String {
+        match Arc::try_unwrap(self.0) {
+            Ok(inner) => inner.value,
+            Err(inner) => inner.value.clone(),
+        }
+    }
+
+    pub(crate) fn downgrade(&self) -> std::sync::Weak<C4StringValueInner> {
+        Arc::downgrade(&self.0)
+    }
+
+    pub(crate) fn from_inner(inner: Arc<C4StringValueInner>) -> Self {
+        Self(inner)
+    }
+}
+
+impl Default for C4StringValue {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
+}
+
+impl Deref for C4StringValue {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.value
+    }
+}
+
+impl AsRef<str> for C4StringValue {
+    fn as_ref(&self) -> &str {
+        self
+    }
+}
+
+impl std::borrow::Borrow<str> for C4StringValue {
+    fn borrow(&self) -> &str {
+        self
+    }
+}
+
+impl From<String> for C4StringValue {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&str> for C4StringValue {
+    fn from(value: &str) -> Self {
+        Self::new(value.to_owned())
+    }
+}
+
+impl From<C4StringValue> for String {
+    fn from(value: C4StringValue) -> Self {
+        value.into_string()
+    }
+}
+
+impl fmt::Debug for C4StringValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_ref(), formatter)
+    }
+}
+
+impl fmt::Display for C4StringValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self)
+    }
+}
+
+impl PartialEq for C4StringValue {
+    fn eq(&self, other: &Self) -> bool {
+        c4_strings_equal(self, other)
+    }
+}
+
+impl PartialEq<str> for C4StringValue {
+    fn eq(&self, other: &str) -> bool {
+        c4_strings_equal(self, other)
+    }
+}
+
+impl PartialEq<String> for C4StringValue {
+    fn eq(&self, other: &String) -> bool {
+        c4_strings_equal(self, other)
+    }
+}
+
+impl PartialEq<C4StringValue> for str {
+    fn eq(&self, other: &C4StringValue) -> bool {
+        c4_strings_equal(self, other)
+    }
+}
+
+impl PartialEq<C4StringValue> for String {
+    fn eq(&self, other: &C4StringValue) -> bool {
+        c4_strings_equal(self, other)
+    }
+}
+
+impl Eq for C4StringValue {}
+
+impl Hash for C4StringValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        c4_string_hash(self).hash(state);
+    }
+}
+
+impl serde::Serialize for C4StringValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        c4_string_serde::serialize(self, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for C4StringValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        c4_string_serde::deserialize(deserializer)
+    }
 }
 
 pub(crate) fn c4_string_from_literal(value: String) -> String {
@@ -268,21 +446,24 @@ pub mod c4_string_serde {
         }
     }
 
-    pub fn serialize<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S, T>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
+        T: AsRef<str> + ?Sized,
     {
-        serde::Serialize::serialize(&Ref(value), serializer)
+        serde::Serialize::serialize(&Ref(value.as_ref()), serializer)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<T, D::Error>
     where
         D: serde::Deserializer<'de>,
+        T: From<String>,
     {
-        match <Repr as serde::Deserialize>::deserialize(deserializer)? {
+        let value = match <Repr as serde::Deserialize>::deserialize(deserializer)? {
             Repr::Text(value) => Ok(c4_string_from_literal(value)),
             Repr::Bytes { c4_bytes } => Ok(c4_string_from_bytes(&c4_bytes)),
-        }
+        }?;
+        Ok(T::from(value))
     }
 
     pub fn serialize_ref<S>(value: &str, serializer: S) -> Result<S::Ok, S::Error>
@@ -291,7 +472,6 @@ pub mod c4_string_serde {
     {
         serde::Serialize::serialize(&Ref(value), serializer)
     }
-
 }
 
 pub mod c4_optional_string_serde {
@@ -447,16 +627,37 @@ pub fn cnv_fn(from: C4VType, to: C4VType) -> CnvFn {
 /// C++ uses an unordered map for lookup plus a separate insertion-order list.
 /// `IndexMap` provides the same externally visible behavior: replacing an
 /// existing key keeps its position, while removing and reinserting appends it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ValueMap(IndexMap<Value, Value>);
+#[derive(Clone, Default)]
+pub struct ValueMap(
+    IndexMap<Value, Value>,
+    // C4ValueHash allocates mapped C4Value slots separately from its hash
+    // entries. Removing an entry retains that slot in emptyValues, including
+    // any value left behind when the key itself became nil. New keys reuse
+    // the most recently removed slot.
+    Vec<Value>,
+);
+
+impl fmt::Debug for ValueMap {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("ValueMap").field(&self.0).finish()
+    }
+}
+
+impl PartialEq for ValueMap {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for ValueMap {}
 
 impl ValueMap {
     pub fn new() -> Self {
-        Self(IndexMap::new())
+        Self(IndexMap::new(), Vec::new())
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
-        Self(IndexMap::with_capacity(capacity))
+        Self(IndexMap::with_capacity(capacity), Vec::new())
     }
 
     pub fn len(&self) -> usize {
@@ -485,6 +686,14 @@ impl ValueMap {
 
     pub fn values_mut(&mut self) -> indexmap::map::ValuesMut<'_, Value, Value> {
         self.0.values_mut()
+    }
+
+    /// Values retained in native `C4ValueHash::emptyValues` slot-reuse order.
+    /// They are not map entries, but remain live C4Values until reuse or map
+    /// destruction and therefore participate in C4String enumeration.
+    #[doc(hidden)]
+    pub fn hidden_values(&self) -> impl DoubleEndedIterator<Item = &Value> {
+        self.1.iter().rev()
     }
 
     /// String-property lookup (`map.foo` and the overwhelmingly common engine
@@ -524,6 +733,7 @@ impl ValueMap {
                 .is_some_and(|current| !matches!(current, Value::Nil))
         {
             self.shift_remove(&key);
+            self.recycle_value_slot(Value::Nil);
         } else {
             self.insert(key, value);
         }
@@ -550,7 +760,33 @@ impl ValueMap {
     }
 
     pub fn insert_key(&mut self, key: Value, value: Value) -> Option<Value> {
+        if let Some(current) = self.0.get_mut(&key) {
+            return Some(std::mem::replace(current, value));
+        }
+
+        if let Some(recycled) = self.1.pop() {
+            // operator[] first attaches the recycled mapped slot to the new
+            // key and only then assigns. A nonnil recycled value assigned nil
+            // therefore clears the slot and immediately removes the new key;
+            // an already-nil slot takes C4Value::Set's unchanged-value return
+            // and leaves a visible nil entry behind.
+            if matches!(value, Value::Nil) && !matches!(recycled, Value::Nil) {
+                self.recycle_value_slot(Value::Nil);
+                return None;
+            }
+        }
+
         self.0.insert(key, value)
+    }
+
+    /// Retain one removed C4ValueHash mapped slot for native-order reuse.
+    ///
+    /// This is exposed for loaders that denumerate an owning map key: native
+    /// `removeValue` erases that key but leaves its mapped value alive in the
+    /// map's `emptyValues` pool until another key reuses it or the map dies.
+    #[doc(hidden)]
+    pub fn recycle_value_slot(&mut self, value: Value) {
+        self.1.push(value);
     }
 
     /// Arbitrary-key form of [`Self::assign`].
@@ -561,6 +797,7 @@ impl ValueMap {
                 .is_some_and(|current| !matches!(current, Value::Nil))
         {
             self.shift_remove_key(&key);
+            self.recycle_value_slot(Value::Nil);
         } else {
             self.insert_key(key, value);
         }
@@ -726,7 +963,7 @@ pub enum Value {
     /// Canonical Boolean values keep using [`Value::Bool`] so the public API
     /// remains ergonomic.
     RawBool(usize),
-    String(#[serde(with = "c4_string_serde")] String),
+    String(C4StringValue),
     C4Id(#[serde(with = "c4_id_serde")] String),
     Object(u64),
     Array(Vec<Value>),
@@ -764,13 +1001,13 @@ impl Hash for Value {
 
 impl From<String> for Value {
     fn from(value: String) -> Self {
-        Self::String(c4_string_from_literal(value))
+        Self::String(c4_string_from_literal(value).into())
     }
 }
 
 impl From<&str> for Value {
     fn from(value: &str) -> Self {
-        Self::String(c4_string_from_literal(value.to_owned()))
+        Self::String(c4_string_from_literal(value.to_owned()).into())
     }
 }
 
@@ -1339,7 +1576,7 @@ impl From<Literal> for Value {
         match literal {
             Literal::Int(i) => Value::Int(i),
             Literal::Bool(b) => Value::Bool(b),
-            Literal::String(s) => Value::String(s),
+            Literal::String(s) => Value::String(s.into()),
             Literal::C4Id(id) => Value::C4Id(id),
             Literal::Nil => Value::Nil,
         }
@@ -1461,6 +1698,47 @@ mod map_tests {
     }
 
     #[test]
+    fn removed_key_value_slots_are_reused_lifo_like_c4valuehash() {
+        let mut map = ValueMap::new();
+        map.recycle_value_slot(Value::String("older".into()));
+        map.recycle_value_slot(Value::String("newer".into()));
+
+        let cloned = map.clone();
+        assert_eq!(
+            cloned.hidden_values().cloned().collect::<Vec<_>>(),
+            vec![Value::String("newer".into()), Value::String("older".into())]
+        );
+        assert_eq!(cloned, ValueMap::new(), "hidden slots do not affect equality");
+
+        let registrations = crate::new_string_registrations();
+        crate::register_c4_value_strings(
+            &registrations,
+            &Value::Proplist(cloned.clone()),
+        );
+        assert_eq!(
+            crate::c4_string_registration_order(&registrations),
+            vec!["newer".to_string(), "older".to_string()],
+            "hidden slots remain live C4Values for string traversal"
+        );
+
+        map.insert_key(Value::Int(1), Value::Int(10));
+        assert_eq!(map.get_key(&Value::Int(1)), Some(&Value::Int(10)));
+        assert_eq!(map.1, vec![Value::String("older".into())]);
+
+        // Reusing a nonnil slot and assigning nil changes that slot to nil,
+        // which immediately removes the just-created entry again.
+        map.assign_key(Value::Int(2), Value::Nil);
+        assert!(!map.contains_value_key(&Value::Int(2)));
+        assert_eq!(map.1, vec![Value::Nil]);
+
+        // Reusing an already-nil slot takes C4Value::Set's early return, so
+        // the nil entry remains present and the pool is consumed.
+        map.assign_key(Value::Int(3), Value::Nil);
+        assert_eq!(map.get_key(&Value::Int(3)), Some(&Value::Nil));
+        assert!(map.1.is_empty());
+    }
+
+    #[test]
     fn string_property_queries_canonicalize_reserved_marker_literals() {
         let literal = char::from_u32(C4_RAW_BYTE_ESCAPE_BASE + 0x80)
             .expect("reserved marker is a valid scalar")
@@ -1475,7 +1753,7 @@ mod map_tests {
         assert!(!map.contains_key(&literal));
 
         let projected_byte = c4_string_from_bytes(&[0x80]);
-        map.insert_key(Value::String(projected_byte.clone()), Value::Int(3));
+        map.insert_key(Value::String(projected_byte.clone().into()), Value::Int(3));
         assert_eq!(map.get(&projected_byte), Some(&Value::Int(3)));
         assert!(map.contains_key(&projected_byte));
         *map.get_mut(&projected_byte)
@@ -1557,8 +1835,8 @@ mod c4_string_tests {
     fn raw_byte_projection_keeps_equality_hashing_and_literal_collisions_byte_exact() {
         let utf8_literal = Value::String("\u{ff}".into());
         let equivalent_raw_bytes =
-            Value::String(c4_string_from_bytes("\u{ff}".as_bytes()));
-        let single_high_byte = Value::String(c4_string_from_bytes(&[0xff]));
+            Value::String(c4_string_from_bytes("\u{ff}".as_bytes()).into());
+        let single_high_byte = Value::String(c4_string_from_bytes(&[0xff]).into());
 
         assert_eq!(utf8_literal, equivalent_raw_bytes);
         assert_ne!(utf8_literal, single_high_byte);
@@ -1588,7 +1866,7 @@ mod c4_string_tests {
             c4_string_bytes(&canonical_literal),
             private_use_literal.as_bytes()
         );
-        assert_ne!(Value::String(canonical_literal), single_high_byte);
+        assert_ne!(Value::String(canonical_literal.into()), single_high_byte);
 
         let encoded = serde_json::to_string(&single_high_byte)
             .expect("raw-byte string serializes");

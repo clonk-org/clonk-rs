@@ -5339,7 +5339,7 @@ func Incineration(iCause) { return 1; }
             assert_eq!(
                 args,
                 &vec![
-                    Value::String("Fire".to_string()),
+                    Value::String("Fire".to_string().into()),
                     Value::Object(id.as_u64()),
                     Value::Int(shield_numbers[&id]),
                     Value::Nil,
@@ -11239,7 +11239,7 @@ func ReadSeen() { return seen_action; }
         assert_eq!(engine.objects[index].state.action.phase, 0);
         assert_eq!(
             engine.call_object_function(index, "ReadSeen", Vec::new())?,
-            Value::String("Loop".to_string())
+            Value::String("Loop".to_string().into())
         );
         Ok(())
     }
@@ -15420,7 +15420,7 @@ protected func ControlCommand() { own_control_calls++; return 1; }
         assert_eq!(builder_state.local_vars.get("control_calls"), Some(&Value::Int(1)));
         assert_eq!(
             builder_state.local_vars.get("control_command"),
-            Some(&Value::String("Exit".to_string()))
+            Some(&Value::String("Exit".to_string().into()))
         );
         assert_eq!(
             builder_state.local_vars.get("control_by"),
@@ -15428,7 +15428,7 @@ protected func ControlCommand() { own_control_calls++; return 1; }
         );
         assert_eq!(
             builder_state.local_vars.get("control_action"),
-            Some(&Value::String("Walk".to_string())),
+            Some(&Value::String("Walk".to_string().into())),
             "ObjectComStop precedes target SetCommand"
         );
     }
@@ -15732,7 +15732,7 @@ protected func BuildAbort()
         );
         assert_eq!(
             builder.local_vars.get("action_seen"),
-            Some(&Value::String("Build".to_owned()))
+            Some(&Value::String("Build".to_owned().into()))
         );
         assert_eq!(
             builder.local_vars.get("callback_order"),
@@ -17139,7 +17139,7 @@ protected func GrabLost()
                 .state
                 .local_vars
                 .get("action_seen"),
-            Some(&Value::String("Walk".to_string())),
+            Some(&Value::String("Walk".to_string().into())),
             "GrabLost observes StopActionDelayCommand first"
         );
     }
@@ -17207,7 +17207,7 @@ protected func GrabLost()
                 .state
                 .local_vars
                 .get("action_seen"),
-            Some(&Value::String("Walk".to_string())),
+            Some(&Value::String("Walk".to_string().into())),
             "StopActionDelayCommand precedes GrabLost"
         );
     }
@@ -17816,11 +17816,11 @@ protected func AttachTargetLost()
         );
         assert_eq!(
             object.state.local_vars.get("abort_action"),
-            Some(&Value::String("Idle".to_string()))
+            Some(&Value::String("Idle".to_string().into()))
         );
         assert_eq!(
             object.state.local_vars.get("lost_action"),
-            Some(&Value::String("Idle".to_string()))
+            Some(&Value::String("Idle".to_string().into()))
         );
         assert_eq!(
             object.state.action.name, "Marker",
@@ -17985,7 +17985,7 @@ protected func Collection2(object item) { item->Mark(2); return 1; }
         );
         assert_eq!(
             object.state.local_vars.get("lost_action"),
-            Some(&Value::String("Idle".to_string()))
+            Some(&Value::String("Idle".to_string().into()))
         );
         assert_eq!(object.state.action.name, "Idle");
         assert_eq!(object.state.action.target, None);
@@ -22452,7 +22452,7 @@ func Trigger() {
         for argument in [
             Value::Object(caller.as_u64()),
             Value::String("truthy".into()),
-            Value::String(String::new()),
+            Value::String(String::new().into()),
             Value::C4Id("CLNK".into()),
             Value::Array(Vec::new()),
             Value::Proplist(Default::default()),
@@ -25208,7 +25208,7 @@ func ReadMenu() { return GetMenu(); }
             vec![
                 Value::String(lc_script::c4_string_from_bytes(&[
                     b'K', b'e', b'e', b'p', b'(', b'\"', 0xff, b'\"', b')',
-                ])),
+                ]).into()),
                 Value::Int(0),
                 Value::Int(0),
                 Value::Int(0),
@@ -25218,7 +25218,7 @@ func ReadMenu() { return GetMenu(); }
         let idx = engine.find_object_index(clonk).expect("clonk exists");
         assert_eq!(
             engine.objects[idx].state.local_vars.get("text"),
-            Some(&Value::String(lc_script::c4_string_from_bytes(&[0xff])))
+            Some(&Value::String(lc_script::c4_string_from_bytes(&[0xff]).into()))
         );
 
         // A PERMANENT menu survives its own execution (C4Menu.cpp:517).
@@ -26304,11 +26304,11 @@ protected func RejectGrabbed(clonk)
         );
         assert_eq!(
             after_ungrab.local_vars.get("finished"),
-            Some(&Value::String("UnGrab".to_string()))
+            Some(&Value::String("UnGrab".to_string().into()))
         );
         assert_eq!(
             after_ungrab.local_vars.get("finished_front"),
-            Some(&Value::String("UnGrab".to_string())),
+            Some(&Value::String("UnGrab".to_string().into())),
             "ControlCommandFinished observes the finished UnGrab front"
         );
 
@@ -26323,11 +26323,11 @@ protected func RejectGrabbed(clonk)
         );
         assert_eq!(
             after_grab.local_vars.get("finished"),
-            Some(&Value::String("Grab".to_string()))
+            Some(&Value::String("Grab".to_string().into()))
         );
         assert_eq!(
             after_grab.local_vars.get("finished_front"),
-            Some(&Value::String("Grab".to_string())),
+            Some(&Value::String("Grab".to_string().into())),
             "the failed Grab remains visible during ControlCommandFinished"
         );
         assert_eq!(
@@ -26391,7 +26391,7 @@ protected func RejectGrabbed(clonk)
         assert_eq!(veto.local_vars.get("order"), Some(&Value::Int(1)));
         assert_eq!(
             veto.local_vars.get("seen_action"),
-            Some(&Value::String("Walk".to_string()))
+            Some(&Value::String("Walk".to_string().into()))
         );
         assert_eq!(
             veto.local_vars.get("seen_target"),
@@ -26399,7 +26399,7 @@ protected func RejectGrabbed(clonk)
         );
         assert_eq!(
             veto.local_vars.get("finished"),
-            Some(&Value::String("Grab".to_string()))
+            Some(&Value::String("Grab".to_string().into()))
         );
         assert!(veto.command_stack.is_empty(), "vetoed Grab finishes now");
 
@@ -26470,7 +26470,7 @@ protected func RejectGrabbed(clonk)
             assert_eq!(actor.local_vars.get("order"), Some(&Value::Int(31)));
             assert_eq!(
                 actor.local_vars.get("seen_action"),
-                Some(&Value::String("Jump".to_string())),
+                Some(&Value::String("Jump".to_string().into())),
                 "let-go and its Jump StartCall precede RejectGrabbed"
             );
             assert_eq!(
@@ -26582,7 +26582,7 @@ protected func RejectGrabbed(clonk)
             );
             assert_eq!(
                 actor.local_vars.get("after_action"),
-                Some(&Value::String(expected_action.to_string()))
+                Some(&Value::String(expected_action.to_string().into()))
             );
             assert_eq!(actor.command_stack.command_names(), expected_commands);
         }
@@ -27146,7 +27146,7 @@ protected func Grabbed(clonk, grab)
             );
             assert_eq!(
                 actor.local_vars.get("push_start_action"),
-                Some(&Value::String("Push".to_string()))
+                Some(&Value::String("Push".to_string().into()))
             );
             assert_eq!(
                 actor.local_vars.get("push_start_target"),
@@ -27178,11 +27178,11 @@ protected func Grabbed(clonk, grab)
         assert_eq!(stopped_build.local_vars.get("stop_order"), Some(&Value::Int(12)));
         assert_eq!(
             stopped_build.local_vars.get("stop_abort_action"),
-            Some(&Value::String("Idle".to_string()))
+            Some(&Value::String("Idle".to_string().into()))
         );
         assert_eq!(
             stopped_build.local_vars.get("stop_walk_start_action"),
-            Some(&Value::String("Walk".to_string()))
+            Some(&Value::String("Walk".to_string().into()))
         );
 
         for (actor, target, expected_action) in [
@@ -27261,7 +27261,7 @@ protected func Grabbed(clonk, grab)
         assert_eq!(cleared_builder.local_vars.get("order"), Some(&Value::Nil));
         assert_eq!(
             cleared_builder.local_vars.get("finished"),
-            Some(&Value::String("Grab".to_string())),
+            Some(&Value::String("Grab".to_string().into())),
             "post-stop null Target fails in the same command execution"
         );
         assert!(cleared_builder.command_stack.is_empty());
@@ -27325,7 +27325,7 @@ protected func Grabbed(clonk, grab)
             .expect("locked-Build actor remains");
         assert_eq!(
             locked_build_actor.local_vars.get("reject_action"),
-            Some(&Value::String("LockedBuild".to_string())),
+            Some(&Value::String("LockedBuild".to_string().into())),
             "Grab's ObjectComStop cannot bypass NoOtherAction before RejectGrabbed"
         );
         assert_eq!(locked_build_actor.command_direction, CommandDirection::Stop);
@@ -27415,7 +27415,7 @@ protected func Grabbed(clonk, grab)
         );
         assert_eq!(
             actor.local_vars.get("push_start_action"),
-            Some(&Value::String("Push".to_string()))
+            Some(&Value::String("Push".to_string().into()))
         );
         assert_eq!(
             actor.local_vars.get("push_start_target"),
@@ -27503,7 +27503,7 @@ protected func Grabbed(clonk, grab)
                     vec![object_reference_value(stop_target)],
                 )
                 .expect("synchronous stop-clear executes"),
-            Value::String("Grab".to_string())
+            Value::String("Grab".to_string().into())
         );
         let stop_actor = engine.object_snapshot(stop_actor).expect("stop actor remains");
         assert!(stop_actor.command_stack.is_empty());
@@ -27511,11 +27511,11 @@ protected func Grabbed(clonk, grab)
         assert_eq!(stop_actor.local_vars.get("stop_order"), Some(&Value::Int(12)));
         assert_eq!(
             stop_actor.local_vars.get("stop_abort_action"),
-            Some(&Value::String("Idle".to_string()))
+            Some(&Value::String("Idle".to_string().into()))
         );
         assert_eq!(
             stop_actor.local_vars.get("stop_walk_start_action"),
-            Some(&Value::String("Walk".to_string()))
+            Some(&Value::String("Walk".to_string().into()))
         );
         let stop_target = engine
             .object_snapshot(stop_target)
@@ -28415,11 +28415,11 @@ protected func ControlCommandFinished(command)
         let index = engine.find_object_index(clonk).expect("clonk exists");
         assert_eq!(
             engine.objects[index].state.local_vars.get("callback_name"),
-            Some(&Value::String("Context".to_string()))
+            Some(&Value::String("Context".to_string().into()))
         );
         assert_eq!(
             engine.objects[index].state.local_vars.get("callback_front"),
-            Some(&Value::String("Context".to_string())),
+            Some(&Value::String("Context".to_string().into())),
             "the callback observes the finished command before it is cleared"
         );
         assert_eq!(
@@ -28741,11 +28741,11 @@ protected func ControlCommandFinished(command)
         let index = engine.find_object_index(clonk).expect("clonk exists");
         assert_eq!(
             engine.objects[index].state.local_vars.get("callback_name"),
-            Some(&Value::String("Context".to_string()))
+            Some(&Value::String("Context".to_string().into()))
         );
         assert_eq!(
             engine.objects[index].state.local_vars.get("callback_front"),
-            Some(&Value::String("Context".to_string()))
+            Some(&Value::String("Context".to_string().into()))
         );
         assert!(engine.objects[index].commands.is_empty());
     }
@@ -28808,7 +28808,7 @@ protected func ControlCommandFinished(command) { finished = command; }
         let target_index = engine.find_object_index(target).expect("target exists");
         assert_eq!(
             engine.objects[target_index].state.local_vars.get("finished"),
-            Some(&Value::String("Context".to_string()))
+            Some(&Value::String("Context".to_string().into()))
         );
         assert!(engine.objects[target_index].commands.is_empty());
 
@@ -29644,7 +29644,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         );
         assert_eq!(
             container_state.local_vars.get("control_command"),
-            Some(&Value::String("Exit".to_string()))
+            Some(&Value::String("Exit".to_string().into()))
         );
         assert_eq!(
             container_state.local_vars.get("control_by"),
@@ -30950,7 +30950,7 @@ func Death(by) { death_by = by; return 1; }
         );
         assert_eq!(
             vehicle.local_vars.get("action_seen"),
-            Some(&Value::String("Push".to_owned())),
+            Some(&Value::String("Push".to_owned().into())),
             "GrabLost must run before the pusher's Jump transition"
         );
     }
@@ -30984,7 +30984,7 @@ func Death(by) { death_by = by; return 1; }
         );
         assert_eq!(
             vehicle.local_vars.get("action_seen"),
-            Some(&Value::String("Walk".to_owned())),
+            Some(&Value::String("Walk".to_owned().into())),
             "StopActionDelayCommand precedes GrabLost"
         );
     }
@@ -40039,7 +40039,7 @@ protected func Script1() { PrivateCall(CreateObject(TALK), "Begin"); }
             .cloned();
         assert_eq!(
             saw,
-            Some(Value::String("Intro".to_string())),
+            Some(Value::String("Intro".to_string().into())),
             "the synchronous FxMovieStart sees the in-flight sName write"
         );
     }
@@ -48002,7 +48002,7 @@ func Award()
                 Value::Array(vec![
                     Value::Bool(true),
                     Value::Int(1),
-                    Value::String(expected.to_string()),
+                    Value::String(expected.to_string().into()),
                 ])
             );
 
@@ -48113,13 +48113,13 @@ func ReadCore()
             read(&mut engine, "CLNK"),
             Value::Array(vec![
                 Value::C4Id("CLNK".to_string()),
-                Value::String("Clonk".to_string()),
-                Value::String(String::new()),
-                Value::String(String::new()),
+                Value::String("Clonk".to_string().into()),
+                Value::String(String::new().into()),
+                Value::String(String::new().into()),
                 Value::Int(0),
-                Value::String("Clonk".to_string()),
-                Value::String("Ensign".to_string()),
-                Value::String("Clonk Type".to_string()),
+                Value::String("Clonk".to_string().into()),
+                Value::String("Ensign".to_string().into()),
+                Value::String("Clonk Type".to_string().into()),
                 Value::Int(1),
                 Value::Int(0),
                 Value::Int(1_000),
@@ -48136,16 +48136,16 @@ func ReadCore()
         let Value::Array(plain) = read(&mut engine, "NONE") else {
             panic!("plain info reflection must return an array");
         };
-        assert_eq!(plain[6], Value::String(String::new()));
-        assert_eq!(plain[7], Value::String("Plain Type".to_string()));
+        assert_eq!(plain[6], Value::String(String::new().into()));
+        assert_eq!(plain[7], Value::String("Plain Type".to_string().into()));
         assert_eq!(plain[10], Value::Int(0));
         let Value::Array(half) = read(&mut engine, "HALF") else {
             panic!("half-base info reflection must return an array");
         };
-        assert_eq!(half[6], Value::String("Veteran".to_string()));
+        assert_eq!(half[6], Value::String("Veteran".to_string().into()));
         assert_eq!(
             half[7],
-            Value::String("123456789012345678901234567890".to_string())
+            Value::String("123456789012345678901234567890".to_string().into())
         );
         assert_eq!(half[10], Value::Int(500));
     }
@@ -48184,7 +48184,7 @@ func ReadExtra(int entry_nr)
                 ("flag".to_string(), Value::Bool(true)),
                 ("kind".to_string(), Value::C4Id("ABCD".to_string())),
                 ("target".to_string(), Value::Object(target.as_u64())),
-                ("text".to_string(), Value::String("hello".to_string())),
+                ("text".to_string(), Value::String("hello".to_string().into())),
             ])]))
             .expect("extra-data owner joins");
         let crew = engine.player(0).expect("owner exists").crew()[0];
@@ -48197,20 +48197,20 @@ func ReadExtra(int entry_nr)
 
         let expected = [
             Value::Int(5),
-            Value::String("number".to_string()),
-            Value::String("i".to_string()),
+            Value::String("number".to_string().into()),
+            Value::String("i".to_string().into()),
             Value::Int(-7),
-            Value::String("flag".to_string()),
-            Value::String("b".to_string()),
+            Value::String("flag".to_string().into()),
+            Value::String("b".to_string().into()),
             Value::Int(1),
-            Value::String("kind".to_string()),
-            Value::String("I".to_string()),
+            Value::String("kind".to_string().into()),
+            Value::String("I".to_string().into()),
             Value::Int(lc_script::c4_id_raw("ABCD") as i32),
-            Value::String("target".to_string()),
-            Value::String("O".to_string()),
+            Value::String("target".to_string().into()),
+            Value::String("O".to_string().into()),
             Value::Int(target.as_u64() as i32),
-            Value::String("text".to_string()),
-            Value::String("S".to_string()),
+            Value::String("text".to_string().into()),
+            Value::String("S".to_string().into()),
             Value::Int(-1),
         ];
         let out_of_range = expected.len() as i32;
@@ -48265,24 +48265,24 @@ func ReadExtra(int entry_nr)
 
         let expected = [
             Value::Int(1),
-            Value::String("tree".to_string()),
-            Value::String("a".to_string()),
+            Value::String("tree".to_string().into()),
+            Value::String("a".to_string().into()),
             Value::Int(2),
-            Value::String("i".to_string()),
+            Value::String("i".to_string().into()),
             Value::Int(7),
-            Value::String("m".to_string()),
+            Value::String("m".to_string().into()),
             Value::Int(2),
-            Value::String("i".to_string()),
+            Value::String("i".to_string().into()),
             Value::Int(1),
-            Value::String("b".to_string()),
+            Value::String("b".to_string().into()),
             Value::Int(1),
-            Value::String("I".to_string()),
+            Value::String("I".to_string().into()),
             Value::Int(lc_script::c4_id_raw("ABCD") as i32),
-            Value::String("a".to_string()),
+            Value::String("a".to_string().into()),
             Value::Int(2),
-            Value::String("i".to_string()),
+            Value::String("i".to_string().into()),
             Value::Int(-3),
-            Value::String("A".to_string()),
+            Value::String("A".to_string().into()),
             Value::Int(0),
         ];
         let out_of_range = expected.len() as i32;
@@ -48367,7 +48367,7 @@ func ReadNext()
             else {
                 panic!("rank reflection must return an array");
             };
-            assert_eq!(before[1], Value::String("stale next".to_string()));
+            assert_eq!(before[1], Value::String("stale next".to_string().into()));
             assert_eq!(before[2], Value::Int(777), "load must not recompute progression");
         }
 
@@ -48414,8 +48414,8 @@ func ReadNext()
                 .call_object_function(rank_137_index, "ReadNext", Vec::new())
                 .expect("rank 137 reflects refreshed progression"),
             Value::Array(vec![
-                Value::String("Exalted Fleet Admiral".to_string()),
-                Value::String("Exalted Counsellor of State".to_string()),
+                Value::String("Exalted Fleet Admiral".to_string().into()),
+                Value::String("Exalted Counsellor of State".to_string().into()),
                 Value::Int(1_621_132),
             ]),
             "the ticket's old rank-137 exhaustion boundary was based on 23, not 24, base names"
@@ -48427,8 +48427,8 @@ func ReadNext()
                 .call_object_function(rank_143_index, "ReadNext", Vec::new())
                 .expect("last rank reflects exhaustion"),
             Value::Array(vec![
-                Value::String("Exalted Premier".to_string()),
-                Value::String(String::new()),
+                Value::String("Exalted Premier".to_string().into()),
+                Value::String(String::new().into()),
                 Value::Int(-1),
             ])
         );
@@ -48538,7 +48538,7 @@ func AwardSelf(int amount) {
                 Value::Bool(true),
                 Value::Int(0),
                 Value::Int(0),
-                Value::String("Recruit".to_string()),
+                Value::String("Recruit".to_string().into()),
                 Value::Int(500),
             ]),
             "DoExperience waits for the global base-1000 curve even when the definition uses base 500"
@@ -48552,7 +48552,7 @@ func AwardSelf(int amount) {
                 Value::Bool(true),
                 Value::Int(1),
                 Value::Int(1),
-                Value::String("Custom One".to_string()),
+                Value::String("Custom One".to_string().into()),
                 Value::Int(8_000),
             ]),
             "DoExperience promotes at most one rank and exposes the write immediately"
@@ -48627,7 +48627,7 @@ func AwardSelf(int amount) {
                 Value::Bool(true),
                 Value::Int(2),
                 Value::Int(2),
-                Value::String("Custom Two".to_string()),
+                Value::String("Custom Two".to_string().into()),
                 Value::Int(8_000),
             ])
         );
@@ -48639,7 +48639,7 @@ func AwardSelf(int amount) {
                 Value::Bool(true),
                 Value::Int(2),
                 Value::Int(2),
-                Value::String("Custom Two".to_string()),
+                Value::String("Custom Two".to_string().into()),
                 Value::Int(0),
             ]),
             "experience clamps at zero without demoting"
@@ -48655,7 +48655,7 @@ func AwardSelf(int amount) {
                 Value::Bool(true),
                 Value::Int(3),
                 Value::Int(3),
-                Value::String("Custom Two".to_string()),
+                Value::String("Custom Two".to_string().into()),
                 Value::Int(5_196),
             ])
         );
@@ -48678,7 +48678,7 @@ func AwardSelf(int amount) {
                 Value::Bool(true),
                 Value::Int(3),
                 Value::Int(3),
-                Value::String("Custom Two".to_string()),
+                Value::String("Custom Two".to_string().into()),
                 Value::Int(0),
             ])
         );
@@ -48694,7 +48694,7 @@ func AwardSelf(int amount) {
                 Value::Bool(true),
                 Value::Int(3),
                 Value::Int(3),
-                Value::String("Custom Two".to_string()),
+                Value::String("Custom Two".to_string().into()),
                 Value::Int(100_000_000),
             ]),
             "the exact maximum suppresses promotion"
@@ -49142,11 +49142,11 @@ func RemoveAndGrabSelf() {
                 .expect("live identity transfer succeeds"),
             Value::Array(vec![
                 Value::Bool(true),
-                Value::String("Veteran Ada".to_string()),
+                Value::String("Veteran Ada".to_string().into()),
                 Value::Int(4),
-                Value::String("Custom Veteran".to_string()),
+                Value::String("Custom Veteran".to_string().into()),
                 Value::Int(8_000),
-                Value::String("Donor definition".to_string()),
+                Value::String("Donor definition".to_string().into()),
                 Value::Nil,
                 Value::Int(0),
                 Value::Int(1),
@@ -49224,11 +49224,11 @@ func RemoveAndGrabSelf() {
                 .expect("dead receiver takes the same identity"),
             Value::Array(vec![
                 Value::Bool(true),
-                Value::String("Veteran Ada".to_string()),
+                Value::String("Veteran Ada".to_string().into()),
                 Value::Int(4),
-                Value::String("Custom Veteran".to_string()),
+                Value::String("Custom Veteran".to_string().into()),
                 Value::Int(8_000),
-                Value::String("Receiver definition".to_string()),
+                Value::String("Receiver definition".to_string().into()),
                 Value::Nil,
                 Value::Int(0),
                 Value::Int(1),
@@ -52340,7 +52340,7 @@ func Hit() { return Punch(FindObject(VCTM), 5); }
             .expect("ask runs");
         assert_eq!(
             after,
-            Value::String("Wait".to_string()),
+            Value::String("Wait".to_string().into()),
             "element 0 is the CommandName string (C4Script.cpp:931)"
         );
     }
@@ -52520,7 +52520,7 @@ public func Poke(pClonk) {
         let idx = engine.find_object_index(holder_id).expect("holder exists");
         assert_eq!(
             engine.objects[idx].state.local_vars.get("sSeen"),
-            Some(&Value::String("Rise".to_string())),
+            Some(&Value::String("Rise".to_string().into())),
             "GetAction(pTarget) reads the in-flight action (C++ live state)"
         );
         assert_eq!(
@@ -56025,7 +56025,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         let args = add_calls[0];
         assert_eq!(
             args.get(2),
-            Some(&Value::String("Fire".to_string())),
+            Some(&Value::String("Fire".to_string().into())),
             "Par1 is the new effect's name (C4Effect.cpp:300)"
         );
         assert_eq!(
@@ -57292,7 +57292,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
                     .with_position(Vector2::new(-1, 8))
                     .with_local_vars(HashMap::from([(
                         "__local_0".to_string(),
-                        Value::String(String::new()),
+                        Value::String(String::new().into()),
                     )])),
             )
             .expect("world-parallax object spawns");
@@ -66212,7 +66212,7 @@ func Probe() {
                 Value::Nil,
                 Value::Int(0x00f4_faf4),
                 Value::Nil,
-                Value::String("Left".to_string()),
+                Value::String("Left".to_string().into()),
                 Value::Nil,
             ])
         );
@@ -73638,7 +73638,7 @@ protected func Entrance(pTarget)
         for local in ["ejection_action", "departure_action"] {
             assert_eq!(
                 flag_state.local_vars.get(local),
-                Some(&Value::String("Idle".to_string())),
+                Some(&Value::String("Idle".to_string().into())),
                 "{local} runs before FlyBase"
             );
         }
@@ -73649,7 +73649,7 @@ protected func Entrance(pTarget)
         );
         assert_eq!(
             flag_state.local_vars.get("flyBaseStartAction"),
-            Some(&Value::String("FlyBase".to_string()))
+            Some(&Value::String("FlyBase".to_string().into()))
         );
         Ok(())
     }
@@ -75185,8 +75185,8 @@ func Probe() {
             Value::Array(vec![
                 Value::String("Left Arrow".into()),
                 Value::String("Left".into()),
-                Value::String(String::new()),
-                Value::String(String::new()),
+                Value::String(String::new().into()),
+                Value::String(String::new().into()),
             ])
         );
     }

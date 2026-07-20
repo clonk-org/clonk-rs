@@ -7342,7 +7342,7 @@ impl Engine {
             CommandData::Text(_) | CommandData::None => 0,
         };
         let args = [
-            Value::String(request.id.to_name().to_string()),
+            Value::String(request.id.to_name().to_string().into()),
             request
                 .target
                 .map(compat::object_reference_value)
@@ -12242,7 +12242,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by) {
         assert_eq!(locals.get("calls"), Some(&Value::Int(1)));
         assert_eq!(
             locals.get("seen_command"),
-            Some(&Value::String("Exit".to_string()))
+            Some(&Value::String("Exit".to_string().into()))
         );
         assert_eq!(locals.get("seen_target"), Some(&Value::Nil));
         assert_eq!(
@@ -12316,7 +12316,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
         assert_eq!(locals.get("calls"), Some(&Value::Int(1)));
         assert_eq!(
             locals.get("seen_command"),
-            Some(&Value::String("Exit".to_string()))
+            Some(&Value::String("Exit".to_string().into()))
         );
         assert_eq!(locals.get("seen_target"), Some(&Value::Nil));
         assert_eq!(locals.get("seen_tx"), Some(&Value::Nil));

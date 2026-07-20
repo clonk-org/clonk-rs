@@ -3,7 +3,7 @@
 //! C4ObjectInfoList.cpp:56-83). The join pipeline consumes this to mirror
 //! `C4Player::Load` (C4Player.cpp:1089-1107).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use lc_resources::{Group, PhysicalInfo};
 use serde::{Deserialize, Serialize};
@@ -17,9 +17,9 @@ use crate::{
 /// C4StringTable IDs and live object numbers used when denumerating an
 /// embedded runtime player's ExtraData. These are scenario-wide in native
 /// C++; the player child group deliberately carries no private Strings.txt.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct PersistedC4ValueResolution {
-    pub strings: HashMap<i32, String>,
+    pub strings: lc_script::StringRegistrations,
     pub object_numbers: HashSet<u64>,
 }
 
@@ -1134,6 +1134,22 @@ struct PersistedC4ValueParser<'a> {
     input: &'a [u8],
     position: usize,
     resolution: Option<&'a PersistedC4ValueResolution>,
+    // CompileFunc resolves the complete containing value stream before the
+    // later pointer-denumeration pass can destroy removed map keys.
+    compile_holds: Vec<lc_script::Value>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PersistedDirectObjectStatus {
+    raw: Option<i32>,
+    missing: bool,
+}
+
+impl PersistedDirectObjectStatus {
+    const NONE: Self = Self {
+        raw: None,
+        missing: false,
+    };
 }
 
 fn persistent_any_fallback(number: i32) -> lc_script::Value {
@@ -1159,6 +1175,7 @@ impl<'a> PersistedC4ValueParser<'a> {
             input: input.as_bytes(),
             position: 0,
             resolution,
+            compile_holds: Vec::new(),
         }
     }
 
@@ -1238,6 +1255,34 @@ impl<'a> PersistedC4ValueParser<'a> {
         Ok(count)
     }
 
+    fn map_keys_equal(
+        left: &lc_script::Value,
+        left_object: PersistedDirectObjectStatus,
+        right: &lc_script::Value,
+        right_object: PersistedDirectObjectStatus,
+    ) -> bool {
+        match (left_object.raw, right_object.raw) {
+            (Some(left), Some(right)) => left == right,
+            (None, None) => left == right,
+            _ => false,
+        }
+    }
+
+    fn map_assignment_is_nil(
+        value: &lc_script::Value,
+        object: PersistedDirectObjectStatus,
+    ) -> bool {
+        if let Some(raw) = object.raw {
+            return raw == 0;
+        }
+        match value {
+            lc_script::Value::Nil => true,
+            lc_script::Value::C4Id(value) => lc_script::c4_id_raw(value) == 0,
+            lc_script::Value::Object(value) => *value == 0,
+            _ => false,
+        }
+    }
+
     fn value(&mut self) -> Result<lc_script::Value, ScenarioError> {
         self.value_with_direct_object_status()
             .map(|(value, _)| value)
@@ -1245,7 +1290,7 @@ impl<'a> PersistedC4ValueParser<'a> {
 
     fn value_with_direct_object_status(
         &mut self,
-    ) -> Result<(lc_script::Value, bool), ScenarioError> {
+    ) -> Result<(lc_script::Value, PersistedDirectObjectStatus), ScenarioError> {
         self.skip_whitespace();
         let kind = *self
             .input
@@ -1262,40 +1307,57 @@ impl<'a> PersistedC4ValueParser<'a> {
                             resolution.object_numbers.contains(number)
                         })
                     }) {
-                        Ok((lc_script::Value::Object(number), false))
+                        Ok((
+                            lc_script::Value::Object(number),
+                            PersistedDirectObjectStatus::NONE,
+                        ))
                     } else {
-                        Ok((persistent_any_fallback(value), false))
+                        Ok((
+                            persistent_any_fallback(value),
+                            PersistedDirectObjectStatus::NONE,
+                        ))
                     }
                 } else {
-                    Ok((persistent_any_fallback(value), false))
+                    Ok((
+                        persistent_any_fallback(value),
+                        PersistedDirectObjectStatus::NONE,
+                    ))
                 }
             }
-            b'i' => self
-                .integer()
-                .map(|value| (lc_script::Value::Int(value), false)),
-            b'b' => self
-                .integer()
-                .map(|value| (lc_script::Value::from_c4_bool_raw(value), false)),
+            b'i' => self.integer().map(|value| {
+                (
+                    lc_script::Value::Int(value),
+                    PersistedDirectObjectStatus::NONE,
+                )
+            }),
+            b'b' => self.integer().map(|value| {
+                (
+                    lc_script::Value::from_c4_bool_raw(value),
+                    PersistedDirectObjectStatus::NONE,
+                )
+            }),
             b'I' => self.integer().map(|value| {
                 (
                     lc_script::Value::C4Id(lc_script::c4_id_from_raw(
                         value as isize as usize,
                     )),
-                    false,
+                    PersistedDirectObjectStatus::NONE,
                 )
             }),
             b'S' => {
                 let id = self.integer()?;
                 let value = self
                     .resolution
-                    .and_then(|resolution| resolution.strings.get(&id))
-                    .cloned()
+                    .and_then(|resolution| {
+                        lc_script::resolve_c4_string(&resolution.strings, id)
+                    })
                     .map(lc_script::Value::String)
                     .unwrap_or(lc_script::Value::Nil);
-                Ok((value, false))
+                Ok((value, PersistedDirectObjectStatus::NONE))
             }
             b'o' | b'O' => {
-                let mut number = self.integer()?;
+                let raw = self.integer()?;
+                let mut number = raw;
                 if number >= 1_000_000_000 {
                     number -= 1_000_000_000;
                 }
@@ -1308,7 +1370,13 @@ impl<'a> PersistedC4ValueParser<'a> {
                     })
                     .map(lc_script::Value::Object);
                 let missing = value.is_none();
-                Ok((value.unwrap_or(lc_script::Value::Nil), missing))
+                Ok((
+                    value.unwrap_or(lc_script::Value::Nil),
+                    PersistedDirectObjectStatus {
+                        raw: Some(raw),
+                        missing,
+                    },
+                ))
             }
             b'a' => {
                 self.expect(b'[')?;
@@ -1327,32 +1395,83 @@ impl<'a> PersistedC4ValueParser<'a> {
                 }
                 values.resize(count, lc_script::Value::Nil);
                 self.expect(b']')?;
-                Ok((lc_script::Value::Array(values), false))
+                Ok((
+                    lc_script::Value::Array(values),
+                    PersistedDirectObjectStatus::NONE,
+                ))
             }
             b'm' => {
                 self.expect(b'[')?;
                 let count = self.count()?;
                 self.expect(b';')?;
-                let mut values = Vec::with_capacity(count);
+                let mut entries = Vec::<(
+                    lc_script::Value,
+                    PersistedDirectObjectStatus,
+                    lc_script::Value,
+                    PersistedDirectObjectStatus,
+                )>::with_capacity(count);
+                let mut compiled_empty_values = Vec::new();
                 for index in 0..count {
                     if index != 0 {
                         self.expect(b';')?;
                     }
-                    let (key, missing_key_object) = self.value_with_direct_object_status()?;
+                    let (key, key_object) = self.value_with_direct_object_status()?;
                     self.expect(b'=')?;
-                    let (value, missing_value_object) =
-                        self.value_with_direct_object_status()?;
-                    if !missing_key_object && !missing_value_object {
-                        values.push((key, value));
+                    let (value, value_object) = self.value_with_direct_object_status()?;
+                    if let Some(existing) = entries.iter().position(
+                        |(existing_key, existing_key_object, _, _)| {
+                            Self::map_keys_equal(
+                                existing_key,
+                                *existing_key_object,
+                                &key,
+                                key_object,
+                            )
+                        },
+                    ) {
+                        if Self::map_assignment_is_nil(&value, value_object)
+                            && !Self::map_assignment_is_nil(
+                                &entries[existing].2,
+                                entries[existing].3,
+                            )
+                        {
+                            entries.remove(existing);
+                            compiled_empty_values.push(lc_script::Value::Nil);
+                        } else {
+                            entries[existing].2 = value;
+                            entries[existing].3 = value_object;
+                        }
+                    } else {
+                        let _ = compiled_empty_values.pop();
+                        entries.push((key, key_object, value, value_object));
                     }
                 }
                 self.expect(b']')?;
-                Ok((lc_script::Value::Proplist(values.into_iter().collect()), false))
+                let mut values = lc_script::ValueMap::with_capacity(entries.len());
+                let mut removed_values = Vec::new();
+                for (key, key_object, value, value_object) in entries {
+                    if key_object.missing || value_object.missing {
+                        if value_object.missing && !key_object.missing {
+                            self.compile_holds.push(key);
+                        }
+                        removed_values.push(value);
+                    } else {
+                        values.insert_key(key, value);
+                    }
+                }
+                for value in compiled_empty_values {
+                    values.recycle_value_slot(value);
+                }
+                for value in removed_values {
+                    values.recycle_value_slot(value);
+                }
+                Ok((
+                    lc_script::Value::Proplist(values),
+                    PersistedDirectObjectStatus::NONE,
+                ))
             }
             _ => Err(self.error(format!("unknown value type `{}`", char::from(kind)))),
         }
     }
-
 }
 
 /// `StdStrBuf` values are escaped while fixed-size C strings are not. The
@@ -1443,12 +1562,12 @@ mod tests {
 
     #[test]
     fn persistent_value_map_resolves_nested_scenario_values() {
+        let strings = lc_script::new_string_registrations();
+        for (id, value) in [(0, "first"), (1, "second"), (2, "key")] {
+            lc_script::register_loaded_c4_string(&strings, id, value);
+        }
         let resolution = PersistedC4ValueResolution {
-            strings: HashMap::from([
-                (0, "first".to_string()),
-                (1, "second".to_string()),
-                (2, "key".to_string()),
-            ]),
+            strings,
             object_numbers: HashSet::from([42]),
         };
 
@@ -1461,12 +1580,12 @@ mod tests {
             vec![(
                 "Complex".to_string(),
                 lc_script::Value::Array(vec![
-                    lc_script::Value::String("second".to_string()),
+                    lc_script::Value::String("second".into()),
                     lc_script::Value::Object(42),
                     lc_script::Value::Proplist(
                         [(
-                            lc_script::Value::String("key".to_string()),
-                            lc_script::Value::String("first".to_string()),
+                            lc_script::Value::String("key".into()),
+                            lc_script::Value::String("first".into()),
                         )]
                         .into_iter()
                         .collect(),
@@ -1474,6 +1593,33 @@ mod tests {
                 ]),
             )]
         );
+    }
+
+    #[test]
+    fn persistent_map_denumeration_retains_missing_key_value_slots() {
+        let strings = lc_script::new_string_registrations();
+        lc_script::register_loaded_c4_string(&strings, 0, "loaded");
+        let resolution = PersistedC4ValueResolution {
+            strings: strings.clone(),
+            object_numbers: HashSet::new(),
+        };
+
+        let values = parse_persisted_value_map(
+            "1;Map=m[2;o999=S0;i1=i2]",
+            Some(&resolution),
+        )
+        .expect("persistent map parses");
+        let Some((_, lc_script::Value::Proplist(mut map))) = values.into_iter().next() else {
+            panic!("persistent value is a map");
+        };
+        assert_eq!(
+            map.get_key(&lc_script::Value::Int(1)),
+            Some(&lc_script::Value::Int(2))
+        );
+        assert!(lc_script::resolve_c4_string(&strings, 0).is_some());
+
+        map.insert_key(lc_script::Value::Int(3), lc_script::Value::Int(4));
+        assert!(lc_script::resolve_c4_string(&strings, 0).is_none());
     }
 
     #[test]

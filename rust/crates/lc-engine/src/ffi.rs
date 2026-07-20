@@ -3379,7 +3379,7 @@ mod tests {
         ] {
             assert_eq!(
                 globals.get(name).map(|cell| cell.borrow().clone()),
-                Some(lc_script::Value::String(expected.to_string())),
+                Some(lc_script::Value::String(expected.to_string().into())),
                 "{name} must use its mirrored pack StringTblUS.txt"
             );
         }

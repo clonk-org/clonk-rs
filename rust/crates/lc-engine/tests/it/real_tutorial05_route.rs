@@ -253,7 +253,7 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
     );
     assert_eq!(
         pressed_effect.vars.first(),
-        Some(&EffectVarValue::String("ControlConf".to_owned())),
+        Some(&EffectVarValue::String("ControlConf".to_owned().into())),
         "FxIntJnRAimStart stores CATA's configuration callback; effect={pressed_effect:?}"
     );
     assert_eq!(pressed_effect.vars.get(1), Some(&EffectVarValue::Int(1)));

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use indexmap::IndexMap;
 
@@ -7,7 +7,7 @@ use crate::ast::{Function, Script as AstScript, VarDecl};
 use crate::debugger::DebuggerHooks;
 use crate::error::{ParseError, RuntimeError, ScriptError};
 use crate::parser::Parser;
-use crate::value::{C4VType, Value};
+use crate::value::{C4StringValue, C4StringValueInner, C4VType, Value};
 use crate::vm::{HostCallArg, ValueReference, Vm};
 
 pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync>;
@@ -131,25 +131,88 @@ pub fn new_global_variables() -> GlobalVariables {
 /// `EnumStrings` call. Scenario-section saves observe that old enumeration
 /// before object serialization assigns a new one, so registration order alone
 /// is not enough to reproduce their `Strings.txt` payload.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct StringRegistrationLedger {
+    state: Mutex<StringRegistrationLedgerState>,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct StringRegistrationLedgerState {
     entries: Vec<StringRegistration>,
+    /// Identities unregistered by C4StringTable::Clear while an external
+    /// C4Value still owns them. They remain valid strings, but pTable is null
+    /// in C++ and later live-value traversal must not silently re-register
+    /// the same pointer.
+    detached: Vec<std::sync::Weak<C4StringValueInner>>,
+}
+
+impl Clone for StringRegistrationLedger {
+    fn clone(&self) -> Self {
+        Self {
+            state: Mutex::new(self.borrow().clone()),
+        }
+    }
+}
+
+impl StringRegistrationLedger {
+    /// Lock the shared string-table state for inspection.
+    ///
+    /// This keeps the former `RefCell::borrow` call surface while allowing
+    /// one process-global ledger to cross worker-thread boundaries safely.
+    #[doc(hidden)]
+    pub fn borrow(&self) -> MutexGuard<'_, StringRegistrationLedgerState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Lock the shared string-table state for mutation.
+    ///
+    /// A mutex is exclusive for both helpers; the separate name preserves
+    /// the old `borrow_mut` call sites and makes mutation intent explicit.
+    #[doc(hidden)]
+    pub fn borrow_mut(&self) -> MutexGuard<'_, StringRegistrationLedgerState> {
+        self.borrow()
+    }
 }
 
 #[derive(Clone, Debug)]
 struct StringRegistration {
-    value: String,
-    /// Parser-owned strings survive with zero value references (`Hold`).
-    held: bool,
-    /// Strings created by `C4StringTable::Load` survive with zero references.
-    loaded: bool,
-    /// The value last assigned by `C4StringTable::EnumStrings`/`Load`.
-    enum_id: Option<i32>,
+    /// C4StringTable itself owns no ordinary reference to runtime strings.
+    /// Their last C4Value release therefore invalidates this weak table link.
+    value: std::sync::Weak<C4StringValueInner>,
+    /// Parser-owned strings survive with zero C4Value references (`Hold`).
+    held: Option<C4StringValue>,
+    /// A newly loaded non-Hold C4String starts at refcount zero but survives
+    /// until its first IncRef/DecRef cycle. This root is consumed by
+    /// `resolve_c4_string`, after which ordinary handle lifetime is decisive.
+    untouched_loaded: Option<C4StringValue>,
+}
+
+impl StringRegistration {
+    fn upgrade(&self) -> Option<C4StringValue> {
+        self.value.upgrade().map(C4StringValue::from_inner)
+    }
+
+    fn c4_value_ref_count(&self) -> usize {
+        // Weak::strong_count observes every live C4StringValue handle. The
+        // ledger's Hold and untouched-load roots model native ownership that
+        // is deliberately *not* part of C4String::iRefCnt, so subtract those
+        // two roots before applying EnumStrings' refcount test.
+        self.value
+            .strong_count()
+            .saturating_sub(usize::from(self.held.is_some()))
+            .saturating_sub(usize::from(self.untouched_loaded.is_some()))
+    }
+
+    fn enum_eligible(&self) -> bool {
+        self.held.is_none() || self.c4_value_ref_count() != 0
+    }
 }
 
 /// Registration/enumeration state shared by every script host in one game.
-pub type StringRegistrations =
-    std::rc::Rc<std::cell::RefCell<StringRegistrationLedger>>;
+pub type StringRegistrations = Arc<StringRegistrationLedger>;
 
 fn c4_string_table_prefix(bytes: &[u8]) -> &[u8] {
     // C4StringTable::{FindString,FindSaveString} use SEqual on `getData()`.
@@ -172,91 +235,199 @@ fn c4_string_table_bytes_equal(left: &[u8], right: &[u8]) -> bool {
 }
 
 pub fn new_string_registrations() -> StringRegistrations {
-    std::rc::Rc::new(std::cell::RefCell::new(StringRegistrationLedger::default()))
+    Arc::new(StringRegistrationLedger::default())
+}
+
+/// `C4StringTable::Clear` at the global script-unlink boundary.
+///
+/// Every parser-Hold entry is unregistered, not merely un-Held. Dropping the
+/// Hold root deletes zero-reference strings immediately. A C4Value-referenced
+/// string survives as a detached identity until its final handle is released;
+/// the tombstone prevents enumeration's recovery pass from attaching it to
+/// the table again.
+pub fn clear_c4_string_holds(registrations: &StringRegistrationLedger) {
+    let mut registrations = registrations.borrow_mut();
+    registrations
+        .detached
+        .retain(|candidate| candidate.strong_count() != 0);
+
+    let mut retained = Vec::with_capacity(registrations.entries.len());
+    let mut detached = std::mem::take(&mut registrations.detached);
+    for mut entry in std::mem::take(&mut registrations.entries) {
+        if entry.held.take().is_none() {
+            if entry.value.strong_count() != 0 {
+                retained.push(entry);
+            }
+            continue;
+        }
+
+        if entry.value.strong_count() != 0
+            && !detached
+                .iter()
+                .any(|candidate| candidate.ptr_eq(&entry.value))
+        {
+            detached.push(entry.value);
+        }
+    }
+    registrations.entries = retained;
+    registrations.detached = detached;
 }
 
 pub fn register_c4_string(
-    registrations: &std::cell::RefCell<StringRegistrationLedger>,
-    value: &str,
+    registrations: &StringRegistrationLedger,
+    value: &C4StringValue,
 ) {
     let mut registrations = registrations.borrow_mut();
+    registrations
+        .detached
+        .retain(|candidate| candidate.strong_count() != 0);
+    let value_identity = value.downgrade();
+    if registrations
+        .detached
+        .iter()
+        .any(|candidate| candidate.ptr_eq(&value_identity))
+    {
+        return;
+    }
+    registrations
+        .entries
+        .retain(|candidate| candidate.value.strong_count() != 0);
     if registrations
         .entries
         .iter()
-        .any(|candidate| crate::value::c4_strings_equal(&candidate.value, value))
+        .filter_map(StringRegistration::upgrade)
+        .any(|candidate| candidate.ptr_eq(value))
     {
         return;
     }
     registrations.entries.push(StringRegistration {
-        value: value.to_owned(),
-        held: false,
-        loaded: false,
-        enum_id: None,
+        value: value.downgrade(),
+        held: None,
+        untouched_loaded: None,
     });
+}
+
+/// Register or reuse a non-Hold string-table entry. The C++ parser uses this
+/// `Shift(Ref)` path for string-valued static constants: equal prefix text
+/// reuses the first native identity, but the parser does not grant it Hold.
+pub fn register_c4_referenced_string(
+    registrations: &StringRegistrationLedger,
+    value: &str,
+) -> C4StringValue {
+    let mut registrations = registrations.borrow_mut();
+    registrations
+        .entries
+        .retain(|candidate| candidate.value.strong_count() != 0);
+    for existing in &mut registrations.entries {
+        let Some(existing_value) = existing.upgrade() else {
+            continue;
+        };
+        if c4_string_table_values_equal(&existing_value, value) {
+            existing.untouched_loaded = None;
+            return existing_value;
+        }
+    }
+    let value = C4StringValue::new(value.to_owned());
+    registrations.entries.push(StringRegistration {
+        value: value.downgrade(),
+        held: None,
+        untouched_loaded: None,
+    });
+    value
 }
 
 /// Register a parser-owned string. `C4AulParse` reuses the first equal table
 /// entry and sets its `Hold` flag rather than constructing a duplicate.
 pub fn register_c4_literal_string(
-    registrations: &std::cell::RefCell<StringRegistrationLedger>,
+    registrations: &StringRegistrationLedger,
     value: &str,
-) {
+) -> C4StringValue {
     let mut registrations = registrations.borrow_mut();
-    if let Some(existing) = registrations
+    registrations
         .entries
-        .iter_mut()
-        .find(|candidate| c4_string_table_values_equal(&candidate.value, value))
-    {
-        existing.held = true;
-        return;
+        .retain(|candidate| candidate.value.strong_count() != 0);
+    for existing in &mut registrations.entries {
+        let Some(existing_value) = existing.upgrade() else {
+            continue;
+        };
+        if c4_string_table_values_equal(&existing_value, value) {
+            existing.held = Some(existing_value.clone());
+            existing.untouched_loaded = None;
+            return existing_value;
+        }
     }
+    let value = C4StringValue::new(value.to_owned());
     registrations.entries.push(StringRegistration {
-        value: value.to_owned(),
-        held: true,
-        loaded: false,
-        enum_id: None,
+        value: value.downgrade(),
+        held: Some(value.clone()),
+        untouched_loaded: None,
     });
+    value
 }
 
 /// Merge one `Strings.txt` line exactly as `C4StringTable::Load`: equal text
 /// reuses the existing registration and a repeated line overwrites its old ID.
 pub fn register_loaded_c4_string(
-    registrations: &std::cell::RefCell<StringRegistrationLedger>,
+    registrations: &StringRegistrationLedger,
     enum_id: i32,
     value: &str,
 ) {
     let mut registrations = registrations.borrow_mut();
-    if let Some(existing) = registrations
+    registrations
         .entries
-        .iter_mut()
-        .find(|candidate| c4_string_table_values_equal(&candidate.value, value))
-    {
-        existing.enum_id = Some(enum_id);
-        return;
+        .retain(|candidate| candidate.value.strong_count() != 0);
+    for existing in &mut registrations.entries {
+        let Some(existing_value) = existing.upgrade() else {
+            continue;
+        };
+        if c4_string_table_values_equal(&existing_value, value) {
+            existing_value.set_enum_id(enum_id);
+            return;
+        }
     }
+    let value = C4StringValue::loaded(value.to_owned(), enum_id);
     registrations.entries.push(StringRegistration {
-        value: value.to_owned(),
-        held: false,
-        loaded: true,
-        enum_id: Some(enum_id),
+        value: value.downgrade(),
+        held: None,
+        untouched_loaded: Some(value),
     });
+}
+
+/// Resolve the first live C4String with this current enumeration ID, exactly
+/// like `C4StringTable::FindString(int)`. Claiming an untouched loaded string
+/// consumes its special refcount-zero root; after the returned handle's final
+/// drop the table entry disappears unless the parser also marked it Hold.
+pub fn resolve_c4_string(
+    registrations: &StringRegistrationLedger,
+    enum_id: i32,
+) -> Option<C4StringValue> {
+    let mut registrations = registrations.borrow_mut();
+    registrations
+        .entries
+        .retain(|candidate| candidate.value.strong_count() != 0);
+    for entry in &mut registrations.entries {
+        let Some(value) = entry.upgrade() else {
+            continue;
+        };
+        if value.enum_id() == enum_id {
+            entry.untouched_loaded = None;
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// Snapshot current table order for diagnostics and compatibility callers.
 pub fn c4_string_registration_order(
-    registrations: &std::cell::RefCell<StringRegistrationLedger>,
+    registrations: &StringRegistrationLedger,
 ) -> Vec<String> {
     registrations
         .borrow()
         .entries
         .iter()
-        .map(|entry| entry.value.clone())
+        .filter_map(StringRegistration::upgrade)
+        .map(C4StringValue::into_string)
         .collect()
-}
-
-fn c4_string_is_referenced(value: &str, referenced: &[Vec<u8>]) -> bool {
-    let bytes = crate::value::c4_string_bytes(value);
-    referenced.iter().any(|candidate| candidate == &bytes)
 }
 
 /// Bytes emitted by `C4StringTable::Save` *without* enumerating first.
@@ -265,18 +436,23 @@ fn c4_string_is_referenced(value: &str, referenced: &[Vec<u8>]) -> bool {
 /// decide eligibility, while output still follows linked-list registration
 /// order. Dead runtime registrations do not participate in `FindSaveString`.
 pub fn save_current_c4_string_enumeration(
-    registrations: &std::cell::RefCell<StringRegistrationLedger>,
-    referenced: &[Vec<u8>],
+    registrations: &StringRegistrationLedger,
+    referenced: &[C4StringValue],
 ) -> Vec<Vec<u8>> {
-    let registrations = registrations.borrow();
+    for value in referenced {
+        register_c4_string(registrations, value);
+    }
+    let mut registrations = registrations.borrow_mut();
     let mut first_live = Vec::<Vec<u8>>::new();
     let mut saved = Vec::new();
     for entry in &registrations.entries {
-        let live = entry.loaded || c4_string_is_referenced(&entry.value, referenced);
-        if !live {
+        if !entry.enum_eligible() {
             continue;
         }
-        let bytes = crate::value::c4_string_bytes(&entry.value);
+        let Some(value) = entry.upgrade() else {
+            continue;
+        };
+        let bytes = crate::value::c4_string_bytes(&value);
         if first_live
             .iter()
             .any(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
@@ -284,10 +460,13 @@ pub fn save_current_c4_string_enumeration(
             continue;
         }
         first_live.push(bytes.clone());
-        if entry.enum_id.is_some() {
+        if value.enum_id() >= 0 {
             saved.push(bytes);
         }
     }
+    registrations
+        .entries
+        .retain(|entry| entry.value.strong_count() != 0);
     saved
 }
 
@@ -296,53 +475,44 @@ pub fn save_current_c4_string_enumeration(
 /// reconstruction of the same text appends after registrations that survived
 /// the death boundary.
 pub fn enumerate_c4_strings(
-    registrations: &std::cell::RefCell<StringRegistrationLedger>,
-    referenced: &[Vec<u8>],
+    registrations: &StringRegistrationLedger,
+    referenced: &[C4StringValue],
 ) -> Vec<Vec<u8>> {
-    let mut registrations = registrations.borrow_mut();
-
     // Every live C4Value string necessarily owns a registration. Values may
     // enter Rust engine state without passing through the VM, so recover such
     // registrations at this same enumeration boundary in traversal order.
-    for bytes in referenced {
-        if registrations.entries.iter().any(|entry| {
-            crate::value::c4_string_bytes(&entry.value) == *bytes
-        }) {
-            continue;
-        }
-        registrations.entries.push(StringRegistration {
-            value: crate::value::c4_string_from_bytes(bytes),
-            held: false,
-            loaded: false,
-            enum_id: None,
-        });
+    for value in referenced {
+        register_c4_string(registrations, value);
     }
 
+    let mut registrations = registrations.borrow_mut();
     let mut values = Vec::<Vec<u8>>::new();
-    let mut next_id = 0_i32;
-    for entry in &mut registrations.entries {
-        let live = entry.loaded || c4_string_is_referenced(&entry.value, referenced);
-        if !live {
-            entry.enum_id = None;
+    for entry in &registrations.entries {
+        if !entry.enum_eligible() {
+            if let Some(value) = entry.upgrade() {
+                value.set_enum_id(-1);
+            }
             continue;
         }
-        let bytes = crate::value::c4_string_bytes(&entry.value);
+        let Some(value) = entry.upgrade() else {
+            continue;
+        };
+        let bytes = crate::value::c4_string_bytes(&value);
         let enum_id = if let Some(index) = values
             .iter()
             .position(|candidate| c4_string_table_bytes_equal(candidate, &bytes))
         {
             i32::try_from(index).unwrap_or(i32::MAX)
         } else {
-            let enum_id = next_id;
-            next_id = next_id.saturating_add(1);
+            let enum_id = i32::try_from(values.len()).unwrap_or(i32::MAX);
             values.push(bytes);
             enum_id
         };
-        entry.enum_id = Some(enum_id);
+        value.set_enum_id(enum_id);
     }
-    registrations.entries.retain(|entry| {
-        entry.enum_id.is_some() || entry.held || entry.loaded
-    });
+    registrations
+        .entries
+        .retain(|entry| entry.value.strong_count() != 0);
     values
 }
 
@@ -350,7 +520,7 @@ pub fn enumerate_c4_strings(
 /// The VM invokes this as expressions materialize; embedders also use it for
 /// values entering synchronized state without passing through the VM.
 pub fn register_c4_value_strings(
-    registrations: &std::cell::RefCell<StringRegistrationLedger>,
+    registrations: &StringRegistrationLedger,
     value: &Value,
 ) {
     match value {
@@ -363,6 +533,9 @@ pub fn register_c4_value_strings(
         Value::Proplist(values) => {
             for (key, value) in values {
                 register_c4_value_strings(registrations, key);
+                register_c4_value_strings(registrations, value);
+            }
+            for value in values.hidden_values() {
                 register_c4_value_strings(registrations, value);
             }
         }
@@ -386,6 +559,26 @@ pub fn register_global_declarations(
     table: &GlobalVariables,
     globals_consts: Option<&GlobalVariables>,
 ) {
+    register_global_declarations_inner(var_decls, table, globals_consts, None);
+}
+
+/// Register globals while binding string constants into the exact shared
+/// C4StringTable identity used by this script engine.
+pub fn register_global_declarations_with_strings(
+    var_decls: &[VarDecl],
+    table: &GlobalVariables,
+    globals_consts: Option<&GlobalVariables>,
+    strings: &StringRegistrationLedger,
+) {
+    register_global_declarations_inner(var_decls, table, globals_consts, Some(strings));
+}
+
+fn register_global_declarations_inner(
+    var_decls: &[VarDecl],
+    table: &GlobalVariables,
+    globals_consts: Option<&GlobalVariables>,
+    strings: Option<&StringRegistrationLedger>,
+) {
     for var_decl in var_decls {
         match var_decl.kind {
             crate::ast::VarDeclKind::Static => {
@@ -399,6 +592,12 @@ pub fn register_global_declarations(
                 // leading sign into ATT_INT when parsing a constant value;
                 // our parser represents a negative integer as Unary(Negate).
                 let value = match &var_decl.init {
+                    Some(crate::ast::Expr::Literal(crate::value::Literal::String(value))) => {
+                        Value::String(match strings {
+                            Some(strings) => register_c4_referenced_string(strings, value),
+                            None => C4StringValue::from(value.clone()),
+                        })
+                    }
                     Some(crate::ast::Expr::Literal(literal)) => Value::from(literal.clone()),
                     Some(crate::ast::Expr::Unary(
                         crate::ast::UnaryOp::Negate,
@@ -648,7 +847,9 @@ impl Engine {
             globals_numbered: Some(new_global_slots()),
             globals_consts: None,
             local_cell_hook: None,
-            string_registrations: None,
+            // Even standalone lc-script engines own one native string table.
+            // Embedders may replace it with their game-global shared ledger.
+            string_registrations: Some(new_string_registrations()),
             string_literals: Vec::new(),
         }
     }
@@ -680,6 +881,9 @@ impl Engine {
     /// C4Script.cpp:6581): identifiers resolve to it when no variable
     /// matches; variables shadow constants.
     pub fn register_constant(&mut self, name: impl Into<String>, value: Value) {
+        if let Some(strings) = self.string_registrations.as_deref() {
+            register_c4_value_strings(strings, &value);
+        }
         self.constants.insert(name.into(), value);
     }
 
@@ -697,6 +901,26 @@ impl Engine {
     }
 
     pub fn add_script(&mut self, mut script: Script) {
+        // C4Aul's preparse pass registers every static declaration before the
+        // later global Parse pass marks function-body strings Hold. Preserve
+        // that construction order even for this standalone immediate-link
+        // path; it determines C4StringTable enumeration IDs.
+        if let Some(table) = &self.globals_named {
+            if let Some(strings) = self.string_registrations.as_deref() {
+                register_global_declarations_with_strings(
+                    &script.var_decls,
+                    table,
+                    self.globals_consts.as_ref(),
+                    strings,
+                );
+            } else {
+                register_global_declarations(
+                    &script.var_decls,
+                    table,
+                    self.globals_consts.as_ref(),
+                );
+            }
+        }
         if let Some(registrations) = &self.string_registrations {
             for literal in &script.string_literals {
                 register_c4_literal_string(registrations, literal);
@@ -723,14 +947,10 @@ impl Engine {
         // they register there (keeping any existing value — statics
         // persist across script loads) and never become per-object locals.
         for var_decl in script.var_decls {
-            if var_decl.kind == crate::ast::VarDeclKind::Static {
-                if let Some(table) = &self.globals_named {
-                    table
-                        .borrow_mut()
-                        .entry(var_decl.name.clone())
-                        .or_insert_with(|| crate::vm::value_cell(Value::Nil));
-                    continue;
-                }
+            if self.globals_named.is_some()
+                && var_decl.kind != crate::ast::VarDeclKind::Local
+            {
+                continue;
             }
             self.var_decls.push(var_decl);
         }
@@ -747,12 +967,23 @@ impl Engine {
     /// tables. With a global table attached they never become object-local
     /// declarations, even when registration is skipped because a relink is
     /// rebuilding an otherwise unchanged host.
-    pub fn replace_script(&mut self, mut script: Script, register_declarations: bool) {
-        if let Some(registrations) = &self.string_registrations {
-            for literal in &script.string_literals {
-                register_c4_literal_string(registrations, literal);
-            }
-        }
+    pub fn replace_script(&mut self, script: Script, register_declarations: bool) {
+        self.replace_script_inner(script, register_declarations, true);
+    }
+
+    /// Restore a preparsed host without acquiring its function-body string
+    /// Holds yet. `C4AulScriptEngine::ReLink` resets every host first, resolves
+    /// appends/includes, and only then runs the global Parse pass.
+    pub fn replace_script_deferred(&mut self, script: Script, register_declarations: bool) {
+        self.replace_script_inner(script, register_declarations, false);
+    }
+
+    fn replace_script_inner(
+        &mut self,
+        mut script: Script,
+        register_declarations: bool,
+        acquire_string_holds: bool,
+    ) {
         self.string_literals.clone_from(&script.string_literals);
         for function in script.functions.values_mut() {
             function.bind_source_host(self.host_identity);
@@ -764,11 +995,28 @@ impl Engine {
 
         if register_declarations {
             if let Some(table) = &self.globals_named {
-                register_global_declarations(
-                    &script.var_decls,
-                    table,
-                    self.globals_consts.as_ref(),
-                );
+                if let Some(strings) = self.string_registrations.as_deref() {
+                    register_global_declarations_with_strings(
+                        &script.var_decls,
+                        table,
+                        self.globals_consts.as_ref(),
+                        strings,
+                    );
+                } else {
+                    register_global_declarations(
+                        &script.var_decls,
+                        table,
+                        self.globals_consts.as_ref(),
+                    );
+                }
+            }
+        }
+
+        if acquire_string_holds {
+            if let Some(registrations) = &self.string_registrations {
+                for literal in &script.string_literals {
+                    register_c4_literal_string(registrations, literal);
+                }
             }
         }
 
@@ -1123,6 +1371,25 @@ impl Engine {
         self.string_registrations = Some(registrations);
     }
 
+    /// Attach the game-global string table during C4Aul's preparse phase.
+    /// Existing function-body operands are deliberately not marked Hold until
+    /// the later engine-global Parse pass, after every host's constants exist.
+    pub fn set_string_registrations_deferred(&mut self, registrations: StringRegistrations) {
+        self.string_registrations = Some(registrations);
+    }
+
+    /// Acquire every function-body string operand in this host's parser order.
+    /// The embedding script engine calls this once for each child host at the
+    /// global Link/Parse boundary (and again after ReLink's Clear/reset pass).
+    pub fn acquire_string_literal_holds(&mut self) {
+        let Some(registrations) = &self.string_registrations else {
+            return;
+        };
+        for literal in &self.string_literals {
+            register_c4_literal_string(registrations, literal);
+        }
+    }
+
     /// Moves `static` declarations that were compiled BEFORE the table was
     /// attached out of the per-object locals and into the shared table
     /// (existing values persist).
@@ -1131,7 +1398,16 @@ impl Engine {
             return;
         };
         let globals_consts = self.globals_consts.clone();
-        register_global_declarations(&self.var_decls, &table, globals_consts.as_ref());
+        if let Some(strings) = self.string_registrations.as_deref() {
+            register_global_declarations_with_strings(
+                &self.var_decls,
+                &table,
+                globals_consts.as_ref(),
+                strings,
+            );
+        } else {
+            register_global_declarations(&self.var_decls, &table, globals_consts.as_ref());
+        }
         self.var_decls
             .retain(|var_decl| var_decl.kind == crate::ast::VarDeclKind::Local);
     }
@@ -2241,10 +2517,8 @@ mod tests {
             c4_string_registration_order(&strings),
             ["zeta".to_string(), "alpha".to_string()]
         );
-        assert_eq!(
-            engine.call("Build", &[]).expect("string concatenates"),
-            Value::String("zetaalpha".to_string())
-        );
+        let built = engine.call("Build", &[]).expect("string concatenates");
+        assert_eq!(built, Value::from("zetaalpha"));
         assert_eq!(
             c4_string_registration_order(&strings),
             [
@@ -2253,93 +2527,335 @@ mod tests {
                 "zetaalpha".to_string(),
             ]
         );
+        drop(built);
+    }
+
+    #[test]
+    fn immediate_script_install_registers_string_constants_before_body_holds() {
+        let source = "static const LABEL = \"constant\";\n\
+                      func Read() { return \"body\"; }";
+
+        for replace in [false, true] {
+            let globals = new_global_variables();
+            let constants = new_global_variables();
+            let strings = new_string_registrations();
+            let mut engine = Engine::new();
+            engine.set_global_variables(globals);
+            engine.set_global_constants(constants.clone());
+            engine.set_string_registrations(strings.clone());
+            if replace {
+                engine.replace_script(compile(source), true);
+            } else {
+                engine.add_script(compile(source));
+            }
+
+            assert_eq!(
+                c4_string_registration_order(&strings),
+                ["constant".to_owned(), "body".to_owned()],
+                "preparse constant Refs precede the later function Parse Holds"
+            );
+            let constant = constants
+                .borrow()
+                .get("LABEL")
+                .cloned()
+                .expect("constant registered")
+                .borrow()
+                .clone();
+            let body = engine.call("Read", &[]).expect("body literal evaluates");
+            let (Value::String(constant), Value::String(body)) = (constant, body) else {
+                panic!("both values remain strings");
+            };
+            assert_eq!(
+                enumerate_c4_strings(&strings, &[constant.clone(), body.clone()]),
+                [b"constant".to_vec(), b"body".to_vec()]
+            );
+            assert_eq!((constant.enum_id(), body.enum_id()), (0, 1));
+        }
+    }
+
+    #[test]
+    fn string_registrations_are_thread_safe_and_deduplicate_atomically() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<StringRegistrations>();
+
+        let strings = new_string_registrations();
+        let workers = (0..8)
+            .map(|_| {
+                let strings = Arc::clone(&strings);
+                std::thread::spawn(move || {
+                    register_c4_literal_string(strings.as_ref(), "shared")
+                })
+            })
+            .collect::<Vec<_>>();
+        let values = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("string worker completes"))
+            .collect::<Vec<_>>();
+
+        assert!(values
+            .iter()
+            .all(|value| value.ptr_eq(values.first().expect("one string value"))));
+        assert_eq!(c4_string_registration_order(&strings), ["shared"]);
     }
 
     #[test]
     fn string_table_preserves_stale_section_enumeration_until_objects_save() {
         let strings = new_string_registrations();
         register_loaded_c4_string(&strings, 0, "loaded");
-        register_c4_string(&strings, "runtime");
-        let referenced = [b"loaded".to_vec(), b"runtime".to_vec()];
+        let runtime = C4StringValue::from("runtime");
+        register_c4_string(&strings, &runtime);
 
         assert_eq!(
-            save_current_c4_string_enumeration(&strings, &referenced),
+            save_current_c4_string_enumeration(&strings, std::slice::from_ref(&runtime)),
             [b"loaded".to_vec()]
         );
         assert_eq!(
-            enumerate_c4_strings(&strings, &referenced),
+            enumerate_c4_strings(&strings, std::slice::from_ref(&runtime)),
             [b"loaded".to_vec(), b"runtime".to_vec()]
         );
         assert_eq!(
-            save_current_c4_string_enumeration(&strings, &referenced),
+            save_current_c4_string_enumeration(&strings, std::slice::from_ref(&runtime)),
             [b"loaded".to_vec(), b"runtime".to_vec()]
         );
+    }
+
+    #[test]
+    fn enumeration_uses_live_handle_refcounts_and_save_does_not_reassign_ids() {
+        let strings = new_string_registrations();
+        let runtime = C4StringValue::from("runtime");
+        register_c4_string(&strings, &runtime);
+        assert_eq!(
+            enumerate_c4_strings(&strings, std::slice::from_ref(&runtime)),
+            [b"runtime".to_vec()]
+        );
+        assert_eq!(runtime.enum_id(), 0);
+
+        assert_eq!(
+            save_current_c4_string_enumeration(&strings, &[]),
+            [b"runtime".to_vec()],
+            "native Save observes C4String::iRefCnt even outside a serializer traversal"
+        );
+        assert_eq!(runtime.enum_id(), 0, "Save never performs EnumStrings");
     }
 
     #[test]
     fn dead_runtime_string_rebirth_appends_after_survivors() {
         let strings = new_string_registrations();
-        register_c4_string(&strings, "first");
-        register_c4_string(&strings, "survivor");
+        let first = C4StringValue::from("first");
+        let survivor = C4StringValue::from("survivor");
+        register_c4_string(&strings, &first);
+        register_c4_string(&strings, &survivor);
         assert_eq!(
-            enumerate_c4_strings(
-                &strings,
-                &[b"first".to_vec(), b"survivor".to_vec()],
-            ),
+            enumerate_c4_strings(&strings, &[first.clone(), survivor.clone()]),
             [b"first".to_vec(), b"survivor".to_vec()]
         );
 
+        drop(first);
         assert_eq!(
-            enumerate_c4_strings(&strings, &[b"survivor".to_vec()]),
+            enumerate_c4_strings(&strings, std::slice::from_ref(&survivor)),
             [b"survivor".to_vec()]
         );
-        register_c4_string(&strings, "first");
+        let reborn = C4StringValue::from("first");
+        register_c4_string(&strings, &reborn);
         assert_eq!(
-            enumerate_c4_strings(
-                &strings,
-                &[b"first".to_vec(), b"survivor".to_vec()],
-            ),
+            enumerate_c4_strings(&strings, &[survivor, reborn]),
             [b"survivor".to_vec(), b"first".to_vec()]
         );
     }
 
     #[test]
-    fn held_and_loaded_strings_survive_zero_reference_enumeration() {
+    fn duplicate_runtime_identity_controls_surviving_enumeration_order() {
         let strings = new_string_registrations();
-        register_c4_literal_string(&strings, "literal");
-        register_loaded_c4_string(&strings, 0, "loaded");
+        let first_x = C4StringValue::from("x");
+        let y = C4StringValue::from("y");
+        let second_x = C4StringValue::from("x");
+        register_c4_string(&strings, &first_x);
+        register_c4_string(&strings, &y);
+        register_c4_string(&strings, &second_x);
+
+        assert_eq!(first_x.enum_id(), -1);
+        assert_eq!(second_x.enum_id(), -1);
+        assert!(!first_x.ptr_eq(&second_x));
+        assert_eq!(first_x, second_x, "strict string equality is textual");
+        assert_eq!(
+            c4_string_registration_order(&strings),
+            ["x".to_owned(), "y".to_owned(), "x".to_owned()]
+        );
+        assert_eq!(
+            enumerate_c4_strings(
+                &strings,
+                &[first_x.clone(), y.clone(), second_x.clone()],
+            ),
+            [b"x".to_vec(), b"y".to_vec()]
+        );
+        assert_eq!(first_x.enum_id(), 0);
+        assert_eq!(second_x.enum_id(), 0);
+
+        drop(first_x);
+        assert_eq!(
+            enumerate_c4_strings(&strings, &[y.clone(), second_x.clone()]),
+            [b"y".to_vec(), b"x".to_vec()]
+        );
+        assert_eq!(y.enum_id(), 0);
+        assert_eq!(second_x.enum_id(), 1);
+    }
+
+    #[test]
+    fn untouched_loaded_string_dies_after_its_first_resolved_reference() {
+        let strings = new_string_registrations();
+        register_loaded_c4_string(&strings, 7, "loaded");
 
         assert_eq!(
             enumerate_c4_strings(&strings, &[]),
-            [b"loaded".to_vec()]
+            [b"loaded".to_vec()],
+            "a newly loaded non-Hold C4String survives at refcount zero"
         );
+        let loaded = resolve_c4_string(&strings, 0).expect("S0 resolves the loaded string");
+        assert_eq!(loaded.as_ref(), "loaded");
+        drop(loaded);
+
+        assert!(
+            resolve_c4_string(&strings, 0).is_none(),
+            "the final C4Value release deletes a non-Hold loaded string"
+        );
+        assert!(enumerate_c4_strings(&strings, &[]).is_empty());
+        assert!(c4_string_registration_order(&strings).is_empty());
+    }
+
+    #[test]
+    fn duplicate_loaded_lines_reuse_identity_and_overwrite_the_old_id() {
+        let strings = new_string_registrations();
+        register_loaded_c4_string(&strings, 0, "same");
+        register_loaded_c4_string(&strings, 1, "same");
+
+        assert_eq!(c4_string_registration_order(&strings), ["same".to_owned()]);
+        assert!(resolve_c4_string(&strings, 0).is_none());
+        let loaded = resolve_c4_string(&strings, 1).expect("the last line ID resolves");
+        assert_eq!(loaded.enum_id(), 1);
+    }
+
+    #[test]
+    fn id_resolution_uses_the_first_registration_when_loaded_ids_collide() {
+        let strings = new_string_registrations();
+        let earlier = C4StringValue::from("earlier");
+        register_c4_string(&strings, &earlier);
+        assert_eq!(
+            enumerate_c4_strings(&strings, std::slice::from_ref(&earlier)),
+            [b"earlier".to_vec()]
+        );
+        register_loaded_c4_string(&strings, 0, "later");
+
+        let resolved = resolve_c4_string(&strings, 0).expect("one colliding ID resolves");
+        assert!(resolved.ptr_eq(&earlier));
+    }
+
+    #[test]
+    fn literal_reuses_loaded_identity_and_hold_excludes_zero_ref_string() {
+        let strings = new_string_registrations();
+        register_loaded_c4_string(&strings, 3, "shared");
+        let literal = register_c4_literal_string(&strings, "shared");
+        let deserialized = resolve_c4_string(&strings, 3).expect("stale S3 still resolves");
+
+        assert!(literal.ptr_eq(&deserialized));
+        drop(literal);
+        drop(deserialized);
+        assert_eq!(
+            save_current_c4_string_enumeration(&strings, &[]),
+            Vec::<Vec<u8>>::new(),
+            "Load does not clear Hold, and held refcount-zero strings are ineligible"
+        );
+        assert!(enumerate_c4_strings(&strings, &[]).is_empty());
         assert_eq!(
             c4_string_registration_order(&strings),
-            ["literal".to_string(), "loaded".to_string()]
+            ["shared".to_owned()],
+            "Hold keeps the parser registration alive despite enum exclusion"
+        );
+        let referenced = register_c4_literal_string(&strings, "shared");
+        assert_eq!(
+            enumerate_c4_strings(&strings, std::slice::from_ref(&referenced)),
+            [b"shared".to_vec()]
+        );
+        assert_eq!(referenced.enum_id(), 0);
+    }
+
+    #[test]
+    fn map_and_property_link_operands_are_held_in_registration_order() {
+        let strings = new_string_registrations();
+        let mut engine = Engine::new();
+        engine.set_string_registrations(strings.clone());
+        engine
+            .load_script(
+                "#strict 3\n\
+                 func Probe(object) {\n\
+                     var map = { bare = 1 };\n\
+                     return [object.dot, object->arrow];\n\
+                 }",
+            )
+            .expect("map and property operands link");
+
+        assert_eq!(
+            c4_string_registration_order(&strings),
+            ["bare".to_owned(), "dot".to_owned(), "arrow".to_owned()]
+        );
+        assert!(
+            enumerate_c4_strings(&strings, &[]).is_empty(),
+            "link operands have Hold but no C4Value reference"
+        );
+    }
+
+    #[test]
+    fn clearing_holds_deletes_unreferenced_and_detaches_referenced_strings() {
+        let strings = new_string_registrations();
+        let obsolete = register_c4_literal_string(&strings, "obsolete");
+        let referenced = register_c4_literal_string(&strings, "shared");
+        drop(obsolete);
+        assert_eq!(
+            enumerate_c4_strings(&strings, std::slice::from_ref(&referenced)),
+            [b"shared".to_vec()]
+        );
+
+        clear_c4_string_holds(&strings);
+        assert!(c4_string_registration_order(&strings).is_empty());
+        assert!(
+            enumerate_c4_strings(&strings, std::slice::from_ref(&referenced)).is_empty(),
+            "a surviving C4Value keeps the C4String alive but not table-registered"
+        );
+        register_c4_string(&strings, &referenced);
+        assert!(
+            c4_string_registration_order(&strings).is_empty(),
+            "live-value recovery must not reattach an UnReg'd pointer"
+        );
+
+        let replacement = register_c4_literal_string(&strings, "shared");
+        assert!(!replacement.ptr_eq(&referenced));
+        assert_eq!(
+            c4_string_registration_order(&strings),
+            ["shared".to_owned()]
         );
         assert_eq!(
-            enumerate_c4_strings(&strings, &[b"literal".to_vec()]),
-            [b"literal".to_vec(), b"loaded".to_vec()]
+            enumerate_c4_strings(&strings, std::slice::from_ref(&replacement)),
+            [b"shared".to_vec()]
         );
     }
 
     #[test]
     fn string_table_enumeration_uses_the_first_nul_as_its_identity_boundary() {
         let strings = new_string_registrations();
-        register_c4_string(&strings, "shared\0first suffix");
-        register_c4_string(&strings, "shared\0second suffix");
-        let referenced = [
-            b"shared\0first suffix".to_vec(),
-            b"shared\0second suffix".to_vec(),
-        ];
+        let first = C4StringValue::from("shared\0first suffix");
+        let second = C4StringValue::from("shared\0second suffix");
+        register_c4_string(&strings, &first);
+        register_c4_string(&strings, &second);
 
         assert_eq!(
-            enumerate_c4_strings(&strings, &referenced),
+            enumerate_c4_strings(&strings, &[first.clone(), second.clone()]),
             [b"shared\0first suffix".to_vec()],
             "FindSaveString gives both registrations the first live prefix-equivalent ID"
         );
+        assert!(!first.ptr_eq(&second));
+        assert_ne!(first, second, "strict equality remains full-length");
+        assert_eq!(first.enum_id(), second.enum_id());
         assert_eq!(
-            save_current_c4_string_enumeration(&strings, &referenced),
+            save_current_c4_string_enumeration(&strings, &[first, second]),
             [b"shared\0first suffix".to_vec()]
         );
     }

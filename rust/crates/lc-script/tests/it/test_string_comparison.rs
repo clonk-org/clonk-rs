@@ -64,8 +64,8 @@ fn string_comparison_stops_at_the_native_nul_terminator() {
     let left = c4_string_from_bytes(b"same\0left");
     let right = c4_string_from_bytes(b"same\0right");
     let mut engine = Engine::new();
-    engine.register_host_function("Left", move |_| Ok(Value::String(left.clone())));
-    engine.register_host_function("Right", move |_| Ok(Value::String(right.clone())));
+    engine.register_host_function("Left", move |_| Ok(Value::String(left.clone().into())));
+    engine.register_host_function("Right", move |_| Ok(Value::String(right.clone().into())));
     engine
         .load_script(
             "func Equal() { return Left() eq Right(); }\n\
@@ -131,7 +131,7 @@ fn textual_ne_compares_nil_as_empty_string() {
 #[test]
 fn keyword_string_equality_accepts_a_real_host_returned_string() {
     let mut engine = Engine::new();
-    engine.register_host_function("GetAction", |_| Ok(Value::String("Walk".to_string())));
+    engine.register_host_function("GetAction", |_| Ok(Value::String("Walk".to_string().into())));
     engine
         .load_script("func Test() { return GetAction() eq \"Walk\"; }")
         .expect("script loads");

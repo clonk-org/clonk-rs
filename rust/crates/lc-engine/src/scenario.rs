@@ -253,6 +253,10 @@ pub(crate) struct ScenarioSectionSpec {
     pub(crate) post_init_map_callbacks: crate::map_creator_s2::PostInitMapCallbacks,
     pub(crate) keep_map_creator: bool,
     pub(crate) no_initialize: bool,
+    /// Precompiled fallback for the active root during initial startup and
+    /// synthetic sections without a backing C4Group. Inactive real sections
+    /// leave this empty and compile their source/frozen Objects.txt on every
+    /// activation.
     pub(crate) objects: Vec<ScenarioSpawn>,
     pub(crate) scenario_values: ScenarioValueStore,
     pub(crate) base_reject_entrance_enabled: bool,
@@ -448,7 +452,7 @@ pub struct Scenario {
     runtime_landscape: Option<LandscapeGameData>,
     /// The C4Aul string enumeration loaded from `Strings.txt`. Compiled
     /// Globals/GlobalNamed/effect variables refer to these integer IDs.
-    legacy_string_table: HashMap<i32, String>,
+    legacy_string_table: lc_script::StringRegistrations,
     /// `RoundResults.txt` compiled after InitControl and before pointer
     /// denumeration. A missing component retains C4RoundResults::Init's
     /// scenario-melee default.
@@ -2897,7 +2901,7 @@ impl Scenario {
             // DefinitionFiles text has been interpreted by a runtime loader.
             Vec::new()
         } else {
-            collect_legacy_objects(group, &collected)?
+            collect_legacy_objects(group, &collected, &legacy_string_table)?
         };
         report_progress(93, "Object records decoded");
         let (mut physics, gravity) = derive_legacy_physics(&manifest)?;
@@ -2923,7 +2927,6 @@ impl Scenario {
         let scenario_sections = load_legacy_scenario_sections(
             group,
             &manifest,
-            &collected,
             classifier.as_mut(),
             random_seed,
             startup_player_count,
@@ -3354,7 +3357,7 @@ impl Scenario {
         // by embedded player-file ExtraData restored later in this startup
         // pipeline. Publish the exact enumeration before either consumer can
         // bind runtime state.
-        engine.set_legacy_string_table(self.legacy_string_table.clone());
+        engine.adopt_legacy_string_table(self.legacy_string_table.clone());
         // C4Scenario::Load/ConvertGoals and C4Landscape::Init have completed
         // before any definition/scenario initialization callback can query
         // Game.C4S. Reset on every apply so a reused Engine cannot retain the
@@ -3504,10 +3507,11 @@ impl Scenario {
                                     "superseded definition parse error quarantined; continuing like C++"
                                 );
                             }
-                            lc_script::register_global_declarations(
+                            lc_script::register_global_declarations_with_strings(
                                 script.var_decls(),
                                 &engine.script_globals,
                                 Some(&engine.script_global_consts),
+                                &engine.script_string_registrations,
                             )
                         }
                         Err(error) => tracing::warn!(
@@ -4266,7 +4270,7 @@ impl Scenario {
             scenario_sections: Vec::new(),
             physics,
             runtime_landscape: None,
-            legacy_string_table: HashMap::new(),
+            legacy_string_table: lc_script::new_string_registrations(),
             round_results: RoundResultsState::default(),
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment,
@@ -11289,7 +11293,6 @@ fn load_legacy_landscape_systems_with_progress(
 fn load_legacy_scenario_sections(
     group: &Group,
     main_manifest: &LegacyScenarioManifest,
-    definitions: &[ScenarioDefinition],
     classifier: Option<&mut MapPixelClassifier>,
     random_seed: u64,
     startup_player_count: i32,
@@ -11408,7 +11411,6 @@ fn load_legacy_scenario_sections(
                 .as_ref()
                 .and_then(Landscape::raster_state)
                 .is_some_and(|state| state.map().is_some() && state.map_creator().is_none());
-        let objects = collect_legacy_objects(&section_group, definitions)?;
         let environment = derive_legacy_environment(manifest)?;
         let scenario_values = ScenarioValueStore::from_runtime_core(
             &manifest.core,
@@ -11448,7 +11450,11 @@ fn load_legacy_scenario_sections(
             post_init_map_callbacks,
             keep_map_creator: manifest.core.landscape.keep_map_creator,
             no_initialize: manifest.core.head.no_initialize != 0,
-            objects,
+            // C4ScenarioSection retains the child group but does not compile
+            // Objects.txt during scenario discovery. C4GameObjects::Load
+            // reopens and compiles it on every activation against the then-
+            // current process-global C4StringTable.
+            objects: Vec::new(),
             scenario_values,
             base_reject_entrance_enabled: (manifest.core.game.realism.base_functionality
                 & BASEFUNC_REJECT_ENTRANCE)
@@ -11466,6 +11472,22 @@ fn load_legacy_scenario_sections(
 fn collect_legacy_objects(
     group: &Group,
     definitions: &[ScenarioDefinition],
+    string_registrations: &lc_script::StringRegistrations,
+) -> Result<Vec<ScenarioSpawn>, ScenarioError> {
+    let definition_ids = definitions
+        .iter()
+        .map(|definition| definition.id.as_str())
+        .collect::<HashSet<_>>();
+    collect_legacy_objects_with_definition_ids(group, &definition_ids, string_registrations)
+}
+
+/// Compile one section's Objects.txt at its C4GameObjects::Load boundary.
+/// Section groups do not own a string table: S# values resolve against the
+/// process-global table as it exists at this activation.
+pub(crate) fn collect_legacy_objects_with_definition_ids(
+    group: &Group,
+    definition_ids: &HashSet<&str>,
+    string_registrations: &lc_script::StringRegistrations,
 ) -> Result<Vec<ScenarioSpawn>, ScenarioError> {
     let bytes = match group.read_file("Objects.txt") {
         Ok(bytes) => bytes,
@@ -11515,10 +11537,6 @@ fn collect_legacy_objects(
         }
     }
 
-    let definition_ids: HashSet<&str> = definitions
-        .iter()
-        .map(|definition| definition.id.as_str())
-        .collect();
     let object_numbers: HashSet<u64> = records
         .iter()
         .filter(|record| !matches!(record.status, Some(ObjectStatus::Deleted)))
@@ -11530,15 +11548,14 @@ fn collect_legacy_objects(
         })
         .filter_map(|record| record.number)
         .collect();
-    let strings = load_legacy_string_table(group)?;
     let value_resolution = SerializedC4ValueResolution {
         object_numbers: &object_numbers,
-        strings: &strings,
+        string_registrations,
     };
 
     let mut spawns = Vec::new();
     for record in records.into_iter() {
-        if let Some(spawn) = record.into_spawn(&definition_ids, &value_resolution)? {
+        if let Some(spawn) = record.into_spawn(definition_ids, &value_resolution)? {
             spawns.push(spawn);
         }
     }
@@ -11549,18 +11566,25 @@ fn collect_legacy_objects(
 /// Repeated text reuses the existing C4String and updates that one instance to
 /// the later ID, so the earlier ID is no longer resolvable
 /// (C4StringTable.cpp:201-216).
-fn load_legacy_string_table(group: &Group) -> Result<HashMap<i32, String>, ScenarioError> {
+fn load_legacy_string_table(
+    group: &Group,
+) -> Result<lc_script::StringRegistrations, ScenarioError> {
+    let string_registrations = lc_script::new_string_registrations();
     let bytes = match group.read_file("Strings.txt") {
         Ok(bytes) => bytes,
-        Err(GroupError::EntryNotFound(_)) => return Ok(HashMap::new()),
+        Err(GroupError::EntryNotFound(_)) => return Ok(string_registrations),
         Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(HashMap::new());
+            return Ok(string_registrations);
         }
         Err(error) => return Err(ScenarioError::Resources(error)),
     };
 
-    let mut id_by_bytes = HashMap::<Vec<u8>, i32>::new();
-    let mut value_by_id = HashMap::new();
+    // SCopySegment/SCharPos scan the component as a C string. Bytes after
+    // the first embedded NUL are therefore invisible to the whole line walk.
+    let bytes = &bytes[..bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len())];
     for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
         let index = i32::try_from(index).unwrap_or(i32::MAX);
         // SCopySegment copies at most C4AUL_MAX_String bytes and
@@ -11571,14 +11595,16 @@ fn load_legacy_string_table(group: &Group) -> Result<HashMap<i32, String>, Scena
             .position(|byte| *byte == b'\r')
             .unwrap_or(line.len())
             .min(1024);
-        let raw_value = line[..end].to_vec();
-        let value = decode_legacy_script_text(&raw_value);
-        if let Some(previous_id) = id_by_bytes.insert(raw_value, index) {
-            value_by_id.remove(&previous_id);
-        }
-        value_by_id.insert(index, value);
+        // C4StringTable::Load passes the component bytes straight to
+        // RegString. Strings.txt is not presentation text and must not pass
+        // through the CP1252-to-Unicode decoder used by names/descriptions.
+        let value = lc_script::c4_string_from_bytes(&line[..end]);
+        // RegisterLoaded performs the native C-string-prefix lookup. Equal
+        // lines reuse one C4String identity and the later line overwrites
+        // that shared instance's current enumeration ID.
+        lc_script::register_loaded_c4_string(&string_registrations, index, &value);
     }
-    Ok(value_by_id)
+    Ok(string_registrations)
 }
 
 #[derive(Debug, Default)]
@@ -13725,11 +13751,11 @@ impl InitialNetworkRuntimeState {
     fn resolve_post_object_state(
         self,
         object_numbers: &HashSet<u64>,
-        strings: &HashMap<i32, String>,
+        string_registrations: &lc_script::StringRegistrations,
     ) -> (ScriptGlobalState, Vec<EffectState>) {
         let resolution = SerializedC4ValueResolution {
             object_numbers,
-            strings,
+            string_registrations,
         };
         let numbered = self
             .script_globals
@@ -14152,12 +14178,7 @@ fn effect_var_from_value(value: lc_script::Value) -> EffectVarValue {
         Value::Array(values) => {
             EffectVarValue::Array(values.into_iter().map(effect_var_from_value).collect())
         }
-        Value::Proplist(values) => EffectVarValue::Proplist(
-            values
-                .iter()
-                .map(|(key, value)| (key.clone(), effect_var_from_value(value.clone())))
-                .collect(),
-        ),
+        Value::Proplist(values) => EffectVarValue::Proplist(values),
         Value::Nil => EffectVarValue::Nil,
     }
 }
@@ -14172,12 +14193,17 @@ enum SerializedC4Value {
     ObjectNumber(i32),
     StringTableIndex(i32),
     Array(Vec<SerializedC4Value>),
-    Map(Vec<(SerializedC4Value, SerializedC4Value)>),
+    Map {
+        entries: Vec<(SerializedC4Value, SerializedC4Value)>,
+        // Compile-time removals can only leave cleared (nil) mapped slots.
+        // C4ValueHash::DenumeratePointers does not traverse emptyValues.
+        empty_value_count: usize,
+    },
 }
 
 struct SerializedC4ValueResolution<'a> {
     object_numbers: &'a HashSet<u64>,
-    strings: &'a HashMap<i32, String>,
+    string_registrations: &'a lc_script::StringRegistrations,
 }
 
 impl SerializedC4Value {
@@ -14185,6 +14211,71 @@ impl SerializedC4Value {
     /// (C4Value.cpp:686-713,783-798). Serialized identities become live VM
     /// values only after the accepted object-number and string tables exist.
     fn resolve(self, resolution: &SerializedC4ValueResolution<'_>) -> lc_script::Value {
+        self.resolve_strings(resolution.string_registrations)
+            .denumerate_objects(resolution.object_numbers)
+    }
+
+    /// C4Value::CompileFunc resolves every serialized string while compiling
+    /// the complete container. Pointer denumeration is a later pass, so a
+    /// missing object entry cannot prevent a sibling from claiming the same
+    /// loaded C4String identity.
+    fn resolve_strings(
+        self,
+        string_registrations: &lc_script::StringRegistrations,
+    ) -> SerializedC4Value {
+        match self {
+            Self::StringTableIndex(index) => Self::Value(
+                lc_script::resolve_c4_string(string_registrations, index)
+                    .map(lc_script::Value::String)
+                    .unwrap_or(lc_script::Value::Nil),
+            ),
+            Self::Array(values) => Self::Array(
+                values
+                    .into_iter()
+                    .map(|value| value.resolve_strings(string_registrations))
+                    .collect(),
+            ),
+            Self::Map {
+                entries,
+                empty_value_count,
+            } => {
+                let mut compiled_entries =
+                    Vec::<(SerializedC4Value, SerializedC4Value)>::with_capacity(entries.len());
+                let mut compiled_empty_value_count = empty_value_count;
+                for (key, value) in entries {
+                    let key = key.resolve_strings(string_registrations);
+                    let value = value.resolve_strings(string_registrations);
+                    if let Some(index) = compiled_entries
+                        .iter()
+                        .position(|(existing, _)| existing == &key)
+                    {
+                        if value.is_compiled_nil()
+                            && !compiled_entries[index].1.is_compiled_nil()
+                        {
+                            compiled_entries.remove(index);
+                            compiled_empty_value_count += 1;
+                        } else {
+                            compiled_entries[index].1 = value;
+                        }
+                    } else {
+                        // CompileFunc's `map[key] = value` consumes a recycled
+                        // mapped slot only for a genuinely new key. Compile-
+                        // time removals leave nil slots, so assigning nil to
+                        // one takes C4Value::Set's unchanged-value return.
+                        compiled_empty_value_count = compiled_empty_value_count.saturating_sub(1);
+                        compiled_entries.push((key, value));
+                    }
+                }
+                Self::Map {
+                    entries: compiled_entries,
+                    empty_value_count: compiled_empty_value_count,
+                }
+            }
+            value => value,
+        }
+    }
+
+    fn denumerate_objects(self, object_numbers: &HashSet<u64>) -> lc_script::Value {
         use lc_script::Value;
         match self {
             Self::Value(value) => value,
@@ -14192,7 +14283,7 @@ impl SerializedC4Value {
                 if (1_000_000_000..=1_001_000_000).contains(&number) {
                     let object_number = number - 1_000_000_000;
                     if let Ok(object_number) = u64::try_from(object_number) {
-                        if resolution.object_numbers.contains(&object_number) {
+                        if object_numbers.contains(&object_number) {
                             return Value::Object(object_number);
                         }
                     }
@@ -14211,42 +14302,66 @@ impl SerializedC4Value {
                 };
                 u64::try_from(number)
                     .ok()
-                    .filter(|number| resolution.object_numbers.contains(number))
+                    .filter(|number| object_numbers.contains(number))
                     .map(Value::Object)
                     .unwrap_or(Value::Nil)
             }
             Self::Array(values) => Value::Array(
                 values
                     .into_iter()
-                    .map(|value| value.resolve(resolution))
+                    .map(|value| value.denumerate_objects(object_numbers))
                     .collect(),
             ),
-            Self::Map(entries) => {
+            Self::Map {
+                entries,
+                empty_value_count,
+            } => {
+                // Denumerate every key and value before mutating the visible
+                // hash. C4ValueHash::DenumeratePointers iterates already-
+                // compiled C4Values; a key that clears retains its mapped
+                // slot in emptyValues, while a value that clears contributes
+                // the now-nil slot.
+                let entries = entries
+                    .into_iter()
+                    .map(|(key, value)| {
+                        let missing_key = key.is_missing_direct_object(object_numbers);
+                        let missing_value = value.is_missing_direct_object(object_numbers);
+                        (
+                            missing_key || missing_value,
+                            key.denumerate_objects(object_numbers),
+                            value.denumerate_objects(object_numbers),
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 let mut values = lc_script::ValueMap::with_capacity(entries.len());
-                for (key, value) in entries {
-                    // C4ValueHash owns both its key and value slots. When a
-                    // direct C4V_C4ObjectEnum cannot be denumerated, Set0
-                    // calls CheckRemoveFromMap and erases the whole entry.
-                    // Nested missing objects are still recursively nilled.
-                    if key.is_missing_direct_object(resolution)
-                        || value.is_missing_direct_object(resolution)
-                    {
+                let mut removed_values = Vec::new();
+                for (removed, key, value) in entries {
+                    if removed {
+                        removed_values.push(value);
                         continue;
                     }
-                    values.insert_key(key.resolve(resolution), value.resolve(resolution));
+                    values.insert_key(key, value);
+                }
+                // Every surviving slot was allocated during CompileFunc,
+                // before DenumeratePointers can populate emptyValues. Queue
+                // removed slots only now so ordinary loaded entries cannot
+                // accidentally reuse them. push_front/pop_front makes the
+                // last removed slot the first one reused, matching Vec::pop.
+                for _ in 0..empty_value_count {
+                    values.recycle_value_slot(Value::Nil);
+                }
+                for value in removed_values {
+                    values.recycle_value_slot(value);
                 }
                 Value::Proplist(values)
             }
-            Self::StringTableIndex(index) => resolution
-                .strings
-                .get(&index)
-                .cloned()
-                .map(Value::String)
-                .unwrap_or(Value::Nil),
+            Self::StringTableIndex(_) => {
+                unreachable!("serialized strings resolve before object denumeration")
+            }
         }
     }
 
-    fn is_missing_direct_object(&self, resolution: &SerializedC4ValueResolution<'_>) -> bool {
+    fn is_missing_direct_object(&self, object_numbers: &HashSet<u64>) -> bool {
         let Self::ObjectNumber(number) = self else {
             return false;
         };
@@ -14257,7 +14372,15 @@ impl SerializedC4Value {
         };
         u64::try_from(number)
             .ok()
-            .is_none_or(|number| !resolution.object_numbers.contains(&number))
+            .is_none_or(|number| !object_numbers.contains(&number))
+    }
+
+    fn is_compiled_nil(&self) -> bool {
+        match self {
+            Self::Value(lc_script::Value::Nil) | Self::Any(0) | Self::ObjectNumber(0) => true,
+            Self::Value(lc_script::Value::C4Id(value)) => lc_script::c4_id_raw(value) == 0,
+            _ => false,
+        }
     }
 }
 
@@ -14570,7 +14693,10 @@ fn parse_serialized_c4value(
                 let value = parse_serialized_c4value(entry[equals + 1..].trim(), line)?;
                 entries.push((key, value));
             }
-            Ok(SerializedC4Value::Map(entries))
+            Ok(SerializedC4Value::Map {
+                entries,
+                empty_value_count: 0,
+            })
         }
         // Character only consumes an alphabetic byte. A raw number therefore
         // falls back to C4V_Any without consuming its first digit; an unknown
@@ -16059,6 +16185,77 @@ mod tests {
 
     fn tempdir() -> std::io::Result<tempfile::TempDir> {
         tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
+
+    #[test]
+    fn legacy_string_table_reuses_identity_and_overwrites_repeated_line_id() {
+        let directory = tempdir().expect("string-table directory");
+        std::fs::write(directory.path().join("Strings.txt"), b"same\r\nsame\r\n")
+            .expect("write Strings.txt");
+        let group = Group::open(directory.path()).expect("open string-table group");
+        let registrations = load_legacy_string_table(&group).expect("load Strings.txt");
+
+        assert!(lc_script::resolve_c4_string(&registrations, 0).is_none());
+        let repeated = lc_script::resolve_c4_string(&registrations, 1)
+            .expect("later repeated line owns the shared ID");
+        let repeated_again = lc_script::resolve_c4_string(&registrations, 1)
+            .expect("live shared identity remains resolvable");
+        assert!(repeated.ptr_eq(&repeated_again));
+        assert_eq!(repeated.as_ref(), "same");
+        assert_eq!(
+            lc_script::resolve_c4_string(&registrations, 2)
+                .expect("trailing LF creates an empty final line")
+                .as_ref(),
+            ""
+        );
+
+        let mut engine = Engine::new();
+        engine.adopt_legacy_string_table(registrations);
+        let literal = lc_script::register_c4_literal_string(
+            &engine.script_string_registrations,
+            "same",
+        );
+        assert!(repeated.ptr_eq(&literal));
+    }
+
+    #[test]
+    fn legacy_string_table_stops_the_whole_scan_at_first_nul() {
+        let directory = tempdir().expect("string-table directory");
+        std::fs::write(
+            directory.path().join("Strings.txt"),
+            b"first\nsecond\0third\nignored",
+        )
+        .expect("write Strings.txt");
+        let group = Group::open(directory.path()).expect("open string-table group");
+        let registrations = load_legacy_string_table(&group).expect("load Strings.txt");
+
+        assert_eq!(
+            lc_script::resolve_c4_string(&registrations, 0)
+                .expect("first line")
+                .as_ref(),
+            "first"
+        );
+        assert_eq!(
+            lc_script::resolve_c4_string(&registrations, 1)
+                .expect("prefix before NUL")
+                .as_ref(),
+            "second"
+        );
+        assert!(lc_script::resolve_c4_string(&registrations, 2).is_none());
+    }
+
+    #[test]
+    fn legacy_string_table_preserves_non_utf8_bytes_verbatim() {
+        let directory = tempdir().expect("string-table directory");
+        std::fs::write(directory.path().join("Strings.txt"), [0xe4])
+            .expect("write raw Strings.txt");
+        let group = Group::open(directory.path()).expect("open string-table group");
+        let registrations = load_legacy_string_table(&group).expect("load Strings.txt");
+
+        let value = lc_script::resolve_c4_string(&registrations, 0)
+            .expect("raw string-table entry resolves");
+        assert_eq!(lc_script::c4_string_bytes(&value), [0xe4]);
+        assert_eq!(lc_script::c4_string_byte_len(&value), 1);
     }
 
     const TEST_SCRIPT: &str = r#"
@@ -18903,7 +19100,7 @@ RandomTeamCount=2
             engine
                 .call_object_function(index, "Raw", Vec::new())
                 .expect("raw definition function runs"),
-            lc_script::Value::String(lc_script::c4_string_from_bytes(&[0xe9, 0xff]))
+            lc_script::Value::String(lc_script::c4_string_from_bytes(&[0xe9, 0xff]).into())
         );
     }
 
@@ -20234,7 +20431,7 @@ global func Step(state, frame, random)
             scenario_sections: Vec::new(),
             physics: None,
             runtime_landscape: None,
-            legacy_string_table: HashMap::new(),
+            legacy_string_table: lc_script::new_string_registrations(),
             round_results: RoundResultsState::default(),
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment: None,
@@ -20368,7 +20565,7 @@ global func Step(state, frame, random)
             scenario_sections: Vec::new(),
             physics: None,
             runtime_landscape: None,
-            legacy_string_table: HashMap::new(),
+            legacy_string_table: lc_script::new_string_registrations(),
             round_results: RoundResultsState::default(),
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment: None,
@@ -21202,7 +21399,7 @@ global func Step(state, frame, random)
             engine
                 .call_object_function(index, "Label", Vec::new())
                 .expect("Label runs"),
-            lc_script::Value::String("Reloaded %dx {{%i}}.".to_string())
+            lc_script::Value::String("Reloaded %dx {{%i}}.".to_string().into())
         );
     }
 
@@ -21250,7 +21447,7 @@ global func Step(state, frame, random)
             engine
                 .call_object_function(index, "PackLabel", Vec::new())
                 .expect("PackLabel runs"),
-            lc_script::Value::String("Packed value".to_string())
+            lc_script::Value::String("Packed value".to_string().into())
         );
     }
 
@@ -21292,7 +21489,7 @@ global func Step(state, frame, random)
                 .get("scenario_pack_value")
                 .map(|cell| cell.borrow().clone()),
             Some(lc_script::Value::String(
-                "localized scenario".to_string()
+                "localized scenario".to_string().into()
             ))
         );
     }
@@ -21472,7 +21669,7 @@ global func Step(state, frame, random)
                 .borrow()
                 .get("def_system_value")
                 .map(|cell| cell.borrow().clone()),
-            Some(lc_script::Value::String("definition pack".to_string()))
+            Some(lc_script::Value::String("definition pack".to_string().into()))
         );
         assert_eq!(
             engine
@@ -21480,7 +21677,7 @@ global func Step(state, frame, random)
                 .borrow()
                 .get("scenario_system_value")
                 .map(|cell| cell.borrow().clone()),
-            Some(lc_script::Value::String("scenario pack".to_string()))
+            Some(lc_script::Value::String("scenario pack".to_string().into()))
         );
     }
 
@@ -21531,7 +21728,7 @@ global func Step(state, frame, random)
             engine
                 .call_object_function(index, "NetworkPackLabel", Vec::new())
                 .expect("NetworkPackLabel runs"),
-            lc_script::Value::String("network pack".to_string())
+            lc_script::Value::String("network pack".to_string().into())
         );
     }
 
@@ -21591,7 +21788,7 @@ global func Step(state, frame, random)
             .expect("localized raw definition function runs");
         assert_eq!(
             value,
-            lc_script::Value::String(lc_script::c4_string_from_bytes(&[0xe9, 0xff]))
+            lc_script::Value::String(lc_script::c4_string_from_bytes(&[0xe9, 0xff]).into())
         );
     }
 
@@ -21636,8 +21833,8 @@ global func Step(state, frame, random)
                 .call_object_function(index, "Messages", Vec::new())
                 .expect("Messages runs"),
             lc_script::Value::Array(vec![
-                lc_script::Value::String("first".to_string()),
-                lc_script::Value::String("second".to_string()),
+                lc_script::Value::String("first".to_string().into()),
+                lc_script::Value::String("second".to_string().into()),
             ])
         );
     }
@@ -23782,7 +23979,7 @@ public func ActualizePhase(pClonk)
                     .borrow()
                     .get("initialized_name")
                     .map(|cell| cell.borrow().clone()),
-                Some(lc_script::Value::String(tagged_name.to_string())),
+                Some(lc_script::Value::String(tagged_name.to_string().into())),
                 "InitializePlayer observes the selected team's color"
             );
         }
@@ -23858,7 +24055,7 @@ public func ActualizePhase(pClonk)
                 .borrow()
                 .get("initialized_name")
                 .map(|cell| cell.borrow().clone()),
-            Some(lc_script::Value::String("<c 55cc88>Solo</c>".to_string())),
+            Some(lc_script::Value::String("<c 55cc88>Solo</c>".to_string().into())),
             "InitializePlayer retains the player-info color"
         );
     }
@@ -25690,7 +25887,7 @@ public func ActualizePhase(pClonk)
                 .borrow()
                 .get(&1)
                 .map(|value| value.borrow().clone()),
-            Some(lc_script::Value::String("saved text".to_string()))
+            Some(lc_script::Value::String("saved text".to_string().into()))
         );
         assert_eq!(engine.global_effects.len(), 1);
         assert_eq!(engine.global_effects[0].name, "Fog");
@@ -25702,10 +25899,10 @@ public func ActualizePhase(pClonk)
             vec![
                 EffectVarValue::Int(5),
                 EffectVarValue::Bool(true),
-                EffectVarValue::Proplist(vec![(
+                EffectVarValue::Proplist(lc_script::ValueMap::from([(
                     lc_script::Value::Int(7),
-                    EffectVarValue::String("saved text".to_string()),
-                )]),
+                    lc_script::Value::String("saved text".to_string().into()),
+                )])),
             ]
         );
         let sky = engine
@@ -27330,10 +27527,15 @@ public func ActualizePhase(pClonk)
 
         let definition_ids = HashSet::from(["GOOD"]);
         let object_numbers = HashSet::from([1_u64, 2]);
-        let strings = HashMap::from([(0, "saved text".to_string())]);
+        let string_registrations = lc_script::new_string_registrations();
+        lc_script::register_loaded_c4_string(
+            &string_registrations,
+            0,
+            "saved text",
+        );
         let resolution = SerializedC4ValueResolution {
             object_numbers: &object_numbers,
-            strings: &strings,
+            string_registrations: &string_registrations,
         };
         let spawn = first
             .into_spawn(&definition_ids, &resolution)
@@ -27380,7 +27582,7 @@ public func ActualizePhase(pClonk)
         assert_eq!(overlay.transform, Some(crate::DrawTransform::identity()));
         assert_eq!(
             config.effects[0].vars[2],
-            EffectVarValue::String("saved text".to_string())
+            EffectVarValue::String("saved text".to_string().into())
         );
         let temporary = config
             .temporary_physical
@@ -27396,7 +27598,7 @@ public func ActualizePhase(pClonk)
             commands[0].tx_value,
             Some(lc_script::Value::Array(vec![
                 lc_script::Value::Int(7),
-                lc_script::Value::String("saved text".to_string()),
+                lc_script::Value::String("saved text".to_string().into()),
                 lc_script::Value::C4Id(lc_script::c4_id_from_raw(0)),
             ]))
         );
@@ -27976,8 +28178,9 @@ public func ActualizePhase(pClonk)
         );
         let runtime =
             InitialNetworkRuntimeState::parse(&data).expect("nested compatibility spelling stages");
-        let (globals, effects) =
-            runtime.resolve_post_object_state(&HashSet::new(), &HashMap::new());
+        let string_registrations = lc_script::new_string_registrations();
+        let (globals, effects) = runtime
+            .resolve_post_object_state(&HashSet::new(), &string_registrations);
         assert!(effects.is_empty());
         assert_eq!(globals.numbered.get(&0), Some(&lc_script::Value::Int(17)));
         assert_eq!(globals.numbered.get(&1), Some(&lc_script::Value::Nil));
@@ -28064,10 +28267,10 @@ public func ActualizePhase(pClonk)
     #[test]
     fn initial_runtime_denumeration_matches_any_maps_and_effect_targets() {
         let objects = HashSet::from([7_u64, 1_001_000_001_u64]);
-        let strings = HashMap::new();
+        let string_registrations = lc_script::new_string_registrations();
         let resolution = SerializedC4ValueResolution {
             object_numbers: &objects,
-            strings: &strings,
+            string_registrations: &string_registrations,
         };
 
         assert_eq!(
@@ -28174,6 +28377,125 @@ public func ActualizePhase(pClonk)
             Some(1_001_000_001),
             "modern raw effect targets above C4EnumPointer2 stay raw"
         );
+    }
+
+    #[test]
+    fn serialized_map_denumeration_preserves_native_string_slot_lifetimes() {
+        let object_numbers = HashSet::new();
+
+        // S0=o999 compiles the string key before the missing value clears its
+        // entry. The key itself is destroyed, so no C4String reference remains.
+        let registrations = lc_script::new_string_registrations();
+        lc_script::register_loaded_c4_string(&registrations, 0, "loaded");
+        let resolution = SerializedC4ValueResolution {
+            object_numbers: &object_numbers,
+            string_registrations: &registrations,
+        };
+        let lc_script::Value::Proplist(map) = parse_serialized_c4value("m[1;S0=o999]", 1)
+            .expect("missing-value map parses")
+            .resolve(&resolution)
+        else {
+            panic!("expected resolved map");
+        };
+        assert!(map.is_empty());
+        assert!(lc_script::resolve_c4_string(&registrations, 0).is_none());
+
+        // Compilation resolves every map value before denumeration removes
+        // any entry. The sibling therefore claims S0 while the doomed key is
+        // still alive and retains that exact loaded identity afterwards.
+        let registrations = lc_script::new_string_registrations();
+        lc_script::register_loaded_c4_string(&registrations, 0, "loaded");
+        let resolution = SerializedC4ValueResolution {
+            object_numbers: &object_numbers,
+            string_registrations: &registrations,
+        };
+        let lc_script::Value::Proplist(map) =
+            parse_serialized_c4value("m[2;S0=o999;i1=S0]", 1)
+                .expect("sibling-string map parses")
+                .resolve(&resolution)
+        else {
+            panic!("expected resolved map");
+        };
+        let Some(lc_script::Value::String(sibling)) =
+            map.get_key(&lc_script::Value::Int(1))
+        else {
+            panic!("resolved sibling string remains visible");
+        };
+        let registered = lc_script::resolve_c4_string(&registrations, 0)
+            .expect("visible sibling keeps S0 registered");
+        assert!(sibling.ptr_eq(&registered));
+
+        // o999=S0 removes the key but C4ValueHash::emptyValues retains its
+        // mapped slot. Reusing that slot for a later insertion releases S0.
+        let registrations = lc_script::new_string_registrations();
+        lc_script::register_loaded_c4_string(&registrations, 0, "loaded");
+        let resolution = SerializedC4ValueResolution {
+            object_numbers: &object_numbers,
+            string_registrations: &registrations,
+        };
+        let lc_script::Value::Proplist(mut map) = parse_serialized_c4value("m[2;o999=S0;i1=i2]", 1)
+            .expect("missing-key map parses")
+            .resolve(&resolution)
+        else {
+            panic!("expected resolved map");
+        };
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.get_key(&lc_script::Value::Int(1)),
+            Some(&lc_script::Value::Int(2)),
+            "a slot compiled after the doomed key does not reuse emptyValues"
+        );
+        assert!(lc_script::resolve_c4_string(&registrations, 0).is_some());
+        map.insert_key(lc_script::Value::Int(7), lc_script::Value::Int(8));
+        assert_eq!(
+            map.get_key(&lc_script::Value::Int(7)),
+            Some(&lc_script::Value::Int(8))
+        );
+        assert!(lc_script::resolve_c4_string(&registrations, 0).is_none());
+    }
+
+    #[test]
+    fn serialized_map_compile_keeps_only_the_final_duplicate_assignment() {
+        let object_numbers = HashSet::new();
+
+        let registrations = lc_script::new_string_registrations();
+        lc_script::register_loaded_c4_string(&registrations, 0, "loaded");
+        let resolution = SerializedC4ValueResolution {
+            object_numbers: &object_numbers,
+            string_registrations: &registrations,
+        };
+        let lc_script::Value::Proplist(map) =
+            parse_serialized_c4value("m[2;i1=S0;i1=o999]", 1)
+                .expect("duplicate-key map parses")
+                .resolve(&resolution)
+        else {
+            panic!("expected resolved map");
+        };
+        assert!(map.is_empty(), "the final missing value removes the slot");
+        assert_eq!(
+            map.hidden_values().cloned().collect::<Vec<_>>(),
+            vec![lc_script::Value::Nil]
+        );
+        assert!(lc_script::resolve_c4_string(&registrations, 0).is_none());
+
+        let registrations = lc_script::new_string_registrations();
+        lc_script::register_loaded_c4_string(&registrations, 0, "loaded");
+        let resolution = SerializedC4ValueResolution {
+            object_numbers: &object_numbers,
+            string_registrations: &registrations,
+        };
+        let lc_script::Value::Proplist(map) =
+            parse_serialized_c4value("m[2;i1=o999;i1=S0]", 1)
+                .expect("reverse duplicate-key map parses")
+                .resolve(&resolution)
+        else {
+            panic!("expected resolved map");
+        };
+        assert_eq!(
+            map.get_key(&lc_script::Value::Int(1)),
+            Some(&lc_script::Value::String("loaded".into()))
+        );
+        assert_eq!(map.hidden_values().count(), 0);
     }
 
     #[test]
@@ -28410,11 +28732,15 @@ public func ActualizePhase(pClonk)
         );
         assert_eq!(
             locals.get("sFirst"),
-            Some(&lc_script::Value::String("first".to_string()))
+            Some(&lc_script::Value::String("first".to_string().into()))
         );
+        let Some(lc_script::Value::String(umlaut)) = locals.get("sUmlaut") else {
+            panic!("raw string-table identity denumerates to a string");
+        };
         assert_eq!(
-            locals.get("sUmlaut"),
-            Some(&lc_script::Value::String("Münkelburg".to_string()))
+            lc_script::c4_string_bytes(umlaut),
+            b"M\xfcnkelburg",
+            "native C4String bytes remain lossless instead of being recoded as UTF-8"
         );
         assert_eq!(
             locals.get("sOldDuplicate"),
@@ -28423,7 +28749,35 @@ public func ActualizePhase(pClonk)
         );
         assert_eq!(
             locals.get("sDuplicate"),
-            Some(&lc_script::Value::String("same".to_string()))
+            Some(&lc_script::Value::String("same".to_string().into()))
+        );
+        assert_eq!(
+            locals
+                .get("sFirst")
+                .and_then(|value| match value {
+                    lc_script::Value::String(value) => Some(value.enum_id()),
+                    _ => None,
+                }),
+            Some(0)
+        );
+        assert_eq!(
+            locals
+                .get("sUmlaut")
+                .and_then(|value| match value {
+                    lc_script::Value::String(value) => Some(value.enum_id()),
+                    _ => None,
+                }),
+            Some(1)
+        );
+        assert_eq!(
+            locals
+                .get("sDuplicate")
+                .and_then(|value| match value {
+                    lc_script::Value::String(value) => Some(value.enum_id()),
+                    _ => None,
+                }),
+            Some(3),
+            "the resolved C4Value retains the duplicate line's overwritten native ID"
         );
         assert_eq!(locals.get("sMissing"), Some(&lc_script::Value::Nil));
 
@@ -29439,6 +29793,152 @@ public func ActualizePhase(pClonk)
                 .get("linked_trace")
                 .map(|cell| cell.borrow().clone()),
             Some(lc_script::Value::String("-2,-2,5".into()))
+        );
+    }
+
+    #[test]
+    fn inactive_section_objects_reparse_source_and_frozen_groups_with_the_live_string_table() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "#strict\n");
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "#strict 2\nlocal probe;\n",
+        )
+        .expect("declare the persisted object local");
+        std::fs::write(scenario_dir.join("Strings.txt"), "startup-only\r\n")
+            .expect("write startup string table");
+        let section_dir = scenario_dir.join("SectNext.c4g");
+        std::fs::create_dir_all(&section_dir).expect("section dir");
+        let write_objects = |x: i32| {
+            std::fs::write(
+                section_dir.join("Objects.txt"),
+                format!(
+                    "[Object]\nid=GOOD\nNumber=500\nStatus=1\nX={x}\nY=9\n\
+                     LocalNamed=1;probe=S0\n"
+                ),
+            )
+            .expect("write section objects");
+        };
+        write_objects(10);
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        assert!(
+            scenario
+                .scenario_sections
+                .iter()
+                .find(|section| section.name.eq_ignore_ascii_case("next"))
+                .expect("inactive section is discovered")
+                .objects
+                .is_empty(),
+            "inactive Objects.txt must remain uncompiled during startup"
+        );
+
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        engine.set_legacy_string_table(HashMap::from([(
+            0,
+            "first-activation-only".to_string(),
+        )]));
+        assert!(engine
+            .load_scenario_section("Next", 0, Vec::new())
+            .expect("first source activation succeeds"));
+        let first = engine
+            .object_snapshot(ObjectId::new(500))
+            .expect("first source object loads");
+        assert_eq!(first.position.x, 10);
+        assert_eq!(
+            first.local_vars.get("probe"),
+            Some(&lc_script::Value::String("first-activation-only".into()))
+        );
+
+        assert!(engine
+            .load_scenario_section("Main", 0, Vec::new())
+            .expect("main reloads"));
+        write_objects(77);
+        engine.set_legacy_string_table(HashMap::from([(
+            0,
+            "second-activation-only".to_string(),
+        )]));
+        assert!(engine
+            .load_scenario_section("Next", 0, Vec::new())
+            .expect("second source activation succeeds"));
+        let second = engine
+            .object_snapshot(ObjectId::new(500))
+            .expect("second source object loads");
+        assert_eq!(second.position.x, 77, "source Objects.txt is reparsed");
+        assert_eq!(
+            second.local_vars.get("probe"),
+            Some(&lc_script::Value::String("second-activation-only".into()))
+        );
+        drop(first);
+        drop(second);
+
+        assert!(engine
+            .load_scenario_section("Main", 2, Vec::new())
+            .expect("departing objects freeze"));
+        assert!(
+            !lc_script::c4_string_registration_order(&engine.script_string_registrations)
+                .iter()
+                .any(|value| value == "second-activation-only"),
+            "the raw frozen group must not retain structured C4String handles"
+        );
+        let frozen = engine
+            .scenario_sections
+            .get("next")
+            .and_then(|section| section.frozen_group.clone())
+            .expect("departed section owns a frozen group");
+        assert!(
+            engine
+                .scenario_sections
+                .get("next")
+                .is_some_and(|section| section.saved_objects.is_none()),
+            "serializer scratch snapshots are discarded after freezing"
+        );
+        let frozen_group = Group::from_raw_memory(
+            PathBuf::from("SectNext.c4g"),
+            frozen,
+        )
+        .expect("frozen group opens");
+        let frozen_objects = String::from_utf8(
+            frozen_group
+                .read_file("Objects.txt")
+                .expect("frozen Objects.txt exists"),
+        )
+        .expect("engine-produced Objects.txt is UTF-8");
+        let enum_id = frozen_objects
+            .split_once("probe=S")
+            .map(|(_, suffix)| {
+                suffix
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse::<i32>()
+                    .expect("frozen probe ID parses")
+            })
+            .expect("frozen local keeps its S# encoding");
+
+        // The source has changed again, but the temporary group is now the
+        // authoritative section. Its S# value still resolves through the
+        // current global table rather than its stale child Strings.txt.
+        write_objects(99);
+        engine.set_legacy_string_table(HashMap::from([(
+            enum_id,
+            "frozen-activation-only".to_string(),
+        )]));
+        assert!(engine
+            .load_scenario_section("Next", 0, Vec::new())
+            .expect("frozen activation succeeds"));
+        let frozen = engine
+            .object_snapshot(ObjectId::new(500))
+            .expect("frozen object reloads");
+        assert_eq!(frozen.position.x, 77, "frozen group wins over source edits");
+        assert_eq!(
+            frozen.local_vars.get("probe"),
+            Some(&lc_script::Value::String("frozen-activation-only".into()))
         );
     }
 
@@ -32369,8 +32869,8 @@ mod game_start_sync {
                 .call_object_function(missing_index, "ReadLoadedAction", Vec::new())
                 .expect("raw action probe succeeds"),
             lc_script::Value::Array(vec![
-                lc_script::Value::String("Idle".to_string()),
-                lc_script::Value::String("Missing".to_string()),
+                lc_script::Value::String("Idle".to_string().into()),
+                lc_script::Value::String("Missing".to_string().into()),
                 lc_script::Value::Int(-9),
                 lc_script::Value::Int(-7),
                 lc_script::Value::Int(43),
@@ -32447,7 +32947,7 @@ mod game_start_sync {
             engine
                 .call_object_function(matched_index, "ReadRawAction", Vec::new())
                 .expect("matched raw action reads"),
-            lc_script::Value::String(matching_name.clone())
+            lc_script::Value::String(matching_name.clone().into())
         );
 
         let unresolved_index = engine
@@ -32472,7 +32972,7 @@ mod game_start_sync {
             engine
                 .call_object_function(unresolved_index, "ReadRawAction", Vec::new())
                 .expect("unresolved raw action reads"),
-            lc_script::Value::String(unresolved_name)
+            lc_script::Value::String(unresolved_name.into())
         );
     }
 

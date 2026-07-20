@@ -1916,6 +1916,7 @@ impl<'a> Parser<'a> {
                 ));
             }
             let (name, _) = self.expect_identifier("expected property name after '.'")?;
+            self.lexer.record_string_operand(name.clone());
             return Ok(Some(NavigationOperation::Property(name)));
         }
         if self.consume_if_symbol(Symbol::Arrow)?.is_some() {
@@ -1945,6 +1946,7 @@ impl<'a> Parser<'a> {
                     token.column,
                 ));
             }
+            self.lexer.record_string_operand(name.clone());
             return Ok(Some(NavigationOperation::Property(name)));
         }
         Ok(None)
@@ -2163,7 +2165,10 @@ impl<'a> Parser<'a> {
 
         let token = self.consume()?;
         match token.kind {
-            TokenKind::Identifier(name) => Ok(Expr::Literal(Literal::String(name))),
+            TokenKind::Identifier(name) => {
+                self.lexer.record_string_operand(name.clone());
+                Ok(Expr::Literal(Literal::String(name)))
+            }
             TokenKind::String(value) => Ok(Expr::Literal(Literal::String(value))),
             _ => Err(ParseError::new(
                 "expected identifier, string, or computed key for map key",
@@ -2478,7 +2483,11 @@ impl<'a> Parser<'a> {
                 // Parse initializers BELOW the comma level so the declaration
                 // list owns its commas (`static const A = 5, B = 1;`).
                 if self.consume_if_symbol(Symbol::Equal)?.is_some() {
-                    Some(self.parse_assignment()?)
+                    let init = self.parse_assignment()?;
+                    if let Expr::Literal(Literal::String(value)) = &init {
+                        self.lexer.discard_last_string_operand(value);
+                    }
+                    Some(init)
                 } else {
                     return Err(ParseError::new(
                         "static const declaration requires an initializer",
@@ -3153,6 +3162,48 @@ func Ok() { return 1; }
             &entries[4].0,
             Expr::Variable(name) if name == "object_key"
         ));
+    }
+
+    #[test]
+    fn link_string_operands_include_map_and_property_identifier_keys_in_order() {
+        let script = parse_script(
+            r#"#strict 3
+               func Test(object) {
+                   var map = {
+                       bare = "value",
+                       "quoted" = 2,
+                       ["computed"] = 3
+                   };
+                   return [object.dot, object->arrow, object->Method()];
+               }"#,
+        )
+        .expect("map and property string operands parse");
+
+        assert_eq!(
+            script.string_literals,
+            ["bare", "value", "quoted", "computed", "dot", "arrow"],
+            "C4Aul links map/property keys, but not arrow method names, in encounter order"
+        );
+    }
+
+    #[test]
+    fn static_const_string_is_not_a_held_link_literal() {
+        let script = parse_script(
+            r#"#strict 3
+               static const LABEL = "constant";
+               func Test() { return ["ordinary", { key = 1 }]; }"#,
+        )
+        .expect("string constant and ordinary literals parse");
+
+        assert!(matches!(
+            script.var_decls.as_slice(),
+            [VarDecl {
+                kind: VarDeclKind::StaticConst,
+                init: Some(Expr::Literal(Literal::String(value))),
+                ..
+            }] if value == "constant"
+        ));
+        assert_eq!(script.string_literals, ["ordinary", "key"]);
     }
 
     #[test]

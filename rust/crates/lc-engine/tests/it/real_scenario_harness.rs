@@ -103,8 +103,8 @@ public func Read(string entry, string section, int index)
                 probe_index,
                 "Read",
                 vec![
-                    Value::String(entry.to_string()),
-                    Value::String(section.to_string()),
+                    Value::String(entry.to_string().into()),
+                    Value::String(section.to_string().into()),
                     Value::Int(index),
                 ],
             )
@@ -3723,7 +3723,7 @@ fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war(
     assert_eq!(schedules[0].interval, 1);
     assert_eq!(
         schedules[0].var(0),
-        EffectVarValue::String(format!("SetFoW(true, {owner})"))
+        EffectVarValue::String(format!("SetFoW(true, {owner})").into())
     );
     assert_eq!(schedules[0].var(1), EffectVarValue::Int(1));
 

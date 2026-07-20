@@ -265,7 +265,7 @@ fn native_no_caller_eagerly_clears_falsy_values_but_preserves_nil_for_int_and_bo
                     Value::Bool(false),
                     Value::Object(0),
                     Value::C4Id("NONE".into()),
-                    Value::String(String::new()),
+                    Value::String(String::new().into()),
                     Value::Array(Vec::new()),
                     empty_map.clone(),
                 ],
@@ -278,7 +278,7 @@ fn native_no_caller_eagerly_clears_falsy_values_but_preserves_nil_for_int_and_bo
             Value::Nil,
             Value::Nil,
             Value::Nil,
-            Value::String(String::new()),
+            Value::String(String::new().into()),
             Value::Array(Vec::new()),
             empty_map,
         ])

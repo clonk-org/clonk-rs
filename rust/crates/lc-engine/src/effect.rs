@@ -1,4 +1,4 @@
-use lc_script::Value;
+use lc_script::{C4StringValue, Value, ValueMap};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -7,81 +7,20 @@ pub enum EffectVarValue {
     Bool(bool),
     /// A C4V_Bool retaining its complete pointer-width C++ `C4V_Data`.
     RawBool(usize),
-    String(#[serde(with = "lc_script::c4_string_serde")] String),
+    String(#[serde(with = "lc_script::c4_string_serde")] C4StringValue),
     /// A definition identifier is a distinct C4Value type from String.
     /// EffectVar must preserve that distinction because scripts may use a
     /// stored id as an object-call target (`idMagic->~Callback()`).
     C4Id(#[serde(with = "lc_script::c4_id_serde")] String),
     Object(u64),
     Array(Vec<EffectVarValue>),
-    Proplist(#[serde(with = "effect_var_map_serde")] Vec<(Value, EffectVarValue)>),
+    /// A native C4Value map, including its detached `C4ValueHash::emptyValues`
+    /// slots. Effect variables own ordinary C4Values in C++, so converting a
+    /// map into an effect-specific entry vector would incorrectly release
+    /// strings retained by those hidden slots and lose their reuse behavior.
+    Proplist(ValueMap),
     #[default]
     Nil,
-}
-
-/// Keep the established JSON object representation for string-only effect
-/// maps, while retaining arbitrary C4Value keys in the general case. The
-/// sequence representation is unambiguous and preserves C4ValueHash key order.
-mod effect_var_map_serde {
-    use indexmap::IndexMap;
-    use lc_script::Value;
-    use serde::ser::SerializeMap;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    use super::EffectVarValue;
-
-    pub fn serialize<S>(
-        entries: &[(Value, EffectVarValue)],
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        if entries
-            .iter()
-            .all(|(key, _)| {
-                matches!(key, Value::String(value) if String::from_utf8(lc_script::c4_string_bytes(value)).is_ok())
-            })
-        {
-            let mut map = serializer.serialize_map(Some(entries.len()))?;
-            for (key, value) in entries {
-                let Value::String(key) = key else {
-                    unreachable!("all keys were checked as strings");
-                };
-                let key = String::from_utf8(lc_script::c4_string_bytes(key))
-                    .expect("all string keys were checked as UTF-8");
-                map.serialize_entry(&key, value)?;
-            }
-            map.end()
-        } else {
-            entries.serialize(serializer)
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<(Value, EffectVarValue)>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Legacy(IndexMap<String, EffectVarValue>),
-            Entries(Vec<(Value, EffectVarValue)>),
-        }
-
-        Ok(match Repr::deserialize(deserializer)? {
-            Repr::Legacy(entries) => entries
-                .into_iter()
-                .map(|(key, value)| {
-                    (
-                        Value::String(lc_script::c4_string_from_bytes(key.as_bytes())),
-                        value,
-                    )
-                })
-                .collect(),
-            Repr::Entries(entries) => entries,
-        })
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,10 +133,10 @@ mod map_serde_tests {
 
     #[test]
     fn effect_var_string_map_keeps_legacy_json_shape() {
-        let value = EffectVarValue::Proplist(vec![
-            (Value::String("beta".into()), EffectVarValue::Int(2)),
-            (Value::String("alpha".into()), EffectVarValue::Int(1)),
-        ]);
+        let value = EffectVarValue::Proplist(ValueMap::from([
+            ("beta", lc_script::Value::Int(2)),
+            ("alpha", lc_script::Value::Int(1)),
+        ]));
 
         let encoded = serde_json::to_string(&value).expect("effect map serializes");
         assert_eq!(
@@ -211,10 +150,16 @@ mod map_serde_tests {
 
     #[test]
     fn effect_var_map_round_trips_arbitrary_keys_in_order() {
-        let value = EffectVarValue::Proplist(vec![
-            (Value::Int(7), EffectVarValue::String("seven".into())),
-            (Value::Bool(true), EffectVarValue::Object(42)),
-        ]);
+        let value = EffectVarValue::Proplist(ValueMap::from([
+            (
+                lc_script::Value::Int(7),
+                lc_script::Value::String("seven".into()),
+            ),
+            (
+                lc_script::Value::Bool(true),
+                lc_script::Value::Object(42),
+            ),
+        ]));
 
         let encoded = serde_json::to_value(&value).expect("effect map serializes");
         assert!(encoded["Proplist"].is_array());

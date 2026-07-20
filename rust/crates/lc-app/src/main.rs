@@ -100084,7 +100084,7 @@ func Award()
             .call_object_function(crew_index, "Award", Vec::new())
             .expect("default-rank promotion succeeds")
         {
-            lc_script::Value::String(name) => name,
+            lc_script::Value::String(name) => name.into_string(),
             other => panic!("promotion returned {other:?}"),
         }
     }
@@ -108151,7 +108151,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                     .call_object_function(
                         probe,
                         "Has",
-                        vec![Value::String(password.to_string())],
+                        vec![Value::String(password.to_string().into())],
                     )
                     .expect("configured access query executes"),
                 Value::Bool(true)
@@ -108168,7 +108168,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .call_object_function(
                     probe,
                     "Grant",
-                    vec![Value::String("Runtime".to_string())],
+                    vec![Value::String("Runtime".to_string().into())],
                 )
                 .expect("runtime access grant executes"),
             Value::Bool(true)
@@ -108181,7 +108181,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .call_object_function(
                     probe,
                     "Has",
-                    vec![Value::String("runtime".to_string())],
+                    vec![Value::String("runtime".to_string().into())],
                 )
                 .expect("replacement engine sees process-local access"),
             Value::Bool(true)
@@ -161389,7 +161389,7 @@ protected func InputCallback(string answer, int player)
             .expect("target remains live after the ready tick");
         assert_eq!(
             target_after_ready.local_vars.get("callback_answer"),
-            Some(&Value::String("MIXED".to_string()))
+            Some(&Value::String("MIXED".to_string().into()))
         );
         assert_eq!(
             target_after_ready.local_vars.get("callback_count"),
@@ -161770,7 +161770,7 @@ protected func InputCallback(string answer, int player)
             .expect("target remains live");
         assert_eq!(
             target.local_vars.get("callback_answer"),
-            Some(&Value::String("q\"\\z".to_string()))
+            Some(&Value::String("q\"\\z".to_string().into()))
         );
         assert_eq!(target.local_vars.get("callback_count"), Some(&Value::Int(1)));
         assert_eq!(app.executing_ready_tick, None);

@@ -33,10 +33,10 @@ impl C4ActionReflection {
         };
         let facet = action.facet.as_ref();
         let entries = HashMap::from([
-            ("Name", vec![Value::String(name.to_string())]),
+            ("Name", vec![Value::String(name.to_string().into())]),
             (
                 "Procedure",
-                vec![Value::String(action.procedure.clone().unwrap_or_default())],
+                vec![Value::String(action.procedure.clone().unwrap_or_default().into())],
             ),
             (
                 "Directions",
@@ -96,7 +96,7 @@ impl C4ActionReflection {
             (
                 "NextAction",
                 vec![Value::String(
-                    action.next_action.clone().unwrap_or_default(),
+                    action.next_action.clone().unwrap_or_default().into(),
                 )],
             ),
             (
@@ -108,23 +108,23 @@ impl C4ActionReflection {
             ),
             (
                 "StartCall",
-                vec![Value::String(action.start_call.clone().unwrap_or_default())],
+                vec![Value::String(action.start_call.clone().unwrap_or_default().into())],
             ),
             (
                 "EndCall",
-                vec![Value::String(action.end_call.clone().unwrap_or_default())],
+                vec![Value::String(action.end_call.clone().unwrap_or_default().into())],
             ),
             (
                 "AbortCall",
-                vec![Value::String(action.abort_call.clone().unwrap_or_default())],
+                vec![Value::String(action.abort_call.clone().unwrap_or_default().into())],
             ),
             (
                 "PhaseCall",
-                vec![Value::String(action.phase_call.clone().unwrap_or_default())],
+                vec![Value::String(action.phase_call.clone().unwrap_or_default().into())],
             ),
             (
                 "Sound",
-                vec![Value::String(action.sound.clone().unwrap_or_default())],
+                vec![Value::String(action.sound.clone().unwrap_or_default().into())],
             ),
             (
                 "ObjectDisabled",
@@ -144,13 +144,13 @@ impl C4ActionReflection {
             (
                 "InLiquidAction",
                 vec![Value::String(
-                    action.in_liquid_action.clone().unwrap_or_default(),
+                    action.in_liquid_action.clone().unwrap_or_default().into(),
                 )],
             ),
             (
                 "TurnAction",
                 vec![Value::String(
-                    action.turn_action.clone().unwrap_or_default(),
+                    action.turn_action.clone().unwrap_or_default().into(),
                 )],
             ),
             (
@@ -1642,7 +1642,7 @@ mod tests {
         );
         assert_eq!(
             reflection.get("Sound", 0),
-            Some(Value::String(String::new()))
+            Some(Value::String(String::new().into()))
         );
         assert_eq!(reflection.get("Directions", 0), Some(Value::Int(1)));
         assert_eq!(reflection.get("Step", 0), Some(Value::Int(1)));

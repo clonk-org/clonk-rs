@@ -292,7 +292,7 @@ impl DefCorePrimitive {
         match self {
             Self::Int(value) => Value::Int(value),
             Self::Bool(value) => Value::Bool(value),
-            Self::String(value) => Value::String(value),
+            Self::String(value) => Value::String(value.into()),
             Self::C4Id(value) => Value::C4Id(value),
             Self::Nil => Value::Nil,
         }
@@ -4603,7 +4603,7 @@ fn parse_command_request(
 
     let data_value = args.get(data_slot).unwrap_or(&Value::Nil);
     let data = match (id, data_value) {
-        (CommandId::Call, Value::String(text)) => CommandData::Text(text.clone()),
+        (CommandId::Call, Value::String(text)) => CommandData::Text(text.as_ref().to_owned()),
         (CommandId::Call, Value::Nil) => CommandData::Text(String::new()),
         (CommandId::Call, other) => {
             return Err(RuntimeError::new(format!(
@@ -4969,7 +4969,7 @@ fn on_message_board_answer(args: &[Value]) -> Result<Value, RuntimeError> {
         "OnMessageBoardAnswer",
         "player",
     )?;
-    let answer = parse_optional_string(args.get(2), "OnMessageBoardAnswer", "answer")?;
+    let answer = parse_optional_string_value(args.get(2), "OnMessageBoardAnswer", "answer")?;
 
     let removed = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -5312,7 +5312,7 @@ fn get_player_name(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
-        Ok(Value::String(player.name.clone()))
+        Ok(Value::String(player.name.clone().into()))
     })
 }
 
@@ -5355,7 +5355,9 @@ fn get_tagged_player_name(args: &[Value]) -> Result<Value, RuntimeError> {
                 | ((green + increment).min(255) << 8)
                 | (blue + increment).min(255);
         }
-        Ok(Value::String(format!("<c {color:x}>{}</c>", player.name)))
+        Ok(Value::String(
+            format!("<c {color:x}>{}</c>", player.name).into(),
+        ))
     })
 }
 
@@ -5471,7 +5473,8 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
                 player
                     .at_client_name
                     .clone()
-                    .unwrap_or_else(|| "Local".to_string()),
+                    .unwrap_or_else(|| "Local".to_string())
+                    .into(),
             ),
             "Index" => Value::Int(player.id),
             "ID" => Value::Int(player.player_info_id),
@@ -5528,7 +5531,7 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "CursorSelection" => Value::Int(player.control.cursor_selection),
             "CursorToggled" => Value::Int(player.control.cursor_toggled),
             "MessageStatus" => Value::Int(player.message_status),
-            "MessageBuf" => Value::String(player.message_buf.clone()),
+            "MessageBuf" => Value::String(player.message_buf.clone().into()),
             "CrewCreated" => Value::Int(player.crew_created),
             _ => Value::Nil,
         })
@@ -5894,7 +5897,7 @@ fn get_team_name(args: &[Value]) -> Result<Value, RuntimeError> {
             .teams()
             .iter()
             .find(|team| team.id == id)
-            .map_or(Value::Nil, |team| Value::String(team.name.clone())))
+            .map_or(Value::Nil, |team| Value::String(team.name.clone().into())))
     })
 }
 
@@ -6233,7 +6236,7 @@ fn set_plr_show_control(args: &[Value]) -> Result<Value, RuntimeError> {
     // to nil before FnStringPar turns them into the empty string
     // (C4AulExec.cpp:1370-1374; C4Script.cpp:78-81).
     let controls = match args.get(1) {
-        Some(Value::String(controls)) => controls.as_str(),
+        Some(Value::String(controls)) => controls.as_ref(),
         Some(Value::Nil | Value::Int(0) | Value::Bool(false)) | None => "",
         Some(other) => {
             return Err(RuntimeError::new(format!(
@@ -6415,9 +6418,15 @@ fn set_crew_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         }
 
-        match info.extra_data.iter_mut().find(|(slot, _)| slot == name) {
+        match info
+            .extra_data
+            .iter_mut()
+            .find(|(slot, _)| slot == name.as_ref())
+        {
             Some((_, value)) => *value = data.clone(),
-            None => info.extra_data.push((name.clone(), data.clone())),
+            None => info
+                .extra_data
+                .push((name.as_ref().to_owned(), data.clone())),
         }
         context
             .object_scope_mut(target)
@@ -6427,9 +6436,15 @@ fn set_crew_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(link) = link {
             let mut state = context.world.crew_info_state.borrow_mut();
             if let Some(entry) = state.entries.get_mut(&link) {
-                match entry.extra_data.iter_mut().find(|(slot, _)| slot == name) {
+                match entry
+                    .extra_data
+                    .iter_mut()
+                    .find(|(slot, _)| slot == name.as_ref())
+                {
                     Some((_, value)) => *value = data.clone(),
-                    None => entry.extra_data.push((name.clone(), data.clone())),
+                    None => entry
+                        .extra_data
+                        .push((name.as_ref().to_owned(), data.clone())),
                 }
             }
             for entries in state.idle.values_mut() {
@@ -6437,9 +6452,15 @@ fn set_crew_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
                     if *candidate != link {
                         continue;
                     }
-                    match entry.extra_data.iter_mut().find(|(slot, _)| slot == name) {
+                    match entry
+                        .extra_data
+                        .iter_mut()
+                        .find(|(slot, _)| slot == name.as_ref())
+                    {
                         Some((_, value)) => *value = data.clone(),
-                        None => entry.extra_data.push((name.clone(), data.clone())),
+                        None => entry
+                            .extra_data
+                            .push((name.as_ref().to_owned(), data.clone())),
                     }
                 }
             }
@@ -6447,7 +6468,7 @@ fn set_crew_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
         context.record_player_command(PlayerCommand::SetCrewExtraData {
             object_id: target,
             link,
-            name: name.clone(),
+            name: name.as_ref().to_owned(),
             value: data.clone(),
         });
         Ok(data)
@@ -6469,9 +6490,9 @@ fn set_plr_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
     if name.is_empty() {
         return Ok(Value::Nil);
     }
-    if !is_extra_data_identifier(name) {
+    if !is_extra_data_identifier(name.as_ref()) {
         tracing::warn!(
-            name,
+            name = %name,
             "SetPlrExtraData: ignoring invalid data name; only alphanumerics, _ and - are allowed"
         );
         return Ok(Value::Nil);
@@ -6492,13 +6513,19 @@ fn set_plr_extra_data(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(player) = context.player_state_mut(player_id) else {
             return Ok(Value::Nil);
         };
-        match player.extra_data.iter_mut().find(|(slot, _)| slot == name) {
+        match player
+            .extra_data
+            .iter_mut()
+            .find(|(slot, _)| slot == name.as_ref())
+        {
             Some((_, value)) => *value = data.clone(),
-            None => player.extra_data.push((name.clone(), data.clone())),
+            None => player
+                .extra_data
+                .push((name.as_ref().to_owned(), data.clone())),
         }
         context.record_player_command(PlayerCommand::SetExtraData {
             player_id,
-            name: name.clone(),
+            name: name.as_ref().to_owned(),
             value: data.clone(),
         });
         Ok(data)
@@ -6993,16 +7020,20 @@ fn get_needed_mat_str(args: &[Value]) -> Result<Value, RuntimeError> {
                 context
                     .world
                     .needed_material_strings
-                    .format_none(&target_name),
+                    .format_none(&target_name)
+                    .into(),
             ))
         } else {
-            Ok(Value::String(format!(
-                "{}{missing}",
-                context
-                    .world
-                    .needed_material_strings
-                    .format_need(&target_name)
-            )))
+            Ok(Value::String(
+                format!(
+                    "{}{missing}",
+                    context
+                        .world
+                        .needed_material_strings
+                        .format_need(&target_name)
+                )
+                .into(),
+            ))
         }
     })
 }
@@ -7112,7 +7143,9 @@ fn material_name(args: &[Value]) -> Result<Value, RuntimeError> {
                     .and_then(|materials| materials.get_by_id(material))
             })
             .map(|material| material.name().to_string());
-        Ok(name.map(Value::String).unwrap_or(Value::Nil))
+        Ok(name
+            .map(|name| Value::String(name.into()))
+            .unwrap_or(Value::Nil))
     })
 }
 
@@ -7287,7 +7320,7 @@ fn get_material_val(args: &[Value]) -> Result<Value, RuntimeError> {
             .and_then(|material| material.core_entry(&entry, entry_index.max(0) as usize))
             .map(|value| match value.parse::<i32>() {
                 Ok(number) => Value::Int(number),
-                Err(_) => Value::String(value.to_string()),
+                Err(_) => Value::String(value.to_string().into()),
             })
             .unwrap_or(Value::Nil))
     })
@@ -7308,7 +7341,7 @@ fn object_set_action(args: &[Value]) -> Result<Value, RuntimeError> {
     else {
         return Ok(Value::Bool(false));
     };
-    let Some(action) = parse_optional_string(args.get(1), "ObjectSetAction", "action")? else {
+    let Some(action) = parse_optional_string_value(args.get(1), "ObjectSetAction", "action")? else {
         return Ok(Value::Bool(false)); // !szAction
     };
     let mut forwarded: Vec<Value> = vec![Value::String(action)];
@@ -7682,7 +7715,7 @@ fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
                         .map(Value::C4Id)
                         .unwrap_or(Value::Nil)
                 } else {
-                    Value::String(portrait.name)
+                    Value::String(portrait.name.into())
                 }
             })
             .unwrap_or(Value::Nil))
@@ -7950,7 +7983,7 @@ fn active_object_id() -> Option<ObjectId> {
 fn c4id_text_of(value: &Value) -> String {
     match value {
         Value::C4Id(id) => lc_script::c4_id_text(id),
-        Value::String(id) if !id.is_empty() => id.clone(),
+        Value::String(id) if !id.is_empty() => id.as_ref().to_owned(),
         Value::Int(raw) => c4id_to_definition(*raw).unwrap_or_else(|| "NONE".to_string()),
         _ => "NONE".to_string(),
     }
@@ -8369,7 +8402,11 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let try_fling = |action: &str, velocity: FixedVec2| -> bool {
         let action_set = matches!(
-            call_world_object_function(target, "SetAction", &[Value::String(action.to_string())]),
+            call_world_object_function(
+                target,
+                "SetAction",
+                &[Value::String(action.to_string().into())],
+            ),
             Some(Ok(value)) if value.as_bool()
         );
         if !action_set {
@@ -11067,7 +11104,7 @@ fn report_buy_error(
     message: String,
     target: Option<ObjectId>,
 ) -> Result<(), RuntimeError> {
-    let _ = player_message(&[Value::Int(player), Value::String(message)])?;
+    let _ = player_message(&[Value::Int(player), Value::String(message.into())])?;
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             context
@@ -11555,7 +11592,7 @@ fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
     if attached {
         let _ = object_set_action(&[
             object_reference_value(item),
-            Value::String("Idle".to_string()),
+            Value::String("Idle".into()),
         ])?;
     }
 
@@ -12151,7 +12188,9 @@ fn get_league(args: &[Value]) -> Result<Value, RuntimeError> {
         if section.is_empty() {
             Ok(Value::Nil)
         } else {
-            Ok(Value::String(lc_script::c4_string_from_bytes(section)))
+            Ok(Value::String(
+                lc_script::c4_string_from_bytes(section).into(),
+            ))
         }
     })
 }
@@ -12204,7 +12243,9 @@ fn get_league_progress_data(args: &[Value]) -> Result<Value, RuntimeError> {
         else {
             return Ok(Value::Nil);
         };
-        Ok(Value::String(lc_script::c4_string_from_bytes(bytes)))
+        Ok(Value::String(
+            lc_script::c4_string_from_bytes(bytes).into(),
+        ))
     })
 }
 
@@ -12227,7 +12268,7 @@ fn parse_native_c4_string_argument(
     }
     match value {
         Value::Nil => Ok(None),
-        Value::String(text) => Ok(Some(text.clone())),
+        Value::String(text) => Ok(Some(text.as_ref().to_owned())),
         other => Err(RuntimeError::new(format!(
             "{function}: expected string for {parameter}, got {}",
             other.type_name()
@@ -13099,11 +13140,11 @@ fn parse_optional_u32(
     Ok(parse_optional_i32(value, function, parameter)?.map(|raw| raw as u32))
 }
 
-fn parse_optional_string(
+fn parse_optional_string_value(
     value: Option<&Value>,
     function: &str,
     parameter: &str,
-) -> Result<Option<String>, RuntimeError> {
+) -> Result<Option<lc_script::C4StringValue>, RuntimeError> {
     match value {
         None => Ok(None),
         Some(Value::Nil) => Ok(None),
@@ -13120,6 +13161,15 @@ fn parse_optional_string(
             other.type_name()
         ))),
     }
+}
+
+fn parse_optional_string(
+    value: Option<&Value>,
+    function: &str,
+    parameter: &str,
+) -> Result<Option<String>, RuntimeError> {
+    Ok(parse_optional_string_value(value, function, parameter)?
+        .map(|text| text.as_ref().to_owned()))
 }
 
 /// FnSetScoreboardData (C4Script.cpp:5881-5884): script order is row then
@@ -13180,7 +13230,7 @@ fn get_scoreboard_string(args: &[Value]) -> Result<Value, RuntimeError> {
                     .cell_by_key(column, row)
                     .and_then(|cell| cell.text().map(str::to_string))
             })
-            .map(Value::String)
+            .map(|text| Value::String(text.into()))
             .unwrap_or(Value::Nil)
     }))
 }
@@ -15991,7 +16041,7 @@ fn format_c4id_string(value: &Value, function: &str) -> Result<String, RuntimeEr
         // A literal id value (FnFormat %i via C4VID).
         Value::C4Id(id) if !id.is_empty() => Ok(render_c4id(cast_c4id_payload(id) as i32)),
         Value::C4Id(_) => Ok("NONE".to_string()),
-        Value::String(text) if !text.is_empty() => Ok(text.clone()),
+        Value::String(text) if !text.is_empty() => Ok(text.as_ref().to_owned()),
         Value::String(_) | Value::Nil => Ok("NONE".to_string()),
         other => Err(RuntimeError::new(format!(
             "{function}: expected C4ID-compatible value for format placeholder, got {}",
@@ -16230,7 +16280,7 @@ fn format_script_string_with_context(
                 })?;
                 arg_index += 1;
                 let raw = match param {
-                    Value::String(text) => text.clone(),
+                    Value::String(text) => text.as_ref().to_owned(),
                     Value::Nil => "(null)".to_string(),
                     other => {
                         return Err(RuntimeError::new(format!(
@@ -16303,7 +16353,7 @@ fn parse_custom_message_decoration(
 
 fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
     let message = match args.first().unwrap_or(&Value::Nil) {
-        Value::String(text) => Some(text.clone()),
+        Value::String(text) => Some(text.as_ref().to_owned()),
         Value::Nil => None,
         other => {
             return Err(RuntimeError::new(format!(
@@ -16341,7 +16391,7 @@ fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let portrait = match args.get(7) {
         Some(Value::Nil | Value::Int(0) | Value::Bool(false)) | None => None,
-        Some(Value::String(name)) if !name.is_empty() => Some(name.clone()),
+        Some(Value::String(name)) if !name.is_empty() => Some(name.as_ref().to_owned()),
         Some(other) => {
             return Err(RuntimeError::new(format!(
                 "CustomMessage: expected string or nil for portrait, got {}",
@@ -16459,7 +16509,7 @@ enum LogLevel {
 
 fn log_internal(function: &str, args: &[Value], level: LogLevel) -> Result<Value, RuntimeError> {
     let format_str = match args.first().unwrap_or(&Value::Nil) {
-        Value::String(text) => text.clone(),
+        Value::String(text) => text.as_ref().to_owned(),
         Value::Nil => String::new(),
         other => {
             return Err(RuntimeError::new(format!(
@@ -17279,7 +17329,7 @@ fn get_index_of(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
 
 fn format_string(args: &[Value]) -> Result<Value, RuntimeError> {
     let format_str = match args.first().unwrap_or(&Value::Nil) {
-        Value::String(text) => text.clone(),
+        Value::String(text) => text.as_ref().to_owned(),
         Value::Nil => String::new(),
         other => {
             return Err(RuntimeError::new(format!(
@@ -17291,12 +17341,12 @@ fn format_string(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let format_args = if args.len() > 1 { &args[1..] } else { &[] };
     let formatted = format_script_string("Format", &format_str, format_args)?;
-    Ok(Value::String(formatted))
+    Ok(Value::String(formatted.into()))
 }
 
 fn message(args: &[Value]) -> Result<Value, RuntimeError> {
     let raw_message = match args.first().unwrap_or(&Value::Nil) {
-        Value::String(text) => text.clone(),
+        Value::String(text) => text.as_ref().to_owned(),
         Value::Nil => return Ok(Value::Bool(false)),
         other => {
             return Err(RuntimeError::new(format!(
@@ -19476,7 +19526,7 @@ fn s_wildcard_match_ex(string: &str, wildcard: &str) -> bool {
 fn wildcard_match(args: &[Value]) -> Result<Value, RuntimeError> {
     let string_par = |value: Option<&Value>, par: &str| -> Result<String, RuntimeError> {
         match value {
-            Some(Value::String(text)) => Ok(text.clone()),
+            Some(Value::String(text)) => Ok(text.as_ref().to_owned()),
             Some(Value::Nil) | Some(Value::Int(0)) | Some(Value::Bool(false)) | None => {
                 Ok(String::new())
             }
@@ -19503,7 +19553,7 @@ fn effect_name_filter<'a>(
     value: &'a Value,
 ) -> Result<Option<&'a str>, RuntimeError> {
     match value {
-        Value::String(name) if !name.is_empty() => Ok(Some(name.as_str())),
+        Value::String(name) if !name.is_empty() => Ok(Some(name.as_ref())),
         Value::String(_) | Value::Nil | Value::Int(0) | Value::Bool(false) => Ok(None),
         other => Err(RuntimeError::new(format!(
             "{function}: expected string or nil for name, got {}",
@@ -19865,7 +19915,7 @@ fn check_effect_with_policy(
         }
         let function = format!("Fx{}Effect", checker.name);
         let mut call_args = vec![
-            Value::String(name.clone()),
+            Value::String(name.clone().into()),
             target.clone(),
             Value::Int(checker.number),
             Value::Nil,
@@ -19904,7 +19954,7 @@ fn check_effect_with_policy(
     let mut add_args = vec![
         target.clone(),
         Value::Int(acceptor.number),
-        Value::String(name),
+        Value::String(name.into()),
         Value::Int(interval),
     ];
     add_args.extend(values);
@@ -20173,7 +20223,7 @@ fn add_effect_constructor(
 
     if (global_scope || live_object_scope) && priority != 1 {
         let mut check_args = vec![
-            Value::String(effect_name.clone()),
+            Value::String(effect_name.clone().into()),
             for_object.clone(),
             Value::Int(priority),
             Value::Int(interval),
@@ -20469,7 +20519,7 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|effect| match query {
             // 0: number (C4Script.cpp:5481 `C4VInt(pEffect->iNumber)`)
             0 => Value::Int(effect.number),
-            1 => Value::String(effect.name.clone()),
+            1 => Value::String(effect.name.clone().into()),
             2 => Value::Int(effect.priority.abs()),
             3 => Value::Int(effect.interval),
             4 => effect
@@ -20885,7 +20935,7 @@ pub(crate) fn object_effect_info_lines(target: ObjectId, effects: &[EffectState]
             continue;
         };
         match result {
-            Ok(Value::String(line)) if !line.is_empty() => lines.push(line),
+            Ok(Value::String(line)) if !line.is_empty() => lines.push(line.into_string()),
             Ok(value) if !value.as_bool() => {}
             Ok(value) => tracing::warn!(
                 effect = effect.name,
@@ -21012,7 +21062,7 @@ fn legacy_s_equal(args: &[Value]) -> Result<Value, RuntimeError> {
         return Err(RuntimeError::new("SEqual expects at most 2 arguments"));
     }
     let string = |value: &Value, parameter: &str| match value {
-        Value::String(value) => Ok(value.clone()),
+        Value::String(value) => Ok(value.as_ref().to_owned()),
         Value::Nil => Ok(String::new()),
         other => Err(RuntimeError::new(format!(
             "SEqual: expected string for {parameter}, got {}",
@@ -21157,7 +21207,7 @@ fn async_random(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn music(args: &[Value]) -> Result<Value, RuntimeError> {
     let song = match args.first().unwrap_or(&Value::Nil) {
-        Value::String(name) => Some(name.clone()),
+        Value::String(name) => Some(name.as_ref().to_owned()),
         Value::Nil | Value::Int(0) => None,
         other => {
             return Err(RuntimeError::new(format!(
@@ -23004,7 +23054,7 @@ fn get_name(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(definition) = def_id {
             return Ok(context
                 .definition_metadata(&definition)
-                .map(|metadata| Value::String(metadata.name.clone()))
+                .map(|metadata| Value::String(metadata.name.clone().into()))
                 .unwrap_or(Value::Nil));
         }
         let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
@@ -23013,7 +23063,7 @@ fn get_name(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         Ok(context
             .object_effective_name(target)
-            .map(Value::String)
+            .map(|name| Value::String(name.into()))
             .unwrap_or(Value::Nil))
     })
 }
@@ -23041,7 +23091,7 @@ fn get_desc(args: &[Value]) -> Result<Value, RuntimeError> {
         Ok(definition
             .as_deref()
             .and_then(|id| context.world.definition_description(id))
-            .map(|description| Value::String(description.to_owned()))
+            .map(|description| Value::String(description.to_owned().into()))
             .unwrap_or(Value::Nil))
     })
 }
@@ -23268,7 +23318,9 @@ fn physical_name_argument(
     fn_name: &str,
 ) -> Result<Option<String>, RuntimeError> {
     match args.get(index) {
-        Some(Value::String(name)) if !name.is_empty() => Ok(Some(name.clone())),
+        Some(Value::String(name)) if !name.is_empty() => {
+            Ok(Some(name.as_ref().to_owned()))
+        }
         Some(Value::String(_)) | Some(Value::Nil) | None => Ok(None),
         Some(other) => Err(RuntimeError::new(format!(
             "{fn_name}: expected string for physical name, got {}",
@@ -24142,7 +24194,7 @@ fn get_plr_control_name(args: &[Value]) -> Result<Value, RuntimeError> {
                 context.world.control_key_name(control_set, control, short)
             })
             .unwrap_or_default();
-        Ok(Value::String(name.to_string()))
+        Ok(Value::String(name.to_string().into()))
     })
 }
 
@@ -24891,7 +24943,7 @@ pub(crate) fn incinerate_target(
     // global script FxFireStart before the native engine fallback.
     let result = add_effect_constructor(
         &[
-            Value::String(crate::C4FX_FIRE.to_string()),
+            Value::String(crate::C4FX_FIRE.into()),
             object_reference_value(target),
             Value::Int(crate::C4FX_FIRE_PRIORITY),
             Value::Int(crate::C4FX_FIRE_TIMER_INTERVAL),
@@ -25556,7 +25608,7 @@ fn fx_fire_stop(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FnFxFireInfo (C4Effect.cpp:794-797; AddFunc C4Script.cpp:6997): the
 /// burning status line (IDS_OBJ_BURNS).
 fn fx_fire_info(_args: &[Value]) -> Result<Value, RuntimeError> {
-    Ok(Value::String("{{FLAM}} The object burns.".to_string()))
+    Ok(Value::String("{{FLAM}} The object burns.".into()))
 }
 
 /// FnIncinerate (C4Script.cpp:245-252): the target defaults to the
@@ -26461,7 +26513,7 @@ fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
         // 3 C4VInt(Ty), 4 Target2, 5 C4Value(Data, C4V_Any) — a zero
         // int Data reads nil in C++.
         match element {
-            0 => Ok(Value::String(view.name.clone())),
+            0 => Ok(Value::String(view.name.clone().into())),
             1 => Ok(view
                 .target
                 .map(object_reference_value)
@@ -26517,7 +26569,7 @@ fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
                     } else {
                         action_name
                     };
-                    return Ok(Value::String(resolved.to_string()));
+                    return Ok(Value::String(resolved.to_string().into()));
                 }
             }
 
@@ -26527,7 +26579,7 @@ fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
                 } else {
                     other.action_name.as_str()
                 };
-                return Ok(Value::String(resolved.to_string()));
+                return Ok(Value::String(resolved.to_string().into()));
             }
 
             return Ok(Value::Nil);
@@ -26544,7 +26596,7 @@ fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
         } else {
             action_name
         };
-        Ok(Value::String(resolved.to_string()))
+        Ok(Value::String(resolved.to_string().into()))
     })
 }
 
@@ -26764,7 +26816,7 @@ fn get_procedure(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         let procedure_value = |name: Option<&str>| match name {
-            Some(procedure) => Value::String(procedure.to_string()),
+            Some(procedure) => Value::String(procedure.to_string().into()),
             None => Value::Nil,
         };
 
@@ -27917,7 +27969,7 @@ fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
     if dive {
-        let set = set_action(&[Value::String("Dive".to_string())])?;
+        let set = set_action(&[Value::String("Dive".into())])?;
         if matches!(set, Value::Bool(true)) {
             HOST_CONTEXT.with(|cell| {
                 if let Some(object) = cell
@@ -27959,7 +28011,7 @@ fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
     // with its Abort/Start calls, then the launch velocities. A failed
     // SetAction (no Jump in the ActMap) returns false without touching
     // the dirs.
-    let set = set_action(&[Value::String("Jump".to_string())])?;
+    let set = set_action(&[Value::String("Jump".into())])?;
     if !matches!(set, Value::Bool(true)) {
         return Ok(Value::Bool(false));
     }
@@ -28701,7 +28753,7 @@ fn get_texture(args: &[Value]) -> Result<Value, RuntimeError> {
             .get(texture_index)
             .and_then(Option::as_deref)
             .unwrap_or_default();
-        Ok(Value::String(texture.to_string()))
+        Ok(Value::String(texture.to_string().into()))
     })
 }
 
@@ -30616,7 +30668,9 @@ impl FindCondition {
             22 => FindCondition::Category(arg_i32(1)),
             // C4FO_Action
             30 => match data.get(1) {
-                Some(Value::String(name)) => FindCondition::Action(name.clone()),
+                Some(Value::String(name)) => {
+                    FindCondition::Action(name.as_ref().to_owned())
+                }
                 _ => return ParsedCriterion::None,
             },
             // C4FO_ActionTarget (index clamped to 0..=1, C4FindObject.cpp:138-144)
@@ -30637,7 +30691,7 @@ impl FindCondition {
             // par 0, capped at 10 pars (SetPar, C4FindObject.cpp:645-651)
             60 => match data.get(1) {
                 Some(Value::String(name)) => FindCondition::Func {
-                    name: name.clone(),
+                    name: name.as_ref().to_owned(),
                     pars: data.iter().skip(2).take(10).cloned().collect(),
                 },
                 _ => return ParsedCriterion::None,
@@ -31030,7 +31084,7 @@ impl SortCriterion {
             // (C4FindObject.cpp:743-755); pars capped at 10
             160 => match data.get(1) {
                 Some(Value::String(name)) => SortCriterion::Func {
-                    name: name.clone(),
+                    name: name.as_ref().to_owned(),
                     pars: data.iter().skip(2).take(10).cloned().collect(),
                 },
                 _ => return None,
@@ -32085,7 +32139,7 @@ fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
             .flatten();
         drop(borrow);
         if let Some(turn_action) = turn_action {
-            let _ = set_action(&[Value::String(turn_action)])?;
+            let _ = set_action(&[Value::String(turn_action.into())])?;
         }
         HOST_CONTEXT.with(|cell| {
             let mut borrow = cell.borrow_mut();
@@ -32323,7 +32377,7 @@ fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 fn command_data_value(data: &CommandData) -> Value {
     match data {
         CommandData::Integer(value) => Value::Int(*value),
-        CommandData::Text(value) => Value::String(value.clone()),
+        CommandData::Text(value) => Value::String(value.clone().into()),
         CommandData::None => Value::Nil,
     }
 }
@@ -34524,7 +34578,7 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
 
     if let Some(command) = finished {
         let callback_args = [
-            Value::String(command.name.clone()),
+            Value::String(command.name.clone().into()),
             command
                 .target
                 .map(object_reference_value)
@@ -34654,7 +34708,7 @@ fn set_command_callback_args(request: &CommandRequest, tx: Value) -> [Value; 6] 
         CommandData::Text(_) | CommandData::None => 0,
     };
     [
-        Value::String(request.id.to_name().to_string()),
+        Value::String(request.id.to_name().to_string().into()),
         request
             .target
             .map(object_reference_value)
@@ -38094,7 +38148,7 @@ fn find_construction_site(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn create_particle(args: &[Value]) -> Result<Value, RuntimeError> {
     let definition = match args.first().unwrap_or(&Value::Nil) {
-        Value::String(name) if !name.is_empty() => name.clone(),
+        Value::String(name) if !name.is_empty() => name.as_ref().to_owned(),
         Value::String(_) | Value::Nil => return Ok(Value::Bool(false)),
         other => {
             return Err(RuntimeError::new(format!(
@@ -38227,7 +38281,7 @@ fn create_particle(args: &[Value]) -> Result<Value, RuntimeError> {
 /// CastBackParticles. Args: name, amount, level, x, y, a0, a1, b0, b1, obj.
 fn cast_a_particles(args: &[Value], back: bool, fn_name: &str) -> Result<Value, RuntimeError> {
     let definition = match args.first() {
-        Some(Value::String(name)) if !name.is_empty() => name.clone(),
+        Some(Value::String(name)) if !name.is_empty() => name.as_ref().to_owned(),
         Some(Value::String(_)) | Some(Value::Nil) | None => return Ok(Value::Bool(false)),
         Some(other) => {
             return Err(RuntimeError::new(format!(
@@ -38321,7 +38375,9 @@ fn cast_back_particles(args: &[Value]) -> Result<Value, RuntimeError> {
 /// a named def that is not loaded → false.
 fn push_particles(args: &[Value]) -> Result<Value, RuntimeError> {
     let definition = match args.first() {
-        Some(Value::String(name)) if !name.is_empty() => Some(name.clone()),
+        Some(Value::String(name)) if !name.is_empty() => {
+            Some(name.as_ref().to_owned())
+        }
         Some(Value::String(_)) | Some(Value::Nil) | None => None,
         Some(other) => {
             return Err(RuntimeError::new(format!(
@@ -38366,7 +38422,9 @@ fn clear_particles(args: &[Value]) -> Result<Value, RuntimeError> {
 
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::String(name) if !name.is_empty() => definition = Some(name.clone()),
+            Value::String(name) if !name.is_empty() => {
+                definition = Some(name.as_ref().to_owned())
+            }
             Value::String(_) | Value::Nil => definition = None,
             other => {
                 return Err(RuntimeError::new(format!(
@@ -38786,7 +38844,7 @@ fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
     // A null pGfxName restores the DEFAULT graphics (FnSetGraphics,
     // C4Script.cpp:4378).
     let graphics_name = match args.first().unwrap_or(&Value::Nil) {
-        Value::String(name) if !name.is_empty() => Some(name.clone()),
+        Value::String(name) if !name.is_empty() => Some(name.as_ref().to_owned()),
         Value::String(_) | Value::Nil => None,
         // Falsy parameters reset to nil before the type check
         // (C4AulExec.cpp:1372): SetGraphics(0) selects the default graphics.
@@ -38850,7 +38908,7 @@ fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
     let action_name = if let Some(arg) = args.get(index) {
         index += 1;
         match arg {
-            Value::String(name) if !name.is_empty() => Some(name.clone()),
+            Value::String(name) if !name.is_empty() => Some(name.as_ref().to_owned()),
             Value::String(_) | Value::Nil | Value::Int(0) | Value::Bool(false) => None,
             other => {
                 return Err(RuntimeError::new(format!(
@@ -40025,23 +40083,23 @@ fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
                 },
             },
         };
-        if !library.is_declared(&action) {
+        if !library.is_declared(action.as_ref()) {
             return Ok(Value::Nil);
         }
-        if let Some(reflection) = library.reflection(&action) {
+        if let Some(reflection) = library.reflection(action.as_ref()) {
             return Ok(reflection
-                .get(entry.as_str(), entry_index)
+                .get(entry.as_ref(), entry_index)
                 .unwrap_or(Value::Nil));
         }
-        let Some(spec) = library.specs().get(&action) else {
+        let Some(spec) = library.specs().get(action.as_ref()) else {
             return Ok(Value::Nil);
         };
 
         // Synthetic fixtures have no resource-backed exact reflection. Keep
         // their historical modeled values and derive the newly covered table
         // entries from ActionSpec/graphics with C++ defaults.
-        let graphics = graphics.and_then(|graphics| graphics.get(&action));
-        if entry == "Facet" {
+        let graphics = graphics.and_then(|graphics| graphics.get(action.as_ref()));
+        if entry.as_ref() == "Facet" {
             let facet = graphics.and_then(|graphics| graphics.facet.as_ref());
             return Ok(match entry_index {
                 0 => Value::Int(facet.map_or(0, |facet| facet.x)),
@@ -40057,9 +40115,9 @@ fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         }
 
-        Ok(match entry.as_str() {
+        Ok(match entry.as_ref() {
             "Name" => Value::String(action.clone()),
-            "Procedure" => Value::String(spec.procedure.clone().unwrap_or_default()),
+            "Procedure" => Value::String(spec.procedure.clone().unwrap_or_default().into()),
             "Directions" => Value::Int(spec.directions.unwrap_or(1)),
             "FlipDir" => {
                 Value::Int(graphics.and_then(|graphics| graphics.flip_dir).unwrap_or(0))
@@ -40076,18 +40134,20 @@ fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "FacetTargetStretch" => Value::Int(i32::from(
                 graphics.is_some_and(|graphics| graphics.facet_target_stretch),
             )),
-            "NextAction" => Value::String(spec.next.clone().unwrap_or_default()),
-            "StartCall" => Value::String(spec.start_call.clone().unwrap_or_default()),
-            "EndCall" => Value::String(spec.end_call.clone().unwrap_or_default()),
-            "AbortCall" => Value::String(spec.abort_call.clone().unwrap_or_default()),
-            "PhaseCall" => Value::String(spec.phase_call.clone().unwrap_or_default()),
-            "Sound" => Value::String(String::new()),
+            "NextAction" => Value::String(spec.next.clone().unwrap_or_default().into()),
+            "StartCall" => Value::String(spec.start_call.clone().unwrap_or_default().into()),
+            "EndCall" => Value::String(spec.end_call.clone().unwrap_or_default().into()),
+            "AbortCall" => Value::String(spec.abort_call.clone().unwrap_or_default().into()),
+            "PhaseCall" => Value::String(spec.phase_call.clone().unwrap_or_default().into()),
+            "Sound" => Value::String(String::new().into()),
             "NoOtherAction" => Value::Int(i32::from(spec.no_other_action)),
             "ObjectDisabled" => Value::Int(i32::from(spec.disabled)),
             "DigFree" => Value::Int(spec.dig_free.unwrap_or(0)),
             "EnergyUsage" => Value::Int(spec.energy_usage),
-            "InLiquidAction" => Value::String(spec.in_liquid_action.clone().unwrap_or_default()),
-            "TurnAction" => Value::String(spec.turn_action.clone().unwrap_or_default()),
+            "InLiquidAction" => {
+                Value::String(spec.in_liquid_action.clone().unwrap_or_default().into())
+            }
+            "TurnAction" => Value::String(spec.turn_action.clone().unwrap_or_default().into()),
             "Reverse" => Value::Int(i32::from(graphics.is_some_and(|graphics| graphics.reverse))),
             "Step" => Value::Int(spec.step.unwrap_or(1)),
             _ => Value::Nil,
@@ -40122,7 +40182,7 @@ impl ObjectValueReflection {
     fn push_fixed(&mut self, path: &[&'static str], value: C4Fixed) {
         // C4Fixed::CompileFunc emits its format character before the raw
         // signed 16.16 payload (Fixed.h:248-265).
-        self.push(path, Value::String("F".to_string()));
+        self.push(path, Value::String("F".into()));
         self.push(path, Value::Int(value.val()));
     }
 
@@ -40163,15 +40223,9 @@ fn push_reflected_c4value(
         Value::C4Id(value) => ("I", cast_c4id_payload(value) as i32),
         Value::Object(value) if *value == 0 => ("A", 0),
         Value::Object(value) => ("O", *value as i32),
-        Value::String(_) => {
-            // C4Value persists the script string-table enumeration number,
-            // not its text. Rust values do not retain that identity/cache;
-            // -1 is C4String's runtime value before EnumStrings. Loaded
-            // string-table IDs require a future identity-bearing value model.
-            ("S", -1)
-        }
+        Value::String(value) => ("S", value.enum_id()),
         Value::Array(values) => {
-            reflection.push(path, Value::String("a".to_string()));
+            reflection.push(path, Value::String("a".into()));
             reflection.push(path, Value::Int(values.len() as i32));
             for value in values {
                 push_reflected_c4value(reflection, path, value);
@@ -40179,7 +40233,7 @@ fn push_reflected_c4value(
             return;
         }
         Value::Proplist(values) => {
-            reflection.push(path, Value::String("m".to_string()));
+            reflection.push(path, Value::String("m".into()));
             reflection.push(path, Value::Int(values.len() as i32));
             for (key, value) in values {
                 push_reflected_c4value(reflection, path, key);
@@ -40188,7 +40242,7 @@ fn push_reflected_c4value(
             return;
         }
     };
-    reflection.push(path, Value::String(kind.to_string()));
+    reflection.push(path, Value::String(kind.to_string().into()));
     reflection.push(path, Value::Int(payload));
 }
 
@@ -40335,7 +40389,7 @@ fn reflect_object_values(
             .unwrap_or(Value::Nil),
     );
     if let Some(name) = context.object_custom_name(target) {
-        reflection.push(&object_path("Name"), Value::String(name));
+        reflection.push(&object_path("Name"), Value::String(name.into()));
     }
     reflection.push(&object_path("Number"), Value::Int(target.as_u64() as i32));
     reflection.push(
@@ -40731,7 +40785,7 @@ fn reflect_object_values(
                 .map(|object| object.action_name.clone())
         })
         .unwrap_or_default();
-    reflection.push(&object_path("Action"), Value::String(action_name));
+    reflection.push(&object_path("Action"), Value::String(action_name.into()));
     reflection.push(
         &object_path("Dir"),
         Value::Int(
@@ -40864,7 +40918,10 @@ fn reflect_object_values(
         Value::Int(local_names.len() as i32),
     );
     for name in &local_names {
-        reflection.push(&object_path("LocalNamed"), Value::String(name.clone()));
+        reflection.push(
+            &object_path("LocalNamed"),
+            Value::String(name.clone().into()),
+        );
         push_reflected_c4value(
             &mut reflection,
             &object_path("LocalNamed"),
@@ -40915,7 +40972,7 @@ fn reflect_object_values(
     );
     reflection.push(
         &object_path("Graphics"),
-        Value::String(graphics_name.to_string()),
+        Value::String(graphics_name.to_string().into()),
     );
 
     // PhysicalTemporary follows the Object root as a sibling section.
@@ -41126,7 +41183,7 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
                 Value::Int(i32::try_from(info.extra_data.len()).unwrap_or(i32::MAX)),
             );
             for (name, value) in &info.extra_data {
-                reflection.push(&path, Value::String(name.clone()));
+                reflection.push(&path, Value::String(name.clone().into()));
                 push_reflected_c4value(&mut reflection, &path, value);
             }
             return Ok(reflection
@@ -41139,15 +41196,17 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
         Ok(match entry.as_str() {
             "id" if info.definition_id.as_str().is_empty() => Value::Nil,
             "id" => Value::C4Id(info.definition_id.as_str().to_string()),
-            "Name" => Value::String(info.name.clone()),
+            "Name" => Value::String(info.name.clone().into()),
             "DeathMessage" => Value::String(
-                active_death_message(&info.death_message).unwrap_or_default(),
+                active_death_message(&info.death_message)
+                    .unwrap_or_default()
+                    .into(),
             ),
-            "PortraitFile" => Value::String(info.core.portrait_file.clone()),
+            "PortraitFile" => Value::String(info.core.portrait_file.clone().into()),
             "Rank" => Value::Int(info.rank),
-            "RankName" => Value::String(info.rank_name.clone()),
-            "NextRankName" => Value::String(info.core.next_rank_name.clone()),
-            "TypeName" => Value::String(info.core.type_name.clone()),
+            "RankName" => Value::String(info.rank_name.clone().into()),
+            "NextRankName" => Value::String(info.core.next_rank_name.clone().into()),
+            "TypeName" => Value::String(info.core.type_name.clone().into()),
             "Participation" => Value::Int(info.participation),
             "Experience" => Value::Int(info.experience),
             "NextRankExp" => Value::Int(info.core.next_rank_exp),
@@ -41231,7 +41290,7 @@ fn get_obj_height(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn get_obj_dimension(target: Option<&Value>, entry: &str) -> Result<Value, RuntimeError> {
     get_object_val(&[
-        Value::String(entry.to_string()),
+        Value::String(entry.to_string().into()),
         Value::Nil,
         target.cloned().unwrap_or(Value::Nil),
     ])
@@ -43620,13 +43679,7 @@ fn value_to_effect_var(value: &Value) -> EffectVarValue {
             let vars = entries.iter().map(value_to_effect_var).collect();
             EffectVarValue::Array(vars)
         }
-        Value::Proplist(map) => {
-            let entries = map
-                .iter()
-                .map(|(key, value)| (key.clone(), value_to_effect_var(value)))
-                .collect();
-            EffectVarValue::Proplist(entries)
-        }
+        Value::Proplist(map) => EffectVarValue::Proplist(map.clone()),
         Value::Nil => EffectVarValue::Nil,
     }
 }
@@ -43643,13 +43696,7 @@ pub(crate) fn effect_var_to_value(value: &EffectVarValue) -> Value {
             let vars = entries.iter().map(effect_var_to_value).collect();
             Value::Array(vars)
         }
-        EffectVarValue::Proplist(map) => {
-            let mut entries = ValueMap::with_capacity(map.len());
-            for (key, value) in map {
-                entries.insert_key(key.clone(), effect_var_to_value(value));
-            }
-            Value::Proplist(entries)
-        }
+        EffectVarValue::Proplist(map) => Value::Proplist(map.clone()),
         EffectVarValue::Nil => Value::Nil,
     }
 }
@@ -50566,7 +50613,7 @@ mod tests {
 
         for pointer in [
             Value::Object(7),
-            Value::String(String::new()),
+            Value::String(String::new().into()),
             Value::Array(Vec::new()),
             Value::Proplist(ValueMap::new()),
         ] {
@@ -51529,7 +51576,7 @@ mod tests {
         let cases = [
             Vec::new(),
             vec![Value::Nil],
-            vec![Value::String(String::new())],
+            vec![Value::String(String::new().into())],
             vec![Value::String("Unknown".into()), Value::Int(3)],
         ];
         for args in cases {
@@ -51622,7 +51669,7 @@ mod tests {
         let world = HostWorldContext::default().with_control_host(true, Rc::clone(&updates));
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             create_script_player(&[
-                Value::String("Bot".to_string()),
+                Value::String("Bot".to_string().into()),
                 Value::Int(0xff44_5566_u32 as i32),
                 Value::Int(2),
                 Value::Int(15),
@@ -51658,7 +51705,7 @@ mod tests {
 
     #[test]
     fn create_script_player_validates_name_before_the_control_host_gate() {
-        for name in [Value::Nil, Value::String(String::new())] {
+        for name in [Value::Nil, Value::String(String::new().into())] {
             let updates = Rc::new(RefCell::new(Vec::new()));
             let world = HostWorldContext::default().with_control_host(true, Rc::clone(&updates));
             let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -51671,7 +51718,7 @@ mod tests {
         let updates = Rc::new(RefCell::new(Vec::new()));
         let world = HostWorldContext::default().with_control_host(false, Rc::clone(&updates));
         let (result, _) = with_effect_context(None, &[], world, 1, || {
-            create_script_player(&[Value::String("Remote Bot".to_string())])
+            create_script_player(&[Value::String("Remote Bot".to_string().into())])
         });
         assert_eq!(result.expect("peer no-op succeeds"), Value::Bool(true));
         assert!(updates.borrow().is_empty());
@@ -52044,7 +52091,7 @@ mod tests {
         let (result, outcome) = with_effect_context(None, &[], world, 1, || {
             assert_eq!(add_evaluation_data(&[])?, Value::Bool(false));
             assert_eq!(
-                add_evaluation_data(&[Value::String(String::new()), Value::Int(41)])?,
+                add_evaluation_data(&[Value::String(String::new().into()), Value::Int(41)])?,
                 Value::Bool(false)
             );
             assert_eq!(
@@ -52362,8 +52409,8 @@ public func Apply(int active, int zero_score, int retired, int runtime_number)
                 Value::Nil,
                 Value::Nil,
                 Value::Nil,
-                Value::String(String::new()),
-                Value::String(lc_script::c4_string_from_bytes(&[b'A', 0xff])),
+                Value::String(String::new().into()),
+                Value::String(lc_script::c4_string_from_bytes(&[b'A', 0xff]).into()),
                 Value::String("bool-id".into()),
             ])
         );
@@ -52554,19 +52601,19 @@ public func ClearWithZero(int id)
                 .call_object_function(
                     strict_index,
                     "RoundTrip",
-                    vec![Value::Int(41), Value::String(raw.clone())],
+                    vec![Value::Int(41), Value::String(raw.clone().into())],
                 )
                 .expect("strict round trip runs"),
             Value::Array(vec![
                 Value::Nil,
                 Value::Bool(true),
-                Value::String(raw.clone()),
+                Value::String(raw.clone().into()),
                 Value::Bool(true),
-                Value::String(String::new()),
+                Value::String(String::new().into()),
                 Value::Bool(true),
                 Value::Nil,
                 Value::Bool(true),
-                Value::String(raw.clone()),
+                Value::String(raw.clone().into()),
             ])
         );
         assert_eq!(
@@ -52645,7 +52692,7 @@ public func ClearWithZero(int id)
                 .call_object_function(
                     strict_index,
                     "RoundTrip",
-                    vec![Value::Int(41), Value::String(raw)],
+                    vec![Value::Int(41), Value::String(raw.into())],
                 )
                 .expect("non-league calls remain typed but gated"),
             Value::Array(vec![
@@ -52858,16 +52905,16 @@ public func Probe()
                 .expect("restored getter runs"),
             Value::Array(vec![
                 Value::String("active".into()),
-                Value::String(String::new()),
+                Value::String(String::new().into()),
                 Value::Nil,
                 Value::Nil,
-                Value::String(lc_script::c4_string_from_bytes(&[b'Y', 0xfd])),
+                Value::String(lc_script::c4_string_from_bytes(&[b'Y', 0xfd]).into()),
                 Value::Int(2),
                 Value::Int(i32::from(b'Y')),
                 Value::Int(0xfd),
                 Value::String("Y".into()),
-                Value::String(lc_script::c4_string_from_bytes(&[0xfd])),
-                Value::String(lc_script::c4_string_from_bytes(&[0xfd])),
+                Value::String(lc_script::c4_string_from_bytes(&[0xfd]).into()),
+                Value::String(lc_script::c4_string_from_bytes(&[0xfd]).into()),
             ])
         );
     }
@@ -53486,7 +53533,7 @@ global func PreInitializePlayer(int player)
             lc_script::c4_string_from_bytes(&[0xbf])
         );
         assert_eq!(
-            legacy_s_equal(&[Value::String("\u{ff}".into()), Value::String(split_utf8)])
+            legacy_s_equal(&[Value::String("\u{ff}".into()), Value::String(split_utf8.into())])
                 .expect("byte-equivalent strings compare"),
             Value::Int(1)
         );
@@ -54157,6 +54204,40 @@ global func PreInitializePlayer(int player)
     }
 
     #[test]
+    fn effect_var_runtime_conversion_preserves_hidden_map_slots() {
+        let hidden = lc_script::C4StringValue::new("retained".to_owned());
+        let mut map = ValueMap::new();
+        map.recycle_value_slot(Value::String(hidden.clone()));
+
+        let effect_value = value_to_effect_var(&Value::Proplist(map));
+        let EffectVarValue::Proplist(effect_map) = &effect_value else {
+            panic!("effect value remains a map");
+        };
+        let Some(Value::String(effect_hidden)) = effect_map.hidden_values().next() else {
+            panic!("effect map retains its detached mapped slot");
+        };
+        assert!(effect_hidden.ptr_eq(&hidden));
+
+        let Value::Proplist(mut restored) = effect_var_to_value(&effect_value) else {
+            panic!("script value remains a map");
+        };
+        let Some(Value::String(restored_hidden)) = restored.hidden_values().next() else {
+            panic!("script map restores its detached mapped slot");
+        };
+        assert!(restored_hidden.ptr_eq(&hidden));
+
+        restored.insert_key(Value::Int(1), Value::Nil);
+        assert!(
+            restored.is_empty(),
+            "assigning nil to a reused nonnil slot removes the new key"
+        );
+        assert_eq!(
+            restored.hidden_values().cloned().collect::<Vec<_>>(),
+            vec![Value::Nil]
+        );
+    }
+
+    #[test]
     fn no_container_and_any_container_return_cpp_sentinels() {
         // FnNoContainer/FnAnyContainer return the FindObject container
         // sentinels NO_CONTAINER=124 / ANY_CONTAINER=123 (C4Object.h:83-84,
@@ -54182,7 +54263,7 @@ global func PreInitializePlayer(int player)
             check_energy_need_chain(&[]).expect("no-context probe"),
             Value::Nil
         );
-        let error = check_energy_need_chain(&[Value::String("not an object".to_string())])
+        let error = check_energy_need_chain(&[Value::String("not an object".to_string().into())])
             .expect_err("truthy strings are not object parameters");
         assert!(
             error.message().contains("expected object"),
@@ -54197,7 +54278,7 @@ global func PreInitializePlayer(int player)
             Value::Nil,
             Value::Nil,
             Value::Nil,
-            Value::String("bad index".to_string()),
+            Value::String("bad index".to_string().into()),
         ])
         .expect_err("native entry_nr conversion precedes body lookup")
         .message()
@@ -54290,8 +54371,8 @@ global func PreInitializePlayer(int player)
             || {
                 let query = |entry: &str, action: &str, id: Value, index: i32| {
                     get_act_map_val(&[
-                        Value::String(entry.to_string()),
-                        Value::String(action.to_string()),
+                        Value::String(entry.to_string().into()),
+                        Value::String(action.to_string().into()),
                         id,
                         Value::Int(index),
                     ])
@@ -54338,7 +54419,7 @@ global func PreInitializePlayer(int player)
                     query("Length", "Idle", Value::Nil, 0)?,
                     query("Length", "Idle", Value::C4Id("EMP1".into()), 0)?,
                     get_act_map_val(&[
-                        Value::String("Length".to_string()),
+                        Value::String("Length".to_string().into()),
                         Value::Nil,
                         Value::C4Id("TST1".into()),
                         Value::Int(0),
@@ -54369,7 +54450,7 @@ global func PreInitializePlayer(int player)
                 Value::Int(3),
                 Value::String("Missing".into()),
                 Value::Int(2),
-                Value::String(String::new()),
+                Value::String(String::new().into()),
                 Value::String("End".into()),
                 Value::String("Abort".into()),
                 Value::String("Phase".into()),
@@ -54381,7 +54462,7 @@ global func PreInitializePlayer(int player)
                 Value::String("Turn".into()),
                 Value::Int(2),
                 Value::Int(-11),
-                Value::String(String::new()),
+                Value::String(String::new().into()),
                 Value::Int(1),
                 Value::Int(0),
                 Value::Nil,
@@ -54488,7 +54569,7 @@ global func PreInitializePlayer(int player)
                     ])?,
                     get_def_core_val(&[
                         Value::String("CollectionLimit".into()),
-                        Value::String(String::new()),
+                        Value::String(String::new().into()),
                         Value::C4Id("KAJO".into()),
                     ])?,
                     get_def_core_val(&[
@@ -54625,9 +54706,9 @@ global func PreInitializePlayer(int player)
             || {
                 let query = |entry: &str, section: Option<&str>, index: i32| {
                     get_def_core_val(&[
-                        Value::String(entry.to_string()),
+                        Value::String(entry.to_string().into()),
                         section
-                            .map(|section| Value::String(section.to_string()))
+                            .map(|section| Value::String(section.to_string().into()))
                             .unwrap_or(Value::Nil),
                         Value::C4Id("TST1".to_string()),
                         Value::Int(index),
@@ -54707,7 +54788,7 @@ global func PreInitializePlayer(int player)
                 Value::C4Id("REQ1".to_string()),
                 Value::C4Id("COMP".to_string()),
                 Value::Int(-3),
-                Value::String("Tick".to_string()),
+                Value::String("Tick".to_string().into()),
                 Value::C4Id("BURN".to_string()),
                 Value::Bool(true),
                 Value::Int(111),
@@ -55430,7 +55511,7 @@ func RenameInfo(object target, string name, bool make_valid)
                     "RenameInfo",
                     vec![
                         Value::Object(target.as_u64()),
-                        Value::String(name.to_string()),
+                        Value::String(name.to_string().into()),
                         Value::Bool(make_valid),
                     ],
                 )
@@ -55492,8 +55573,8 @@ func RenameInfo(object target, string name, bool make_valid)
             rename(&mut engine, &eight_high_bytes, false),
             Value::Array(vec![
                 Value::Bool(true),
-                Value::String(eight_high_bytes.clone()),
-                Value::String(eight_high_bytes.clone()),
+                Value::String(eight_high_bytes.clone().into()),
+                Value::String(eight_high_bytes.clone().into()),
             ]),
             "eight native bytes are not miscounted as 32 UTF-8 storage bytes"
         );
@@ -55502,8 +55583,8 @@ func RenameInfo(object target, string name, bool make_valid)
             rename(&mut engine, &thirty_one_high_bytes, false),
             Value::Array(vec![
                 Value::Bool(false),
-                Value::String(eight_high_bytes.clone()),
-                Value::String(eight_high_bytes.clone()),
+                Value::String(eight_high_bytes.clone().into()),
+                Value::String(eight_high_bytes.clone().into()),
             ])
         );
         assert_eq!(
@@ -55997,7 +56078,7 @@ func Announce()
         // adding a replacement (C4Script.cpp:2395-2462;
         // C4GameMessage.cpp:290-305).
         let (result, outcome) =
-            with_object_host_context(|| message(&[Value::String(String::new())]));
+            with_object_host_context(|| message(&[Value::String(String::new().into())]));
         assert_eq!(result.expect("empty Message succeeds"), Value::Bool(true));
         assert!(matches!(
             outcome.messages.as_slice(),
@@ -56015,7 +56096,7 @@ func Announce()
             vec![player.clone()],
         );
         let (result, outcome) = with_object_host_context_with_world(world, || {
-            player_message(&[Value::Int(1), Value::String(String::new())])
+            player_message(&[Value::Int(1), Value::String(String::new().into())])
         });
         assert_eq!(
             result.expect("empty PlayerMessage succeeds"),
@@ -56036,7 +56117,7 @@ func Announce()
             vec![player],
         );
         let (result, outcome) = with_object_host_context_with_world(world, || {
-            plr_message(&[Value::String(String::new()), Value::Int(1)])
+            plr_message(&[Value::String(String::new().into()), Value::Int(1)])
         });
         assert_eq!(
             result.expect("empty PlrMessage succeeds"),
@@ -56315,7 +56396,7 @@ func Announce()
         // C4GameMessageList::New, which performs a clear-only operation and
         // returns true (C4Script.cpp:5995-6039; C4GameMessage.cpp:290-305).
         let args = [
-            Value::String(String::new()),
+            Value::String(String::new().into()),
             Value::Nil,
             Value::Int(0),
             Value::Int(10),
@@ -57228,7 +57309,7 @@ public func CheckGoals()
 
         assert_eq!(
             engine
-                .call_object_function(goal_index, "HasAccess", vec![Value::String(String::new())],)
+                .call_object_function(goal_index, "HasAccess", vec![Value::String(String::new().into())],)
                 .expect("explicit empty query executes"),
             Value::Bool(true),
             "SGetModule exposes the initially empty module"
@@ -57248,7 +57329,7 @@ public func CheckGoals()
         );
         assert_eq!(
             engine
-                .call_object_function(goal_index, "HasAccess", vec![Value::String(String::new())],)
+                .call_object_function(goal_index, "HasAccess", vec![Value::String(String::new().into())],)
                 .expect("post-grant empty query executes"),
             Value::Bool(false)
         );
@@ -57283,7 +57364,7 @@ public func CheckGoals()
                 .call_object_function(
                     goal_index,
                     "Grant",
-                    vec![Value::String(boundary_password.clone())],
+                    vec![Value::String(boundary_password.clone().into())],
                 )
                 .expect("boundary grant executes"),
             Value::Bool(true)
@@ -57293,7 +57374,7 @@ public func CheckGoals()
                 .call_object_function(
                     goal_index,
                     "HasAccess",
-                    vec![Value::String(boundary_password)],
+                    vec![Value::String(boundary_password.into())],
                 )
                 .expect("boundary grant remains queryable"),
             Value::Bool(true)
@@ -57332,7 +57413,7 @@ public func CheckGoals()
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             assert_eq!(
-                gain_mission_access(&[Value::String(split_utf8)])?,
+                gain_mission_access(&[Value::String(split_utf8.into())])?,
                 Value::Bool(true)
             );
             get_mission_access(&[Value::String("\u{ff}".into())])
@@ -57588,14 +57669,14 @@ public func CheckGoals()
             engine
                 .call_object_function(actor_index, "Render", Vec::new())
                 .expect("object Format probe runs"),
-            Value::String(format!("Actor #{}", actor.as_u64()))
+            Value::String(format!("Actor #{}", actor.as_u64()).into())
         );
     }
 
     #[test]
     fn format_width_precision_and_c4id_use_native_byte_counts() {
         let utf8 = Value::String("\u{ff}".into());
-        let projected = Value::String(lc_script::c4_string_from_bytes("\u{ff}".as_bytes()));
+        let projected = Value::String(lc_script::c4_string_from_bytes("\u{ff}".as_bytes()).into());
         let format = Value::String("%.1s|%3s|%c".into());
         let render = |value: Value| {
             let result = format_string(&[format.clone(), value.clone(), value, Value::Int(0xff)])
@@ -57628,7 +57709,7 @@ public func CheckGoals()
         assert_eq!(lc_script::c4_string_bytes(&nul_truncated), b"A");
 
         let raw = [0xff, b'A', b'B', b'C'];
-        let id = c4_id(&[Value::String(lc_script::c4_string_from_bytes(&raw))])
+        let id = c4_id(&[Value::String(lc_script::c4_string_from_bytes(&raw).into())])
             .expect("raw C4ID converts");
         assert_eq!(
             cast_int(&[id.clone()]).expect("raw C4ID payload casts"),
@@ -57675,7 +57756,7 @@ public func CheckGoals()
                 Value::C4Id(stored_numeric.clone()),
                 Value::Nil,
                 Value::Nil,
-                Value::String(String::new()),
+                Value::String(String::new().into()),
             ],
             CommandArgLayout::Set,
             "SetCommand",
@@ -59363,7 +59444,7 @@ public func RejectConstruction(x, y, builder)
         );
         assert_eq!(
             query("MissionAccess", Value::String("Head".into()), Value::Nil),
-            Value::String(String::new())
+            Value::String(String::new().into())
         );
         assert_eq!(
             query("StandardCrew", Value::String("Player1".into()), Value::Nil),
@@ -59371,7 +59452,7 @@ public func RejectConstruction(x, y, builder)
             "C4ID_None is C4V_Any"
         );
         assert_eq!(
-            query("MapZoom", Value::String(String::new()), Value::Nil),
+            query("MapZoom", Value::String(String::new().into()), Value::Nil),
             Value::Int(10),
             "an empty section is the no-section form"
         );
@@ -60044,7 +60125,7 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(
             result.expect("GetTexture succeeds"),
             Value::Array(vec![
-                Value::String("Rough".to_string()),
+                Value::String("Rough".to_string().into()),
                 Value::Nil,
                 Value::Nil,
             ])
@@ -60123,8 +60204,8 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(
             result.expect("GetTexture succeeds"),
             Value::Array(vec![
-                Value::String("Smooth".to_string()),
-                Value::String("Liquid".to_string()),
+                Value::String("Smooth".to_string().into()),
+                Value::String("Liquid".to_string().into()),
                 Value::Nil,
                 Value::Nil,
             ])
@@ -60152,37 +60233,37 @@ public func RejectConstruction(x, y, builder)
                         Value::Bool(false),
                     ])?,
                     set_texture_index(&[
-                        Value::String("Earth-Rough".to_string()),
+                        Value::String("Earth-Rough".to_string().into()),
                         Value::Int(0),
                         Value::Bool(false),
                     ])?,
                     set_texture_index(&[
-                        Value::String("Earth-Rough".to_string()),
+                        Value::String("Earth-Rough".to_string().into()),
                         Value::Int(127),
                         Value::Bool(false),
                     ])?,
                     set_texture_index(&[
-                        Value::String("Earth-Rough".to_string()),
+                        Value::String("Earth-Rough".to_string().into()),
                         Value::Int(300),
                         Value::Bool(false),
                     ])?,
                     set_texture_index(&[
-                        Value::String("Earth-Rough".to_string()),
+                        Value::String("Earth-Rough".to_string().into()),
                         Value::Int(128),
                         Value::Bool(false),
                     ])?,
                     set_texture_index(&[
-                        Value::String("Earth-Rough".to_string()),
+                        Value::String("Earth-Rough".to_string().into()),
                         Value::Int(1),
                         Value::Bool(false),
                     ])?,
                     set_texture_index(&[
-                        Value::String("Missing-Rough".to_string()),
+                        Value::String("Missing-Rough".to_string().into()),
                         Value::Int(2),
                         Value::Bool(false),
                     ])?,
                     set_texture_index(&[
-                        Value::String("Earth-Ridge".to_string()),
+                        Value::String("Earth-Ridge".to_string().into()),
                         Value::Int(2),
                         Value::Bool(true),
                     ])?,
@@ -60239,7 +60320,7 @@ public func RejectConstruction(x, y, builder)
 
         let (result, outcome) = with_effect_context(None, &[], world, 1, || {
             set_texture_index(&[
-                Value::String("Earth-Rough".to_string()),
+                Value::String("Earth-Rough".to_string().into()),
                 Value::Int(2),
                 Value::Bool(false),
             ])
@@ -60299,14 +60380,14 @@ public func RejectConstruction(x, y, builder)
                 Ok::<_, RuntimeError>(Value::Array(vec![
                     get_texture(&[Value::Int(2), Value::Int(2)])?,
                     set_texture_index(&[
-                        Value::String("Earth-Rough".to_string()),
+                        Value::String("Earth-Rough".to_string().into()),
                         Value::Int(2),
                         Value::Bool(false),
                     ])?,
                     get_texture(&[Value::Int(2), Value::Int(2)])?,
                     get_texture(&[Value::Int(1), Value::Int(2)])?,
                     set_texture_index(&[
-                        Value::String("Earth-Rough".to_string()),
+                        Value::String("Earth-Rough".to_string().into()),
                         Value::Int(2),
                         Value::Bool(false),
                     ])?,
@@ -60318,8 +60399,8 @@ public func RejectConstruction(x, y, builder)
             Value::Array(vec![
                 Value::Nil,
                 Value::Int(1),
-                Value::String("Rough".to_string()),
-                Value::String("Rough".to_string()),
+                Value::String("Rough".to_string().into()),
+                Value::String("Rough".to_string().into()),
                 Value::Int(0),
             ])
         );
@@ -60368,7 +60449,7 @@ public func RejectConstruction(x, y, builder)
                 Ok::<_, RuntimeError>((
                     get_texture(&[Value::Int(2), Value::Int(2)])?,
                     set_texture_index(&[
-                        Value::String("Earth-Rough".to_string()),
+                        Value::String("Earth-Rough".to_string().into()),
                         Value::Int(2),
                         Value::Bool(false),
                     ])?,
@@ -60376,7 +60457,7 @@ public func RejectConstruction(x, y, builder)
             });
         assert_eq!(
             replayed.expect("replayed callback sees texmap"),
-            (Value::String("Rough".to_string()), Value::Int(0))
+            (Value::String("Rough".to_string().into()), Value::Int(0))
         );
         assert!(replayed_outcome.landscape.is_empty());
 
@@ -60438,7 +60519,7 @@ public func RejectConstruction(x, y, builder)
                     // Slot 4 was Earth-Ridge but had neither a pixel nor a
                     // material reference. Its removal is immediately live.
                     set_texture_index(&[
-                        Value::String("Earth-Ridge".to_string()),
+                        Value::String("Earth-Ridge".to_string().into()),
                         Value::Int(7),
                         Value::Bool(false),
                     ])?,
@@ -60450,7 +60531,7 @@ public func RejectConstruction(x, y, builder)
             (
                 Value::Nil,
                 Value::Int(0),
-                Value::String("Smooth".to_string()),
+                Value::String("Smooth".to_string().into()),
             )
         );
         assert_eq!(outcome.landscape.len(), 1);
@@ -60489,7 +60570,7 @@ public func RejectConstruction(x, y, builder)
         let (replayed, replayed_outcome) =
             with_effect_context(None, &[], replay_world, 1, || {
                 set_texture_index(&[
-                    Value::String("Earth-Ridge".to_string()),
+                    Value::String("Earth-Ridge".to_string().into()),
                     Value::Int(7),
                     Value::Bool(false),
                 ])
@@ -60523,7 +60604,7 @@ public func RejectConstruction(x, y, builder)
             .expect("landscape exists")
             .clone();
         let draw_args = [
-            Value::String("Earth-Ridge".to_string()),
+            Value::String("Earth-Ridge".to_string().into()),
             Value::Int(1),
             Value::Int(0),
             Value::Int(2),
@@ -60607,8 +60688,8 @@ public func RejectConstruction(x, y, builder)
             Value::Int(6),
             Value::Int(0),
             Value::Int(0),
-            Value::String("Earth".to_string()),
-            Value::String("Smooth".to_string()),
+            Value::String("Earth".to_string().into()),
+            Value::String("Smooth".to_string().into()),
             Value::Bool(false),
         ];
         let (drew, chunks_outcome) =
@@ -60643,7 +60724,7 @@ public func RejectConstruction(x, y, builder)
             Value::Int(1),
             Value::Int(7),
             Value::Int(5),
-            Value::String("map Runtime { seed = 9; Named; };".to_string()),
+            Value::String("map Runtime { seed = 9; Named; };".to_string().into()),
         ];
         let guard = enter_random_context(LcgRng::new(17));
         let (result, outcome) =
@@ -60687,7 +60768,7 @@ public func RejectConstruction(x, y, builder)
             Value::Int(0),
             Value::Int(1),
             Value::Int(1),
-            Value::String(String::new()),
+            Value::String(String::new().into()),
         ];
         let guard = enter_random_context(LcgRng::new(19));
         let (result, outcome) =
@@ -60727,7 +60808,7 @@ public func RejectConstruction(x, y, builder)
             Value::Int(0),
             Value::Int(3),
             Value::Int(3),
-            Value::String("map Runtime { seed = 9; Named; };".to_string()),
+            Value::String("map Runtime { seed = 9; Named; };".to_string().into()),
         ];
         let (result, outcome) =
             with_effect_context(None, &[], draw_map_world(8, 7, 3, true), 1, || {
@@ -60752,14 +60833,14 @@ public func RejectConstruction(x, y, builder)
             Value::Int(1),
             Value::Int(7),
             Value::Int(5),
-            Value::String("map Runtime { seed = 9; Named; };".to_string()),
+            Value::String("map Runtime { seed = 9; Named; };".to_string().into()),
         ];
         let draw_def_map_args = [
             Value::Int(-2),
             Value::Int(1),
             Value::Int(7),
             Value::Int(5),
-            Value::String("Requested".to_string()),
+            Value::String("Requested".to_string().into()),
         ];
 
         for (name, seed, draw_def) in [
@@ -60781,7 +60862,7 @@ public func RejectConstruction(x, y, builder)
 
             assert_eq!(
                 result.unwrap_or_else(|error| panic!("{name} failed: {error}")),
-                (Value::Int(1), Value::String("Smooth".to_string())),
+                (Value::Int(1), Value::String("Smooth".to_string().into())),
                 "{name} re-puts the Vehicle mask before returning"
             );
             assert_eq!(outcome.landscape.len(), 1);
@@ -60818,7 +60899,7 @@ public func RejectConstruction(x, y, builder)
             Value::Int(0),
             Value::Int(3),
             Value::Int(3),
-            Value::String("overlay Added { mat = Earth; tex = Ridge; seed = 7; };".to_string()),
+            Value::String("overlay Added { mat = Earth; tex = Ridge; seed = 7; };".to_string().into()),
         ];
         let guard = enter_random_context(LcgRng::new(31));
         let (result, outcome) =
@@ -60831,7 +60912,7 @@ public func RejectConstruction(x, y, builder)
 
         assert_eq!(
             result.expect("DrawMap and GetTexture succeed"),
-            (Value::Int(0), Value::String("Ridge".to_string()))
+            (Value::Int(0), Value::String("Ridge".to_string().into()))
         );
         assert_eq!(outcome.landscape.len(), 1);
         match &outcome.landscape[0] {
@@ -60861,7 +60942,7 @@ public func RejectConstruction(x, y, builder)
                 Value::Int(0),
                 Value::Int(1),
                 Value::Int(1),
-                Value::String("map Runtime { Named; };".to_string()),
+                Value::String("map Runtime { Named; };".to_string().into()),
             ],
         ] {
             let initial_rng = LcgRng::new(29);
@@ -60896,7 +60977,7 @@ public func RejectConstruction(x, y, builder)
             Value::Int(1),
             Value::Int(7),
             Value::Int(5),
-            Value::String("Requested".to_string()),
+            Value::String("Requested".to_string().into()),
         ];
         let world = draw_map_world(8, 7, 3, true);
         let initial_landscape = world.landscape_ref().expect("landscape exists").clone();
@@ -60958,14 +61039,14 @@ public func RejectConstruction(x, y, builder)
             Value::Int(0),
             Value::Int(1),
             Value::Int(1),
-            Value::String("Decoy".to_string()),
+            Value::String("Decoy".to_string().into()),
         ];
         let map_args = [
             Value::Int(0),
             Value::Int(0),
             Value::Int(1),
             Value::Int(1),
-            Value::String(String::new()),
+            Value::String(String::new().into()),
         ];
         let (result, outcome) =
             with_effect_context(None, &[], draw_map_world(8, 7, 3, true), 1, || {
@@ -61004,7 +61085,7 @@ public func RejectConstruction(x, y, builder)
             Value::Int(0),
             Value::Int(1),
             Value::Int(1),
-            Value::String("Decoy".to_string()),
+            Value::String("Decoy".to_string().into()),
         ];
         let (first_result, first_outcome) =
             with_effect_context(None, &[], world.clone(), 1, || draw_def_map(&def_args));
@@ -61018,7 +61099,7 @@ public func RejectConstruction(x, y, builder)
             Value::Int(0),
             Value::Int(1),
             Value::Int(1),
-            Value::String(String::new()),
+            Value::String(String::new().into()),
         ];
         let (second_result, second_outcome) =
             with_effect_context(None, &[], world, 1, || draw_map(&map_args));
@@ -61048,7 +61129,7 @@ public func RejectConstruction(x, y, builder)
                     Value::Int(0),
                     Value::Int(1),
                     Value::Int(1),
-                    Value::String("Missing".to_string()),
+                    Value::String("Missing".to_string().into()),
                 ],
             ),
             (
@@ -61058,7 +61139,7 @@ public func RejectConstruction(x, y, builder)
                     Value::Int(0),
                     Value::Int(1),
                     Value::Int(1),
-                    Value::String("Half".to_string()),
+                    Value::String("Half".to_string().into()),
                 ],
             ),
             (
@@ -61068,7 +61149,7 @@ public func RejectConstruction(x, y, builder)
                     Value::Int(0),
                     Value::Int(1),
                     Value::Int(1),
-                    Value::String("Requested".to_string()),
+                    Value::String("Requested".to_string().into()),
                 ],
             ),
             (
@@ -61088,7 +61169,7 @@ public func RejectConstruction(x, y, builder)
                     Value::Int(0),
                     Value::Int(1),
                     Value::Int(1),
-                    Value::String("Requested".to_string()),
+                    Value::String("Requested".to_string().into()),
                 ],
             ),
         ] {
@@ -61130,8 +61211,8 @@ public func RejectConstruction(x, y, builder)
             Value::Int(6),
             Value::Int(2),
             Value::Int(2),
-            Value::String("Earth".to_string()),
-            Value::String("Rough".to_string()),
+            Value::String("Earth".to_string().into()),
+            Value::String("Rough".to_string().into()),
             Value::Bool(true),
         ];
         let mut replay_world = draw_mat_chunks_world();
@@ -61152,7 +61233,7 @@ public func RejectConstruction(x, y, builder)
             result.expect("DrawMatChunks and Random succeed"),
             (
                 Value::Int(1),
-                Value::String("Rough".to_string()),
+                Value::String("Rough".to_string().into()),
                 Value::Int(expected_after)
             )
         );
@@ -61245,8 +61326,8 @@ public func RejectConstruction(x, y, builder)
             Value::Int(6),
             Value::Int(1),
             Value::Int(1),
-            Value::String("Earth".to_string()),
-            Value::String("Rough".to_string()),
+            Value::String("Earth".to_string().into()),
+            Value::String("Rough".to_string().into()),
             Value::Bool(false),
         ];
         let mut world = draw_mat_chunks_world();
@@ -61266,7 +61347,7 @@ public func RejectConstruction(x, y, builder)
 
         assert_eq!(
             result.expect("offscreen DrawMatChunks succeeds"),
-            (Value::Int(1), Value::String("Rough".to_string()))
+            (Value::Int(1), Value::String("Rough".to_string().into()))
         );
         assert_eq!(final_rng.count, 1);
         let mut engine = crate::Engine::new();
@@ -61299,8 +61380,8 @@ public func RejectConstruction(x, y, builder)
             Value::Int(6),
             Value::Int(2),
             Value::Int(2),
-            Value::String("Earth".to_string()),
-            Value::String("Rough".to_string()),
+            Value::String("Earth".to_string().into()),
+            Value::String("Rough".to_string().into()),
             Value::Bool(true),
         ];
         let guard = enter_random_context(LcgRng::new(59));
@@ -61314,7 +61395,7 @@ public func RejectConstruction(x, y, builder)
 
         assert_eq!(
             result.expect("masked DrawMatChunks succeeds"),
-            (Value::Int(1), Value::String("Smooth".to_string())),
+            (Value::Int(1), Value::String("Smooth".to_string().into())),
             "FinishChange re-puts the Vehicle mask before the host returns"
         );
 
@@ -61344,8 +61425,8 @@ public func RejectConstruction(x, y, builder)
                 Value::Int(6),
                 Value::Int(2),
                 Value::Int(2),
-                Value::String(material.to_string()),
-                Value::String(texture.to_string()),
+                Value::String(material.to_string().into()),
+                Value::String(texture.to_string().into()),
                 Value::Bool(false),
             ];
             let initial_rng = LcgRng::new(61);
@@ -61371,8 +61452,8 @@ public func RejectConstruction(x, y, builder)
             Value::Int(6),
             Value::Int(0),
             Value::Int(2),
-            Value::String("Earth".to_string()),
-            Value::String("Rough".to_string()),
+            Value::String("Earth".to_string().into()),
+            Value::String("Rough".to_string().into()),
             Value::Bool(false),
         ];
         let initial_rng = LcgRng::new(67);
@@ -61460,7 +61541,7 @@ public func RejectConstruction(x, y, builder)
             result.expect("DrawVolcanoBranch and queries succeed"),
             (
                 Value::Nil,
-                Value::String("Smooth".to_string()),
+                Value::String("Smooth".to_string().into()),
                 Value::Bool(false),
                 Value::Bool(true),
                 Value::Int(expected_after),
@@ -61494,7 +61575,7 @@ public func RejectConstruction(x, y, builder)
         });
         assert_eq!(
             replayed.expect("replayed callback reads landscape"),
-            (Value::String("Smooth".to_string()), Value::Bool(false))
+            (Value::String("Smooth".to_string().into()), Value::Bool(false))
         );
 
         let mut engine = crate::Engine::new();
@@ -61577,7 +61658,7 @@ public func RejectConstruction(x, y, builder)
         // (C4Landscape.cpp:2448-2466), so the host can return true now and
         // defer the same resolved operation to the engine fold.
         let args = [
-            Value::String("Water".to_string()),
+            Value::String("Water".to_string().into()),
             Value::Int(1),
             Value::Int(2),
             Value::Int(4),
@@ -61628,7 +61709,7 @@ public func RejectConstruction(x, y, builder)
         // DrawQuad returns false before PrepareChange (C4Landscape.cpp:
         // 2450-2452), so no deferred write may be queued.
         let args = [
-            Value::String("Water-Missing".to_string()),
+            Value::String("Water-Missing".to_string().into()),
             Value::Int(0),
             Value::Int(0),
             Value::Int(1),
@@ -61826,7 +61907,7 @@ func ProbeDrawDefMap() {
         let earth_state = Value::Array(vec![
             Value::Bool(true),
             Value::Int(earth.index() as i32),
-            Value::String("Rough".to_string()),
+            Value::String("Rough".to_string().into()),
         ]);
         let sky_state = Value::Array(vec![
             Value::Bool(false),
@@ -62100,7 +62181,7 @@ func ProbeDrawDefMap() {
             Value::Int(4),
             Value::Int(6),
             Value::Bool(true),
-            Value::String("discarded".to_string()),
+            Value::String("discarded".to_string().into()),
         ];
         let (extra, extra_outcome) = with_object_host_context(|| blast_free(&args));
         assert_eq!(extra.expect("the fifth argument is discarded"), Value::Nil);
@@ -63143,7 +63224,7 @@ func ProbeDrawDefMap() {
             };
             Ok::<_, RuntimeError>(Value::Array(vec![
                 read("AtClient", Value::Int(0), 4, 0)?,
-                read("AtClientName", Value::String(String::new()), 4, 0)?,
+                read("AtClientName", Value::String(String::new().into()), 4, 0)?,
                 read("Color", Value::String("Player".into()), 4, 0)?,
                 read("Position", Value::Int(0), 4, 0)?,
                 read("Evaluated", Value::Int(0), 4, 0)?,
@@ -65069,7 +65150,7 @@ func ProbeBadIndex(id) {
             (
                 "CreateScriptPlayer",
                 create_script_player(&[
-                    Value::String(String::new()),
+                    Value::String(String::new().into()),
                     Value::Nil,
                     Value::Nil,
                     Value::Nil,
@@ -65079,7 +65160,7 @@ func ProbeBadIndex(id) {
             (
                 "SetPortrait",
                 set_portrait(&[
-                    Value::String(String::new()),
+                    Value::String(String::new().into()),
                     Value::Nil,
                     Value::String("CLNK".into()),
                 ]),
@@ -65379,7 +65460,7 @@ func Missing() { return ComponentAll(0, WOOD); }
         assert_eq!(
             result.expect("MaterialName succeeds"),
             Value::Array(vec![
-                Value::String("GlowingRock".to_string()),
+                Value::String("GlowingRock".to_string().into()),
                 Value::Nil,
                 Value::Nil,
             ])
@@ -65546,7 +65627,7 @@ func Missing() { return ComponentAll(0, WOOD); }
                 get_rank(&[object_reference_value(ObjectId::new(3))])?,
                 get_rank(&[
                     object_reference_value(ObjectId::new(1)),
-                    Value::String("ignored".to_owned()),
+                    Value::String("ignored".to_owned().into()),
                 ])?,
             ]))
         });
@@ -65568,7 +65649,7 @@ func Missing() { return ComponentAll(0, WOOD); }
             global_result.expect("global GetRank succeeds"),
             Value::Array(vec![Value::Nil, Value::Nil])
         );
-        assert!(get_rank(&[Value::String("not an object".to_owned())]).is_err());
+        assert!(get_rank(&[Value::String("not an object".to_owned().into())]).is_err());
     }
 
     #[test]
@@ -67934,7 +68015,7 @@ func Probe(state) {
             &[],
             HostWorldContext::default(),
             1,
-            || set_action(&[Value::String(projected)]),
+            || set_action(&[Value::String(projected.into())]),
         );
         assert_eq!(result.expect("SetAction succeeds"), Value::Bool(true));
         assert_eq!(
@@ -69171,6 +69252,24 @@ func Probe(state) {
     }
 
     #[test]
+    fn loaded_string_table_identity_survives_get_object_val_reflection() {
+        let strings = lc_script::new_string_registrations();
+        lc_script::register_loaded_c4_string(&strings, 3, "loaded");
+        let loaded = lc_script::resolve_c4_string(&strings, 3).expect("loaded S3 resolves");
+        let runtime = lc_script::C4StringValue::from("runtime");
+
+        let mut reflection = ObjectValueReflection::default();
+        let path = ["Object", "Locals"];
+        push_reflected_c4value(&mut reflection, &path, &Value::String(loaded));
+        push_reflected_c4value(&mut reflection, &path, &Value::String(runtime));
+
+        assert_eq!(reflection.get("Locals", None, 0), Some(Value::from("S")));
+        assert_eq!(reflection.get("Locals", None, 1), Some(Value::Int(3)));
+        assert_eq!(reflection.get("Locals", None, 2), Some(Value::from("S")));
+        assert_eq!(reflection.get("Locals", None, 3), Some(Value::Int(-1)));
+    }
+
+    #[test]
     fn get_object_val_follows_cpp_primitive_indexing_sections_and_types() {
         // FnGetObjectVal decompiles C4Object::CompileFunc through the
         // C4ValueGetCompiler. Shape and Action are inline under Object;
@@ -69308,14 +69407,14 @@ func Probe(state) {
             set_phase(&[Value::Int(4)])?;
             let call = |entry: &str, section: Value, entry_nr: Value| {
                 get_object_val(&[
-                    Value::String(entry.to_string()),
+                    Value::String(entry.to_string().into()),
                     section,
                     object_reference_value(target),
                     entry_nr,
                 ])
             };
             let phase_delay_after_set_phase = call("PhaseDelay", Value::Nil, Value::Int(0))?;
-            set_action(&[Value::String("Walk".to_string())])?;
+            set_action(&[Value::String("Walk".to_string().into())])?;
             Ok::<_, RuntimeError>(Value::Array(vec![
                 call("Offset", Value::Nil, Value::Nil)?,
                 call("Offset", Value::Nil, Value::Bool(false))?,
@@ -69374,7 +69473,7 @@ func Probe(state) {
                 Value::Nil,
                 Value::Nil,
                 Value::C4Id("SELF".to_string()),
-                Value::String("Oracle".to_string()),
+                Value::String("Oracle".to_string().into()),
                 Value::Bool(true),
                 Value::Int(37),
                 Value::Bool(true),
@@ -69388,7 +69487,7 @@ func Probe(state) {
                 Value::Int(44),
                 Value::Int(3),
                 Value::Int(0),
-                Value::String("F".to_string()),
+                Value::String("F".to_string().into()),
                 // C4Object::SetAction resets fix_x/fix_y to the current
                 // integer position before returning (C4Object.cpp:4144).
                 Value::Int(itofix(11).val()),
@@ -69403,11 +69502,11 @@ func Probe(state) {
                 Value::Nil,
                 Value::Nil,
                 Value::C4Id("SKIN".to_string()),
-                Value::String("Alt".to_string()),
+                Value::String("Alt".to_string().into()),
                 Value::Int(1),
-                Value::String("named".to_string()),
+                Value::String("named".to_string().into()),
                 Value::Int(1),
-                Value::String("i".to_string()),
+                Value::String("i".to_string().into()),
                 Value::Int(42),
             ])
         );
@@ -73019,7 +73118,7 @@ public func Probe(object carrier)
                 "nil call name is a silent nil"
             );
             assert_eq!(
-                effect_call(&[state.clone(), number, Value::String(String::new())])?,
+                effect_call(&[state.clone(), number, Value::String(String::new().into())])?,
                 Value::Nil,
                 "empty call name is a silent nil"
             );
@@ -74701,7 +74800,7 @@ func ChangeAndProbe()
         let args = [
             Value::Nil,
             Value::Bool(true),
-            Value::String("discarded".to_string()),
+            Value::String("discarded".to_string().into()),
         ];
         let (result, outcome) = with_object_host_context(|| {
             assert_eq!(kill(&args)?, Value::Bool(true));
@@ -74817,7 +74916,7 @@ func ChangeAndProbe()
         // (C4Script.cpp:552-688) on a non-crew object with all-zero
         // definition physicals.
         let (result, outcome) = with_object_host_context(|| {
-            let walk = || Value::String("Walk".to_string());
+            let walk = || Value::String("Walk".to_string().into());
             // TrainPhysical with neither temp mode nor info trains nothing
             // (C4Object.cpp:2136-2146).
             assert_eq!(
@@ -74827,7 +74926,7 @@ func ChangeAndProbe()
             // Unknown physical name fails (C4Script.cpp:562).
             assert_eq!(
                 set_physical(&[
-                    Value::String("Bogus".to_string()),
+                    Value::String("Bogus".to_string().into()),
                     Value::Int(1),
                     Value::Int(2)
                 ])?,
@@ -74920,7 +75019,7 @@ func ChangeAndProbe()
         ])));
 
         let (result, _) = with_object_host_context_with_world(world, || {
-            let magic = || Value::String("Magic".to_string());
+            let magic = || Value::String("Magic".to_string().into());
             // Give the caller a temporary physical set, then lower its live
             // Magic to zero. GetPhysical(..., nil, GetID()) must still read
             // the raw definition value (C4Script.cpp:644-653).
@@ -74955,7 +75054,7 @@ func ChangeAndProbe()
             // merely contains the packed MAGE bytes is therefore rejected
             // before FnGetPhysical executes (C4Value.cpp:469-478,550-561).
             for rejected in [
-                Value::String("MAGE".to_string()),
+                Value::String("MAGE".to_string().into()),
                 Value::Int(i32::from_le_bytes(*b"MAGE")),
                 Value::Bool(true),
             ] {
@@ -75033,7 +75132,7 @@ func ChangeAndProbe()
 
         let (result, _) = with_object_host_context_with_world(world, || {
             get_physical(&[
-                Value::String("CanConstruct".to_string()),
+                Value::String("CanConstruct".to_string().into()),
                 Value::Int(PHYS_CURRENT),
                 object_reference_value(clonk),
             ])
@@ -81798,7 +81897,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         let (result, outcome) = with_object_host_context(|| {
             let random = enter_random_context(LcgRng::new(9));
             let result = add_effect(&[
-                Value::String(crate::C4FX_FIRE.to_string()),
+                Value::String(crate::C4FX_FIRE.to_string().into()),
                 Value::Object(1),
                 Value::Int(crate::C4FX_FIRE_PRIORITY),
                 Value::Int(crate::C4FX_FIRE_TIMER_INTERVAL),

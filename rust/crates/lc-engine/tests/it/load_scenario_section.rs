@@ -34,7 +34,7 @@ pub(super) fn gold_rush_do_change_section_loads_ash_city_landscape(
     engine
         .call_scenario_script_function(
             "ChangeSection",
-            vec![Value::String("AshCity".to_string())],
+            vec![Value::String("AshCity".to_string().into())],
         )
         .expect("the shipped ChangeSection callback runs");
     engine

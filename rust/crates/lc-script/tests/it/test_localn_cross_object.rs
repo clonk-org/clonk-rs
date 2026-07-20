@@ -123,8 +123,8 @@ fn object_index_and_property_read_named_local_cells() {
                 "Peek",
                 &[
                     Value::Object(7),
-                    Value::String("iWater".to_string()),
-                    Value::String("items".to_string()),
+                    Value::String("iWater".to_string().into()),
+                    Value::String("items".to_string().into()),
                 ],
             )
             .expect("call succeeds"),
@@ -141,7 +141,7 @@ fn object_index_and_property_read_named_local_cells() {
     let (self_result, _) = engine
         .call_with_locals_and_this(
             "PeekSelf",
-            &[Value::String("iWater".to_string())],
+            &[Value::String("iWater".to_string().into())],
             &self_locals,
             Value::Object(7),
         )
@@ -171,7 +171,7 @@ fn object_index_assignment_evaluates_base_key_then_rhs_once() {
     let trace = Arc::new(Mutex::new(Vec::new()));
     for (name, marker, value) in [
         ("MarkBase", 1, Value::Int(0)),
-        ("MarkKey", 2, Value::String("money".to_string())),
+        ("MarkKey", 2, Value::String("money".to_string().into())),
         ("MarkRhs", 3, Value::Int(9)),
     ] {
         let trace = Arc::clone(&trace);

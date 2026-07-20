@@ -166,7 +166,7 @@ fn open(
         "Open",
         vec![
             Value::Bool(uppercase),
-            Value::String(prompt.to_string()),
+            Value::String(prompt.to_string().into()),
             Value::Int(player),
         ],
     )
@@ -218,7 +218,7 @@ fn call_message_board_rejects_invalid_players_and_status_zero_objects() {
             vec![
                 Value::Object(target.as_u64()),
                 Value::Bool(false),
-                Value::String("deleted object".to_string()),
+                Value::String("deleted object".to_string().into()),
                 Value::Int(PLAYER),
             ],
         ),
@@ -599,7 +599,7 @@ fn message_board_answer_reaches_the_target_input_callback_exactly_once() {
     let answer_args = || {
         vec![
             Value::Object(target.as_u64()),
-            Value::String("typed answer".to_string()),
+            Value::String("typed answer".to_string().into()),
             Value::Int(PLAYER),
         ]
     };
@@ -613,7 +613,7 @@ fn message_board_answer_reaches_the_target_input_callback_exactly_once() {
         .expect("callback target remains active");
     assert_eq!(
         target_state.local_vars.get("callback_answer"),
-        Some(&Value::String("typed answer".to_string()))
+        Some(&Value::String("typed answer".to_string().into()))
     );
     assert_eq!(
         target_state.local_vars.get("callback_player"),
@@ -888,9 +888,9 @@ fn message_board_answer_control_preserves_escaped_and_raw_text_in_the_same_frame
         .expect("callback target remains");
     assert_eq!(
         target_state.local_vars.get("callback_answer"),
-        Some(&Value::String(lc_script::c4_string_from_bytes(
-            b"say \" ); SetGravity(99); // \\ \x80"
-        ))),
+        Some(&Value::String(
+            lc_script::c4_string_from_bytes(b"say \" ); SetGravity(99); // \\ \x80").into(),
+        )),
         "quote/backslash escaping must be transparent without transcoding packet bytes"
     );
     assert_eq!(

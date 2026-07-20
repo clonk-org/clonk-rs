@@ -149,7 +149,7 @@ fn lc_value_to_rust(value: &LcScriptValue) -> Result<Value, ()> {
                 return Err(());
             }
             let c_str = unsafe { CStr::from_ptr(value.string_value) };
-            Ok(Value::String(c4_string_from_bytes(c_str.to_bytes())))
+            Ok(Value::String(c4_string_from_bytes(c_str.to_bytes()).into()))
         }
         LcScriptValueKind::C4Id => {
             if value.object_id_value != 0 {
@@ -358,7 +358,7 @@ mod tests {
         ));
         assert_eq!(
             lc_value_to_rust(&out),
-            Ok(Value::String(c4_string_from_bytes(&[0xff])))
+            Ok(Value::String(c4_string_from_bytes(&[0xff]).into()))
         );
 
         lc_script_value_free(&mut out);
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn string_ffi_round_trip_uses_the_native_c_string_prefix() {
-        let value = Value::String(c4_string_from_bytes(&[0xff, 0, b'X']));
+        let value = Value::String(c4_string_from_bytes(&[0xff, 0, b'X']).into());
         let mut ffi_value = rust_value_to_lc(&value);
 
         assert_eq!(ffi_value.kind, LcScriptValueKind::String);
@@ -377,7 +377,7 @@ mod tests {
         );
         assert_eq!(
             lc_value_to_rust(&ffi_value),
-            Ok(Value::String(c4_string_from_bytes(&[0xff])))
+            Ok(Value::String(c4_string_from_bytes(&[0xff]).into()))
         );
 
         lc_script_value_free(&mut ffi_value);
@@ -391,7 +391,7 @@ mod tests {
             Value::C4Id("ROCK".to_string()),
             Value::C4Id(crate::c4_id_from_raw(12345)),
             Value::Object(42),
-            Value::Array(vec![Value::String("nested".to_string())]),
+            Value::Array(vec![Value::String("nested".to_string().into())]),
             Value::Array(Vec::new()),
         ]);
 
@@ -408,7 +408,7 @@ mod tests {
             ("flag".to_string(), Value::Bool(true)),
             (
                 "items".to_string(),
-                Value::Array(vec![Value::Int(1), Value::String("two".to_string())]),
+                Value::Array(vec![Value::Int(1), Value::String("two".to_string().into())]),
             ),
             ("id".to_string(), Value::C4Id("ROCK".to_string())),
             ("object".to_string(), Value::Object(42)),
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(
             ffi_keys,
             ["flag", "items", "id", "object", "nested", "empty"]
-                .map(|key| Value::String(key.to_string()))
+                .map(|key| Value::String(key.to_string().into()))
         );
         assert_eq!(lc_value_to_rust(&ffi_value), Ok(value));
 

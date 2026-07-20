@@ -121,7 +121,7 @@ fn script_static_consts_are_callable_across_hosts_below_strict2() {
 
     assert_eq!(
         caller.call("Probe", &[]).expect("constant call succeeds"),
-        Value::String("MCLK_PrefCombo".to_string())
+        Value::String("MCLK_PrefCombo".to_string().into())
     );
 }
 

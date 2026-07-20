@@ -196,7 +196,7 @@ fn convert_case_value(name: &str) -> ScriptValue {
         "bool_true" => ScriptValue::Bool(true),
         "bool_false" => ScriptValue::Bool(false),
         "id_CLNK" => ScriptValue::C4Id("CLNK".to_string()),
-        "string" => ScriptValue::String("x".to_string()),
+        "string" => ScriptValue::String("x".to_string().into()),
         "array" => ScriptValue::Array(Vec::new()),
         "map" => ScriptValue::Proplist(ValueMap::new()),
         other => panic!("unknown script_value_convert case `{other}`"),
@@ -1790,25 +1790,26 @@ fn parity_differential_matches_cpp_golden() {
             ("bool_true", ScriptValue::Bool(true)),
             ("id_CLNK", ScriptValue::C4Id("CLNK".to_string())),
             ("id_1337", ScriptValue::C4Id("1337".to_string())),
-            ("string_empty", ScriptValue::String(String::new())),
-            ("string_alpha", ScriptValue::String("alpha".to_string())),
+            ("string_empty", ScriptValue::String(String::new().into())),
+            ("string_alpha", ScriptValue::String("alpha".to_string().into())),
             (
                 "string_16",
-                ScriptValue::String("abcdefghijklmnop".to_string()),
+                ScriptValue::String("abcdefghijklmnop".to_string().into()),
             ),
             (
                 "string_24",
-                ScriptValue::String("abcdefghijklmnopqrstuvwx".to_string()),
+                ScriptValue::String("abcdefghijklmnopqrstuvwx".to_string().into()),
             ),
             (
                 "string_40",
-                ScriptValue::String("abcdefghijklmnopqrstuvwxyz0123456789ABCD".to_string()),
+                ScriptValue::String("abcdefghijklmnopqrstuvwxyz0123456789ABCD".to_string().into()),
             ),
             (
                 "string_80",
                 ScriptValue::String(
                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                        .to_string(),
+                        .to_string()
+                        .into(),
                 ),
             ),
             (
@@ -1816,7 +1817,7 @@ fn parity_differential_matches_cpp_golden() {
                 ScriptValue::Array(vec![
                     ScriptValue::Int(1),
                     ScriptValue::Bool(true),
-                    ScriptValue::String("x".to_string()),
+                    ScriptValue::String("x".to_string().into()),
                 ]),
             ),
             ("map_a1_b23", ScriptValue::Proplist(map)),

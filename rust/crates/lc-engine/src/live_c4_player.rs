@@ -119,20 +119,13 @@ pub fn serialize_live_c4_player_with_options(
     maker: &[u8],
     options: LiveC4PlayerSaveOptions<'_>,
 ) -> Result<MutableGroup, LiveC4PlayerError> {
-    let state = engine.capture_state_for_network_save();
-    let player = state
-        .players
-        .iter()
-        .find(|player| player.id == player_number)
-        .ok_or(LiveC4PlayerError::PlayerNotFound(player_number))?;
-    let enumeration = local_player_value_enumeration(&state, player);
-    serialize_live_c4_player_with_options_and_enumeration(
+    serialize_live_c4_player_with_options_and_value_encoding(
         engine,
         player_number,
         filename,
         maker,
         options,
-        &enumeration,
+        PlayerValueEncoding::CurrentIds,
     )
 }
 
@@ -171,14 +164,13 @@ pub fn serialize_live_c4_player_for_synchronization(
         .iter()
         .find(|player| player.id == player_number)
         .ok_or(LiveC4PlayerError::PlayerNotFound(player_number))?;
-    let enumeration = local_player_value_enumeration(&state, player);
     let synchronized = serialize_player_group_with_profile_policy(
         &state,
         player,
         filename,
         maker,
         options,
-        &enumeration,
+        PlayerValueEncoding::CurrentIds,
         |info| {
             let definition = engine.definition(&info.id);
             // Ordinary external files omit TemporaryCrew. Remote Strip also
@@ -264,6 +256,24 @@ pub fn serialize_live_c4_player_with_options_and_enumeration(
     options: LiveC4PlayerSaveOptions<'_>,
     enumeration: &LiveC4ValueEnumeration,
 ) -> Result<MutableGroup, LiveC4PlayerError> {
+    serialize_live_c4_player_with_options_and_value_encoding(
+        engine,
+        player_number,
+        filename,
+        maker,
+        options,
+        PlayerValueEncoding::Synchronized(enumeration),
+    )
+}
+
+fn serialize_live_c4_player_with_options_and_value_encoding(
+    engine: &Engine,
+    player_number: i32,
+    filename: &[u8],
+    maker: &[u8],
+    options: LiveC4PlayerSaveOptions<'_>,
+    value_encoding: PlayerValueEncoding<'_>,
+) -> Result<MutableGroup, LiveC4PlayerError> {
     let state = engine.capture_state_for_network_save();
     let player = state
         .players
@@ -276,7 +286,7 @@ pub fn serialize_live_c4_player_with_options_and_enumeration(
         filename,
         maker,
         options,
-        enumeration,
+        value_encoding,
         |info| should_serialize_crew_definition(engine, &info.id, options.savegame),
         |info| {
             materialize_live_portrait(engine, info, options)?;
@@ -323,14 +333,13 @@ pub fn serialize_live_c4_player_state(
     filename: &[u8],
     maker: &[u8],
 ) -> Result<MutableGroup, LiveC4PlayerError> {
-    let enumeration = local_player_value_enumeration(state, player);
     serialize_player_group(
         state,
         player,
         filename,
         maker,
         LiveC4PlayerSaveOptions::default(),
-        &enumeration,
+        PlayerValueEncoding::CurrentIds,
         |_| true,
         |_| Ok(()),
     )
@@ -345,45 +354,25 @@ fn should_serialize_crew_definition(engine: &Engine, id: &str, savegame: bool) -
             .is_none_or(|definition| definition.temporary_crew == 0)
 }
 
-fn local_player_value_enumeration(
-    state: &EngineState,
-    player: &PlayerState,
-) -> LiveC4ValueEnumeration {
-    fn collect(value: &lc_script::Value, strings: &mut Vec<String>) {
-        match value {
-            lc_script::Value::String(value) => strings.push(value.clone()),
-            lc_script::Value::Array(values) => {
-                for value in values {
-                    collect(value, strings);
-                }
-            }
-            lc_script::Value::Proplist(values) => {
-                for (key, value) in values {
-                    collect(key, strings);
-                    collect(value, strings);
-                }
-            }
-            lc_script::Value::Nil
-            | lc_script::Value::Int(_)
-            | lc_script::Value::Bool(_)
-            | lc_script::Value::RawBool(_)
-            | lc_script::Value::C4Id(_)
-            | lc_script::Value::Object(_) => {}
-        }
-    }
+#[derive(Clone, Copy)]
+enum PlayerValueEncoding<'a> {
+    /// Ordinary C4Player::Save does not enumerate the global string table.
+    /// It writes each C4String's current iEnumID verbatim, including -1.
+    CurrentIds,
+    /// Embedded player groups follow the enumeration captured by the
+    /// enclosing synchronized scenario save.
+    Synchronized(&'a LiveC4ValueEnumeration),
+}
 
-    let mut strings = Vec::new();
-    for (_, value) in &player.extra_data {
-        collect(value, &mut strings);
-    }
-    if let Some(roster) = state.crew_info_rosters.get(&player.id) {
-        for info in roster {
-            for (_, value) in &info.extra_data {
-                collect(value, &mut strings);
-            }
+impl PlayerValueEncoding<'_> {
+    fn encode_value(self, value: &lc_script::Value) -> Result<String, LiveC4ValueEncodeError> {
+        match self {
+            Self::CurrentIds => Ok(crate::live_c4_save::encode_value_with_current_string_ids(
+                value,
+            )),
+            Self::Synchronized(enumeration) => enumeration.encode_value(value),
         }
     }
-    LiveC4ValueEnumeration::from_strings_in_id_order(strings)
 }
 
 fn serialize_player_group(
@@ -392,7 +381,7 @@ fn serialize_player_group(
     filename: &[u8],
     maker: &[u8],
     options: LiveC4PlayerSaveOptions<'_>,
-    enumeration: &LiveC4ValueEnumeration,
+    value_encoding: PlayerValueEncoding<'_>,
     include_crew: impl FnMut(&CrewInfo) -> bool,
     mut refresh_rank: impl FnMut(&mut CrewInfo) -> Result<(), LiveC4PlayerError>,
 ) -> Result<MutableGroup, LiveC4PlayerError> {
@@ -402,7 +391,7 @@ fn serialize_player_group(
         filename,
         maker,
         options,
-        enumeration,
+        value_encoding,
         include_crew,
         false,
         retained_or_unique_crew_filename,
@@ -428,7 +417,7 @@ fn serialize_player_group_with_profile_policy(
     filename: &[u8],
     maker: &[u8],
     options: LiveC4PlayerSaveOptions<'_>,
-    enumeration: &LiveC4ValueEnumeration,
+    value_encoding: PlayerValueEncoding<'_>,
     mut include_crew: impl FnMut(&CrewInfo) -> bool,
     store_tiny: bool,
     mut resolve_filename: impl FnMut(&CrewInfo, &[Vec<u8>]) -> Vec<u8>,
@@ -438,7 +427,7 @@ fn serialize_player_group_with_profile_policy(
     group.set_maker_bytes(maker);
     group.add_file(
         "Player.txt",
-        serialize_player_core(player, options.player_rank_name_default, enumeration)?,
+        serialize_player_core(player, options.player_rank_name_default, value_encoding)?,
     )?;
 
     let roster = state
@@ -462,9 +451,12 @@ fn serialize_player_group_with_profile_policy(
         let child_name = resolve_filename(&info, &used_filenames);
         let mut child = MutableGroup::new_bytes(child_name.clone());
         child.set_maker_bytes(maker);
-        child.add_file("ObjectInfo.txt", serialize_object_info(&info, enumeration)?)?;
+        child.add_file(
+            "ObjectInfo.txt",
+            serialize_object_info(&info, value_encoding)?,
+        )?;
         if !store_tiny {
-        add_retained_portrait_files(&mut child, &info)?;
+            add_retained_portrait_files(&mut child, &info)?;
         }
         child.sort(C4FLS_OBJECT);
         group.add_child_bytes(child_name.clone(), child)?;
@@ -840,7 +832,7 @@ fn overlay_rank_extension(base: &mut image::RgbaImage, extension: &image::RgbaIm
 fn serialize_player_core(
     player: &PlayerState,
     rank_name_default: &str,
-    enumeration: &LiveC4ValueEnumeration,
+    value_encoding: PlayerValueEncoding<'_>,
 ) -> Result<Vec<u8>, LiveC4PlayerError> {
     let mut core = player
         .player_info_core
@@ -881,7 +873,7 @@ fn serialize_player_core(
             "ExtraData",
             &core.extra_data,
             "player",
-            enumeration,
+            value_encoding,
         )?);
     }
 
@@ -957,7 +949,7 @@ fn fallback_player_info_core(player: &PlayerState) -> PlayerInfoCoreState {
 
 fn serialize_object_info(
     info: &CrewInfo,
-    enumeration: &LiveC4ValueEnumeration,
+    value_encoding: PlayerValueEncoding<'_>,
 ) -> Result<Vec<u8>, LiveC4PlayerError> {
     let mut object_lines = Vec::new();
     let definition = lc_script::c4_id_text(&info.id);
@@ -1016,7 +1008,7 @@ fn serialize_object_info(
             "ExtraData",
             &info.extra_data,
             "crew",
-            enumeration,
+            value_encoding,
         )?);
     }
 
@@ -1061,7 +1053,7 @@ fn named_value_map_line(
     key: &str,
     entries: &[(String, lc_script::Value)],
     scope: &'static str,
-    enumeration: &LiveC4ValueEnumeration,
+    value_encoding: PlayerValueEncoding<'_>,
 ) -> Result<Vec<u8>, LiveC4PlayerError> {
     let count =
         i32::try_from(entries.len()).map_err(|_| LiveC4PlayerError::TooManyExtraDataEntries {
@@ -1089,7 +1081,7 @@ fn named_value_map_line(
         }
         line.extend_from_slice(&name_bytes);
         line.push(b'=');
-        let encoded = enumeration.encode_value(value).map_err(|source| {
+        let encoded = value_encoding.encode_value(value).map_err(|source| {
             LiveC4PlayerError::ExtraDataValue {
                 scope,
                 name: name.clone(),
@@ -1527,7 +1519,7 @@ mod tests {
         });
 
         assert_eq!(
-            serialize_player_core(&player, "Rank", &LiveC4ValueEnumeration::default()).unwrap(),
+            serialize_player_core(&player, "Rank", PlayerValueEncoding::CurrentIds).unwrap(),
             b"[Player]\r\nName=Ala Kadabra\r\nComment=Ready\r\nRank=2\r\nRankName=Captain\r\nScore=9\r\nRounds=4\r\nRoundsWon=3\r\nRoundsLost=1\r\nTotalPlayingTime=77\r\nExtraData=2;Key=i12,Flag=b0\r\n\r\n[Preferences]\r\nColor=3\r\nColorDw=1193046\r\nAlternateColorDw=6636321\r\nControl=0\r\nAutoStopControl=1\r\nAutoContextMenu=0\r\nPosition=4\r\nMouse=0\r\n\r\n[LastRound]\r\nTitle=\"Mine \\\"A\\\"\\n\"\r\nDate=123\r\nDuration=50\r\nWon=1\r\nScore=7\r\nFinalScore=8\r\nTotalScore=17\r\nBonus=1\r\nLevel=3\r\n"
         );
     }
@@ -1542,7 +1534,7 @@ mod tests {
             ..PlayerState::default()
         };
 
-        let serialized = serialize_player_core(&player, "Rank", &LiveC4ValueEnumeration::default())
+        let serialized = serialize_player_core(&player, "Rank", PlayerValueEncoding::CurrentIds)
             .expect("player core serializes");
         assert!(!serialized
             .windows(b"Runtime script alias".len())
@@ -1605,13 +1597,17 @@ mod tests {
         };
 
         assert_eq!(
-            serialize_object_info(&info, &LiveC4ValueEnumeration::default()).unwrap(),
+            serialize_object_info(&info, PlayerValueEncoding::CurrentIds).unwrap(),
             b"[ObjectInfo]\r\nid=CLNK\r\nName=Veteran\r\nDeathMessage=Gone\r\nPortraitFile=custom\r\nRank=2\r\nRankName=\"Lieutenant\"\r\nNextRankName=\"Captain\"\r\nExperience=900\r\nNextRankExp=5196\r\nRounds=6\r\nDeathCount=7\r\nBirthday=123\r\nTotalPlayingTime=17999\r\nAge=7\r\nExtraData=1;Badge=I1145851719\r\n\r\n[Physical]\r\nEnergy=80000\r\nWalk=35000\r\nCanDig=1\r\n"
         );
     }
 
     #[test]
     fn fresh_player_group_round_trips_nondefault_core_and_retained_crew_assets() {
+        let second = lc_script::C4StringValue::loaded("second".to_string(), 0);
+        let key = lc_script::C4StringValue::loaded("key".to_string(), 1);
+        let first = lc_script::C4StringValue::loaded("first".to_string(), 2);
+        let crew_value = lc_script::C4StringValue::loaded("crew value".to_string(), 3);
         let mut player = PlayerState {
             id: 7,
             name: "Runtime alias".to_string(),
@@ -1623,11 +1619,11 @@ mod tests {
             extra_data: vec![(
                 "Live".to_string(),
                 lc_script::Value::Array(vec![
-                    lc_script::Value::String("second".to_string()),
+                    lc_script::Value::String(second),
                     lc_script::Value::Object(42),
                     lc_script::Value::Proplist(lc_script::ValueMap::from([(
-                        lc_script::Value::String("key".to_string()),
-                        lc_script::Value::String("first".to_string()),
+                        lc_script::Value::String(key),
+                        lc_script::Value::String(first),
                     )])),
                 ]),
             )],
@@ -1688,10 +1684,7 @@ mod tests {
             was_in_action: false,
             in_action_time: 0,
             has_died: false,
-            extra_data: vec![(
-                "Crew".to_string(),
-                lc_script::Value::String("crew value".to_string()),
-            )],
+            extra_data: vec![("Crew".to_string(), lc_script::Value::String(crew_value))],
             portraits: crate::CrewPortraitState::default(),
         };
 
@@ -1705,13 +1698,12 @@ mod tests {
         let reopened =
             lc_resources::Group::from_memory(std::path::PathBuf::from("Profile.c4p"), packed)
                 .unwrap();
+        let strings = lc_script::new_string_registrations();
+        for (id, value) in [(0, "second"), (1, "key"), (2, "first"), (3, "crew value")] {
+            lc_script::register_loaded_c4_string(&strings, id, value);
+        }
         let resolution = crate::player_file::PersistedC4ValueResolution {
-            strings: std::collections::HashMap::from([
-                (0, "second".to_string()),
-                (1, "key".to_string()),
-                (2, "first".to_string()),
-                (3, "crew value".to_string()),
-            ]),
+            strings,
             object_numbers: std::collections::HashSet::from([42]),
         };
         let loaded = crate::player_file::PlayerFile::load_with_portraits_and_value_resolution(
@@ -1738,9 +1730,50 @@ mod tests {
             loaded.crew[0].extra_data,
             vec![(
                 "Crew".to_string(),
-                lc_script::Value::String("crew value".to_string())
+                lc_script::Value::String("crew value".to_string().into())
             )]
         );
+    }
+
+    #[test]
+    fn standalone_player_save_writes_current_string_ids_without_enumerating() {
+        let runtime = lc_script::C4StringValue::from("runtime");
+        let loaded = lc_script::C4StringValue::loaded("loaded".to_string(), 7);
+        let player = PlayerState {
+            id: 7,
+            extra_data: vec![
+                (
+                    "Runtime".to_string(),
+                    lc_script::Value::String(runtime.clone()),
+                ),
+                (
+                    "Loaded".to_string(),
+                    lc_script::Value::String(loaded.clone()),
+                ),
+            ],
+            ..PlayerState::default()
+        };
+        let mut state = Engine::new().capture_state();
+        state.players.push(player.clone());
+
+        let group = serialize_live_c4_player_state(&state, &player, b"Profile.c4p", b"Test Maker")
+            .expect("standalone player serializes");
+
+        assert_eq!(
+            runtime.enum_id(),
+            -1,
+            "save must not enumerate runtime strings"
+        );
+        assert_eq!(loaded.enum_id(), 7, "save must retain loaded string IDs");
+        let reopened = lc_resources::Group::from_memory(
+            std::path::PathBuf::from("Profile.c4p"),
+            group.pack_raw().expect("player group packs"),
+        )
+        .expect("player group reopens");
+        let player_txt = reopened.read_file("Player.txt").expect("Player.txt exists");
+        assert!(player_txt
+            .windows(b"ExtraData=2;Runtime=S-1,Loaded=S7".len())
+            .any(|window| window == b"ExtraData=2;Runtime=S-1,Loaded=S7"));
     }
 
     #[test]
@@ -1778,7 +1811,7 @@ mod tests {
                 "ExtraData",
                 &entries,
                 "test",
-                &LiveC4ValueEnumeration::default(),
+                PlayerValueEncoding::CurrentIds,
             )
             .unwrap(),
             b"ExtraData=6;nil=A0,int=i-7,bool=b1,raw_bool=b7,id=I-2,zero_id=I0"
@@ -1787,25 +1820,34 @@ mod tests {
 
     #[test]
     fn c4_value_map_reuses_scenario_ids_for_nested_live_values() {
+        let first = lc_script::C4StringValue::from("first");
+        let second = lc_script::C4StringValue::from("second");
+        let key = lc_script::C4StringValue::from("key");
         let enumeration = LiveC4ValueEnumeration::from_strings_in_id_order([
-            "first".to_string(),
-            "second".to_string(),
-            "key".to_string(),
+            first.clone(),
+            second.clone(),
+            key.clone(),
         ]);
         let entries = vec![(
             "Complex".to_string(),
             lc_script::Value::Array(vec![
-                lc_script::Value::String("second".to_string()),
+                lc_script::Value::String(second),
                 lc_script::Value::Object(42),
                 lc_script::Value::Proplist(lc_script::ValueMap::from([(
-                    lc_script::Value::String("key".to_string()),
-                    lc_script::Value::String("first".to_string()),
+                    lc_script::Value::String(key),
+                    lc_script::Value::String(first),
                 )])),
             ]),
         )];
 
         assert_eq!(
-            named_value_map_line("ExtraData", &entries, "test", &enumeration).unwrap(),
+            named_value_map_line(
+                "ExtraData",
+                &entries,
+                "test",
+                PlayerValueEncoding::Synchronized(&enumeration),
+            )
+            .unwrap(),
             b"ExtraData=1;Complex=a[3;S1,O42,m[1;S2=S0]]"
         );
     }
@@ -1825,7 +1867,7 @@ mod tests {
             ..PlayerState::default()
         };
 
-        let serialized = serialize_player_core(&player, "Rank", &LiveC4ValueEnumeration::default())
+        let serialized = serialize_player_core(&player, "Rank", PlayerValueEncoding::CurrentIds)
             .expect("player core serializes");
         assert!(serialized
             .windows(b"AutoStopControl=2".len())
@@ -1849,13 +1891,13 @@ mod tests {
         };
 
         let localized =
-            serialize_player_core(&player, "Dienstgrad", &LiveC4ValueEnumeration::default())
+            serialize_player_core(&player, "Dienstgrad", PlayerValueEncoding::CurrentIds)
                 .expect("localized player core serializes");
         assert!(!localized
             .windows(b"RankName=".len())
             .any(|window| window == b"RankName="));
 
-        let english = serialize_player_core(&player, "Rank", &LiveC4ValueEnumeration::default())
+        let english = serialize_player_core(&player, "Rank", PlayerValueEncoding::CurrentIds)
             .expect("English-default player core serializes");
         assert!(english
             .windows(b"RankName=Dienstgrad".len())
@@ -1874,12 +1916,9 @@ mod tests {
             ..PlayerState::default()
         };
 
-        let serialized = serialize_player_core(
-            &player,
-            &localized_default,
-            &LiveC4ValueEnumeration::default(),
-        )
-        .expect("player core serializes");
+        let serialized =
+            serialize_player_core(&player, &localized_default, PlayerValueEncoding::CurrentIds)
+                .expect("player core serializes");
         let expected = format!("RankName={bounded}\r\n");
         assert!(serialized
             .windows(expected.len())
@@ -1914,7 +1953,7 @@ mod tests {
             portraits: crate::CrewPortraitState::default(),
         };
 
-        let serialized = serialize_object_info(&info, &LiveC4ValueEnumeration::default())
+        let serialized = serialize_object_info(&info, PlayerValueEncoding::CurrentIds)
             .expect("crew core serializes");
         assert!(serialized
             .windows(b"RankName=\"Clonk\"\r\n".len())

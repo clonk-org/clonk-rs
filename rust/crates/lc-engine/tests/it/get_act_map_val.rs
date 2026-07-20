@@ -119,7 +119,7 @@ func ScenarioActLength()
             .expect("ChangeDef reflection probe runs"),
         Value::Array(vec![
             Value::Int(11),
-            Value::String("Zap".to_string()),
+            Value::String("Zap".to_string().into()),
             Value::Int(2),
             Value::Int(-11),
             Value::Int(11),
@@ -281,7 +281,7 @@ fn shipped_hazard_trail_gets_its_real_facet_width_by_entry_index() {
                     Value::Int(20),
                     Value::Int(100),
                     Value::Object(shot.as_u64()),
-                    Value::String("Travel".to_string()),
+                    Value::String("Travel".to_string().into()),
                 ],
             )
             .expect("real shipped Trail Set executes"),

@@ -49,7 +49,7 @@ fn long_string_below_strict3_truncates_to_1024_and_warns() {
     let source = format!("#strict 2\nfunc Test() {{ return \"{literal}\"; }}");
     let (script, value) = compile_and_call(&source);
 
-    assert_eq!(value, Value::String("x".repeat(1024)));
+    assert_eq!(value, Value::String("x".repeat(1024).into()));
     assert_eq!(
         script.parse_diagnostics().len(),
         1,

@@ -8610,6 +8610,8 @@ pub enum EngineError {
     RuntimeJoinPlayerRestore(#[from] RuntimeJoinPlayerRestoreError),
     #[error("failed to persist scenario section `{section}`: {detail}")]
     ScenarioSectionSave { section: String, detail: String },
+    #[error("failed to load objects for scenario section `{section}`: {detail}")]
+    ScenarioSectionObjects { section: String, detail: String },
 }
 
 #[derive(Debug, Error)]
@@ -9459,24 +9461,40 @@ fn denumerate_script_value(value: &Value, object_numbers: &HashSet<u64>) -> Valu
                 .map(|value| denumerate_script_value(value, object_numbers))
                 .collect(),
         ),
-        Value::Proplist(entries) => Value::Proplist(
-            entries
-                .iter()
-                .filter_map(|(key, value)| {
-                    if is_missing_script_object(key, object_numbers)
-                        || is_missing_script_object(value, object_numbers)
-                    {
-                        return None;
-                    }
-                    Some((
-                        denumerate_script_value(key, object_numbers),
-                        denumerate_script_value(value, object_numbers),
-                    ))
-                })
-                .collect(),
-        ),
+        Value::Proplist(entries) => {
+            Value::Proplist(denumerate_script_map(entries, object_numbers))
+        }
         value => value.clone(),
     }
+}
+
+fn denumerate_script_map(entries: &ValueMap, object_numbers: &HashSet<u64>) -> ValueMap {
+    // Existing emptyValues are not part of C4ValueHash's visible iterator and
+    // are therefore not denumerated. Preserve their current LIFO reuse order;
+    // new removals are pushed in front of them by removeValue.
+    let hidden_values = entries.hidden_values().cloned().collect::<Vec<_>>();
+    let mut resolved = ValueMap::with_capacity(entries.len());
+    let mut removed_values = Vec::new();
+    for (key, value) in entries {
+        let removed = is_missing_script_object(key, object_numbers)
+            || is_missing_script_object(value, object_numbers);
+        let key = denumerate_script_value(key, object_numbers);
+        let value = denumerate_script_value(value, object_numbers);
+        if removed {
+            // A cleared key retains its mapped value; a cleared mapped value
+            // is already nil. Both slots enter C4ValueHash::emptyValues.
+            removed_values.push(value);
+        } else {
+            resolved.insert_key(key, value);
+        }
+    }
+    for value in hidden_values.into_iter().rev() {
+        resolved.recycle_value_slot(value);
+    }
+    for value in removed_values {
+        resolved.recycle_value_slot(value);
+    }
+    resolved
 }
 
 fn is_missing_script_object(value: &Value, object_numbers: &HashSet<u64>) -> bool {
@@ -9512,6 +9530,41 @@ fn map_denumeration_erases_missing_direct_object_entries() {
     assert_eq!(
         map.get_key(&Value::Object(8)),
         Some(&Value::String("live".into()))
+    );
+    assert_eq!(
+        map.hidden_values().cloned().collect::<Vec<_>>(),
+        vec![Value::Nil, Value::Int(1)],
+        "removed mapped slots remain alive in native LIFO reuse order"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn effect_map_denumeration_preserves_existing_and_removed_hidden_slots() {
+    let mut map = ValueMap::new();
+    map.insert_key(Value::Object(7), Value::String("removed value".into()));
+    map.insert_key(Value::Int(1), Value::Object(7));
+    map.insert_key(Value::Object(8), Value::String("visible".into()));
+    map.recycle_value_slot(Value::String("older hidden".into()));
+    let mut effect_value = EffectVarValue::Proplist(map);
+
+    denumerate_effect_value(&mut effect_value, &HashSet::from([8]));
+
+    let EffectVarValue::Proplist(map) = effect_value else {
+        panic!("effect value remains a map");
+    };
+    assert_eq!(map.len(), 1);
+    assert_eq!(
+        map.get_key(&Value::Object(8)),
+        Some(&Value::String("visible".into()))
+    );
+    assert_eq!(
+        map.hidden_values().cloned().collect::<Vec<_>>(),
+        vec![
+            Value::Nil,
+            Value::String("removed value".into()),
+            Value::String("older hidden".into()),
+        ]
     );
 }
 
@@ -10029,17 +10082,7 @@ fn denumerate_effect_value(value: &mut EffectVarValue, object_numbers: &HashSet<
             }
         }
         EffectVarValue::Proplist(entries) => {
-            let previous = std::mem::take(entries);
-            for (mut key, mut value) in previous {
-                if is_missing_script_object(&key, object_numbers)
-                    || matches!(&value, EffectVarValue::Object(id) if !object_numbers.contains(id))
-                {
-                    continue;
-                }
-                key = denumerate_script_value(&key, object_numbers);
-                denumerate_effect_value(&mut value, object_numbers);
-                entries.push((key, value));
-            }
+            *entries = denumerate_script_map(entries, object_numbers);
         }
         _ => {}
     }
@@ -11984,7 +12027,8 @@ impl Definition {
     /// linked include/append copies but retains original script functions and
     /// the engine-owned global value cells.
     fn reset_script_links(&mut self) {
-        Arc::make_mut(&mut self.script).replace_script(self.base_script.clone(), false);
+        Arc::make_mut(&mut self.script)
+            .replace_script_deferred(self.base_script.clone(), false);
         self.includes_resolved = false;
         if !self.rank_names_owned {
             self.rank_names = None;
@@ -14244,7 +14288,7 @@ impl Definition {
                     state,
                     &object_definition.action_library,
                 ),
-                Value::String(action_name.to_string()),
+                Value::String(action_name.to_string().into()),
             ]
         };
         let physics_guard = enter_physics_context(physics);
@@ -14514,7 +14558,7 @@ impl Definition {
 
         let args = [
             build_state_value(&self.id, object_id, state, &self.action_library),
-            Value::String(kind.as_str().to_string()),
+            Value::String(kind.as_str().to_string().into()),
             build_menu_selection_value(selection),
         ];
         let physics_guard = enter_physics_context(physics);
@@ -15145,7 +15189,7 @@ impl Definition {
                 Ok(Value::Array(
                     compat::object_effect_info_lines(object_id, &effects)
                         .into_iter()
-                        .map(Value::String)
+                        .map(Value::from)
                         .collect(),
                 ))
             },
@@ -15154,7 +15198,7 @@ impl Definition {
             Value::Array(values) => values
                 .into_iter()
                 .filter_map(|value| match value {
-                    Value::String(line) => Some(line),
+                    Value::String(line) => Some(line.into_string()),
                     _ => None,
                 })
                 .collect(),
@@ -15402,7 +15446,7 @@ impl Definition {
             };
 
             let label = match props.get("label") {
-                Some(Value::String(text)) if !text.is_empty() => text.clone(),
+                Some(Value::String(text)) if !text.is_empty() => text.to_string(),
                 Some(other) => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: self.id.clone(),
@@ -15423,7 +15467,7 @@ impl Definition {
             };
 
             let function = match props.get("callback") {
-                Some(Value::String(name)) if !name.is_empty() => name.clone(),
+                Some(Value::String(name)) if !name.is_empty() => name.to_string(),
                 Some(other) => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: self.id.clone(),
@@ -15445,7 +15489,7 @@ impl Definition {
 
             let description = match props.get("description") {
                 Some(Value::String(text)) if text.is_empty() => None,
-                Some(Value::String(text)) => Some(text.clone()),
+                Some(Value::String(text)) => Some(text.to_string()),
                 Some(other) => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: self.id.clone(),
@@ -15592,7 +15636,7 @@ impl Definition {
         game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
-        let mut extras = vec![Value::String(pending.name.clone())];
+        let mut extras = vec![Value::String(pending.name.clone().into())];
         // rVal1-4 (C4Effect.cpp:282): always four slots, missing = nil.
         extras.extend(constructor_values.iter().cloned());
         self.dispatch_effect_callback(
@@ -15632,7 +15676,7 @@ impl Definition {
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
         let mut extras = vec![
-            Value::String(pending.name.clone()),
+            Value::String(pending.name.clone().into()),
             Value::Int(pending.interval),
         ];
         // rVal1-4 (C4Effect.cpp:301): always four slots, missing = nil.
@@ -16135,7 +16179,8 @@ impl ScenarioScript {
     }
 
     fn reset_script_links(&mut self) {
-        Arc::make_mut(&mut self.script).replace_script(self.base_script.clone(), false);
+        Arc::make_mut(&mut self.script)
+            .replace_script_deferred(self.base_script.clone(), false);
         self.includes_resolved = false;
         self.has_initialize = self.script.has_function("Initialize");
         self.has_step = self.script.has_function("Step");
@@ -16870,6 +16915,8 @@ struct RuntimeScenarioSection {
     post_init_map_callbacks: map_creator_s2::PostInitMapCallbacks,
     keep_map_creator: bool,
     no_initialize: bool,
+    /// Synthetic-group fallback only. Real source/frozen sections recompile
+    /// Objects.txt for every C4GameObjects::Load boundary.
     initial_objects: Vec<scenario::ScenarioSpawn>,
     saved_objects: Option<Vec<PersistedObject>>,
     saved_object_order: Vec<ObjectId>,
@@ -17196,7 +17243,7 @@ pub struct Engine {
     /// Exact zero-based `Strings.txt` enumeration from the scenario/save
     /// group currently being loaded. Object state consumes it during parse;
     /// embedded player files need the same IDs later in the restore pipeline.
-    legacy_string_table: HashMap<i32, String>,
+    legacy_string_table: lc_script::StringRegistrations,
     /// Every live script host in C4AulScriptEngine child order. Definition-pack
     /// System hosts are interleaved with definitions; scenario Script.c and
     /// its System.c4g hosts follow all definitions.
@@ -19499,6 +19546,7 @@ impl Engine {
     }
 
     pub fn with_seed(seed: u64) -> Self {
+        let script_string_registrations = lc_script::new_string_registrations();
         let mut engine = Self {
             definitions: HashMap::new(),
             definition_load_order: Vec::new(),
@@ -19506,8 +19554,8 @@ impl Engine {
             script_globals: lc_script::new_global_variables(),
             script_global_slots: lc_script::new_global_slots(),
             script_global_consts: lc_script::new_global_variables(),
-            script_string_registrations: lc_script::new_string_registrations(),
-            legacy_string_table: HashMap::new(),
+            script_string_registrations: script_string_registrations.clone(),
+            legacy_string_table: script_string_registrations,
             script_link_sources: Vec::new(),
             reloaded_global_definitions: Vec::new(),
             objects_generation: std::cell::Cell::new(1),
@@ -20132,21 +20180,47 @@ impl Engine {
     }
 
     pub(crate) fn set_legacy_string_table(&mut self, strings: HashMap<i32, String>) {
+        let registrations = lc_script::new_string_registrations();
         let mut ids = strings.keys().copied().collect::<Vec<_>>();
         ids.sort_unstable();
         for id in ids {
             if let Some(value) = strings.get(&id) {
-                lc_script::register_loaded_c4_string(
-                    &self.script_string_registrations,
-                    id,
-                    value,
-                );
+                lc_script::register_loaded_c4_string(&registrations, id, value);
             }
         }
-        self.legacy_string_table = strings;
+        self.adopt_legacy_string_table(registrations);
     }
 
-    pub(crate) fn legacy_string_table_snapshot(&self) -> HashMap<i32, String> {
+    /// Adopt the exact process-global C4StringTable used while compiling
+    /// legacy scenario state. Pre-resolved C4Values retain identities from
+    /// this ledger, so rebuilding it from text here would split pointers.
+    pub(crate) fn adopt_legacy_string_table(
+        &mut self,
+        registrations: lc_script::StringRegistrations,
+    ) {
+        self.script_string_registrations = registrations.clone();
+        self.legacy_string_table = registrations.clone();
+
+        // Scenario application normally runs before installing any new
+        // definition/scenario host. Reattach surviving hosts as well so a
+        // reused Engine cannot keep registering literals in the old table.
+        for definition in self.definitions.values_mut() {
+            Arc::make_mut(&mut definition.script)
+                .set_string_registrations_deferred(registrations.clone());
+        }
+        if let Some(scenario) = self.scenario_script.as_mut() {
+            Arc::make_mut(&mut scenario.script)
+                .set_string_registrations_deferred(registrations.clone());
+        }
+        for source in &mut self.script_link_sources {
+            if let ScriptLinkSource::Script { script, .. } = source {
+                Arc::make_mut(script).set_string_registrations_deferred(registrations.clone());
+            }
+        }
+        self.invalidate_host_definition_tables();
+    }
+
+    pub(crate) fn legacy_string_table_snapshot(&self) -> lc_script::StringRegistrations {
         self.legacy_string_table.clone()
     }
 
@@ -20183,7 +20257,11 @@ impl Engine {
                         post_init_map_callbacks: section.post_init_map_callbacks.clone(),
                         keep_map_creator: section.keep_map_creator,
                         no_initialize: section.no_initialize,
-                        initial_objects: section.objects.clone(),
+                        initial_objects: section
+                            .source_group
+                            .is_none()
+                            .then(|| section.objects.clone())
+                            .unwrap_or_default(),
                         saved_objects: None,
                         saved_object_order: Vec::new(),
                         scenario_values: section.scenario_values.clone(),
@@ -25866,12 +25944,20 @@ impl Engine {
         let name = name.into();
         let mut script = ScenarioScript::from_source(name, source)?;
         script.c4_args = c4_args;
+        // C4Aul's preparser installs Ref (non-Hold) static-constant strings
+        // before its later function-body parse registers held operands.
+        lc_script::register_global_declarations_with_strings(
+            script.base_script.var_decls(),
+            &self.script_globals,
+            Some(&self.script_global_consts),
+            &self.script_string_registrations,
+        );
         {
             let host = Arc::make_mut(&mut script.script);
             host.set_global_variables(self.script_globals.clone());
             host.set_global_slots(self.script_global_slots.clone());
             host.set_global_constants(self.script_global_consts.clone());
-            host.set_string_registrations(self.script_string_registrations.clone());
+            host.set_string_registrations_deferred(self.script_string_registrations.clone());
             host.adopt_statics_into_globals();
         }
         let scenario_globals: Vec<(String, lc_script::Function)> = script
@@ -27856,6 +27942,13 @@ impl Engine {
         // this insertion boundary covers legacy, network, and sandbox paths
         // without making the non-idempotent palette replacement repeat.
         definition.colorize_by_material(&self.materials);
+        // Preparse constants precede the function-body Hold pass in C4Aul.
+        lc_script::register_global_declarations_with_strings(
+            definition.base_script.var_decls(),
+            &self.script_globals,
+            Some(&self.script_global_consts),
+            &self.script_string_registrations,
+        );
         {
             // One GlobalNamed table for every script host: `static`
             // declarations compiled into the definition move to it.
@@ -27863,7 +27956,7 @@ impl Engine {
             script.set_global_variables(self.script_globals.clone());
             script.set_global_slots(self.script_global_slots.clone());
             script.set_global_constants(self.script_global_consts.clone());
-            script.set_string_registrations(self.script_string_registrations.clone());
+            script.set_string_registrations_deferred(self.script_string_registrations.clone());
             script.adopt_statics_into_globals();
         }
 
@@ -28013,18 +28106,21 @@ impl Engine {
                     // the same engine-global GlobalNamed/GlobalConsts tables
                     // as definition scripts (C4Aul preparser and
                     // RegisterGlobalConstant, C4Aul.cpp:484-492).
-                    lc_script::register_global_declarations(
+                    lc_script::register_global_declarations_with_strings(
                         compiled.var_decls(),
                         &self.script_globals,
                         Some(&self.script_global_consts),
+                        &self.script_string_registrations,
                     );
                     let mut script = ScriptEngine::new();
+                    script.add_script(compiled.clone().without_static_declarations());
                     script.set_global_variables(self.script_globals.clone());
                     script.set_global_slots(self.script_global_slots.clone());
                     script.set_global_constants(self.script_global_consts.clone());
-                    script.set_string_registrations(self.script_string_registrations.clone());
+                    script.set_string_registrations_deferred(
+                        self.script_string_registrations.clone(),
+                    );
                     script.set_global_functions(self.global_script_functions.clone());
-                    script.add_script(compiled.clone().without_static_declarations());
                     compat::register_host_functions(&mut script);
                     let declarations = script
                         .global_access_functions()
@@ -28113,11 +28209,13 @@ impl Engine {
                         continue;
                     }
                     let mut engine = ScriptEngine::new();
+                    engine.add_script(script.without_static_declarations());
                     engine.set_global_variables(self.script_globals.clone());
                     engine.set_global_slots(self.script_global_slots.clone());
                     engine.set_global_constants(self.script_global_consts.clone());
-                    engine.set_string_registrations(self.script_string_registrations.clone());
-                    engine.add_script(script.without_static_declarations());
+                    engine.set_string_registrations_deferred(
+                        self.script_string_registrations.clone(),
+                    );
                     #[allow(clippy::arc_with_non_send_sync)] // single-threaded sharing
                     (Arc::new(engine), None, targets)
                 }
@@ -28271,21 +28369,31 @@ impl Engine {
     /// engine-global static and constant cells deliberately remain intact;
     /// only linked function copies and dependency state are discarded.
     pub fn relink_scripts(&mut self) -> Result<(), EngineError> {
-        for source in &mut self.script_link_sources {
-            if let ScriptLinkSource::Script {
-                base_script,
-                script,
-                ..
-            } = source
-            {
-                Arc::make_mut(script).replace_script(base_script.clone(), false);
+        lc_script::clear_c4_string_holds(&self.script_string_registrations);
+        // UnLink restores every preparsed host without reacquiring function-
+        // body Holds. The one global Parse pass after append/include linking
+        // below reacquires them in engine child-list order.
+        for index in 0..self.script_link_sources.len() {
+            match self.script_link_sources[index].clone() {
+                ScriptLinkSource::Script { base_script, .. } => {
+                    let ScriptLinkSource::Script { script, .. } =
+                        &mut self.script_link_sources[index]
+                    else {
+                        unreachable!()
+                    };
+                    Arc::make_mut(script).replace_script_deferred(base_script, false);
+                }
+                ScriptLinkSource::Definition(id) => {
+                    if let Some(definition) = self.definitions.get_mut(&id) {
+                        definition.reset_script_links();
+                    }
+                }
+                ScriptLinkSource::Scenario => {
+                    if let Some(scenario) = self.scenario_script.as_mut() {
+                        scenario.reset_script_links();
+                    }
+                }
             }
-        }
-        for definition in self.definitions.values_mut() {
-            definition.reset_script_links();
-        }
-        if let Some(scenario) = self.scenario_script.as_mut() {
-            scenario.reset_script_links();
         }
 
         self.rebuild_global_script_functions();
@@ -28328,10 +28436,11 @@ impl Engine {
         // Existing static cells keep their values; constants reuse and
         // overwrite their cells. Pure ReLink below must not re-register the
         // unchanged hosts.
-        lc_script::register_global_declarations(
+        lc_script::register_global_declarations_with_strings(
             script.var_decls(),
             &self.script_globals,
             Some(&self.script_global_consts),
+            &self.script_string_registrations,
         );
         self.definitions
             .get_mut(definition_id)
@@ -28343,6 +28452,34 @@ impl Engine {
         self.reloaded_global_definitions.push(definition_id);
         self.relink_scripts()?;
         Ok(true)
+    }
+
+    /// C4AulScriptEngine::Link's final recursive Parse pass. Every host has
+    /// already preparsed its declarations, so static-constant string Refs are
+    /// present before the first function-body operand receives Hold.
+    fn acquire_script_string_holds(&mut self) {
+        for index in 0..self.script_link_sources.len() {
+            match self.script_link_sources[index].clone() {
+                ScriptLinkSource::Script { .. } => {
+                    let ScriptLinkSource::Script { script, .. } =
+                        &mut self.script_link_sources[index]
+                    else {
+                        unreachable!()
+                    };
+                    Arc::make_mut(script).acquire_string_literal_holds();
+                }
+                ScriptLinkSource::Definition(id) => {
+                    if let Some(definition) = self.definitions.get_mut(&id) {
+                        Arc::make_mut(&mut definition.script).acquire_string_literal_holds();
+                    }
+                }
+                ScriptLinkSource::Scenario => {
+                    if let Some(scenario) = self.scenario_script.as_mut() {
+                        Arc::make_mut(&mut scenario.script).acquire_string_literal_holds();
+                    }
+                }
+            }
+        }
     }
 
     /// Recollects every persistent host's `global func` declarations in
@@ -28469,6 +28606,12 @@ impl Engine {
                 scenario.refresh_script_flags();
             }
         }
+
+        // Native Link performs Parse only after every append/include has been
+        // resolved. This is also the first point where initial-load function
+        // literals may acquire Hold; all hosts' constants were preparsed while
+        // they were installed.
+        self.acquire_script_string_holds();
 
         Ok(())
     }
@@ -36364,6 +36507,54 @@ impl Engine {
         }
     }
 
+    fn scenario_section_object_spawns(
+        &self,
+        section: &RuntimeScenarioSection,
+    ) -> Result<Vec<scenario::ScenarioSpawn>, EngineError> {
+        let group = if let Some(payload) = section.frozen_group.as_ref() {
+            Some(
+                lc_resources::Group::from_raw_memory(
+                    std::path::PathBuf::from(format!("Sect{}.c4g", section.name)),
+                    payload.clone(),
+                )
+                .map_err(|error| EngineError::ScenarioSectionObjects {
+                    section: section.name.clone(),
+                    detail: error.to_string(),
+                })?,
+            )
+        } else {
+            section.source_group.clone()
+        };
+        let Some(group) = group else {
+            // Unit/synthetic sections have no C4Group to reopen. Preserve
+            // their explicit templates as the test-fixture equivalent of an
+            // Objects.txt component.
+            return Ok(section.initial_objects.clone());
+        };
+        if section.source_group.is_none() && !group.exists("Objects.txt") {
+            // A landscape-only freeze of a synthetic section creates a temp
+            // group without an object component. Real named sections copied
+            // their original Objects.txt into that group; only fixtures need
+            // to fall back to the explicit templates here.
+            return Ok(section.initial_objects.clone());
+        }
+
+        let definition_ids = self
+            .definitions
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        scenario::collect_legacy_objects_with_definition_ids(
+            &group,
+            &definition_ids,
+            &self.legacy_string_table,
+        )
+        .map_err(|error| EngineError::ScenarioSectionObjects {
+            section: section.name.clone(),
+            detail: error.to_string(),
+        })
+    }
+
     fn spawn_scenario_section_objects(
         &mut self,
         mut pending: Vec<scenario::ScenarioSpawn>,
@@ -36594,6 +36785,12 @@ impl Engine {
                 detail: error.to_string(),
             })?;
             current.frozen_group = Some(frozen_group);
+            // The persisted snapshots are only scratch input to Objects.Save.
+            // Native deletes the departing live objects after producing the
+            // temporary group; retaining these structured copies would keep
+            // their C4String references registered outside the raw section.
+            current.saved_objects = None;
+            current.saved_object_order.clear();
             if flags & 1 != 0 {
                 // C4Landscape::Save writes a changed retained Map.bmp before
                 // the exact section is reloaded. Exact Init then owns no Map,
@@ -36893,17 +37090,9 @@ impl Engine {
         state.transfer_zones.clear();
         state.mass_movers.clear();
 
-        let load_initial_objects = target.saved_objects.is_none();
-        state.objects = target.saved_objects.unwrap_or_default();
-        state
-            .objects
-            .retain(|object| !preserved.contains(&object.snapshot.id));
+        state.objects.clear();
         state.objects.extend(retained);
-        state.object_order = target.saved_object_order;
-        state
-            .object_order
-            .retain(|id| !preserved.contains(id));
-        state.object_order.extend(retained_order);
+        state.object_order = retained_order;
 
         self.base_extinguish_enabled = target.base_extinguish_enabled;
         self.restore_state(&state)?;
@@ -36932,9 +37121,8 @@ impl Engine {
             physics.set_script_gravity(gravity);
             self.set_physics(physics);
         }
-        if load_initial_objects {
-            self.spawn_scenario_section_objects(target.initial_objects)?;
-        }
+        let target_objects = self.scenario_section_object_spawns(&target)?;
+        self.spawn_scenario_section_objects(target_objects)?;
         if !target.no_initialize && landscape_loaded && keep_map_creator {
             self.run_post_init_map_callbacks(&post_init_map_callbacks)?;
         }
@@ -40339,7 +40527,7 @@ impl Engine {
                         "Build:GetNeededMatStr",
                     ))?
                     .and_then(|value| match value {
-                        Value::String(text) => Some(text),
+                        Value::String(text) => Some(text.into_string()),
                         _ => None,
                     });
                     if let Some(text) = text {
@@ -52091,7 +52279,7 @@ impl Engine {
         command: command::CommandView,
     ) -> Result<(), EngineError> {
         let args = vec![
-            Value::String(command.name.clone()),
+            Value::String(command.name.clone().into()),
             command
                 .target
                 .map(object_reference_value)
@@ -52110,7 +52298,7 @@ impl Engine {
             command.legacy_data.map(Value::Int).unwrap_or_else(|| {
                 match &command.data {
                     CommandData::Integer(value) => Value::Int(*value),
-                    CommandData::Text(value) => Value::String(value.clone()),
+                    CommandData::Text(value) => Value::String(value.clone().into()),
                     CommandData::None => Value::Nil,
                 }
             }),
@@ -52265,7 +52453,7 @@ impl Engine {
                                 "CommandFail:GetNeededMatStr",
                             ))?
                             .and_then(|value| match value {
-                                Value::String(text) => Some(text),
+                                Value::String(text) => Some(text.into_string()),
                                 _ => None,
                             });
                         }
@@ -52513,7 +52701,7 @@ impl Engine {
         );
         let definition_value = definition_id_to_c4id(definition_id)
             .map(Value::Int)
-            .unwrap_or_else(|| Value::String(definition_id.to_string()));
+            .unwrap_or_else(|| Value::String(definition_id.to_string().into()));
         args.push(definition_value);
 
         let value = self.call_object_function(index, "~ControlCommandAcquire", args)?;
@@ -52547,7 +52735,7 @@ impl Engine {
             target2.map(object_reference_value).unwrap_or(Value::Nil),
             definition_id_to_c4id(definition_id)
                 .map(Value::Int)
-                .unwrap_or_else(|| Value::String(definition_id.to_string())),
+                .unwrap_or_else(|| Value::String(definition_id.to_string().into())),
         ];
         let value = self.call_object_function(index, "~ControlCommandConstruction", args)?;
         let code = match value {
@@ -56990,7 +57178,7 @@ fn build_state_value(
     let mut map = ValueMap::with_capacity(8);
     map.insert(
         "definition".into(),
-        Value::String(definition_id.to_string()),
+        Value::String(definition_id.to_string().into()),
     );
     map.insert("id".into(), Value::Int(truncate_to_i32(object_id.as_u64())));
     map.insert("position".into(), state.position.to_value());
@@ -57027,7 +57215,10 @@ fn build_state_value(
         .collect();
     map.insert("contents".into(), Value::Array(contents));
     let mut action = ValueMap::with_capacity(7);
-    action.insert("name".into(), Value::String(state.action.name.clone()));
+    action.insert(
+        "name".into(),
+        Value::String(state.action.name.clone().into()),
+    );
     action.insert("phase".into(), Value::Int(state.action.phase));
     action.insert("ticks".into(), Value::Int(state.action.ticks));
     action.insert("data".into(), Value::Int(state.action.data));
@@ -57056,7 +57247,7 @@ fn build_state_value(
     if let Some(procedure) = library
         .procedure_name_for_entry(&state.action.name, state.action.act_map_index)
     {
-        action.insert("procedure".into(), Value::String(procedure.to_string()));
+        action.insert("procedure".into(), Value::String(procedure.to_string().into()));
     }
     map.insert("action".into(), Value::Proplist(action));
     let effects: Vec<_> = state
@@ -57064,7 +57255,7 @@ fn build_state_value(
         .iter()
         .map(|effect| {
             let mut props = ValueMap::with_capacity(6);
-            props.insert("name".into(), Value::String(effect.name.clone()));
+            props.insert("name".into(), Value::String(effect.name.clone().into()));
             props.insert("priority".into(), Value::Int(effect.priority));
             props.insert("interval".into(), Value::Int(effect.interval));
             props.insert("timer".into(), Value::Int(effect.timer));
@@ -57072,7 +57263,10 @@ fn build_state_value(
                 props.insert("command_target".into(), Value::Int(target));
             }
             if let Some(id) = &effect.command_id {
-                props.insert("command_target_id".into(), Value::String(id.clone()));
+                props.insert(
+                    "command_target_id".into(),
+                    Value::String(id.clone().into()),
+                );
             }
             Value::Proplist(props)
         })
@@ -57095,9 +57289,12 @@ fn build_menu_selection_value(selection: &MenuCommandSelection) -> Value {
     map.insert("instances".into(), Value::Array(instances));
     map.insert(
         "definition".into(),
-        Value::String(selection.definition_id.clone()),
+        Value::String(selection.definition_id.clone().into()),
     );
-    map.insert("label".into(), Value::String(selection.label.clone()));
+    map.insert(
+        "label".into(),
+        Value::String(selection.label.clone().into()),
+    );
     Value::Proplist(map)
 }
 
@@ -57105,7 +57302,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
     let mut map = ValueMap::with_capacity(11);
     map.insert(
         "definition".into(),
-        Value::String(snapshot.definition_id.clone()),
+        Value::String(snapshot.definition_id.clone().into()),
     );
     map.insert(
         "id".into(),
@@ -57150,7 +57347,10 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
         .collect();
     map.insert("contents".into(), Value::Array(contents));
     let mut action = ValueMap::with_capacity(7);
-    action.insert("name".into(), Value::String(snapshot.action.name.clone()));
+    action.insert(
+        "name".into(),
+        Value::String(snapshot.action.name.clone().into()),
+    );
     action.insert("phase".into(), Value::Int(snapshot.action.phase));
     action.insert("ticks".into(), Value::Int(snapshot.action.ticks));
     action.insert("data".into(), Value::Int(snapshot.action.data));
@@ -57177,7 +57377,10 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
         }
     }
     if let Some(procedure) = &snapshot.action_procedure {
-        action.insert("procedure".into(), Value::String(procedure.clone()));
+        action.insert(
+            "procedure".into(),
+            Value::String(procedure.clone().into()),
+        );
     }
     map.insert("action".into(), Value::Proplist(action));
     let effects: Vec<_> = snapshot.effects.iter().map(build_effect_value).collect();
@@ -57575,7 +57778,7 @@ fn parse_scenario_command(
                         detail: format!("unexpected key `{key}`"),
                     });
                 };
-                match key.as_str() {
+                match key.as_ref() {
                     "spawn" => {
                         batch
                             .spawns
@@ -58163,7 +58366,7 @@ fn parse_command_from_proplist(
                 detail: format!("unexpected key `{key}`"),
             });
         };
-        match key.as_str() {
+        match key.as_ref() {
             "position" => {
                 batch.delta.position = Some(value_to_vector(definition, function, value)?);
             }
@@ -58280,7 +58483,7 @@ fn parse_action_update(
                 detail: format!("unexpected key `{key}` in action proplist"),
             });
         };
-        match key.as_str() {
+        match key.as_ref() {
             "name" => match value {
                 Value::String(name) => update.set_name(name),
                 other => {
@@ -58380,7 +58583,7 @@ fn value_to_physics_delta(
                         detail: format!("unexpected physics key `{key}`"),
                     });
                 };
-                match key.as_str() {
+                match key.as_ref() {
                     "gravity" => match entry {
                         Value::Int(val) => delta.gravity = Some(val),
                         Value::Nil => delta.gravity = Some(0),
@@ -58678,7 +58881,7 @@ fn value_to_commands(
                     detail: format!("unexpected key `{key}` in command entry"),
                 });
             };
-            match key.as_str() {
+            match key.as_ref() {
                 "delay" => {
                     let raw_delay = value_to_int(definition, function, value)?;
                     if raw_delay < 0 {
@@ -58800,7 +59003,7 @@ fn value_to_effect_commands(
             }
         };
 
-        match op.as_str() {
+        match op.as_ref() {
             "add" => {
                 let name_value =
                     map.shift_remove("name")
@@ -59003,7 +59206,7 @@ fn value_to_landscape_commands(
             }
         };
 
-        match op.as_str() {
+        match op.as_ref() {
             "lower" => {
                 let start = match map.shift_remove("start") {
                     Some(value) => value_to_int(definition, function, value)?,
@@ -60987,7 +61190,7 @@ func RegisterFromEval()
 
         let matching = command(b"who", b"ignored", 3, 0);
         assert!(execute(&mut engine, &matching, true));
-        assert_eq!(probe(&engine), Value::String("3/3".to_string()));
+        assert_eq!(probe(&engine), Value::String("3/3".to_string().into()));
 
         for rejected in [
             command(b"who", b"ignored", 3, 7),
@@ -60996,13 +61199,13 @@ func RegisterFromEval()
             command(b"missing", b"ignored", 3, 0),
         ] {
             assert!(!execute(&mut engine, &rejected, true));
-            assert_eq!(probe(&engine), Value::String("3/3".to_string()));
+            assert_eq!(probe(&engine), Value::String("3/3".to_string().into()));
         }
         assert!(!execute(&mut engine, &matching, false));
 
         let ownerless = command(b"who", b"ignored", -1, 91);
         assert!(execute(&mut engine, &ownerless, true));
-        assert_eq!(probe(&engine), Value::String("-1/-1".to_string()));
+        assert_eq!(probe(&engine), Value::String("-1/-1".to_string().into()));
     }
 
     #[test]
@@ -61049,7 +61252,7 @@ func RegisterFromEval()
             &command(b"percent", b"17", -1, 55),
             true,
         ));
-        assert_eq!(probe(&engine), Value::String("17/%".to_string()));
+        assert_eq!(probe(&engine), Value::String("17/%".to_string().into()));
 
         for (name, script) in [
             ("repeated", "Capture(%d); Capture(%d)"),
@@ -61068,7 +61271,7 @@ func RegisterFromEval()
             ));
             assert_eq!(
                 probe(&engine),
-                Value::String("17/%".to_string()),
+                Value::String("17/%".to_string().into()),
                 "invalid fmt template {script:?} must not reach DirectExec"
             );
         }
@@ -61102,7 +61305,7 @@ func RegisterFromEval()
             &command(b"escaped", b"a\\\"b", -1, 4),
             true,
         ));
-        assert_eq!(probe(&engine), Value::String("a\\\"b".to_string()));
+        assert_eq!(probe(&engine), Value::String("a\\\"b".to_string().into()));
 
         assert!(execute(
             &mut engine,
@@ -61118,7 +61321,7 @@ func RegisterFromEval()
         ));
         assert_eq!(
             probe(&engine),
-            Value::String("AZaz09_~+- space\t".to_string())
+            Value::String("AZaz09_~+- space\t".to_string().into())
         );
 
         assert!(execute(
@@ -61126,7 +61329,7 @@ func RegisterFromEval()
             &command(b"identifier", b".discarded", -1, 4),
             true,
         ));
-        assert_eq!(probe(&engine), Value::String(String::new()));
+        assert_eq!(probe(&engine), Value::String(String::new().into()));
 
         let legacy_name = lc_script::c4_string_from_bytes(&[0xff]);
         assert!(engine.add_message_board_command(registered(
@@ -62937,6 +63140,110 @@ mod script_relink_regression {
         engine
             .call_object_function(index, function, Vec::new())
             .expect("fixture function runs")
+    }
+
+    fn link_initial_scripts(engine: &mut Engine) {
+        engine.resolve_appends();
+        engine.resolve_includes().expect("initial scripts link");
+    }
+
+    #[test]
+    fn initial_link_preparses_every_host_constant_before_function_literal_holds() {
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System/A.c".into(),
+                "func Literal() { return \"a\"; }".into(),
+            )]),
+            1
+        );
+        assert!(
+            engine.script_string_registration_order().is_empty(),
+            "preparse must discard the earlier host's function body"
+        );
+
+        register(
+            &mut engine,
+            "LATE",
+            "static const Later = \"b\";\nfunc Constant() { return Later; }",
+        );
+        assert_eq!(engine.script_string_registration_order(), ["b"]);
+
+        link_initial_scripts(&mut engine);
+        assert_eq!(
+            engine.script_string_registration_order(),
+            ["b", "a"],
+            "the global Parse pass runs only after every host was preparsed"
+        );
+    }
+
+    #[test]
+    fn initial_literal_hold_reuses_later_static_constant_identity() {
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System/A.c".into(),
+                "func Literal() { return \"shared\"; }".into(),
+            )]),
+            1
+        );
+        assert!(engine.script_string_registration_order().is_empty());
+
+        register(
+            &mut engine,
+            "LATE",
+            "static const Shared = \"shared\";\nfunc Constant() { return Shared; }",
+        );
+        let constant = engine
+            .script_global_consts
+            .borrow()
+            .get("Shared")
+            .expect("constant was preparsed")
+            .borrow()
+            .clone();
+        let Value::String(constant) = constant else {
+            panic!("Shared is a string constant");
+        };
+
+        link_initial_scripts(&mut engine);
+        let source = engine
+            .script_link_sources
+            .iter()
+            .find_map(|source| match source {
+                ScriptLinkSource::Script { name, script, .. } if name == "System/A.c" => {
+                    Some(Arc::clone(script))
+                }
+                _ => None,
+            })
+            .expect("system host remains installed");
+        let Value::String(initial_literal) = source.call("Literal", &[]).expect("literal runs")
+        else {
+            panic!("Literal returns a string");
+        };
+        assert!(
+            constant.ptr_eq(&initial_literal),
+            "Parse must set Hold on the constant's preparsed identity"
+        );
+
+        engine.relink_scripts().expect("native Clear/reparse succeeds");
+        let source = engine
+            .script_link_sources
+            .iter()
+            .find_map(|source| match source {
+                ScriptLinkSource::Script { name, script, .. } if name == "System/A.c" => {
+                    Some(Arc::clone(script))
+                }
+                _ => None,
+            })
+            .expect("system host remains installed");
+        let Value::String(relinked_literal) = source.call("Literal", &[]).expect("literal runs")
+        else {
+            panic!("Literal returns a string");
+        };
+        assert!(
+            !constant.ptr_eq(&relinked_literal),
+            "Clear unregisters a held identity even while the constant still references it"
+        );
     }
 
     #[test]
@@ -64887,7 +65194,7 @@ mod script_control_execution_tests {
             .expect("host packet is accepted");
         assert_eq!(
             value,
-            Value::String(lc_script::c4_string_from_bytes(&[0xe9, 0xff]))
+            Value::String(lc_script::c4_string_from_bytes(&[0xe9, 0xff]).into())
         );
     }
 
@@ -65578,7 +65885,7 @@ protected func Departure(pTarget)
                 .state
                 .local_vars
                 .get("command_after_nested"),
-            Some(&Value::String("Throw".to_string())),
+            Some(&Value::String("Throw".to_string().into())),
             "removing the inner Throw while its helper returns leaves the outer instance live"
         );
         assert!(
@@ -65625,7 +65932,7 @@ protected func Departure(pTarget)
                 .state
                 .local_vars
                 .get("command_after_same_reentry"),
-            Some(&Value::String("Get".to_string())),
+            Some(&Value::String("Get".to_string().into())),
             "the in-flight Throw reexecutes and queues Get after its requested item moved"
         );
         assert_eq!(
@@ -65661,7 +65968,7 @@ protected func Departure(pTarget)
         let actor_state = &engine.objects[actor_index].state;
         assert_eq!(
             actor_state.local_vars.get("command_during_throw_start"),
-            Some(&Value::String("Throw".to_string())),
+            Some(&Value::String("Throw".to_string().into())),
             "StartCall sees the exact executing Throw before Finish(true)"
         );
         assert_eq!(
@@ -66942,6 +67249,51 @@ mod scenario_section_random_regression {
             })
             .expect("runtime-join section state applies");
         engine
+    }
+
+    #[test]
+    fn synthetic_section_without_a_group_uses_its_explicit_object_fallback() {
+        let mut next = section("next", 120, true);
+        next.objects.push(scenario::ScenarioSpawn {
+            handle: Some("900".to_string()),
+            container_handle: None,
+            contents_handles: Vec::new(),
+            info_name: None,
+            config: SpawnConfig::new("SYNO")
+                .with_id(ObjectId::new(900))
+                .with_position(Vector2::new(12, 34))
+                .with_loaded(true),
+        });
+
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("SYNO", "Synthetic object", "")
+                    .expect("synthetic definition compiles"),
+            )
+            .expect("synthetic definition registers");
+        engine.configure_scenario_sections(&[section("main", 80, true), next]);
+        engine.set_landscape(vehicle_section_landscape(80, 40));
+
+        assert!(engine
+            .load_scenario_section("next", 0, Vec::new())
+            .expect("synthetic section loads"));
+        let object = engine
+            .object_snapshot(ObjectId::new(900))
+            .expect("explicit fallback object loads");
+        assert_eq!(object.definition_id, "SYNO");
+        assert_eq!(object.position, Vector2::new(12, 34));
+
+        assert!(engine
+            .load_scenario_section("main", 1, Vec::new())
+            .expect("synthetic section landscape freezes"));
+        assert!(engine
+            .load_scenario_section("next", 0, Vec::new())
+            .expect("synthetic landscape-only section reopens"));
+        assert!(
+            engine.object_snapshot(ObjectId::new(900)).is_some(),
+            "a groupless landscape-only freeze retains explicit object templates"
+        );
     }
 
     #[test]
