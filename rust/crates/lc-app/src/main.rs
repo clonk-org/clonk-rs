@@ -171,7 +171,7 @@ use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegist
 use menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
 use network::{
     ClientSettings, HostSettings, NetworkControl, NetworkControlClock, NetworkEvent,
-    NetworkManager, NetworkMode, NetworkStartError,
+    LeagueRecordStreamStatus, NetworkManager, NetworkMode, NetworkStartError,
 };
 use network_host_preparation::NetworkHostPreparation;
 use network_team_assignment::{NetworkTeamAssignmentState, NetworkTeamControlError};
@@ -21470,7 +21470,8 @@ fn build_game_over_dialog(
     let evaluation = EvaluationViewModel::new(goals, players).with_dialog_context(
         c4_presentation_text(&snapshot.round_results.custom_evaluation_strings),
         separate_team_ids,
-    );
+    )
+    .with_team_order(teams.iter().map(|team| team.id));
 
     // Keep the asset-less fallback usable, but derive it from the same frozen
     // evaluation instead of treating every still-Active player as a winner or
@@ -28174,7 +28175,13 @@ impl GameApp {
                 (VirtualKeyCode::Escape, modifiers, ElementState::Pressed)
                     if modifiers.is_empty() =>
                 {
-                    self.handle_game_over_action(GameOverAction::End)?;
+                    if self
+                        .game_over_dialog
+                        .as_ref()
+                        .is_some_and(GameOverState::allows_escape_close)
+                    {
+                        self.handle_game_over_action(GameOverAction::End)?;
+                    }
                 }
                 _ => {}
             }
@@ -35525,7 +35532,16 @@ impl GameApp {
                 class: GuiButtonClass::High,
                 state: ElementState::Pressed,
                 ..
-            } => self.handle_game_over_action(GameOverAction::End),
+            } => {
+                if self
+                    .game_over_dialog
+                    .as_ref()
+                    .is_some_and(GameOverState::allows_escape_close)
+                {
+                    self.handle_game_over_action(GameOverAction::End)?;
+                }
+                Ok(())
+            }
             GamepadEvent::Direction {
                 button: ControlButton::Left,
                 state: ElementState::Pressed,
@@ -58079,6 +58095,7 @@ impl GameApp {
         }
         self.tick_league_update_at(now);
         self.tick_league_record_stream_at(now);
+        let game_over_network_result_changed = self.refresh_game_over_network_result();
         Ok(status_reached == RuntimeStatusReachOutcome::Reported
             || lobby_countdown_changed
             || ready_check_changed
@@ -58088,6 +58105,7 @@ impl GameApp {
             || lobby_client_telemetry_changed
             || vote_timeout_changed
             || client_list_changed
+            || game_over_network_result_changed
             || after != before)
     }
 
@@ -58115,6 +58133,30 @@ impl GameApp {
         if let Err(error) = network.pump_league_record_stream(now) {
             tracing::error!(%error, "failed to queue league record stream pump");
         }
+    }
+
+    fn league_record_stream_status(&self) -> LeagueRecordStreamStatus {
+        self.network
+            .as_ref()
+            .and_then(NetworkManager::league_record_stream_status)
+            .unwrap_or_default()
+    }
+
+    fn refresh_game_over_network_result(&mut self) -> bool {
+        let result = self.snapshot.round_results.network_result;
+        let result_text =
+            legacy_presentation_text(&self.snapshot.round_results.network_result_message);
+        let stream = self.league_record_stream_status();
+        let is_host = matches!(self.network_mode, Some(NetworkMode::Host(_)));
+        self.game_over_dialog.as_mut().is_some_and(|dialog| {
+            dialog.update_network_result(
+                is_host,
+                &result_text,
+                result,
+                stream.pending_compressed_bytes(),
+                stream.is_streaming(),
+            )
+        })
     }
 
     fn tick_host_league_vote_timeout_at(&mut self, now: i64) -> bool {
@@ -58491,6 +58533,18 @@ impl GameApp {
                     .definition_picture_image(definition_id)
                     .map(definition_menu_picture)
             },
+        );
+        let network_result = self.snapshot.round_results.network_result;
+        let network_result_text =
+            legacy_presentation_text(&self.snapshot.round_results.network_result_message);
+        let stream = self.league_record_stream_status();
+        dialog.initialize_network_result(
+            self.network_is_league || network_result.is_some(),
+            matches!(self.network_mode, Some(NetworkMode::Host(_))),
+            &network_result_text,
+            network_result,
+            stream.pending_compressed_bytes(),
+            stream.is_streaming(),
         );
         for (action, label_key, label, description_key, description) in [
             (
@@ -153693,6 +153747,77 @@ func ControlDig() { dig_count = 1; return(1); }
             assert!(ending_app.game_over_dialog.is_none());
             assert!(matches!(ending_app.mode, AppMode::Menu));
         }
+    }
+
+    #[test]
+    fn game_over_pending_network_result_preserves_cpp_button_and_escape_latches() {
+        let pending_host = || {
+            let mut app = new_classic_running_sandbox_app();
+            configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
+            app.network_is_league = true;
+            app.handle_game_over().expect("show pending host evaluation");
+            app
+        };
+
+        let mut host = pending_host();
+        let dialog = host.game_over_dialog.as_ref().expect("host evaluation");
+        assert_eq!(dialog.network_result_label(), Some(""));
+        assert!(!dialog.is_net_done());
+        assert!(!dialog.allows_escape_close());
+        assert!(dialog.actions().contains(&GameOverAction::End));
+        assert!(dialog.actions().contains(&GameOverAction::Continue));
+        host.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("pending host Escape is consumed");
+        assert!(host.game_over_dialog.is_some());
+        host.handle_game_over_gamepad_event(GamepadEvent::GuiButton {
+            slot: GamepadSlot::new(0),
+            class: GuiButtonClass::High,
+            state: ElementState::Pressed,
+        })
+        .expect("pending host High is consumed");
+        assert!(host.game_over_dialog.is_some());
+
+        let mut clickable = pending_host();
+        clickable
+            .handle_modifiers_changed(ModifiersState::ALT)
+            .expect("enable native mnemonic mask");
+        clickable
+            .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect("visible pending Continue remains clickable like C++");
+        assert!(clickable.game_over_dialog.is_none());
+        assert_eq!(clickable.mode, AppMode::Running);
+
+        let mut resolved = pending_host();
+        resolved.snapshot.round_results.network_result =
+            Some(lc_engine::RoundResultsNetworkResult::LeagueOk);
+        resolved.snapshot.round_results.network_result_message = b"evaluated".to_vec();
+        assert!(resolved.sec1_timer().expect("refresh final network result"));
+        let dialog = resolved
+            .game_over_dialog
+            .as_ref()
+            .expect("resolved host evaluation");
+        assert_eq!(dialog.network_result_label(), Some("evaluated"));
+        assert!(dialog.is_net_done());
+        assert!(dialog.allows_escape_close());
+        resolved
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("resolved host Escape ends the round");
+        assert!(resolved.game_over_dialog.is_none());
+
+        let mut client = new_classic_running_sandbox_app();
+        configure_runtime_network_role(&mut client, RuntimeNetworkRole::Client);
+        client.network_is_league = true;
+        client
+            .handle_game_over()
+            .expect("show pending client evaluation");
+        assert!(client
+            .game_over_dialog
+            .as_ref()
+            .is_some_and(GameOverState::allows_escape_close));
+        client
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("pending client Escape is allowed");
+        assert!(client.game_over_dialog.is_none());
     }
 
     #[test]

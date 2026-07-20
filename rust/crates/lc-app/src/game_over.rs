@@ -2,6 +2,7 @@ use lc_frontend::classic_gui::{ClassicButtonState, ClassicGuiSkin, IntRect};
 use lc_frontend::{expand_hotkey_markup, ClonkFontSet, ImageData};
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, GammaRamp, Rect, Surface, TextFont};
+use lc_engine::RoundResultsNetworkResult;
 
 const CLASSIC_DIALOG_TITLE: &str = "Evaluation";
 const CLASSIC_MIN_CAPTION_HEIGHT: i32 = 23;
@@ -203,6 +204,7 @@ pub struct EvaluationViewModel {
     players: Vec<EvaluationPlayer>,
     custom_evaluation_strings: String,
     separate_team_ids: Option<[i32; 2]>,
+    team_order: Vec<i32>,
 }
 
 impl EvaluationViewModel {
@@ -212,6 +214,7 @@ impl EvaluationViewModel {
             players,
             custom_evaluation_strings: String::new(),
             separate_team_ids: None,
+            team_order: Vec::new(),
         }
     }
 
@@ -222,6 +225,11 @@ impl EvaluationViewModel {
     ) -> Self {
         self.custom_evaluation_strings = custom_evaluation_strings;
         self.separate_team_ids = separate_team_ids;
+        self
+    }
+
+    pub fn with_team_order(mut self, team_order: impl IntoIterator<Item = i32>) -> Self {
+        self.team_order = team_order.into_iter().collect();
         self
     }
 
@@ -247,6 +255,33 @@ impl EvaluationViewModel {
 
     fn player_list_count(&self) -> usize {
         usize::from(self.separate_team_ids.is_some()) + 1
+    }
+
+    fn player_indices_in_team_order(&self) -> Vec<usize> {
+        let mut indices = self
+            .team_order
+            .iter()
+            .flat_map(|team_id| {
+                self.players
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, player)| {
+                        (player.team_id == Some(*team_id)).then_some(index)
+                    })
+            })
+            .collect::<Vec<_>>();
+        indices.extend(
+            self.players
+                .iter()
+                .enumerate()
+                .filter_map(|(index, player)| {
+                    player
+                        .team_id
+                        .is_none_or(|team_id| !self.team_order.contains(&team_id))
+                        .then_some(index)
+                }),
+        );
+        indices
     }
 
     pub fn player_by_info_id(&self, player_info_id: i32) -> Option<&EvaluationPlayer> {
@@ -325,6 +360,7 @@ pub struct ClassicEvaluationTextLayout {
 pub struct ClassicEvaluationLayout {
     pub goal_display: Option<IntRect>,
     pub goals: Vec<ClassicEvaluationGoalLayout>,
+    pub network_result: Option<IntRect>,
     pub custom_evaluation: Option<ClassicEvaluationTextLayout>,
     pub player_lists: Vec<IntRect>,
     pub players: Vec<ClassicEvaluationPlayerLayout>,
@@ -352,6 +388,11 @@ pub struct GameOverState {
     sounds: Vec<GameOverSound>,
     classic_button_width: Option<i32>,
     classic_text_font: Option<lc_graphics::clonk_font::ClonkFont>,
+    network_result_label: Option<String>,
+    is_net_done: bool,
+    quit_buttons_visible: bool,
+    quit_allowed: bool,
+    show_winners: bool,
     custom_evaluation_scroll: i32,
     pointer_position: Option<(f32, f32)>,
     pointer_surface_size: Option<(u32, u32)>,
@@ -435,6 +476,11 @@ impl GameOverState {
             sounds: Vec::new(),
             classic_button_width: None,
             classic_text_font: None,
+            network_result_label: None,
+            is_net_done: true,
+            quit_buttons_visible: true,
+            quit_allowed: true,
+            show_winners: true,
             custom_evaluation_scroll: 0,
             pointer_position: None,
             pointer_surface_size: None,
@@ -459,6 +505,113 @@ impl GameOverState {
         &self.evaluation
     }
 
+    /// Construct the network-result child and run the dialog's first
+    /// `Update()`. C++ creates this label only for a league game or a result
+    /// that already exists; a result arriving later cannot add it.
+    pub fn initialize_network_result(
+        &mut self,
+        present: bool,
+        is_host: bool,
+        result_text: &str,
+        result: Option<RoundResultsNetworkResult>,
+        pending_stream_data: usize,
+        is_streaming: bool,
+    ) {
+        self.network_result_label = present.then(String::new);
+        self.is_net_done = !present;
+        self.quit_buttons_visible = true;
+        self.quit_allowed = false;
+        self.show_winners = true;
+        self.update_network_result(
+            is_host,
+            result_text,
+            result,
+            pending_stream_data,
+            is_streaming,
+        );
+    }
+
+    /// Mirror `C4GameOverDlg::Update`/`SetNetResult`, including its literal
+    /// initial visibility latch: controls are born visible, so an initially
+    /// pending host still has clickable End/Continue buttons while Escape is
+    /// ignored until the result and record stream are both complete.
+    pub fn update_network_result(
+        &mut self,
+        is_host: bool,
+        result_text: &str,
+        result: Option<RoundResultsNetworkResult>,
+        pending_stream_data: usize,
+        is_streaming: bool,
+    ) -> bool {
+        let before = (
+            self.network_result_label.clone(),
+            self.is_net_done,
+            self.quit_buttons_visible,
+            self.quit_allowed,
+            self.show_winners,
+        );
+        if let Some(label) = self.network_result_label.as_mut() {
+            label.clear();
+            label.push_str(result_text);
+            if is_streaming {
+                label.push_str("|[!]Transmitting record to league server... (");
+                label.push_str(&(pending_stream_data / 1024).to_string());
+                label.push_str(" kb remaining)");
+            }
+            if result.is_some() && !is_streaming {
+                self.is_net_done = true;
+            }
+            if result == Some(RoundResultsNetworkResult::NetworkError) {
+                self.show_winners = false;
+            }
+        }
+
+        let quit_allowed = self.is_net_done || !is_host;
+        if quit_allowed != self.quit_allowed {
+            self.quit_allowed = quit_allowed;
+            self.quit_buttons_visible = quit_allowed;
+            if !quit_allowed {
+                let buttons = &self.buttons;
+                let is_visible = |index: usize| {
+                    buttons.get(index).is_some_and(|button| {
+                        !matches!(button.action, GameOverAction::End | GameOverAction::Continue)
+                    })
+                };
+                self.hovered_button = self.hovered_button.filter(|index| is_visible(*index));
+                self.pressed_button = self.pressed_button.filter(|index| is_visible(*index));
+                self.down_controls.retain(|focus| match *focus {
+                    GameOverFocus::Button(index) => is_visible(index),
+                    _ => true,
+                });
+            }
+        }
+        before
+            != (
+                self.network_result_label.clone(),
+                self.is_net_done,
+                self.quit_buttons_visible,
+                self.quit_allowed,
+                self.show_winners,
+            )
+    }
+
+    pub fn network_result_label(&self) -> Option<&str> {
+        self.network_result_label.as_deref()
+    }
+
+    pub fn is_net_done(&self) -> bool {
+        self.is_net_done
+    }
+
+    pub fn allows_escape_close(&self) -> bool {
+        self.quit_allowed
+    }
+
+    #[cfg(test)]
+    fn shows_winners(&self) -> bool {
+        self.show_winners
+    }
+
     #[cfg(test)]
     pub(crate) fn custom_evaluation_scroll(&self) -> i32 {
         self.custom_evaluation_scroll
@@ -470,7 +623,12 @@ impl GameOverState {
     }
 
     pub fn actions(&self) -> Vec<GameOverAction> {
-        self.buttons.iter().map(|button| button.action).collect()
+        self.buttons
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.button_is_visible(*index))
+            .map(|(_, button)| button.action)
+            .collect()
     }
 
     pub fn set_button_content(
@@ -499,16 +657,18 @@ impl GameOverState {
 
     pub fn advance_focus(&mut self, backwards: bool) -> GameOverFocus {
         let player_list_count = self.evaluation.player_list_count();
-        let focus_count = self.buttons.len() + player_list_count + 1;
-        let current = self.focused.and_then(|focus| match focus {
-            GameOverFocus::Close => Some(0),
-            GameOverFocus::PlayerList(index) if index < player_list_count => Some(index + 1),
-            GameOverFocus::PlayerList(_) => None,
-            GameOverFocus::Button(index) if index < self.buttons.len() => {
-                Some(index + player_list_count + 1)
-            }
-            GameOverFocus::Button(_) => None,
-        });
+        let mut order = Vec::with_capacity(self.buttons.len() + player_list_count + 1);
+        order.push(GameOverFocus::Close);
+        order.extend((0..player_list_count).map(GameOverFocus::PlayerList));
+        order.extend(
+            (0..self.buttons.len())
+                .filter(|index| self.button_is_visible(*index))
+                .map(GameOverFocus::Button),
+        );
+        let focus_count = order.len();
+        let current = self
+            .focused
+            .and_then(|focus| order.iter().position(|candidate| *candidate == focus));
         let index = match current {
             Some(0) if backwards => focus_count - 1,
             Some(index) if backwards => index - 1,
@@ -516,11 +676,7 @@ impl GameOverState {
             None if backwards => focus_count - 1,
             None => 0,
         };
-        let focus = match index {
-            0 => GameOverFocus::Close,
-            index if index <= player_list_count => GameOverFocus::PlayerList(index - 1),
-            index => GameOverFocus::Button(index - player_list_count - 1),
-        };
+        let focus = order[index];
         self.focused = Some(focus);
         focus
     }
@@ -548,9 +704,13 @@ impl GameOverState {
     /// focus/down state or emit the button's ArrowHit/Click sounds.
     pub fn hotkey_action(&self, hotkey: char) -> Option<GameOverAction> {
         let hotkey = hotkey.to_ascii_uppercase();
-        self.buttons.iter().find_map(|button| {
-            (expand_hotkey_markup(&button.label).1 == Some(hotkey)).then_some(button.action)
-        })
+        self.buttons
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.button_is_visible(*index))
+            .find_map(|(_, button)| {
+                (expand_hotkey_markup(&button.label).1 == Some(hotkey)).then_some(button.action)
+            })
     }
 
     pub fn cancel_interaction(&mut self) {
@@ -583,7 +743,10 @@ impl GameOverState {
         self.hovered_button = self
             .button_rects(surface_width, surface_height)
             .iter()
-            .position(|rect| point_in_rect(x, y, *rect));
+            .enumerate()
+            .find_map(|(index, rect)| {
+                (self.button_is_visible(index) && point_in_rect(x, y, *rect)).then_some(index)
+            });
         if let Some(focus) = pressed {
             if self.pointer_is_over_focus(focus) {
                 self.set_down(focus);
@@ -625,7 +788,10 @@ impl GameOverState {
         self.pressed_button = self.pointer_position.and_then(|(x, y)| {
             self.button_rects(surface_width, surface_height)
                 .iter()
-                .position(|rect| point_in_rect(x, y, *rect))
+                .enumerate()
+                .find_map(|(index, rect)| {
+                    (self.button_is_visible(index) && point_in_rect(x, y, *rect)).then_some(index)
+                })
         });
         if let Some(index) = self.pressed_button {
             self.set_down(GameOverFocus::Button(index));
@@ -653,8 +819,18 @@ impl GameOverState {
         match focus {
             GameOverFocus::Close => Some(GameOverAction::End),
             GameOverFocus::PlayerList(_) => None,
-            GameOverFocus::Button(index) => self.buttons.get(index).map(|button| button.action),
+            GameOverFocus::Button(index) if self.button_is_visible(index) => {
+                self.buttons.get(index).map(|button| button.action)
+            }
+            GameOverFocus::Button(_) => None,
         }
+    }
+
+    fn button_is_visible(&self, index: usize) -> bool {
+        self.buttons.get(index).is_some_and(|button| {
+            self.quit_buttons_visible
+                || !matches!(button.action, GameOverAction::End | GameOverAction::Continue)
+        })
     }
 
     fn pointer_pressed_focus(&self) -> Option<GameOverFocus> {
@@ -729,7 +905,10 @@ impl GameOverState {
         }
         self.button_rects(surface_width, surface_height)
             .iter()
-            .position(|rect| point_in_rect(x, y, *rect))
+            .enumerate()
+            .find_map(|(index, rect)| {
+                (self.button_is_visible(index) && point_in_rect(x, y, *rect)).then_some(index)
+            })
             .and_then(|index| self.buttons.get(index))
             .map(|button| button.action)
     }
@@ -1026,6 +1205,17 @@ impl GameOverState {
         let mut player_list_y =
             chrome.player_area.y + goal_rows * goal_area_height + post_goal_inset;
         let player_area_bottom = chrome.player_area.y + chrome.player_area.h;
+        let network_result = self.network_result_label.as_ref().map(|_| {
+            let width = (chrome.dialog.w - 6 * CLASSIC_INDENT_X).max(0);
+            let area = IntRect {
+                x: chrome.dialog.x + (chrome.dialog.w - width) / 2,
+                y: player_list_y,
+                w: width,
+                h: text_font.line_height * 2,
+            };
+            player_list_y += area.h + 2 * CLASSIC_INDENT_Y;
+            area
+        });
         let custom_evaluation =
             (!self.evaluation.custom_evaluation_strings().is_empty()).then(|| {
                 let width = (chrome.dialog.w - 6 * CLASSIC_INDENT_X).max(0);
@@ -1114,7 +1304,7 @@ impl GameOverState {
                         (player.team_id == Some(team_ids[player_list_index])).then_some(index)
                     })
                     .collect::<Vec<_>>()
-            } else {
+            } else if self.show_winners {
                 [true, false]
                     .into_iter()
                     .flat_map(|won| {
@@ -1124,6 +1314,8 @@ impl GameOverState {
                             .filter_map(move |(index, player)| (player.won == won).then_some(index))
                     })
                     .collect::<Vec<_>>()
+            } else {
+                self.evaluation.player_indices_in_team_order()
             };
             let row_width =
                 (player_list.w - CLASSIC_PLAYER_ROW_LEFT_INSET - CLASSIC_PLAYER_ROW_RIGHT_INSET)
@@ -1181,6 +1373,7 @@ impl GameOverState {
         ClassicEvaluationLayout {
             goal_display,
             goals,
+            network_result,
             custom_evaluation,
             player_lists,
             players,
@@ -1374,6 +1567,9 @@ impl GameOverState {
             .zip(self.button_rects(surface.width(), surface.height()))
             .enumerate()
         {
+            if !self.button_is_visible(index) {
+                continue;
+            }
             fill_rect(
                 surface,
                 rect,
@@ -1446,6 +1642,9 @@ impl GameOverState {
 
         self.render_classic_evaluation(surface, resources, gamma);
         for (index, (button, rect)) in self.buttons.iter().zip(layout.buttons).enumerate() {
+            if !self.button_is_visible(index) {
+                continue;
+            }
             resources.skin.draw_button(
                 surface,
                 rect,
@@ -1528,6 +1727,26 @@ impl GameOverState {
             }
         }
 
+        if let (Some(result_layout), Some(result)) =
+            (layout.network_result, self.network_result_label.as_deref())
+        {
+            let broken = lc_frontend::message_dialog::break_message(
+                &resources.fonts.text,
+                result,
+                result_layout.w.max(1),
+            );
+            draw_clonk_text(
+                surface,
+                &resources.fonts.text,
+                result_layout.x + result_layout.w / 2,
+                result_layout.y,
+                &broken,
+                Color::opaque(0xff, 0xff, 0x00),
+                TextAlign::Center,
+                gamma,
+            );
+        }
+
         if let Some(text_layout) = layout.custom_evaluation {
             let lines = classic_multiline_label_lines(
                 &resources.fonts.text,
@@ -1587,7 +1806,11 @@ impl GameOverState {
                 player_layout.row.y,
                 player_layout.row.x + player_layout.row.w - 1,
                 player_layout.row.y + player_layout.row.h - 1,
-                if player.won { 0x4faf_7a00 } else { 0x7faf_afaf },
+                if self.show_winners && player.won {
+                    0x4faf_7a00
+                } else {
+                    0x7faf_afaf
+                },
                 gamma,
             );
 
@@ -1603,17 +1826,22 @@ impl GameOverState {
                 draw_classic_image(surface, icon, player_layout.icon, gamma);
             }
 
+            let name = if self.show_winners {
+                format!(
+                    "{} ({})",
+                    player.name,
+                    if player.won { "won" } else { "lost" }
+                )
+            } else {
+                player.name.clone()
+            };
             draw_clonk_text(
                 surface,
                 &resources.fonts.text,
                 player_layout.name_anchor.0,
                 player_layout.name_anchor.1,
-                &format!(
-                    "{} ({})",
-                    player.name,
-                    if player.won { "won" } else { "lost" }
-                ),
-                if player.won {
+                &name,
+                if self.show_winners && player.won {
                     Color::opaque(0xff, 0xdf, 0x00)
                 } else {
                     Color::opaque(0xff, 0xff, 0xff)
@@ -2028,6 +2256,111 @@ mod tests {
     }
 
     #[test]
+    fn network_result_matches_cpp_pending_streaming_and_done_latches() {
+        let mut host = GameOverState::new("Evaluation".into(), Vec::new());
+        host.initialize_network_result(true, true, "", None, 0, false);
+        assert_eq!(host.network_result_label(), Some(""));
+        assert!(!host.is_net_done());
+        assert!(!host.allows_escape_close());
+        assert!(host.actions().contains(&GameOverAction::End));
+        assert!(host.actions().contains(&GameOverAction::Continue));
+        assert_eq!(host.hotkey_action('e'), Some(GameOverAction::End));
+
+        assert!(host.update_network_result(
+            true,
+            "evaluated",
+            Some(RoundResultsNetworkResult::LeagueOk),
+            2_047,
+            true,
+        ));
+        assert_eq!(
+            host.network_result_label(),
+            Some("evaluated|[!]Transmitting record to league server... (1 kb remaining)")
+        );
+        assert!(!host.is_net_done());
+        assert!(!host.allows_escape_close());
+
+        assert!(host.update_network_result(
+            true,
+            "evaluated",
+            Some(RoundResultsNetworkResult::LeagueOk),
+            0,
+            false,
+        ));
+        assert_eq!(host.network_result_label(), Some("evaluated"));
+        assert!(host.is_net_done());
+        assert!(host.allows_escape_close());
+
+        let mut client = GameOverState::new("Evaluation".into(), Vec::new());
+        client.initialize_network_result(true, false, "", None, 0, false);
+        assert!(!client.is_net_done());
+        assert!(client.allows_escape_close());
+        assert!(client.actions().contains(&GameOverAction::End));
+
+        let mut local = GameOverState::new("Evaluation".into(), Vec::new());
+        local.initialize_network_result(false, true, "ignored", None, 0, false);
+        assert_eq!(local.network_result_label(), None);
+        assert!(local.is_net_done());
+        assert!(local.allows_escape_close());
+    }
+
+    #[test]
+    fn network_result_label_reserves_and_renders_the_native_two_line_area() {
+        let fonts = endeavour_fonts();
+        let mut state = GameOverState::new("Evaluation".into(), Vec::new());
+        state.initialize_network_result(
+            true,
+            true,
+            "evaluated",
+            Some(RoundResultsNetworkResult::LeagueOk),
+            1_023,
+            true,
+        );
+        let layout = state.classic_evaluation_layout(1024, 600, &fonts);
+        let result = layout.network_result.expect("network result label");
+        assert_eq!(
+            result,
+            IntRect {
+                x: 35,
+                y: 34,
+                w: 954,
+                h: fonts.text.line_height * 2,
+            }
+        );
+        assert_eq!(
+            layout.player_lists[0].y,
+            result.y + result.h + 2 * CLASSIC_INDENT_Y
+        );
+
+        let caption = solid_image(192, 23, [20, 30, 40, 255]);
+        let button = solid_image(128, 32, [0, 120, 0, 255]);
+        let button_down = solid_image(128, 32, [0, 0, 180, 255]);
+        let skin = ClassicGuiSkin::new(&caption, &button, &button_down, None);
+        let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        state.render(
+            &mut surface,
+            &lc_graphics::BitmapFont::new(),
+            Some(GameOverClassicResources::new(
+                skin, &fonts, None, None, None, None,
+            )),
+        );
+        let command = surface
+            .take_clonk_text_capture()
+            .into_iter()
+            .find(|command| command.text.starts_with("evaluated|[!]Transmitting"))
+            .expect("network result text draw");
+        assert_eq!(
+            command.text,
+            "evaluated|[!]Transmitting record to league server... (0 kb remaining)"
+        );
+        assert_eq!((command.x, command.y), (result.x + result.w / 2, result.y));
+        assert_eq!(command.align, TextAlign::Center);
+        assert_eq!(command.color, [0xff, 0xff, 0x00, 0xff]);
+        assert!(command.markup);
+    }
+
+    #[test]
     fn native_focus_order_includes_close_player_list_and_visible_buttons() {
         let next = Some(NextMissionButton {
             label: "Next mission".to_string(),
@@ -2420,6 +2753,97 @@ mod tests {
             score_new: Some(100),
             custom_evaluation_strings: String::new(),
             big_icon: None,
+        }
+    }
+
+    #[test]
+    fn network_error_uses_no_winners_team_order_names_and_losing_style() {
+        let fonts = endeavour_fonts();
+        let mut players = vec![
+            evaluation_player(20, "Blue winner"),
+            evaluation_player(10, "Red loser"),
+            evaluation_player(30, "Teamless winner"),
+            evaluation_player(11, "Red winner"),
+        ];
+        players[0].team_id = Some(2);
+        players[1].team_id = Some(1);
+        players[1].won = false;
+        players[2].team_id = None;
+        players[3].team_id = Some(1);
+        let evaluation = EvaluationViewModel::new(Vec::new(), players).with_team_order([1, 2]);
+        let mut state = GameOverState::new("Evaluation".into(), Vec::new());
+        state.set_evaluation(evaluation);
+        state.initialize_network_result(
+            true,
+            false,
+            "network failed",
+            Some(RoundResultsNetworkResult::NetworkError),
+            0,
+            false,
+        );
+        assert!(!state.shows_winners());
+        let layout = state.classic_evaluation_layout(1024, 600, &fonts);
+        assert_eq!(
+            layout
+                .players
+                .iter()
+                .map(|player| player.player_index)
+                .collect::<Vec<_>>(),
+            vec![1, 3, 0, 2]
+        );
+
+        let caption = solid_image(192, 23, [20, 30, 40, 255]);
+        let button = solid_image(128, 32, [0, 120, 0, 255]);
+        let button_down = solid_image(128, 32, [0, 0, 180, 255]);
+        let skin = ClassicGuiSkin::new(&caption, &button, &button_down, None);
+        let background = Color::opaque(11, 22, 33);
+        let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
+        surface.fill(background);
+        surface.begin_clonk_text_capture();
+        state.render(
+            &mut surface,
+            &lc_graphics::BitmapFont::new(),
+            Some(GameOverClassicResources::new(
+                skin, &fonts, None, None, None, None,
+            )),
+        );
+        let commands = surface.take_clonk_text_capture();
+        for name in [
+            "Blue winner",
+            "Red loser",
+            "Teamless winner",
+            "Red winner",
+        ] {
+            let command = commands
+                .iter()
+                .find(|command| command.text == name)
+                .expect("raw no-winners player name");
+            assert_eq!(command.color, [0xff, 0xff, 0xff, 0xff]);
+        }
+        assert!(!commands
+            .iter()
+            .any(|command| command.text.ends_with("(won)") || command.text.ends_with("(lost)")));
+
+        let mut expected = Surface::new(1, 1, lc_graphics::PixelFormat::Rgba8888);
+        expected.fill(background);
+        lc_frontend::classic_gui::draw_engine_box(
+            &mut expected,
+            0,
+            0,
+            0,
+            0,
+            lc_frontend::classic_gui::STANDARD_BACKGROUND_COLOR,
+            None,
+        );
+        lc_frontend::classic_gui::draw_engine_box(&mut expected, 0, 0, 0, 0, 0x7faf_afaf, None);
+        for player in &layout.players {
+            assert_eq!(
+                surface.get_pixel(
+                    (player.row.x + player.row.w - 40) as u32,
+                    (player.row.y + player.row.h / 2) as u32,
+                ),
+                expected.get_pixel(0, 0),
+            );
         }
     }
 

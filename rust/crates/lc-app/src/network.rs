@@ -506,6 +506,31 @@ enum LeagueRecordRuntimeCommand {
 #[derive(Debug, Clone)]
 struct LeagueRecordRuntimeHandle {
     command_tx: tokio_mpsc::UnboundedSender<LeagueRecordRuntimeCommand>,
+    status: Arc<Mutex<LeagueRecordStreamStatus>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LeagueRecordStreamStatus {
+    is_streaming: bool,
+    /// C++'s `getPendingStreamData`: compressed bytes retained for upload,
+    /// including an in-flight prefix until its successful acknowledgement.
+    pending_compressed_bytes: usize,
+}
+
+impl LeagueRecordStreamStatus {
+    pub(crate) fn is_streaming(self) -> bool {
+        self.is_streaming
+    }
+
+    pub(crate) fn pending_compressed_bytes(self) -> usize {
+        self.pending_compressed_bytes
+    }
+}
+
+impl LeagueRecordRuntimeHandle {
+    fn status(&self) -> LeagueRecordStreamStatus {
+        *self.status.lock()
+    }
 }
 
 #[derive(Debug)]
@@ -520,19 +545,22 @@ fn spawn_league_record_runtime(
 ) -> std::result::Result<LeagueRecordRuntimeHandle, lc_network::LeagueHttpTransportError> {
     let transport = lc_network::LeagueHttpPostTransport::cpp_default()?;
     let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
+    let status = Arc::new(Mutex::new(LeagueRecordStreamStatus::default()));
     tokio::spawn(run_league_record_runtime(
         endpoint,
         transport,
         config,
+        Arc::clone(&status),
         command_rx,
     ));
-    Ok(LeagueRecordRuntimeHandle { command_tx })
+    Ok(LeagueRecordRuntimeHandle { command_tx, status })
 }
 
 async fn run_league_record_runtime(
     endpoint: String,
     transport: lc_network::LeagueHttpPostTransport,
     config: lc_network::LeagueHttpTransportConfig,
+    status: Arc<Mutex<LeagueRecordStreamStatus>>,
     mut command_rx: tokio_mpsc::UnboundedReceiver<LeagueRecordRuntimeCommand>,
 ) {
     let (upload_result_tx, mut upload_result_rx) =
@@ -555,12 +583,13 @@ async fn run_league_record_runtime(
                     tracing::warn!(%error, "league record upload failed; retaining bytes for retry");
                 }
                 let Some(stream) = stream.as_mut() else {
+                    publish_league_record_stream_status(&status, None);
                     continue;
                 };
                 if let Err(error) = stream.acknowledge_upload(success) {
                     tracing::error!(%error, "league record upload acknowledgement failed");
                 }
-                if shutdown_completion.is_some() {
+                let shutdown_result = if shutdown_completion.is_some() {
                     let shutdown_result = if !success {
                         Some(Err(upload_error.unwrap_or_else(|| {
                             "league record upload failed during shutdown".to_string()
@@ -578,12 +607,16 @@ async fn run_league_record_runtime(
                         .err()
                         .map(|error| Err(error.to_string()))
                     };
-                    if let Some(result) = shutdown_result {
-                        if let Some(completion) = shutdown_completion.take() {
-                            let _ = completion.send(result);
-                        }
-                        break;
+                    shutdown_result
+                } else {
+                    None
+                };
+                publish_league_record_stream_status(&status, Some(&*stream));
+                if let Some(result) = shutdown_result {
+                    if let Some(completion) = shutdown_completion.take() {
+                        let _ = completion.send(result);
                     }
+                    break;
                 }
             }
             command = command_rx.recv() => {
@@ -598,6 +631,7 @@ async fn run_league_record_runtime(
                             finish_requested = false;
                             Ok(())
                         };
+                        publish_league_record_stream_status(&status, stream.as_ref());
                         let _ = completion.send(result);
                     }
                     LeagueRecordRuntimeCommand::Append(bytes) => {
@@ -608,6 +642,7 @@ async fn run_league_record_runtime(
                         if let Err(error) = result {
                             tracing::error!(%error, "failed to append league record bytes");
                         }
+                        publish_league_record_stream_status(&status, stream.as_ref());
                     }
                     LeagueRecordRuntimeCommand::Pump { now } => {
                         last_now = now;
@@ -622,6 +657,7 @@ async fn run_league_record_runtime(
                                 tracing::error!(%error, "failed to pump league record stream");
                             }
                         }
+                        publish_league_record_stream_status(&status, stream.as_ref());
                     }
                     LeagueRecordRuntimeCommand::Finish { now, completion } => {
                         last_now = now;
@@ -644,6 +680,7 @@ async fn run_league_record_runtime(
                         if result.is_ok() {
                             finish_requested = true;
                         }
+                        publish_league_record_stream_status(&status, stream.as_ref());
                         let _ = completion.send(result);
                     }
                     LeagueRecordRuntimeCommand::Shutdown { completion } => {
@@ -652,6 +689,7 @@ async fn run_league_record_runtime(
                                 .as_ref()
                                 .is_some_and(lc_network::LeagueRecordStream::is_streaming);
                         if !needs_drain {
+                            publish_league_record_stream_status(&status, None);
                             let _ = completion.send(Ok(()));
                             break;
                         }
@@ -663,6 +701,7 @@ async fn run_league_record_runtime(
                             &config,
                             &upload_result_tx,
                         );
+                        publish_league_record_stream_status(&status, stream.as_ref());
                         match dispatch_result {
                             Err(error) => {
                                 if let Some(completion) = shutdown_completion.take() {
@@ -687,6 +726,20 @@ async fn run_league_record_runtime(
             }
         }
     }
+
+    publish_league_record_stream_status(&status, None);
+}
+
+fn publish_league_record_stream_status(
+    status: &Mutex<LeagueRecordStreamStatus>,
+    stream: Option<&lc_network::LeagueRecordStream>,
+) {
+    *status.lock() = stream.map_or_else(LeagueRecordStreamStatus::default, |stream| {
+        LeagueRecordStreamStatus {
+            is_streaming: stream.is_streaming(),
+            pending_compressed_bytes: stream.pending_compressed_len(),
+        }
+    });
 }
 
 fn dispatch_league_record_upload(
@@ -3124,6 +3177,12 @@ impl NetworkManager {
 
     pub fn league_record_stream_available(&self) -> bool {
         self.role == NetworkRole::Host && self.league_record_runtime.is_some()
+    }
+
+    pub(crate) fn league_record_stream_status(&self) -> Option<LeagueRecordStreamStatus> {
+        self.league_record_runtime
+            .as_ref()
+            .map(LeagueRecordRuntimeHandle::status)
     }
 
     pub fn append_league_record_bytes(&self, bytes: &[u8]) -> Result<()> {
@@ -6947,9 +7006,16 @@ mod tests {
         assert_eq!(client_result, 9);
     }
 
-    fn serve_one_league_record_upload() -> (String, thread::JoinHandle<Vec<u8>>) {
+    fn serve_one_league_record_upload() -> (
+        String,
+        Receiver<()>,
+        Sender<()>,
+        thread::JoinHandle<Vec<u8>>,
+    ) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        let (request_received, request_ready) = mpsc::channel();
+        let (respond, response_release) = mpsc::channel();
         let request = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream
@@ -6981,22 +7047,32 @@ mod tests {
                     break;
                 }
             }
+            request_received.send(()).unwrap();
+            response_release
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .unwrap();
             request
         });
-        (format!("http://{address}/stream?token=x&"), request)
+        (
+            format!("http://{address}/stream?token=x&"),
+            request_ready,
+            respond,
+            request,
+        )
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn league_record_runtime_posts_terminal_zlib_bytes_to_cpp_url() {
-        let (endpoint, request) = serve_one_league_record_upload();
+        let (endpoint, request_ready, respond, request) = serve_one_league_record_upload();
         let runtime = spawn_league_record_runtime(
             endpoint,
             lc_network::LeagueHttpTransportConfig::default(),
         )
         .unwrap();
+        assert_eq!(runtime.status(), LeagueRecordStreamStatus::default());
         let (started, start_result) = std::sync::mpsc::channel();
         runtime
             .command_tx
@@ -7006,6 +7082,13 @@ mod tests {
             })
             .unwrap();
         start_result.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(
+            runtime.status(),
+            LeagueRecordStreamStatus {
+                is_streaming: true,
+                pending_compressed_bytes: 0,
+            }
+        );
 
         let source = b"C++ compatible streamed record bytes".to_vec();
         runtime
@@ -7021,6 +7104,13 @@ mod tests {
             })
             .unwrap();
         finish_result.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        let finishing_status = runtime.status();
+        assert!(finishing_status.is_streaming());
+        assert!(finishing_status.pending_compressed_bytes() > 0);
+        request_ready
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        respond.send(()).unwrap();
         let (shutdown, shut_down) = tokio::sync::oneshot::channel();
         runtime
             .command_tx
@@ -7033,6 +7123,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+        assert_eq!(runtime.status(), LeagueRecordStreamStatus::default());
 
         let request = request.join().unwrap();
         let header_end = request
