@@ -40,11 +40,12 @@ use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::ops::ControlFlow as OpsControlFlow;
 use std::path::{Component, Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicU64, Ordering as AtomicOrdering},
+    atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
     mpsc::{self, Receiver, TryRecvError},
 };
 use std::thread;
@@ -609,6 +610,27 @@ impl ScenarioLoadingState {
 
 enum BootLoadingEvent {
     Finished(Option<Arc<MaterialSet>>),
+}
+
+enum ScenarioSelectorDiscoveryEvent {
+    Progress(u8),
+    Finished(Vec<FrontendScenario>),
+}
+
+struct ScenarioSelectorDiscoveryState {
+    receiver: Receiver<ScenarioSelectorDiscoveryEvent>,
+    cancel: Arc<AtomicBool>,
+    progress_percent: u8,
+    selected_identifier: Option<String>,
+    select_first_when_missing: bool,
+    apply_live_search: bool,
+    retained_title: Option<(String, String)>,
+}
+
+impl Drop for ScenarioSelectorDiscoveryState {
+    fn drop(&mut self) {
+        self.cancel.store(true, AtomicOrdering::Relaxed);
+    }
 }
 
 struct BootLoadingState {
@@ -10530,6 +10552,10 @@ struct GameApp {
     save_browser_return_to_menu: bool,
     mode: AppMode,
     scenario_catalog: HashMap<String, FrontendScenario>,
+    /// Interactive scenario refreshes run outside the UI thread. The old
+    /// menu tree remains live but hidden until this worker supplies the
+    /// replacement vector, making completion one atomic book rebuild.
+    scenario_selector_discovery: Option<ScenarioSelectorDiscoveryState>,
     /// Cached `C4ScenarioListLoader::Entry::CanOpen` result for the current
     /// selector mode. Rows stay actionable; this controls label color only.
     scenario_entry_enabled: HashMap<String, bool>,
@@ -20643,6 +20669,7 @@ impl GameApp {
             save_browser_return_to_menu: false,
             mode: AppMode::Loading,
             scenario_catalog,
+            scenario_selector_discovery: None,
             scenario_entry_enabled: HashMap::new(),
             active_scenario: None,
             active_definition_load: None,
@@ -22103,6 +22130,9 @@ impl GameApp {
             return Ok(());
         }
         if self.startup_view == StartupView::ScenarioBrowser {
+            if self.scenario_selector_discovery.is_some() {
+                return Ok(());
+            }
             self.handle_menu_input(|menu| menu.select_list_character(character))?;
             return Ok(());
         }
@@ -22644,6 +22674,9 @@ impl GameApp {
     }
 
     fn handle_scensel_scrollbar_down(&mut self, point: GuiPoint) -> bool {
+        if self.scenario_selector_discovery.is_some() {
+            return false;
+        }
         let Some(spec) = self.scensel_scrollbar_spec_at(point) else {
             return false;
         };
@@ -22678,6 +22711,10 @@ impl GameApp {
     }
 
     fn handle_scensel_scrollbar_move(&mut self, point: GuiPoint) -> bool {
+        if self.scenario_selector_discovery.is_some() {
+            self.menu_state.scrollbar_interaction = None;
+            return false;
+        }
         let Some(mut interaction) = self.menu_state.scrollbar_interaction else {
             return false;
         };
@@ -22717,6 +22754,10 @@ impl GameApp {
     }
 
     fn handle_scensel_scrollbar_up(&mut self, point: GuiPoint) -> bool {
+        if self.scenario_selector_discovery.is_some() {
+            self.menu_state.scrollbar_interaction = None;
+            return false;
+        }
         let Some(interaction) = self.menu_state.scrollbar_interaction.take() else {
             return false;
         };
@@ -23087,6 +23128,9 @@ impl GameApp {
             return Ok(());
         }
         if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+            return Ok(());
+        }
+        if self.scenario_selector_discovery.is_some() {
             return Ok(());
         }
         let Some(point) = self.menu_state.pointer_position() else {
@@ -23845,20 +23889,79 @@ impl GameApp {
         select_first_when_missing: bool,
         apply_live_search: bool,
     ) -> Result<(), EngineError> {
-        let entries = self
-            .app_paths
-            .as_ref()
-            .map(load_frontend_scenarios_from_paths)
-            .unwrap_or_else(|| {
-                self.menu_state
-                    .stack
-                    .first()
-                    .map(|layer| layer.entries.clone())
-                    .unwrap_or_default()
+        self.cancel_scenario_selector_discovery();
+        self.menu_state.scrollbar_interaction = None;
+        let selected_identifier = selected_identifier.map(str::to_string);
+        let Some(paths) = self.app_paths.clone() else {
+            let entries = self
+                .menu_state
+                .stack
+                .first()
+                .map(|layer| layer.entries.clone())
+                .unwrap_or_default();
+            return self.apply_scenario_selector_entries(
+                entries,
+                selected_identifier,
+                select_first_when_missing,
+                apply_live_search,
+                None,
+            );
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.scenario_selector_discovery = Some(ScenarioSelectorDiscoveryState {
+            receiver,
+            cancel: Arc::clone(&cancel),
+            progress_percent: 0,
+            selected_identifier,
+            select_first_when_missing,
+            apply_live_search,
+            retained_title: None,
+        });
+        thread::spawn(move || {
+            let mut last_percent = 0_u8;
+            let entries = load_frontend_scenarios_from_paths_with_progress(&paths, |percent| {
+                if cancel.load(AtomicOrdering::Relaxed) {
+                    return false;
+                }
+                if percent != last_percent {
+                    last_percent = percent;
+                    if sender
+                        .send(ScenarioSelectorDiscoveryEvent::Progress(percent))
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+                true
             });
+            if let Some(entries) = entries {
+                let _ = sender.send(ScenarioSelectorDiscoveryEvent::Finished(entries));
+            }
+        });
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn apply_scenario_selector_entries(
+        &mut self,
+        mut entries: Vec<FrontendScenario>,
+        selected_identifier: Option<String>,
+        select_first_when_missing: bool,
+        apply_live_search: bool,
+        retained_title: Option<(String, String)>,
+    ) -> Result<(), EngineError> {
+        if let Some((identifier, title)) = retained_title {
+            override_frontend_scenario_title(
+                &mut entries,
+                &identifier,
+                &title,
+                load_startup_alphabetical_sorting(self.app_paths.as_ref()),
+            );
+        }
         self.scenario_catalog = build_scenario_catalog(&entries);
         self.refresh_scenario_entry_enabled();
-        let selected_identifier = selected_identifier.map(str::to_string);
         self.handle_menu_input(move |menu| {
             menu.replace_discovered_entries(
                 entries,
@@ -23879,11 +23982,98 @@ impl GameApp {
         Ok(())
     }
 
+    fn cancel_scenario_selector_discovery(&mut self) {
+        if let Some(state) = self.scenario_selector_discovery.take() {
+            state.cancel.store(true, AtomicOrdering::Relaxed);
+        }
+    }
+
+    fn scenario_selector_loading_label(&self) -> Option<String> {
+        let progress = self
+            .scenario_selector_discovery
+            .as_ref()
+            .map(|state| state.progress_percent)?;
+        let progress = progress.to_string();
+        let template = self
+            .startup_tooltip_resources
+            .get("IDS_MSG_SCENARIODESC_LOADING")
+            .cloned()
+            .unwrap_or_else(|| "Loading... (%d%%)".to_string());
+        Some(format_resource_string(template, &[&progress]).replace("%%", "%"))
+    }
+
+    fn poll_scenario_selector_discovery(&mut self) -> Result<(), EngineError> {
+        let mut finished = None;
+        let mut disconnected = false;
+        loop {
+            let Some(event) = self
+                .scenario_selector_discovery
+                .as_ref()
+                .map(|state| state.receiver.try_recv())
+            else {
+                break;
+            };
+            match event {
+                Ok(ScenarioSelectorDiscoveryEvent::Progress(percent)) => {
+                    let state = self
+                        .scenario_selector_discovery
+                        .as_mut()
+                        .expect("scenario discovery exists while polling");
+                    let percent = state.progress_percent.max(percent.min(100));
+                    if state.progress_percent != percent {
+                        state.progress_percent = percent;
+                        self.mark_menu_dirty();
+                    }
+                }
+                Ok(ScenarioSelectorDiscoveryEvent::Finished(entries)) => {
+                    finished = Some(entries);
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        if let Some(entries) = finished {
+            let mut state = self
+                .scenario_selector_discovery
+                .take()
+                .expect("finished scenario discovery retains its state");
+            state.cancel.store(true, AtomicOrdering::Relaxed);
+            if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+                return Ok(());
+            }
+            let selected_identifier = state.selected_identifier.take();
+            let retained_title = state.retained_title.take();
+            return self.apply_scenario_selector_entries(
+                entries,
+                selected_identifier,
+                state.select_first_when_missing,
+                state.apply_live_search,
+                retained_title,
+            );
+        }
+        if disconnected {
+            self.cancel_scenario_selector_discovery();
+            self.status_text = "Scenario discovery interrupted".to_string();
+            tracing::warn!("scenario discovery worker disconnected");
+            self.mark_menu_dirty();
+        }
+        Ok(())
+    }
+
     fn retain_renamed_scenario_title(
         &mut self,
         identifier: &str,
         title: &str,
     ) -> Result<(), EngineError> {
+        if let Some(state) = self.scenario_selector_discovery.as_mut() {
+            state.retained_title = Some((identifier.to_string(), title.to_string()));
+            return Ok(());
+        }
         let mut entries = self
             .menu_state
             .stack
@@ -24457,11 +24647,24 @@ impl GameApp {
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         let no_modifiers = c4_modifiers.is_empty();
+        let blocked_while_loading = (no_modifiers
+            && (matches!(key, VirtualKeyCode::F5 | VirtualKeyCode::F2)
+                || key == VirtualKeyCode::Delete && !self.menu_state.search_focused()))
+            || (c4_modifiers == ModifiersState::ALT && key == VirtualKeyCode::M);
+        if self.scenario_selector_discovery.is_some() {
+            return Ok(blocked_while_loading);
+        }
         let book_selection = self.menu_state.current_map().is_none()
             && self.menu_state.selected_scenario().is_some();
         match key {
             VirtualKeyCode::F5 if no_modifiers => {
-                self.reload_scenario_selector(None, true, true)?;
+                if self.scenario_selector_discovery.is_none() {
+                    let selected = self
+                        .menu_state
+                        .selected_scenario()
+                        .map(|entry| entry.identifier.clone());
+                    self.reload_scenario_selector(selected.as_deref(), true, true)?;
+                }
                 Ok(true)
             }
             VirtualKeyCode::F2 if no_modifiers && book_selection => {
@@ -26234,7 +26437,20 @@ impl GameApp {
                     if self.handle_scenario_selector_override_key(key, state)? {
                         return Ok(());
                     }
-                    if self.handle_scenario_game_option_key(key, state)? {
+                    let discovery_loading = self.scenario_selector_discovery.is_some();
+                    let discovery_modifiers = self.keyboard_modifiers
+                        & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                    if discovery_loading && !self.menu_state.search_focused() {
+                        if state == ElementState::Pressed && discovery_modifiers.is_empty() {
+                            match key {
+                                VirtualKeyCode::Escape => self.close_scenario_browser(),
+                                VirtualKeyCode::Left => self.scensel_do_back()?,
+                                _ => {}
+                            }
+                        }
+                        return Ok(());
+                    }
+                    if !discovery_loading && self.handle_scenario_game_option_key(key, state)? {
                         return Ok(());
                     }
                     if self.scenario_game_options.focused_button().is_none()
@@ -26421,6 +26637,15 @@ impl GameApp {
                         if consumed {
                             return Ok(());
                         }
+                    }
+                    if discovery_loading {
+                        if state == ElementState::Pressed
+                            && discovery_modifiers.is_empty()
+                            && key == VirtualKeyCode::Left
+                        {
+                            self.scensel_do_back()?;
+                        }
+                        return Ok(());
                     }
                     if self.handle_scensel_list_navigation_key(key, state)? {
                         return Ok(());
@@ -33101,6 +33326,9 @@ impl GameApp {
                 // and cancels that original transfer in Dialog::SetFocus.
                 return Ok(());
             }
+            if self.scenario_selector_discovery.is_some() {
+                return Ok(());
+            }
             let direction = match button {
                 ControlButton::Left => GameOptionGamepadDirection::Left,
                 ControlButton::Right => GameOptionGamepadDirection::Right,
@@ -33367,6 +33595,13 @@ impl GameApp {
             // RenameEdit and Dialog bind the physical AnyHigh/AnyLow inputs,
             // respectively. Those eligibility-gated raw events are handled
             // above and own their complete alias cluster.
+            return Ok(());
+        }
+        if self.mode == AppMode::Menu
+            && self.startup_view == StartupView::ScenarioBrowser
+            && self.scenario_selector_discovery.is_some()
+            && action == GamepadActionType::Select
+        {
             return Ok(());
         }
         match action {
@@ -33740,6 +33975,11 @@ impl GameApp {
                         self.menu_state.set_pointer_position(Some(point));
                         let actions = self.scenario_game_options.handle_pointer_move(point);
                         self.finish_game_option_input(actions)?;
+                        if self.scenario_selector_discovery.is_some() {
+                            let _ = self.handle_scensel_search_pointer_move(point);
+                            self.mark_menu_dirty();
+                            return Ok(());
+                        }
                         if self.menu_state.current_map().is_some() {
                             self.mark_menu_dirty();
                             return Ok(());
@@ -49439,6 +49679,10 @@ impl GameApp {
     }
 
     fn scensel_do_back(&mut self) -> Result<(), EngineError> {
+        if self.scenario_selector_discovery.is_some() {
+            self.close_scenario_browser();
+            return Ok(());
+        }
         if self.menu_state.stack.len() <= 1 {
             self.close_scenario_browser();
         } else {
@@ -49505,12 +49749,22 @@ impl GameApp {
             self.graphics.surface().height() as i32,
             &fonts,
         );
-        if self.menu_state.current_map().is_some() {
-            return self.handle_scensel_map_click(point, layout);
-        }
         let (px, py) = (point.x as i32, point.y as i32);
         let inside =
             |x: i32, y: i32, w: i32, h: i32| px >= x && px < x + w && py >= y && py < y + h;
+        if self.scenario_selector_discovery.is_some() {
+            let back = layout.back_button;
+            if inside(back.x, back.y, back.w, back.h) {
+                if !suppress_click_focus {
+                    self.set_scensel_dialog_focus(ScenselDialogFocus::Back);
+                }
+                self.scensel_do_back()?;
+            }
+            return Ok(());
+        }
+        if self.menu_state.current_map().is_some() {
+            return self.handle_scensel_map_click(point, layout);
+        }
         let (back, open, list, search, definitions) = (
             layout.back_button,
             layout.open_button,
@@ -49628,6 +49882,9 @@ impl GameApp {
     /// buttons sit above map pictures and consume the press instead, while a
     /// fullscreen dialog background is not a `MapPic` at all.
     fn handle_scensel_map_pointer_down(&mut self, point: GuiPoint) -> bool {
+        if self.scenario_selector_discovery.is_some() {
+            return true;
+        }
         let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
             return false;
         };
@@ -49694,12 +49951,14 @@ impl GameApp {
     }
 
     fn render_inactive_startup_dialog_layer(&mut self, frame: &mut [u8]) -> Result<()> {
+        let scenario_loading_label = self.scenario_selector_loading_label();
         render_startup_frame(
             &mut self.graphics,
             self.assets.as_ref(),
             &mut self.main_menu_state,
             &mut self.menu_state,
             &self.scenario_entry_enabled,
+            scenario_loading_label.as_deref(),
             self.startup_network_dialog.as_ref(),
             self.startup_player_dialog.as_ref(),
             &self.startup_player_models,
@@ -49829,6 +50088,9 @@ impl GameApp {
         if view != StartupView::Options {
             self.startup_options_advanced_dialog = None;
         }
+        if view != StartupView::ScenarioBrowser {
+            self.cancel_scenario_selector_discovery();
+        }
         self.startup_view = view;
         let keeps_pending_fade = self
             .visible_startup_dialog()
@@ -49870,6 +50132,7 @@ impl GameApp {
     }
 
     fn open_scenario_browser_with_mode(&mut self, selector_mode: ScenarioSelectorMode) {
+        self.cancel_scenario_selector_discovery();
         self.menu_state.abort_renaming();
         self.close_context_menu_silently();
         self.startup_player_properties_dialog = None;
@@ -52577,6 +52840,7 @@ impl GameApp {
             }
         }
         self.poll_startup_game_search()?;
+        self.poll_scenario_selector_discovery()?;
         self.poll_startup_irc();
         self.poll_startup_network_connection();
         self.poll_live_masterserver_signup()?;
@@ -56665,6 +56929,7 @@ impl GameApp {
                         game_option_input_open,
                     )
                 };
+                let scenario_loading_label = self.scenario_selector_loading_label();
                 let network_lobby = self.network_lobby.as_mut();
                 render_startup_frame(
                     &mut self.graphics,
@@ -56672,6 +56937,7 @@ impl GameApp {
                     &mut self.main_menu_state,
                     &mut self.menu_state,
                     &self.scenario_entry_enabled,
+                    scenario_loading_label.as_deref(),
                     self.startup_network_dialog.as_ref(),
                     self.startup_player_dialog.as_ref(),
                     &self.startup_player_models,
@@ -63052,6 +63318,7 @@ fn draw_scensel_dynamic(
     button_down: &ImageData,
     fonts: &lc_frontend::ClonkFontSet,
     book_fonts: &lc_frontend::startup_scensel::BookFontSet,
+    loading_label: Option<&str>,
     gamma: &'static lc_graphics::GammaRamp,
     draw_focus: bool,
 ) -> Result<()> {
@@ -63083,6 +63350,40 @@ fn draw_scensel_dynamic(
         },
         Some(gamma),
     )?;
+
+    let search_cursor_x = fonts
+        .text
+        .measure(
+            &scenario_menu.search_edit.text[..scenario_menu.search_edit.caret],
+            false,
+        )
+        .0;
+    let search_cursor_half = fonts.text.measure("¦", false).0 / 2;
+    scenario_menu.search_edit.scroll_cursor_in_view(
+        search_cursor_x,
+        layout.search_edit.w - 4,
+        search_cursor_half,
+    );
+    let search_selection = scenario_menu
+        .search_edit
+        .selection_range()
+        .map(|range| (range.start, range.end));
+    scensel::draw_search_edit_contents(
+        surface,
+        &layout,
+        fonts,
+        scenario_menu.search_text(),
+        scenario_menu.search_edit.caret,
+        search_selection,
+        scenario_menu.search_edit.horizontal_scroll,
+        draw_focus && scenario_menu.search_edit.cursor_visible(),
+        Some(gamma),
+    );
+
+    if let Some(label) = loading_label {
+        scensel::draw_loading_label(surface, &layout, fonts, book_fonts, label, Some(gamma));
+        return Ok(());
+    }
 
     // Caption: current folder name, or "Scenarios" at root (cpp:1527-1535).
     scensel::draw_book_caption(
@@ -63281,35 +63582,6 @@ fn draw_scensel_dynamic(
         }
     }
 
-    let search_cursor_x = fonts
-        .text
-        .measure(
-            &scenario_menu.search_edit.text[..scenario_menu.search_edit.caret],
-            false,
-        )
-        .0;
-    let search_cursor_half = fonts.text.measure("¦", false).0 / 2;
-    scenario_menu.search_edit.scroll_cursor_in_view(
-        search_cursor_x,
-        layout.search_edit.w - 4,
-        search_cursor_half,
-    );
-    let search_selection = scenario_menu
-        .search_edit
-        .selection_range()
-        .map(|range| (range.start, range.end));
-    scensel::draw_search_edit_contents(
-        surface,
-        &layout,
-        fonts,
-        scenario_menu.search_text(),
-        scenario_menu.search_edit.caret,
-        search_selection,
-        scenario_menu.search_edit.horizontal_scroll,
-        draw_focus && scenario_menu.search_edit.cursor_visible(),
-        Some(gamma),
-    );
-
     let selection = scensel_selection(scenario_menu);
     let is_scenario = selection.is_some_and(|entry| matches!(entry.kind, ScenarioKind::Scenario));
     let open_text = if is_scenario { "&Start" } else { "Open" };
@@ -63395,6 +63667,7 @@ fn render_startup_frame(
     main_menu: &mut MainMenuState,
     scenario_menu: &mut MenuState,
     scenario_entry_enabled: &HashMap<String, bool>,
+    scenario_loading_label: Option<&str>,
     network_dialog: Option<&lc_frontend::startup_netdlg::NetDlgController>,
     player_dialog: Option<&lc_frontend::startup_plrsel::PlrSelController>,
     player_models: &[lc_frontend::startup_plrsel::PlrSelPlayer],
@@ -63475,7 +63748,7 @@ fn render_startup_frame(
                     let draw_focus = !context_menu_open
                         && !definition_selector_open
                         && !game_option_input_open;
-                    if scenario_menu.current_map().is_some() {
+                    if scenario_loading_label.is_none() && scenario_menu.current_map().is_some() {
                         // The book sheet is hidden in map mode. Paint only the
                         // dialog background before the map so cached search/
                         // list chrome cannot leak through aspect-fit margins.
@@ -63523,6 +63796,7 @@ fn render_startup_frame(
                             button_down,
                             fonts,
                             book_fonts,
+                            scenario_loading_label,
                             startup_gamma(),
                             draw_focus,
                         )?;
@@ -66973,19 +67247,52 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
 }
 
 fn load_frontend_scenarios_from_paths(paths: &AppPaths) -> Vec<FrontendScenario> {
+    load_frontend_scenarios_from_paths_with_progress(paths, |_| true).unwrap_or_default()
+}
+
+fn load_frontend_scenarios_from_paths_with_progress<F>(
+    paths: &AppPaths,
+    mut report_progress: F,
+) -> Option<Vec<FrontendScenario>>
+where
+    F: FnMut(u8) -> bool,
+{
     let alphabetical_sorting = load_startup_alphabetical_sorting(Some(paths));
     let languages = startup_language_sequence(Some(paths));
     let language_packs = classic_language_packs(paths);
-    let roots = scenario_roots(paths);
+    let roots = scenario_roots(paths)
+        .into_iter()
+        .filter(|root| root.path.exists())
+        .collect::<Vec<_>>();
+    if !report_progress(0) {
+        return None;
+    }
     let mut combined_entries: Vec<(resource_scenario::ScenarioEntry, String)> = Vec::new();
-    for root in roots.iter().filter(|root| root.path.exists()) {
-        match resource_scenario::discover_with_languages_and_packs(
+    let root_count = roots.len().max(1);
+    let mut emitted_percent = 0_u8;
+    for (root_index, root) in roots.iter().enumerate() {
+        let root_base = root_index.saturating_mul(100);
+        let result = resource_scenario::discover_with_languages_and_packs_with_progress(
             &root.path,
             &languages,
             &language_packs,
-        ) {
+            |progress| {
+                let combined = (root_base
+                    .saturating_add(usize::from(progress.percent())))
+                    / root_count;
+                let combined = u8::try_from(combined.min(100)).unwrap_or(100);
+                emitted_percent = emitted_percent.max(combined);
+                if report_progress(emitted_percent) {
+                    OpsControlFlow::Continue(())
+                } else {
+                    OpsControlFlow::Break(())
+                }
+            },
+        );
+        match result {
             Ok(entries) => combined_entries
                 .extend(entries.into_iter().map(|entry| (entry, root.label.clone()))),
+            Err(resource_scenario::ScenarioDiscoveryError::Cancelled) => return None,
             Err(err) => tracing::warn!(
                 error = %err,
                 path = %root.path.display(),
@@ -66993,13 +67300,16 @@ fn load_frontend_scenarios_from_paths(paths: &AppPaths) -> Vec<FrontendScenario>
             ),
         }
     }
-    merge_frontend_scenarios(
+    if !report_progress(100) {
+        return None;
+    }
+    Some(merge_frontend_scenarios(
         combined_entries
             .into_iter()
             .map(|(entry, label)| FrontendScenario::from_resource(entry, &label))
             .collect(),
         alphabetical_sorting,
-    )
+    ))
 }
 
 /// Resolves the physical C4Group file and child path represented by a
@@ -83853,6 +84163,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             &button_down,
             &fonts,
             &book,
+            None,
             startup_gamma(),
             true,
         )
@@ -83943,6 +84254,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             " secret ".to_string(),
         )])
         .expect("grant and reload Mission Access");
+        wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(app.mission_access.snapshot(), "secret");
         assert_eq!(
             load_configured_mission_access(&paths).expect("load persisted mission access"),
@@ -83968,6 +84280,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         // but the same live apply path must preserve one loaded from config.
         app.apply_scenario_mission_access(&native_password)
             .expect("apply native-byte mission access");
+        wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(
             app.mission_access.snapshot(),
             format!("secret;{native_password}")
@@ -84064,6 +84377,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 &button_down,
                 &fonts,
                 &book,
+                None,
                 startup_gamma(),
                 true,
             )
@@ -91723,6 +92037,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
             .expect("C4 ignores Logo when matching unmodified F5");
+        wait_for_scenario_selector_discovery(&mut app);
 
         app.handle_modifiers_changed(ModifiersState::empty())
             .expect("set keyboard modifiers");
@@ -92201,6 +92516,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         }
         app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
             .expect("focus loss submits rename as OK");
+        wait_for_scenario_selector_discovery(&mut app);
         assert!(app.menu_state.rename_edit.is_none());
         assert!(!old_path.exists());
         assert!(new_path.exists());
@@ -92244,11 +92560,28 @@ public func Grant(password) { return GainMissionAccess(password); }
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
         let folder = paths.scenario_dir().join("RefreshPack.c4f");
         let alpha = folder.join("Alpha.c4s");
+        let beta = folder.join("Beta.c4s");
+        let delta = folder.join("Delta.c4s");
         fs::create_dir_all(&alpha).expect("create initial refresh scenario");
+        fs::create_dir_all(&beta).expect("create second initial refresh scenario");
+        fs::create_dir_all(&delta).expect("create unrelated refresh scenario");
         fs::write(folder.join("Folder.txt"), "[Head]\nIndex=1\n")
             .expect("write refresh folder core");
-        fs::write(alpha.join("Scenario.txt"), "[Head]\nTitle=Alpha\n")
+        fs::write(
+            alpha.join("Scenario.txt"),
+            "[Head]\nTitle=Alpha Mission\n",
+        )
             .expect("write initial refresh scenario core");
+        fs::write(
+            beta.join("Scenario.txt"),
+            "[Head]\nTitle=Beta Mission\n",
+        )
+        .expect("write second initial refresh scenario core");
+        fs::write(
+            delta.join("Scenario.txt"),
+            "[Head]\nTitle=Unrelated\n",
+        )
+        .expect("write unrelated refresh scenario core");
 
         let mut app = new_menu_app_with_paths(800, 600, &paths);
         app.open_scenario_browser();
@@ -92259,14 +92592,68 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .map(|folder| folder.identifier.as_str()),
             Some("RefreshPack.c4f")
         );
-        app.menu_state.set_search_text("beta");
+        let beta_index = app
+            .menu_state
+            .visible_entries()
+            .iter()
+            .position(|entry| entry.identifier == "RefreshPack.c4f/Beta.c4s")
+            .expect("initial Beta row");
+        app.handle_menu_input(|menu| menu.menu().select_entry_by_index(beta_index).unwrap())
+            .expect("select Beta before refresh");
+        app.menu_state.set_search_text("mission");
+        app.menu_state.set_search_focused(true);
 
-        let beta = folder.join("Beta.c4s");
-        fs::create_dir_all(&beta).expect("create refreshed scenario");
-        fs::write(beta.join("Scenario.txt"), "[Head]\nTitle=Beta Mission\n")
+        let gamma = folder.join("Gamma.c4s");
+        fs::create_dir_all(&gamma).expect("create refreshed scenario");
+        fs::write(
+            gamma.join("Scenario.txt"),
+            "[Head]\nTitle=Gamma Mission\n",
+        )
             .expect("write refreshed scenario core");
         app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
             .expect("refresh current scenario folder");
+
+        assert_eq!(
+            app.scenario_selector_loading_label().as_deref(),
+            Some("Loading... (0%)"),
+            "the loading book is observable before the worker can be polled"
+        );
+        let mut zero_percent_frame = vec![0_u8; 800 * 600 * 4];
+        app.render(&mut zero_percent_frame)
+            .expect("render zero-percent loading book");
+        app.scenario_selector_discovery
+            .as_mut()
+            .expect("loading state remains installed before polling")
+            .progress_percent = 37;
+        app.mark_menu_dirty();
+        let mut progressed_frame = vec![0_u8; 800 * 600 * 4];
+        app.render(&mut progressed_frame)
+            .expect("render progressed loading book");
+        assert_ne!(
+            zero_percent_frame, progressed_frame,
+            "the visible loading label must track the percentage state"
+        );
+        assert_eq!(app.menu_state.search_text(), "mission");
+        app.handle_key(VirtualKeyCode::Home, ElementState::Pressed)
+            .expect("move loading search caret home");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("edit search without deleting the retained hidden row");
+        assert_eq!(app.menu_state.search_text(), "ission");
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("RefreshPack.c4f/Beta.c4s"),
+            "the old tree remains intact behind the loading book"
+        );
+        assert!(
+            !app
+                .scenario_catalog
+                .contains_key("RefreshPack.c4f/Gamma.c4s"),
+            "the discovered tree must not leak in before the atomic completion"
+        );
+
+        wait_for_scenario_selector_discovery(&mut app);
 
         assert_eq!(
             app.menu_state
@@ -92280,7 +92667,11 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .iter()
                 .map(|entry| entry.identifier.as_str())
                 .collect::<Vec<_>>(),
-            vec!["RefreshPack.c4f/Beta.c4s"]
+            vec![
+                "RefreshPack.c4f/Alpha.c4s",
+                "RefreshPack.c4f/Beta.c4s",
+                "RefreshPack.c4f/Gamma.c4s",
+            ]
         );
         assert_eq!(
             app.menu_state
@@ -92288,9 +92679,11 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .map(|entry| entry.identifier.as_str()),
             Some("RefreshPack.c4f/Beta.c4s")
         );
+        assert_eq!(app.menu_state.search_text(), "ission");
+        assert_eq!(app.menu_state.applied_search_text, "ission");
         assert!(
             app.scenario_catalog
-                .contains_key("RefreshPack.c4f/Beta.c4s")
+                .contains_key("RefreshPack.c4f/Gamma.c4s")
         );
         reset_cached_app_paths();
     }
@@ -92346,6 +92739,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         }
         app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
             .expect("commit inline rename");
+        wait_for_scenario_selector_discovery(&mut app);
 
         let new_path = paths.scenario_dir().join("New Name.c4s");
         assert!(!old_path.exists());
@@ -92569,6 +92963,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
         app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
             .expect("confirm scenario deletion");
+        wait_for_scenario_selector_discovery(&mut app);
         assert!(!paths.scenario_dir().join("B.c4s").exists());
         assert_eq!(
             app.menu_state
@@ -92689,6 +93084,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             "Secret;Second".to_string(),
         )])
         .expect("grant mission access");
+        wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(app.mission_access.snapshot(), "Secret;Second");
         assert_eq!(
             load_configured_mission_access(&paths).expect("load persisted mission access"),
@@ -92701,6 +93097,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             "-secret".to_string(),
         )])
         .expect("remove mission access case-insensitively");
+        wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(app.mission_access.snapshot(), "Second");
         assert_eq!(
             load_configured_mission_access(&paths).expect("load updated mission access"),
@@ -92960,6 +93357,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             &button_down,
             &fonts,
             &book,
+            None,
             startup_gamma(),
             true,
         )
@@ -92972,6 +93370,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             &button_down,
             &fonts,
             &book,
+            None,
             startup_gamma(),
             false,
         )
@@ -95183,6 +95582,19 @@ public func Grant(password) { return GainMissionAccess(password); }
         .expect("initialise app with paths");
         wait_for_menu(&mut app);
         app
+    }
+
+    fn wait_for_scenario_selector_discovery(app: &mut GameApp) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while app.scenario_selector_discovery.is_some() {
+            app.poll_scenario_selector_discovery()
+                .expect("poll scenario selector discovery");
+            assert!(
+                Instant::now() < deadline,
+                "scenario selector discovery did not finish"
+            );
+            thread::yield_now();
+        }
     }
 
     fn exact_loader_test_paths(
@@ -99839,6 +100251,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         .expect("refreshed map scenario core");
         app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
             .expect("refresh active map folder");
+        wait_for_scenario_selector_discovery(&mut app);
 
         assert_eq!(
             app.menu_state
@@ -100118,6 +100531,7 @@ ScenInfoArea=70,5,25,90
 
         app.apply_scenario_mission_access("MissingPass")
             .expect("grant, persist, and reload mission access");
+        wait_for_scenario_selector_discovery(&mut app);
         assert_eq!(app.mission_access.snapshot(), "OtherPass;MissingPass");
         app.enter_scenario_folder("Map.c4f");
         assert_eq!(

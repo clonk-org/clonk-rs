@@ -1292,6 +1292,32 @@ pub fn draw_book_caption(
     );
 }
 
+/// Draws `C4StartupScenSelDlg::pScenSelProgressLabel` while recursive
+/// scenario discovery owns the book. Native anchors the label at the list's
+/// horizontal midpoint and (quirkily) derives its y coordinate from that
+/// same midpoint (`C4StartupScenSelDlg.cpp:1357`).
+pub fn draw_loading_label(
+    surface: &mut Surface,
+    layout: &ScenSelLayout,
+    gui_fonts: &ClonkFontSet,
+    book_fonts: &BookFontSet,
+    text: &str,
+    gamma: Option<&GammaRamp>,
+) {
+    let middle_x = layout.list.x + layout.list.w / 2;
+    let local_middle_x = layout.list.x - layout.map_sheet.x + layout.list.w / 2;
+    book_fonts.caption.draw_with_gamma(
+        surface,
+        middle_x,
+        layout.map_sheet.y + local_middle_x - gui_fonts.caption.line_height / 2,
+        text,
+        [0, 0, 0, 255],
+        TextAlign::Center,
+        false,
+        gamma,
+    );
+}
+
 /// Draws the mutable contents of the cached scenario-search edit. The edit
 /// frame itself is part of [`ScenSelScreen::render_chrome`]; C++ routes text
 /// through `C4GUI::Edit::DrawElement` (C4GuiEdit.cpp:556-626).
@@ -1938,6 +1964,33 @@ mod tests {
         assert_eq!(commands.len(), 1);
         assert_eq!((commands[0].x, commands[0].y), (7, 6));
         assert_eq!(commands[0].clip, Some(lc_graphics::Rect::new(5, 4, 7, 10)));
+    }
+
+    #[test]
+    fn loading_label_uses_the_classic_book_caption_anchor() {
+        let ttf = std::fs::read(
+            crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"),
+        )
+        .expect("read Endeavour.ttf");
+        let book_fonts = build_book_font_set(&ttf).expect("book fonts");
+        let fonts = endeavour_font_set();
+        let layout = scen_sel_layout(1280, 720, &fonts);
+        let mut surface = Surface::new(1280, 720, lc_graphics::PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+
+        draw_loading_label(
+            &mut surface,
+            &layout,
+            &fonts,
+            &book_fonts,
+            "Loading... (37%)",
+            None,
+        );
+
+        let commands = surface.take_clonk_text_capture();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].text, "Loading... (37%)");
+        assert_eq!((commands[0].x, commands[0].y), (374, 387));
     }
 
     // Pixel-exact geometry at 1280x720, derived from

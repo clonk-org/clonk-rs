@@ -6,12 +6,15 @@ use serde::Deserialize;
 use std::cmp::Ordering;
 use std::fs;
 use std::io;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::debug;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScenarioDiscoveryError {
+    #[error("scenario discovery cancelled")]
+    Cancelled,
     #[error("failed to read directory {path}: {source}")]
     ReadDirectory {
         path: PathBuf,
@@ -46,6 +49,76 @@ pub enum ScenarioDiscoveryError {
     LegacyCoreEncoding { path: PathBuf },
     #[error("path is not valid UTF-8: {path}")]
     NonUtf8Path { path: PathBuf },
+}
+
+/// Progress through a scenario discovery walk. The total grows as nested
+/// folders are opened, matching the loader's incremental work estimation
+/// without performing a second filesystem/archive traversal up front. The
+/// percentage is held at its previous high-water mark when that growth would
+/// otherwise make it move backwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScenarioDiscoveryProgress {
+    pub current: usize,
+    pub total: usize,
+    percent_floor: u8,
+}
+
+impl ScenarioDiscoveryProgress {
+    pub fn percent(self) -> u8 {
+        let percent = (self.current as u128) * 100 / (self.total.max(1) as u128);
+        u8::try_from(percent.min(100))
+            .unwrap_or(100)
+            .max(self.percent_floor)
+    }
+}
+
+struct DiscoveryContext<'a> {
+    callback: &'a mut dyn FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
+    current: usize,
+    total: usize,
+    emitted_percent: u8,
+}
+
+impl<'a> DiscoveryContext<'a> {
+    fn new(
+        callback: &'a mut dyn FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
+    ) -> Self {
+        Self {
+            callback,
+            current: 0,
+            total: 0,
+            emitted_percent: 0,
+        }
+    }
+
+    fn report(&mut self) -> Result<(), ScenarioDiscoveryError> {
+        let progress = ScenarioDiscoveryProgress {
+            current: self.current,
+            total: self.total,
+            percent_floor: self.emitted_percent,
+        };
+        self.emitted_percent = progress.percent();
+        match (self.callback)(progress) {
+            ControlFlow::Continue(()) => Ok(()),
+            ControlFlow::Break(()) => Err(ScenarioDiscoveryError::Cancelled),
+        }
+    }
+
+    fn add_work(&mut self, count: usize) -> Result<(), ScenarioDiscoveryError> {
+        self.total = self.total.saturating_add(count);
+        self.report()
+    }
+
+    fn complete_work(&mut self) -> Result<(), ScenarioDiscoveryError> {
+        self.current = self.current.saturating_add(1).min(self.total);
+        self.report()
+    }
+
+    fn finish(&mut self) -> Result<(), ScenarioDiscoveryError> {
+        self.total = self.total.max(1);
+        self.current = self.total;
+        self.report()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,7 +249,32 @@ pub fn discover_with_languages_and_packs(
     languages: &[String],
     language_packs: &LanguagePacks,
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
-    discover_many_with_languages_and_packs([root.as_ref()], languages, language_packs)
+    discover_with_languages_and_packs_with_progress(
+        root,
+        languages,
+        language_packs,
+        |_| ControlFlow::Continue(()),
+    )
+}
+
+/// Discovers one scenario root while reporting incremental recursive work.
+/// Returning [`ControlFlow::Break`] cancels at the next filesystem/group
+/// checkpoint and yields [`ScenarioDiscoveryError::Cancelled`].
+pub fn discover_with_languages_and_packs_with_progress<F>(
+    root: impl AsRef<Path>,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    progress: F,
+) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError>
+where
+    F: FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
+{
+    discover_many_with_languages_and_packs_with_progress(
+        [root.as_ref()],
+        languages,
+        language_packs,
+        progress,
+    )
 }
 
 pub fn discover_many<I, P>(roots: I) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError>
@@ -207,14 +305,45 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
+    discover_many_with_languages_and_packs_with_progress(
+        roots,
+        languages,
+        language_packs,
+        |_| ControlFlow::Continue(()),
+    )
+}
+
+pub fn discover_many_with_languages_and_packs_with_progress<I, P, F>(
+    roots: I,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    mut progress: F,
+) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+    F: FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
+{
+    let roots = roots
+        .into_iter()
+        .map(|root| root.as_ref().to_path_buf())
+        .collect::<Vec<_>>();
+    let mut context = DiscoveryContext::new(&mut progress);
+    context.add_work(roots.len())?;
     let mut entries = Vec::new();
     for root in roots {
-        let root_path = root.as_ref();
-        let mut discovered =
-            collect_from_path(root_path, "", languages, language_packs)?;
+        let mut discovered = collect_from_path(
+            &root,
+            "",
+            languages,
+            language_packs,
+            &mut context,
+        )?;
         entries.append(&mut discovered);
+        context.complete_work()?;
     }
     sort_entries(&mut entries);
+    context.finish()?;
     Ok(entries)
 }
 
@@ -223,6 +352,7 @@ fn collect_from_directory(
     parent_identifier: &str,
     languages: &[String],
     language_packs: &LanguagePacks,
+    context: &mut DiscoveryContext<'_>,
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
     let mut entries: Vec<fs::DirEntry> = fs::read_dir(path)
         .map_err(|source| ScenarioDiscoveryError::ReadDirectory {
@@ -241,9 +371,11 @@ fn collect_from_directory(
             b.file_name().to_string_lossy().as_ref(),
         )
     });
+    context.add_work(entries.len())?;
 
     let mut result = Vec::new();
     for entry in entries {
+        context.report()?;
         let file_type = entry
             .file_type()
             .map_err(|source| ScenarioDiscoveryError::ReadEntry {
@@ -258,6 +390,7 @@ fn collect_from_directory(
         };
 
         if should_ignore_name(name) {
+            context.complete_work()?;
             continue;
         }
 
@@ -289,11 +422,13 @@ fn collect_from_directory(
                 identifier,
                 languages,
                 language_packs,
+                context,
             )?);
-        } else if file_type.is_dir()
-            && Path::new(name).extension().is_none()
-            && dir_contains_scenarios(&entry.path())
-        {
+        } else if file_type.is_dir() && Path::new(name).extension().is_none() {
+            if !dir_contains_scenarios(&entry.path(), context)? {
+                context.complete_work()?;
+                continue;
+            }
             let group = Group::open(entry.path()).map_err(|err| ScenarioDiscoveryError::Group {
                 path: entry.path(),
                 source: err,
@@ -303,8 +438,10 @@ fn collect_from_directory(
                 identifier,
                 languages,
                 language_packs,
+                context,
             )?);
         }
+        context.complete_work()?;
     }
     sort_entries(&mut result);
     Ok(result)
@@ -312,26 +449,36 @@ fn collect_from_directory(
 
 /// Recursive check whether a directory contains a `.c4s` or `.c4f` item,
 /// mirroring `DirContainsScenarios` (C4StartupScenSelDlg.cpp:561-579).
-fn dir_contains_scenarios(dir: &Path) -> bool {
+fn dir_contains_scenarios(
+    dir: &Path,
+    context: &mut DiscoveryContext<'_>,
+) -> Result<bool, ScenarioDiscoveryError> {
+    context.report()?;
     let Ok(read_dir) = fs::read_dir(dir) else {
-        return false;
+        return Ok(false);
     };
-    read_dir.flatten().any(|entry| {
+    for entry in read_dir.flatten() {
+        context.report()?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
-            return false;
+            continue;
         };
         if should_ignore_name(name) {
-            return false;
+            continue;
         }
         if is_scenario_filename(name) || is_folder_filename(name) {
-            return true;
+            return Ok(true);
         }
-        entry
+        let contains_scenarios = entry
             .file_type()
-            .map(|kind| kind.is_dir() && dir_contains_scenarios(&entry.path()))
+            .map(|kind| kind.is_dir())
             .unwrap_or(false)
-    })
+            && dir_contains_scenarios(&entry.path(), context)?;
+        if contains_scenarios {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn collect_from_path(
@@ -339,15 +486,29 @@ fn collect_from_path(
     parent_identifier: &str,
     languages: &[String],
     language_packs: &LanguagePacks,
+    context: &mut DiscoveryContext<'_>,
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
+    context.report()?;
     if path.is_dir() {
-        return collect_from_directory(path, parent_identifier, languages, language_packs);
+        return collect_from_directory(
+            path,
+            parent_identifier,
+            languages,
+            language_packs,
+            context,
+        );
     }
     if path.is_file() {
         if !is_scenario_filename_os(path) && !is_folder_filename_os(path) {
             return Ok(Vec::new());
         }
-        return collect_from_group_file(path, parent_identifier, languages, language_packs);
+        return collect_from_group_file(
+            path,
+            parent_identifier,
+            languages,
+            language_packs,
+            context,
+        );
     }
     Ok(Vec::new())
 }
@@ -357,6 +518,7 @@ fn collect_children_from_group(
     parent_identifier: &str,
     languages: &[String],
     language_packs: &LanguagePacks,
+    context: &mut DiscoveryContext<'_>,
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
     let mut entries = group
         .entries()
@@ -374,9 +536,11 @@ fn collect_children_from_group(
                 .as_ref(),
         )
     });
+    context.add_work(entries.len())?;
 
     let mut result = Vec::new();
     for entry in entries {
+        context.report()?;
         let name_os = os_str_from_path(&entry.relative_path);
         let name = match name_os.to_str() {
             Some(name) => name,
@@ -387,6 +551,7 @@ fn collect_children_from_group(
             }
         };
         if should_ignore_name(name) {
+            context.complete_work()?;
             continue;
         }
         let identifier = join_identifier(parent_identifier, name);
@@ -413,8 +578,10 @@ fn collect_children_from_group(
                 identifier,
                 languages,
                 language_packs,
+                context,
             )?);
         }
+        context.complete_work()?;
     }
     sort_entries(&mut result);
     Ok(result)
@@ -425,7 +592,9 @@ fn collect_from_group_file(
     parent_identifier: &str,
     languages: &[String],
     language_packs: &LanguagePacks,
+    context: &mut DiscoveryContext<'_>,
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
+    context.report()?;
     let name_os = match path.file_name() {
         Some(name) => name,
         None => return Ok(Vec::new()),
@@ -446,7 +615,7 @@ fn collect_from_group_file(
     let entry = if is_scenario_filename(name) {
         build_scenario_entry(&group, identifier, languages, language_packs)?
     } else {
-        build_folder_entry(&group, identifier, languages, language_packs)?
+        build_folder_entry(&group, identifier, languages, language_packs, context)?
     };
     Ok(vec![entry])
 }
@@ -940,6 +1109,7 @@ fn build_folder_entry(
     identifier: String,
     languages: &[String],
     language_packs: &LanguagePacks,
+    context: &mut DiscoveryContext<'_>,
 ) -> Result<ScenarioEntry, ScenarioDiscoveryError> {
     let fallback = fallback_title_for_path(group.root());
     let components = language_packs.component_groups(group, None, None);
@@ -959,9 +1129,15 @@ fn build_folder_entry(
     // .c4f folders (packed or unpacked) only search the "*.c4s"/"*.c4f"
     // masks (SubFolder::DoLoadContents, :973-1014).
     let children = if group.is_directory() && group.root().extension().is_none() {
-        collect_from_directory(group.root(), &identifier, languages, language_packs)?
+        collect_from_directory(
+            group.root(),
+            &identifier,
+            languages,
+            language_packs,
+            context,
+        )?
     } else {
-        collect_children_from_group(group, &identifier, languages, language_packs)?
+        collect_children_from_group(group, &identifier, languages, language_packs, context)?
     };
     let folder_index = folder_info.and_then(|info| info.index);
 
@@ -1477,6 +1653,112 @@ mod tests {
             Some("Test"),
             "description propagated"
         );
+    }
+
+    #[test]
+    fn discovery_progress_percent_is_overflow_safe_and_bounded() {
+        let complete = ScenarioDiscoveryProgress {
+            current: usize::MAX,
+            total: usize::MAX,
+            percent_floor: 0,
+        };
+        assert_eq!(complete.percent(), 100);
+
+        let over_complete = ScenarioDiscoveryProgress {
+            current: usize::MAX,
+            total: 1,
+            percent_floor: 0,
+        };
+        assert_eq!(over_complete.percent(), 100);
+
+        let empty = ScenarioDiscoveryProgress {
+            current: 0,
+            total: 0,
+            percent_floor: 0,
+        };
+        assert_eq!(empty.percent(), 0);
+    }
+
+    #[test]
+    fn recursive_discovery_reports_progress_and_can_cancel() {
+        let dir = tempdir().unwrap();
+        let root_scenario = dir.path().join("Alpha.c4s");
+        fs::create_dir(&root_scenario).unwrap();
+        fs::write(
+            root_scenario.join("Scenario.txt"),
+            "[Head]\nTitle=Root Mission\n",
+        )
+        .unwrap();
+        let folder = dir.path().join("Missions.c4f");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("Folder.txt"), "[Head]\nTitle=Missions\n").unwrap();
+        for name in ["Alpha.c4s", "Beta.c4s", "Gamma.c4s"] {
+            let scenario = folder.join(name);
+            fs::create_dir(&scenario).unwrap();
+            fs::write(scenario.join("Scenario.txt"), "[Head]\nTitle=Mission\n").unwrap();
+        }
+        let languages = default_language_sequence();
+        let packs = LanguagePacks::default();
+        let mut progress_updates = Vec::new();
+
+        let entries = discover_with_languages_and_packs_with_progress(
+            dir.path(),
+            &languages,
+            &packs,
+            |progress| {
+                progress_updates.push(progress);
+                ControlFlow::Continue(())
+            },
+        )
+        .expect("discover with recursive progress");
+
+        let percentages = progress_updates
+            .iter()
+            .map(|progress| progress.percent())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(percentages.first(), Some(&0));
+        assert_eq!(percentages.last(), Some(&100));
+        assert!(percentages.iter().all(|percent| *percent <= 100));
+        assert!(percentages.iter().any(|percent| (1..100).contains(percent)));
+        assert!(
+            progress_updates
+                .iter()
+                .all(|progress| progress.current <= progress.total)
+        );
+        assert!(
+            percentages.windows(2).all(|pair| pair[0] <= pair[1]),
+            "reported percentages must not move backwards as nested work expands the total: {percentages:?}"
+        );
+        assert!(
+            progress_updates.iter().any(|progress| {
+                let raw_percent = (progress.current as u128) * 100
+                    / (progress.total.max(1) as u128);
+                raw_percent < u128::from(progress.percent())
+            }),
+            "the fixture must exercise a nested total expansion behind the monotonic high-water mark"
+        );
+
+        let mut cancellation_percentages = Vec::new();
+        let mut cancelled_during_nested_work = false;
+        let error = discover_with_languages_and_packs_with_progress(
+            dir.path(),
+            &languages,
+            &packs,
+            |progress| {
+                cancellation_percentages.push(progress.percent());
+                if progress.total > 3 && progress.current >= 2 {
+                    cancelled_during_nested_work = true;
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            },
+        )
+        .expect_err("cancel recursive discovery");
+        assert!(matches!(error, ScenarioDiscoveryError::Cancelled));
+        assert!(cancelled_during_nested_work);
+        assert_ne!(cancellation_percentages.last(), Some(&100));
     }
 
     #[test]

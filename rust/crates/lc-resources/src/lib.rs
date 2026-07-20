@@ -34,8 +34,10 @@ pub use material::{MaterialDefinition, MaterialError, MaterialLibrary};
 pub use network_scenario::{combine_network_scenario, NetworkScenarioError};
 pub use scenario::{
     discover, discover_many, discover_many_with_languages,
-    discover_many_with_languages_and_packs, discover_with_languages,
-    discover_with_languages_and_packs, ScenarioDiscoveryError, ScenarioEntry, ScenarioEntryKind,
+    discover_many_with_languages_and_packs,
+    discover_many_with_languages_and_packs_with_progress, discover_with_languages,
+    discover_with_languages_and_packs, discover_with_languages_and_packs_with_progress,
+    ScenarioDiscoveryError, ScenarioDiscoveryProgress, ScenarioEntry, ScenarioEntryKind,
 };
 pub use script_strings::{
     decode_legacy_script_text, encode_legacy_script_text, localize_script_source,
