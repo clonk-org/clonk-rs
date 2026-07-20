@@ -2,6 +2,7 @@
 
 use crate::support::real_scenario::{
     join_local_player, join_local_player_on_team, load_installed_scenario, load_tutorial,
+    prepare_installed_scenario, PreparedInstalledScenario,
 };
 use lc_engine::{
     math, ActionState, AudioCommand, Definition, Direction, EffectVarValue, EngineError,
@@ -791,8 +792,122 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
 }
 
 #[test]
-fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_real_scenario_subcases_batch_1() {
+    run_alchemy_batch(&[
+        (
+            "earthquake_cast_applies_the_shipped_view_shake",
+            alchemy_earthquake_cast_applies_the_shipped_view_shake,
+        ),
+        (
+            "small_force_field_timer_accepts_its_shipped_sound_flags",
+            alchemy_small_force_field_timer_accepts_its_shipped_sound_flags,
+        ),
+        (
+            "tunnel_spell_opens_its_first_shipped_landscape_row",
+            alchemy_tunnel_spell_opens_its_first_shipped_landscape_row,
+        ),
+        (
+            "firelump_collects_its_same_call_fireball_into_the_mage",
+            alchemy_firelump_collects_its_same_call_fireball_into_the_mage,
+        ),
+    ]);
+}
+
+#[test]
+fn alchemy_real_scenario_subcases_batch_2() {
+    run_alchemy_batch(&[
+        (
+            "learned_group_heal_cast_sustains_magic_and_heals_nearby_crew",
+            alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew,
+        ),
+        (
+            "firefist_flame_consumes_inflammable_landscape",
+            alchemy_firefist_flame_consumes_inflammable_landscape,
+        ),
+        (
+            "learned_icestrike_aims_steers_and_impacts_through_player_controls",
+            alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls,
+        ),
+        (
+            "make_artefact_cast_opens_the_real_enchantment_menu",
+            alchemy_make_artefact_cast_opens_the_real_enchantment_menu,
+        ),
+    ]);
+}
+
+#[test]
+fn alchemy_real_scenario_subcases_batch_3() {
+    run_alchemy_batch(&[
+        (
+            "make_artefact_hit_mode_casts_the_selected_spell_after_throw",
+            alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw,
+        ),
+        (
+            "force_field_wall_puts_its_mask_before_segment_initialize",
+            alchemy_force_field_wall_puts_its_mask_before_segment_initialize,
+        ),
+        (
+            "reincarnation_spell_revives_its_mage_during_assign_death",
+            alchemy_reincarnation_spell_revives_its_mage_during_assign_death,
+        ),
+        (
+            "combo_mode_opens_and_accepts_the_shipped_element_control",
+            alchemy_combo_mode_opens_and_accepts_the_shipped_element_control,
+        ),
+    ]);
+}
+
+#[test]
+fn alchemy_real_scenario_subcases_batch_4() {
+    run_alchemy_batch(&[
+        (
+            "possession_uses_the_shipped_selector_control",
+            alchemy_possession_uses_the_shipped_selector_control,
+        ),
+        (
+            "mage_uses_context_magic_and_casts_the_shipped_gravity_spells",
+            alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells,
+        ),
+        (
+            "warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage",
+            alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage,
+        ),
+        (
+            "learned_lightning_cast_launches_the_shipped_line_object",
+            alchemy_learned_lightning_cast_launches_the_shipped_line_object,
+        ),
+        (
+            "seeded_bag_collects_and_activates_through_player_controls",
+            alchemy_seeded_bag_collects_and_activates_through_player_controls,
+        ),
+    ]);
+}
+
+fn run_alchemy_batch(subcases: &[(&'static str, fn(&PreparedInstalledScenario))]) {
+    let prepared = prepare_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let mut failures = Vec::new();
+
+    for &(name, subcase) in subcases {
+        eprintln!("running Alchemy subcase `{name}`");
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subcase(&prepared))).is_err() {
+            eprintln!("Alchemy subcase `{name}` failed; continuing batch");
+            failures.push(name);
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "{} Alchemy subcase(s) failed: {}",
+            failures.len(),
+            failures.join(", ")
+        );
+    }
+}
+
+fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy magic parity");
     // Scenario.txt creates CLNK followed by MCLK. C4ObjectList::Add with
     // stMain ordering puts the newest equal-rank crew first, so C4Player's
@@ -1157,9 +1272,10 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells() {
     );
 }
 
-#[test]
-fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy warp parity");
     let mage = engine
         .crew_cursor(owner)
@@ -1465,9 +1581,10 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         .all(|effect| effect.name != "WarpUSpellData"));
 }
 
-#[test]
-fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy reincarnation parity");
     let mage = engine
         .crew_cursor(owner)
@@ -1600,9 +1717,10 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death() {
         .any(|effect| effect.name == "IntReincDelay"));
 }
 
-#[test]
-fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy group-heal parity");
     let mage = engine
         .crew_cursor(owner)
@@ -1734,9 +1852,10 @@ fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew() {
     );
 }
 
-#[test]
-fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy artefact parity");
     let mage = engine
         .crew_cursor(owner)
@@ -1846,9 +1965,10 @@ fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu() {
     );
 }
 
-#[test]
-fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy artefact activation parity");
     let mage = engine
         .crew_cursor(owner)
@@ -2024,9 +2144,10 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw() {
     );
 }
 
-#[test]
-fn alchemy_seeded_bag_collects_and_activates_through_player_controls() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy ingredient pickup parity");
     let mage = engine
         .crew_cursor(owner)
@@ -2147,9 +2268,8 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls() {
     );
 }
 
-#[test]
-fn alchemy_possession_uses_the_shipped_selector_control() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_possession_uses_the_shipped_selector_control(prepared: &PreparedInstalledScenario) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy selector parity");
     let mage = engine
         .crew_cursor(owner)
@@ -2223,9 +2343,10 @@ fn alchemy_possession_uses_the_shipped_selector_control() {
     );
 }
 
-#[test]
-fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy combo parity");
     let mage = engine
         .crew_cursor(owner)
@@ -2371,9 +2492,10 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control() {
     );
 }
 
-#[test]
-fn alchemy_learned_lightning_cast_launches_the_shipped_line_object() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy lightning parity");
     let mage = engine
         .crew_cursor(owner)
@@ -2493,9 +2615,10 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object() {
     );
 }
 
-#[test]
-fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy icestrike parity");
     let mage = engine
         .crew_cursor(owner)
@@ -2712,9 +2835,8 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls() {
     );
 }
 
-#[test]
-fn alchemy_earthquake_cast_applies_the_shipped_view_shake() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedInstalledScenario) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy earthquake parity");
     let mage = engine
         .crew_cursor(owner)
@@ -2907,9 +3029,10 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake() {
     assert!(removed, "FXQ1 removes itself after its shipped lifetime");
 }
 
-#[test]
-fn alchemy_small_force_field_timer_accepts_its_shipped_sound_flags() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_small_force_field_timer_accepts_its_shipped_sound_flags(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let protege = engine
         .spawn_object(SpawnConfig::new("ROCK").with_position(Vector2::new(500, 200)))
         .expect("force-field protege spawns in open sky");
@@ -2949,9 +3072,10 @@ fn alchemy_small_force_field_timer_accepts_its_shipped_sound_flags() {
     }));
 }
 
-#[test]
-fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy force-field-wall parity");
     // Frozen seed-zero open sky. Keeping this fixed makes IDs/positions a
     // stable real-scenario oracle instead of searching the generated map.
@@ -3213,9 +3337,10 @@ fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize() {
     );
 }
 
-#[test]
-fn alchemy_firelump_collects_its_same_call_fireball_into_the_mage() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_firelump_collects_its_same_call_fireball_into_the_mage(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy firelump parity");
     let mage = engine
         .crew_cursor(owner)
@@ -3914,9 +4039,10 @@ fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step() {
     assert_eq!(endboss.action.target, Some(ObjectId::new(202)));
 }
 
-#[test]
-fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row(
+    prepared: &PreparedInstalledScenario,
+) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy tunnel parity");
     let mage = engine.crew_cursor(owner).expect("Alchemy MCLK cursor");
     let earth = engine
@@ -4002,9 +4128,8 @@ fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row() {
     );
 }
 
-#[test]
-fn alchemy_firefist_flame_consumes_inflammable_landscape() {
-    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+fn alchemy_firefist_flame_consumes_inflammable_landscape(prepared: &PreparedInstalledScenario) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Alchemy firefist parity");
     let mage = engine.crew_cursor(owner).expect("Alchemy MCLK cursor");
     let fuel = engine.materials().id_of("Oil").expect("Alchemy loads Oil");

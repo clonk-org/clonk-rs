@@ -185,6 +185,41 @@ work and 33.8% fewer cycles. The command shape was
 Promote an elapsed speedup only after a repeated idle full-workspace
 measurement.
 
+### Serialized-fleet and scenario-batching follow-up
+
+The next pass separated host contention from Cargo and test costs. Multiple
+worktrees had independently compiled the 162k-line `lc-app` harness while a
+workspace gate was running; one observed contended gate took 50.92s to compile
+and 73.736s to execute, with host load around 25--30 on 16 logical cores. That
+sample is evidence of contention, not a profile baseline. The shared worker
+protocol now admits compile/link/test commands through one token-owned build
+lock, polling without process-spawning at 5ms, and omits the redundant whole-
+crate working-phase suite before the final workspace gate.
+
+With the host build slot isolated, a same-source, one-line incremental app
+change compared warmed test-profile artifacts (`n = 1` each):
+
+| `lc-app` test optimization | Compile | 1,463-test suite | Compile + suite |
+| --- | ---: | ---: | ---: |
+| level 3 | 30.98s | 34.025s | 65.005s |
+| level 2 | 29.02s | 32.075s | 61.095s |
+
+Level 2 reduced this measured app-change loop by 3.910s (6.0%) without a
+runtime penalty in the sample. Level 1 was rejected after a slower directional
+run (34.08s compile plus 35.256s execution). These are local single samples,
+not regression thresholds; the final workspace gate remains authoritative.
+
+The real Alchemy integration surface also repeated the same immutable scenario
+parse in 17 nextest processes. It now uses four balanced nextest-visible
+batches. Each batch prepares the scenario once, instantiates a fresh `Engine`
+for every one of the 17 unchanged assertion bodies, continues after caught
+subcase panics, and reports all failed subcase names. This preserves fresh
+simulation state and four-way parallelism while reducing scenario parses from
+17 to four. The uncontended focused result compiled in 2.80s and passed all
+four batches in 7.936s (11.53s command wall time); batch durations ranged from
+5.844s to 7.935s. Earlier 17-test and single-batch runs were contended, so they
+are retained only as diagnostics rather than claimed as a formal elapsed A/B.
+
 The first local reference baseline was recorded on 2026-07-12 from
 `dd32e5d3` with content `67a54d0`, Rust 1.87.0, macOS/Darwin arm64, and an
 Apple M4 Max. The representative command was:

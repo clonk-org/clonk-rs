@@ -69,9 +69,11 @@ opt-level = 3
 debug = false
 
 # The main application test harness is the largest final link in the workspace.
-# Keep this explicit so future global profile changes do not accidentally add
-# debug data back to the 150k-line test wrapper.
+# Level 2 keeps its gameplay-heavy tests close to fully optimized while
+# avoiding the longest level-3 codegen tail on this 150k-line wrapper. Keep
+# debug data disabled so future global changes do not grow that final link.
 [profile.test.package.lc-app]
+opt-level = 2
 debug = false
 
 # Engine line tables account for roughly 36 MiB of its test-profile rlib and

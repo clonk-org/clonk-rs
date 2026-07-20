@@ -1,7 +1,8 @@
-// One integration-test binary for the whole crate: each former tests/*.rs
-// file is a module here, so an engine edit costs one test-crate compile and
-// one link instead of one per file. nextest still runs every #[test]
-// separately (process-per-test), so isolation and parallelism are unchanged.
+// One integration-test binary for the whole crate: each former tests/*.rs file
+// is a module here, so an engine edit costs one test-crate compile and one link
+// instead of one per file. Nextest runs each #[test] in a separate process.
+// Explicitly batched real-scenario subcases share immutable preparation within
+// one process, but every subcase instantiates a fresh Engine.
 mod support;
 
 mod action_attach;
