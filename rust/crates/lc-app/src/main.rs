@@ -11664,6 +11664,9 @@ struct GameApp {
     audio: Option<AudioContext>,
     #[cfg(test)]
     ui_sound_log: Vec<String>,
+    #[cfg(test)]
+    league_surrender_pre_abort_results:
+        Option<(lc_engine::RoundResultsState, lc_engine::RoundResultsState, bool)>,
     /// `C4Game::IsMusicEnabled`; runtime playback ownership remains distinct
     /// from persisted RXMusic while a game is running.
     runtime_music_enabled: bool,
@@ -22221,6 +22224,8 @@ impl GameApp {
             audio,
             #[cfg(test)]
             ui_sound_log: Vec::new(),
+            #[cfg(test)]
+            league_surrender_pre_abort_results: None,
             runtime_music_enabled: false,
             resume_frontend_music_after_fade: false,
             frontend_music_attempted_for_entry: false,
@@ -61160,6 +61165,15 @@ impl GameApp {
             MessageDialogContinuation::LeagueSurrender
                 if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
             {
+                self.record_league_surrender_round_result();
+                #[cfg(test)]
+                {
+                    self.league_surrender_pre_abort_results = Some((
+                        self.engine.snapshot().round_results,
+                        self.snapshot.round_results.clone(),
+                        self.network.is_some(),
+                    ));
+                }
                 if let Some(local_client_id) = self
                     .network
                     .as_ref()
@@ -61242,6 +61256,15 @@ impl GameApp {
             MessageDialogContinuation::OptionsAdvancedWarning => {}
         }
         Ok(())
+    }
+
+    fn record_league_surrender_round_result(&mut self) {
+        let message = self.runtime_resource_bytes("IDS_ERR_YOUSURRENDEREDTHELEAGUEGA");
+        self.engine.evaluate_network_round_results(
+            lc_engine::RoundResultsNetworkResult::NetworkError,
+            Some(message),
+        );
+        self.snapshot.round_results = self.engine.snapshot().round_results;
     }
 
     fn complete_lobby_ready_check_response(&mut self, ready: bool) -> Result<(), EngineError> {
@@ -161382,14 +161405,29 @@ func ControlDig() { dig_count = 1; return(1); }
             .player_mut(app.local_owner)
             .expect("local player")
             .set_at_client(lc_engine::PlayerAtClient::new(local_client));
-        let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client as u32);
+        let (manager, _events, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(local_client as u32);
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
             SocketAddr::from(([127, 0, 0, 1], 11_112)),
             "Client",
         )));
+        app.network_is_league = true;
         app.control_clients.register(0, true, false);
         app.control_clients.register(local_client, true, false);
+        let local_info = 55;
+        app.control_player_infos.replace_snapshot(
+            local_info,
+            [lc_engine::PlayerInfoControlData {
+                client_id: local_client,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: local_info,
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
         app.execute_league_vote(lc_engine::VoteControlData {
             vote_type: lc_engine::VOTE_TYPE_KICK,
             approve: true,
@@ -161408,12 +161446,35 @@ func ControlDig() { dig_count = 1; return(1); }
         )
         .expect("reject own self-kick");
 
+        let no_report = thread::spawn(move || commands.complete_league_disconnect_report());
         app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
             .expect("accept league surrender");
 
+        let (engine_results, presentation_results, network_was_live) = app
+            .league_surrender_pre_abort_results
+            .take()
+            .expect("the accepted confirmation records its pre-abort state");
+        assert!(network_was_live, "the result precedes Network.Clear");
+        assert_eq!(
+            engine_results.network_result,
+            Some(lc_engine::RoundResultsNetworkResult::NetworkError)
+        );
+        assert_eq!(
+            engine_results.network_result_message.as_slice(),
+            b"You have surrendered the league game."
+        );
+        assert_eq!(
+            presentation_results, engine_results,
+            "the presentation snapshot exposes the verdict before teardown"
+        );
         assert!(app.network.is_none());
         assert!(app.network_mode.is_none());
         assert!(matches!(app.mode, AppMode::Menu));
+        assert_eq!(
+            no_report.join().expect("league report listener exits"),
+            None,
+            "the surrendering client leaves reporting to the other clients"
+        );
     }
 
     #[test]
