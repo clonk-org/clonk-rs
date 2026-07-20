@@ -10,7 +10,8 @@ use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use crate::classic_gui::{
-    draw_3d_frame, draw_clipped_text, draw_engine_box, draw_facet_stretch, ClassicGuiSkin, IntRect,
+    draw_3d_frame, draw_clipped_text, draw_clipped_text_with_markup, draw_engine_box,
+    draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect,
 };
 use crate::context_menu::{draw_classic_tooltip, ClassicTooltipTracker};
 use crate::game_lobby::{LobbyOptionKind, LobbyOptionRow};
@@ -37,6 +38,10 @@ const CONTEXT_HEIGHT: u32 = 16;
 const SCROLLBAR_EXTENT: i32 = 16;
 const LIST_BOX_MARGIN: i32 = 3;
 const OPTION_ITEM_SPACING: i32 = 1;
+const INFO_DIALOG_INDENT: i32 = 10;
+const INFO_BUTTON_AREA_HEIGHT: i32 = 40;
+const INFO_CLOSE_BUTTON_WIDTH: i32 = 140;
+const INFO_CLOSE_BUTTON_HEIGHT: i32 = 32;
 const STANDARD_BACKGROUND_COLOR: u32 = 0x4f3f_1a00;
 const LIST_SELECTION: u32 = 0xafaf_0000;
 const LIST_SELECTION_INACTIVE: u32 = 0xaf7f_7f7f;
@@ -80,6 +85,39 @@ impl RuntimeClientListResources<'_> {
         ensure!(
             self.tooltip_font.line_height > 0,
             "classic tooltip font has no line height"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct StaticInfoDialogResources<'a> {
+    pub skin: ClassicGuiSkin<'a>,
+    pub fonts: &'a ClonkFontSet,
+    pub icons: &'a ImageData,
+    pub button_highlight: &'a ImageData,
+    pub scroll: &'a ImageData,
+}
+
+impl StaticInfoDialogResources<'_> {
+    pub fn validate(self) -> Result<()> {
+        self.skin.validate_message_dialog_assets()?;
+        ensure!(
+            self.fonts.text.line_height > 0,
+            "FontRegular is not initialized"
+        );
+        let icon_columns = self.icons.width() / ICON_CELL;
+        ensure!(
+            icon_columns > 0 && self.icons.height() >= (ICON_CLOSE / icon_columns + 1) * ICON_CELL,
+            "GUIIcons.png cannot provide the InfoDialog close phase"
+        );
+        ensure!(
+            self.button_highlight.width() > 0 && self.button_highlight.height() > 0,
+            "GUIButtonHighlight.png is empty"
+        );
+        ensure!(
+            self.scroll.width() == 32 && self.scroll.height() == 48,
+            "GUIScroll.png must be 32x48"
         );
         Ok(())
     }
@@ -172,6 +210,7 @@ enum HitTarget {
     Dialog,
     Close,
     InfoClose,
+    InfoBottomClose,
     InfoScrollUp,
     InfoScrollDown,
     InfoScrollTrack,
@@ -237,6 +276,7 @@ pub struct RuntimeClientInfoLayout {
     pub bounds: IntRect,
     pub caption: IntRect,
     pub close_button: IntRect,
+    pub bottom_close_button: Option<IntRect>,
     pub text_window: IntRect,
     pub text: IntRect,
     pub scrollbar: IntRect,
@@ -291,8 +331,11 @@ pub struct RuntimeClientListDialog {
     selected_entry: Option<RuntimeClientListSelection>,
     open_option: Option<LobbyOptionKind>,
     tooltip: ClassicTooltipTracker,
+    info_open: bool,
     info_client_id: Option<i32>,
     info_only: bool,
+    info_static: bool,
+    info_close_label: String,
     option_caption_reference: String,
     option_caption_width: Cell<i32>,
     option_scroll_row: Cell<usize>,
@@ -329,8 +372,11 @@ impl RuntimeClientListDialog {
             selected_entry: None,
             open_option: None,
             tooltip: ClassicTooltipTracker::new(),
+            info_open: false,
             info_client_id: None,
             info_only: false,
+            info_static: false,
+            info_close_label: String::new(),
             option_caption_reference,
             option_caption_width: Cell::new(0),
             option_scroll_row: Cell::new(0),
@@ -361,14 +407,61 @@ impl RuntimeClientListDialog {
             selected_entry: None,
             open_option: None,
             tooltip: ClassicTooltipTracker::new(),
+            info_open: true,
             info_client_id: Some(client_id),
             info_only: true,
+            info_static: false,
+            info_close_label: String::new(),
             option_caption_reference: String::new(),
             option_caption_width: Cell::new(0),
             option_scroll_row: Cell::new(0),
             scroll_row: Cell::new(0),
         }
         .with_initial_info_lines(lines)
+    }
+
+    /// Presents the static-text `C4GUI::InfoDialog` constructor. Its input
+    /// uses the native `|` line separator and has no one-second update hook.
+    pub fn new_static_info(
+        caption: impl Into<String>,
+        requested_line_count: usize,
+        text: &str,
+        close_label: impl Into<String>,
+    ) -> Self {
+        Self {
+            caption: String::new(),
+            info_dialog: ScrollingInfoDialog::new(caption, requested_line_count, false),
+            caption_scroll: Cell::new(CaptionScrollState::default()),
+            info_caption_scroll: Cell::new(CaptionScrollState::default()),
+            options: Vec::new(),
+            rows: Vec::new(),
+            status: RuntimeClientListStatus::default(),
+            dialog_offset: (0, 0),
+            info_dialog_offset: (0, 0),
+            pointer: None,
+            pointer_capture: None,
+            title_drag: None,
+            focus: None,
+            keyboard_press: None,
+            selected_entry: None,
+            open_option: None,
+            tooltip: ClassicTooltipTracker::new(),
+            info_open: true,
+            info_client_id: None,
+            info_only: true,
+            info_static: true,
+            info_close_label: close_label.into(),
+            option_caption_reference: String::new(),
+            option_caption_width: Cell::new(0),
+            option_scroll_row: Cell::new(0),
+            scroll_row: Cell::new(0),
+        }
+        .with_initial_info_lines(
+            text.split('|')
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect(),
+        )
     }
 
     fn with_initial_info_lines(mut self, lines: Vec<String>) -> Self {
@@ -441,12 +534,28 @@ impl RuntimeClientListDialog {
         self.info_client_id
     }
 
+    pub const fn info_is_open(&self) -> bool {
+        self.info_open || self.info_client_id.is_some()
+    }
+
     pub fn info_lines(&self) -> &[String] {
         self.info_dialog.lines()
     }
 
+    pub fn info_caption(&self) -> &str {
+        self.info_dialog.caption()
+    }
+
+    pub const fn info_requested_line_count(&self) -> usize {
+        self.info_dialog.requested_line_count()
+    }
+
     pub const fn is_info_only(&self) -> bool {
         self.info_only
+    }
+
+    pub const fn is_static_info_only(&self) -> bool {
+        self.info_only && self.info_static
     }
 
     pub const fn has_positional_pointer_drag(&self) -> bool {
@@ -478,6 +587,9 @@ impl RuntimeClientListDialog {
         status: RuntimeClientListStatus,
         sec1_timer: bool,
     ) {
+        if self.is_static_info_only() {
+            return;
+        }
         self.options = options;
         self.rows = rows;
         self.status = status;
@@ -521,8 +633,14 @@ impl RuntimeClientListDialog {
     }
 
     pub fn layout(&self, preferred: IntRect, font_line_height: i32) -> RuntimeClientListLayout {
-        let width = (preferred.w * 3 / 4).max(180).min(preferred.w.max(1));
-        let height = (preferred.h * 3 / 4).max(120).min(preferred.h.max(1));
+        let (width, height) = if self.is_static_info_only() {
+            (preferred.w.max(1), preferred.h.max(1))
+        } else {
+            (
+                (preferred.w * 3 / 4).max(180).min(preferred.w.max(1)),
+                (preferred.h * 3 / 4).max(120).min(preferred.h.max(1)),
+            )
+        };
         let bounds = IntRect {
             x: (preferred.x + (preferred.w - width) / 2).saturating_add(self.dialog_offset.0),
             y: (preferred.y + (preferred.h - height) / 2).saturating_add(self.dialog_offset.1),
@@ -661,7 +779,21 @@ impl RuntimeClientListDialog {
     ) -> Option<ScrollingInfoMetrics> {
         let layout = self.info_layout(preferred, font.line_height)?;
         let geometry = info_scrolling_geometry(&layout, font.line_height);
+        self.info_dialog
+            .prepare_wrapped_lines(font, geometry.viewport.w);
         Some(self.info_dialog.metrics(&geometry))
+    }
+
+    /// Primes TextWindow wrapping for render-independent pointer, wheel and
+    /// keyboard input. The cache uses interior mutability so app geometry
+    /// queries can keep their read-only controller access.
+    pub fn prepare_info_lines(&self, preferred: IntRect, font: &ClonkFont) {
+        let Some(layout) = self.info_layout(preferred, font.line_height) else {
+            return;
+        };
+        let geometry = info_scrolling_geometry(&layout, font.line_height);
+        self.info_dialog
+            .prepare_wrapped_lines(font, geometry.viewport.w);
     }
 
     pub fn visible_info_lines(&self, preferred: IntRect, font: &ClonkFont) -> Vec<String> {
@@ -669,6 +801,8 @@ impl RuntimeClientListDialog {
             return Vec::new();
         };
         let geometry = info_scrolling_geometry(&layout, font.line_height);
+        self.info_dialog
+            .prepare_wrapped_lines(font, geometry.viewport.w);
         self.info_dialog
             .visible_lines(&geometry)
             .into_iter()
@@ -692,7 +826,11 @@ impl RuntimeClientListDialog {
 
         let layout = self.layout(preferred, font_line_height);
         if let Some(info) = self.info_layout_from_parent(&layout) {
-            if contains(info.close_button, point) {
+            if contains(info.close_button, point)
+                || info
+                    .bottom_close_button
+                    .is_some_and(|button| contains(button, point))
+            {
                 Some(StartupTooltip::resource("IDS_MNU_CLOSE"))
             } else if contains(info.caption, point) {
                 Some(StartupTooltip::text(self.info_dialog.caption().to_string()))
@@ -919,7 +1057,7 @@ impl RuntimeClientListDialog {
         }
         let action = match pressed {
             HitTarget::Close => RuntimeClientListAction::Close,
-            HitTarget::InfoClose => {
+            HitTarget::InfoClose | HitTarget::InfoBottomClose => {
                 self.close_info();
                 RuntimeClientListAction::CloseInfo
             }
@@ -941,6 +1079,7 @@ impl RuntimeClientListDialog {
                 if let Some(row) = self.rows.iter().find(|row| row.client_id == client_id) {
                     self.info_dialog.reset_lines(client_info_lines(row));
                 }
+                self.info_open = true;
                 self.info_client_id = Some(client_id);
                 RuntimeClientListAction::OpenInfo(client_id)
             }
@@ -979,7 +1118,7 @@ impl RuntimeClientListDialog {
         if !pressed {
             return None;
         }
-        if self.info_client_id.is_some() {
+        if self.info_is_open() {
             self.close_info();
             Some(RuntimeClientListAction::CloseInfo)
         } else {
@@ -991,7 +1130,9 @@ impl RuntimeClientListDialog {
         &self,
         parent: &RuntimeClientListLayout,
     ) -> Option<RuntimeClientInfoLayout> {
-        self.info_client_id?;
+        if !self.info_is_open() {
+            return None;
+        }
         let width = 620.min(parent.bounds.w).max(1);
         let font_line_height = parent.font_line_height;
         let height = self
@@ -1010,20 +1151,57 @@ impl RuntimeClientListDialog {
             w: width,
             h: height,
         };
+        let caption_height = if self.info_static {
+            font_line_height.max(23)
+        } else {
+            (parent.row_height + 4).max(24)
+        };
         let caption = IntRect {
             x: bounds.x,
             y: bounds.y,
             w: bounds.w,
-            h: (parent.row_height + 4).max(24),
+            h: caption_height,
         };
-        let text_window = IntRect {
-            x: bounds.x + 4,
-            y: caption.y + caption.h + 3,
-            w: (bounds.w - 8).max(1),
-            h: self
-                .info_dialog
-                .preferred_text_window_height(font_line_height)
-                .min((bounds.h - caption.h - 7).max(1)),
+        let (text_window, bottom_close_button) = if self.info_static {
+            let inner = IntRect {
+                x: bounds.x + INFO_DIALOG_INDENT,
+                y: caption.y + caption.h + INFO_DIALOG_INDENT,
+                w: (bounds.w - 2 * INFO_DIALOG_INDENT).max(1),
+                h: (bounds.h - caption.h - 2 * INFO_DIALOG_INDENT).max(1),
+            };
+            let button_area_height = INFO_BUTTON_AREA_HEIGHT.min(inner.h).max(1);
+            let button_area = IntRect {
+                x: inner.x,
+                y: inner.y + inner.h - button_area_height,
+                w: inner.w,
+                h: button_area_height,
+            };
+            let close_width = INFO_CLOSE_BUTTON_WIDTH.min(button_area.w).max(1);
+            (
+                IntRect {
+                    h: (inner.h - button_area_height - 2 * INFO_DIALOG_INDENT).max(1),
+                    ..inner
+                },
+                Some(IntRect {
+                    x: button_area.x + (button_area.w - close_width) / 2,
+                    y: button_area.y + (button_area.h - INFO_CLOSE_BUTTON_HEIGHT) / 2,
+                    w: close_width,
+                    h: INFO_CLOSE_BUTTON_HEIGHT.min(button_area.h).max(1),
+                }),
+            )
+        } else {
+            (
+                IntRect {
+                    x: bounds.x + 4,
+                    y: caption.y + caption.h + 3,
+                    w: (bounds.w - 8).max(1),
+                    h: self
+                        .info_dialog
+                        .preferred_text_window_height(font_line_height)
+                        .min((bounds.h - caption.h - 7).max(1)),
+                },
+                None,
+            )
         };
         let scrolling = self.info_dialog.geometry(text_window, font_line_height);
         Some(RuntimeClientInfoLayout {
@@ -1031,10 +1209,15 @@ impl RuntimeClientListDialog {
             caption,
             close_button: IntRect {
                 x: bounds.x + bounds.w - 20,
-                y: caption.y + (caption.h - 16) / 2,
+                y: if self.info_static {
+                    caption.y + 4
+                } else {
+                    caption.y + (caption.h - 16) / 2
+                },
                 w: 16,
                 h: 16,
             },
+            bottom_close_button,
             text_window,
             text: scrolling.viewport,
             scrollbar: scrolling.scrollbar,
@@ -1091,6 +1274,7 @@ impl RuntimeClientListDialog {
     }
 
     fn close_info(&mut self) {
+        self.info_open = false;
         self.info_client_id = None;
         self.pointer_capture = None;
         self.reset_info_presentation();
@@ -1105,10 +1289,14 @@ impl RuntimeClientListDialog {
         font_line_height: i32,
     ) -> (bool, Option<RuntimeClientListAction>) {
         self.tooltip.note_non_pointer_input();
-        if self.info_client_id.is_some() {
+        if self.info_is_open() {
             self.keyboard_press = None;
             if key == KeyCode::Escape {
                 return (true, self.handle_escape(true));
+            }
+            if self.info_static && key == KeyCode::Enter {
+                self.close_info();
+                return (true, Some(RuntimeClientListAction::CloseInfo));
             }
             let layout = self.layout(preferred, font_line_height);
             if let Some(info) = self.info_layout_from_parent(&layout) {
@@ -1524,6 +1712,38 @@ impl RuntimeClientListDialog {
         self.render_at(surface, preferred, resources, active, gamma, Instant::now())
     }
 
+    pub fn render_static_info(
+        &self,
+        surface: &mut Surface,
+        preferred: IntRect,
+        resources: StaticInfoDialogResources<'_>,
+        active: bool,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
+        self.render_static_info_at(surface, preferred, resources, active, gamma, Instant::now())
+    }
+
+    fn render_static_info_at(
+        &self,
+        surface: &mut Surface,
+        preferred: IntRect,
+        resources: StaticInfoDialogResources<'_>,
+        active: bool,
+        gamma: Option<&GammaRamp>,
+        now: Instant,
+    ) -> Result<()> {
+        ensure!(
+            self.is_static_info_only(),
+            "static InfoDialog renderer requires static info state"
+        );
+        resources.validate()?;
+        let parent = self.layout(preferred, resources.fonts.text.line_height);
+        if let Some(info) = self.info_layout_from_parent(&parent) {
+            self.draw_static_info(surface, &parent, &info, resources, active, gamma, now);
+        }
+        Ok(())
+    }
+
     pub fn render_at(
         &self,
         surface: &mut Surface,
@@ -1533,13 +1753,27 @@ impl RuntimeClientListDialog {
         gamma: Option<&GammaRamp>,
         now: Instant,
     ) -> Result<()> {
+        if self.is_static_info_only() {
+            return self.render_static_info_at(
+                surface,
+                preferred,
+                StaticInfoDialogResources {
+                    skin: resources.skin,
+                    fonts: resources.fonts,
+                    icons: resources.icons,
+                    button_highlight: resources.button_highlight,
+                    scroll: resources.scroll,
+                },
+                active,
+                gamma,
+                now,
+            );
+        }
         resources.validate()?;
         self.measure_option_caption_width(&resources.fonts.text);
         let layout = self.layout(preferred, resources.fonts.text.line_height);
         if self.info_only {
-            if let (Some(_), Some(info)) =
-                (self.info_client_id, self.info_layout_from_parent(&layout))
-            {
+            if let Some(info) = self.info_layout_from_parent(&layout) {
                 self.draw_client_info(surface, &layout, &info, resources, active, gamma, now);
             }
             return Ok(());
@@ -1690,8 +1924,7 @@ impl RuntimeClientListDialog {
             layout.status,
         );
 
-        if let (Some(_), Some(info)) = (self.info_client_id, self.info_layout_from_parent(&layout))
-        {
+        if let Some(info) = self.info_layout_from_parent(&layout) {
             self.draw_client_info(surface, &layout, &info, resources, active, gamma, now);
         } else if active {
             if let Some(tooltip) = self.tooltip_state_at(now, preferred, &resources.fonts.text) {
@@ -1933,6 +2166,119 @@ impl RuntimeClientListDialog {
         }
     }
 
+    fn draw_static_info(
+        &self,
+        surface: &mut Surface,
+        parent: &RuntimeClientListLayout,
+        layout: &RuntimeClientInfoLayout,
+        resources: StaticInfoDialogResources<'_>,
+        active: bool,
+        gamma: Option<&GammaRamp>,
+        now: Instant,
+    ) {
+        resources.skin.draw_dialog(surface, layout.bounds, gamma);
+        let geometry = info_scrolling_geometry(layout, resources.fonts.text.line_height);
+        self.info_dialog
+            .prepare_wrapped_lines(&resources.fonts.text, geometry.viewport.w);
+        let caption_scroll = self.caption_scroll_offset_at(
+            now,
+            &resources.fonts.text,
+            &layout.caption,
+            DialogTitle::Info,
+        );
+        resources.skin.draw_caption_scrolled(
+            surface,
+            layout.caption,
+            self.info_dialog.caption(),
+            &resources.fonts.text,
+            [255, 255, 255, 255],
+            TextAlign::Left,
+            TITLE_RIGHT_INDENT,
+            caption_scroll,
+            gamma,
+        );
+
+        let pointer_target = self
+            .pointer
+            .and_then(|point| self.hit_target(point, parent));
+        let close_hovered = active && pointer_target == Some(HitTarget::InfoClose);
+        let close_pressed = close_hovered && self.pointer_capture == Some(HitTarget::InfoClose);
+        if close_hovered && !close_pressed {
+            draw_highlight(
+                surface,
+                layout.close_button,
+                resources.button_highlight,
+                gamma,
+            );
+        }
+        draw_icon(
+            surface,
+            layout.close_button,
+            resources.icons,
+            ICON_CLOSE,
+            gamma,
+        );
+        if close_pressed {
+            draw_highlight(
+                surface,
+                layout.close_button,
+                resources.button_highlight,
+                gamma,
+            );
+        }
+
+        draw_engine_box(
+            surface,
+            layout.text_window.x,
+            layout.text_window.y,
+            layout.text_window.x + layout.text_window.w - 1,
+            layout.text_window.y + layout.text_window.h - 1,
+            0x7f00_0000,
+            gamma,
+        );
+        draw_3d_frame(surface, layout.text_window, gamma);
+        for line in self.info_dialog.visible_lines(&geometry) {
+            draw_clipped_text_with_markup(
+                surface,
+                &resources.fonts.text,
+                geometry.viewport.x,
+                line.y,
+                &line.text,
+                [255, 255, 255, 255],
+                TextAlign::Left,
+                gamma,
+                geometry.viewport,
+                false,
+            );
+        }
+        let metrics = self.info_dialog.metrics(&geometry);
+        draw_scrollbar(
+            surface,
+            geometry.scrollbar,
+            resources.scroll,
+            self.info_dialog.scrollbar_pin(&geometry),
+            usize::try_from(metrics.max_scroll).unwrap_or(usize::MAX),
+            self.pointer_capture == Some(HitTarget::InfoScrollUp),
+            self.pointer_capture == Some(HitTarget::InfoScrollDown),
+            gamma,
+        );
+
+        if let Some(button) = layout.bottom_close_button {
+            let hovered = active && pointer_target == Some(HitTarget::InfoBottomClose);
+            resources.skin.draw_button(
+                surface,
+                button,
+                &self.info_close_label,
+                resources.fonts,
+                ClassicButtonState {
+                    pressed: hovered && self.pointer_capture == Some(HitTarget::InfoBottomClose),
+                    highlighted: hovered,
+                },
+                gamma,
+            );
+        }
+    }
+
     fn draw_client_info(
         &self,
         surface: &mut Surface,
@@ -1944,6 +2290,9 @@ impl RuntimeClientListDialog {
         now: Instant,
     ) {
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
+        let geometry = info_scrolling_geometry(layout, resources.fonts.text.line_height);
+        self.info_dialog
+            .prepare_wrapped_lines(&resources.fonts.text, geometry.viewport.w);
         let caption_scroll = self.caption_scroll_offset_at(
             now,
             &resources.fonts.text,
@@ -1981,7 +2330,6 @@ impl RuntimeClientListDialog {
             gamma,
         );
         draw_3d_frame(surface, layout.text_window, gamma);
-        let geometry = info_scrolling_geometry(layout, resources.fonts.text.line_height);
         for line in self.info_dialog.visible_lines(&geometry) {
             draw_clipped_text(
                 surface,
@@ -2105,6 +2453,11 @@ impl RuntimeClientListDialog {
         if let Some(info) = self.info_layout_from_parent(layout) {
             return if contains(info.close_button, point) {
                 Some(HitTarget::InfoClose)
+            } else if info
+                .bottom_close_button
+                .is_some_and(|button| contains(button, point))
+            {
+                Some(HitTarget::InfoBottomClose)
             } else if let Some(target) = self.info_dialog.scroll_target_at(
                 point,
                 &info_scrolling_geometry(&info, layout.font_line_height),
@@ -2606,6 +2959,86 @@ mod tests {
             dialog.handle_escape(true),
             Some(RuntimeClientListAction::Close)
         );
+    }
+
+    #[test]
+    fn l148_static_info_uses_pipe_lines_without_a_client_or_live_snapshot() {
+        let mut dialog = RuntimeClientListDialog::new_static_info(
+            "Error Log",
+            10,
+            "oldest|middle||newest|",
+            "&Close",
+        );
+
+        assert!(dialog.is_info_only());
+        assert!(dialog.info_is_open());
+        assert_eq!(dialog.info_client_id(), None);
+        assert_eq!(dialog.info_caption(), "Error Log");
+        assert_eq!(dialog.info_requested_line_count(), 10);
+        assert_eq!(dialog.info_lines(), ["oldest", "middle", "newest"]);
+        dialog.replace_snapshot_on_sec1(
+            options(true),
+            vec![row()],
+            RuntimeClientListStatus::default(),
+        );
+        assert!(dialog.info_is_open());
+        assert_eq!(dialog.info_lines(), ["oldest", "middle", "newest"]);
+        let preferred = IntRect {
+            x: 0,
+            y: 0,
+            w: 800,
+            h: 600,
+        };
+        let layout = dialog.info_layout(preferred, 16).expect("static layout");
+        assert_eq!(layout.bounds.w, 620);
+        assert_eq!(layout.caption.h, 23);
+        assert_eq!(layout.close_button.y, layout.caption.y + 4);
+        let bottom_close = layout.bottom_close_button.expect("bottom Close button");
+        assert_eq!(bottom_close.w, 140);
+        assert_eq!(bottom_close.h, 32);
+        assert_eq!(
+            bottom_close.y - (layout.text_window.y + layout.text_window.h),
+            24
+        );
+        assert_eq!(
+            dialog.handle_escape(true),
+            Some(RuntimeClientListAction::CloseInfo)
+        );
+        assert!(!dialog.info_is_open());
+    }
+
+    #[test]
+    fn l148_static_info_bottom_close_and_enter_dismiss_the_modal() {
+        let preferred = IntRect {
+            x: 0,
+            y: 0,
+            w: 800,
+            h: 600,
+        };
+        let mut dialog =
+            RuntimeClientListDialog::new_static_info("Error Log", 10, "retained", "&Close");
+        let button = dialog
+            .info_layout(preferred, 16)
+            .and_then(|layout| layout.bottom_close_button)
+            .expect("bottom Close button");
+        let point = GuiPoint::new(
+            (button.x + button.w / 2) as f32,
+            (button.y + button.h / 2) as f32,
+        );
+        assert!(dialog.handle_pointer_down(point, preferred, 16));
+        assert_eq!(
+            dialog.handle_pointer_up(point, preferred, 16),
+            Some(RuntimeClientListAction::CloseInfo)
+        );
+        assert!(!dialog.info_is_open());
+
+        let mut dialog =
+            RuntimeClientListDialog::new_static_info("Error Log", 10, "retained", "&Close");
+        assert_eq!(
+            dialog.handle_key(KeyCode::Enter, false, preferred, 16),
+            (true, Some(RuntimeClientListAction::CloseInfo))
+        );
+        assert!(!dialog.info_is_open());
     }
 
     #[test]

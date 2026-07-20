@@ -1,8 +1,9 @@
 //! Reusable scrolling text state for classic `C4GUI::InfoDialog`-shaped modals.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use crate::classic_gui::IntRect;
+use crate::message_dialog::{break_message, break_message_with_options, BreakMessageOptions};
 use crate::{GuiPoint, KeyCode};
 
 pub const INFO_SCROLLBAR_EXTENT: i32 = 16;
@@ -52,6 +53,8 @@ pub struct ScrollingInfoDialog {
     requested_line_count: usize,
     live_updates: bool,
     lines: Vec<String>,
+    wrapped_width: Cell<Option<i32>>,
+    wrapped_lines: RefCell<Vec<String>>,
     scroll_y: Cell<i32>,
 }
 
@@ -66,6 +69,8 @@ impl ScrollingInfoDialog {
             requested_line_count: requested_line_count.max(1),
             live_updates,
             lines: Vec::new(),
+            wrapped_width: Cell::new(None),
+            wrapped_lines: RefCell::new(Vec::new()),
             scroll_y: Cell::new(0),
         }
     }
@@ -88,6 +93,7 @@ impl ScrollingInfoDialog {
 
     pub fn reset_lines(&mut self, lines: Vec<String>) {
         self.lines = lines;
+        self.clear_wrapping();
         self.scroll_y.set(0);
     }
 
@@ -97,6 +103,7 @@ impl ScrollingInfoDialog {
 
     pub fn replace_lines_preserving_scroll(&mut self, lines: Vec<String>) {
         self.lines = lines;
+        self.clear_wrapping();
     }
 
     /// Scheduler hook for dynamic InfoDialog consumers. Static callers set
@@ -163,11 +170,81 @@ impl ScrollingInfoDialog {
     }
 
     pub fn physical_lines(&self) -> Vec<String> {
-        self.lines.clone()
+        if self.wrapped_width.get().is_some() {
+            self.wrapped_lines.borrow().clone()
+        } else {
+            self.lines.clone()
+        }
+    }
+
+    /// Rebuilds TextWindow-style physical rows for the current viewport.
+    /// Pipe separation is handled by the static InfoDialog constructor;
+    /// AddTextLine additionally honors CR/LF and wraps long logical rows.
+    pub fn prepare_wrapped_lines(&self, font: &lc_graphics::clonk_font::ClonkFont, width: i32) {
+        let width = width.max(1);
+        if self.wrapped_width.get() == Some(width) {
+            return;
+        }
+        let mut physical = Vec::new();
+        for logical in &self.lines {
+            for paragraph in logical.split(['\r', '\n']).filter(|line| !line.is_empty()) {
+                // C4LogBuffer first gives the unindented row the complete
+                // width, then wraps the untouched suffix against the width
+                // remaining after its two-space continuation prefix.
+                let first_break = break_message_with_options(
+                    font,
+                    paragraph,
+                    width,
+                    BreakMessageOptions {
+                        max_lines: 1,
+                        ..BreakMessageOptions::default()
+                    },
+                );
+                let first_separator = first_break.char_indices().find_map(|(index, character)| {
+                    matches!(character, '\r' | '\n').then_some(index)
+                });
+                let Some(separator) = first_separator else {
+                    if !first_break.is_empty() {
+                        physical.push(first_break);
+                    }
+                    continue;
+                };
+                let first = &first_break[..separator];
+                if !first.is_empty() {
+                    physical.push(first.to_string());
+                }
+                let suffix_start = separator
+                    + first_break[separator..]
+                        .chars()
+                        .next()
+                        .map(char::len_utf8)
+                        .unwrap_or_default();
+                let suffix = &first_break[suffix_start..];
+                if suffix.is_empty() {
+                    continue;
+                }
+                let indent_width = font.measure("  ", true).0.max(0);
+                let wrapped_suffix =
+                    break_message(font, suffix, width.saturating_sub(indent_width));
+                for line in wrapped_suffix
+                    .split(['\r', '\n'])
+                    .filter(|line| !line.is_empty())
+                {
+                    physical.push(format!("  {line}"));
+                }
+            }
+        }
+        *self.wrapped_lines.borrow_mut() = physical;
+        self.wrapped_width.set(Some(width));
+    }
+
+    fn clear_wrapping(&self) {
+        self.wrapped_width.set(None);
+        self.wrapped_lines.borrow_mut().clear();
     }
 
     pub fn metrics(&self, geometry: &ScrollingInfoGeometry) -> ScrollingInfoMetrics {
-        let physical_count = i32::try_from(self.lines.len()).unwrap_or(i32::MAX);
+        let physical_count = i32::try_from(self.physical_lines().len()).unwrap_or(i32::MAX);
         let content_height = physical_count.saturating_mul(geometry.line_height).max(1);
         let max_scroll = content_height.saturating_sub(geometry.viewport.h).max(0);
         let scroll_y = self.scroll_y.get().clamp(0, max_scroll);

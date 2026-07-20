@@ -72,7 +72,7 @@ the statuses below.
 | Automatic/manual/incoming update flow | `C4StartupMainDlg::OnShown`, `C4UpdateDlg` | **Dropped** | Update discovery, incoming-package application and automatic checks are explicitly owned by the launcher/package manager in the Rust build; they are not repeated when the in-game main menu is shown. The About button provides the user-visible hand-off described below. |
 | F6 editor launch from startup | `C4StartupMainDlg::SwitchToEditor` | **Missing** | Bind and validate the legacy editor launch. |
 | Rust editor scenario/controller route | no C++ startup-list equivalent | **Fail-fast** | `ScenarioKind::Editor`, touch activation and `StartupMenuAction::EditEntry` return typed, logged boundaries; the external-editor substitute was removed. Keep the guard until the real developer UI exists. |
-| Startup fatal/restart log presentation | `C4Startup::DoStartup`; `GameApp::finish_startup_network_failure` | **Partial** | Terminal host/join initialization failures now follow the same-process restart path: partial network state is cleared, the remembered NetworkHost selector or a fresh NetDlg is reconstructed, generic status stays empty, and a localized regular OK/Error `Error Log` modal presents the fatal string. Remaining: the ringbuffer-only fallback still needs the classic 10-line expandable `InfoDialog`, and other startup-fatal producers have not all been routed through this presentation. |
+| Startup fatal/restart log presentation | `C4Startup::DoStartup`; `GameApp::finish_startup_network_failure` | **Partial** | Same-process host/join restart presentation clears partial network state and reconstructs the remembered NetworkHost selector or a fresh NetDlg before its overlay. Fatal text takes precedence and uses the localized regular OK/Error `Error Log`; without fatal text, retained entries are consumed in order by the reusable static 10-line scrolling `InfoDialog`, while an empty log uses regular `(no error)`. Generic status stays empty. Remaining: other startup-fatal producers have not all been routed through this presentation. |
 
 ## Scenario selection subtree
 
@@ -392,11 +392,12 @@ call sites remain.
   percent, cancellation and a 100-second unchanged-progress timeout that resets
   whenever progress advances, with a headless client join pinning 0→17→63%
   before Cancel tears down the wait and join);
-- scrolling expandable `InfoDialog`/log text (**Partial reusable chassis**: the
-  reusable configurable-line-count scrolling info state, TextWindow geometry,
-  wheel/scrollbar, keyboard accessibility, and scroll-preserving per-second
-  refresh back runtime/lobby client info; the startup expandable log caller
-  remains missing);
+- scrolling expandable `InfoDialog`/log text (**Complete**: reusable
+  configurable-line-count scrolling state, TextWindow geometry,
+  wheel/scrollbar, keyboard accessibility and scroll-preserving per-second
+  refresh back live runtime/lobby client info; the static 10-line startup
+  `Error Log` preserves consumed ringbuffer order and uses the regular
+  `(no error)` empty-log fallback);
 - context and nested context menus (**Partial reusable chassis**: exact classic
   geometry/assets, recursive submenus, deepest-first pointer routing,
   keyboard/hotkeys, touch and low/high gamepad input, flip placement,

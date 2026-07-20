@@ -5060,6 +5060,29 @@ impl FrontendAssets {
         )
     }
 
+    fn static_info_dialog_resources(
+        &self,
+    ) -> Option<lc_frontend::runtime_client_list::StaticInfoDialogResources<'_>> {
+        let caption = self.startup_dialog_images.get("GUICaption.png")?;
+        let button = self.startup_dialog_images.get("GUIButton.png")?;
+        let button_down = self.startup_dialog_images.get("GUIButtonDown.png")?;
+        let button_highlight = self.game_over_button_highlight.as_ref()?;
+        Some(
+            lc_frontend::runtime_client_list::StaticInfoDialogResources {
+                skin: lc_frontend::classic_gui::ClassicGuiSkin::new(
+                    caption,
+                    button,
+                    button_down,
+                    Some(button_highlight),
+                ),
+                fonts: self.clonk_fonts.as_deref()?,
+                icons: self.startup_dialog_images.get("GUIIcons.png")?,
+                button_highlight,
+                scroll: self.startup_dialog_images.get("GUIScroll.png")?,
+            },
+        )
+    }
+
     fn definition_sel_resources(
         &self,
     ) -> Option<lc_frontend::definition_sel::DefinitionSelResources<'_>> {
@@ -9849,6 +9872,68 @@ enum StartupNetworkPurpose {
     StagedHost,
 }
 
+const STARTUP_RESTART_LOG_CAPACITY: usize = 100;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StartupRestartPresentation {
+    Fatal(String),
+    Ringbuffer(Vec<String>),
+    Empty,
+}
+
+/// Process-owned startup diagnostics captured before a failed game is
+/// cleared. Fatal errors are deduplicated, while the ordinary log retains the
+/// newest 100 entries in oldest-to-newest presentation order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct StartupRestartDiagnostics {
+    quit_with_error: bool,
+    fatal_errors: Vec<String>,
+    ringbuffer_entries: VecDeque<String>,
+}
+
+impl StartupRestartDiagnostics {
+    fn begin_game_init(&mut self) {
+        self.quit_with_error = false;
+        self.ringbuffer_entries.clear();
+    }
+
+    fn mark_quit_with_error(&mut self) {
+        self.quit_with_error = true;
+    }
+
+    fn add_fatal_error(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if !message.is_empty() && !self.fatal_errors.contains(&message) {
+            self.fatal_errors.push(message);
+        }
+    }
+
+    fn add_log_entry(&mut self, message: impl Into<String>) {
+        if self.ringbuffer_entries.len() == STARTUP_RESTART_LOG_CAPACITY {
+            self.ringbuffer_entries.pop_front();
+        }
+        self.ringbuffer_entries.push_back(message.into());
+    }
+
+    fn take_presentation(&mut self) -> Option<StartupRestartPresentation> {
+        if !self.quit_with_error && self.fatal_errors.is_empty() {
+            return None;
+        }
+        self.quit_with_error = false;
+        let fatal_errors = std::mem::take(&mut self.fatal_errors);
+        if !fatal_errors.is_empty() {
+            self.ringbuffer_entries.clear();
+            return Some(StartupRestartPresentation::Fatal(fatal_errors.join("|")));
+        }
+        let entries = self.ringbuffer_entries.drain(..).collect::<Vec<_>>();
+        if entries.is_empty() {
+            Some(StartupRestartPresentation::Empty)
+        } else {
+            Some(StartupRestartPresentation::Ringbuffer(entries))
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum StartupDirectReferenceQueryState {
     Pending,
@@ -11749,6 +11834,7 @@ struct GameApp {
     focus_snapshot: Option<lc_engine::ObjectSnapshot>,
     frame_text: String,
     status_text: String,
+    startup_restart_diagnostics: StartupRestartDiagnostics,
     energy_fraction: f32,
     scenario_label: String,
     fallback_ground: i32,
@@ -22523,6 +22609,7 @@ impl GameApp {
             focus_snapshot: None,
             frame_text: String::new(),
             status_text: String::new(),
+            startup_restart_diagnostics: StartupRestartDiagnostics::default(),
             energy_fraction: 0.0,
             scenario_label,
             fallback_ground: DEFAULT_GROUND_HEIGHT,
@@ -28941,13 +29028,18 @@ impl GameApp {
     }
 
     fn refresh_runtime_client_list_inner(&mut self, sec1_timer: bool) -> bool {
-        if self.runtime_client_list.is_none() {
+        if self.runtime_client_list.is_none()
+            || self
+                .runtime_client_list
+                .as_ref()
+                .is_some_and(|dialog| dialog.is_static_info_only())
+        {
             return false;
         }
         let info_was_open = self
             .runtime_client_list
             .as_ref()
-            .is_some_and(|dialog| dialog.info_client_id().is_some());
+            .is_some_and(|dialog| dialog.info_is_open());
         let (options, rows, status) = self.runtime_client_list_snapshot();
         let close_info_only = self.runtime_client_list.as_mut().is_some_and(|dialog| {
             if sec1_timer {
@@ -28955,13 +29047,13 @@ impl GameApp {
             } else {
                 dialog.replace_snapshot(options, rows, status);
             }
-            dialog.is_info_only() && dialog.info_client_id().is_none()
+            dialog.is_info_only() && !dialog.info_is_open()
         });
         if info_was_open
             && self
                 .runtime_client_list
                 .as_ref()
-                .is_some_and(|dialog| dialog.info_client_id().is_none())
+                .is_some_and(|dialog| !dialog.info_is_open())
         {
             self.startup_tooltip.pointer_left();
         }
@@ -29151,13 +29243,14 @@ impl GameApp {
     fn runtime_client_list_input_geometry(
         &self,
     ) -> Option<(lc_frontend::classic_gui::IntRect, i32)> {
-        self.runtime_client_list.as_ref()?;
-        let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
+        let dialog = self.runtime_client_list.as_ref()?;
+        let font = &self.assets.clonk_fonts.as_deref()?.text;
         let preferred = scoreboard_preferred_rect(
             self.graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
         );
-        Some((preferred, line_height))
+        dialog.prepare_info_lines(preferred, font);
+        Some((preferred, font.line_height))
     }
 
     fn runtime_client_list_owns_game_over(&self) -> bool {
@@ -29220,6 +29313,7 @@ impl GameApp {
                     matches!(
                         key,
                         KeyCode::Escape
+                            | KeyCode::Enter
                             | KeyCode::Up
                             | KeyCode::Down
                             | KeyCode::Home
@@ -47747,6 +47841,7 @@ impl GameApp {
     /// reference-backed or unresolved direct join. The synchronized client
     /// load replaces this seed with the host's exact fixed resources later.
     fn prepare_network_join_game_state(&mut self) {
+        self.startup_restart_diagnostics.begin_game_init();
         self.clear_lobby_preload();
         self.active_scenario = None;
         self.active_definition_load = Some(self.scenario_seed_definition_load());
@@ -48534,6 +48629,15 @@ impl GameApp {
         message: String,
     ) -> Result<(), EngineError> {
         tracing::error!(?purpose, error = %message, "startup network session failed");
+        self.startup_restart_diagnostics.mark_quit_with_error();
+        self.startup_restart_diagnostics.add_fatal_error(message);
+        self.finish_startup_network_restart(purpose)
+    }
+
+    fn finish_startup_network_restart(
+        &mut self,
+        purpose: StartupNetworkPurpose,
+    ) -> Result<(), EngineError> {
 
         // Failed C4Game::Init returns through QuitGame and constructs the
         // remembered startup dialog again in the same process. Clear every
@@ -48612,14 +48716,57 @@ impl GameApp {
         // must not displace the fatal diagnostic with a generic overlay.
         self.status_text.clear();
         let caption = self.runtime_resource_text("IDS_DLG_LOG", "Error Log");
-        self.push_message_dialog(
-            lc_frontend::message_dialog::MessageDialogState::regular_ok(
-                message,
+        self.runtime_client_list = None;
+        self.runtime_client_list_consumed_keys.clear();
+        self.runtime_client_list_above_game_over = false;
+        let presentation = self
+            .startup_restart_diagnostics
+            .take_presentation()
+            .expect("startup restart is entered only after an error flag or fatal diagnostic");
+        let entries = match presentation {
+            StartupRestartPresentation::Fatal(message) => {
+                return self.push_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                        message,
+                        caption,
+                        lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                    ),
+                    MessageDialogContinuation::None,
+                );
+            }
+            StartupRestartPresentation::Empty => {
+                return self.push_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                        "(no error)",
+                        caption,
+                        lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                    ),
+                    MessageDialogContinuation::None,
+                );
+            }
+            StartupRestartPresentation::Ringbuffer(entries) => entries,
+        };
+
+        Self::guard_gui_overlay_result(
+            "C4GUI::InfoDialog",
+            self.assets
+                .static_info_dialog_resources()
+                .context("exact C4GUI::InfoDialog resource set is absent")
+                .and_then(|resources| resources.validate()),
+        )?;
+        let text = entries.join("|");
+        let close_label = self.runtime_resource_text("IDS_DLG_CLOSE", "&Close");
+        self.cancel_underlying_interaction();
+        self.runtime_client_list = Some(
+            lc_frontend::runtime_client_list::RuntimeClientListDialog::new_static_info(
                 caption,
-                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                10,
+                &text,
+                close_label,
             ),
-            MessageDialogContinuation::None,
-        )
+        );
+        self.mark_menu_dirty();
+        Ok(())
     }
 
     fn poll_startup_network_connection(&mut self) -> Result<(), EngineError> {
@@ -48629,11 +48776,9 @@ impl GameApp {
         let selected_scenario = connection.selected_scenario.clone();
         let purpose = connection.purpose;
         let result = match connection.receiver.try_recv() {
-            Ok(result) => result,
+            Ok(result) => Some(result),
             Err(TryRecvError::Empty) => return Ok(()),
-            Err(TryRecvError::Disconnected) => Err(NetworkStartError::Other(
-                "network worker disconnected before reporting readiness".to_string(),
-            )),
+            Err(TryRecvError::Disconnected) => None,
         };
         let mut authenticated_league_players = self
             .startup_network_connection
@@ -48646,6 +48791,13 @@ impl GameApp {
             self.dismiss_startup_network_connect_progress();
         }
         self.mark_menu_dirty();
+        let Some(result) = result else {
+            let message = "network worker disconnected before reporting readiness";
+            tracing::error!(?purpose, error = message, "startup network session failed");
+            self.startup_restart_diagnostics.add_log_entry(message);
+            self.startup_restart_diagnostics.mark_quit_with_error();
+            return self.finish_startup_network_restart(purpose);
+        };
         match result {
             Ok((mut mode, mut manager)) => {
                 if let Some(response) = manager.take_league_start_response() {
@@ -66210,9 +66362,6 @@ impl GameApp {
             return Ok(());
         };
         let assets = Arc::clone(&self.assets);
-        let resources = assets
-            .runtime_client_list_resources()
-            .expect("runtime client-list resources were preflighted before rendering");
         let preferred = scoreboard_preferred_rect(
             self.graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
@@ -66221,13 +66370,29 @@ impl GameApp {
             || self.runtime_client_list_above_game_over)
             && self.message_dialogs.is_empty()
             && self.context_menu.is_none();
-        dialog.render(
-            self.graphics.surface_mut(),
-            preferred,
-            resources,
-            active,
-            Some(frame_gamma),
-        )?;
+        if dialog.is_static_info_only() {
+            let resources = assets
+                .static_info_dialog_resources()
+                .expect("static InfoDialog resources were preflighted before rendering");
+            dialog.render_static_info(
+                self.graphics.surface_mut(),
+                preferred,
+                resources,
+                active,
+                Some(frame_gamma),
+            )?;
+        } else {
+            let resources = assets
+                .runtime_client_list_resources()
+                .expect("runtime client-list resources were preflighted before rendering");
+            dialog.render(
+                self.graphics.surface_mut(),
+                preferred,
+                resources,
+                active,
+                Some(frame_gamma),
+            )?;
+        }
         if ordered_native {
             self.next_pending_native_overlay();
         }
@@ -66884,14 +67049,24 @@ impl GameApp {
                 "C4GUI::MessageDialog",
             )?;
         }
-        if self.runtime_client_list.is_some() {
-            check(
-                self.assets
-                    .runtime_client_list_resources()
-                    .context("exact C4Network2ClientListDlg resource set is absent")
-                    .and_then(|resources| resources.validate()),
-                "C4Network2ClientListDlg",
-            )?;
+        if let Some(dialog) = self.runtime_client_list.as_ref() {
+            if dialog.is_static_info_only() {
+                check(
+                    self.assets
+                        .static_info_dialog_resources()
+                        .context("exact C4GUI::InfoDialog resource set is absent")
+                        .and_then(|resources| resources.validate()),
+                    "C4GUI::InfoDialog",
+                )?;
+            } else {
+                check(
+                    self.assets
+                        .runtime_client_list_resources()
+                        .context("exact C4Network2ClientListDlg resource set is absent")
+                        .and_then(|resources| resources.validate()),
+                    "C4Network2ClientListDlg",
+                )?;
+            }
         }
         if self.external_irc_dialog_visible {
             check(
@@ -70642,6 +70817,7 @@ impl GameApp {
         frontend: FrontendScenario,
         definition_load: ScenarioDefinitionLoad,
     ) {
+        self.startup_restart_diagnostics.begin_game_init();
         self.staged_network_host_scenario = None;
         self.clear_lobby_preload();
         let title = frontend.title.clone();
@@ -70805,6 +70981,7 @@ impl GameApp {
         scenario: FrontendScenario,
         definition_load: ScenarioDefinitionLoad,
     ) -> Result<(), EngineError> {
+        self.startup_restart_diagnostics.begin_game_init();
         self.close_context_menu_silently();
         self.definition_selector = None;
         self.pending_definition_selection = None;
@@ -96772,6 +96949,210 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(dialog.state.size(), MessageDialogSize::Regular);
         assert!(matches!(dialog.continuation, MessageDialogContinuation::None));
         assert!(app.status_text.is_empty());
+    }
+
+    #[test]
+    fn l148_restart_diagnostics_bound_order_deduplicate_and_reset() {
+        let mut diagnostics = StartupRestartDiagnostics::default();
+        diagnostics.mark_quit_with_error();
+        for index in 0..=STARTUP_RESTART_LOG_CAPACITY {
+            diagnostics.add_log_entry(format!("entry-{index:03}"));
+        }
+        assert_eq!(
+            diagnostics.take_presentation(),
+            Some(StartupRestartPresentation::Ringbuffer(
+                (1..=STARTUP_RESTART_LOG_CAPACITY)
+                    .map(|index| format!("entry-{index:03}"))
+                    .collect()
+            ))
+        );
+        assert_eq!(diagnostics, StartupRestartDiagnostics::default());
+
+        diagnostics.add_fatal_error("fatal");
+        diagnostics.add_fatal_error("fatal");
+        diagnostics.begin_game_init();
+        diagnostics.add_log_entry("ordinary");
+        assert_eq!(
+            diagnostics.take_presentation(),
+            Some(StartupRestartPresentation::Fatal("fatal".to_string()))
+        );
+        assert_eq!(diagnostics, StartupRestartDiagnostics::default());
+
+        diagnostics.mark_quit_with_error();
+        assert_eq!(
+            diagnostics.take_presentation(),
+            Some(StartupRestartPresentation::Empty)
+        );
+        assert_eq!(diagnostics, StartupRestartDiagnostics::default());
+    }
+
+    #[test]
+    fn l148_disconnected_startup_worker_reaches_ringbuffer_only_restart_branch() {
+        let mut app = new_real_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut app);
+        let (sender, receiver) = mpsc::channel::<std::result::Result<
+            (NetworkMode, NetworkManager),
+            NetworkStartError,
+        >>();
+        drop(sender);
+        app.startup_network_connection = Some(StartupNetworkConnection {
+            receiver,
+            selected_scenario: None,
+            purpose: StartupNetworkPurpose::Join,
+            authenticated_league_players: None,
+        });
+
+        app.poll_startup_network_connection()
+            .expect("disconnected worker restarts startup with retained log");
+
+        let info = app.runtime_client_list.as_ref().expect("static Error Log");
+        assert!(info.is_static_info_only());
+        assert_eq!(
+            info.info_lines(),
+            ["network worker disconnected before reporting readiness"]
+        );
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.status_text.is_empty());
+        let (preferred, line_height) = app
+            .runtime_client_list_input_geometry()
+            .expect("static InfoDialog geometry");
+        let bottom_close = app
+            .runtime_client_list
+            .as_ref()
+            .and_then(|dialog| dialog.info_layout(preferred, line_height))
+            .and_then(|layout| layout.bottom_close_button)
+            .expect("bottom Close button");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(bottom_close.x + bottom_close.w / 2),
+            f64::from(bottom_close.y + bottom_close.h / 2),
+        ))
+        .expect("point at bottom Close button");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press bottom Close button");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release bottom Close button");
+        assert!(app.runtime_client_list.is_none());
+        assert_eq!(
+            app.startup_restart_diagnostics,
+            StartupRestartDiagnostics::default()
+        );
+    }
+
+    #[test]
+    fn l148_restart_ringbuffer_uses_static_ten_line_error_log_info_dialog() {
+        let mut app = new_real_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut app);
+        app.startup_network_dialog
+            .as_mut()
+            .expect("remembered NetDlg")
+            .set_join_address("remembered.example:11112");
+        app.status_text = "stale generic status".to_string();
+        let mut entries = (0..16)
+            .map(|index| format!("retained-log-{index:02}"))
+            .collect::<Vec<_>>();
+        entries[15] = format!("retained-log-15 {}TAIL", "wrapped-segment ".repeat(80));
+
+        app.startup_restart_diagnostics.mark_quit_with_error();
+        for entry in &entries {
+            app.startup_restart_diagnostics.add_log_entry(entry.clone());
+        }
+        app.finish_startup_network_restart(StartupNetworkPurpose::Join)
+            .expect("reconstruct NetDlg and show retained log");
+
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.startup_network_dialog.is_some());
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.status_text.is_empty());
+        let info = app.runtime_client_list.as_ref().expect("Error Log info");
+        assert!(info.is_info_only());
+        assert!(info.info_is_open());
+        assert_eq!(info.info_client_id(), None);
+        assert_eq!(info.info_caption(), "Error Log");
+        assert_eq!(info.info_requested_line_count(), 10);
+        assert_eq!(info.info_lines(), entries);
+
+        let (preferred, _) = app
+            .runtime_client_list_input_geometry()
+            .expect("InfoDialog geometry");
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("Error Log info")
+                .visible_info_lines(preferred, &fonts.text)
+                .first()
+                .map(String::as_str),
+            Some("retained-log-00")
+        );
+        assert!(app
+            .runtime_client_list
+            .as_ref()
+            .expect("Error Log info")
+            .info_scroll_metrics(preferred, &fonts.text)
+            .is_some_and(|metrics| metrics.max_scroll > 0));
+        let mut frame = vec![0x4c; 800 * 600 * 4];
+        app.render(&mut frame)
+            .expect("render reconstructed NetDlg and Error Log info");
+        assert!(frame.iter().any(|byte| *byte != 0x4c));
+
+        app.handle_key(VirtualKeyCode::End, ElementState::Pressed)
+            .expect("scroll retained log to end");
+        assert!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("scrolled Error Log info")
+                .visible_info_lines(preferred, &fonts.text)
+                .last()
+                .is_some_and(|line| line.ends_with("TAIL"))
+        );
+        app.handle_key(VirtualKeyCode::End, ElementState::Released)
+            .expect("release retained-log scroll key");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("dismiss retained Error Log info");
+        assert!(app.runtime_client_list.is_none());
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.startup_network_dialog.is_some());
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("dismissed info owns Return release");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert_eq!(
+            app.startup_restart_diagnostics,
+            StartupRestartDiagnostics::default()
+        );
+    }
+
+    #[test]
+    fn l148_empty_restart_log_uses_regular_error_modal_over_restored_host_selector() {
+        let mut app = new_real_classic_menu_app(800, 600);
+        app.open_network_game_dialog();
+        app.open_network_host_scenario_browser();
+        app.status_text = "stale generic status".to_string();
+
+        app.startup_restart_diagnostics.mark_quit_with_error();
+        app.finish_startup_network_restart(StartupNetworkPurpose::StagedHost)
+            .expect("reconstruct host selector and show empty-log fallback");
+
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(
+            app.scenario_selector_mode,
+            ScenarioSelectorMode::NetworkHost
+        );
+        assert!(app.runtime_client_list.is_none());
+        assert_startup_error_log(&app, "(no error)");
+        let mut frame = vec![0x4c; 800 * 600 * 4];
+        app.render(&mut frame)
+            .expect("render restored host selector and empty-log fallback");
+        assert!(frame.iter().any(|byte| *byte != 0x4c));
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss empty-log fallback");
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(
+            app.startup_restart_diagnostics,
+            StartupRestartDiagnostics::default()
+        );
     }
 
     #[test]
