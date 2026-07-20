@@ -23,10 +23,12 @@ const C4M_LIQUID: i32 = 25;
 /// C4Texture.cpp:319-340).
 const C4M_MAX_TEX_INDEX: usize = 127;
 /// C++ retains at most fifty pending relight rectangles
-/// (`C4LS_MaxRelights`, C4Landscape.h:43). Rust keeps the same bounded number
-/// of completed render-dirty generations; an older cache safely falls back to
-/// a full rebuild when its generation has expired.
+/// (`C4LS_MaxRelights`, C4Landscape.h:43). Rust keeps the same spatial cap in
+/// each completed render-dirty generation and reapplies it when joining
+/// skipped generations. Generation history is also bounded; an older cache
+/// safely falls back to a full rebuild when its lineage has expired.
 const MAX_RENDER_DIRTY_GENERATIONS: usize = 50;
+const MAX_RENDER_DIRTY_RECTS: usize = 50;
 
 const RENDER_TOKEN_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const RENDER_TOKEN_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -115,6 +117,19 @@ impl PixelGridDirtyRect {
             && other.y < self.y.saturating_add(self.height)
     }
 
+    fn set_pix_overlap_area(self) -> Self {
+        let x = self.x.saturating_sub(2);
+        let y = self.y.saturating_sub(16);
+        let right = self.x.saturating_add(self.width).saturating_add(2);
+        let bottom = self.y.saturating_add(self.height).saturating_add(16);
+        Self {
+            x,
+            y,
+            width: right.saturating_sub(x),
+            height: bottom.saturating_sub(y),
+        }
+    }
+
     pub fn x(self) -> u32 {
         self.x
     }
@@ -145,7 +160,49 @@ struct PixelGridDirtyGeneration {
     revision: u64,
     base_token: u64,
     token: u64,
+    /// Bounding union retained under the original field name so an older
+    /// reader safely over-renders a sparse generation it cannot understand.
     rect: PixelGridDirtyRect,
+    /// Runtime-only precision for the frontend cache. Serialized engine state
+    /// retains the legacy bounding rectangle so replay hashes remain stable.
+    #[serde(skip)]
+    rects: Vec<PixelGridDirtyRect>,
+}
+
+impl PixelGridDirtyGeneration {
+    fn rects(&self) -> impl Iterator<Item = PixelGridDirtyRect> + '_ {
+        let legacy = self.rects.is_empty().then_some(self.rect);
+        legacy.into_iter().chain(self.rects.iter().copied())
+    }
+
+    fn add_rect(&mut self, rect: PixelGridDirtyRect) {
+        let overlap_area = rect.set_pix_overlap_area();
+        if self.rects.is_empty() {
+            if self.rect.overlaps(overlap_area) {
+                self.rect = self.rect.union(rect);
+                return;
+            }
+            self.rects.push(self.rect);
+        }
+        Self::add_capped_rect(&mut self.rects, rect);
+        self.rect = self.rect.union(rect);
+    }
+
+    /// `C4Landscape::SetPix`: merge lighting-nearby changes, retain fifty
+    /// regions, then union all overflow into the final slot.
+    fn add_capped_rect(rects: &mut Vec<PixelGridDirtyRect>, rect: PixelGridDirtyRect) {
+        let overlap_area = rect.set_pix_overlap_area();
+        if let Some(existing) = rects
+            .iter_mut()
+            .find(|existing| existing.overlaps(overlap_area))
+        {
+            *existing = existing.union(rect);
+        } else if rects.len() < MAX_RENDER_DIRTY_RECTS {
+            rects.push(rect);
+        } else if let Some(last) = rects.last_mut() {
+            *last = last.union(rect);
+        }
+    }
 }
 
 /// Hex-string serde for the pixel byte plane (a JSON number array would be
@@ -469,23 +526,40 @@ impl PixelGrid {
         {
             return None;
         }
+        let same_surface8 = (self.revision, self.render_token)
+            == (previous.revision, previous.render_token);
+        if same_surface8
+            && !Arc::ptr_eq(&self.bytes, &previous.bytes)
+            && self.bytes.as_slice() != previous.bytes.as_slice()
+        {
+            return None;
+        }
         let mut rects = Self::render_lineage_dirty_rects(
             self.revision,
             self.render_token,
             &self.dirty_generations,
             previous.revision,
             previous.render_token,
-            Arc::ptr_eq(&self.bytes, &previous.bytes)
-                || self.bytes.as_slice() == previous.bytes.as_slice(),
+            true,
         )?;
+        let same_surface32 = (self.surface32_revision, self.surface32_render_token)
+            == (
+                previous.surface32_revision,
+                previous.surface32_render_token,
+            );
+        if same_surface32
+            && !Arc::ptr_eq(&self.surface32_pixels, &previous.surface32_pixels)
+            && self.surface32_pixels.as_ref() != previous.surface32_pixels.as_ref()
+        {
+            return None;
+        }
         rects.extend(Self::render_lineage_dirty_rects(
             self.surface32_revision,
             self.surface32_render_token,
             &self.surface32_dirty_generations,
             previous.surface32_revision,
             previous.surface32_render_token,
-            Arc::ptr_eq(&self.surface32_pixels, &previous.surface32_pixels)
-                || self.surface32_pixels.as_ref() == previous.surface32_pixels.as_ref(),
+            false,
         )?);
         Some(rects)
     }
@@ -496,10 +570,10 @@ impl PixelGrid {
         generations: &VecDeque<PixelGridDirtyGeneration>,
         previous_revision: u64,
         previous_token: u64,
-        storage_equal: bool,
+        cap_set_pix_rects: bool,
     ) -> Option<Vec<PixelGridDirtyRect>> {
         if (current_revision, current_token) == (previous_revision, previous_token) {
-            return storage_equal.then(Vec::new);
+            return Some(Vec::new());
         }
 
         let mut revision = previous_revision;
@@ -509,7 +583,13 @@ impl PixelGrid {
             if (generation.base_revision, generation.base_token) != (revision, token) {
                 continue;
             }
-            rects.push(generation.rect);
+            if cap_set_pix_rects {
+                for rect in generation.rects() {
+                    PixelGridDirtyGeneration::add_capped_rect(&mut rects, rect);
+                }
+            } else {
+                rects.extend(generation.rects());
+            }
             revision = generation.revision;
             token = generation.token;
             if (revision, token) == (current_revision, current_token) {
@@ -678,7 +758,7 @@ impl PixelGrid {
                 .expect("checked dirty generation exists");
             generation.revision = revision;
             generation.token = token;
-            generation.rect = generation.rect.union(rect);
+            generation.add_rect(rect);
         } else {
             generations.push_back(PixelGridDirtyGeneration {
                 base_revision,
@@ -686,6 +766,7 @@ impl PixelGrid {
                 base_token,
                 token,
                 rect,
+                rects: Vec::new(),
             });
         }
         while generations.len() > MAX_RENDER_DIRTY_GENERATIONS {
@@ -7674,21 +7755,13 @@ mod tests {
         );
         assert_eq!(
             live.render_dirty_rects_since(&first_snapshot),
-            Some(vec![
-                PixelGridDirtyRect {
-                    x: 2,
-                    y: 3,
-                    width: 3,
-                    height: 3,
-                },
-                PixelGridDirtyRect {
-                    x: 6,
-                    y: 1,
-                    width: 1,
-                    height: 1,
-                },
-            ]),
-            "a skipped snapshot can apply each retained bounded generation"
+            Some(vec![PixelGridDirtyRect {
+                x: 2,
+                y: 1,
+                width: 5,
+                height: 5,
+            }]),
+            "a skipped snapshot merges nearby generations like one C++ pending relight list"
         );
 
         let mut sibling = second_snapshot.clone();
@@ -7707,6 +7780,162 @@ mod tests {
         assert!(
             live.render_dirty_rects_since(&sibling).is_none(),
             "equal legacy/default tokens still compare content before reusing a cache"
+        );
+    }
+
+    #[test]
+    fn distant_set_pix_writes_keep_separate_render_dirty_rectangles() {
+        // C4Landscape::SetPix retains up to C4LS_MaxRelights spatially
+        // separate rectangles and merges only nearby changes
+        // (C4Landscape.cpp:741-763). Far Worlds maps are several million
+        // pixels, so joining distant edits would relight the strip between
+        // them even though C++ never touches it.
+        let mut live = PixelGrid::new(
+            512,
+            64,
+            vec![1; 512 * 64],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let snapshot = live.clone();
+
+        live.set_byte(2, 32, 7);
+        live.set_byte(509, 32, 8);
+
+        assert_eq!(
+            live.render_dirty_rects_since(&snapshot),
+            Some(vec![
+                PixelGridDirtyRect::single(2, 32),
+                PixelGridDirtyRect::single(509, 32),
+            ])
+        );
+    }
+
+    #[test]
+    fn set_pix_dirty_rects_use_cpp_lighting_overlap_distances() {
+        let mut live = PixelGrid::new(
+            20,
+            40,
+            vec![1; 20 * 40],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let snapshot = live.clone();
+
+        for (x, y) in [(2, 2), (4, 2), (7, 2), (15, 2), (15, 18), (15, 35)] {
+            live.set_byte(x, y, 2);
+        }
+
+        assert_eq!(
+            live.render_dirty_rects_since(&snapshot),
+            Some(vec![
+                PixelGridDirtyRect {
+                    x: 2,
+                    y: 2,
+                    width: 3,
+                    height: 1,
+                },
+                PixelGridDirtyRect::single(7, 2),
+                PixelGridDirtyRect {
+                    x: 15,
+                    y: 2,
+                    width: 1,
+                    height: 17,
+                },
+                PixelGridDirtyRect::single(15, 35),
+            ]),
+            "dx=2 and dy=16 merge, while dx=3 and dy=17 stay separate"
+        );
+    }
+
+    #[test]
+    fn skipped_render_snapshots_keep_cpp_relight_thresholds_and_global_cap() {
+        let mut live = PixelGrid::new(
+            180,
+            40,
+            vec![1; 180 * 40],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let rendered = live.clone();
+
+        for index in 0..30 {
+            live.set_byte(index * 3, 20, 2);
+        }
+        let _skipped_snapshot = live.clone();
+        for index in 30..60 {
+            live.set_byte(index * 3, 20, 2);
+        }
+
+        let rects = live
+            .render_dirty_rects_since(&rendered)
+            .expect("both COW generations descend from the rendered grid");
+        assert_eq!(rects.len(), MAX_RENDER_DIRTY_RECTS);
+        assert_eq!(rects[48], PixelGridDirtyRect::single(144, 20));
+        assert_eq!(
+            rects[49],
+            PixelGridDirtyRect {
+                x: 147,
+                y: 20,
+                width: 31,
+                height: 1,
+            },
+            "C++ unions the 51st and later distant changes into its final relight slot"
+        );
+    }
+
+    #[test]
+    fn sparse_render_dirty_generation_keeps_legacy_bounding_rect() {
+        let mut live = PixelGrid::new(
+            512,
+            64,
+            vec![1; 512 * 64],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let snapshot = live.clone();
+        live.set_byte(2, 32, 7);
+        live.set_byte(509, 32, 8);
+
+        let generation = live
+            .dirty_generations
+            .back()
+            .expect("two writes create one COW generation");
+        let encoded = serde_json::to_value(generation).expect("generation serializes");
+        assert_eq!(
+            encoded["rect"],
+            serde_json::json!({"x": 2, "y": 32, "width": 508, "height": 1}),
+            "old readers safely over-render the bounding union"
+        );
+        assert!(
+            encoded.get("rects").is_none(),
+            "runtime cache precision must not change serialized replay state"
+        );
+        assert_eq!(
+            generation.rects().collect::<Vec<_>>(),
+            live.render_dirty_rects_since(&snapshot).unwrap()
+        );
+
+        let legacy: PixelGridDirtyGeneration = serde_json::from_value(serde_json::json!({
+            "base_revision": 0,
+            "revision": 2,
+            "base_token": 11,
+            "token": 22,
+            "rect": {"x": 2, "y": 32, "width": 508, "height": 1}
+        }))
+        .expect("legacy one-rect generation still decodes");
+        assert_eq!(
+            legacy.rects().collect::<Vec<_>>(),
+            vec![PixelGridDirtyRect {
+                x: 2,
+                y: 32,
+                width: 508,
+                height: 1,
+            }]
         );
     }
 

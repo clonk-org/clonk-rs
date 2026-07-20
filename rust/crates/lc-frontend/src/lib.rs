@@ -24788,6 +24788,64 @@ mod tests {
     }
 
     #[test]
+    fn distant_landscape_edits_patch_sparse_surface32_regions() {
+        // C4Landscape::SetPix keeps distant relights separate and
+        // DoRelights updates each bounded Surface32 region independently
+        // (C4Landscape.cpp:741-763,2477-2511). Joining these cells would
+        // compose the 508-pixel strip between them; multi-million-pixel Far
+        // Worlds landscapes magnify that mistake across both axes.
+        const WIDTH: u32 = 512;
+        const HEIGHT: u32 = 64;
+        const CHANGE_Y: i32 = 32;
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT as i32);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT,
+            vec![1; (WIDTH * HEIGHT) as usize],
+            vec![0, 50, 50],
+            vec![None, Some("Earth".to_string()), Some("Earth".to_string())],
+            vec![None, Some("Rough".to_string()), Some("Smooth".to_string())],
+        ));
+        landscape.set_shade_materials(true);
+        let mut graphics = GraphicsSystem::new(
+            1,
+            1,
+            1,
+            "sparse landscape cache patch",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_material_textures(Arc::new(HashMap::from([
+            (
+                "rough".to_string(),
+                ImageData::new(1, 1, vec![255, 0, 0, 255]),
+            ),
+            (
+                "smooth".to_string(),
+                ImageData::new(1, 1, vec![0, 255, 0, 255]),
+            ),
+        ])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "earth".to_string(),
+            MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
+        )])));
+
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert!(landscape.insert_material_texture_pix(2, CHANGE_Y, 2));
+        assert!(landscape.insert_material_texture_pix(509, CHANGE_Y, 2));
+        reset_material_composition_calls();
+
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(
+            material_composition_calls(),
+            2 * 3 * 17,
+            "only the two C++ x=1/y=8 relight neighborhoods should be recomposed"
+        );
+    }
+
+    #[test]
     fn one_pixel_landscape_edit_recomposes_only_its_dirty_cache_cell() {
         // C4Landscape::SetPix records the changed pixel and DoRelights updates
         // only a bounded rectangle of persistent Surface32
