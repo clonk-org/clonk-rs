@@ -2201,6 +2201,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+ "windows-sys 0.52.0",
  "zip",
 ]
 

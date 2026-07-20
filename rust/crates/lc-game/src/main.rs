@@ -1,3 +1,5 @@
+mod legacy_registry;
+
 use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
@@ -23,6 +25,9 @@ use lc_launcher::{
     UpdateTelemetrySummary,
 };
 use lc_platform::AppPaths;
+use legacy_registry::{
+    read_legacy_windows_registry, serialize_legacy_registry_config, LegacyRegistryConfig,
+};
 use serde::Serialize;
 
 const SKIP_PATCHER_VALIDATION_ENV: &str = "LC_GAME_SKIP_PATCHER_CHECK";
@@ -582,6 +587,17 @@ fn sibling_runtime_candidates(exe: &Path) -> Vec<PathBuf> {
 }
 
 fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> {
+    prepare_config_with_registry_reader(paths, logger, read_legacy_windows_registry)
+}
+
+fn prepare_config_with_registry_reader<F>(
+    paths: &AppPaths,
+    logger: &LauncherLogger,
+    read_registry: F,
+) -> Result<PathBuf>
+where
+    F: FnOnce() -> Result<Option<LegacyRegistryConfig>>,
+{
     if let Some(override_path) = config_override_path() {
         if override_path.is_dir() {
             bail!(
@@ -637,7 +653,49 @@ fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> 
     }
 
     let mut migrated = false;
-    for candidate in legacy_config_candidates() {
+    let mut migrated_from_registry = false;
+    if let Some(candidate) = explicit_legacy_config_file().filter(|candidate| candidate.exists()) {
+        fs::copy(&candidate, &config_path).with_context(|| {
+            format!(
+                "failed to migrate config from {} to {}",
+                candidate.display(),
+                config_path.display()
+            )
+        })?;
+        logger
+            .log_line(&format!("migrated config from {}", candidate.display()))
+            .context("failed to log config migration")?;
+        migrated = true;
+    }
+
+    if !migrated {
+        if let Some(registry) =
+            read_registry().context("failed to read classic Windows registry config")?
+        {
+            if let Some(config) = serialize_legacy_registry_config(&registry)
+                .context("failed to convert classic Windows registry config")?
+            {
+                migrate_registry_config_atomically(&config_path, &config, logger).with_context(
+                    || {
+                        format!(
+                            "failed to migrate Windows registry config to {}",
+                            config_path.display()
+                        )
+                    },
+                )?;
+                logger
+                    .log_line("migrated config from HKCU\\Software\\LegacyClonk Team\\LegacyClonk")
+                    .context("failed to log Windows registry config migration")?;
+                migrated = true;
+                migrated_from_registry = true;
+            }
+        }
+    }
+
+    for candidate in heuristic_legacy_config_candidates() {
+        if migrated {
+            break;
+        }
         if candidate.exists() {
             fs::copy(&candidate, &config_path).with_context(|| {
                 format!(
@@ -662,13 +720,47 @@ fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> 
             .context("failed to log config creation")?;
     }
 
-    adapt_config_to_current_version(&config_path, logger)
-        .context("failed to adapt classic configuration")?;
-
-    apply_headless_display_mode_override(&config_path, logger)
-        .context("failed to apply headless display mode override")?;
+    if !migrated_from_registry {
+        adapt_config_to_current_version(&config_path, logger)
+            .context("failed to adapt classic configuration")?;
+        apply_headless_display_mode_override(&config_path, logger)
+            .context("failed to apply headless display mode override")?;
+    }
 
     Ok(config_path)
+}
+
+fn migrate_registry_config_atomically(
+    config_path: &Path,
+    config: &[u8],
+    logger: &LauncherLogger,
+) -> Result<()> {
+    let file_name = config_path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "config path has no filename"))?
+        .to_string_lossy();
+    let temporary_path = config_path.with_file_name(format!(
+        ".{file_name}.registry-import-{}.tmp",
+        std::process::id()
+    ));
+
+    let result = (|| {
+        fs::write(&temporary_path, config)
+            .with_context(|| format!("failed to stage {}", config_path.display()))?;
+        adapt_config_to_current_version(&temporary_path, logger)
+            .context("failed to adapt staged registry config")?;
+        apply_headless_display_mode_override_with_io_policy(&temporary_path, logger, true)
+            .context("failed to apply headless override to staged registry config")?;
+        fs::rename(&temporary_path, config_path)
+            .with_context(|| format!("failed to publish {}", config_path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        // A failed first-run import must not leave a destination that would
+        // suppress the next migration attempt.
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
 }
 
 fn rediscover_paths_after_config(config_path: &Path) -> Result<AppPaths> {
@@ -1299,12 +1391,14 @@ fn config_override_path() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn legacy_config_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
+fn explicit_legacy_config_file() -> Option<PathBuf> {
+    env::var_os("LC_LEGACY_CONFIG_FILE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
 
-    if let Some(explicit) = env::var_os("LC_LEGACY_CONFIG_FILE") {
-        candidates.push(PathBuf::from(explicit));
-    }
+fn heuristic_legacy_config_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
 
     #[cfg(target_os = "macos")]
     {
@@ -1333,6 +1427,14 @@ fn legacy_config_candidates() -> Vec<PathBuf> {
 }
 
 fn apply_headless_display_mode_override(config_path: &Path, logger: &LauncherLogger) -> Result<()> {
+    apply_headless_display_mode_override_with_io_policy(config_path, logger, false)
+}
+
+fn apply_headless_display_mode_override_with_io_policy(
+    config_path: &Path,
+    logger: &LauncherLogger,
+    fail_on_io_error: bool,
+) -> Result<()> {
     let Some(reason) = headless_override_reason() else {
         return Ok(());
     };
@@ -1341,6 +1443,10 @@ fn apply_headless_display_mode_override(config_path: &Path, logger: &LauncherLog
         Ok(config) => config,
         Err(err) if err.kind() == io::ErrorKind::NotFound => Config::new(),
         Err(err) => {
+            if fail_on_io_error {
+                return Err(err)
+                    .with_context(|| format!("failed to load {}", config_path.display()));
+            }
             logger
                 .log_line(&format!(
                     "headless display guard skipped because {} could not be loaded: {err}",
@@ -1375,8 +1481,12 @@ fn apply_headless_display_mode_override(config_path: &Path, logger: &LauncherLog
     let previous = current_value.as_deref().unwrap_or("unset");
     let native_config = match fs::read(config_path) {
         Ok(config) => config,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(err) if err.kind() == io::ErrorKind::NotFound && !fail_on_io_error => Vec::new(),
         Err(err) => {
+            if fail_on_io_error {
+                return Err(err)
+                    .with_context(|| format!("failed to read {}", config_path.display()));
+            }
             logger
                 .log_line(&format!(
                     "headless display guard failed to read {}: {err}",
@@ -1394,6 +1504,10 @@ fn apply_headless_display_mode_override(config_path: &Path, logger: &LauncherLog
     );
 
     if let Err(err) = fs::write(config_path, native_config) {
+        if fail_on_io_error {
+            return Err(err)
+                .with_context(|| format!("failed to persist {}", config_path.display()));
+        }
         logger
             .log_line(&format!(
                 "headless display guard failed to persist override for {}: {err}",
@@ -2328,11 +2442,13 @@ impl From<&UpdateTelemetrySummary> for AutomationTelemetry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::legacy_registry::{LegacyRegistryData, LegacyRegistryKey, LegacyRegistryValue};
     use lc_launcher::{
         ProviderAutomationRecord, ProviderAutomationSnapshot, ProviderAutomationState,
         ProviderBulkRetargetRecord, ProviderBulkRetargetSummary, ProviderPathStatus,
     };
     use serde_json::Value;
+    use std::cell::Cell;
     use std::env;
     use std::fs::{self, File};
     use std::io::{LineWriter, Read};
@@ -2563,8 +2679,10 @@ mod tests {
         paths.ensure_user_dirs().unwrap();
         let logger = test_logger(&log_dir);
 
-        let config_path =
-            prepare_config(&paths, &logger).expect("config preparation should succeed");
+        let config_path = prepare_config_with_registry_reader(&paths, &logger, || {
+            panic!("LC_CONFIG_FILE must bypass legacy registry migration")
+        })
+        .expect("config preparation should succeed");
 
         assert_eq!(paths.config_file(), override_path);
         assert_eq!(config_path, override_path);
@@ -2573,6 +2691,145 @@ mod tests {
             fs::metadata(&config_path).unwrap().is_file(),
             "override config path should resolve to a file"
         );
+    }
+
+    #[test]
+    fn l025_default_config_imports_windows_registry_once() {
+        fn value(name: &str, data: LegacyRegistryData) -> LegacyRegistryValue {
+            LegacyRegistryValue {
+                name: name.to_string(),
+                data,
+            }
+        }
+
+        let install_dir = TempDir::new().unwrap();
+        fs::create_dir_all(install_dir.path().join("planet")).unwrap();
+        fs::write(install_dir.path().join("planet/System.c4g"), b"system").unwrap();
+        let user_dir = TempDir::new().unwrap();
+        let legacy_home = TempDir::new().unwrap();
+        let log_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+            ("LC_CONFIG_FILE", None),
+            ("LC_LEGACY_CONFIG_FILE", None),
+            ("HOME", Some(legacy_home.path())),
+            ("APPDATA", Some(legacy_home.path())),
+            ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
+        ]);
+
+        let heuristic_path = heuristic_legacy_config_candidates()
+            .into_iter()
+            .next()
+            .expect("the host platform should expose a legacy config candidate");
+        fs::create_dir_all(heuristic_path.parent().unwrap()).unwrap();
+        fs::write(heuristic_path, b"[General]\nVersion=362\nName=Heuristic\n").unwrap();
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = test_logger(&log_dir);
+        let registry = LegacyRegistryConfig {
+            keys: vec![
+                LegacyRegistryKey {
+                    path: vec!["General".to_string()],
+                    values: vec![
+                        value(
+                            "Version",
+                            LegacyRegistryData::Dword(362_u32.to_le_bytes().to_vec()),
+                        ),
+                        value("Name", LegacyRegistryData::String(b"M\xfcller\0".to_vec())),
+                        value(
+                            "GamepadEnabled",
+                            LegacyRegistryData::Dword(0_u32.to_le_bytes().to_vec()),
+                        ),
+                    ],
+                },
+                LegacyRegistryKey {
+                    path: vec!["Graphics".to_string()],
+                    values: vec![
+                        value(
+                            "ResolutionX",
+                            LegacyRegistryData::Dword(1920_u32.to_le_bytes().to_vec()),
+                        ),
+                        value(
+                            "DisplayMode",
+                            LegacyRegistryData::String(b"Window\0".to_vec()),
+                        ),
+                    ],
+                },
+                LegacyRegistryKey {
+                    path: vec!["Gamepad0".to_string()],
+                    values: vec![value(
+                        "Button1",
+                        LegacyRegistryData::Dword(u32::MAX.to_le_bytes().to_vec()),
+                    )],
+                },
+                LegacyRegistryKey {
+                    path: vec!["Network".to_string()],
+                    values: vec![value(
+                        "LastUpdateTime",
+                        LegacyRegistryData::Qword(0x1122_3344_5566_7788_u64.to_le_bytes().to_vec()),
+                    )],
+                },
+                LegacyRegistryKey {
+                    path: vec!["Logging".to_string(), "C4AudioSystem".to_string()],
+                    values: vec![value(
+                        "LogLevel",
+                        LegacyRegistryData::String(b"debug\0".to_vec()),
+                    )],
+                },
+                LegacyRegistryKey {
+                    path: vec!["Console".to_string()],
+                    values: vec![value(
+                        "Unrelated",
+                        LegacyRegistryData::String(b"ignored\0".to_vec()),
+                    )],
+                },
+            ],
+        };
+        let reads = Cell::new(0);
+
+        let config_path = prepare_config_with_registry_reader(&paths, &logger, || {
+            reads.set(reads.get() + 1);
+            Ok(Some(registry))
+        })
+        .expect("first run should import the registry snapshot");
+
+        assert_eq!(reads.get(), 1);
+        let imported_bytes = fs::read(&config_path).unwrap();
+        let imported = Config::load(&config_path).unwrap();
+        assert_eq!(imported.get_in(Some("General"), "Version"), Some("362"));
+        assert_eq!(imported.get_in(Some("General"), "Name"), Some("Müller"));
+        assert_eq!(
+            imported.get_in(Some("General"), "GamepadEnabled"),
+            Some("false")
+        );
+        assert_eq!(
+            imported.get_in(Some("Graphics"), "ResolutionX"),
+            Some("1920")
+        );
+        assert_eq!(
+            imported.get_in(Some("Graphics"), "DisplayMode"),
+            Some("Window")
+        );
+        assert_eq!(imported.get_in(Some("Gamepad0"), "Button1"), Some("-1"));
+        assert_eq!(
+            imported.get_in(Some("Network"), "LastUpdateTime"),
+            Some("1234605616436508552")
+        );
+        assert!(imported_bytes
+            .windows(b"  [C4AudioSystem]\r\n  LogLevel=debug\r\n".len())
+            .any(|window| window == b"  [C4AudioSystem]\r\n  LogLevel=debug\r\n"));
+        assert!(!imported_bytes
+            .windows(b"[Console]".len())
+            .any(|window| window == b"[Console]"));
+
+        let second_path = prepare_config_with_registry_reader(&paths, &logger, || {
+            panic!("an existing destination must not read the legacy registry")
+        })
+        .expect("later runs should keep the imported destination");
+        assert_eq!(second_path, config_path);
+        assert_eq!(fs::read(second_path).unwrap(), imported_bytes);
     }
 
     #[test]
@@ -2644,8 +2901,10 @@ mod tests {
         paths.ensure_user_dirs().unwrap();
         let logger = test_logger(&log_dir);
 
-        let config_path =
-            prepare_config(&paths, &logger).expect("config preparation should succeed");
+        let config_path = prepare_config_with_registry_reader(&paths, &logger, || {
+            panic!("LC_LEGACY_CONFIG_FILE must bypass legacy registry migration")
+        })
+        .expect("config preparation should succeed");
 
         assert_eq!(config_path, paths.config_file());
         assert!(
