@@ -12013,7 +12013,9 @@ fn extract_default_startup_portraits_once(paths: &AppPaths) {
             return;
         }
     }
-    if let Err(error) = config.save(&config_path) {
+    if let Err(error) =
+        save_config_preserving_native_gamepads_enabled(&config, &config_path, None)
+    {
         tracing::warn!(%error, path = %config_path.display(), "failed to persist portrait extraction flag");
     }
 }
@@ -12460,7 +12462,15 @@ struct GameApp {
     keyboard_modifiers: ModifiersState,
     pending_screenshots: VecDeque<ScreenshotRequest>,
     pending_options_display_requests: VecDeque<OptionsDisplayRequest>,
+    /// Current `Config.General.GamepadEnabled` value used by each new
+    /// `C4Player::InitControl` analogue.
+    gamepads_enabled: bool,
+    /// Startup-time gamepad subsystem gate. Native does not create or later
+    /// poll `C4GamePadControl` when this was false during application init.
+    gamepad_input_enabled: bool,
     gamepads: GamepadManager,
+    #[cfg(test)]
+    gamepad_poll_count: usize,
     gamepad_gui_control: bool,
     snapshot: SimulationSnapshot,
     focus_id: Option<ObjectId>,
@@ -20379,7 +20389,7 @@ fn repair_rust_truncated_masterserver_urls(config_path: &Path) -> io::Result<boo
         }
     }
     if repaired {
-        config.save(config_path)?;
+        save_config_preserving_native_gamepads_enabled(&config, config_path, None)?;
     }
     Ok(repaired)
 }
@@ -20528,6 +20538,48 @@ fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
     let config = load_native_config_bytes(paths);
     lc_app::configured_native_boolean(&config, "General", "NoCrew")
         .unwrap_or(false)
+}
+
+fn configured_gamepads_enabled(config: &[u8]) -> bool {
+    lc_app::configured_native_boolean(config, "General", "GamepadEnabled").unwrap_or(true)
+}
+
+fn load_gamepads_enabled(paths: Option<&AppPaths>) -> bool {
+    configured_gamepads_enabled(&load_native_config_bytes(paths))
+}
+
+fn save_config_preserving_native_gamepads_enabled(
+    config: &Config,
+    path: &Path,
+    updated_gamepads_enabled: Option<bool>,
+) -> io::Result<()> {
+    // The UTF-8 convenience writer emits `Key = value`, but native Boolean
+    // values must begin immediately after `=`. Preserve or explicitly replace
+    // this flag whenever a Rust-owned save rewrites the complete file.
+    let gamepads_enabled = match updated_gamepads_enabled {
+        Some(enabled) => Some(enabled),
+        None => match fs::read(path) {
+            Ok(config) => {
+                lc_app::configured_native_boolean(&config, "General", "GamepadEnabled")
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        },
+    };
+    config.save(path)?;
+    if let Some(enabled) = gamepads_enabled {
+        let config = fs::read(path)?;
+        let updated = lc_app::update_configured_native_values(
+            &config,
+            "General",
+            &[(
+                "GamepadEnabled",
+                lc_app::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
+            )],
+        )?;
+        fs::write(path, updated)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21622,7 +21674,7 @@ fn persist_config_value(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    config.save(path)
+    save_config_preserving_native_gamepads_enabled(&config, &path, None)
 }
 
 fn persist_irc_login_settings(
@@ -21840,7 +21892,7 @@ fn persist_startup_options_config(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    config.save(path)
+    save_config_preserving_native_gamepads_enabled(&config, &path, None)
 }
 
 fn load_participants_label(paths: Option<&AppPaths>) -> String {
@@ -22010,7 +22062,7 @@ fn save_validated_startup_participant_config(
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    config.save(config_path)
+    save_config_preserving_native_gamepads_enabled(&config, &config_path, None)
 }
 
 fn remove_startup_participant_config(
@@ -23342,6 +23394,7 @@ impl GameApp {
             })
             .unwrap_or_default();
         let show_folder_maps = load_show_folder_maps(paths);
+        let gamepads_enabled = load_gamepads_enabled(paths);
         let bindings = KeyboardBindings::load(paths);
         let show_commands_requests = ShowCommandsRequestStore::default();
         let mut engine = Engine::new();
@@ -23501,7 +23554,9 @@ impl GameApp {
             keyboard_modifiers: ModifiersState::empty(),
             pending_screenshots: VecDeque::new(),
             pending_options_display_requests: VecDeque::new(),
-            gamepads: if cfg!(test) {
+            gamepads_enabled,
+            gamepad_input_enabled: gamepads_enabled,
+            gamepads: if cfg!(test) || !gamepads_enabled {
                 // Synthetic app tests inject normalized events directly. Starting the
                 // macOS gilrs backend for every nextest process creates two unused
                 // threads per fixture and can leave hundreds contending during the
@@ -23510,6 +23565,8 @@ impl GameApp {
             } else {
                 GamepadManager::new()
             },
+            #[cfg(test)]
+            gamepad_poll_count: 0,
             gamepad_gui_control: load_gamepad_gui_control(paths),
             snapshot,
             focus_id: None,
@@ -25769,7 +25826,7 @@ impl GameApp {
             owner: self.local_owner,
             preferred_set: 0,
             prefers_mouse: true,
-            gamepads_enabled: true,
+            gamepads_enabled: self.gamepads_enabled,
             replay: false,
             disable_mouse: !self.mouse_control_allowed,
         });
@@ -25864,7 +25921,7 @@ impl GameApp {
             owner: predicted_owner,
             preferred_set: preferred_control,
             prefers_mouse,
-            gamepads_enabled: true,
+            gamepads_enabled: self.gamepads_enabled,
             replay: false,
             disable_mouse: !self.mouse_control_allowed,
         });
@@ -41431,7 +41488,14 @@ impl GameApp {
     }
 
     fn process_gamepad_events(&mut self) -> Result<(), EngineError> {
+        if !self.gamepad_input_enabled {
+            return Ok(());
+        }
         self.guard_classic_global_gui_bootstrap()?;
+        #[cfg(test)]
+        {
+            self.gamepad_poll_count += 1;
+        }
         let events = self.gamepads.poll();
         let gamepad_gui_control = self.gamepad_gui_control;
         self.process_sourced_gamepad_event_batch(events, gamepad_gui_control)
@@ -41474,6 +41538,9 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         use lc_frontend::runtime_client_list::RuntimeClientListAction;
 
+        if !self.gamepad_input_enabled {
+            return Ok(());
+        }
         self.guard_classic_global_gui_bootstrap()?;
         let events = events.into_iter().collect::<Vec<_>>();
         if !events.is_empty() {
@@ -59194,10 +59261,13 @@ impl GameApp {
             .rev()
             .find(|change| change.section == "General" && change.key == "NoCrew")
             .map(|change| parse_config_bool(&change.value));
+        let gamepads_enabled = config
+            .get_in(Some("General"), "GamepadEnabled")
+            .map(parse_config_bool);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        config.save(&path)?;
+        save_config_preserving_native_gamepads_enabled(&config, &path, gamepads_enabled)?;
         if let Some(enabled) = fair_crew {
             persist_native_config_values(
                 paths,
@@ -59238,6 +59308,7 @@ impl GameApp {
             .set_mission_access_store(self.mission_access.clone());
         self.bindings = KeyboardBindings::load(paths);
         self.gamepad_bindings = GamepadBindings::load(paths);
+        self.gamepads_enabled = load_gamepads_enabled(paths);
         self.gamepad_gui_control = load_gamepad_gui_control(paths);
         self.engine
             .set_control_key_names(configured_control_key_names(&self.bindings));
@@ -66333,7 +66404,7 @@ impl GameApp {
             owner: predicted_owner,
             preferred_set,
             prefers_mouse,
-            gamepads_enabled: true,
+            gamepads_enabled: self.gamepads_enabled,
             replay: false,
             disable_mouse: !self.mouse_control_allowed,
         };
@@ -77008,7 +77079,7 @@ impl GameApp {
                         owner: predicted_owner,
                         preferred_set: player_file.pref_control,
                         prefers_mouse: player_file.pref_mouse,
-                        gamepads_enabled: true,
+                        gamepads_enabled: self.gamepads_enabled,
                         replay: false,
                         disable_mouse: !self.mouse_control_allowed,
                     });
@@ -78002,7 +78073,7 @@ impl GameApp {
                 owner: number,
                 preferred_set: preferred_control_set,
                 prefers_mouse,
-                gamepads_enabled: true,
+                gamepads_enabled: self.gamepads_enabled,
                 replay: false,
                 disable_mouse: !self.mouse_control_allowed,
             };
@@ -133046,6 +133117,124 @@ ScenInfoArea=70,5,25,90
             state: ElementState::Pressed,
         }])
         .expect("next controller input");
+    }
+
+    #[test]
+    fn l017_gamepad_enabled_uses_native_false_and_defaults_true() {
+        assert!(configured_gamepads_enabled(b""));
+        assert!(configured_gamepads_enabled(
+            b"[General]\nGamepadEnabled=invalid\n"
+        ));
+        assert!(!configured_gamepads_enabled(
+            b"[General]\nGamepadEnabled=false\n"
+        ));
+        assert!(!configured_gamepads_enabled(
+            b"[General]\nGamepadEnabled=0\n"
+        ));
+    }
+
+    #[test]
+    fn l017_false_startup_config_never_polls_gamepad_manager() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated gamepad config");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_native_config_values(
+            &paths,
+            "General",
+            &[(
+                "GamepadEnabled",
+                lc_app::NativeConfigValue::RawAscii("false"),
+            )],
+        )
+        .expect("disable gamepads in native config");
+
+        let mut app = GameApp::new_with_frontend_scenarios(
+            320,
+            200,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+            Some(Vec::new()),
+        )
+        .expect("initialise app with disabled gamepads");
+
+        assert!(!app.gamepads_enabled);
+        assert!(!app.gamepad_input_enabled);
+        assert!(!load_gamepads_enabled(Some(&paths)));
+        persist_config_value(&paths, "Network", "Comment", "resaved")
+            .expect("resave an unrelated config field");
+        assert!(!load_gamepads_enabled(Some(&paths)));
+        assert_eq!(app.gamepad_poll_count, 0);
+        app.process_gamepad_events()
+            .expect("disabled gamepad processing is inert");
+        assert_eq!(app.gamepad_poll_count, 0);
+    }
+
+    #[test]
+    fn l017_disabled_gamepads_neither_dispatch_nor_assign_a_gamepad_set() {
+        let mut app = new_running_sandbox_app();
+        let original_owner = app.local_owner;
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: original_owner,
+            preferred_set: GamepadSlot::new(0).control_set(),
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.gamepad_input_enabled = false;
+        let pressed_coms = |app: &GameApp, owner| {
+            app.engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+        };
+        let pressed_before = pressed_coms(&app, original_owner);
+
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
+            button: ControlButton::Left,
+            state: ElementState::Pressed,
+        }])
+        .expect("disabled gamepad input is inert");
+
+        assert_eq!(pressed_coms(&app, original_owner), pressed_before);
+
+        app.engine
+            .remove_player(original_owner)
+            .expect("remove initial local player");
+        app.local_controls.remove(original_owner);
+        app.selected_player_file = Some(PlayerFile {
+            name: "Gamepad preference".to_string(),
+            pref_control: GamepadSlot::new(0).control_set(),
+            pref_mouse: false,
+            ..PlayerFile::default()
+        });
+        app.gamepads_enabled = false;
+
+        app.join_local_player()
+            .expect("join falls back from the disabled gamepad");
+        let player = app.engine.player(app.local_owner).expect("joined player");
+        assert_eq!(player.control_set(), 0);
+        assert_eq!(player.control_preferences(), (4, false));
+        assert_eq!(app.local_controls.owner_for_set(4), None);
     }
 
     #[test]
