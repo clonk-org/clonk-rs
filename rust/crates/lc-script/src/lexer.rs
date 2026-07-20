@@ -108,6 +108,11 @@ impl<'a> Lexer<'a> {
                     }
                     return Ok(self.lex_identifier('S', idx, line, column));
                 }
+                // C4AulParse.cpp:616-671 keeps `@` as a legacy identifier
+                // initial below STRICT2; its continuation is ordinary ID text.
+                '@' if self.strict_level < 2 => {
+                    return Ok(self.lex_identifier(ch, idx, line, column));
+                }
                 'a'..='z' | 'A'..='Z' | '_' => {
                     return Ok(self.lex_identifier(ch, idx, line, column));
                 }
@@ -1012,6 +1017,28 @@ mod tests {
             tokens[0].kind,
             TokenKind::Keyword(Keyword::Global)
         ));
+    }
+
+    #[test]
+    fn at_prefixed_identifier_is_legacy_only() {
+        let spelling = "@legacy_42";
+        for strict_level in 0..2 {
+            let tokens = lex_all_at_strict_level(spelling, strict_level)
+                .expect("legacy strictness accepts @-prefixed identifiers");
+            assert!(matches!(
+                tokens.as_slice(),
+                [Token {
+                    kind: TokenKind::Identifier(name),
+                    ..
+                }] if name == spelling
+            ));
+        }
+
+        for strict_level in 2..=3 {
+            let error = lex_all_at_strict_level(spelling, strict_level)
+                .expect_err("modern strictness rejects @-prefixed identifiers");
+            assert_eq!(error.message(), "unexpected character '@'");
+        }
     }
 
     #[test]
