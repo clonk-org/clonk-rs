@@ -11966,6 +11966,10 @@ struct GameApp {
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
     network_sync: NetworkSyncGate,
+    /// Offline counterpart of C4Game::HaltCount. Native assigns this as a
+    /// boolean from Pause/Unpause and tests it after Control.Prepare, leaving
+    /// the outer event and graphics loops alive while simulation is stopped.
+    offline_halt_count: bool,
     network_control_running: bool,
     /// App-owned counterpart of C4Network2's runtime fStatusReached state.
     /// The session owns acknowledgement consensus; the app owns driving
@@ -13341,14 +13345,6 @@ enum RuntimeGlobalKeyOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimePauseBoundary {
-    OfflineHaltCountUnavailable,
-    NetworkHostLeagueUnknown,
-    NetworkClientLeagueUnknown,
-    NetworkRoleUnknown,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeFlashProducerBoundary {
     ObserverPrompt,
     ObserverClear,
@@ -13474,7 +13470,6 @@ enum ClassicParityBoundary {
         action: &'static str,
     },
     RuntimeFlashProducer(RuntimeFlashProducerBoundary),
-    RuntimePause(RuntimePauseBoundary),
     Scoreboard {
         trigger: ClassicScoreboardTrigger,
         rows: usize,
@@ -13628,22 +13623,6 @@ impl fmt::Display for ClassicParityBoundary {
             Self::RuntimeFlashProducer(producer) => write!(
                 f,
                 "classic timed flash producer {producer:?} is unavailable because its authoritative runtime state is not modeled; refusing the producer action and partial flash mutation"
-            ),
-            Self::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable) => write!(
-                f,
-                "classic offline Pause toggle is unavailable because Game.HaltCount ownership is not modeled"
-            ),
-            Self::RuntimePause(RuntimePauseBoundary::NetworkHostLeagueUnknown) => write!(
-                f,
-                "classic network-host Pause route is unavailable because runtime league state is unknown; refusing to guess between vote and host status mutation"
-            ),
-            Self::RuntimePause(RuntimePauseBoundary::NetworkClientLeagueUnknown) => write!(
-                f,
-                "classic network-client Pause route is unavailable because runtime league state is unknown; refusing to guess between vote and client no-op"
-            ),
-            Self::RuntimePause(RuntimePauseBoundary::NetworkRoleUnknown) => write!(
-                f,
-                "classic network Pause route is unavailable because the runtime network role is ambiguous"
             ),
             Self::Scoreboard {
                 trigger,
@@ -22657,6 +22636,7 @@ impl GameApp {
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
             network_sync: NetworkSyncGate::default(),
+            offline_halt_count: false,
             network_control_running,
             runtime_network_status_barrier: None,
             host_reference_paused: false,
@@ -22907,6 +22887,7 @@ impl GameApp {
             // that C++ draws after game messages is visible.
             && self.ingame_selection_frame().is_none()
             && !self.runtime_help_visible
+            && !self.runtime_halt_active()
             && self
                 .runtime_flash_message
                 .as_ref()
@@ -28096,6 +28077,120 @@ impl GameApp {
         }
     }
 
+    fn runtime_network_is_paused(&self) -> bool {
+        debug_assert!(self.network.is_some());
+        // C4Network2::isRunning requires both GS_Go and a fully acknowledged
+        // status. Either an active PAUSE/GO barrier or stopped control is
+        // therefore paused for TogglePause's immediate routing decision.
+        self.runtime_network_status_barrier.is_some() || !self.network_control_running
+    }
+
+    fn runtime_halt_active(&self) -> bool {
+        if self.network.is_some() {
+            // The synchronized status barrier owns network HaltCount. Control
+            // stops at the same reached/committed boundary that native tests
+            // before Control.Execute and the simulation ticks.
+            !self.network_control_running
+        } else {
+            self.offline_halt_count
+        }
+    }
+
+    fn request_host_runtime_pause(&mut self, paused: bool) {
+        let target_tick = if paused {
+            // C4Network2::Pause targets Control.getNextControlTick().
+            self.next_network_control_tick()
+        } else {
+            // C4Network2::Start targets the current ControlTick, which Rust's
+            // already-advanced cadence clock exposes through this projection.
+            self.displayed_network_control_tick()
+        };
+        let status = lc_network::NetworkStatus {
+            state: if paused {
+                lc_network::NETWORK_STATE_PAUSE
+            } else {
+                lc_network::NETWORK_STATE_GO
+            },
+            control_mode: self.league_vote_control_mode(),
+            target_tick,
+        };
+        match self.change_runtime_network_status(status) {
+            Ok(()) => {
+                // ChangeGameStatus changes the advertised Status before the
+                // synchronized halt is reached, just as C++ IsPaused does.
+                self.host_reference_paused = paused;
+                self.publish_running_host_reference();
+            }
+            Err(error) => tracing::error!(%error, paused, "failed to toggle host pause status"),
+        }
+    }
+
+    fn set_runtime_pause(&mut self, paused: bool) {
+        let role = self.runtime_network_role();
+        let currently_paused = match role {
+            RuntimeNetworkRole::Offline => self.offline_halt_count,
+            RuntimeNetworkRole::Host | RuntimeNetworkRole::Client => {
+                self.runtime_network_is_paused()
+            }
+            RuntimeNetworkRole::Ambiguous => return,
+        };
+        if paused == currently_paused {
+            return;
+        }
+        match role {
+            RuntimeNetworkRole::Offline => {
+                // C++ HaltCount is an integer for nested engine holds, but
+                // Game::Pause and Game::Unpause assign true/false.
+                self.offline_halt_count = paused;
+            }
+            RuntimeNetworkRole::Host | RuntimeNetworkRole::Client
+                if self.network_is_league && !self.game_over_handled =>
+            {
+                let _ = self.submit_own_league_vote(
+                    LeagueVoteSubject {
+                        vote_type: lc_engine::VOTE_TYPE_PAUSE,
+                        data: i32::from(paused),
+                    },
+                    true,
+                );
+            }
+            RuntimeNetworkRole::Host => self.request_host_runtime_pause(paused),
+            RuntimeNetworkRole::Client => {
+                // Native non-host Pause/Unpause is a consumed no-op.
+            }
+            RuntimeNetworkRole::Ambiguous => unreachable!("handled above"),
+        }
+    }
+
+    fn toggle_runtime_pause(&mut self) {
+        let paused = match self.runtime_network_role() {
+            RuntimeNetworkRole::Offline => self.offline_halt_count,
+            RuntimeNetworkRole::Host | RuntimeNetworkRole::Client => {
+                self.runtime_network_is_paused()
+            }
+            RuntimeNetworkRole::Ambiguous => return,
+        };
+        self.set_runtime_pause(!paused);
+    }
+
+    fn apply_engine_pause_game_requests(&mut self) {
+        let requests = self.engine.take_pause_game_requests();
+        if !matches!(self.mode, AppMode::Running) || self.game_over_dialog.is_some() {
+            // The evaluation dialog owns native's temporary game pause.
+            // PauseGame(true) is guarded by TogglePause, while PauseGame()
+            // sees the existing hold and is a no-op. Rust freezes evaluation
+            // at the app boundary, so consume both without creating a hold
+            // that would survive Continue.
+            return;
+        }
+        for request in requests {
+            match request {
+                lc_engine::PauseGameRequest::Halt => self.set_runtime_pause(true),
+                lc_engine::PauseGameRequest::Toggle => self.toggle_runtime_pause(),
+            }
+        }
+    }
+
     fn runtime_help_columns(&self) -> Result<&RuntimeHelpColumns> {
         self.runtime_help_text_cache
             .get_or_init(|| {
@@ -29482,7 +29577,7 @@ impl GameApp {
             self.toggle_runtime_music_playback()?;
             return Ok(RuntimeGlobalKeyOutcome::Handled);
         }
-        let boundary = match key {
+        match key {
             VirtualKeyCode::F4 => {
                 if state == ElementState::Released {
                     return Ok(RuntimeGlobalKeyOutcome::Handled);
@@ -29496,21 +29591,11 @@ impl GameApp {
                 if state == ElementState::Released || self.game_over_dialog.is_some() {
                     return Ok(RuntimeGlobalKeyOutcome::Handled);
                 }
-                let boundary = match self.runtime_network_role() {
-                    RuntimeNetworkRole::Offline => {
-                        RuntimePauseBoundary::OfflineHaltCountUnavailable
-                    }
-                    RuntimeNetworkRole::Host => RuntimePauseBoundary::NetworkHostLeagueUnknown,
-                    RuntimeNetworkRole::Client => RuntimePauseBoundary::NetworkClientLeagueUnknown,
-                    RuntimeNetworkRole::Ambiguous => RuntimePauseBoundary::NetworkRoleUnknown,
-                };
-                ClassicParityBoundary::RuntimePause(boundary)
+                self.toggle_runtime_pause();
+                Ok(RuntimeGlobalKeyOutcome::Handled)
             }
-            _ => return Ok(RuntimeGlobalKeyOutcome::Unhandled),
-        };
-        Err(classic_parity_engine_error(report_classic_parity_boundary(
-            boundary,
-        )))
+            _ => Ok(RuntimeGlobalKeyOutcome::Unhandled),
+        }
     }
 
     fn handle_runtime_irc_toggle_key(
@@ -29554,7 +29639,16 @@ impl GameApp {
         if self.handle_options_control_capture_key(key, state)? {
             return Ok(());
         }
-        self.guard_runtime_key_dispatch(key)?;
+        if let Err(error) = self.guard_runtime_key_dispatch(key) {
+            if key == VirtualKeyCode::Pause {
+                // An unknown global KeyConfig may have rebound the physical
+                // key. Refuse that default action without letting Pause cross
+                // the event loop's fatal EngineError boundary.
+                tracing::error!(%error, "suppressing Pause under unavailable runtime KeyConfig");
+                return Ok(());
+            }
+            return Err(error);
+        }
         if self.running_chat_active() && self.context_menu.is_none() {
             let modifiers = self.keyboard_modifiers
                 & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
@@ -34504,6 +34598,15 @@ impl GameApp {
         // that newer transition must own the final running/reference state.
         if runtime_commit.is_some() {
             self.runtime_network_status_barrier = None;
+        }
+        if status.state == lc_network::NETWORK_STATE_GO
+            && matches!(self.network_mode, Some(NetworkMode::Host(_)))
+        {
+            // Host CheckStatusAck assigns fStatusAck before its local
+            // ExecSyncControl, so Network::isRunning already reports true.
+            // Clients execute PID_ExecSyncCtrl before receiving the status
+            // acknowledgement and remain paused until the tail below.
+            self.network_control_running = true;
         }
         let sync_tick = runtime_commit
             .and_then(|pending| pending.actual_control_tick)
@@ -59807,6 +59910,7 @@ impl GameApp {
         self.network_ticks.clear();
         self.network_sync.clear();
         self.sync_checks.clear();
+        self.offline_halt_count = false;
         self.network_control_running = true;
         self.runtime_network_status_barrier = None;
         self.league_votes.clear();
@@ -60805,6 +60909,11 @@ impl GameApp {
                 break;
             }
         }
+        // A synchronized script executes inside native Control.Execute and
+        // changes pause state before ControlTick advances, while the current
+        // game frame still runs to completion. Apply those app-owned requests
+        // now; the caller advances its cadence clock after this method.
+        self.apply_engine_pause_game_requests();
         let goal_menu_result = self.apply_game_goal_menu_requests();
         if result.is_ok() {
             result = goal_menu_result;
@@ -61036,7 +61145,7 @@ impl GameApp {
 
     fn pause_host_for_league_vote(&mut self) {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
-            || !self.network_control_running
+            || self.runtime_network_is_paused()
             || self.league_votes.paused_for_vote
         {
             return;
@@ -61493,6 +61602,12 @@ impl GameApp {
         match self.mode {
             AppMode::Running => {
                 self.reconcile_initial_scoreboard();
+                // Console/direct script execution remains available through
+                // the outer app loop while HaltCount stops Game::Execute. A
+                // queued PauseGame(true) must therefore be consumed before
+                // the game-over and halt returns below; Toggle's own dialog
+                // guard discards it while evaluation is visible.
+                self.apply_engine_pause_game_requests();
                 if self.game_over_dialog.is_some() {
                     return Ok(());
                 }
@@ -61500,7 +61615,11 @@ impl GameApp {
                     return Ok(());
                 }
                 self.reconcile_message_board_input_dialog()?;
-                if self.network.is_some() && !self.network_control_running {
+                // C4Game::Execute returns at its HaltCount gate while the
+                // application continues polling input and drawing the frozen
+                // frame. Network control reaches the same gate through its
+                // synchronized status barrier.
+                if self.runtime_halt_active() {
                     return Ok(());
                 }
                 // Prepare local network input every frame. C++ looks ahead by
@@ -61671,10 +61790,13 @@ impl GameApp {
                 self.apply_direct_film_view_projection();
                 let _ = self.apply_pending_viewport_presentation_requests();
                 let local_viewport_owners_before_tick = self.execute_local_team_selections()?;
-                self.snapshot = self
-                    .engine
-                    .tick()
-                    .map_err(map_runtime_flash_producer_engine_error)?;
+                let tick_result = self.engine.tick();
+                // PauseGame is a process-local console request emitted from
+                // scripts during this tick. Native applies it immediately,
+                // then observes HaltCount at the start of the next Execute.
+                // Drain it even when the originating script reports an error.
+                self.apply_engine_pause_game_requests();
+                self.snapshot = tick_result.map_err(map_runtime_flash_producer_engine_error)?;
                 self.reconcile_message_board_input_dialog()?;
                 let retired_viewport_owner = local_viewport_owners_before_tick
                     .iter()
@@ -64655,6 +64777,10 @@ impl GameApp {
             }
             return false;
         }
+        // C4Network2::Vote broadcasts the Pause status before it queues its
+        // own direct vote, so peers cannot observe the ballot while still
+        // running past the host's chosen control boundary.
+        self.pause_host_for_league_vote();
         let Some(network) = self.network.as_ref() else {
             return false;
         };
@@ -67538,6 +67664,7 @@ impl GameApp {
             }
         }
         let runtime_help_columns = self.preflight_visible_runtime_help()?;
+        let runtime_hold_message_visible = self.runtime_halt_active();
         let runtime_flash_message = self.preflight_visible_runtime_flash()?;
         // Scoreboard reconciliation mutates presentation/refcount state. All
         // already-visible running layers must prove their exact resources or
@@ -68472,6 +68599,30 @@ impl GameApp {
                 viewport_area,
                 &columns.left,
                 &columns.right,
+                Some(&frame_gamma),
+            );
+            if ordered_native {
+                self.next_pending_native_overlay();
+            }
+        }
+
+        if runtime_hold_message_visible {
+            let fonts = self
+                .assets
+                .clonk_fonts
+                .clone()
+                .expect("global GUI preflight guarantees FontRegular");
+            let screen_height =
+                i32::try_from(self.graphics.surface().height()).unwrap_or(i32::MAX);
+            let y = screen_height / 2 - fonts.text.line_height.saturating_mul(2);
+            // DrawHoldMessages uses the same default message color, centered
+            // FontRegular TextOut path as a flash message, but with a fixed
+            // literal and no lifetime counter.
+            lc_frontend::flash_message::render_flash_message(
+                self.graphics.surface_mut(),
+                &fonts.text,
+                "Pause",
+                y,
                 Some(&frame_gamma),
             );
             if ordered_native {
@@ -70002,6 +70153,7 @@ impl GameApp {
         self.sync_checks.clear();
         self.network_ticks.clear();
         self.network_sync.clear();
+        self.offline_halt_count = false;
         self.network_control_running = self.network.is_none();
         self.runtime_network_status_barrier = None;
         self.league_votes.clear();
@@ -72628,6 +72780,7 @@ impl GameApp {
         self.sync_checks.clear();
         self.network_ticks.clear();
         self.network_sync.clear();
+        self.offline_halt_count = false;
         self.network_control_running = self.network.is_none();
         self.runtime_network_status_barrier = None;
         if self.network.is_none() {
@@ -168188,53 +168341,396 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn runtime_pause_boundary_carries_role_specific_missing_state() {
-        for (role, pause) in [
-            (
-                RuntimeNetworkRole::Offline,
-                RuntimePauseBoundary::OfflineHaltCountUnavailable,
-            ),
-            (
-                RuntimeNetworkRole::Host,
-                RuntimePauseBoundary::NetworkHostLeagueUnknown,
-            ),
-            (
-                RuntimeNetworkRole::Client,
-                RuntimePauseBoundary::NetworkClientLeagueUnknown,
-            ),
-            (
-                RuntimeNetworkRole::Ambiguous,
-                RuntimePauseBoundary::NetworkRoleUnknown,
-            ),
-        ] {
-            let mut app = new_running_sandbox_app();
-            configure_runtime_network_role(&mut app, role);
-            expect_runtime_global_boundary_unchanged(
-                &mut app,
-                VirtualKeyCode::Pause,
-                ClassicParityBoundary::RuntimePause(pause),
-            );
-        }
-
-        let mut logo_app = new_running_sandbox_app();
-        logo_app
+    fn runtime_pause_halts_offline_ticks_and_draws_the_exact_hold_message() {
+        let mut app = new_classic_running_sandbox_app();
+        app
             .handle_modifiers_changed(ModifiersState::LOGO)
             .expect("set keyboard modifiers");
-        expect_runtime_global_boundary_unchanged(
-            &mut logo_app,
-            VirtualKeyCode::Pause,
-            ClassicParityBoundary::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable),
+        let frame_before_pause = app.engine.frame();
+        app.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+            .expect("Logo+Pause halts the offline round without an error");
+        assert!(app.offline_halt_count);
+        for _ in 0..3 {
+            app.update().expect("the halted app loop remains live");
+        }
+        assert_eq!(app.engine.frame(), frame_before_pause);
+        let mut schedule = frame_schedule_for_mode(
+            app.mode,
+            app.engine.game_tick_delay_ms(),
+            app.engine.game_tick_delay_revision(),
         );
-        expect_runtime_global_boundary_unchanged(
-            &mut logo_app,
-            VirtualKeyCode::Pause,
-            ClassicParityBoundary::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable),
+        let mut accumulator = schedule.simulation_interval;
+        let halted_pass = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+            .expect("the scheduler consumes a halted app pass");
+        assert!(halted_pass.did_update);
+        assert_eq!(halted_pass.executed_frames, 0);
+        assert!(!halted_pass.skip_redraw);
+        assert_eq!(app.engine.frame(), frame_before_pause);
+
+        let mut frame = vec![0_u8; app.graphics.surface().pixels().len()];
+        app.render_ordered_native_base(&mut frame)
+            .expect("the frozen world continues rendering");
+        let hold_messages = app
+            .pending_native_presentation
+            .as_ref()
+            .expect("ordered render captures its text layers")
+            .batches
+            .iter()
+            .flat_map(|batch| batch.text.iter())
+            .filter(|command| command.text == "Pause")
+            .collect::<Vec<_>>();
+        let [hold] = hold_messages.as_slice() else {
+            panic!("expected one fullscreen Pause hold message, got {hold_messages:?}");
+        };
+        let font = &app.assets.clonk_fonts.as_ref().expect("classic fonts").text;
+        assert_eq!(hold.role, lc_graphics::clonk_font::ClonkFontRole::GuiText);
+        assert_eq!(
+            (hold.x, hold.y),
+            (160, 100 - font.line_height * 2)
         );
-        let before_release = runtime_global_ui_snapshot(&logo_app);
-        logo_app
+        assert_eq!(hold.color, [255, 255, 255, 255]);
+        assert_eq!(
+            hold.align,
+            lc_graphics::clonk_font::TextAlign::Center
+        );
+
+        app
             .handle_key(VirtualKeyCode::Pause, ElementState::Released)
             .expect("runtime Pause release is consumed");
-        assert_eq!(runtime_global_ui_snapshot(&logo_app), before_release);
+        assert!(app.offline_halt_count, "release does not toggle");
+        app.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+            .expect("a repeated Pause down resumes the offline round");
+        assert!(!app.offline_halt_count);
+        app.update().expect("resumed simulation advances");
+        assert_eq!(app.engine.frame(), frame_before_pause + 1);
+
+        app.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+            .expect("pause before teardown");
+        assert!(!app.take_exit_request());
+        app.return_to_menu();
+        assert!(!app.offline_halt_count, "Game::Default clears the halt");
+    }
+
+    #[test]
+    fn runtime_pause_routes_host_league_client_and_unknown_roles_nonfatally() {
+        let mut host = new_running_sandbox_app();
+        let (host_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 2);
+        queue_empty_ready_tick(&host, &host_events);
+        host.update().expect("execute host control tick zero");
+        assert_eq!((host.engine.frame(), host.next_network_control_tick()), (1, 1));
+        let pause_target = host.next_network_control_tick();
+        host.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+            .expect("nonleague host Pause requests synchronized halt");
+        let pause_changes = host_commands
+            .take_runtime_status_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                network::TestRuntimeStatusCommand::Change(status) => Some(status),
+                network::TestRuntimeStatusCommand::Reached { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pause_changes.len(), 1);
+        assert_eq!(
+            (pause_changes[0].state, pause_changes[0].target_tick),
+            (lc_network::NETWORK_STATE_PAUSE, pause_target)
+        );
+        assert!(host.host_reference_paused);
+
+        let go_target = host.displayed_network_control_tick();
+        host.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+            .expect("a second host Pause press requests synchronized Go");
+        let go_changes = host_commands
+            .take_runtime_status_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                network::TestRuntimeStatusCommand::Change(status) => Some(status),
+                network::TestRuntimeStatusCommand::Reached { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(go_changes.len(), 1);
+        assert_eq!(
+            (go_changes[0].state, go_changes[0].target_tick),
+            (lc_network::NETWORK_STATE_GO, go_target)
+        );
+        assert_eq!(go_target, 0, "Start uses native's current ControlTick");
+        assert_eq!(
+            host.runtime_network_status_barrier
+                .expect("Go replaces the pending Pause barrier")
+                .status,
+            go_changes[0]
+        );
+        assert!(!host.host_reference_paused);
+        assert!(!host.take_exit_request());
+
+        for (local_client_id, paused, expected_data) in
+            [(0, false, 1), (0, true, 0), (7, false, 1), (7, true, 0)]
+        {
+            let mut league = new_running_sandbox_app();
+            let (_events, mut commands) =
+                install_running_network_stub(&mut league, local_client_id, 0, 1);
+            league.network_is_league = true;
+            league.network_control_running = !paused;
+            let pause_target = league.next_network_control_tick();
+            league
+                .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+                .expect("league Pause submits a nonfatal vote");
+            if local_client_id == 0 && !paused {
+                let barrier = league
+                    .runtime_network_status_barrier
+                    .expect("a running league host pauses before its vote echo");
+                assert_eq!(
+                    (barrier.status.state, barrier.status.target_tick),
+                    (lc_network::NETWORK_STATE_PAUSE, pause_target)
+                );
+                assert!(league.league_votes.paused_for_vote);
+                assert!(league.host_reference_paused);
+            }
+            assert_eq!(
+                commands.take_submitted_votes(),
+                vec![lc_engine::VoteControlData {
+                    vote_type: lc_engine::VOTE_TYPE_PAUSE,
+                    approve: true,
+                    data: expected_data,
+                    by_client: i32::try_from(local_client_id).unwrap(),
+                }]
+            );
+            assert!(!league.take_exit_request());
+        }
+
+        let mut evaluated_league_host = new_running_sandbox_app();
+        let (_events, mut evaluated_commands) =
+            install_running_network_stub(&mut evaluated_league_host, 0, 0, 1);
+        evaluated_league_host.network_is_league = true;
+        evaluated_league_host.game_over_handled = true;
+        evaluated_league_host
+            .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+            .expect("evaluated league host uses direct network Pause");
+        assert!(evaluated_commands
+            .take_runtime_status_commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                network::TestRuntimeStatusCommand::Change(status)
+                    if status.state == lc_network::NETWORK_STATE_PAUSE
+            )));
+        assert!(!evaluated_league_host.take_exit_request());
+
+        let mut client = new_running_sandbox_app();
+        let (_events, mut client_commands) = install_running_network_stub(&mut client, 7, 0, 1);
+        client
+            .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+            .expect("nonleague client Pause is a consumed no-op");
+        assert!(client_commands.take_runtime_status_commands().is_empty());
+        assert!(client_commands.take_submitted_votes().is_empty());
+        assert!(!client.take_exit_request());
+
+        let mut ambiguous = new_running_sandbox_app();
+        let (ambiguous_manager, _events, mut ambiguous_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(3);
+        ambiguous.network = Some(ambiguous_manager);
+        ambiguous.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        assert_eq!(ambiguous.runtime_network_role(), RuntimeNetworkRole::Ambiguous);
+        ambiguous
+            .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+            .expect("an inconsistent runtime role is safely consumed");
+        assert!(ambiguous_commands.take_runtime_status_commands().is_empty());
+        assert!(ambiguous_commands.take_submitted_votes().is_empty());
+        assert!(!ambiguous.take_exit_request());
+
+        let mut disconnected_host = new_running_sandbox_app();
+        let (manager, _events, commands) = NetworkManager::test_stub_with_commands();
+        disconnected_host.network = Some(manager);
+        disconnected_host.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        drop(commands);
+        disconnected_host
+            .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+            .expect("a failed host status send never exits through Pause");
+        assert!(!disconnected_host.take_exit_request());
+
+        let mut unavailable_key_config = new_running_sandbox_app();
+        unavailable_key_config.runtime_key_config_cache = OnceLock::new();
+        unavailable_key_config
+            .runtime_key_config_cache
+            .set(Err("unsupported Pause override".to_string()))
+            .expect("install unavailable KeyConfig result");
+        unavailable_key_config
+            .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+            .expect("an unavailable Pause mapping is suppressed, never fatal");
+        assert!(!unavailable_key_config.offline_halt_count);
+        assert!(!unavailable_key_config.take_exit_request());
+    }
+
+    #[test]
+    fn runtime_pause_applies_direct_script_halt_and_toggle_requests() {
+        let mut app = new_running_sandbox_app();
+        app.engine.clear_scenario_script();
+        app.engine
+            .install_scenario_script_with_convention(
+                "PauseGameProbe.c",
+                "#strict 3\nfunc Halt() { PauseGame(); }\nfunc Toggle() { PauseGame(true); }",
+                true,
+            )
+            .expect("install PauseGame probe");
+
+        let initial_frame = app.engine.frame();
+        app.engine
+            .call_scenario_script_function("Halt", Vec::new())
+            .expect("queue script halt");
+        app.update().expect("apply direct script halt before simulation");
+        assert_eq!(app.engine.frame(), initial_frame);
+        assert!(app.offline_halt_count);
+
+        app.engine
+            .call_scenario_script_function("Toggle", Vec::new())
+            .expect("queue script resume while halted");
+        app.update()
+            .expect("a pre-existing toggle drains before the halt gate");
+        assert_eq!(app.engine.frame(), initial_frame + 1);
+        assert!(!app.offline_halt_count);
+
+        app.engine
+            .call_scenario_script_function("Toggle", Vec::new())
+            .expect("queue a running script toggle");
+        app.update().expect("direct toggle halts before another tick");
+        assert_eq!(app.engine.frame(), initial_frame + 1);
+        assert!(app.offline_halt_count);
+
+        let mut game_over = new_game_over_keyboard_app();
+        game_over.engine.clear_scenario_script();
+        game_over
+            .engine
+            .install_scenario_script_with_convention(
+                "PauseGameToggle.c",
+                "#strict 3\nfunc Halt() { PauseGame(); }\nfunc Toggle() { PauseGame(true); }",
+                true,
+            )
+            .expect("install game-over pause probes");
+        game_over
+            .engine
+            .call_scenario_script_function("Halt", Vec::new())
+            .expect("queue halt during evaluation");
+        game_over
+            .engine
+            .call_scenario_script_function("Toggle", Vec::new())
+            .expect("queue toggle during evaluation");
+        game_over
+            .update()
+            .expect("evaluation consumes queued pause requests before returning");
+        assert!(!game_over.offline_halt_count);
+        game_over
+            .handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set the Continue mnemonic modifier");
+        game_over
+            .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect("Continue closes evaluation");
+        assert!(game_over.game_over_dialog.is_none());
+        game_over
+            .update()
+            .expect("discarded evaluation requests do not replay after Continue");
+        assert!(!game_over.offline_halt_count);
+    }
+
+    #[test]
+    fn runtime_pause_control_script_uses_the_executing_network_tick() {
+        let mut app = new_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 7, 2);
+        app.apply_ready_controls(
+            7,
+            vec![NetworkControl::Script(lc_engine::ScriptControlData {
+                target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+                strictness: lc_engine::ScriptStrictness::Strict3,
+                script: lc_engine::LegacyCString::from_bytes(b"PauseGame()".to_vec())
+                    .expect("script is NUL-free"),
+                by_client: 0,
+            })],
+        )
+        .expect("execute synchronized PauseGame control");
+
+        let changes = commands
+            .take_runtime_status_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                network::TestRuntimeStatusCommand::Change(status) => Some(status),
+                network::TestRuntimeStatusCommand::Reached { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            (changes[0].state, changes[0].target_tick),
+            (lc_network::NETWORK_STATE_PAUSE, 7),
+            "PauseGame runs before Rust advances the executing control tick"
+        );
+        assert!(!app.take_exit_request());
+    }
+
+    #[test]
+    fn runtime_pause_sync_control_inside_go_commit_observes_running_status() {
+        for (local_client_id, script, expected_vote_data) in [
+            (0, b"PauseGame()".as_slice(), Some(1)),
+            (0, b"PauseGame(true)".as_slice(), Some(1)),
+            (7, b"PauseGame()".as_slice(), None),
+            (7, b"PauseGame(true)".as_slice(), Some(0)),
+        ] {
+            let mut app = new_running_sandbox_app();
+            let (_events, mut commands) =
+                install_running_network_stub(&mut app, local_client_id, 0, 1);
+            app.network_is_league = true;
+            app.network_control_running = false;
+            let go = lc_network::NetworkStatus {
+                state: lc_network::NETWORK_STATE_GO,
+                control_mode: 1,
+                target_tick: 0,
+            };
+            app.runtime_network_status_barrier = Some(RuntimeNetworkStatusBarrier {
+                status: go,
+                local_reached: true,
+                actual_control_tick: Some(0),
+            });
+            app.network_sync.queue(
+                0,
+                0,
+                vec![NetworkControl::Script(lc_engine::ScriptControlData {
+                    target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+                    strictness: lc_engine::ScriptStrictness::Strict3,
+                    script: lc_engine::LegacyCString::from_bytes(script.to_vec())
+                        .expect("script is NUL-free"),
+                    by_client: 0,
+                })],
+            );
+            app.handle_status_committed(go)
+                .expect("execute the sync control after Go becomes acknowledged");
+
+            if local_client_id == 0 {
+                let pause = app
+                    .runtime_network_status_barrier
+                    .expect("PauseGame starts a new host Pause barrier")
+                    .status;
+                assert_eq!(pause.state, lc_network::NETWORK_STATE_PAUSE);
+                assert!(app.league_votes.paused_for_vote);
+            } else {
+                assert!(
+                    app.runtime_network_status_barrier.is_none(),
+                    "client {local_client_id} left an unexpected barrier for {script:?}: {:?}",
+                    app.runtime_network_status_barrier
+                );
+                assert!(!app.league_votes.paused_for_vote);
+            }
+            let expected_votes = expected_vote_data
+                .into_iter()
+                .map(|data| lc_engine::VoteControlData {
+                    vote_type: lc_engine::VOTE_TYPE_PAUSE,
+                    approve: true,
+                    data,
+                    by_client: i32::try_from(local_client_id).unwrap(),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                commands.take_submitted_votes(),
+                expected_votes,
+                "client {local_client_id} observes the native status ordering for {script:?}"
+            );
+            assert!(!app.take_exit_request());
+        }
     }
 
     #[test]
@@ -168253,10 +168749,9 @@ func ControlDig() { dig_count = 1; return(1); }
                 .handle_key(VirtualKeyCode::Pause, state)
                 .expect("C4 disables Pause throughout round evaluation");
             assert_eq!(runtime_global_ui_snapshot(&game_over), before_game_over);
+            assert!(!game_over.offline_halt_count);
         }
 
-        let expected =
-            ClassicParityBoundary::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable);
         let mut message = new_running_sandbox_app();
         message
             .push_message_dialog(
@@ -168268,15 +168763,19 @@ func ControlDig() { dig_count = 1; return(1); }
                 MessageDialogContinuation::None,
             )
             .expect("push running modal");
-        expect_runtime_global_boundary_unchanged(
-            &mut message,
-            VirtualKeyCode::Pause,
-            expected.clone(),
-        );
+        message
+            .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+            .expect("Pause precedes an ordinary running modal");
+        assert!(message.offline_halt_count);
+        assert_eq!(message.message_dialogs.len(), 1);
 
         let mut ingame = new_running_sandbox_app();
         ingame.open_ingame_menu().expect("open in-game menu");
-        expect_runtime_global_boundary_unchanged(&mut ingame, VirtualKeyCode::Pause, expected);
+        ingame
+            .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
+            .expect("Pause precedes the fullscreen in-game menu");
+        assert!(ingame.offline_halt_count);
+        assert!(ingame.ingame_menu.is_some());
     }
 
     #[test]
