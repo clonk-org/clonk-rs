@@ -49391,6 +49391,177 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         );
     }
 
+    #[test]
+    fn shift_contents_skips_only_cpp_picture_concat_equivalents() {
+        // C4Object::ShiftContents compares every candidate with the original
+        // front through CanConcatPictureWith. Same-ID objects are skipped only
+        // when their live pictures concatenate (C4Object.cpp:5751-5773,
+        // 6173-6213), in both traversal directions.
+        let chest_script = r#"#strict 3
+        local controlled;
+        func MutateAndCycle(back, target) {
+            SetPicture(0, 76, 64, 64, target);
+            return ShiftContents(nil, back, nil, true);
+        }
+        func Cycle(back) { return ShiftContents(nil, back); }
+        func ControlContents(id) { controlled = id; return false; }
+        "#;
+        let item_script = r#"#strict 3
+        local selected;
+        func Selection(container) { selected = container; return true; }
+        "#;
+        let mut engine = Engine::with_seed(17);
+        engine
+            .register_definition(
+                Definition::from_script("CHES", "Chest", chest_script).expect("chest compiles"),
+            )
+            .expect("chest registers");
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", item_script).expect("item compiles"),
+            )
+            .expect("ordinary item registers");
+        let mut color_stack = simple_definition("PASS");
+        color_stack.set_allow_picture_stack(APS_COLOR);
+        engine
+            .register_definition(color_stack)
+            .expect("color-stack item registers");
+
+        let chest = engine
+            .spawn_object(SpawnConfig::new("CHES"))
+            .expect("chest spawns");
+        let visually_distinct = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(chest))
+            .expect("picture target spawns");
+        let equivalent = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(chest))
+            .expect("equivalent item spawns");
+        let front = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(chest))
+            .expect("front item spawns");
+        let chest_index = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_index].state.contents,
+            vec![front, equivalent, visually_distinct]
+        );
+
+        for (shift_back, order, expected) in [
+            (
+                false,
+                vec![front, equivalent, visually_distinct],
+                vec![visually_distinct, front, equivalent],
+            ),
+            (
+                true,
+                vec![front, visually_distinct, equivalent],
+                vec![visually_distinct, equivalent, front],
+            ),
+        ] {
+            let target_index = engine
+                .find_object_index(visually_distinct)
+                .expect("picture target exists");
+            engine.objects[target_index].state.picture_rect = DefinitionRect::default();
+            engine.objects[target_index]
+                .state
+                .local_vars
+                .insert("selected".into(), Value::Nil);
+            let chest_index = engine.find_object_index(chest).expect("chest exists");
+            engine.objects[chest_index].state.contents = order;
+            engine.objects[chest_index]
+                .state
+                .local_vars
+                .insert("controlled".into(), Value::Nil);
+            engine.pending_audio.clear();
+            assert_eq!(
+                engine
+                    .call_object_function(
+                        chest_index,
+                        "MutateAndCycle",
+                        vec![
+                            Value::Bool(shift_back),
+                            Value::Object(visually_distinct.as_u64()),
+                        ],
+                    )
+                    .expect("same-call picture-aware shift runs"),
+                Value::Bool(true)
+            );
+            let chest_index = engine.find_object_index(chest).expect("chest exists");
+            assert_eq!(
+                engine.objects[chest_index].state.contents,
+                expected,
+                "direction {shift_back}: exact duplicate is skipped, but the same-ID picture changed earlier in this call is selected"
+            );
+            assert_eq!(
+                engine.objects[chest_index].state.local_vars.get("controlled"),
+                Some(&Value::C4Id("ITEM".into())),
+                "ControlContents sees the selected same-definition target"
+            );
+            let target_index = engine
+                .find_object_index(visually_distinct)
+                .expect("picture target exists");
+            assert_eq!(
+                engine.objects[target_index].state.local_vars.get("selected"),
+                Some(&Value::Object(chest.as_u64())),
+                "the selected picture target receives Selection(container)"
+            );
+            assert!(
+                !engine.pending_audio.iter().any(|command| matches!(
+                    command,
+                    AudioCommand::PlaySound { name, .. } if name == "Grab"
+                )),
+                "truthy Selection suppresses the Grab sound"
+            );
+        }
+
+        // APS_Color makes tint differences concat-compatible, so the next
+        // picture-rect difference is the first selectable picture stack.
+        let color_chest = engine
+            .spawn_object(SpawnConfig::new("CHES"))
+            .expect("color-stack chest spawns");
+        let picture_distinct = engine
+            .spawn_object(
+                SpawnConfig::new("PASS")
+                    .with_picture_rect(DefinitionRect::new(0, 76, 64, 64))
+                    .with_container(color_chest),
+            )
+            .expect("picture-distinct item spawns");
+        let tint_ignored = engine
+            .spawn_object(
+                SpawnConfig::new("PASS")
+                    .with_color_modulation(0x0040_4040)
+                    .with_container(color_chest),
+            )
+            .expect("ignored-tint item spawns");
+        let color_front = engine
+            .spawn_object(SpawnConfig::new("PASS").with_container(color_chest))
+            .expect("color-stack front spawns");
+        let color_chest_index = engine
+            .find_object_index(color_chest)
+            .expect("color-stack chest exists");
+        assert_eq!(
+            engine.objects[color_chest_index].state.contents,
+            vec![color_front, tint_ignored, picture_distinct]
+        );
+        assert_eq!(
+            engine
+                .call_object_function(
+                    color_chest_index,
+                    "Cycle",
+                    vec![Value::Bool(false)],
+                )
+                .expect("APS-aware shift runs"),
+            Value::Bool(true)
+        );
+        let color_chest_index = engine
+            .find_object_index(color_chest)
+            .expect("color-stack chest exists");
+        assert_eq!(
+            engine.objects[color_chest_index].state.contents,
+            vec![picture_distinct, color_front, tint_ignored],
+            "APS_Color skips the tint while the picture rectangle still splits the stack"
+        );
+    }
+
     // A container whose contents all picture-concat (same definition here)
     // has nothing different to shift to (C4Object.cpp:5741-5745).
     #[test]

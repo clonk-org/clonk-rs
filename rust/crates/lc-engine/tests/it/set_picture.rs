@@ -1,10 +1,11 @@
 use lc_engine::{
-    Definition, DefinitionPicture, DefinitionSpriteImage, Engine, GraphicsOverlayMode,
-    ObjectBaseGraphics, ObjectGraphicsOverlay, ObjectId, ObjectUpdate, PlayerConfig, RgbColor,
-    SpawnConfig, APS_COLOR, APS_GRAPHICS, APS_NAME, APS_OVERLAY,
+    Definition, DefinitionPicture, DefinitionSpriteImage, DrawTransform, Engine,
+    GraphicsOverlayMode, ObjectBaseGraphics, ObjectGraphicsOverlay, ObjectId, ObjectUpdate,
+    PlayerConfig, RgbColor, SpawnConfig, APS_COLOR, APS_GRAPHICS, APS_NAME, APS_OVERLAY,
 };
 use lc_script::Value;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 fn picture_engine() -> (Engine, ObjectId, ObjectId) {
@@ -247,6 +248,15 @@ fn stack_engine(allow_picture_stack: i32) -> (Engine, ObjectId, ObjectId) {
         Definition::from_script("STAK", "Stack probe", "#strict").expect("probe compiles");
     definition.set_color_by_owner(true);
     definition.set_allow_picture_stack(allow_picture_stack);
+    definition.set_sprite_variants(HashMap::from([(
+        "alternate".to_string(),
+        DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from(vec![0_u8; 4]),
+            color_mask: None,
+        },
+    )]));
     engine
         .register_definition(definition)
         .expect("probe registers");
@@ -431,6 +441,80 @@ fn picture_overlay_phase_does_not_split_stacks() {
         )
         .expect("second overlay updates");
     assert!(snapshots_stack(&engine, first, second));
+}
+
+#[test]
+fn serialized_picture_defaults_resolve_to_cpp_stack_equivalence() {
+    // C++ compares resolved C4DefGraphics pointers, its graphics lookup is
+    // case-insensitive, every overlay owns an identity transform, and an
+    // empty CustomName falls back through GetName. Rust snapshots omit those
+    // defaults, so normalize the representation before comparing
+    // (src/C4DefGraphics.cpp:221-229,868-878; src/C4Object.cpp:6173-6213).
+    let (mut engine, first, second) = stack_engine(0);
+    engine
+        .apply_object_update(
+            first,
+            ObjectUpdate {
+                custom_name: Some(Some(String::new())),
+                base_graphics: Some(Some(ObjectBaseGraphics {
+                    definition: "STAK".to_string(),
+                    graphics_name: Some("Alternate".to_string()),
+                    blit_mode: 0,
+                })),
+                graphics_overlays: Some(vec![ObjectGraphicsOverlay::new(
+                    7,
+                    GraphicsOverlayMode::Picture,
+                )
+                .with_definition(Some("STAK".to_string()))
+                .with_graphics_name(Some("Alternate".to_string()))]),
+                ..ObjectUpdate::default()
+            },
+        )
+        .expect("first serialized representation installs");
+    engine
+        .apply_object_update(
+            second,
+            ObjectUpdate {
+                base_graphics: Some(Some(ObjectBaseGraphics {
+                    definition: "STAK".to_string(),
+                    graphics_name: Some("alternate".to_string()),
+                    blit_mode: 0,
+                })),
+                graphics_overlays: Some(vec![ObjectGraphicsOverlay::new(
+                    7,
+                    GraphicsOverlayMode::Picture,
+                )
+                .with_definition(Some("STAK".to_string()))
+                .with_graphics_name(Some("alternate".to_string()))
+                .with_action(Some(String::new()))
+                .with_transform(Some(DrawTransform::identity()))]),
+                ..ObjectUpdate::default()
+            },
+        )
+        .expect("second serialized representation installs");
+
+    assert!(
+        snapshots_stack(&engine, first, second),
+        "case-only graphics names, omitted defaults, and an empty custom name resolve identically"
+    );
+
+    let mut changed_overlay = ObjectGraphicsOverlay::new(7, GraphicsOverlayMode::Picture)
+        .with_definition(Some("STAK".to_string()))
+        .with_graphics_name(Some("alternate".to_string()));
+    changed_overlay.transform = Some(DrawTransform::from_components(2.0, 1.0, 0.0, 0.0));
+    engine
+        .apply_object_update(
+            second,
+            ObjectUpdate {
+                graphics_overlays: Some(vec![changed_overlay]),
+                ..ObjectUpdate::default()
+            },
+        )
+        .expect("nonidentity overlay transform installs");
+    assert!(
+        !snapshots_stack(&engine, first, second),
+        "a genuinely different native transform still splits the stack"
+    );
 }
 
 #[test]

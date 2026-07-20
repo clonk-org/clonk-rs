@@ -5658,7 +5658,7 @@ impl Engine {
     // ---- Contents shifting (C4Object.cpp:5751-5797) -----------------------
 
     /// `C4Object::ShiftContents` (C4Object.cpp:5751-5775): walk First->Next
-    /// (or Last->Prev with `shift_back`) for the first ACTIVE item the
+    /// (or Last->Prev with `shift_back`) for the first present item the
     /// current front cannot concat-picture with, using the full definition,
     /// color, graphics, name, and overlay rules; select it via
     /// DirectComContents.
@@ -5669,23 +5669,25 @@ impl Engine {
         do_calls: bool,
     ) -> Result<bool, EngineError> {
         let contents = self.objects[index].state.contents.clone();
-        let Some(front_id) = contents.first().copied() else {
+        let present_contents: Vec<ObjectId> = contents
+            .into_iter()
+            .filter(|candidate_id| {
+                self.find_object_index(*candidate_id).is_some_and(|candidate| {
+                    self.objects[candidate].state.status != crate::ObjectStatus::Deleted
+                })
+            })
+            .collect();
+        let Some(front_id) = present_contents.first().copied() else {
             return Ok(false);
         };
         let Some(front) = self.object_snapshot(front_id) else {
             return Ok(false);
         };
-        let mut candidates: Vec<ObjectId> = contents[1..].to_vec();
+        let mut candidates: Vec<ObjectId> = present_contents[1..].to_vec();
         if shift_back {
             candidates.reverse();
         }
         for candidate_id in candidates {
-            let Some(candidate_index) = self.find_object_index(candidate_id) else {
-                continue;
-            };
-            if !self.objects[candidate_index].state.status.is_active() {
-                continue;
-            }
             let Some(candidate) = self.object_snapshot(candidate_id) else {
                 continue;
             };
@@ -5708,17 +5710,28 @@ impl Engine {
         target_id: ObjectId,
         do_calls: bool,
     ) -> Result<(), EngineError> {
-        // Safety: active and contained in this object (:5780).
+        // Safety: present and contained in this object (:5780). Both
+        // Status=1 (Normal) and Status=2 (Inactive) are truthy in C++.
         let Some(target_index) = self.find_object_index(target_id) else {
             return Ok(());
         };
-        if !self.objects[target_index].state.status.is_active()
+        if self.objects[target_index].state.status == crate::ObjectStatus::Deleted
             || self.objects[target_index].state.container != Some(self.objects[index].id)
         {
             return Ok(());
         }
         // Desired object already at front? (:5782)
-        if self.objects[index].state.contents.first() == Some(&target_id) {
+        let front = self.objects[index]
+            .state
+            .contents
+            .iter()
+            .copied()
+            .find(|candidate_id| {
+                self.find_object_index(*candidate_id).is_some_and(|candidate| {
+                    self.objects[candidate].state.status != crate::ObjectStatus::Deleted
+                })
+            });
+        if front == Some(target_id) {
             return Ok(());
         }
         // Select object via script? (:5784-5786)
@@ -17340,6 +17353,41 @@ protected func ContainedDown(pByClonk) { DoDamage(1); return(1); }
     }
 
     #[test]
+    fn shift_contents_uses_the_first_present_link_as_front() {
+        // C4ObjectList::GetObject skips Status=0 links. Both ShiftContents'
+        // comparison seed and DirectComContents' already-front check use that
+        // first PRESENT object rather than the raw First link
+        // (C4Object.cpp:5753,5782; C4ObjectList.cpp:296-308).
+        let mut engine = Engine::new();
+        let (crew, [rock, gold, skul]) = wheel_fixture(&mut engine, "#strict\n");
+        let skul_index = engine.find_object_index(skul).expect("skull exists");
+        engine.objects[skul_index].state.status = crate::ObjectStatus::Deleted;
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.contents = vec![skul, rock, gold];
+
+        engine
+            .object_direct_com_contents(crew_index, rock, false)
+            .expect("selecting the first present link succeeds");
+        assert_eq!(
+            contents(&engine, crew),
+            vec![skul, rock, gold],
+            "the first present object is already front despite a deleted raw link"
+        );
+
+        assert!(
+            engine
+                .object_shift_contents(crew_index, false, false)
+                .expect("picture shift succeeds"),
+            "the distinct present item is found after the effective front"
+        );
+        assert_eq!(
+            contents(&engine, crew),
+            vec![gold, skul, rock],
+            "the dead raw link participates in relinking but never seeds comparison"
+        );
+    }
+
+    #[test]
     fn wheel_shift_separates_same_definition_pictures_that_cannot_concat() {
         // ShiftContents does not merely compare definition IDs: it advances
         // to the first item for which C4Object::CanConcatPictureWith is false
@@ -17368,12 +17416,26 @@ protected func ContainedDown(pByClonk) { DoDamage(1); return(1); }
             .expect("tinted rock spawns");
         let index = engine.find_object_index(crew).expect("crew exists");
         engine.objects[index].state.contents = vec![plain, tinted];
+        engine
+            .apply_object_update(
+                tinted,
+                crate::ObjectUpdate::new().with_status(crate::ObjectStatus::Inactive),
+            )
+            .expect("tinted rock becomes inactive");
+        assert_eq!(
+            engine
+                .object_snapshot(tinted)
+                .expect("inactive rock remains present")
+                .status,
+            crate::ObjectStatus::Inactive,
+            "C++ Status=2 remains truthy for ShiftContents and DirectComContents"
+        );
 
         engine.player_in_com(1, COM_WHEEL_DOWN, 0).expect("wheel");
         assert_eq!(
             contents(&engine, crew),
             vec![tinted, plain],
-            "non-concatenable same-definition picture becomes the new front"
+            "inactive non-concatenable same-definition picture becomes the new front"
         );
     }
 

@@ -25588,10 +25588,10 @@ fn scroll_contents(args: &[Value]) -> Result<Value, RuntimeError> {
 /// ~ControlContents(id) may veto and the new front gets
 /// ~Selection(container) with the Grab sound on a falsy return
 /// (C4Object.cpp:5760-5767); the menu Refill (:5769-5772) is
-/// presentation-only and unmodeled. Documented gaps: CanConcatPictureWith
-/// (id/color/graphics/name/overlay stack check, C4Object.cpp) is
-/// approximated by DEFINITION ID equality. Contents include same-call
-/// CreateContents/Enter scopes, matching the live C4ObjectList.
+/// presentation-only and unmodeled. Unfiltered shifts reuse the same live
+/// CanConcatPictureWith predicate as internal menu grouping, including
+/// same-call appearance writes. Contents include same-call CreateContents/
+/// Enter scopes, matching the live C4ObjectList.
 fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_object = match args.first() {
         None | Some(Value::Nil | Value::Int(0)) => None,
@@ -25662,7 +25662,7 @@ fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 .collect(),
             None => return Picked::Done(Value::Bool(false)),
         };
-        let Some((front_id, front_definition)) = contents.first().cloned() else {
+        let Some((front_id, _)) = contents.first().cloned() else {
             return Picked::Done(Value::Bool(false));
         };
         let new_front = if let Some(id_target) = id_target {
@@ -25687,12 +25687,12 @@ fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                     .iter()
                     .skip(1)
                     .rev()
-                    .find(|(_, definition)| *definition != front_definition)
+                    .find(|(id, _)| !context.object_can_concat_picture_with(front_id, *id))
             } else {
                 contents
                     .iter()
                     .skip(1)
-                    .find(|(_, definition)| *definition != front_definition)
+                    .find(|(id, _)| !context.object_can_concat_picture_with(front_id, *id))
             };
             match candidate {
                 Some((id, _)) => *id,
@@ -32076,7 +32076,7 @@ impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSo
         HOST_CONTEXT.with(|cell| {
             cell.borrow()
                 .as_ref()
-                .is_some_and(|context| context.internal_menu_can_concat_picture_with(object, other))
+                .is_some_and(|context| context.object_can_concat_picture_with(object, other))
         })
     }
 
@@ -46463,10 +46463,10 @@ impl EffectHostContext {
         })
     }
 
-    /// Live C4Object::CanConcatPictureWith for internal menu refill rows.
-    /// The pending scope overlays make nested ExecuteCommand see the same
-    /// picture grouping as the ordinary Engine builder.
-    fn internal_menu_can_concat_picture_with(&self, object: ObjectId, other: ObjectId) -> bool {
+    /// Live C4Object::CanConcatPictureWith shared by script ShiftContents and
+    /// internal menu refill rows. Pending scope overlays make nested calls see
+    /// the same picture grouping as the ordinary Engine builder.
+    fn object_can_concat_picture_with(&self, object: ObjectId, other: ObjectId) -> bool {
         let Some(object_picture) = self.object_menu_picture_snapshot(object, false, 0) else {
             return false;
         };
@@ -46506,8 +46506,14 @@ impl EffectHostContext {
                     })
                     .unwrap_or((picture.definition_id.as_str(), None))
             }
-            if graphics_key(&object_picture) != graphics_key(&other_picture)
-                || object_picture.picture_rect != other_picture.picture_rect
+            let (object_definition, object_name) = graphics_key(&object_picture);
+            let (other_definition, other_name) = graphics_key(&other_picture);
+            if !crate::resolved_graphics_equal(
+                Some(object_definition),
+                object_name,
+                Some(other_definition),
+                other_name,
+            ) || object_picture.picture_rect != other_picture.picture_rect
             {
                 return false;
             }
@@ -46546,16 +46552,6 @@ impl EffectHostContext {
             }
         }
         if allowed & crate::APS_OVERLAY == 0 {
-            let overlays_equal = |left: &ObjectGraphicsOverlay, right: &ObjectGraphicsOverlay| {
-                left.mode == right.mode
-                    && left.definition == right.definition
-                    && left.graphics_name == right.graphics_name
-                    && left.action == right.action
-                    && left.blit_mode == right.blit_mode
-                    && left.color_modulation == right.color_modulation
-                    && left.transform == right.transform
-                    && left.overlay_object == right.overlay_object
-            };
             for overlay in object_picture
                 .graphics_overlays
                 .iter()
@@ -46568,7 +46564,7 @@ impl EffectHostContext {
                 else {
                     return false;
                 };
-                if !overlays_equal(other_overlay, overlay) {
+                if !crate::picture_overlays_equal(other_overlay, overlay) {
                     return false;
                 }
             }

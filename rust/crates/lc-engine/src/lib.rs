@@ -1375,6 +1375,61 @@ impl ObjectGraphicsOverlay {
     }
 }
 
+/// Whether two valid, resolved graphics references name the same native
+/// `C4DefGraphics` pointer. Rust's named-graphics resolver folds ASCII case;
+/// an absent/empty name denotes the definition's default graphics. An
+/// unresolved serialized name does not model a native pointer and is outside
+/// this comparison's input contract.
+pub(crate) fn resolved_graphics_equal(
+    left_definition: Option<&str>,
+    left_name: Option<&str>,
+    right_definition: Option<&str>,
+    right_name: Option<&str>,
+) -> bool {
+    let (Some(left_definition), Some(right_definition)) = (left_definition, right_definition) else {
+        // A null pSourceGfx compares by pointer value; no serialized name can
+        // make two null references different.
+        return left_definition.is_none() && right_definition.is_none();
+    };
+    if left_definition != right_definition {
+        return false;
+    }
+    match (
+        left_name.filter(|name| !name.is_empty()),
+        right_name.filter(|name| !name.is_empty()),
+    ) {
+        (None, None) => true,
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        _ => false,
+    }
+}
+
+/// `C4GraphicsOverlay::operator==` fields used by
+/// `C4Object::CanConcatPictureWith`. Animation phase and overlay ID are
+/// deliberately handled outside this comparison. Native overlays always
+/// own an identity transform, whereas the Rust snapshot omits that default.
+pub(crate) fn picture_overlays_equal(
+    left: &ObjectGraphicsOverlay,
+    right: &ObjectGraphicsOverlay,
+) -> bool {
+    let optional_string_equal = |left: Option<&str>, right: Option<&str>| {
+        left.filter(|value| !value.is_empty()) == right.filter(|value| !value.is_empty())
+    };
+    left.mode == right.mode
+        && resolved_graphics_equal(
+            left.definition.as_deref(),
+            left.graphics_name.as_deref(),
+            right.definition.as_deref(),
+            right.graphics_name.as_deref(),
+        )
+        && optional_string_equal(left.action.as_deref(), right.action.as_deref())
+        && left.blit_mode == right.blit_mode
+        && left.color_modulation == right.color_modulation
+        && left.transform.unwrap_or_else(DrawTransform::identity)
+            == right.transform.unwrap_or_else(DrawTransform::identity)
+        && left.overlay_object == right.overlay_object
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectBaseGraphics {
     pub definition: DefinitionId,
@@ -28622,8 +28677,14 @@ impl Engine {
                     })
                     .unwrap_or((snapshot.definition_id.as_str(), None))
             }
-            if graphics_key(object) != graphics_key(other)
-                || object.picture_rect != other.picture_rect
+            let (object_definition, object_name) = graphics_key(object);
+            let (other_definition, other_name) = graphics_key(other);
+            if !resolved_graphics_equal(
+                Some(object_definition),
+                object_name,
+                Some(other_definition),
+                other_name,
+            ) || object.picture_rect != other.picture_rect
             {
                 return false;
             }
@@ -28632,6 +28693,7 @@ impl Engine {
             let object_name = object
                 .custom_name
                 .as_deref()
+                .filter(|name| !name.is_empty())
                 .or_else(|| {
                     self.crew_object_infos
                         .get(&object.id)
@@ -28641,6 +28703,7 @@ impl Engine {
             let other_name = other
                 .custom_name
                 .as_deref()
+                .filter(|name| !name.is_empty())
                 .or_else(|| {
                     self.crew_object_infos
                         .get(&other.id)
@@ -28654,16 +28717,6 @@ impl Engine {
         if allowed & APS_OVERLAY == 0 {
             // C4GraphicsOverlay::operator== intentionally ignores animation
             // phase (C4DefGraphics.cpp:868-878).
-            let overlays_equal = |left: &ObjectGraphicsOverlay, right: &ObjectGraphicsOverlay| {
-                left.mode == right.mode
-                    && left.definition == right.definition
-                    && left.graphics_name == right.graphics_name
-                    && left.action == right.action
-                    && left.blit_mode == right.blit_mode
-                    && left.color_modulation == right.color_modulation
-                    && left.transform == right.transform
-                    && left.overlay_object == right.overlay_object
-            };
             for overlay in object
                 .graphics_overlays
                 .iter()
@@ -28676,7 +28729,7 @@ impl Engine {
                 else {
                     return false;
                 };
-                if !overlays_equal(other_overlay, overlay) {
+                if !picture_overlays_equal(other_overlay, overlay) {
                     return false;
                 }
             }
