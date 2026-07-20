@@ -45589,7 +45589,6 @@ func RemoveAndRecruit(object target) {
     }
 
     #[test]
-    #[ignore = "over-constrained tutorial driver; excluded from the parity baseline"]
     fn shipped_hazard_tutorial_script1_raises_limit_before_creating_drones() {
         // Hazard starts at MaxPlayer=1. Its exact Script1 raises that live
         // parameter to two immediately before CreateScriptPlayer; an absent
@@ -45607,11 +45606,16 @@ func RemoveAndRecruit(object target) {
             1,
             "the app normally supplies System.c4g's RGB helper"
         );
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../content/Hazard.c4f/Tutorial.c4s/Script.c");
-        let source = std::fs::read(&path)
+        let scenario_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../content/Hazard.c4f/Tutorial.c4s");
+        let scenario = lc_resources::Group::open(&scenario_path)
+            .expect("shipped Hazard tutorial group opens");
+        let source = scenario
+            .read_file("Script.c")
             .unwrap_or_else(|error| panic!("shipped Hazard tutorial script reads: {error}"));
         let source = String::from_utf8_lossy(&source);
+        let source = lc_resources::localize_script_source(&scenario, &source, &["US"])
+            .expect("shipped Hazard tutorial script localizes");
         engine
             .load_scenario_script_with_convention("Hazard Tutorial", &source, true)
             .expect("shipped Hazard tutorial script loads without Initialize");
@@ -45630,7 +45634,7 @@ func RemoveAndRecruit(object target) {
         let [drone] = request.players.as_slice() else {
             panic!("expected one Hazard drone player, got {:?}", request.players);
         };
-        assert_eq!(drone.name.as_bytes(), b"$Drones$");
+        assert_eq!(drone.name.as_bytes(), b"Drones");
         assert_eq!(drone.player_type, PLAYER_INFO_TYPE_SCRIPT);
         assert_eq!((drone.color, drone.original_color), (0x0001_0101, 0x0001_0101));
         assert_eq!(drone.team, 2);
@@ -45644,7 +45648,6 @@ func RemoveAndRecruit(object target) {
     }
 
     #[test]
-    #[ignore = "over-constrained tutorial driver; excluded from the parity baseline"]
     fn shipped_hazard_tutorial_script65_awards_crew_experience() {
         // Exercise the exact shipped call without applying Hazard's very large
         // Initialize function. Script65 ends the tutorial with

@@ -157671,7 +157671,6 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    #[ignore = "over-constrained tutorial driver; excluded from the parity baseline"]
     fn install_definition_resolver_prefers_global_pack_before_folder_local_collision() {
         fn write_definition(root: &Path, directory: &str, id: &str, value: i32) {
             let definition = root.join(directory);
@@ -157806,8 +157805,9 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    #[ignore = "over-constrained tutorial driver; excluded from the parity baseline"]
     fn install_definition_resolver_opens_packed_parent_resource_chain() {
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
         let dir = tempdir().expect("tempdir");
         let inner_png_path = dir.path().join("inner.png");
         let outer_png_path = dir.path().join("outer.png");
@@ -157922,6 +157922,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 .pixels(),
             &[1, 2, 3, 255]
         );
+        reset_cached_app_paths();
     }
 
     #[test]

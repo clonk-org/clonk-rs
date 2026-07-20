@@ -26,8 +26,12 @@ queues joins before `Initialize`, and executes them before frame-one simulation.
 Duplicate real paths retain separate infos but the later join is rejected like
 `FileInUse`; distinct local players receive their `.c4p` keyboard sets and route
 controls independently, including all-player focus-loss clearing. Scenario
-definition lists use classic quoted/numbered parsing and load
-explicit global packs before ancestor-local packs. Alchemy (ALCO+NMGE)
+definition lists use classic quoted/numbered parsing and load explicit global
+packs before ancestor-local packs; later folder-local ID collisions overload
+the global definition, while packed parent graphics and materials resolve
+inner-first. Hazard's US-localized Script1 raises the live max-player limit
+before emitting the host's exact `Drones` AddPlayers request; Script65 updates
+live and persisted crew experience without a rank promotion. Alchemy (ALCO+NMGE)
 intentionally replaces mana with ingredients. Its seeded bag follows C++
 exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`, MGUP/MGDW
 global-effect merging, ABLA aim/release/Airblast, POSE selector/Possession,
@@ -137,6 +141,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask engine-snapshots verify
 cargo xtask parity verify
 ```
+
+Only the real engine Tutorial04 and Tutorial06 end-to-end drivers are accepted
+over-constraint skips. Manual timing probes, live-service checks, and C++
+differential executables remain explicit opt-ins; the remaining ignored app
+Tutorial04/06/07 and engine Tutorial05/07 routes are temporary test defects,
+not an accepted parity baseline.
 
 Behavior changes also require the relevant scenario sweep/audit and rebuilt
 live comparison.
