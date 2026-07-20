@@ -6,6 +6,7 @@
 //! `C4GUI::Dialog`/`WoodenLabel` furniture beneath it.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Result};
 use lc_engine::ScoreboardState;
@@ -38,9 +39,11 @@ const ICON_CELL: u32 = 40;
 const PLAYER_ICON_PHASE: u32 = 9;
 const CLOSE_ICON_PHASE: u32 = 34;
 const CAPTION_RIGHT_INDENT: i32 = 20;
+const CAPTION_TEXT_OFFSET: i32 = 5;
 const CAPTION_ICON_INSET: i32 = 1;
 const CLOSE_BUTTON_SIZE: i32 = 16;
 const CLOSE_BUTTON_INSET: i32 = 4;
+const TITLE_SCROLL_DELAY: Duration = Duration::from_millis(3_000);
 /// `CMarkupTagItalic::Apply`: each open `<i>` subtracts 0.3 from the
 /// destination-space x/y matrix term (src/StdMarkup.cpp:24-28).
 const ITALIC_SHEAR: f32 = -0.3;
@@ -95,6 +98,56 @@ impl ScoreboardLayout {
             },
         })
     }
+
+    /// Move the retained dialog and every absolute child rectangle without
+    /// re-running `C4ScoreboardDlg::Update`/`DoPlacement`.
+    pub fn translate(&mut self, dx: i32, dy: i32) {
+        translate_rect(&mut self.bounds, dx, dy);
+        translate_rect(&mut self.client, dx, dy);
+        if let Some(caption) = &mut self.caption {
+            translate_rect(caption, dx, dy);
+        }
+        if let Some(title_icon) = &mut self.title_icon {
+            translate_rect(title_icon, dx, dy);
+        }
+        if let Some(close_button) = &mut self.close_button {
+            translate_rect(close_button, dx, dy);
+        }
+    }
+}
+
+fn translate_rect(rect: &mut IntRect, dx: i32, dy: i32) {
+    rect.x = rect.x.saturating_add(dx);
+    rect.y = rect.y.saturating_add(dy);
+}
+
+/// Transient `C4GUI::IconButton` and `WoodenLabel` draw state supplied by the
+/// app while rendering one retained scoreboard layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScoreboardRenderState {
+    pub close_hovered: bool,
+    pub close_pressed: bool,
+    pub title_scroll_offset: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ScoreboardCaptionScroll {
+    last_change: Option<Instant>,
+    position: i32,
+    direction: i8,
+}
+
+/// Retained presentation state for one native `C4ScoreboardDlg` lifetime.
+///
+/// Matrix data and show-count state remain engine-owned. This object retains
+/// only geometry, the title widget lifetime needed by `Update`, and the
+/// frame-driven `WoodenLabel` scroll state.
+#[derive(Clone, Debug)]
+pub struct ScoreboardPresentationState {
+    layout: ScoreboardLayout,
+    title_source: Option<String>,
+    title: Option<String>,
+    title_scroll: ScoreboardCaptionScroll,
 }
 
 /// Validated process-global assets used by `C4ScoreboardDlg`.
@@ -109,6 +162,7 @@ pub struct ScoreboardResources<'a> {
     icons: &'a ImageData,
     fonts: &'a ClonkFontSet,
     font_images: Option<&'a HashMap<String, ImageData>>,
+    button_highlight: Option<&'a ImageData>,
 }
 
 impl<'a> ScoreboardResources<'a> {
@@ -122,6 +176,7 @@ impl<'a> ScoreboardResources<'a> {
             icons,
             fonts,
             font_images: None,
+            button_highlight: None,
         };
         resources.validate()?;
         Ok(resources)
@@ -129,6 +184,13 @@ impl<'a> ScoreboardResources<'a> {
 
     pub fn with_font_images(mut self, images: &'a HashMap<String, ImageData>) -> Self {
         self.font_images = Some(images);
+        self
+    }
+
+    /// Add the transparent-RGB-clean `GUIButtonHighlight.png` used by the
+    /// close icon's additive hover/down passes.
+    pub fn with_button_highlight(mut self, image: &'a ImageData) -> Self {
+        self.button_highlight = Some(image);
         self
     }
 
@@ -159,6 +221,12 @@ impl<'a> ScoreboardResources<'a> {
             self.fonts.text.line_height > 0 && self.fonts.text.cell_height > 0,
             "classic FontRegular must have positive line and cell heights"
         );
+        if let Some(highlight) = self.button_highlight {
+            ensure!(
+                highlight.width() > 0 && highlight.height() > 0,
+                "GUIButtonHighlight.png must be non-empty"
+            );
+        }
         Ok(())
     }
 }
@@ -177,12 +245,34 @@ pub fn scoreboard_inline_image_specs(scoreboard: &ScoreboardState) -> Vec<String
     specs
 }
 
+/// Return the visible title in the same display encoding used by rendering.
+/// Null and allocated-empty title cells have no WoodenLabel or tooltip.
+pub fn scoreboard_title_text(scoreboard: &ScoreboardState) -> Option<String> {
+    visible_scoreboard_title(scoreboard).map(presentation_text)
+}
+
 /// Calculate the dialog exactly as `C4ScoreboardDlg::Update` and
-/// `DoPlacement` do. `preferred` is `C4GUI::Screen::GetPreferredDlgRect()`.
+/// `DoPlacement` do for its constructor Update. `preferred` is
+/// `C4GUI::Screen::GetPreferredDlgRect()`.
 pub fn scoreboard_layout(
     preferred: IntRect,
     scoreboard: &ScoreboardState,
     resources: &ScoreboardResources<'_>,
+) -> Result<ScoreboardLayout> {
+    // C4ScoreboardDlg's base constructor installs the temporary title
+    // "nops" before the first Update.
+    scoreboard_layout_with_title_presence(preferred, scoreboard, resources, true)
+}
+
+/// Calculate one `C4ScoreboardDlg::Update` with the title-widget state that
+/// existed on entry. This exposes the C++ two-phase `SetTitle` behavior needed
+/// by retained callers: an allocated empty title can retain a stale top margin
+/// for one Update, then collapses it on the next Update.
+pub fn scoreboard_layout_with_title_presence(
+    preferred: IntRect,
+    scoreboard: &ScoreboardState,
+    resources: &ScoreboardResources<'_>,
+    title_present_before_update: bool,
 ) -> Result<ScoreboardLayout> {
     resources.validate()?;
     ensure!(
@@ -245,15 +335,20 @@ pub fn scoreboard_layout(
             width.max(scoreboard_text_width(&title, font, images).saturating_add(TITLE_EXTRA_WIDTH));
     }
 
-    // The constructor initially installs "nops". For an allocated-but-empty
-    // (0,0), Update therefore computes this margin before final SetTitle("")
-    // removes the visible WoodenLabel without updating rcClientRect again.
-    let title_margin_height = title
-        .is_some()
-        .then(|| font.line_height.max(MIN_WOOD_BAR_HEIGHT));
-    let visible_caption_height = title
-        .is_some_and(|title| !title.is_empty())
-        .then(|| font.line_height.max(MIN_WOOD_BAR_HEIGHT));
+    let title_pointer_present = title.is_some();
+    let visible_title_present = title.is_some_and(|title| !title.is_empty());
+    // Before querying margins C++ calls SetTitle iff bool(pTitle) differs
+    // from bool(szTitle pointer). SetTitle(empty) removes pTitle despite the
+    // non-null pointer. The unconditional SetTitle after SetBounds establishes
+    // `visible_title_present` for the following Update.
+    let title_present_for_margin = if title_present_before_update != title_pointer_present {
+        visible_title_present
+    } else {
+        title_present_before_update
+    };
+    let title_height = font.line_height.max(MIN_WOOD_BAR_HEIGHT);
+    let title_margin_height = title_present_for_margin.then_some(title_height);
+    let visible_caption_height = visible_title_present.then_some(title_height);
     let row_height = font.line_height.saturating_add(Y_INDENT);
     let client_height = Y_MARGIN
         .saturating_mul(2)
@@ -314,6 +409,155 @@ pub fn scoreboard_layout(
     })
 }
 
+impl ScoreboardPresentationState {
+    /// Construct the dialog with the base `C4GUI::Dialog` title (`"nops"`)
+    /// still present on entry to the first native Update.
+    pub fn new(
+        preferred: IntRect,
+        scoreboard: &ScoreboardState,
+        resources: &ScoreboardResources<'_>,
+    ) -> Result<Self> {
+        Self::new_with_title_presence(preferred, scoreboard, resources, true)
+    }
+
+    /// Construct retained presentation state with an explicit title-widget
+    /// state on entry to the current Update.
+    ///
+    /// Delayed consumers use this when an earlier engine-side Update supplied
+    /// the post-Update `pTitle` state but the live matrix has changed again
+    /// before the frontend observes it.
+    pub fn new_with_title_presence(
+        preferred: IntRect,
+        scoreboard: &ScoreboardState,
+        resources: &ScoreboardResources<'_>,
+        title_present_before_update: bool,
+    ) -> Result<Self> {
+        let layout = scoreboard_layout_with_title_presence(
+            preferred,
+            scoreboard,
+            resources,
+            title_present_before_update,
+        )?;
+        let title_source = visible_scoreboard_title(scoreboard).map(str::to_owned);
+        let title = scoreboard_title_text(scoreboard);
+        Ok(Self {
+            layout,
+            title_source,
+            title,
+            title_scroll: ScoreboardCaptionScroll::default(),
+        })
+    }
+
+    /// Apply the next native data Update. Placement is recomputed here, while
+    /// ordinary renders continue using the retained layout.
+    pub fn update(
+        &mut self,
+        preferred: IntRect,
+        scoreboard: &ScoreboardState,
+        resources: &ScoreboardResources<'_>,
+    ) -> Result<()> {
+        let layout = scoreboard_layout_with_title_presence(
+            preferred,
+            scoreboard,
+            resources,
+            self.title_present(),
+        )?;
+        let title_source = visible_scoreboard_title(scoreboard).map(str::to_owned);
+        if self.title_source != title_source {
+            self.title_scroll = ScoreboardCaptionScroll::default();
+        }
+        self.title = scoreboard_title_text(scoreboard);
+        self.title_source = title_source;
+        self.layout = layout;
+        Ok(())
+    }
+
+    pub fn layout(&self) -> &ScoreboardLayout {
+        &self.layout
+    }
+
+    pub fn layout_mut(&mut self) -> &mut ScoreboardLayout {
+        &mut self.layout
+    }
+
+    /// Display-ready title text, also used by the classic title tooltip.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// Final `pTitle` state after the most recent Update.
+    pub fn title_present(&self) -> bool {
+        self.title_source.is_some()
+    }
+
+    /// Advance the classic one-pixel-per-draw title bounce after its three
+    /// second dwell and return the current offset.
+    pub fn title_scroll_offset_at(
+        &mut self,
+        now: Instant,
+        resources: &ScoreboardResources<'_>,
+    ) -> i32 {
+        let (Some(title), Some(caption)) = (self.title.as_deref(), self.layout.caption) else {
+            return 0;
+        };
+        let max_scroll = scoreboard_text_width(
+            title,
+            &resources.fonts.text,
+            resources.font_images(),
+        )
+        .saturating_add(caption.h)
+        .saturating_add(CAPTION_TEXT_OFFSET)
+        .saturating_add(CAPTION_RIGHT_INDENT)
+        .saturating_sub(caption.w)
+        .max(0);
+        let Some(last_change) = self.title_scroll.last_change else {
+            self.title_scroll.last_change = Some(now);
+            return 0;
+        };
+        if now.checked_duration_since(last_change).unwrap_or_default() >= TITLE_SCROLL_DELAY {
+            if self.title_scroll.direction == 0 {
+                self.title_scroll.direction = 1;
+            }
+            if max_scroll > 0 {
+                self.title_scroll.position = self
+                    .title_scroll
+                    .position
+                    .saturating_add(i32::from(self.title_scroll.direction));
+                if self.title_scroll.position >= max_scroll || self.title_scroll.position < 0 {
+                    self.title_scroll.direction = -self.title_scroll.direction;
+                    self.title_scroll.position = self
+                        .title_scroll
+                        .position
+                        .saturating_add(i32::from(self.title_scroll.direction));
+                    self.title_scroll.last_change = Some(now);
+                }
+            }
+        }
+        self.title_scroll.position
+    }
+
+    pub fn render_state_at(
+        &mut self,
+        now: Instant,
+        resources: &ScoreboardResources<'_>,
+        close_hovered: bool,
+        close_pressed: bool,
+    ) -> ScoreboardRenderState {
+        ScoreboardRenderState {
+            close_hovered,
+            close_pressed,
+            title_scroll_offset: self.title_scroll_offset_at(now, resources),
+        }
+    }
+}
+
+fn visible_scoreboard_title(scoreboard: &ScoreboardState) -> Option<&str> {
+    scoreboard
+        .cell(0, 0)
+        .and_then(|cell| cell.text())
+        .filter(|title| !title.is_empty())
+}
+
 /// Draw a visible scoreboard dialog. Lifecycle and input remain app-owned;
 /// this function performs no state mutation.
 pub fn render_scoreboard(
@@ -324,8 +568,30 @@ pub fn render_scoreboard(
     gamma: Option<&GammaRamp>,
 ) -> Result<()> {
     let layout = scoreboard_layout(preferred, scoreboard, resources)?;
-    render_scoreboard_body_with_layout(surface, scoreboard, resources, &layout, gamma);
-    render_scoreboard_caption_with_layout(surface, scoreboard, resources, &layout, gamma)
+    render_scoreboard_with_layout(
+        surface,
+        scoreboard,
+        resources,
+        &layout,
+        ScoreboardRenderState::default(),
+        gamma,
+    )
+}
+
+/// Draw a scoreboard using geometry retained from its most recent native
+/// show/data Update.
+pub fn render_scoreboard_with_layout(
+    surface: &mut Surface,
+    scoreboard: &ScoreboardState,
+    resources: &ScoreboardResources<'_>,
+    layout: &ScoreboardLayout,
+    state: ScoreboardRenderState,
+    gamma: Option<&GammaRamp>,
+) -> Result<()> {
+    render_scoreboard_body_with_layout(surface, scoreboard, resources, layout, gamma)?;
+    render_scoreboard_caption_with_layout(
+        surface, scoreboard, resources, layout, state, gamma,
+    )
 }
 
 /// Draw the dialog background/frame and spreadsheet cells, stopping before
@@ -339,8 +605,7 @@ pub fn render_scoreboard_body(
     gamma: Option<&GammaRamp>,
 ) -> Result<()> {
     let layout = scoreboard_layout(preferred, scoreboard, resources)?;
-    render_scoreboard_body_with_layout(surface, scoreboard, resources, &layout, gamma);
-    Ok(())
+    render_scoreboard_body_with_layout(surface, scoreboard, resources, &layout, gamma)
 }
 
 /// Draw the caption bar, icon, markup-aware title, and close button after
@@ -353,16 +618,25 @@ pub fn render_scoreboard_caption(
     gamma: Option<&GammaRamp>,
 ) -> Result<()> {
     let layout = scoreboard_layout(preferred, scoreboard, resources)?;
-    render_scoreboard_caption_with_layout(surface, scoreboard, resources, &layout, gamma)
+    render_scoreboard_caption_with_layout(
+        surface,
+        scoreboard,
+        resources,
+        &layout,
+        ScoreboardRenderState::default(),
+        gamma,
+    )
 }
 
-fn render_scoreboard_body_with_layout(
+/// Draw only the retained dialog body and matrix cells.
+pub fn render_scoreboard_body_with_layout(
     surface: &mut Surface,
     scoreboard: &ScoreboardState,
     resources: &ScoreboardResources<'_>,
     layout: &ScoreboardLayout,
     gamma: Option<&GammaRamp>,
-) {
+) -> Result<()> {
+    validate_retained_layout(scoreboard, resources, layout)?;
     draw_engine_box(
         surface,
         layout.bounds.x,
@@ -405,15 +679,19 @@ fn render_scoreboard_body_with_layout(
             );
         }
     }
+    Ok(())
 }
 
-fn render_scoreboard_caption_with_layout(
+/// Draw only the retained caption/title/close-button phase.
+pub fn render_scoreboard_caption_with_layout(
     surface: &mut Surface,
     scoreboard: &ScoreboardState,
     resources: &ScoreboardResources<'_>,
     layout: &ScoreboardLayout,
+    state: ScoreboardRenderState,
     gamma: Option<&GammaRamp>,
 ) -> Result<()> {
+    validate_retained_layout(scoreboard, resources, layout)?;
     if let (Some(caption), Some(title)) = (
         layout.caption,
         scoreboard.cell(0, 0).and_then(|cell| cell.text()),
@@ -439,7 +717,7 @@ fn render_scoreboard_caption_with_layout(
             // TextOut. Preserve that C++ quirk for colors, italics and images.
             draw_scoreboard_text(
                 caption_surface,
-                caption.x + caption.h + 5,
+                caption.x + caption.h + CAPTION_TEXT_OFFSET - state.title_scroll_offset,
                 text_y,
                 &title,
                 &resources.fonts.text,
@@ -449,10 +727,51 @@ fn render_scoreboard_caption_with_layout(
             );
         });
         if let Some(close) = layout.close_button {
+            if state.close_hovered {
+                draw_scoreboard_close_highlight(surface, close, resources, gamma);
+            }
             draw_icon_phase(surface, resources.icons, CLOSE_ICON_PHASE, close, gamma)?;
+            if state.close_pressed {
+                draw_scoreboard_close_highlight(surface, close, resources, gamma);
+            }
         }
     }
     Ok(())
+}
+
+fn validate_retained_layout(
+    scoreboard: &ScoreboardState,
+    resources: &ScoreboardResources<'_>,
+    layout: &ScoreboardLayout,
+) -> Result<()> {
+    resources.validate()?;
+    ensure!(
+        scoreboard.row_count() == layout.rows && scoreboard.column_count() == layout.columns,
+        "retained scoreboard layout does not match the live matrix dimensions"
+    );
+    Ok(())
+}
+
+fn draw_scoreboard_close_highlight(
+    surface: &mut Surface,
+    close: IntRect,
+    resources: &ScoreboardResources<'_>,
+    gamma: Option<&GammaRamp>,
+) {
+    let Some(highlight) = resources.button_highlight else {
+        return;
+    };
+    crate::draw_image_bilinear_additive(
+        surface,
+        &lc_gui::Rect::new(
+            close.x as f32,
+            close.y as f32,
+            close.w as f32,
+            close.h as f32,
+        ),
+        highlight,
+        gamma,
+    );
 }
 
 fn draw_icon_phase(
@@ -541,8 +860,11 @@ fn scoreboard_text_width(text: &str, font: &ClonkFont, images: &HashMap<String, 
     // because raw source (the separator) remained. With FontRegular's -1
     // spacing, layout can therefore be one pixel narrower than TextOut's
     // independently aligned line. Preserve that deliberate mismatch.
-    let mut maximum = 0_i32;
-    let mut row_width = 0_i32;
+    // CStdFont::GetTextExtent retains a float accumulator for the entire row
+    // and truncates only once when returning `rsx` (src/StdFont.cpp:579-636).
+    // In particular, do not truncate each aspect-scaled custom image.
+    let mut maximum = 0.0_f32;
+    let mut row_width = 0.0_f32;
     let mut rest = text;
     while !rest.is_empty() {
         while rest.starts_with('<') {
@@ -556,11 +878,11 @@ fn scoreboard_text_width(text: &str, font: &ClonkFont, images: &HashMap<String, 
         }
         if let Some((spec, advance)) = inline_image_token(rest) {
             if let Some(image) = font_image(images, spec) {
-                row_width = row_width.saturating_add(scaled_font_image_width(font, image));
+                row_width += scaled_font_image_width(font, image);
             }
             rest = &rest[advance..];
             if !rest.is_empty() {
-                row_width = row_width.saturating_add(font.h_space);
+                row_width += font.h_space as f32;
             }
             maximum = maximum.max(row_width);
             continue;
@@ -568,19 +890,19 @@ fn scoreboard_text_width(text: &str, font: &ClonkFont, images: &HashMap<String, 
         let character = rest.chars().next().expect("non-empty text");
         rest = &rest[character.len_utf8()..];
         if character == '\n' || character == '|' {
-            row_width = 0;
+            row_width = 0.0;
             continue;
         }
         if character < ' ' {
             continue;
         }
-        row_width = row_width.saturating_add(font.glyph(character).map_or(0, |glyph| glyph.width));
+        row_width += font.glyph(character).map_or(0, |glyph| glyph.width) as f32;
         if !rest.is_empty() {
-            row_width = row_width.saturating_add(font.h_space);
+            row_width += font.h_space as f32;
         }
         maximum = maximum.max(row_width);
     }
-    maximum
+    maximum as i32
 }
 
 fn scoreboard_line_width(
@@ -588,7 +910,7 @@ fn scoreboard_line_width(
     font: &ClonkFont,
     images: &HashMap<String, ImageData>,
 ) -> i32 {
-    let mut width = 0_i32;
+    let mut width = 0.0_f32;
     while !text.is_empty() {
         while text.starts_with('<') {
             let Some(advance) = skip_markup_tag(text) else {
@@ -601,11 +923,11 @@ fn scoreboard_line_width(
         }
         if let Some((spec, advance)) = inline_image_token(text) {
             if let Some(image) = font_image(images, spec) {
-                width = width.saturating_add(scaled_font_image_width(font, image));
+                width += scaled_font_image_width(font, image);
             }
             text = &text[advance..];
             if !text.is_empty() {
-                width = width.saturating_add(font.h_space);
+                width += font.h_space as f32;
             }
             continue;
         }
@@ -614,12 +936,12 @@ fn scoreboard_line_width(
         if character < ' ' {
             continue;
         }
-        width = width.saturating_add(font.glyph(character).map_or(0, |glyph| glyph.width));
+        width += font.glyph(character).map_or(0, |glyph| glyph.width) as f32;
         if !text.is_empty() {
-            width = width.saturating_add(font.h_space);
+            width += font.h_space as f32;
         }
     }
-    width
+    width as i32
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -636,11 +958,14 @@ fn draw_scoreboard_text(
     let mut markup = Vec::new();
     for (line_index, line) in text.split(['\n', '|']).enumerate() {
         let line_width = scoreboard_line_width(line, font, images);
-        let mut pen_x = x.saturating_sub(match align {
-            TextAlign::Left => 0,
-            TextAlign::Center => line_width / 2,
-            TextAlign::Right => line_width,
-        });
+        // Alignment uses GetTextExtent's final integer result, but DrawText's
+        // pen remains float thereafter (src/StdFont.cpp:816,827-842,927).
+        let mut pen_x = x as f32
+            - match align {
+                TextAlign::Left => 0,
+                TextAlign::Center => line_width / 2,
+                TextAlign::Right => line_width,
+            } as f32;
         let line_y = y.saturating_add(line_index as i32 * font.line_height);
         let mut rest = line;
         while !rest.is_empty() {
@@ -658,7 +983,7 @@ fn draw_scoreboard_text(
                     continue;
                 };
                 let width = scaled_font_image_width(font, image);
-                if width > 0 {
+                if width > 0.0 {
                     let modulation = markup_rgba(&markup);
                     draw_scoreboard_font_image(
                         surface,
@@ -671,7 +996,7 @@ fn draw_scoreboard_text(
                         markup_shear(&markup),
                         gamma,
                     );
-                    pen_x = pen_x.saturating_add(width).saturating_add(font.h_space);
+                    pen_x += width + font.h_space as f32;
                 }
                 continue;
             }
@@ -686,10 +1011,11 @@ fn draw_scoreboard_text(
                 let shear = markup_shear(&markup);
                 let native_capture =
                     font.role().is_some() && surface.is_clonk_text_capture_active();
-                if native_capture || (shear == 0.0 && color[3] == 255) {
+                let integral_pen = pen_x.fract() == 0.0;
+                if (native_capture || (shear == 0.0 && color[3] == 255)) && integral_pen {
                     font.draw_with_gamma(
                         surface,
-                        pen_x,
+                        pen_x as i32,
                         line_y,
                         &character.to_string(),
                         color,
@@ -710,9 +1036,8 @@ fn draw_scoreboard_text(
                     );
                 }
             }
-            pen_x = pen_x
-                .saturating_add(font.glyph(character).map_or(0, |glyph| glyph.width))
-                .saturating_add(font.h_space);
+            pen_x +=
+                font.glyph(character).map_or(0, |glyph| glyph.width) as f32 + font.h_space as f32;
         }
     }
 }
@@ -761,39 +1086,29 @@ fn markup_sample_alpha(sample_alpha: f32, tag_alpha: u8) -> f32 {
 fn draw_scoreboard_font_image(
     surface: &mut Surface,
     image: &ImageData,
-    x: i32,
+    x: f32,
     y: i32,
-    width: i32,
+    width: f32,
     height: i32,
     modulation: [u8; 4],
     shear: f32,
     gamma: Option<&GammaRamp>,
 ) {
-    if modulation == [255, 255, 255, 255] {
-        if shear == 0.0 {
-            draw_facet_stretch(
-                surface,
-                image,
-                (0.0, 0.0, image.width() as f32, image.height() as f32),
-                (x as f32, y as f32, width as f32, height as f32),
-                gamma,
-            );
-        } else {
-            draw_sheared_font_image(surface, image, x, y, width, height, shear, gamma);
-        }
+    if modulation == [255, 255, 255, 255] && shear == 0.0 {
+        draw_facet_stretch(
+            surface,
+            image,
+            (0.0, 0.0, image.width() as f32, image.height() as f32),
+            (x, y as f32, width, height as f32),
+            gamma,
+        );
     } else {
-        let tinted = modulate_font_image(image, modulation);
-        if shear == 0.0 {
-            draw_facet_stretch(
-                surface,
-                &tinted,
-                (0.0, 0.0, tinted.width() as f32, tinted.height() as f32),
-                (x as f32, y as f32, width as f32, height as f32),
-                gamma,
-            );
-        } else {
-            draw_sheared_font_image(surface, &tinted, x, y, width, height, shear, gamma);
-        }
+        // GL_LINEAR runs in texture2D before the blit shader multiplies RGB
+        // and adds inverted alpha (src/StdGL.cpp:1072-1081). Tinting a copied
+        // ImageData first would quantize each texel before interpolation.
+        draw_sheared_font_image(
+            surface, image, x, y, width, height, modulation, shear, gamma,
+        );
     }
 }
 
@@ -807,20 +1122,28 @@ fn draw_sheared_glyph(
     surface: &mut Surface,
     glyph: &GlyphCell,
     height: i32,
-    x: i32,
+    x: f32,
     y: i32,
     modulation: [u8; 4],
     shear: f32,
     gamma: Option<&GammaRamp>,
 ) {
-    let width = glyph.width;
+    let width = glyph.width as f32;
     let Some((x0, y0, x1, y1)) = sheared_raster_bounds(surface, x, y, width, height, shear) else {
         return;
     };
     for target_y in y0..y1 {
         for target_x in x0..x1 {
             let Some((sample_x, sample_y)) = inverse_sheared_sample(
-                target_x, target_y, x, y, width, height, width, height, shear,
+                target_x,
+                target_y,
+                x,
+                y,
+                width,
+                height,
+                glyph.width,
+                height,
+                shear,
             ) else {
                 continue;
             };
@@ -870,10 +1193,11 @@ fn draw_sheared_glyph(
 fn draw_sheared_font_image(
     surface: &mut Surface,
     image: &ImageData,
-    x: i32,
+    x: f32,
     y: i32,
-    width: i32,
+    width: f32,
     height: i32,
+    modulation: [u8; 4],
     shear: f32,
     gamma: Option<&GammaRamp>,
 ) {
@@ -902,24 +1226,35 @@ fn draw_sheared_font_image(
             let destination = surface
                 .get_pixel(target_x as u32, target_y as u32)
                 .unwrap_or_default();
-            let alpha = (sample[3] / 255.0).clamp(0.0, 1.0);
-            let encode = |value: f32| {
-                gamma.map_or_else(
-                    || value.round().clamp(0.0, 255.0),
-                    |ramp| f32::from(ramp.encode_float(value)),
-                )
+            let source_alpha = markup_sample_alpha(sample[3], modulation[3]);
+            if source_alpha <= 0.0 {
+                continue;
+            }
+            let alpha = (source_alpha / 255.0).clamp(0.0, 1.0);
+            let source_channel = |channel: GammaChannel, value: f32, tint: u8| {
+                let value = value * f32::from(tint) / 255.0;
+                gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value))
             };
             let blend = |source: f32, destination: u8| {
-                store_sample(encode(source) * alpha + f32::from(destination) * (1.0 - alpha))
+                store_sample(source * alpha + f32::from(destination) * (1.0 - alpha))
             };
             let _ = surface.set_pixel(
                 target_x as u32,
                 target_y as u32,
                 Color::new(
-                    blend(sample[0], destination.r),
-                    blend(sample[1], destination.g),
-                    blend(sample[2], destination.b),
-                    blend(sample[3], destination.a),
+                    blend(
+                        source_channel(GammaChannel::Red, sample[0], modulation[0]),
+                        destination.r,
+                    ),
+                    blend(
+                        source_channel(GammaChannel::Green, sample[1], modulation[1]),
+                        destination.g,
+                    ),
+                    blend(
+                        source_channel(GammaChannel::Blue, sample[2], modulation[2]),
+                        destination.b,
+                    ),
+                    blend(source_alpha, destination.a),
                 ),
             );
         }
@@ -928,13 +1263,13 @@ fn draw_sheared_font_image(
 
 fn sheared_raster_bounds(
     surface: &Surface,
-    x: i32,
+    x: f32,
     y: i32,
-    width: i32,
+    width: f32,
     height: i32,
     shear: f32,
 ) -> Option<(i32, i32, i32, i32)> {
-    if width <= 0 || height <= 0 || surface.width() == 0 || surface.height() == 0 {
+    if width <= 0.0 || height <= 0 || surface.width() == 0 || surface.height() == 0 {
         return None;
     }
     let half_height = height as f32 / 2.0;
@@ -945,9 +1280,8 @@ fn sheared_raster_bounds(
     // A destination pixel participates when its center lies inside the
     // transformed quad. This is the same half-pixel convention used by the
     // classic stretch blitter in `classic_gui`.
-    let x0 = ((x as f32 + min_shift - 0.5).ceil() as i32).max(0);
-    let x1 =
-        ((x as f32 + width as f32 + max_shift - 0.5).ceil() as i32).min(surface.width() as i32);
+    let x0 = ((x + min_shift - 0.5).ceil() as i32).max(0);
+    let x1 = ((x + width + max_shift - 0.5).ceil() as i32).min(surface.width() as i32);
     let y0 = y.max(0);
     let y1 = y.saturating_add(height).min(surface.height() as i32);
     (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
@@ -957,15 +1291,18 @@ fn sheared_raster_bounds(
 fn inverse_sheared_sample(
     target_x: i32,
     target_y: i32,
-    x: i32,
+    x: f32,
     y: i32,
-    destination_width: i32,
+    destination_width: f32,
     destination_height: i32,
     source_width: i32,
     source_height: i32,
     shear: f32,
 ) -> Option<(f32, f32)> {
-    if destination_width <= 0 || destination_height <= 0 || source_width <= 0 || source_height <= 0
+    if destination_width <= 0.0
+        || destination_height <= 0
+        || source_width <= 0
+        || source_height <= 0
     {
         return None;
     }
@@ -975,17 +1312,17 @@ fn inverse_sheared_sample(
     // Forward: x' = x + shear * (y - center_y). Undo that term to
     // inverse-map the destination pixel center into the unsheared quad.
     let unsheared_x = pixel_x - shear * (pixel_y - center_y);
-    let local_x = unsheared_x - x as f32;
+    let local_x = unsheared_x - x;
     let local_y = pixel_y - y as f32;
     if local_x < 0.0
         || local_y < 0.0
-        || local_x >= destination_width as f32
+        || local_x >= destination_width
         || local_y >= destination_height as f32
     {
         return None;
     }
     Some((
-        local_x * source_width as f32 / destination_width as f32 - 0.5,
+        local_x * source_width as f32 / destination_width - 0.5,
         local_y * source_height as f32 / destination_height as f32 - 0.5,
     ))
 }
@@ -1051,29 +1388,11 @@ fn store_sample(value: f32) -> u8 {
     value.round().clamp(0.0, 255.0) as u8
 }
 
-fn modulate_font_image(image: &ImageData, rgba: [u8; 4]) -> ImageData {
-    let pixels = image
-        .pixels()
-        .chunks_exact(4)
-        .flat_map(|pixel| {
-            [
-                ((u16::from(pixel[0]) * u16::from(rgba[0])) / 255) as u8,
-                ((u16::from(pixel[1]) * u16::from(rgba[1])) / 255) as u8,
-                ((u16::from(pixel[2]) * u16::from(rgba[2])) / 255) as u8,
-                pixel[3].saturating_sub(255 - rgba[3]),
-            ]
-        })
-        .collect();
-    ImageData::new(image.width(), image.height(), pixels)
-}
-
-fn scaled_font_image_width(font: &ClonkFont, image: &ImageData) -> i32 {
+fn scaled_font_image_width(font: &ClonkFont, image: &ImageData) -> f32 {
     if image.height() == 0 {
-        return 0;
+        return 0.0;
     }
-    ((i64::from(image.width()) * i64::from(font.cell_height)) / i64::from(image.height()))
-        .try_into()
-        .unwrap_or(i32::MAX)
+    image.width() as f32 * font.cell_height as f32 / image.height() as f32
 }
 
 fn font_image<'a>(images: &'a HashMap<String, ImageData>, spec: &str) -> Option<&'a ImageData> {
@@ -1332,6 +1651,163 @@ mod tests {
     }
 
     #[test]
+    fn retained_empty_title_margin_collapses_on_the_next_update() {
+        let fonts = endeavour_font_set();
+        let caption = load_graphics_png("GUICaption.png");
+        let icons = load_graphics_png("GUIIcons.png");
+        let resources =
+            ScoreboardResources::new(&caption, &icons, fonts.as_ref()).expect("resources");
+        let empty_title = scoreboard(serde_json::json!([[{"text":"","value":-1}]]));
+        let mut presentation =
+            ScoreboardPresentationState::new(preferred(), &empty_title, &resources)
+                .expect("constructor Update");
+
+        let initial = presentation.layout().clone();
+        let stale_margin = MIN_WOOD_BAR_HEIGHT.max(fonts.text.line_height);
+        assert!(!presentation.title_present());
+        assert_eq!(initial.client.y - initial.bounds.y, stale_margin);
+
+        presentation
+            .update(preferred(), &empty_title, &resources)
+            .expect("next data Update");
+        let collapsed = presentation.layout();
+        assert!(collapsed.caption.is_none());
+        assert_eq!(collapsed.client.y, collapsed.bounds.y);
+        assert_eq!(initial.bounds.h - collapsed.bounds.h, stale_margin);
+
+        let null_title = scoreboard(serde_json::json!([[{"value":-1}]]));
+        let null_from_title = scoreboard_layout_with_title_presence(
+            preferred(),
+            &null_title,
+            &resources,
+            true,
+        )
+        .expect("null title removes pTitle before margins");
+        assert_eq!(null_from_title.client.y, null_from_title.bounds.y);
+    }
+
+    #[test]
+    fn retained_layout_translation_moves_every_absolute_child() {
+        let fonts = endeavour_font_set();
+        let caption = load_graphics_png("GUICaption.png");
+        let icons = load_graphics_png("GUIIcons.png");
+        let resources =
+            ScoreboardResources::new(&caption, &icons, fonts.as_ref()).expect("resources");
+        let board = scoreboard(serde_json::json!([[
+            {"text":"Scores","value":-1},
+            {"text":"Points","value":1}
+        ]]));
+        let mut layout = scoreboard_layout(preferred(), &board, &resources).expect("layout");
+        let before = layout.clone();
+
+        layout.translate(-37, 29);
+
+        let translated = |rect: IntRect| IntRect {
+            x: rect.x - 37,
+            y: rect.y + 29,
+            ..rect
+        };
+        assert_eq!(layout.bounds, translated(before.bounds));
+        assert_eq!(layout.client, translated(before.client));
+        assert_eq!(layout.caption, before.caption.map(translated));
+        assert_eq!(layout.title_icon, before.title_icon.map(translated));
+        assert_eq!(layout.close_button, before.close_button.map(translated));
+        assert_eq!(layout.column_widths, before.column_widths);
+    }
+
+    #[test]
+    fn retained_title_autoscroll_waits_three_seconds_and_bounces_per_draw() {
+        let fonts = endeavour_font_set();
+        let caption = load_graphics_png("GUICaption.png");
+        let icons = load_graphics_png("GUIIcons.png");
+        let resources =
+            ScoreboardResources::new(&caption, &icons, fonts.as_ref()).expect("resources");
+        let title = "W".repeat(100);
+        let board = scoreboard(serde_json::json!([[{"text":title,"value":-1}]]));
+        let mut presentation = ScoreboardPresentationState::new(preferred(), &board, &resources)
+            .expect("presentation");
+        let caption = presentation.layout().caption.expect("caption");
+        let max_scroll = scoreboard_text_width(
+            presentation.title().expect("title"),
+            &fonts.text,
+            resources.font_images(),
+        ) + caption.h
+            + CAPTION_TEXT_OFFSET
+            + CAPTION_RIGHT_INDENT
+            - caption.w;
+        assert!(max_scroll > 2);
+
+        let base = Instant::now();
+        assert_eq!(presentation.title_scroll_offset_at(base, &resources), 0);
+        assert_eq!(
+            presentation.title_scroll_offset_at(
+                base + TITLE_SCROLL_DELAY - Duration::from_millis(1),
+                &resources,
+            ),
+            0
+        );
+        let outbound = base + TITLE_SCROLL_DELAY;
+        for expected in 1..max_scroll {
+            assert_eq!(
+                presentation.title_scroll_offset_at(outbound, &resources),
+                expected
+            );
+        }
+        assert_eq!(
+            presentation.title_scroll_offset_at(outbound, &resources),
+            max_scroll - 1,
+            "the attempted endpoint frame reverses and immediately backs off"
+        );
+        assert_eq!(
+            presentation.title_scroll_offset_at(
+                outbound + TITLE_SCROLL_DELAY - Duration::from_millis(1),
+                &resources,
+            ),
+            max_scroll - 1
+        );
+
+        let returning = outbound + TITLE_SCROLL_DELAY;
+        for expected in (0..max_scroll - 1).rev() {
+            assert_eq!(
+                presentation.title_scroll_offset_at(returning, &resources),
+                expected
+            );
+        }
+        assert_eq!(
+            presentation.title_scroll_offset_at(returning, &resources),
+            0,
+            "the attempted negative frame reverses and pauses at the start"
+        );
+        assert_eq!(
+            presentation.title_scroll_offset_at(
+                returning + TITLE_SCROLL_DELAY,
+                &resources,
+            ),
+            1
+        );
+
+        let retained_scroll = presentation.title_scroll;
+        presentation
+            .update(preferred(), &board, &resources)
+            .expect("same-title Update");
+        assert_eq!(presentation.title_scroll.position, retained_scroll.position);
+        assert_eq!(presentation.title_scroll.direction, retained_scroll.direction);
+        assert_eq!(
+            presentation.title_scroll.last_change,
+            retained_scroll.last_change,
+            "SetTitle returns early for an unchanged title"
+        );
+
+        let changed = scoreboard(serde_json::json!([[{"text":"Changed","value":-1}]]));
+        presentation
+            .update(preferred(), &changed, &resources)
+            .expect("changed-title Update");
+        assert_eq!(presentation.title_scroll.position, 0);
+        assert_eq!(presentation.title_scroll.direction, 0);
+        assert!(presentation.title_scroll.last_change.is_none());
+    }
+
+    #[test]
     fn live_matrix_growth_remeasures_and_keeps_the_right_edge_fixed() {
         let fonts = endeavour_font_set();
         let caption = load_graphics_png("GUICaption.png");
@@ -1400,6 +1876,7 @@ mod tests {
             scoreboard_layout(preferred(), &raw, &resources).expect("raw layout"),
             scoreboard_layout(preferred(), &presented, &resources).expect("presented layout")
         );
+        assert_eq!(scoreboard_title_text(&raw).as_deref(), Some("Sc\u{f6}res"));
         let render = |board: &ScoreboardState| {
             let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
             render_scoreboard(&mut surface, preferred(), board, &resources, None)
@@ -1428,6 +1905,74 @@ mod tests {
         assert_eq!(scoreboard_line_width("XX", &font, &images), 11);
         assert_eq!(scoreboard_text_width("{{TEST}}|", &font, &images), 5);
         assert_eq!(scoreboard_line_width("{{TEST}}", &font, &images), 6);
+    }
+
+    #[test]
+    fn custom_images_keep_fractional_width_through_metrics_and_pen_advances() {
+        let font = solid_test_font();
+        let transparent = ImageData::new(3, 4, vec![0; 3 * 4 * 4]);
+        let blue = ImageData::new(
+            3,
+            4,
+            [0_u8, 0, 255, 255]
+                .into_iter()
+                .cycle()
+                .take(3 * 4 * 4)
+                .collect(),
+        );
+        let images = HashMap::from([("A".to_string(), transparent), ("B".to_string(), blue)]);
+
+        assert_eq!(scaled_font_image_width(&font, &images["A"]), 7.5);
+        // C++ accumulates 7.5 - 1 + 7.5 and truncates only the final 14.0;
+        // truncating each image first would incorrectly return 13.
+        assert_eq!(scoreboard_text_width("{{A}}{{B}}", &font, &images), 14);
+        assert_eq!(scoreboard_line_width("{{A}}{{B}}", &font, &images), 14);
+
+        let background = Color::opaque(3, 5, 7);
+        let mut surface = Surface::new(24, 12, PixelFormat::Rgba8888);
+        surface.fill(background);
+        draw_scoreboard_text(
+            &mut surface,
+            2,
+            0,
+            "{{A}}{{B}}",
+            &font,
+            &images,
+            TextAlign::Left,
+            None,
+        );
+        // B begins at x=2+7.5-1=8.5 and its linearly filtered edge reaches
+        // pixel 15. The old per-image truncation ended before that pixel.
+        let edge = surface.get_pixel(15, 0).expect("filtered image edge");
+        assert!(edge.b > background.b);
+        assert_eq!(surface.get_pixel(16, 0), Some(background));
+    }
+
+    #[test]
+    fn custom_image_modulation_happens_after_linear_filtering() {
+        let pixels = (0..20)
+            .flat_map(|_| [[1_u8, 0, 0, 255], [2_u8, 0, 0, 255]])
+            .flatten()
+            .collect();
+        let image = ImageData::new(2, 20, pixels);
+        let mut surface = Surface::new(2, 10, PixelFormat::Rgba8888);
+
+        draw_scoreboard_font_image(
+            &mut surface,
+            &image,
+            0.0,
+            0,
+            1.0,
+            10,
+            [126, 0, 0, 255],
+            0.0,
+            None,
+        );
+
+        // GL_LINEAR first produces red=1.5, then modulation gives
+        // 1.5*126/255=0.741 -> 1. Pre-tinting quantizes both source texels to
+        // zero before interpolation and therefore produces the wrong result.
+        assert_eq!(surface.get_pixel(0, 0), Some(Color::opaque(1, 0, 0)));
     }
 
     #[test]
@@ -1497,11 +2042,11 @@ mod tests {
 
         let surface = Surface::new(100, 40, PixelFormat::Rgba8888);
         assert_eq!(
-            sheared_raster_bounds(&surface, 20, 5, 6, 10, -0.3),
+            sheared_raster_bounds(&surface, 20.0, 5, 6.0, 10, -0.3),
             Some((18, 5, 27, 15))
         );
         let (sample_x, sample_y) =
-            inverse_sheared_sample(22, 5, 20, 5, 6, 10, 6, 10, -0.3)
+            inverse_sheared_sample(22, 5, 20.0, 5, 6.0, 10, 6, 10, -0.3)
                 .expect("sample inside transformed quad");
         assert!((sample_x - 0.65).abs() < 0.0001);
         assert!(sample_y.abs() < 0.0001);
@@ -1639,6 +2184,54 @@ mod tests {
         assert!(changed(layout.bounds));
         assert!(changed(layout.title_icon.expect("player icon")));
         assert!(changed(layout.close_button.expect("close icon")));
+    }
+
+    #[test]
+    fn close_hover_and_down_each_add_the_classic_highlight_pass() {
+        let fonts = endeavour_font_set();
+        let caption = ImageData::new(192, 23, vec![0; 192 * 23 * 4]);
+        let icons = ImageData::new(240, 360, vec![0; 240 * 360 * 4]);
+        let highlight_pixel = [20_u8, 10, 5, 255];
+        let highlight = ImageData::new(
+            2,
+            2,
+            highlight_pixel.into_iter().cycle().take(2 * 2 * 4).collect(),
+        );
+        let resources = ScoreboardResources::new(&caption, &icons, fonts.as_ref())
+            .expect("resources")
+            .with_button_highlight(&highlight);
+        let board = scoreboard(serde_json::json!([[{"text":"Scores","value":-1}]]));
+        let layout = scoreboard_layout(preferred(), &board, &resources).expect("layout");
+        let close = layout.close_button.expect("close");
+        let sample = |state| {
+            let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+            surface.fill(Color::opaque(1, 2, 3));
+            render_scoreboard_caption_with_layout(
+                &mut surface,
+                &board,
+                &resources,
+                &layout,
+                state,
+                None,
+            )
+            .expect("caption");
+            surface
+                .get_pixel((close.x + close.w / 2) as u32, (close.y + close.h / 2) as u32)
+                .expect("close center")
+        };
+
+        let normal = sample(ScoreboardRenderState::default());
+        let hovered = sample(ScoreboardRenderState {
+            close_hovered: true,
+            ..ScoreboardRenderState::default()
+        });
+        let down = sample(ScoreboardRenderState {
+            close_hovered: true,
+            close_pressed: true,
+            ..ScoreboardRenderState::default()
+        });
+        assert!(hovered.r > normal.r && hovered.g > normal.g && hovered.b > normal.b);
+        assert!(down.r > hovered.r && down.g > hovered.g && down.b > hovered.b);
     }
 
     #[test]

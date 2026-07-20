@@ -4943,8 +4943,13 @@ impl FrontendAssets {
             .clonk_fonts
             .as_deref()
             .context("CStdFont-faithful GUI fonts are unavailable")?;
+        let button_highlight = self
+            .game_over_button_highlight
+            .as_ref()
+            .context("GUIButtonHighlight.png is unavailable")?;
         Ok(
             lc_frontend::scoreboard::ScoreboardResources::new(caption, icons, fonts)?
+                .with_button_highlight(button_highlight)
                 .with_font_images(font_images),
         )
     }
@@ -9548,6 +9553,7 @@ enum LeaguePlayerAuthStatus {
 
 #[derive(Clone)]
 struct PendingMessageDialog {
+    running_stack_id: u64,
     state: lc_frontend::message_dialog::MessageDialogState,
     continuation: MessageDialogContinuation,
 }
@@ -12271,6 +12277,12 @@ struct GameApp {
     scoreboard_dialog: Option<ScoreboardPresentationRequest>,
     scoreboard_initial_reconcile_pending: bool,
     scoreboard_close_pointer_capture: bool,
+    scoreboard_runtime: ScoreboardDialogRuntime,
+    /// Bottom-to-top native Screen child order for the running shared-dialog
+    /// layers whose z/activation interactions cross controller boundaries.
+    running_dialog_stack: Vec<RunningDialogStackEntry>,
+    running_active_dialog: Option<RunningDialogStackEntry>,
+    next_running_message_stack_id: u64,
     /// App-owned classic dialogs, in C4GUI z-order. Pointer hit-testing starts
     /// at the top; every entry is rendered bottom-to-top without a scrim.
     message_dialogs: Vec<PendingMessageDialog>,
@@ -13489,7 +13501,45 @@ enum ClassicScoreboardTrigger {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScoreboardPointerTarget {
     Close,
+    Title,
     Dialog,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScoreboardTitleDrag {
+    pointer: GuiPoint,
+    origin: (i32, i32),
+}
+
+/// Presentation-only state owned by the live native `C4ScoreboardDlg`.
+/// The deterministic matrix/refcount remain in `lc-engine`; this cache has
+/// exactly the dialog lifetime and is rebuilt only by native `Update` events.
+#[derive(Clone, Debug, Default)]
+struct ScoreboardDialogRuntime {
+    presentation: Option<lc_frontend::scoreboard::ScoreboardPresentationState>,
+    layout_revision: u64,
+    preferred: Option<lc_frontend::classic_gui::IntRect>,
+    pointer: Option<GuiPoint>,
+    title_drag: Option<ScoreboardTitleDrag>,
+    close_hovered: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RunningDialogStackEntry {
+    Scoreboard,
+    RuntimeClientList,
+    Message(u64),
+    Chat,
+}
+
+impl RunningDialogStackEntry {
+    fn z_order(self) -> i8 {
+        match self {
+            Self::Scoreboard | Self::RuntimeClientList => 0,
+            Self::Message(_) => 1,
+            Self::Chat => 2,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22849,6 +22899,10 @@ impl GameApp {
             scoreboard_dialog: None,
             scoreboard_initial_reconcile_pending: false,
             scoreboard_close_pointer_capture: false,
+            scoreboard_runtime: ScoreboardDialogRuntime::default(),
+            running_dialog_stack: Vec::new(),
+            running_active_dialog: None,
+            next_running_message_stack_id: 1,
             message_dialogs: Vec::new(),
             league_signup_dialog: None,
             cancelled_league_signup_continuation: None,
@@ -24469,7 +24523,7 @@ impl GameApp {
         self.running_pointer_position = None;
         self.ingame_menu_close_pointer_capture = None;
         self.script_menu_close_pointer_capture = None;
-        self.scoreboard_close_pointer_capture = false;
+        self.scoreboard_pointer_left();
         self.menu_title_drag = None;
         for menu in self.ingame_menu.by_player.values_mut() {
             menu.reset_location();
@@ -25183,7 +25237,7 @@ impl GameApp {
         }
         if self.game_option_input_dialog.is_some()
             && self.context_menu.is_none()
-            && (self.running_chat_controller().is_none() || self.running_chat_active())
+            && (self.running_chat_controller().is_none() || self.running_chat_keyboard_active())
         {
             let Some(layout) = self.game_option_input_layout() else {
                 return Ok(());
@@ -26024,11 +26078,72 @@ impl GameApp {
         output_scale: f32,
     ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.sync_scoreboard_before_running_pointer_input();
         self.startup_tooltip.note_pointer_wheel();
         if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
-        if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
+        let context_routed_before_running_dialogs = self.mode == AppMode::Running
+            && self.context_menu.is_some()
+            && !self.running_dialog_stack.is_empty();
+        if context_routed_before_running_dialogs {
+            let outcome = self.context_menu.as_mut().map(|menu| {
+                let point = menu.pointer_position();
+                menu.handle_pointer_down(point, ContextMenuPointerButton::Other)
+            });
+            if let Some(outcome) = outcome {
+                let captured = outcome.captured && !outcome.pass_through;
+                self.process_context_menu_outcome(outcome)?;
+                if captured {
+                    self.occlude_running_dialog_pointer_hovers();
+                    return Ok(());
+                }
+            }
+        }
+        if self.mode == AppMode::Running {
+            let shared_target = self
+                .running_pointer_position
+                .map(|point| self.top_scoreboard_message_pointer_target(point, false))
+                .transpose()?
+                .flatten();
+            match shared_target {
+                Some(RunningDialogStackEntry::RuntimeClientList) => {
+                    let native_delta = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                        MouseScrollDelta::PixelDelta(position) => {
+                            (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                        }
+                    };
+                    let geometry = self.runtime_client_list_input_geometry();
+                    let point = self.running_pointer_position;
+                    let changed = geometry
+                        .zip(point)
+                        .and_then(|((preferred, line_height), point)| {
+                            self.runtime_client_list.as_mut().map(|dialog| {
+                                dialog.handle_wheel(point, native_delta, preferred, line_height)
+                            })
+                        })
+                        .unwrap_or(false);
+                    if changed {
+                        self.mark_menu_dirty();
+                    }
+                    self.suspend_ingame_pointer_for_gui();
+                    self.cancel_ingame_mouse_gestures();
+                    return Ok(());
+                }
+                Some(
+                    RunningDialogStackEntry::Scoreboard
+                    | RunningDialogStackEntry::Message(_)
+                    | RunningDialogStackEntry::Chat,
+                ) => {
+                    self.suspend_ingame_pointer_for_gui();
+                    self.cancel_ingame_mouse_gestures();
+                    return Ok(());
+                }
+                None if self.running_shared_gui_has_keyboard_focus() => return Ok(()),
+                None => {}
+            }
+        } else if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
             return Ok(());
         }
         if self.league_signup_dialog.is_some() {
@@ -26056,7 +26171,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.external_irc_dialog_visible {
+        if self.external_irc_dialog_visible && !context_routed_before_running_dialogs {
             if let Some(menu) = self.context_menu.as_mut() {
                 let point = menu.pointer_position();
                 let outcome = menu.handle_pointer_down(point, ContextMenuPointerButton::Other);
@@ -26164,16 +26279,20 @@ impl GameApp {
             self.mark_menu_dirty();
             return Ok(());
         }
-        if let Some(menu) = self.context_menu.as_mut() {
-            let point = menu.pointer_position();
-            let outcome = menu.handle_pointer_down(point, ContextMenuPointerButton::Other);
-            let captured = outcome.captured && !outcome.pass_through;
-            self.process_context_menu_outcome(outcome)?;
-            if captured {
-                return Ok(());
+        if !context_routed_before_running_dialogs {
+            if let Some(menu) = self.context_menu.as_mut() {
+                let point = menu.pointer_position();
+                let outcome = menu.handle_pointer_down(point, ContextMenuPointerButton::Other);
+                let captured = outcome.captured && !outcome.pass_through;
+                self.process_context_menu_outcome(outcome)?;
+                if captured {
+                    return Ok(());
+                }
             }
         }
-        if self.game_option_input_dialog.is_some() {
+        if self.game_option_input_dialog.is_some()
+            && self.game_option_input_owns_running_pointer_event()
+        {
             return Ok(());
         }
         if self.startup_dialog_fade_active() {
@@ -26223,6 +26342,16 @@ impl GameApp {
         }
         let runtime_client_list_can_receive_wheel = self.runtime_client_list.is_some()
             && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over);
+        if self.mode == AppMode::Running
+            && self.runtime_client_list.is_some()
+            && self.game_over_dialog.is_none()
+            && self.scoreboard_is_above_runtime_client_list()
+            && self.scoreboard_contains_running_pointer()?
+        {
+            self.suspend_ingame_pointer_for_gui();
+            self.cancel_ingame_mouse_gestures();
+            return Ok(());
+        }
         if self.mode == AppMode::Running && runtime_client_list_can_receive_wheel {
             let native_delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
@@ -26267,6 +26396,11 @@ impl GameApp {
             return Ok(());
         }
         if self.mode == AppMode::Running {
+            if self.scoreboard_contains_running_pointer()? {
+                self.suspend_ingame_pointer_for_gui();
+                self.cancel_ingame_mouse_gestures();
+                return Ok(());
+            }
             let native_delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
                 MouseScrollDelta::PixelDelta(position) => {
@@ -27001,7 +27135,7 @@ impl GameApp {
         if self.game_option_input_dialog.is_none() {
             return Ok(false);
         }
-        if self.running_chat_controller().is_some() && !self.running_chat_active() {
+        if self.running_chat_controller().is_some() && !self.running_chat_keyboard_active() {
             return Ok(false);
         }
         if self.context_menu.is_some() {
@@ -28503,8 +28637,7 @@ impl GameApp {
     }
 
     fn local_player_key_binding_in_scope(&self, key: VirtualKeyCode) -> bool {
-        self.game_over_dialog.is_none()
-            && self.running_chat_controller().is_none()
+        !self.runtime_gui_has_keyboard_focus()
             && self.snapshot.hud.local_players.contains(&self.local_owner)
             && self.engine.player(self.local_owner).is_some()
             && self
@@ -28519,12 +28652,18 @@ impl GameApp {
             rows: scoreboard.row_count(),
             columns: scoreboard.column_count(),
             show_count: scoreboard.show_count(),
+            layout_revision: self.engine.scoreboard_layout_revision(),
+            title_widget_present: scoreboard
+                .cell(0, 0)
+                .and_then(lc_engine::ScoreboardCell::text)
+                .is_some_and(|title| !title.is_empty()),
+            scoreboard: scoreboard.clone(),
         }
     }
 
     fn scoreboard_boundary_for_request(
         trigger: ClassicScoreboardTrigger,
-        request: ScoreboardPresentationRequest,
+        request: &ScoreboardPresentationRequest,
     ) -> ClassicParityBoundary {
         ClassicParityBoundary::Scoreboard {
             trigger,
@@ -28535,7 +28674,7 @@ impl GameApp {
     }
 
     fn scoreboard_boundary(&self, trigger: ClassicScoreboardTrigger) -> ClassicParityBoundary {
-        Self::scoreboard_boundary_for_request(trigger, self.scoreboard_request())
+        Self::scoreboard_boundary_for_request(trigger, &self.scoreboard_request())
     }
 
     fn scoreboard_presentation_error(
@@ -28549,88 +28688,622 @@ impl GameApp {
         ))
     }
 
-    /// Resolve every live `FontRegular` custom image and validate layout
-    /// before the viewport renderer may touch the output surface. The owned
-    /// image map survives until the later GUI draw pass.
-    fn preflight_visible_scoreboard(&self) -> Result<Option<HashMap<String, ImageData>>> {
-        if self.scoreboard_dialog.is_none() {
-            return Ok(None);
+    /// Reproduce the synchronous C4ScoreboardDlg constructor Update from the
+    /// request-time matrix. SetCell may already have invalidated it, but C++
+    /// retains these bounds for input until Draw performs the lazy Update.
+    fn materialize_scoreboard_presentation(&mut self) -> Result<()> {
+        if self.scoreboard_runtime.presentation.is_some() {
+            return Ok(());
         }
-        let trigger = ClassicScoreboardTrigger::ScriptVisibility;
-        let font_images = resolve_scoreboard_font_images(
-            &self.engine,
-            &self.snapshot.hud.scoreboard,
-            self.script_text_spec_resources(),
-        )
-        .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
-        let resources = self
-            .assets
-            .scoreboard_resources(&font_images)
-            .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
-        let preferred = scoreboard_preferred_rect(
-            self.graphics
-                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
-        );
-        lc_frontend::scoreboard::scoreboard_layout(
-            preferred,
-            &self.snapshot.hud.scoreboard,
-            &resources,
-        )
-        .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
-        Ok(Some(font_images))
-    }
-
-    fn scoreboard_pointer_target(
-        &self,
-        point: GuiPoint,
-    ) -> Result<Option<ScoreboardPointerTarget>, EngineError> {
-        if self.scoreboard_dialog.is_none() {
-            return Ok(None);
-        }
-        let trigger = ClassicScoreboardTrigger::UserToggle;
-        let fail = |error: anyhow::Error| {
-            tracing::error!(%error, "classic scoreboard pointer layout failed");
-            classic_parity_engine_error(report_classic_parity_boundary(
-                self.scoreboard_boundary(trigger),
-            ))
+        let Some(request) = self.scoreboard_dialog.clone() else {
+            return Ok(());
         };
         let font_images = resolve_scoreboard_font_images(
             &self.engine,
-            &self.snapshot.hud.scoreboard,
+            &request.scoreboard,
             self.script_text_spec_resources(),
-        )
-        .map_err(fail)?;
-        let resources = self
-            .assets
-            .scoreboard_resources(&font_images)
-            .map_err(fail)?;
-        let preferred = scoreboard_preferred_rect(
+        )?;
+        let assets = Arc::clone(&self.assets);
+        let resources = assets.scoreboard_resources(&font_images)?;
+        let live_preferred = scoreboard_preferred_rect(
             self.graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
         );
-        let layout = lc_frontend::scoreboard::scoreboard_layout(
-            preferred,
+        let preferred = self.scoreboard_runtime.preferred.unwrap_or(live_preferred);
+        self.scoreboard_runtime.presentation = Some(
+            lc_frontend::scoreboard::ScoreboardPresentationState::new(
+                preferred,
+                &request.scoreboard,
+                &resources,
+            )?,
+        );
+        self.scoreboard_runtime.layout_revision = request.layout_revision;
+        Ok(())
+    }
+
+    /// Validate the live draw matrix, then apply C4ScoreboardDlg::Draw's lazy
+    /// Update exactly once for the current SetCell generation. A preferred-
+    /// viewport change alone never moves the retained dialog.
+    fn preflight_visible_scoreboard_unchecked(
+        &mut self,
+    ) -> Result<Option<HashMap<String, ImageData>>> {
+        if self.scoreboard_dialog.is_none() {
+            return Ok(None);
+        }
+        self.materialize_scoreboard_presentation()?;
+        let font_images = resolve_scoreboard_font_images(
+            &self.engine,
             &self.snapshot.hud.scoreboard,
-            &resources,
-        )
-        .map_err(fail)?;
+            self.script_text_spec_resources(),
+        )?;
+        let assets = Arc::clone(&self.assets);
+        let resources = assets.scoreboard_resources(&font_images)?;
+        let scoreboard = self.snapshot.hud.scoreboard.clone();
+        let layout_revision = self.engine.scoreboard_layout_revision();
+        if self.scoreboard_runtime.layout_revision != layout_revision {
+            let preferred = scoreboard_preferred_rect(
+                self.graphics
+                    .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+            );
+            self.scoreboard_runtime.preferred = Some(preferred);
+            self.scoreboard_runtime
+                .presentation
+                .as_mut()
+                .expect("constructor presentation was materialized")
+                .update(preferred, &scoreboard, &resources)?;
+            self.scoreboard_runtime.layout_revision = layout_revision;
+        }
+        if self
+            .scoreboard_runtime
+            .presentation
+            .as_ref()
+            .is_none_or(|presentation| presentation.layout().close_button.is_none())
+        {
+            self.scoreboard_close_pointer_capture = false;
+            self.scoreboard_runtime.close_hovered = false;
+        }
+        Ok(Some(font_images))
+    }
+
+    /// Resolve every live `FontRegular` custom image and validate layout
+    /// before the viewport renderer may touch the output surface. The owned
+    /// image map survives until the later GUI draw pass.
+    fn preflight_visible_scoreboard(&mut self) -> Result<Option<HashMap<String, ImageData>>> {
+        let trigger = ClassicScoreboardTrigger::ScriptVisibility;
+        let result = self.preflight_visible_scoreboard_unchecked();
+        result.map_err(|error| self.scoreboard_presentation_error(trigger, error))
+    }
+
+    fn scoreboard_pointer_target_cached(&self, point: GuiPoint) -> Option<ScoreboardPointerTarget> {
+        let layout = self.scoreboard_runtime.presentation.as_ref()?.layout();
         let contains = |rect: lc_frontend::classic_gui::IntRect| {
             point.x >= rect.x as f32
                 && point.x < (rect.x + rect.w) as f32
                 && point.y >= rect.y as f32
                 && point.y < (rect.y + rect.h) as f32
         };
-        Ok(if layout.close_button.is_some_and(contains) {
+        if layout.close_button.is_some_and(contains) {
             Some(ScoreboardPointerTarget::Close)
+        } else if layout.caption.is_some_and(contains) {
+            Some(ScoreboardPointerTarget::Title)
         } else if contains(layout.bounds) {
             Some(ScoreboardPointerTarget::Dialog)
         } else {
             None
-        })
+        }
+    }
+
+    fn scoreboard_tooltip_target_cached(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        match self.scoreboard_pointer_target_cached(point)? {
+            ScoreboardPointerTarget::Close => Some(StartupTooltip::resource("IDS_MNU_CLOSE")),
+            ScoreboardPointerTarget::Title => self
+                .scoreboard_runtime
+                .presentation
+                .as_ref()
+                .and_then(|presentation| presentation.title())
+                .map(StartupTooltip::text),
+            ScoreboardPointerTarget::Dialog => None,
+        }
+    }
+
+    fn scoreboard_pointer_target(
+        &mut self,
+        point: GuiPoint,
+    ) -> Result<Option<ScoreboardPointerTarget>, EngineError> {
+        // Synchronous script callbacks mutate the engine between ticks. Pull
+        // their model/lifecycle effects before routing input, but preserve an
+        // existing dialog's geometry until Draw performs C4ScoreboardDlg's
+        // lazy Update. This also prevents pairing a new engine revision with
+        // the previous snapshot's matrix.
+        self.sync_scoreboard_presentation();
+        if self.scoreboard_dialog.is_none() {
+            return Ok(None);
+        }
+        if self.scoreboard_runtime.presentation.is_none() {
+            let trigger = ClassicScoreboardTrigger::UserToggle;
+            if let Err(error) = self.materialize_scoreboard_presentation() {
+                tracing::error!(%error, "classic scoreboard pointer layout failed");
+                return Err(classic_parity_engine_error(report_classic_parity_boundary(
+                    self.scoreboard_boundary(trigger),
+                )));
+            }
+        }
+        Ok(self.scoreboard_pointer_target_cached(point))
+    }
+
+    fn set_running_active_dialog(&mut self, entry: Option<RunningDialogStackEntry>) {
+        self.running_active_dialog = entry;
+        if let Some(chat) = self.running_chat.as_mut() {
+            chat.active = entry == Some(RunningDialogStackEntry::Chat);
+        }
+    }
+
+    fn show_running_dialog(&mut self, entry: RunningDialogStackEntry) {
+        if self.mode != AppMode::Running {
+            return;
+        }
+        self.running_dialog_stack
+            .retain(|current| *current != entry);
+        let z_order = entry.z_order();
+        let previous_len = self.running_dialog_stack.len();
+        let index = self
+            .running_dialog_stack
+            .iter()
+            .position(|current| current.z_order() > z_order)
+            .unwrap_or(self.running_dialog_stack.len());
+        self.running_dialog_stack.insert(index, entry);
+        if index == previous_len {
+            self.set_running_active_dialog(Some(entry));
+        }
+    }
+
+    fn remove_running_dialog(&mut self, entry: RunningDialogStackEntry) {
+        let was_active = self.running_active_dialog == Some(entry);
+        if was_active {
+            // Screen::CloseDialog releases the one screen-global drag element
+            // and aborts its context menu before selecting the next active
+            // dialog. The element may belong to a lower dialog that began a
+            // drag before this one was shown asynchronously.
+            self.release_all_running_pointer_elements();
+        }
+        self.running_dialog_stack
+            .retain(|current| *current != entry);
+        if was_active {
+            let next = self.running_dialog_stack.last().copied();
+            self.set_running_active_dialog(next);
+        }
+    }
+
+    fn activate_running_dialog(&mut self, entry: RunningDialogStackEntry) {
+        if !self
+            .running_dialog_stack
+            .iter()
+            .any(|current| *current == entry)
+        {
+            return;
+        }
+        if entry.z_order() != 0 {
+            self.set_running_active_dialog(Some(entry));
+            return;
+        }
+        // Screen::ActivateDialog uses MakeLastElement for default-z dialogs,
+        // even when this carries them past specially ordered input/chat
+        // dialogs. Subsequent ShowDialog insertion observes that exact order.
+        self.running_dialog_stack
+            .retain(|current| *current != entry);
+        self.running_dialog_stack.push(entry);
+        self.set_running_active_dialog(Some(entry));
+    }
+
+    fn running_dialog_is_above(
+        &self,
+        candidate: RunningDialogStackEntry,
+        other: RunningDialogStackEntry,
+    ) -> bool {
+        let candidate = self
+            .running_dialog_stack
+            .iter()
+            .rposition(|entry| *entry == candidate);
+        let other = self
+            .running_dialog_stack
+            .iter()
+            .rposition(|entry| *entry == other);
+        matches!((candidate, other), (Some(candidate), Some(other)) if candidate > other)
+    }
+
+    fn scoreboard_is_above_runtime_client_list(&self) -> bool {
+        self.running_dialog_is_above(
+            RunningDialogStackEntry::Scoreboard,
+            RunningDialogStackEntry::RuntimeClientList,
+        )
+    }
+
+    fn scoreboard_is_above_all_messages(&self) -> bool {
+        let scoreboard = self
+            .running_dialog_stack
+            .iter()
+            .rposition(|entry| *entry == RunningDialogStackEntry::Scoreboard);
+        let top_message = self
+            .running_dialog_stack
+            .iter()
+            .rposition(|entry| matches!(entry, RunningDialogStackEntry::Message(_)));
+        matches!((scoreboard, top_message), (Some(scoreboard), Some(message)) if scoreboard > message)
+    }
+
+    fn running_message_index(&self, stack_id: u64) -> Option<usize> {
+        self.message_dialogs
+            .iter()
+            .position(|dialog| dialog.running_stack_id == stack_id)
+    }
+
+    fn running_shared_gui_has_keyboard_focus(&self) -> bool {
+        if self.mode != AppMode::Running {
+            return true;
+        }
+        match self.running_dialog_stack.last().copied() {
+            Some(RunningDialogStackEntry::Chat) => true,
+            Some(RunningDialogStackEntry::Message(stack_id)) => self
+                .running_message_index(stack_id)
+                .and_then(|index| self.message_dialogs.get(index))
+                .is_some_and(|dialog| {
+                    matches!(
+                        dialog.continuation,
+                        MessageDialogContinuation::LeagueVote { .. }
+                            | MessageDialogContinuation::LeagueSurrender
+                    )
+                }),
+            Some(
+                RunningDialogStackEntry::Scoreboard | RunningDialogStackEntry::RuntimeClientList,
+            )
+            | None => false,
+        }
+    }
+
+    fn message_dialog_owns_gamepad_input(&self) -> bool {
+        if self.message_dialogs.is_empty() {
+            return false;
+        }
+        if self.mode != AppMode::Running {
+            return true;
+        }
+        matches!(
+            self.running_active_dialog,
+            Some(RunningDialogStackEntry::Message(_))
+        ) && self.running_shared_gui_has_keyboard_focus()
+    }
+
+    fn runtime_gui_has_keyboard_focus(&self) -> bool {
+        self.mode == AppMode::Running
+            && (self.running_shared_gui_has_keyboard_focus() || self.game_over_dialog_is_active())
+    }
+
+    fn release_all_running_pointer_elements(&mut self) {
+        self.scoreboard_pointer_left();
+        self.release_message_dialog_pointer_elements();
+        if let Some(dialog) = self.runtime_client_list.as_mut() {
+            dialog.pointer_left();
+        }
+        let game_over_sounds = self
+            .game_over_dialog
+            .as_mut()
+            .map(|dialog| {
+                dialog.pointer_left();
+                dialog.take_sound_events()
+            })
+            .unwrap_or_default();
+        self.play_game_over_sound_events(game_over_sounds);
+        self.release_game_option_input_pointer_elements();
+        self.close_context_menu_silently();
+    }
+
+    fn occlude_running_dialog_pointer_hovers(&mut self) {
+        self.scoreboard_pointer_occluded();
+        for index in 0..self.message_dialogs.len() {
+            self.message_dialog_pointer_left_at(index);
+        }
+        if let Some(dialog) = self.runtime_client_list.as_mut() {
+            dialog.pointer_occluded();
+        }
+        let sounds = self
+            .running_chat_controller_mut()
+            .map(|controller| {
+                controller.pointer_left();
+                controller.take_sound_events()
+            })
+            .unwrap_or_default();
+        self.play_input_dialog_sound_events(sounds);
+    }
+
+    fn runtime_client_list_contains_point(&self, point: GuiPoint) -> bool {
+        let Some((preferred, line_height)) = self.runtime_client_list_input_geometry() else {
+            return false;
+        };
+        let Some(dialog) = self.runtime_client_list.as_ref() else {
+            return false;
+        };
+        let bounds = dialog.layout(preferred, line_height).bounds;
+        point.x >= bounds.x as f32
+            && point.x < (bounds.x + bounds.w) as f32
+            && point.y >= bounds.y as f32
+            && point.y < (bounds.y + bounds.h) as f32
+    }
+
+    fn top_scoreboard_message_pointer_target_cached(
+        &self,
+        point: GuiPoint,
+    ) -> Option<RunningDialogStackEntry> {
+        self.running_dialog_stack
+            .iter()
+            .rev()
+            .find_map(|entry| match *entry {
+                RunningDialogStackEntry::Scoreboard
+                    if self.scoreboard_pointer_target_cached(point).is_some() =>
+                {
+                    Some(*entry)
+                }
+                RunningDialogStackEntry::Message(stack_id) => {
+                    let index = self.running_message_index(stack_id)?;
+                    self.message_dialog_layout_at(index)
+                        .is_some_and(|layout| Self::point_in_message_dialog_bounds(point, &layout))
+                        .then_some(*entry)
+                }
+                RunningDialogStackEntry::RuntimeClientList
+                    if self.runtime_client_list_contains_point(point) =>
+                {
+                    Some(*entry)
+                }
+                RunningDialogStackEntry::Chat
+                    if self.game_option_input_layout().is_some_and(|layout| {
+                        Self::point_in_input_dialog_bounds(point, &layout)
+                    }) =>
+                {
+                    Some(*entry)
+                }
+                RunningDialogStackEntry::Scoreboard
+                | RunningDialogStackEntry::RuntimeClientList
+                | RunningDialogStackEntry::Chat => None,
+            })
+    }
+
+    fn top_scoreboard_message_pointer_target(
+        &mut self,
+        point: GuiPoint,
+        include_capture: bool,
+    ) -> Result<Option<RunningDialogStackEntry>, EngineError> {
+        // CMouse owns one screen-global pDragElement. While it exists, the
+        // active shared dialog remains a hit outside its bounds regardless of
+        // which dialog owns the captured element.
+        let global_drag_open = include_capture
+            && (self.scoreboard_close_pointer_capture
+                || self.scoreboard_runtime.title_drag.is_some()
+                || self.message_dialog_pointer_capture_index.is_some()
+                || self
+                    .runtime_client_list
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.has_pointer_capture())
+                || self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left));
+        let stack = self.running_dialog_stack.clone();
+        for entry in stack.into_iter().rev() {
+            match entry {
+                RunningDialogStackEntry::Scoreboard => {
+                    let captured = global_drag_open && self.running_active_dialog == Some(entry);
+                    if captured || self.scoreboard_pointer_target(point)?.is_some() {
+                        return Ok(Some(entry));
+                    }
+                }
+                RunningDialogStackEntry::Message(stack_id) => {
+                    let Some(index) = self.running_message_index(stack_id) else {
+                        continue;
+                    };
+                    let captured = global_drag_open && self.running_active_dialog == Some(entry);
+                    let hit = self
+                        .message_dialog_layout_at(index)
+                        .is_some_and(|layout| Self::point_in_message_dialog_bounds(point, &layout));
+                    if captured || hit {
+                        return Ok(Some(entry));
+                    }
+                }
+                RunningDialogStackEntry::RuntimeClientList => {
+                    let captured = global_drag_open && self.running_active_dialog == Some(entry);
+                    if captured || self.runtime_client_list_contains_point(point) {
+                        return Ok(Some(entry));
+                    }
+                }
+                RunningDialogStackEntry::Chat => {
+                    let captured = global_drag_open && self.running_active_dialog == Some(entry);
+                    let hit = self
+                        .game_option_input_layout()
+                        .is_some_and(|layout| Self::point_in_input_dialog_bounds(point, &layout));
+                    if captured || hit {
+                        return Ok(Some(entry));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn scoreboard_pointer_occluded(&mut self) {
+        if self.scoreboard_close_pointer_capture && self.scoreboard_runtime.close_hovered {
+            self.play_ui_sound("ArrowHit");
+        }
+        self.scoreboard_runtime.close_hovered = false;
+    }
+
+    fn handle_scoreboard_message_pointer_move(
+        &mut self,
+        point: GuiPoint,
+    ) -> Result<bool, EngineError> {
+        let target = self.top_scoreboard_message_pointer_target(point, true)?;
+        match target {
+            Some(RunningDialogStackEntry::Scoreboard) => {
+                if self.primary_pointer_left_down {
+                    self.activate_running_dialog(RunningDialogStackEntry::Scoreboard);
+                }
+                for index in 0..self.message_dialogs.len() {
+                    self.message_dialog_pointer_left_at(index);
+                }
+                self.handle_scoreboard_pointer_move(point)
+            }
+            Some(RunningDialogStackEntry::Message(stack_id)) => {
+                let Some(index) = self.running_message_index(stack_id) else {
+                    return Ok(false);
+                };
+                self.scoreboard_pointer_occluded();
+                if self.primary_pointer_left_down {
+                    self.message_dialog_active_index = Some(index);
+                    self.activate_running_dialog(RunningDialogStackEntry::Message(stack_id));
+                }
+                for other in 0..self.message_dialogs.len() {
+                    if other != index {
+                        self.message_dialog_pointer_left_at(other);
+                    }
+                }
+                Ok(self.handle_message_dialog_pointer_move_at(index, point))
+            }
+            Some(RunningDialogStackEntry::RuntimeClientList) => {
+                self.scoreboard_pointer_occluded();
+                if self.primary_pointer_left_down {
+                    self.activate_running_dialog(RunningDialogStackEntry::RuntimeClientList);
+                }
+                for index in 0..self.message_dialogs.len() {
+                    self.message_dialog_pointer_left_at(index);
+                }
+                Ok(self.handle_runtime_client_list_pointer_move(point))
+            }
+            Some(RunningDialogStackEntry::Chat) => {
+                unreachable!("chat routing is handled by its z=+2 controller")
+            }
+            None => {
+                self.scoreboard_pointer_occluded();
+                for index in 0..self.message_dialogs.len() {
+                    self.message_dialog_pointer_left_at(index);
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    fn handle_scoreboard_message_pointer_button(
+        &mut self,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        let Some(point) = self.running_pointer_position else {
+            return Ok(false);
+        };
+        let target = self.top_scoreboard_message_pointer_target(point, false)?;
+        if self.mode == AppMode::Running && state == ElementState::Released {
+            self.release_occluded_running_pointer_captures(target);
+        }
+        match target {
+            Some(RunningDialogStackEntry::Scoreboard) => {
+                if state == ElementState::Pressed {
+                    if let Some(captured) = self.captured_message_dialog_index() {
+                        self.cancel_message_dialog_pointer_capture_at(captured);
+                    }
+                }
+                self.handle_scoreboard_pointer_button(state)
+            }
+            Some(RunningDialogStackEntry::Message(stack_id)) => {
+                let Some(index) = self.running_message_index(stack_id) else {
+                    return Ok(false);
+                };
+                if state == ElementState::Pressed {
+                    self.scoreboard_pointer_left();
+                    self.message_dialog_active_index = Some(index);
+                    self.activate_running_dialog(RunningDialogStackEntry::Message(stack_id));
+                } else if self.scoreboard_close_pointer_capture
+                    || self.scoreboard_runtime.title_drag.is_some()
+                {
+                    self.scoreboard_pointer_left();
+                }
+                self.handle_message_dialog_pointer_button_at(index, state)
+            }
+            Some(RunningDialogStackEntry::RuntimeClientList) => {
+                if state == ElementState::Pressed {
+                    self.scoreboard_pointer_left();
+                    if let Some(captured) = self.captured_message_dialog_index() {
+                        self.cancel_message_dialog_pointer_capture_at(captured);
+                    }
+                    self.activate_running_dialog(RunningDialogStackEntry::RuntimeClientList);
+                }
+                self.handle_runtime_client_list_pointer_button(state)
+            }
+            Some(RunningDialogStackEntry::Chat) => {
+                unreachable!("chat routing is handled by its z=+2 controller")
+            }
+            None => {
+                let scoreboard_consumed = self.handle_scoreboard_pointer_button(state)?;
+                if scoreboard_consumed {
+                    return Ok(true);
+                }
+                self.handle_message_dialog_pointer_button(state)
+            }
+        }
+    }
+
+    fn release_occluded_running_pointer_captures(
+        &mut self,
+        target: Option<RunningDialogStackEntry>,
+    ) {
+        // CMouse clears pDragElement before reverse dialog hit-testing.
+        // Cancel captures owned by any now-occluded dialog, then deliver
+        // LeftUp only to the actual release-time stack hit.
+        if target != Some(RunningDialogStackEntry::Scoreboard) {
+            if self.scoreboard_close_pointer_capture || self.scoreboard_runtime.title_drag.is_some()
+            {
+                self.scoreboard_pointer_left();
+            } else {
+                self.scoreboard_pointer_occluded();
+            }
+        }
+        if let Some(index) = self.captured_message_dialog_index() {
+            let captured = self
+                .message_dialogs
+                .get(index)
+                .map(|dialog| RunningDialogStackEntry::Message(dialog.running_stack_id));
+            if captured != target {
+                self.cancel_message_dialog_pointer_capture_at(index);
+            }
+        }
+        if target != Some(RunningDialogStackEntry::RuntimeClientList)
+            && self
+                .runtime_client_list
+                .as_ref()
+                .is_some_and(|dialog| dialog.has_pointer_capture())
+        {
+            if let Some(dialog) = self.runtime_client_list.as_mut() {
+                dialog.pointer_left();
+            }
+        }
     }
 
     fn scoreboard_opening_blocked_by_game_over(&self) -> bool {
         self.game_over_dialog.is_some() || (self.snapshot.game_over && !self.game_over_handled)
+    }
+
+    fn open_scoreboard_dialog(&mut self, request: ScoreboardPresentationRequest) {
+        let preferred = scoreboard_preferred_rect(
+            self.graphics
+                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+        );
+        let layout_revision = request.layout_revision;
+        self.scoreboard_dialog = Some(request);
+        self.scoreboard_close_pointer_capture = false;
+        self.scoreboard_runtime = ScoreboardDialogRuntime {
+            layout_revision,
+            preferred: Some(preferred),
+            ..ScoreboardDialogRuntime::default()
+        };
+        self.show_running_dialog(RunningDialogStackEntry::Scoreboard);
+    }
+
+    fn close_scoreboard_dialog(&mut self) -> bool {
+        let closed = self.scoreboard_dialog.take().is_some();
+        self.scoreboard_pointer_left();
+        self.remove_running_dialog(RunningDialogStackEntry::Scoreboard);
+        self.scoreboard_runtime = ScoreboardDialogRuntime::default();
+        closed
     }
 
     /// Arms runtime request capture only after scenario initialization or save
@@ -28641,8 +29314,7 @@ impl GameApp {
     fn arm_initial_scoreboard_reconcile(&mut self) {
         self.engine.begin_scoreboard_presentation_capture();
         self.snapshot.hud.scoreboard_presentations.clear();
-        self.scoreboard_dialog = None;
-        self.scoreboard_close_pointer_capture = false;
+        self.close_scoreboard_dialog();
         self.scoreboard_initial_reconcile_pending = true;
     }
 
@@ -28652,10 +29324,11 @@ impl GameApp {
         }
         self.scoreboard_initial_reconcile_pending = false;
         let request = self.scoreboard_request();
-        self.scoreboard_dialog = (request.should_be_shown()
-            && !self.scoreboard_opening_blocked_by_game_over())
-        .then_some(request);
-        self.scoreboard_close_pointer_capture = false;
+        if request.should_be_shown() && !self.scoreboard_opening_blocked_by_game_over() {
+            self.open_scoreboard_dialog(request);
+        } else {
+            self.close_scoreboard_dialog();
+        }
     }
 
     fn apply_scoreboard_presentation_requests(&mut self) {
@@ -28665,12 +29338,10 @@ impl GameApp {
                 if self.scoreboard_dialog.is_none()
                     && !self.scoreboard_opening_blocked_by_game_over()
                 {
-                    self.scoreboard_dialog = Some(request);
-                    self.scoreboard_close_pointer_capture = false;
+                    self.open_scoreboard_dialog(request);
                 }
             } else if self.scoreboard_dialog.is_some() {
-                self.scoreboard_dialog = None;
-                self.scoreboard_close_pointer_capture = false;
+                self.close_scoreboard_dialog();
             }
         }
     }
@@ -28687,25 +29358,26 @@ impl GameApp {
         self.apply_scoreboard_presentation_requests();
     }
 
+    fn sync_scoreboard_before_running_pointer_input(&mut self) {
+        if self.mode == AppMode::Running {
+            self.reconcile_initial_scoreboard();
+            self.sync_scoreboard_presentation();
+        }
+    }
+
     /// C4 registers ScoreboardToggle at PRIO_Base. Active dialog focus and a
     /// configured local-player control therefore get first refusal, while a
     /// context menu's unrecognized Tab falls through to the lower priorities
     /// (C4KeyboardInput.h:343-353; C4GuiMenu.cpp:302-325).
     fn scoreboard_tab_has_higher_priority_route(&self) -> bool {
-        // Ordinary MessageDialog, InputDialog, and definition selectors inherit
-        // Dialog::IsExclusiveDialog() == false. In C4's shared running Screen
-        // they therefore do not establish KEYSCOPE_Gui; only the game-over
-        // dialog among the currently ported layers owns the bare Tab route.
-        self.context_menu.is_none()
-            && (self.game_over_dialog.is_some() || self.runtime_client_list.is_some())
+        self.context_menu.is_none() && self.runtime_gui_has_keyboard_focus()
     }
 
     fn local_tab_player_control_in_scope(&self) -> bool {
         // Configured player controls are PRIO_PlrControl. They are outside the
         // input scope while an exclusive dialog has keyboard focus. Ordinary
         // dialogs remain non-exclusive on the shared running Screen.
-        self.game_over_dialog.is_none()
-            && self.running_chat_controller().is_none()
+        !self.runtime_gui_has_keyboard_focus()
             && self.snapshot.hud.local_players.contains(&self.local_owner)
             && self.engine.player(self.local_owner).is_some()
             && ControlBindingId::ALL
@@ -28838,17 +29510,15 @@ impl GameApp {
         if state == ElementState::Released {
             return Ok(true);
         }
-        if self.scoreboard_dialog.take().is_some() {
+        if self.close_scoreboard_dialog() {
             // User toggle closes an existing dialog regardless of a now-
             // negative refcount (C4Scoreboard.cpp:243-255).
-            self.scoreboard_close_pointer_capture = false;
             return Ok(true);
         }
         if !self.snapshot.hud.scoreboard.can_be_shown() {
             return Ok(true);
         }
-        self.scoreboard_dialog = Some(self.scoreboard_request());
-        self.scoreboard_close_pointer_capture = false;
+        self.open_scoreboard_dialog(self.scoreboard_request());
         Ok(true)
     }
 
@@ -29357,6 +30027,7 @@ impl GameApp {
         }
         if close_info_only {
             self.runtime_client_list = None;
+            self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
             self.runtime_client_list_above_game_over = false;
         }
         true
@@ -29364,6 +30035,7 @@ impl GameApp {
 
     fn toggle_runtime_client_list(&mut self) -> Result<(), EngineError> {
         if self.runtime_client_list.take().is_some() {
+            self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
             self.startup_tooltip.pointer_left();
             if self.context_menu_lobby_option.is_some() {
                 self.close_context_menu_silently();
@@ -29399,6 +30071,7 @@ impl GameApp {
             .with_option_caption_reference(option_caption_reference)
             .with_info_caption(self.runtime_resource_string("IDS_NET_CLIENT_INFO")),
         );
+        self.show_running_dialog(RunningDialogStackEntry::RuntimeClientList);
         Ok(())
     }
 
@@ -29417,6 +30090,7 @@ impl GameApp {
             RuntimeClientListAction::Close => {
                 self.startup_tooltip.pointer_left();
                 self.runtime_client_list = None;
+                self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
                 self.runtime_client_list_above_game_over = false;
                 return Ok(());
             }
@@ -29432,6 +30106,7 @@ impl GameApp {
                     .is_some_and(|dialog| dialog.is_info_only())
                 {
                     self.runtime_client_list = None;
+                    self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
                     self.runtime_client_list_above_game_over = false;
                 }
                 return Ok(());
@@ -29557,6 +30232,17 @@ impl GameApp {
             && self.game_over_dialog.is_some()
     }
 
+    fn runtime_client_list_strong_gamepad_callback_is_active(&self) -> bool {
+        self.mode == AppMode::Running
+            && self
+                .runtime_client_list
+                .as_ref()
+                .is_some_and(|dialog| !dialog.is_info_only())
+            && self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
+            && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
+            && self.context_menu.is_none()
+    }
+
     fn game_over_dialog_is_mouse_active(&self) -> bool {
         self.mode == AppMode::Running
             && self.game_over_dialog.is_some()
@@ -29601,6 +30287,34 @@ impl GameApp {
             .runtime_client_list
             .as_ref()
             .is_some_and(|dialog| dialog.is_info_only());
+        if self.mode == AppMode::Running {
+            let active = self.running_active_dialog
+                == Some(RunningDialogStackEntry::RuntimeClientList)
+                && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
+                && self.context_menu.is_none();
+            if !active {
+                return Ok(false);
+            }
+            if !info_only {
+                let modifiers = self.keyboard_modifiers
+                    & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                if key != VirtualKeyCode::Escape || !modifiers.is_empty() {
+                    return Ok(false);
+                }
+                if state == ElementState::Released {
+                    return Ok(false);
+                }
+                self.runtime_client_list_consumed_keys.insert(key);
+                let action = self
+                    .runtime_client_list
+                    .as_mut()
+                    .and_then(|dialog| dialog.handle_escape(true));
+                if let Some(action) = action {
+                    self.handle_runtime_client_list_action(action)?;
+                }
+                return Ok(true);
+            }
+        }
         if info_only {
             if state != ElementState::Pressed {
                 return Ok(true);
@@ -29755,6 +30469,9 @@ impl GameApp {
             })
             .unwrap_or_default();
         if consumed || info_only {
+            if state == ElementState::Pressed {
+                self.activate_running_dialog(RunningDialogStackEntry::RuntimeClientList);
+            }
             self.suspend_ingame_pointer_for_gui();
             self.cancel_ingame_mouse_gestures();
         }
@@ -30041,7 +30758,7 @@ impl GameApp {
             }
             return Err(error);
         }
-        if self.running_chat_active() && self.context_menu.is_none() {
+        if self.running_chat_keyboard_active() && self.context_menu.is_none() {
             let modifiers = self.keyboard_modifiers
                 & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
             let replacement_mode = match modifiers {
@@ -30127,7 +30844,7 @@ impl GameApp {
             state == ElementState::Released && self.definition_selector_consumed_keys.remove(&key);
         let input_dialog_release_latched =
             state == ElementState::Released && self.game_option_input_consumed_keys.remove(&key);
-        if self.running_chat_active() {
+        if self.running_chat_keyboard_active() {
             let context_menu_was_open = self.context_menu.is_some();
             let modifiers = self.keyboard_modifiers
                 & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
@@ -33261,9 +33978,7 @@ impl GameApp {
     /// FilmView/FreeView scope. Nonexclusive overlays (scoreboard, client
     /// list, and player-owned menus) deliberately do not participate.
     fn viewport_cycle_scope_available(&self) -> bool {
-        self.running_chat_controller().is_none()
-            && !self.top_message_dialog_is_exclusive_vote()
-            && self.game_over_dialog.is_none()
+        !self.runtime_gui_has_keyboard_focus()
             && !(self.primary_physical_viewport_is_no_owner() && self.ingame_menu.is_some())
     }
 
@@ -36331,6 +37046,7 @@ impl GameApp {
             active: true,
             kind: RunningChatKind::Ordinary,
         });
+        self.show_running_dialog(RunningDialogStackEntry::Chat);
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::RunningChat,
             controller: InputDialogController::new_chat(label, &text).with_chat_tooltip(tooltip),
@@ -36366,6 +37082,7 @@ impl GameApp {
             active: true,
             kind: RunningChatKind::MessageBoardInput(input),
         });
+        self.show_running_dialog(RunningDialogStackEntry::Chat);
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::RunningChat,
             controller,
@@ -36432,6 +37149,12 @@ impl GameApp {
 
     fn running_chat_active(&self) -> bool {
         self.running_chat.as_ref().is_some_and(|chat| chat.active)
+            && (self.mode != AppMode::Running
+                || self.running_active_dialog == Some(RunningDialogStackEntry::Chat))
+    }
+
+    fn running_chat_keyboard_active(&self) -> bool {
+        self.running_chat_active() && self.running_shared_gui_has_keyboard_focus()
     }
 
     fn set_running_chat_active(&mut self, active: bool) {
@@ -36440,6 +37163,7 @@ impl GameApp {
         }
         if active {
             self.message_dialog_active_index = None;
+            self.activate_running_dialog(RunningDialogStackEntry::Chat);
         }
     }
 
@@ -36464,6 +37188,7 @@ impl GameApp {
             self.release_game_option_input_pointer_elements();
         }
         self.running_chat = None;
+        self.remove_running_dialog(RunningDialogStackEntry::Chat);
         if self
             .game_option_input_dialog
             .as_ref()
@@ -36474,7 +37199,12 @@ impl GameApp {
         self.close_context_menu_silently();
         self.game_option_input_last_click = None;
         if was_active {
-            self.message_dialog_active_index = self.message_dialogs.len().checked_sub(1);
+            self.message_dialog_active_index = match self.running_active_dialog {
+                Some(RunningDialogStackEntry::Message(stack_id)) => {
+                    self.running_message_index(stack_id)
+                }
+                _ => None,
+            };
         }
         // Releases swallowed by the modal cannot clear the raw repeat/Tab
         // trackers. Forget them with the synchronized gameplay controls.
@@ -36540,7 +37270,9 @@ impl GameApp {
     }
 
     fn complete_running_chat_nick(&mut self) {
-        let Some(controller) = self.running_chat_controller() else {
+        let Some(controller) = self.game_option_input_dialog.as_ref().and_then(|dialog| {
+            (dialog.purpose == PendingInputDialogPurpose::RunningChat).then_some(&dialog.controller)
+        }) else {
             return;
         };
         let text = controller.text().to_string();
@@ -36750,7 +37482,10 @@ impl GameApp {
         }
         if !self.running_chat_active() {
             let chat_open = self.handle_running_chat_open_key(key, state);
-            return Ok(chat_open || self.running_chat.is_some());
+            return Ok(chat_open);
+        }
+        if !self.running_shared_gui_has_keyboard_focus() {
+            return Ok(false);
         }
         if self.keyboard_modifiers.alt() {
             return Ok(false);
@@ -38062,7 +38797,7 @@ impl GameApp {
                 cluster_events.push(events.next().expect("peeked cluster event").event);
             }
 
-            let game_over_open = self.mode == AppMode::Running && self.game_over_dialog.is_some();
+            let game_over_active = self.game_over_dialog_is_active();
             let screen_gamepad_open = gamepad_gui_control && gamepad == 0;
             let options_input_scope =
                 self.mode == AppMode::Menu && self.startup_view == StartupView::Options;
@@ -38077,7 +38812,7 @@ impl GameApp {
                             == lc_frontend::startup_options_controls::ControlDevice::Gamepad
                 )
             });
-            let mut owner = if self.running_chat_active() {
+            let mut owner = if self.running_chat_keyboard_active() {
                 if self.context_menu.is_some() {
                     ClusterOwner::ContextPending
                 } else {
@@ -38085,7 +38820,7 @@ impl GameApp {
                     // above default-z runtime dialogs for every gamepad.
                     ClusterOwner::Chat
                 }
-            } else if game_over_open && !eligible_gamepad_gui {
+            } else if game_over_active && !eligible_gamepad_gui {
                 // The exclusive evaluation screen owns the whole GUI stack,
                 // but C++ did not register a receiver for this source.
                 ClusterOwner::Suppressed
@@ -38105,14 +38840,15 @@ impl GameApp {
                 }
             } else if self.context_menu.is_some() {
                 ClusterOwner::ContextPending
-            } else if !self.message_dialogs.is_empty() {
+            } else if self.message_dialog_owns_gamepad_input() {
                 ClusterOwner::Message
             } else if self.league_signup_dialog.is_some() {
                 ClusterOwner::LeagueSignup
-            } else if self
-                .runtime_client_list
-                .as_ref()
-                .is_some_and(|dialog| dialog.is_info_only())
+            } else if self.runtime_client_list_keyboard_active()
+                && self
+                    .runtime_client_list
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.is_info_only())
             {
                 ClusterOwner::RuntimeClientInfo
             } else if self.external_irc_dialog_visible {
@@ -38136,13 +38872,7 @@ impl GameApp {
                 } else {
                     ClusterOwner::Suppressed
                 }
-            } else if self.runtime_client_list_owns_game_over() {
-                // The newer equal-z client-list dialog makes evaluation's
-                // DlgKeyCB/ControlKeyCB callbacks inactive. Its remaining
-                // gamepad focus controls are outside the current model, but
-                // input must never leak into the obscured game-over dialog.
-                ClusterOwner::Suppressed
-            } else if game_over_open {
+            } else if game_over_active {
                 ClusterOwner::GameOver
             } else if self.startup_dialog_fade_active()
                 && self.startup_player_properties_dialog.is_none()
@@ -38257,15 +38987,18 @@ impl GameApp {
                                     // gone, so this raw cluster cannot fall
                                     // through to evaluation focus traversal.
                                     ClusterOwner::Suppressed
-                                } else if self.running_chat_active() {
+                                } else if self.running_chat_keyboard_active() {
                                     // An open context makes its parent dialog
                                     // keyboard-inactive, including the chat's
                                     // raw gamepad forwarding callback.
                                     ClusterOwner::Suppressed
-                                } else if self
-                                    .runtime_client_list
-                                    .as_ref()
-                                    .is_some_and(|dialog| dialog.is_info_only())
+                                } else if self.message_dialog_owns_gamepad_input() {
+                                    ClusterOwner::Message
+                                } else if self.runtime_client_list_keyboard_active()
+                                    && self
+                                        .runtime_client_list
+                                        .as_ref()
+                                        .is_some_and(|dialog| dialog.is_info_only())
                                 {
                                     ClusterOwner::RuntimeClientInfo
                                 } else if self.game_option_input_dialog.is_some() {
@@ -38278,11 +39011,7 @@ impl GameApp {
                                     } else {
                                         ClusterOwner::Suppressed
                                     }
-                                } else if self.runtime_client_list_owns_game_over() {
-                                    ClusterOwner::Suppressed
-                                } else if self.mode == AppMode::Running
-                                    && self.game_over_dialog.is_some()
-                                {
+                                } else if self.game_over_dialog_is_active() {
                                     ClusterOwner::GameOver
                                 } else if self.startup_dialog_fade_active()
                                     && self.startup_player_properties_dialog.is_none()
@@ -38399,6 +39128,26 @@ impl GameApp {
                                 && self.startup_view == StartupView::Options
                                 && self.startup_options_advanced_dialog.is_none();
                             match event {
+                                GamepadEvent::GuiButton {
+                                    class: GuiButtonClass::High,
+                                    state: ElementState::Pressed,
+                                    ..
+                                } if self
+                                    .runtime_client_list_strong_gamepad_callback_is_active() =>
+                                {
+                                    let action = self
+                                        .runtime_client_list
+                                        .as_mut()
+                                        .and_then(|dialog| dialog.handle_escape(true));
+                                    if let Some(action) = action {
+                                        self.handle_runtime_client_list_action(action)?;
+                                    }
+                                    // C4Network2ClientListDlg's stronger
+                                    // AnyHighButton callback owns the complete
+                                    // raw cluster, including Cancel/MenuToggle
+                                    // aliases emitted after the physical key.
+                                    owner = ClusterOwner::Suppressed;
+                                }
                                 GamepadEvent::Direction {
                                     button: ControlButton::Left | ControlButton::Right,
                                     ..
@@ -38827,7 +39576,7 @@ impl GameApp {
         self.note_classic_host_lobby_non_pointer_input();
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.context_menu_pointer_dismissed_lobby_option = None;
-        if self.message_dialogs.is_empty()
+        if self.runtime_client_list_keyboard_active()
             && self
                 .runtime_client_list
                 .as_ref()
@@ -38898,7 +39647,7 @@ impl GameApp {
                         .unwrap_or_default();
                     self.process_options_dialog_actions(actions)?;
                 } else if matches!(self.mode, AppMode::Running)
-                    && (self.game_over_dialog.is_none()
+                    && (!self.game_over_dialog_is_active()
                         || self.running_chat_controller().is_some())
                 {
                     self.dispatch_control_event(ControlEvent::ClearPressed)?;
@@ -39010,7 +39759,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if !self.message_dialogs.is_empty() && !self.running_chat_active() {
+        if self.message_dialog_owns_gamepad_input() {
             return Ok(());
         }
         if self
@@ -39029,7 +39778,7 @@ impl GameApp {
         if self.definition_selector.is_some() {
             return Ok(());
         }
-        if self.game_over_dialog.is_some() && self.running_chat_controller().is_none() {
+        if self.game_over_dialog_is_active() && self.running_chat_controller().is_none() {
             return Ok(());
         }
         if !matches!(self.mode, AppMode::Running) {
@@ -39065,7 +39814,7 @@ impl GameApp {
         button: ControlButton,
         state: ElementState,
     ) -> Result<(), EngineError> {
-        if !self.message_dialogs.is_empty() && !self.running_chat_active() {
+        if self.message_dialog_owns_gamepad_input() {
             return self.handle_message_dialog_gamepad_event(GamepadEvent::Direction {
                 slot,
                 button,
@@ -39138,7 +39887,7 @@ impl GameApp {
                 state,
             });
         }
-        if self.game_over_dialog.is_some() && self.running_chat_controller().is_none() {
+        if self.game_over_dialog_is_active() && self.running_chat_controller().is_none() {
             return Ok(());
         }
         if self.classic_host_lobby_active() {
@@ -39384,7 +40133,7 @@ impl GameApp {
         action: GamepadActionType,
         state: ElementState,
     ) -> Result<(), EngineError> {
-        if !self.message_dialogs.is_empty() && !self.running_chat_active() {
+        if self.message_dialog_owns_gamepad_input() {
             return self.handle_message_dialog_gamepad_event(GamepadEvent::Action {
                 slot,
                 action,
@@ -39434,7 +40183,7 @@ impl GameApp {
         if self.definition_selector.is_some() {
             return Ok(());
         }
-        if self.game_over_dialog.is_some() {
+        if self.game_over_dialog_is_active() {
             return Ok(());
         }
         if self.classic_host_lobby_active() {
@@ -39673,6 +40422,7 @@ impl GameApp {
 
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.sync_scoreboard_before_running_pointer_input();
         self.mark_menu_dirty();
         // C4GraphicsSystem::MouseMove ceil-quantizes the scale-adjusted
         // coordinates once before either C4GUI::CMouse or viewport routing.
@@ -39705,6 +40455,9 @@ impl GameApp {
         }
         if self.mode == AppMode::Running {
             self.ingame_gui_pointer = Some(point);
+            // CMouse invokes DoDragging before top-down dialog routing, even
+            // when another shared dialog now owns the pointer location.
+            self.update_scoreboard_title_drag(point);
             if self.update_menu_title_drag(point) {
                 self.suspend_ingame_pointer_for_gui();
                 return Ok(());
@@ -39739,13 +40492,23 @@ impl GameApp {
                 .unwrap_or_default();
             self.finish_game_option_input_dialog_actions(actions)?;
         }
+        let context_routed_before_running_dialogs = self.mode == AppMode::Running
+            && self.context_menu.is_some()
+            && !self.running_dialog_stack.is_empty();
+        if context_routed_before_running_dialogs && self.handle_context_menu_pointer_move(point)? {
+            self.occlude_running_dialog_pointer_hovers();
+            self.suspend_ingame_pointer_for_gui();
+            return Ok(());
+        }
         if self.running_chat_controller().is_some() {
             // CMouse retains the original button as pDragElement, but classic
             // buttons have no DoDragging implementation. Screen hit-testing
             // still runs top-down; while capture exists, the active dialog is
             // also a match outside its bounds and therefore blocks lower hits.
             let lower_capture = self.captured_message_dialog_index();
-            if self.handle_context_menu_pointer_move(point)? {
+            if !context_routed_before_running_dialogs
+                && self.handle_context_menu_pointer_move(point)?
+            {
                 if let Some(controller) = self.running_chat_controller_mut() {
                     controller.pointer_left();
                 }
@@ -39755,12 +40518,23 @@ impl GameApp {
                 self.suspend_ingame_pointer_for_gui();
                 return Ok(());
             }
+            let shared_target = self.top_scoreboard_message_pointer_target(point, true)?;
+            if shared_target.is_some() && shared_target != Some(RunningDialogStackEntry::Chat) {
+                if let Some(controller) = self.running_chat_controller_mut() {
+                    controller.pointer_left();
+                }
+                self.finish_game_option_input_dialog_actions(Vec::new())?;
+                self.handle_scoreboard_message_pointer_move(point)?;
+                self.suspend_ingame_pointer_for_gui();
+                return Ok(());
+            }
             let layout = self.game_option_input_layout();
             let chat_hit = layout.as_ref().is_some_and(|layout| {
                 Self::point_in_input_dialog_bounds(point, layout)
             }) || self.game_option_input_pointer_capture
                 == Some(ContextMenuPointerButton::Left)
                 || (self.running_chat_active() && lower_capture.is_some());
+            let mut shared_pointer_consumed = chat_hit;
             self.game_option_input_pointer_position = Some(point);
             if chat_hit {
                 if self.primary_pointer_left_down {
@@ -39793,6 +40567,7 @@ impl GameApp {
                         Self::point_in_message_dialog_bounds(point, &layout)
                     }) || (lower_capture.is_some() && active_message == Some(*index))
                 });
+                shared_pointer_consumed = message_target.is_some();
                 if self.primary_pointer_left_down {
                     let target_is_hit = message_target.is_some_and(|index| {
                         self.message_dialog_layout_at(index).is_some_and(|layout| {
@@ -39813,18 +40588,23 @@ impl GameApp {
                     self.handle_message_dialog_pointer_move_at(target, point);
                 }
             }
-            self.suspend_ingame_pointer_for_gui();
-            return Ok(());
+            if shared_pointer_consumed || self.running_shared_gui_has_keyboard_focus() {
+                self.suspend_ingame_pointer_for_gui();
+                return Ok(());
+            }
         }
         if self.running_chat_controller().is_none()
-            && self.handle_message_dialog_pointer_move(point)
+            && !self.message_dialogs.is_empty()
+            && self.handle_scoreboard_message_pointer_move(point)?
         {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
         if self.league_signup_dialog.is_some() && self.context_menu.is_some() {
             self.league_signup_pointer_position = Some(point);
-            if self.handle_context_menu_pointer_move(point)? {
+            if !context_routed_before_running_dialogs
+                && self.handle_context_menu_pointer_move(point)?
+            {
                 self.league_signup_pointer_left(false);
                 self.suspend_ingame_pointer_for_gui();
                 return Ok(());
@@ -39835,7 +40615,9 @@ impl GameApp {
             return Ok(());
         }
         if self.external_irc_dialog_visible {
-            if self.handle_context_menu_pointer_move(point)? {
+            if !context_routed_before_running_dialogs
+                && self.handle_context_menu_pointer_move(point)?
+            {
                 self.suspend_ingame_pointer_for_gui();
                 return Ok(());
             }
@@ -39908,7 +40690,7 @@ impl GameApp {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        if self.handle_context_menu_pointer_move(point)? {
+        if !context_routed_before_running_dialogs && self.handle_context_menu_pointer_move(point)? {
             if let Some(dialog) = self.game_option_input_dialog.as_mut() {
                 dialog.controller.pointer_left();
                 let sounds = dialog.controller.take_sound_events();
@@ -39917,7 +40699,9 @@ impl GameApp {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        if self.game_option_input_dialog.is_some() {
+        if self.game_option_input_dialog.is_some()
+            && self.game_option_input_owns_running_pointer_event()
+        {
             self.game_option_input_pointer_position = Some(point);
             let layout = self.game_option_input_layout();
             let fonts = self.assets.clonk_fonts.clone();
@@ -39949,6 +40733,13 @@ impl GameApp {
             dialog.handle_pointer_move(point.x, point.y, surface.width(), surface.height());
             let sounds = dialog.take_sound_events();
             self.play_game_over_sound_events(sounds);
+            self.suspend_ingame_pointer_for_gui();
+            return Ok(());
+        }
+        if !runtime_client_list_above_game_over
+            && self.scoreboard_is_above_runtime_client_list()
+            && self.handle_scoreboard_pointer_move(point)?
+        {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
@@ -40076,9 +40867,7 @@ impl GameApp {
                 }
             }
             AppMode::Running => {
-                if self.scoreboard_close_pointer_capture
-                    || self.scoreboard_pointer_target(point)?.is_some()
-                {
+                if self.handle_scoreboard_pointer_move(point)? {
                     self.suspend_ingame_pointer_for_gui();
                     return Ok(());
                 }
@@ -40236,7 +41025,7 @@ impl GameApp {
         {
             return false;
         }
-        if self.scoreboard_pointer_target(gui_point).ok().flatten().is_some()
+        if self.scoreboard_pointer_target_cached(gui_point).is_some()
             || self.ingame_menu_pointer_target(gui_point).is_some()
             || self
                 .ingame_viewport_region(scroll.owner, scroll.screen)
@@ -42155,34 +42944,58 @@ impl GameApp {
         if button_state == ElementState::Pressed {
             self.scoreboard_close_pointer_capture = false;
         }
-        if button_state == ElementState::Released
-            && std::mem::take(&mut self.scoreboard_close_pointer_capture)
-        {
-            let target = self
-                .running_pointer_position
-                .map(|point| self.scoreboard_pointer_target(point))
-                .transpose()?
-                .flatten();
-            if target == Some(ScoreboardPointerTarget::Close)
-                && self.scoreboard_dialog.take().is_some()
-            {
-                self.play_ui_sound("Click");
-            }
-            // CMouse clears pDragElement before release hit-testing. A release
-            // back over this dialog remains consumed; one outside falls
-            // through to the next shared dialog or the game world.
-            if target.is_some() {
-                self.cancel_ingame_mouse_gestures();
-            }
-            return Ok(target.is_some());
-        }
-
         let Some(point) = self.running_pointer_position else {
             return Ok(false);
         };
         let target = self.scoreboard_pointer_target(point)?;
-        if button_state == ElementState::Pressed && target == Some(ScoreboardPointerTarget::Close) {
-            self.scoreboard_close_pointer_capture = true;
+        if button_state == ElementState::Released {
+            let close_captured = std::mem::take(&mut self.scoreboard_close_pointer_capture);
+            let title_dragged = self.scoreboard_runtime.title_drag.take().is_some();
+            if close_captured {
+                if target == Some(ScoreboardPointerTarget::Close) {
+                    self.play_ui_sound("Click");
+                    self.close_scoreboard_dialog();
+                } else if self.scoreboard_runtime.close_hovered {
+                    // A release can cross the button edge without an
+                    // intermediate cursor event. Native MouseLeave calls
+                    // SetUp(false) and emits the second ArrowHit here.
+                    self.play_ui_sound("ArrowHit");
+                    self.scoreboard_runtime.close_hovered = false;
+                }
+            }
+            // CMouse clears pDragElement before release hit-testing. A release
+            // back over this dialog remains consumed; one outside falls
+            // through to the next shared dialog or the game world.
+            let consumed = target.is_some();
+            if consumed || close_captured || title_dragged {
+                self.cancel_ingame_mouse_gestures();
+            }
+            return Ok(consumed);
+        }
+
+        if target.is_some() {
+            self.activate_running_dialog(RunningDialogStackEntry::Scoreboard);
+        }
+        match target {
+            Some(ScoreboardPointerTarget::Close) => {
+                self.scoreboard_close_pointer_capture = true;
+                self.scoreboard_runtime.close_hovered = true;
+                self.play_ui_sound("ArrowHit");
+            }
+            Some(ScoreboardPointerTarget::Title) => {
+                if let Some(layout) = self
+                    .scoreboard_runtime
+                    .presentation
+                    .as_ref()
+                    .map(|presentation| presentation.layout())
+                {
+                    self.scoreboard_runtime.title_drag = Some(ScoreboardTitleDrag {
+                        pointer: point,
+                        origin: (layout.bounds.x, layout.bounds.y),
+                    });
+                }
+            }
+            Some(ScoreboardPointerTarget::Dialog) | None => {}
         }
         if target.is_some() {
             self.cancel_ingame_mouse_gestures();
@@ -42190,8 +43003,105 @@ impl GameApp {
         Ok(target.is_some())
     }
 
+    fn update_scoreboard_title_drag(&mut self, point: GuiPoint) -> bool {
+        let Some(drag) = self.scoreboard_runtime.title_drag else {
+            return false;
+        };
+        let Some(presentation) = self.scoreboard_runtime.presentation.as_mut() else {
+            self.scoreboard_runtime.title_drag = None;
+            return false;
+        };
+        let target_x = drag
+            .origin
+            .0
+            .saturating_add((point.x - drag.pointer.x).round() as i32);
+        let target_y = drag
+            .origin
+            .1
+            .saturating_add((point.y - drag.pointer.y).round() as i32);
+        let bounds = presentation.layout().bounds;
+        presentation.layout_mut().translate(
+            target_x.saturating_sub(bounds.x),
+            target_y.saturating_sub(bounds.y),
+        );
+        true
+    }
+
+    fn handle_scoreboard_pointer_move(&mut self, point: GuiPoint) -> Result<bool, EngineError> {
+        if self.scoreboard_dialog.is_none() {
+            return Ok(false);
+        }
+        self.scoreboard_runtime.pointer = Some(point);
+        let dragging = self.update_scoreboard_title_drag(point);
+        let target = self.scoreboard_pointer_target(point)?;
+        let close_hovered = target == Some(ScoreboardPointerTarget::Close);
+        if self.scoreboard_close_pointer_capture
+            && self.scoreboard_runtime.close_hovered != close_hovered
+        {
+            // MouseLeave calls SetUp(false), and re-entry calls SetDown().
+            self.play_ui_sound("ArrowHit");
+        }
+        self.scoreboard_runtime.close_hovered = close_hovered;
+        Ok(dragging || self.scoreboard_close_pointer_capture || target.is_some())
+    }
+
+    fn scoreboard_pointer_left(&mut self) {
+        if self.scoreboard_close_pointer_capture && self.scoreboard_runtime.close_hovered {
+            self.play_ui_sound("ArrowHit");
+        }
+        self.scoreboard_close_pointer_capture = false;
+        self.scoreboard_runtime.pointer = None;
+        self.scoreboard_runtime.title_drag = None;
+        self.scoreboard_runtime.close_hovered = false;
+    }
+
+    fn scoreboard_contains_running_pointer(&mut self) -> Result<bool, EngineError> {
+        let Some(point) = self.running_pointer_position else {
+            return Ok(false);
+        };
+        Ok(self.scoreboard_pointer_target(point)?.is_some())
+    }
+
+    fn scoreboard_is_top_scoreboard_message_at_running_pointer(
+        &mut self,
+    ) -> Result<bool, EngineError> {
+        let Some(point) = self.running_pointer_position else {
+            return Ok(false);
+        };
+        Ok(matches!(
+            self.top_scoreboard_message_pointer_target(point, false)?,
+            Some(RunningDialogStackEntry::Scoreboard)
+        ))
+    }
+
+    fn handle_scoreboard_touch(
+        &mut self,
+        position: GuiPoint,
+        phase: TouchPhase,
+    ) -> Result<bool, EngineError> {
+        self.running_pointer_position = Some(position);
+        match phase {
+            TouchPhase::Started => {
+                self.handle_scoreboard_pointer_move(position)?;
+                self.handle_scoreboard_pointer_button(ElementState::Pressed)
+            }
+            TouchPhase::Moved => self.handle_scoreboard_pointer_move(position),
+            TouchPhase::Ended => {
+                self.handle_scoreboard_pointer_move(position)?;
+                self.handle_scoreboard_pointer_button(ElementState::Released)
+            }
+            TouchPhase::Cancelled => {
+                let captured = self.scoreboard_close_pointer_capture
+                    || self.scoreboard_runtime.title_drag.is_some();
+                self.scoreboard_pointer_left();
+                Ok(captured)
+            }
+        }
+    }
+
     fn handle_right_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.sync_scoreboard_before_running_pointer_input();
         self.mark_menu_dirty();
         self.startup_tooltip.note_pointer_button();
         if self.startup_network_transition_blocks_input() {
@@ -42211,7 +43121,36 @@ impl GameApp {
         {
             return Ok(());
         }
-        if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
+        let context_routed_before_running_dialogs = self.mode == AppMode::Running
+            && self.context_menu.is_some()
+            && !self.running_dialog_stack.is_empty();
+        if context_routed_before_running_dialogs
+            && self
+                .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Right)?
+        {
+            self.occlude_running_dialog_pointer_hovers();
+            return Ok(());
+        }
+        if self.mode == AppMode::Running {
+            let shared_target = self
+                .running_pointer_position
+                .map(|point| self.top_scoreboard_message_pointer_target(point, false))
+                .transpose()?
+                .flatten();
+            if matches!(
+                shared_target,
+                Some(
+                    RunningDialogStackEntry::Scoreboard
+                        | RunningDialogStackEntry::Message(_)
+                        | RunningDialogStackEntry::RuntimeClientList
+                )
+            ) || shared_target.is_none() && self.running_shared_gui_has_keyboard_focus()
+            {
+                self.suspend_ingame_pointer_for_gui();
+                self.cancel_ingame_mouse_gestures();
+                return Ok(());
+            }
+        } else if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
             return Ok(());
         }
         if self.league_signup_dialog.is_some() {
@@ -42251,7 +43190,10 @@ impl GameApp {
         if self.definition_selector.is_some() {
             return Ok(());
         }
-        if self.handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Right)? {
+        if !context_routed_before_running_dialogs
+            && self
+                .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Right)?
+        {
             return Ok(());
         }
         if self.external_irc_dialog_visible {
@@ -42269,7 +43211,9 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.game_option_input_dialog.is_some() {
+        if self.game_option_input_dialog.is_some()
+            && self.game_option_input_owns_running_pointer_event()
+        {
             if button_state == ElementState::Pressed {
                 let point = self.game_option_input_pointer_position;
                 let layout = self.game_option_input_layout();
@@ -42304,6 +43248,15 @@ impl GameApp {
             self.runtime_client_list_above_game_over = false;
         }
         if self.game_over_dialog.is_some() {
+            return Ok(());
+        }
+        if !runtime_client_list_above_game_over
+            && self.runtime_client_list.is_some()
+            && self.scoreboard_is_above_runtime_client_list()
+            && self.scoreboard_contains_running_pointer()?
+        {
+            self.suspend_ingame_pointer_for_gui();
+            self.cancel_ingame_mouse_gestures();
             return Ok(());
         }
         if !runtime_client_list_above_game_over {
@@ -42376,12 +43329,7 @@ impl GameApp {
                 if self.ingame_mouse_help || self.ingame_captured_drag_active() {
                     self.handle_ingame_right_mouse_button(button_state)
                 } else {
-                    let scoreboard_hit = self
-                        .running_pointer_position
-                        .map(|point| self.scoreboard_pointer_target(point))
-                        .transpose()?
-                        .flatten()
-                        .is_some();
+                    let scoreboard_hit = self.scoreboard_contains_running_pointer()?;
                     if scoreboard_hit
                         || self.handle_ingame_menu_pointer_button(button_state, true)?
                     {
@@ -42398,16 +43346,10 @@ impl GameApp {
 
     fn handle_other_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.sync_scoreboard_before_running_pointer_input();
         self.mark_menu_dirty();
         self.startup_tooltip.note_pointer_button();
         if self.startup_network_transition_blocks_input() {
-            return Ok(());
-        }
-        if self
-            .runtime_client_list
-            .as_ref()
-            .is_some_and(|dialog| dialog.is_info_only())
-        {
             return Ok(());
         }
         if self.mode == AppMode::Running && self.ingame_captured_drag_active() {
@@ -42442,7 +43384,47 @@ impl GameApp {
         {
             return Ok(());
         }
-        if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
+        let context_routed_before_running_dialogs = self.mode == AppMode::Running
+            && self.context_menu.is_some()
+            && !self.running_dialog_stack.is_empty();
+        if context_routed_before_running_dialogs
+            && self
+                .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Other)?
+        {
+            self.occlude_running_dialog_pointer_hovers();
+            return Ok(());
+        }
+        if self.mode == AppMode::Running {
+            let shared_target = self
+                .running_pointer_position
+                .map(|point| self.top_scoreboard_message_pointer_target(point, false))
+                .transpose()?
+                .flatten();
+            if matches!(
+                shared_target,
+                Some(
+                    RunningDialogStackEntry::Scoreboard
+                        | RunningDialogStackEntry::Message(_)
+                        | RunningDialogStackEntry::RuntimeClientList
+                )
+            ) || shared_target.is_none() && self.running_shared_gui_has_keyboard_focus()
+            {
+                self.suspend_ingame_pointer_for_gui();
+                self.cancel_ingame_mouse_gestures();
+                return Ok(());
+            }
+        }
+        if self
+            .runtime_client_list
+            .as_ref()
+            .is_some_and(|dialog| dialog.is_info_only())
+        {
+            return Ok(());
+        }
+        if self.mode != AppMode::Running
+            && !self.message_dialogs.is_empty()
+            && self.running_chat_controller().is_none()
+        {
             return Ok(());
         }
         if self.league_signup_dialog.is_some() {
@@ -42486,7 +43468,10 @@ impl GameApp {
         if self.definition_selector.is_some() {
             return Ok(());
         }
-        if self.handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Other)? {
+        if !context_routed_before_running_dialogs
+            && self
+                .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Other)?
+        {
             return Ok(());
         }
         if self.external_irc_dialog_visible {
@@ -42511,7 +43496,9 @@ impl GameApp {
             }
             return Ok(());
         }
-        if self.game_option_input_dialog.is_some() {
+        if self.game_option_input_dialog.is_some()
+            && self.game_option_input_owns_running_pointer_event()
+        {
             if button_state == ElementState::Pressed {
                 let point = self.game_option_input_pointer_position;
                 let layout = self.game_option_input_layout();
@@ -42595,13 +43582,44 @@ impl GameApp {
             }
             return Ok(());
         }
+        let runtime_client_list_above_game_over =
+            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
+        if runtime_client_list_above_game_over {
+            if let Some(point) = self.running_pointer_position {
+                if self.handle_runtime_client_list_pointer_move(point) {
+                    self.suspend_ingame_pointer_for_gui();
+                    self.cancel_ingame_mouse_gestures();
+                    return Ok(());
+                }
+            }
+        }
         if self.game_over_dialog.is_some() {
             return Ok(());
+        }
+        if self.runtime_client_list.is_some()
+            && self.scoreboard_is_above_runtime_client_list()
+            && self.scoreboard_contains_running_pointer()?
+        {
+            self.suspend_ingame_pointer_for_gui();
+            self.cancel_ingame_mouse_gestures();
+            return Ok(());
+        }
+        if let Some(point) = self.running_pointer_position {
+            if self.handle_runtime_client_list_pointer_move(point) {
+                self.suspend_ingame_pointer_for_gui();
+                self.cancel_ingame_mouse_gestures();
+                return Ok(());
+            }
         }
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_middle_button(button_state);
         }
         if self.mode == AppMode::Running {
+            if self.scoreboard_contains_running_pointer()? {
+                self.suspend_ingame_pointer_for_gui();
+                self.cancel_ingame_mouse_gestures();
+                return Ok(());
+            }
             if !self.initialize_ingame_mouse_center()? {
                 self.advance_ingame_mouse_caption_lifetime();
                 self.restore_ingame_mouse_region_caption();
@@ -44050,6 +45068,7 @@ impl GameApp {
         left_double_click: bool,
     ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.sync_scoreboard_before_running_pointer_input();
         self.primary_pointer_left_down = button_state == ElementState::Pressed;
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.context_menu_pointer_dismissed_lobby_option = None;
@@ -44085,7 +45104,7 @@ impl GameApp {
             if self
                 .runtime_client_list
                 .as_ref()
-                .is_some_and(|dialog| dialog.has_positional_pointer_drag())
+                .is_some_and(|dialog| dialog.has_pointer_capture())
             {
                 if let Some(dialog) = self.runtime_client_list.as_mut() {
                     dialog.pointer_left();
@@ -44128,16 +45147,48 @@ impl GameApp {
             }
             return Ok(());
         }
+        let context_routed_before_running_dialogs = self.mode == AppMode::Running
+            && self.context_menu.is_some()
+            && !self.running_dialog_stack.is_empty();
+        if context_routed_before_running_dialogs
+            && self
+                .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Left)?
+        {
+            if button_state == ElementState::Released {
+                self.release_occluded_running_pointer_captures(None);
+            }
+            self.occlude_running_dialog_pointer_hovers();
+            return Ok(());
+        }
         if self.running_chat_controller().is_some() {
             let lower_capture = self.captured_message_dialog_index();
-            if self
-                .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Left)?
+            if !context_routed_before_running_dialogs
+                && self.handle_context_menu_pointer_button(
+                    button_state,
+                    ContextMenuPointerButton::Left,
+                )?
             {
                 if button_state == ElementState::Released {
                     if let Some(captured) = lower_capture {
                         self.cancel_message_dialog_pointer_capture_at(captured);
                     }
                 }
+                return Ok(());
+            }
+            let shared_target = self
+                .running_pointer_position
+                .map(|point| self.top_scoreboard_message_pointer_target(point, false))
+                .transpose()?
+                .flatten();
+            if shared_target.is_some() && shared_target != Some(RunningDialogStackEntry::Chat) {
+                if button_state == ElementState::Pressed {
+                    self.set_running_chat_active(false);
+                }
+                if let Some(controller) = self.running_chat_controller_mut() {
+                    controller.pointer_left();
+                }
+                self.finish_game_option_input_dialog_actions(Vec::new())?;
+                self.handle_scoreboard_message_pointer_button(button_state)?;
                 return Ok(());
             }
             let point = self.running_pointer_position;
@@ -44177,12 +45228,13 @@ impl GameApp {
                 }
                 return Ok(());
             }
-            // The z=+2 chat keeps the shared screen exclusive even where no
-            // dialog rectangle was hit, so the game world never sees this.
-            return Ok(());
+            if self.running_shared_gui_has_keyboard_focus() {
+                return Ok(());
+            }
         }
         if self.running_chat_controller().is_none()
-            && self.handle_message_dialog_pointer_button(button_state)?
+            && !self.message_dialogs.is_empty()
+            && self.handle_scoreboard_message_pointer_button(button_state)?
         {
             return Ok(());
         }
@@ -44376,13 +45428,18 @@ impl GameApp {
         if definition_selector_release_latched {
             return Ok(());
         }
-        if self.handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Left)? {
+        if !context_routed_before_running_dialogs
+            && self
+                .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Left)?
+        {
             if input_dialog_release_latched {
                 self.release_game_option_input_pointer_elements();
             }
             return Ok(());
         }
-        if self.game_option_input_dialog.is_some() {
+        if self.game_option_input_dialog.is_some()
+            && self.game_option_input_owns_running_pointer_event()
+        {
             self.handle_game_option_input_primary_pointer(button_state)?;
             return Ok(());
         }
@@ -44423,6 +45480,21 @@ impl GameApp {
             if let Some(action) = action {
                 self.handle_game_over_action(action)?;
             }
+            return Ok(());
+        }
+        if self.mode == AppMode::Running && button_state == ElementState::Released {
+            let target = self
+                .running_pointer_position
+                .map(|point| self.top_scoreboard_message_pointer_target(point, false))
+                .transpose()?
+                .flatten();
+            self.release_occluded_running_pointer_captures(target);
+        }
+        if !runtime_client_list_above_game_over
+            && self.runtime_client_list.is_some()
+            && self.scoreboard_is_above_runtime_client_list()
+            && self.handle_scoreboard_pointer_button(button_state)?
+        {
             return Ok(());
         }
         if !runtime_client_list_above_game_over
@@ -44857,6 +45929,7 @@ impl GameApp {
                 Instant::now(),
             );
         self.guard_classic_global_gui_bootstrap()?;
+        self.sync_scoreboard_before_running_pointer_input();
         match phase {
             TouchPhase::Started => self.primary_pointer_left_down = true,
             TouchPhase::Ended | TouchPhase::Cancelled => {
@@ -44874,6 +45947,17 @@ impl GameApp {
         self.context_menu_pointer_dismissed_lobby_option = None;
         if self.startup_network_transition_blocks_input() {
             return Ok(());
+        }
+        if self.mode == AppMode::Running && phase == TouchPhase::Cancelled {
+            self.release_all_running_pointer_elements();
+        } else if self.mode == AppMode::Running
+            && self.scoreboard_runtime.title_drag.is_some()
+            && matches!(phase, TouchPhase::Moved | TouchPhase::Ended)
+        {
+            self.update_scoreboard_title_drag(position);
+            if phase == TouchPhase::Ended {
+                self.scoreboard_runtime.title_drag = None;
+            }
         }
         if self
             .runtime_client_list
@@ -44976,7 +46060,83 @@ impl GameApp {
         if phase == TouchPhase::Cancelled {
             self.context_menu_pointer_capture = None;
         }
-        if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
+        let context_before_running_messages = self.mode == AppMode::Running
+            && self.context_menu.is_some()
+            && self.running_chat_controller().is_none()
+            && !self.message_dialogs.is_empty();
+        if context_before_running_messages {
+            if phase == TouchPhase::Cancelled {
+                self.close_context_menu_silently();
+            } else {
+                let move_captured = self.handle_context_menu_pointer_move(position)?;
+                let button_captured = match phase {
+                    TouchPhase::Started => self.handle_context_menu_pointer_button(
+                        ElementState::Pressed,
+                        ContextMenuPointerButton::Left,
+                    )?,
+                    TouchPhase::Ended => self.handle_context_menu_pointer_button(
+                        ElementState::Released,
+                        ContextMenuPointerButton::Left,
+                    )?,
+                    TouchPhase::Moved => false,
+                    TouchPhase::Cancelled => unreachable!("handled above"),
+                };
+                if move_captured || button_captured {
+                    if phase == TouchPhase::Ended {
+                        self.release_occluded_running_pointer_captures(None);
+                    }
+                    self.occlude_running_dialog_pointer_hovers();
+                    self.mark_menu_dirty();
+                    return Ok(());
+                }
+            }
+        }
+        let running_message_shared_target = if self.mode == AppMode::Running
+            && self.running_chat_controller().is_none()
+            && !self.message_dialogs.is_empty()
+        {
+            self.top_scoreboard_message_pointer_target(position, true)?
+        } else {
+            None
+        };
+        if self.mode == AppMode::Running
+            && !self.message_dialogs.is_empty()
+            && phase == TouchPhase::Ended
+        {
+            self.release_occluded_running_pointer_captures(running_message_shared_target);
+        }
+        if !self.message_dialogs.is_empty()
+            && self.running_chat_controller().is_none()
+            && matches!(
+                running_message_shared_target,
+                Some(RunningDialogStackEntry::Scoreboard)
+            )
+            && self.handle_scoreboard_touch(position, phase)?
+        {
+            self.mark_menu_dirty();
+            if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                self.pointer_left_unchecked();
+            }
+            return Ok(());
+        }
+        if !self.message_dialogs.is_empty()
+            && self.running_chat_controller().is_none()
+            && matches!(
+                running_message_shared_target,
+                Some(RunningDialogStackEntry::RuntimeClientList)
+            )
+            && self.handle_runtime_client_list_touch(position, phase)?
+        {
+            return Ok(());
+        }
+        if !self.message_dialogs.is_empty()
+            && self.running_chat_controller().is_none()
+            && (matches!(
+                running_message_shared_target,
+                Some(RunningDialogStackEntry::Message(_))
+            ) || running_message_shared_target.is_none()
+                && self.running_shared_gui_has_keyboard_focus())
+        {
             self.mark_menu_dirty();
             let retained_title_drag = self.captured_message_dialog_index().filter(|index| {
                 self.message_dialogs
@@ -45344,23 +46504,25 @@ impl GameApp {
             return Ok(());
         }
         if !runtime_client_list_above_game_over
+            && self.runtime_client_list.is_some()
+            && self.scoreboard_is_above_runtime_client_list()
+            && self.handle_scoreboard_touch(position, phase)?
+        {
+            if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                self.pointer_left_unchecked();
+            }
+            return Ok(());
+        }
+        if !runtime_client_list_above_game_over
             && self.handle_runtime_client_list_touch(position, phase)?
         {
             return Ok(());
         }
         if self.mode == AppMode::Running {
             self.mark_menu_dirty();
-            self.running_pointer_position = Some(position);
-            match phase {
-                TouchPhase::Started => {
-                    let _ = self.handle_scoreboard_pointer_button(ElementState::Pressed)?;
-                }
-                TouchPhase::Ended => {
-                    let _ = self.handle_scoreboard_pointer_button(ElementState::Released)?;
-                    self.pointer_left_unchecked();
-                }
-                TouchPhase::Cancelled => self.pointer_left_unchecked(),
-                TouchPhase::Moved => {}
+            let _ = self.handle_scoreboard_touch(position, phase)?;
+            if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                self.pointer_left_unchecked();
             }
             return Ok(());
         }
@@ -45694,6 +46856,9 @@ impl GameApp {
     fn pointer_left_unchecked(&mut self) {
         self.mark_menu_dirty();
         self.startup_tooltip.pointer_left();
+        if self.mode == AppMode::Running {
+            self.scoreboard_pointer_left();
+        }
         // CursorLeft may be the only lifecycle event after an activation
         // closed the menu on down. An open popup, however, must retain its
         // capture so a later outside up cannot leak to the underlying screen.
@@ -45704,7 +46869,10 @@ impl GameApp {
         for index in 0..self.message_dialogs.len() {
             self.message_dialog_pointer_left_at(index);
         }
-        if messages_open && self.running_chat_controller().is_none() {
+        if self.mode != AppMode::Running
+            && messages_open
+            && self.running_chat_controller().is_none()
+        {
             return;
         }
         if self.league_signup_dialog.is_some() {
@@ -45869,7 +47037,6 @@ impl GameApp {
                 self.ingame_edge_scroll = None;
                 self.ingame_mouse_caption = IngameMouseCaptionState::default();
                 self.running_pointer_position = None;
-                self.scoreboard_close_pointer_capture = false;
             }
             AppMode::Loading => {}
         }
@@ -59616,6 +60783,8 @@ impl GameApp {
         self.active_global_gui_overrides.clear();
         self.running_chat = None;
         self.runtime_client_list = None;
+        self.running_dialog_stack.clear();
+        self.running_active_dialog = None;
         self.runtime_client_list_consumed_keys.clear();
         self.runtime_client_list_above_game_over = false;
         self.message_input_history.clear();
@@ -60360,6 +61529,7 @@ impl GameApp {
         self.network = None;
         self.network_mode = None;
         self.runtime_client_list = None;
+        self.remove_running_dialog(RunningDialogStackEntry::RuntimeClientList);
         self.runtime_client_list_consumed_keys.clear();
         self.runtime_client_list_above_game_over = false;
         self.control_messages.clear_clients();
@@ -63061,8 +64231,7 @@ impl GameApp {
         // interactive. The synchronized object/cursor menu survives
         // C4Player::CloseMenu; save-browser UI is a descendant of the app's
         // fullscreen menu. The scoreboard refcount is untouched.
-        self.scoreboard_dialog = None;
-        self.scoreboard_close_pointer_capture = false;
+        self.close_scoreboard_dialog();
         let fullscreen_menu_open = self.ingame_menu.is_some() || self.save_browser.is_some();
         self.close_ingame_menu();
         self.save_browser = None;
@@ -64212,6 +65381,16 @@ impl GameApp {
         )
     }
 
+    fn game_option_input_owns_running_pointer_event(&self) -> bool {
+        self.running_chat_controller().is_none()
+            || self.running_shared_gui_has_keyboard_focus()
+            || self.game_option_input_pointer_capture.is_some()
+            || self
+                .running_pointer_position
+                .zip(self.game_option_input_layout().as_ref())
+                .is_some_and(|(point, layout)| Self::point_in_input_dialog_bounds(point, layout))
+    }
+
     fn play_input_dialog_sound_events(&mut self, events: Vec<InputDialogSound>) {
         for event in events {
             self.play_ui_sound(match event {
@@ -64723,28 +65902,25 @@ impl GameApp {
                 .and_then(|resources| resources.validate()),
         )?;
         let chat_above = self.running_chat_controller().is_some();
-        if !chat_above {
+        if !chat_above && self.mode != AppMode::Running {
             self.close_context_menu_silently();
         }
         if self.message_dialogs.is_empty() {
-            if !chat_above {
-                // Release the underlying screen's hover/drag capture before
-                // the C4GUI input-z dialog takes over. Chat has z=+2, so a
-                // newly inserted default-z message remains underneath it.
+            if !chat_above && self.mode != AppMode::Running {
                 self.cancel_underlying_interaction();
-                if matches!(self.mode, AppMode::Running) {
-                    self.clear_local_controls()?;
-                    self.cancel_ingame_mouse_gestures();
-                }
             }
         }
-        if !chat_above {
+        if !chat_above && self.mode != AppMode::Running {
             self.pressed_engine_keys.clear();
         }
+        let running_stack_id = self.next_running_message_stack_id;
+        self.next_running_message_stack_id = self.next_running_message_stack_id.wrapping_add(1);
         self.message_dialogs.push(PendingMessageDialog {
+            running_stack_id,
             state,
             continuation,
         });
+        self.show_running_dialog(RunningDialogStackEntry::Message(running_stack_id));
         if !chat_above {
             self.message_dialog_active_index = self.message_dialogs.len().checked_sub(1);
         }
@@ -64817,12 +65993,19 @@ impl GameApp {
         if index >= self.message_dialogs.len() {
             return None;
         }
-        let was_active = self.message_dialog_active_index == Some(index);
+        let removed_entry =
+            RunningDialogStackEntry::Message(self.message_dialogs[index].running_stack_id);
+        let was_active = if self.mode == AppMode::Running {
+            self.running_active_dialog == Some(removed_entry)
+        } else {
+            self.message_dialog_active_index == Some(index)
+        };
         if was_active {
             self.release_message_dialog_pointer_elements();
             self.release_game_option_input_pointer_elements();
         }
         let pending = self.message_dialogs.remove(index);
+        self.remove_running_dialog(removed_entry);
         self.message_dialog_active_index = match self.message_dialog_active_index {
             Some(active) if active > index => Some(active - 1),
             Some(active) if active == index => None,
@@ -64835,7 +66018,19 @@ impl GameApp {
                 captured => captured,
             };
         if was_active {
-            if self.running_chat.is_some() {
+            if self.mode == AppMode::Running {
+                self.message_dialog_active_index = match self.running_active_dialog {
+                    Some(RunningDialogStackEntry::Message(stack_id)) => {
+                        self.running_message_index(stack_id)
+                    }
+                    _ => None,
+                };
+                if self.running_active_dialog == Some(RunningDialogStackEntry::Chat) {
+                    if let Some(chat) = self.running_chat.as_mut() {
+                        chat.active = true;
+                    }
+                }
+            } else if self.running_chat.is_some() {
                 self.set_running_chat_active(true);
             } else {
                 self.message_dialog_active_index = self.message_dialogs.len().checked_sub(1);
@@ -65393,6 +66588,12 @@ impl GameApp {
     }
 
     fn active_message_dialog_index(&self) -> Option<usize> {
+        if self.mode == AppMode::Running {
+            let RunningDialogStackEntry::Message(stack_id) = self.running_active_dialog? else {
+                return None;
+            };
+            return self.running_message_index(stack_id);
+        }
         self.message_dialog_active_index
             .filter(|index| *index < self.message_dialogs.len())
     }
@@ -65488,9 +66689,12 @@ impl GameApp {
         };
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        let top_exclusive = self.top_message_dialog_is_exclusive_vote();
         let chat_already_open = self.running_chat_controller().is_some();
-        let gui_scope = self.mode != AppMode::Running || top_exclusive || chat_already_open;
+        // Screen::HasKeyboardFocus asks whether the actual list-top dialog is
+        // exclusive; keyboard input is then sent to pActiveDlg. Activation of
+        // z+1/z+2 dialogs does not reorder them, so active and list-top can
+        // intentionally differ after a default-z dialog was moved last.
+        let gui_scope = self.running_shared_gui_has_keyboard_focus();
         let chat_open_fallthrough = matches!(self.mode, AppMode::Running)
             && !self.running_chat_active()
             && (matches!(
@@ -65692,6 +66896,8 @@ impl GameApp {
                 });
                 if target_is_hit {
                     self.message_dialog_active_index = Some(target);
+                    let stack_id = self.message_dialogs[target].running_stack_id;
+                    self.activate_running_dialog(RunningDialogStackEntry::Message(stack_id));
                 }
             }
         }
@@ -65800,6 +67006,8 @@ impl GameApp {
             && hit_index == Some(target_index)
         {
             self.message_dialog_active_index = Some(target_index);
+            let stack_id = self.message_dialogs[target_index].running_stack_id;
+            self.activate_running_dialog(RunningDialogStackEntry::Message(stack_id));
         }
         self.handle_message_dialog_pointer_button_at(target_index, state)
     }
@@ -65837,7 +67045,8 @@ impl GameApp {
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         let now = Instant::now();
         for index in 0..=last {
-            let keyboard_active = Some(index) == active_index && self.context_menu.is_none();
+            let keyboard_active =
+                Some(index) == active_index && self.context_menu.is_none();
             let mouse_active = self.mode == AppMode::Running || Some(index) == active_index;
             self.message_dialogs[index].state.render_at(
                 self.graphics.surface_mut(),
@@ -65850,6 +67059,41 @@ impl GameApp {
             if ordered_native && index != last {
                 self.next_pending_native_overlay();
             }
+        }
+        Ok(())
+    }
+
+    fn render_running_message_dialog_layer(
+        &mut self,
+        stack_id: u64,
+        gamma: Option<&lc_graphics::GammaRamp>,
+        now: Instant,
+        ordered_native: bool,
+    ) -> Result<()> {
+        let Some(index) = self
+            .message_dialogs
+            .iter()
+            .position(|dialog| dialog.running_stack_id == stack_id)
+        else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        let resources = assets
+            .message_dialog_resources()
+            .context("classic message-dialog resources are unavailable")?;
+        let keyboard_active = Some(index) == self.active_message_dialog_index()
+            && !self.running_chat_active()
+            && self.context_menu.is_none();
+        self.message_dialogs[index].state.render_at(
+            self.graphics.surface_mut(),
+            resources,
+            keyboard_active,
+            true,
+            gamma,
+            now,
+        )?;
+        if ordered_native {
+            self.next_pending_native_overlay();
         }
         Ok(())
     }
@@ -66068,8 +67312,36 @@ impl GameApp {
         &self,
         point: GuiPoint,
     ) -> Option<StartupTooltip> {
-        if !self.message_dialogs.is_empty() || self.context_menu.is_some() {
+        if self.context_menu.is_some() {
             return None;
+        }
+        let scoreboard_owns_point = |app: &Self| {
+            app.scoreboard_tooltip_target_cached(point).or_else(|| {
+                app.scoreboard_pointer_target_cached(point)
+                    .map(|_| StartupTooltip::text(String::new()))
+            })
+        };
+        if self.mode == AppMode::Running
+            && self.game_over_dialog.is_none()
+            && !self.running_dialog_stack.is_empty()
+        {
+            return match self.top_scoreboard_message_pointer_target_cached(point) {
+                Some(RunningDialogStackEntry::Scoreboard) => {
+                    self.scoreboard_tooltip_target_cached(point)
+                }
+                Some(RunningDialogStackEntry::RuntimeClientList) => {
+                    let dialog = self.runtime_client_list.as_ref()?;
+                    let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
+                    let preferred = scoreboard_preferred_rect(
+                        self.graphics
+                            .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                    );
+                    dialog.tooltip_at(point, preferred, line_height)
+                }
+                Some(RunningDialogStackEntry::Message(_))
+                | Some(RunningDialogStackEntry::Chat)
+                | None => None,
+            };
         }
 
         // The lobby's standalone client-info window is composited after the
@@ -66088,6 +67360,19 @@ impl GameApp {
                 return dialog.tooltip_at(point, preferred, line_height);
             }
         }
+        let scoreboard_above_chat = self.running_chat_controller().is_some()
+            && self.running_dialog_is_above(
+                RunningDialogStackEntry::Scoreboard,
+                RunningDialogStackEntry::Chat,
+            );
+        if scoreboard_above_chat {
+            if let Some(target) = scoreboard_owns_point(self) {
+                return match target {
+                    StartupTooltip::Text(text) if text.is_empty() => None,
+                    target => Some(target),
+                };
+            }
+        }
         if self.external_irc_dialog_visible || self.game_option_input_dialog.is_some() {
             return None;
         }
@@ -66095,13 +67380,28 @@ impl GameApp {
             if self.game_over_dialog.is_some() && !self.runtime_client_list_owns_game_over() {
                 return None;
             }
+            let scoreboard_above_client = self.runtime_client_list.is_none()
+                || self.scoreboard_is_above_runtime_client_list();
+            if scoreboard_above_client {
+                if let Some(target) = scoreboard_owns_point(self) {
+                    return match target {
+                        StartupTooltip::Text(text) if text.is_empty() => None,
+                        target => Some(target),
+                    };
+                }
+            }
             if let Some(dialog) = self.runtime_client_list.as_ref() {
                 let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
                 let preferred = scoreboard_preferred_rect(
                     self.graphics
                         .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
                 );
-                return dialog.tooltip_at(point, preferred, line_height);
+                if let Some(target) = dialog.tooltip_at(point, preferred, line_height) {
+                    return Some(target);
+                }
+            }
+            if !scoreboard_above_client {
+                return self.scoreboard_tooltip_target_cached(point);
             }
         }
         if let Some(controller) = self.definition_selector.as_ref() {
@@ -66157,17 +67457,27 @@ impl GameApp {
             let surface = self.graphics.surface();
             (surface.width() as i32, surface.height() as i32)
         };
-        let Some(index) = (0..self.message_dialogs.len()).rev().find(|index| {
-            let dialog = &self.message_dialogs[*index].state;
-            let layout = dialog.layout(
-                surface_width,
-                surface_height,
-                &resources.fonts.text,
-            );
-            dialog
-                .tooltip_state(Some(tooltip_pointer), &layout)
-                .is_some()
-        }) else {
+        let index = if self.mode == AppMode::Running {
+            match self.top_scoreboard_message_pointer_target_cached(tooltip_pointer) {
+                Some(RunningDialogStackEntry::Message(stack_id)) => {
+                    self.running_message_index(stack_id)
+                }
+                _ => None,
+            }
+        } else {
+            (0..self.message_dialogs.len()).rev().find(|index| {
+                let dialog = &self.message_dialogs[*index].state;
+                let layout = dialog.layout(
+                    surface_width,
+                    surface_height,
+                    &resources.fonts.text,
+                );
+                dialog
+                    .tooltip_state(Some(tooltip_pointer), &layout)
+                    .is_some()
+            })
+        };
+        let Some(index) = index else {
             return Ok(());
         };
         if self.graphics.surface().is_clonk_text_capture_active() {
@@ -66270,6 +67580,62 @@ impl GameApp {
             .expect("checked above")
             .controller
             .render_tooltip(self.graphics.surface_mut(), &resources, mouse_active, gamma)
+    }
+
+    fn render_running_chat_layer(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+        ordered_native: bool,
+    ) -> Result<()> {
+        let Some(controller) = self.game_option_input_dialog.as_ref().and_then(|dialog| {
+            (dialog.purpose == PendingInputDialogPurpose::RunningChat).then_some(&dialog.controller)
+        }) else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        let resources = assets
+            .input_dialog_resources()
+            .context("classic C4GUI::InputDialog resources are unavailable")?;
+        let keyboard_active = self.context_menu.is_none() && self.running_chat_active();
+        let mouse_active = self.context_menu.is_none();
+        controller.render_with_activity(
+            self.graphics.surface_mut(),
+            &resources,
+            keyboard_active,
+            mouse_active,
+            gamma,
+        )?;
+        if ordered_native {
+            self.next_pending_native_overlay();
+        }
+        Ok(())
+    }
+
+    fn render_running_chat_tooltip(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Result<()> {
+        if self.mode == AppMode::Running {
+            let Some(pointer) = self.startup_tooltip.eligible_pointer() else {
+                return Ok(());
+            };
+            if self.top_scoreboard_message_pointer_target_cached(pointer)
+                != Some(RunningDialogStackEntry::Chat)
+            {
+                return Ok(());
+            }
+        }
+        let Some(controller) = self.game_option_input_dialog.as_ref().and_then(|dialog| {
+            (dialog.purpose == PendingInputDialogPurpose::RunningChat).then_some(&dialog.controller)
+        }) else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        let resources = assets
+            .input_dialog_resources()
+            .context("classic C4GUI::InputDialog resources are unavailable")?;
+        let mouse_active = self.context_menu.is_none();
+        controller.render_tooltip(self.graphics.surface_mut(), &resources, mouse_active, gamma)
     }
 
     fn startup_base_context_menu(
@@ -66688,10 +68054,8 @@ impl GameApp {
             self.graphics
                 .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
         );
-        let active = (self.game_over_dialog.is_none()
-            || self.runtime_client_list_above_game_over)
-            && self.message_dialogs.is_empty()
-            && self.context_menu.is_none();
+        let keyboard_active = self.runtime_client_list_draw_active();
+        let mouse_active = self.runtime_client_list_mouse_active();
         if dialog.is_static_info_only() {
             let resources = assets
                 .static_info_dialog_resources()
@@ -66700,23 +68064,160 @@ impl GameApp {
                 self.graphics.surface_mut(),
                 preferred,
                 resources,
-                active,
+                mouse_active,
                 Some(frame_gamma),
             )?;
         } else {
             let resources = assets
                 .runtime_client_list_resources()
                 .expect("runtime client-list resources were preflighted before rendering");
-            dialog.render(
+            dialog.render_with_activity(
                 self.graphics.surface_mut(),
                 preferred,
                 resources,
-                active,
+                keyboard_active,
+                mouse_active,
                 Some(frame_gamma),
             )?;
         }
         if ordered_native {
             self.next_pending_native_overlay();
+        }
+        Ok(())
+    }
+
+    fn runtime_client_list_keyboard_active(&self) -> bool {
+        if self.mode == AppMode::Running {
+            self.runtime_client_list
+                .as_ref()
+                .is_some_and(|dialog| dialog.is_info_only())
+                && self.running_active_dialog
+                    == Some(RunningDialogStackEntry::RuntimeClientList)
+                && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
+                && self.context_menu.is_none()
+        } else {
+            (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
+                && self.message_dialogs.is_empty()
+                && self.context_menu.is_none()
+        }
+    }
+
+    fn runtime_client_list_draw_active(&self) -> bool {
+        if self.mode == AppMode::Running {
+            self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
+                && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
+                && self.context_menu.is_none()
+        } else {
+            (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
+                && self.message_dialogs.is_empty()
+                && self.context_menu.is_none()
+        }
+    }
+
+    fn runtime_client_list_mouse_active(&self) -> bool {
+        if self.mode == AppMode::Running {
+            (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
+                && self.context_menu.is_none()
+        } else {
+            self.runtime_client_list_keyboard_active()
+        }
+    }
+
+    fn render_scoreboard_layer(
+        &mut self,
+        font_images: &HashMap<String, ImageData>,
+        frame_gamma: &lc_graphics::GammaRamp,
+        ordered_native: bool,
+    ) -> Result<()> {
+        let trigger = ClassicScoreboardTrigger::ScriptVisibility;
+        let assets = Arc::clone(&self.assets);
+        let resources = assets
+            .scoreboard_resources(font_images)
+            .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
+        let scoreboard = self.snapshot.hud.scoreboard.clone();
+        // Shared C4GUI dialogs remain mouse-active even when another dialog
+        // owns keyboard focus. Reverse stack routing clears this flag only
+        // when a higher hit actually occludes the scoreboard close button.
+        let close_hovered = self.scoreboard_runtime.close_hovered;
+        let close_pressed = self.scoreboard_close_pointer_capture && close_hovered;
+        let (layout, render_state) = {
+            let presentation = self
+                .scoreboard_runtime
+                .presentation
+                .as_mut()
+                .expect("scoreboard preflight materializes retained presentation state");
+            let render_state = presentation.render_state_at(
+                Instant::now(),
+                &resources,
+                close_hovered,
+                close_pressed,
+            );
+            (presentation.layout().clone(), render_state)
+        };
+        if ordered_native {
+            lc_frontend::scoreboard::render_scoreboard_body_with_layout(
+                self.graphics.surface_mut(),
+                &scoreboard,
+                &resources,
+                &layout,
+                Some(frame_gamma),
+            )
+            .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
+            self.next_pending_native_overlay();
+            lc_frontend::scoreboard::render_scoreboard_caption_with_layout(
+                self.graphics.surface_mut(),
+                &scoreboard,
+                &resources,
+                &layout,
+                render_state,
+                Some(frame_gamma),
+            )
+            .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
+            self.next_pending_native_overlay();
+        } else {
+            lc_frontend::scoreboard::render_scoreboard_with_layout(
+                self.graphics.surface_mut(),
+                &scoreboard,
+                &resources,
+                &layout,
+                render_state,
+                Some(frame_gamma),
+            )
+            .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
+        }
+        Ok(())
+    }
+
+    fn render_running_dialog_stack(
+        &mut self,
+        scoreboard_font_images: Option<&HashMap<String, ImageData>>,
+        frame_gamma: &lc_graphics::GammaRamp,
+        ordered_native: bool,
+    ) -> Result<()> {
+        let stack = self.running_dialog_stack.clone();
+        let now = Instant::now();
+        for entry in stack {
+            match entry {
+                RunningDialogStackEntry::Scoreboard => {
+                    if let Some(font_images) = scoreboard_font_images {
+                        self.render_scoreboard_layer(font_images, frame_gamma, ordered_native)?;
+                    }
+                }
+                RunningDialogStackEntry::RuntimeClientList => {
+                    self.render_runtime_client_list_layer(frame_gamma, ordered_native)?;
+                }
+                RunningDialogStackEntry::Message(stack_id) => {
+                    self.render_running_message_dialog_layer(
+                        stack_id,
+                        Some(frame_gamma),
+                        now,
+                        ordered_native,
+                    )?;
+                }
+                RunningDialogStackEntry::Chat => {
+                    self.render_running_chat_layer(Some(frame_gamma), ordered_native)?;
+                }
+            }
         }
         Ok(())
     }
@@ -69153,58 +70654,18 @@ impl GameApp {
             }
         }
 
-        if let Some(font_images) = scoreboard_font_images.as_ref() {
-            let trigger = ClassicScoreboardTrigger::ScriptVisibility;
-            let assets = Arc::clone(&self.assets);
-            let resources = assets
-                .scoreboard_resources(font_images)
-                .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
-            let preferred = scoreboard_preferred_rect(
-                self.graphics
-                    .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
-            );
-            let scoreboard = self.snapshot.hud.scoreboard.clone();
-            if ordered_native {
-                let render_result = lc_frontend::scoreboard::render_scoreboard_body(
-                    self.graphics.surface_mut(),
-                    preferred,
-                    &scoreboard,
-                    &resources,
-                    Some(&frame_gamma),
-                );
-                if let Err(error) = render_result {
-                    return Err(self.scoreboard_presentation_error(trigger, error));
-                }
-                self.next_pending_native_overlay();
-                let render_result = lc_frontend::scoreboard::render_scoreboard_caption(
-                    self.graphics.surface_mut(),
-                    preferred,
-                    &scoreboard,
-                    &resources,
-                    Some(&frame_gamma),
-                );
-                if let Err(error) = render_result {
-                    return Err(self.scoreboard_presentation_error(trigger, error));
-                }
-                self.next_pending_native_overlay();
-            } else {
-                let render_result = lc_frontend::scoreboard::render_scoreboard(
-                    self.graphics.surface_mut(),
-                    preferred,
-                    &scoreboard,
-                    &resources,
-                    Some(&frame_gamma),
-                );
-                if let Err(error) = render_result {
-                    return Err(self.scoreboard_presentation_error(trigger, error));
-                }
+        let use_running_dialog_stack =
+            self.mode == AppMode::Running && self.game_over_dialog.is_none();
+        if !use_running_dialog_stack {
+            if let Some(font_images) = scoreboard_font_images.as_ref() {
+                self.render_scoreboard_layer(font_images, &frame_gamma, ordered_native)?;
             }
         }
 
         let runtime_client_list_above_game_over = self.runtime_client_list_owns_game_over();
         let game_over_mouse_active = self.game_over_dialog_is_mouse_active();
         let game_over_active = self.game_over_dialog_is_active();
-        if !runtime_client_list_above_game_over {
+        if !use_running_dialog_stack && !runtime_client_list_above_game_over {
             self.render_runtime_client_list_layer(&frame_gamma, ordered_native)?;
         }
 
@@ -69228,7 +70689,7 @@ impl GameApp {
             }
         }
 
-        if runtime_client_list_above_game_over {
+        if !use_running_dialog_stack && runtime_client_list_above_game_over {
             self.render_runtime_client_list_layer(&frame_gamma, ordered_native)?;
         }
 
@@ -69248,18 +70709,26 @@ impl GameApp {
         if self.render_league_signup_tooltip(Some(&frame_gamma))? && ordered_native {
             self.next_pending_native_overlay();
         }
-        self.render_message_dialogs(Some(&frame_gamma))?;
-        if ordered_native && !self.message_dialogs.is_empty() {
-            self.next_pending_native_overlay();
+        if use_running_dialog_stack {
+            self.render_running_dialog_stack(
+                scoreboard_font_images.as_ref(),
+                &frame_gamma,
+                ordered_native,
+            )?;
+        } else {
+            self.render_message_dialogs(Some(&frame_gamma))?;
+            if ordered_native && !self.message_dialogs.is_empty() {
+                self.next_pending_native_overlay();
+            }
         }
         let running_chat_input_open = self.running_chat_controller().is_some();
-        if running_chat_input_open {
+        if running_chat_input_open && !use_running_dialog_stack {
             self.render_game_option_input_dialog(Some(&frame_gamma))?;
             if ordered_native {
                 self.next_pending_native_overlay();
             }
         }
-        if self.context_menu.is_some() && !running_chat_input_open {
+        if self.context_menu.is_some() && (!running_chat_input_open || use_running_dialog_stack) {
             // C4GUI::Screen draws its recursively owned context chain after
             // every dialog, so it stays above viewport menus, F1 help,
             // scoreboard, evaluation and message dialogs.
@@ -69271,6 +70740,12 @@ impl GameApp {
         }
         if self.render_game_over_tooltip(Some(&frame_gamma))? && ordered_native {
             self.next_pending_native_overlay();
+        }
+        if running_chat_input_open && use_running_dialog_stack {
+            self.render_running_chat_tooltip(Some(&frame_gamma))?;
+            if ordered_native {
+                self.next_pending_native_overlay();
+            }
         }
         if self.render_classic_dialog_title_tooltip(Some(&frame_gamma))? && ordered_native {
             self.next_pending_native_overlay();
@@ -70621,11 +72096,14 @@ impl GameApp {
         self.clear_physical_viewport_states();
         self.physical_viewports_authoritative = false;
         self.runtime_client_list = None;
+        self.running_dialog_stack.clear();
+        self.running_active_dialog = None;
         self.runtime_client_list_consumed_keys.clear();
         self.runtime_client_list_above_game_over = false;
         self.scoreboard_dialog = None;
         self.scoreboard_initial_reconcile_pending = false;
         self.scoreboard_close_pointer_capture = false;
+        self.scoreboard_runtime = ScoreboardDialogRuntime::default();
         // C4Application::QuitGame runs Game.Default and enters PreInit before
         // showing startup again. This is when a language selected in the
         // previous startup session finally replaces Game.Rank.
@@ -73308,6 +74786,8 @@ impl GameApp {
         self.runtime_help_visible = false;
         self.runtime_flash_message = None;
         self.runtime_client_list = None;
+        self.running_dialog_stack.clear();
+        self.running_active_dialog = None;
         self.runtime_client_list_consumed_keys.clear();
         self.runtime_client_list_above_game_over = false;
         self.runtime_key_config_cache = OnceLock::new();
@@ -73318,6 +74798,7 @@ impl GameApp {
         self.scoreboard_dialog = None;
         self.scoreboard_initial_reconcile_pending = false;
         self.scoreboard_close_pointer_capture = false;
+        self.scoreboard_runtime = ScoreboardDialogRuntime::default();
         self.network_chart_open = false;
         self.mode = AppMode::Running;
         // Startup hint + join log line for the HUD. Game.Time is owned by the
@@ -134830,8 +136311,8 @@ ScenInfoArea=70,5,25,90
         app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
             .expect("exclusive chat replaces FreeView scope");
         assert_eq!(app.film_view_player, Some(OWNER_NONE));
-        app.running_chat = None;
-        app.game_option_input_dialog = None;
+        app.close_running_chat()
+            .expect("close exclusive chat through its production lifecycle");
 
         app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
             .expect("observer cycling resumes after exclusive UI closes");
@@ -161698,7 +163179,7 @@ func ControlDig() { dig_count = 1; return(1); }
             runtime_help_visible: app.runtime_help_visible,
             runtime_flash_message: app.runtime_flash_message.clone(),
             runtime_client_list_open: app.runtime_client_list.is_some(),
-            scoreboard_dialog: app.scoreboard_dialog,
+            scoreboard_dialog: app.scoreboard_dialog.clone(),
             scoreboard: app.snapshot.hud.scoreboard.clone(),
             scoreboard_initial_reconcile_pending: app.scoreboard_initial_reconcile_pending,
             scoreboard_close_pointer_capture: app.scoreboard_close_pointer_capture,
@@ -161760,27 +163241,45 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("release the scoreboard key");
     }
 
-    fn current_scoreboard_test_layout(app: &GameApp) -> lc_frontend::scoreboard::ScoreboardLayout {
-        let images = resolve_scoreboard_font_images(
-            &app.engine,
-            &app.snapshot.hud.scoreboard,
-            ScriptTextSpecResources::from_assets(&app.assets),
-        )
-        .expect("scoreboard font images");
-        let resources = app
-            .assets
-            .scoreboard_resources(&images)
-            .expect("scoreboard resources");
-        let preferred = scoreboard_preferred_rect(
-            app.graphics
-                .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
+    fn route_primary_gamepad_to_local_owner(app: &mut GameApp) {
+        app.local_controls.remove(app.local_owner);
+        app.local_controls.initialize(LocalControlInit {
+            owner: app.local_owner,
+            preferred_set: GamepadSlot::new(0).control_set(),
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+    }
+
+    fn current_scoreboard_test_layout(
+        app: &mut GameApp,
+    ) -> lc_frontend::scoreboard::ScoreboardLayout {
+        app.materialize_scoreboard_presentation()
+            .expect("scoreboard presentation resources");
+        app.scoreboard_runtime
+            .presentation
+            .as_ref()
+            .expect("retained scoreboard presentation")
+            .layout()
+            .clone()
+    }
+
+    fn install_visible_scoreboard_highlight_fixture(app: &mut GameApp) {
+        let highlight_pixel = [20_u8, 10, 5, 255];
+        let highlight = ImageData::new(
+            2,
+            2,
+            highlight_pixel
+                .into_iter()
+                .cycle()
+                .take(2 * 2 * 4)
+                .collect(),
         );
-        lc_frontend::scoreboard::scoreboard_layout(
-            preferred,
-            &app.snapshot.hud.scoreboard,
-            &resources,
-        )
-        .expect("scoreboard layout")
+        Arc::get_mut(&mut app.assets)
+            .expect("scoreboard fixture owns its frontend asset bundle")
+            .game_over_button_highlight = Some(highlight);
     }
 
     fn frames_differ_in_rect(
@@ -161880,7 +163379,7 @@ func ControlDig() { dig_count = 1; return(1); }
         eligible
             .render(&mut frame)
             .expect("render user-open scoreboard");
-        let layout = current_scoreboard_test_layout(&eligible);
+        let layout = current_scoreboard_test_layout(&mut eligible);
         assert!(frames_differ_in_rect(&hidden, &frame, 320, layout.bounds,));
 
         toggle_scoreboard(&mut eligible, ModifiersState::empty());
@@ -161903,10 +163402,12 @@ func ControlDig() { dig_count = 1; return(1); }
                    SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
                }"#,
         );
+        install_visible_scoreboard_highlight_fixture(&mut app);
         toggle_scoreboard(&mut app, ModifiersState::empty());
         let mut frame = vec![0_u8; 320 * 200 * 4];
         app.render(&mut frame).expect("lay out the scoreboard");
-        let close = current_scoreboard_test_layout(&app)
+        let baseline = app.graphics.surface().pixels().to_vec();
+        let close = current_scoreboard_test_layout(&mut app)
             .close_button
             .expect("titled board close button");
         let point = PhysicalPosition::new(
@@ -161914,14 +163415,31 @@ func ControlDig() { dig_count = 1; return(1); }
             f64::from(close.y + close.h / 2),
         );
         app.handle_cursor_moved(point).expect("hover close");
+        assert!(app.scoreboard_runtime.close_hovered);
+        app.render(&mut frame).expect("render close hover pass");
+        let hovered = app.graphics.surface().pixels().to_vec();
+        assert!(frames_differ_in_rect(&baseline, &hovered, 320, close));
+        let sounds_before_press = app.ui_sound_log.len();
         app.handle_mouse_button(ElementState::Pressed)
             .expect("press close");
+        assert_eq!(
+            &app.ui_sound_log[sounds_before_press..],
+            &["ArrowHit".to_string()]
+        );
+        app.render(&mut frame).expect("render close down pass");
+        let down = app.graphics.surface().pixels().to_vec();
+        assert!(frames_differ_in_rect(&hovered, &down, 320, close));
         assert!(app.scoreboard_close_pointer_capture);
         assert!(app.scoreboard_dialog.is_some());
 
         let outside = PhysicalPosition::new(0.0, 199.0);
+        let sounds_before_leave = app.ui_sound_log.len();
         app.handle_cursor_moved(outside)
             .expect("captured close drag remains in scoreboard");
+        assert_eq!(
+            &app.ui_sound_log[sounds_before_leave..],
+            &["ArrowHit".to_string()]
+        );
         assert!(app.scoreboard_close_pointer_capture);
         assert!(app.ingame_pointer.is_none());
         app.handle_mouse_button(ElementState::Released)
@@ -161934,12 +163452,610 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("press close again");
         app.handle_cursor_moved(outside)
             .expect("drag outside before re-entry");
+        let sounds_before_reentry = app.ui_sound_log.len();
         app.handle_cursor_moved(point)
             .expect("drag back over close");
+        assert_eq!(
+            &app.ui_sound_log[sounds_before_reentry..],
+            &["ArrowHit".to_string()]
+        );
+        let sounds_before_click = app.ui_sound_log.len();
         app.handle_mouse_button(ElementState::Released)
             .expect("release after re-entering close");
+        assert_eq!(
+            &app.ui_sound_log[sounds_before_click..],
+            &["Click".to_string()]
+        );
         assert!(app.scoreboard_dialog.is_none());
         assert!(!app.scoreboard_close_pointer_capture);
+    }
+
+    #[test]
+    fn scoreboard_title_drag_and_cached_placement_survive_frames_until_data_update() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "A scoreboard title");
+               }
+               global func InvalidateLayout()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "A scoreboard title");
+               }"#,
+        );
+        toggle_scoreboard(&mut app, ModifiersState::empty());
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("materialize scoreboard layout");
+        let original = current_scoreboard_test_layout(&mut app);
+        let caption = original.caption.expect("title-bearing scoreboard");
+        let title = PhysicalPosition::new(
+            f64::from(caption.x + caption.w / 2),
+            f64::from(caption.y + caption.h / 2),
+        );
+        app.handle_cursor_moved(title)
+            .expect("hover scoreboard title");
+        assert_eq!(
+            app.classic_dialog_title_tooltip_target_at(GuiPoint::new(
+                title.x as f32,
+                title.y as f32,
+            )),
+            Some(StartupTooltip::text("A scoreboard title")),
+        );
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("start scoreboard title drag");
+        let moved_pointer = PhysicalPosition::new(title.x + 35.0, title.y + 22.0);
+        app.handle_cursor_moved(moved_pointer)
+            .expect("move retained scoreboard title drag");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("finish scoreboard title drag");
+        let moved = current_scoreboard_test_layout(&mut app);
+        assert_eq!(moved.bounds.x, original.bounds.x + 35);
+        assert_eq!(moved.bounds.y, original.bounds.y + 22);
+
+        app.render(&mut frame)
+            .expect("render a subsequent frame without new drag input");
+        assert_eq!(current_scoreboard_test_layout(&mut app), moved);
+
+        app.resize(640, 480)
+            .expect("change the live preferred viewport rectangle");
+        let mut resized_frame = vec![0_u8; 640 * 480 * 4];
+        app.render(&mut resized_frame)
+            .expect("preferred-only change keeps cached placement");
+        assert_eq!(current_scoreboard_test_layout(&mut app), moved);
+
+        call_scoreboard_function_and_update(&mut app, "InvalidateLayout");
+        app.render(&mut resized_frame)
+            .expect("data invalidation performs native Update and placement");
+        assert_ne!(
+            current_scoreboard_test_layout(&mut app).bounds,
+            moved.bounds
+        );
+    }
+
+    #[test]
+    fn asynchronously_shown_message_stays_active_during_scoreboard_title_drag() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        app.resize(1024, 768).expect("resize shared running screen");
+        toggle_scoreboard(&mut app, ModifiersState::empty());
+        let mut frame = vec![0_u8; 1024 * 768 * 4];
+        app.render(&mut frame)
+            .expect("materialize scoreboard layout");
+        let before = current_scoreboard_test_layout(&mut app);
+        let caption = before.caption.expect("scoreboard title");
+        let start = PhysicalPosition::new(
+            f64::from(caption.x + caption.w / 2),
+            f64::from(caption.y + caption.h / 2),
+        );
+        app.handle_cursor_moved(start)
+            .expect("hover scoreboard title");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("capture scoreboard title");
+        assert!(app.scoreboard_runtime.title_drag.is_some());
+
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Asynchronous notice",
+                "Higher dialog",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("show a higher dialog during the retained drag");
+        assert!(matches!(
+            app.running_active_dialog,
+            Some(RunningDialogStackEntry::Message(_))
+        ));
+
+        let moved_pointer = PhysicalPosition::new(start.x - 24.0, start.y + 17.0);
+        let message = app.top_message_dialog_layout().expect("message layout");
+        assert!(!GameApp::point_in_message_dialog_bounds(
+            GuiPoint::new(moved_pointer.x as f32, moved_pointer.y as f32),
+            &message,
+        ));
+        app.handle_cursor_moved(moved_pointer)
+            .expect("global drag updates below the active message");
+        let moved = current_scoreboard_test_layout(&mut app);
+        assert_eq!(moved.bounds.x, before.bounds.x - 24);
+        assert_eq!(moved.bounds.y, before.bounds.y + 17);
+        assert!(matches!(
+            app.running_active_dialog,
+            Some(RunningDialogStackEntry::Message(_))
+        ));
+        assert!(app.ingame_pointer.is_none());
+
+        app.remove_message_dialog_at(0)
+            .expect("close the asynchronously active message");
+        assert!(app.scoreboard_runtime.title_drag.is_none());
+        assert!(app.message_dialogs.is_empty());
+        let after_close = current_scoreboard_test_layout(&mut app);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            moved_pointer.x + 31.0,
+            moved_pointer.y - 9.0,
+        ))
+        .expect("movement after active close no longer drags the scoreboard");
+        assert_eq!(current_scoreboard_test_layout(&mut app), after_close);
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release after active close is harmless");
+    }
+
+    #[test]
+    fn scoreboard_pointer_before_draw_cannot_stamp_new_revision_onto_old_matrix() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }
+               global func GrowBetweenFrames()
+               {
+                   SetScoreboardData(1, SBRD_Caption, "A much wider second column");
+               }"#,
+        );
+        toggle_scoreboard(&mut app, ModifiersState::empty());
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("materialize initial geometry");
+        let initial = current_scoreboard_test_layout(&mut app);
+        let initial_revision = app.scoreboard_runtime.layout_revision;
+        let point = GuiPoint::new(
+            (initial.bounds.x + initial.bounds.w / 2) as f32,
+            (initial.bounds.y + initial.bounds.h / 2) as f32,
+        );
+
+        app.engine
+            .call_scenario_script_function("GrowBetweenFrames", Vec::new())
+            .expect("mutate the live scoreboard between frames");
+        assert!(app
+            .scoreboard_pointer_target(point)
+            .expect("pointer route")
+            .is_some());
+        assert_eq!(app.snapshot.hud.scoreboard.row_count(), 2);
+        assert_eq!(app.scoreboard_runtime.layout_revision, initial_revision);
+        assert_eq!(
+            app.scoreboard_runtime
+                .presentation
+                .as_ref()
+                .expect("retained presentation")
+                .layout(),
+            &initial,
+            "pointer input retains pre-draw C++ geometry",
+        );
+
+        app.render(&mut frame)
+            .expect("the next draw lazily applies the live matrix update");
+        assert_eq!(
+            app.scoreboard_runtime.layout_revision,
+            app.engine.scoreboard_layout_revision(),
+        );
+        assert_ne!(current_scoreboard_test_layout(&mut app), initial);
+    }
+
+    #[test]
+    fn scoreboard_show_then_grow_keeps_constructor_hit_bounds_until_first_draw() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func ShowThenGrow()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "S");
+                   DoScoreboardShow(1);
+                   SetScoreboardData(1, SBRD_Caption, "A deliberately huge late column");
+               }"#,
+        );
+        call_scoreboard_function_and_update(&mut app, "ShowThenGrow");
+        let request_revision = app
+            .scoreboard_dialog
+            .as_ref()
+            .expect("show request opened the dialog")
+            .layout_revision;
+        assert!(request_revision < app.engine.scoreboard_layout_revision());
+
+        let constructor = current_scoreboard_test_layout(&mut app);
+        let late_column_point = GuiPoint::new(
+            (constructor.bounds.x - 2) as f32,
+            (constructor.client.y + constructor.client.h / 2) as f32,
+        );
+        assert!(
+            app.scoreboard_pointer_target(late_column_point)
+                .expect("pre-draw pointer route")
+                .is_none(),
+            "the late column is outside the synchronous constructor bounds",
+        );
+        assert_eq!(app.scoreboard_runtime.layout_revision, request_revision);
+        assert_eq!(current_scoreboard_test_layout(&mut app), constructor);
+
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("first Draw applies the pending SetCell invalidation");
+        let updated = current_scoreboard_test_layout(&mut app);
+        assert!(updated.bounds.x < late_column_point.x as i32);
+        assert!(app
+            .scoreboard_pointer_target_cached(late_column_point)
+            .is_some());
+    }
+
+    #[test]
+    fn synchronous_scoreboard_show_joins_pointer_routing_before_update_or_draw() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func ShowNow()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "S");
+                   DoScoreboardShow(1);
+               }"#,
+        );
+        app.engine
+            .call_scenario_script_function("ShowNow", Vec::new())
+            .expect("show scoreboard synchronously");
+        assert!(app.scoreboard_dialog.is_none());
+
+        let point = GuiPoint::new(299.0, 50.0);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("the first pointer ingress observes the synchronous dialog");
+
+        assert!(app.scoreboard_dialog.is_some());
+        assert!(app.scoreboard_pointer_target_cached(point).is_some());
+        assert_eq!(
+            app.running_active_dialog,
+            Some(RunningDialogStackEntry::Scoreboard),
+        );
+        assert!(app.ingame_pointer.is_none());
+    }
+
+    #[test]
+    fn scoreboard_resize_releases_title_drag_without_replacing_cached_geometry() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        toggle_scoreboard(&mut app, ModifiersState::empty());
+        let before = current_scoreboard_test_layout(&mut app);
+        let caption = before.caption.expect("scoreboard title");
+        let start = PhysicalPosition::new(
+            f64::from(caption.x + caption.w / 2),
+            f64::from(caption.y + caption.h / 2),
+        );
+        app.handle_cursor_moved(start)
+            .expect("hover scoreboard title");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("capture scoreboard title");
+        assert!(app.scoreboard_runtime.title_drag.is_some());
+
+        app.resize(360, 220).expect("resize running screen");
+        assert!(app.scoreboard_runtime.title_drag.is_none());
+        assert!(app.scoreboard_runtime.pointer.is_none());
+        assert!(!app.scoreboard_runtime.close_hovered);
+        assert!(!app.scoreboard_close_pointer_capture);
+        let cached = current_scoreboard_test_layout(&mut app);
+        assert_eq!(cached, before);
+
+        app.handle_cursor_moved(PhysicalPosition::new(start.x + 30.0, start.y + 20.0))
+            .expect("movement after resize does not continue the old drag");
+        assert_eq!(current_scoreboard_test_layout(&mut app), cached);
+    }
+
+    #[test]
+    fn scoreboard_touch_capture_is_released_when_a_new_message_owns_end_or_cancel() {
+        let board = r#"global func Initialize()
+                      {
+                          SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                      }"#;
+        let notice = || {
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Notice",
+                "Higher dialog",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            )
+        };
+
+        let mut close = new_scoreboard_test_app(board);
+        toggle_scoreboard(&mut close, ModifiersState::empty());
+        let close_button = current_scoreboard_test_layout(&mut close)
+            .close_button
+            .expect("scoreboard close button");
+        let close_point = GuiPoint::new(
+            (close_button.x + close_button.w / 2) as f32,
+            (close_button.y + close_button.h / 2) as f32,
+        );
+        close
+            .handle_touch(TouchPhase::Started, close_point)
+            .expect("capture scoreboard close touch");
+        assert!(close.scoreboard_close_pointer_capture);
+        close
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("show higher message");
+        let message = close.top_message_dialog_layout().expect("message layout");
+        let message_point = GuiPoint::new(
+            (message.bounds.x + message.bounds.w / 2) as f32,
+            (message.bounds.y + message.bounds.h / 2) as f32,
+        );
+        close
+            .handle_touch(TouchPhase::Ended, message_point)
+            .expect("message owns release-time hit");
+        assert!(close.scoreboard_dialog.is_some());
+        assert!(!close.scoreboard_close_pointer_capture);
+
+        let mut drag = new_scoreboard_test_app(board);
+        toggle_scoreboard(&mut drag, ModifiersState::empty());
+        let layout = current_scoreboard_test_layout(&mut drag);
+        let caption = layout.caption.expect("scoreboard title");
+        let title_point = GuiPoint::new(
+            (caption.x + caption.w / 2) as f32,
+            (caption.y + caption.h / 2) as f32,
+        );
+        drag.handle_touch(TouchPhase::Started, title_point)
+            .expect("capture scoreboard title touch");
+        assert!(drag.scoreboard_runtime.title_drag.is_some());
+        drag.push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("show higher message during title drag");
+        drag.handle_touch(TouchPhase::Cancelled, title_point)
+            .expect("cancel the screen-global touch");
+        assert!(drag.scoreboard_runtime.title_drag.is_none());
+        assert!(!drag.scoreboard_close_pointer_capture);
+        let after_cancel = current_scoreboard_test_layout(&mut drag);
+        drag.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(title_point.x + 30.0),
+            f64::from(title_point.y + 20.0),
+        ))
+        .expect("movement after cancellation cannot resume the drag");
+        assert_eq!(current_scoreboard_test_layout(&mut drag), after_cancel);
+    }
+
+    #[test]
+    fn scoreboard_bounds_consume_secondary_middle_wheel_and_touch_input() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        toggle_scoreboard(&mut app, ModifiersState::empty());
+        let layout = current_scoreboard_test_layout(&mut app);
+        let point = GuiPoint::new(
+            (layout.client.x + layout.client.w / 2) as f32,
+            (layout.client.y + layout.client.h / 2) as f32,
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("move over scoreboard client");
+        app.ingame_mouse_init_centered = false;
+
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("scoreboard consumes right down");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("scoreboard consumes right up");
+        assert!(!app.ingame_mouse_init_centered);
+        assert!(commands.take_submitted_local().is_empty());
+
+        app.handle_other_mouse_button(ElementState::Pressed)
+            .expect("scoreboard consumes middle down");
+        app.handle_other_mouse_button(ElementState::Released)
+            .expect("scoreboard consumes middle up");
+        assert!(!app.ingame_mouse_init_centered);
+        assert!(commands.take_submitted_local().is_empty());
+
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("scoreboard consumes wheel");
+        assert!(!app.ingame_mouse_init_centered);
+        assert!(commands.take_submitted_local().is_empty());
+
+        let before_touch = current_scoreboard_test_layout(&mut app);
+        let caption = before_touch.caption.expect("scoreboard title");
+        let touch_title = GuiPoint::new(
+            (caption.x + caption.w / 2) as f32,
+            (caption.y + caption.h / 2) as f32,
+        );
+        let touch_moved = GuiPoint::new(touch_title.x + 12.0, touch_title.y + 9.0);
+        app.handle_touch(TouchPhase::Started, touch_title)
+            .expect("scoreboard consumes touch start");
+        assert!(app.scoreboard_runtime.title_drag.is_some());
+        app.handle_touch(TouchPhase::Moved, touch_moved)
+            .expect("scoreboard consumes touch move");
+        let after_touch_move = current_scoreboard_test_layout(&mut app);
+        assert_eq!(after_touch_move.bounds.x, before_touch.bounds.x + 12);
+        assert_eq!(after_touch_move.bounds.y, before_touch.bounds.y + 9);
+        app.handle_touch(TouchPhase::Ended, touch_moved)
+            .expect("scoreboard consumes touch end");
+        assert!(app.scoreboard_runtime.title_drag.is_none());
+        assert_eq!(current_scoreboard_test_layout(&mut app), after_touch_move);
+        assert!(commands.take_submitted_local().is_empty());
+        assert!(app.scoreboard_dialog.is_some());
+    }
+
+    #[test]
+    fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
+        const BOARD: &str = r#"global func Initialize()
+        {
+            SetScoreboardData(SBRD_Caption, SBRD_Caption, "A deliberately wide scoreboard");
+            SetScoreboardData(1, 1, "A deliberately wide value");
+        }"#;
+
+        let mut overlap = new_scoreboard_test_app(BOARD);
+        overlap
+            .resize(1024, 768)
+            .expect("resize shared running screen");
+        toggle_scoreboard(&mut overlap, ModifiersState::empty());
+        let mut frame = vec![0_u8; 1024 * 768 * 4];
+        overlap.render(&mut frame).expect("materialize scoreboard");
+        let bounds = current_scoreboard_test_layout(&mut overlap).bounds;
+        overlap
+            .scoreboard_runtime
+            .presentation
+            .as_mut()
+            .expect("scoreboard presentation")
+            .layout_mut()
+            .translate(40 - bounds.x, 40 - bounds.y);
+        overlap
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Message",
+                    "Higher shared dialog",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("show message above scoreboard");
+        overlap
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Popup row")],
+                GuiPoint::new(48.0, 48.0),
+            )
+            .expect("open popup over scoreboard");
+        let popup_row = overlap
+            .context_menu
+            .as_ref()
+            .expect("context menu")
+            .layout()
+            .panels[0]
+            .rows[0]
+            .rect;
+        let popup_point = GuiPoint::new(
+            (popup_row.x + popup_row.w / 2) as f32,
+            (popup_row.y + popup_row.h / 2) as f32,
+        );
+        assert!(overlap
+            .scoreboard_pointer_target_cached(popup_point)
+            .is_some());
+        assert!(!GameApp::point_in_message_dialog_bounds(
+            popup_point,
+            &overlap.top_message_dialog_layout().expect("message layout"),
+        ));
+        overlap
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(popup_point.x),
+                f64::from(popup_point.y),
+            ))
+            .expect("popup owns overlapping movement");
+        overlap
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("popup owns overlapping press");
+        assert!(overlap.context_menu.is_some());
+        assert!(!overlap.scoreboard_close_pointer_capture);
+        assert!(matches!(
+            overlap.running_active_dialog,
+            Some(RunningDialogStackEntry::Message(_))
+        ));
+        overlap
+            .handle_mouse_button(ElementState::Released)
+            .expect("release popup row");
+
+        let mut outside = new_scoreboard_test_app(BOARD);
+        toggle_scoreboard(&mut outside, ModifiersState::empty());
+        outside
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Popup row")],
+                GuiPoint::new(10.0, 10.0),
+            )
+            .expect("open popup away from scoreboard");
+        let scoreboard = current_scoreboard_test_layout(&mut outside);
+        let body = GuiPoint::new(
+            (scoreboard.client.x + scoreboard.client.w / 2) as f32,
+            (scoreboard.client.y + scoreboard.client.h / 2) as f32,
+        );
+        assert!(!outside
+            .context_menu
+            .as_ref()
+            .expect("context menu")
+            .captures_point(body));
+        outside
+            .handle_cursor_moved(PhysicalPosition::new(f64::from(body.x), f64::from(body.y)))
+            .expect("move outside popup over scoreboard");
+        outside.ingame_mouse_init_centered = false;
+        outside
+            .handle_right_mouse_button(ElementState::Pressed)
+            .expect("outside right down closes popup then reaches scoreboard");
+        assert!(outside.context_menu.is_none());
+        assert!(!outside.ingame_mouse_init_centered);
+    }
+
+    #[test]
+    fn scoreboard_wheel_does_not_scroll_an_overlapped_lower_f4_dialog() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        app.resize(1024, 768).expect("resize shared running screen");
+        let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        app.control_clients
+            .replace_snapshot((0..40).map(|client_id| message_client(client_id, b"Remote")));
+        toggle_scoreboard(&mut app, ModifiersState::empty());
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open F4 above the scoreboard");
+        app.activate_running_dialog(RunningDialogStackEntry::Scoreboard);
+
+        let (preferred, line_height) = app
+            .runtime_client_list_input_geometry()
+            .expect("F4 geometry");
+        let f4_layout = app
+            .runtime_client_list
+            .as_ref()
+            .expect("F4 dialog")
+            .layout(preferred, line_height);
+        let scoreboard = current_scoreboard_test_layout(&mut app);
+        let dx = f4_layout.list.x + 8 - scoreboard.client.x;
+        let dy = f4_layout.list.y + 8 - scoreboard.client.y;
+        app.scoreboard_runtime
+            .presentation
+            .as_mut()
+            .expect("scoreboard presentation")
+            .layout_mut()
+            .translate(dx, dy);
+        let scoreboard = current_scoreboard_test_layout(&mut app);
+        let point = GuiPoint::new(
+            (scoreboard.client.x + 4) as f32,
+            (scoreboard.client.y + 4) as f32,
+        );
+        assert!(point.x < (f4_layout.list.x + f4_layout.list.w) as f32);
+        assert!(point.y < (f4_layout.list.y + f4_layout.list.h) as f32);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("hover the overlapping scoreboard and F4 list");
+        let before = app
+            .runtime_client_list
+            .as_ref()
+            .expect("F4 dialog")
+            .scroll_row(preferred, line_height);
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("top scoreboard consumes wheel");
+        let after = app
+            .runtime_client_list
+            .as_ref()
+            .expect("F4 remains open")
+            .scroll_row(preferred, line_height);
+        assert_eq!(after, before, "wheel cannot fall through to lower F4");
     }
 
     #[test]
@@ -161950,6 +164066,7 @@ func ControlDig() { dig_count = 1; return(1); }
                    SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
                }"#,
         );
+        install_visible_scoreboard_highlight_fixture(&mut app);
         app.resize(1024, 768).expect("resize shared running screen");
         toggle_scoreboard(&mut app, ModifiersState::empty());
         app.push_message_dialog(
@@ -161962,7 +164079,7 @@ func ControlDig() { dig_count = 1; return(1); }
         )
         .expect("show ordinary shared message dialog");
 
-        let close = current_scoreboard_test_layout(&app)
+        let close = current_scoreboard_test_layout(&mut app)
             .close_button
             .expect("titled board close button");
         let point = GuiPoint::new(
@@ -161975,17 +164092,326 @@ func ControlDig() { dig_count = 1; return(1); }
             &message_layout,
         ));
 
+        let mut frame = vec![0_u8; 1024 * 768 * 4];
+        app.render(&mut frame)
+            .expect("render inactive scoreboard below message");
+        let baseline = app.graphics.surface().pixels().to_vec();
+
         app.handle_cursor_moved(PhysicalPosition::new(
             f64::from(point.x),
             f64::from(point.y),
         ))
         .expect("route outside-dialog hover to the exposed scoreboard");
+        assert!(matches!(
+            app.running_active_dialog,
+            Some(RunningDialogStackEntry::Message(_))
+        ));
+        assert!(app.scoreboard_runtime.close_hovered);
+        app.render(&mut frame)
+            .expect("shared inactive scoreboard still draws mouse hover");
+        let hovered = app.graphics.surface().pixels().to_vec();
+        assert!(frames_differ_in_rect(&baseline, &hovered, 1024, close));
         app.handle_mouse_button(ElementState::Pressed)
             .expect("press exposed scoreboard close button");
         app.handle_mouse_button(ElementState::Released)
             .expect("release exposed scoreboard close button");
         assert_eq!(app.message_dialogs.len(), 1);
         assert!(app.scoreboard_dialog.is_none());
+    }
+
+    #[test]
+    fn scoreboard_uses_shared_cpp_show_and_left_activation_stack_order() {
+        const BOARD: &str = r#"global func Initialize()
+        {
+            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+        }"#;
+
+        let mut f4 = new_scoreboard_test_app(BOARD);
+        let (_events, _commands) = install_running_network_stub(&mut f4, 0, 40, 4);
+        f4.control_clients
+            .replace_snapshot([message_client(0, b"Host")]);
+        f4.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("show equal-z F4 list first");
+        toggle_scoreboard(&mut f4, ModifiersState::empty());
+        assert!(f4.scoreboard_is_above_runtime_client_list());
+        f4.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("close F4 list");
+        f4.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("show F4 list after scoreboard");
+        assert!(!f4.scoreboard_is_above_runtime_client_list());
+
+        let mut messages = new_scoreboard_test_app(BOARD);
+        messages.resize(1024, 768).expect("resize shared screen");
+        toggle_scoreboard(&mut messages, ModifiersState::empty());
+        messages
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "First message",
+                    "Input-z dialog",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("show message after scoreboard");
+        assert!(!messages.scoreboard_is_above_all_messages());
+        let layout = current_scoreboard_test_layout(&mut messages);
+        let point = GuiPoint::new(
+            (layout.client.x + layout.client.w / 2) as f32,
+            (layout.client.y + layout.client.h / 2) as f32,
+        );
+        assert!(!GameApp::point_in_message_dialog_bounds(
+            point,
+            &messages
+                .top_message_dialog_layout()
+                .expect("message layout"),
+        ));
+        messages
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(point.x),
+                f64::from(point.y),
+            ))
+            .expect("hover exposed scoreboard");
+        messages
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("left activation moves default-z scoreboard last");
+        messages
+            .handle_mouse_button(ElementState::Released)
+            .expect("release scoreboard body");
+        assert!(messages.scoreboard_is_above_all_messages());
+
+        messages
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Second message",
+                    "Later input-z dialog",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("later z+1 show overtakes activated scoreboard");
+        assert!(!messages.scoreboard_is_above_all_messages());
+        assert!(matches!(
+            messages.running_dialog_stack.last(),
+            Some(RunningDialogStackEntry::Message(_))
+        ));
+    }
+
+    #[test]
+    fn scoreboard_close_restores_the_chat_exposed_beneath_its_activation() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        toggle_scoreboard(&mut app, ModifiersState::empty());
+        app.start_running_chat(RunningChatMode::All);
+        assert!(app.running_chat_active());
+
+        let layout = current_scoreboard_test_layout(&mut app);
+        let body = PhysicalPosition::new(
+            f64::from(layout.client.x + layout.client.w / 2),
+            f64::from(layout.client.y + layout.client.h / 2),
+        );
+        let chat = app.game_option_input_layout().expect("chat layout");
+        assert!(!GameApp::point_in_input_dialog_bounds(
+            GuiPoint::new(body.x as f32, body.y as f32),
+            &chat,
+        ));
+        app.handle_cursor_moved(body)
+            .expect("hover the exposed scoreboard body");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("activate scoreboard over chat");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release scoreboard activation");
+        assert!(!app.running_chat_active());
+        assert_eq!(
+            app.running_active_dialog,
+            Some(RunningDialogStackEntry::Scoreboard),
+        );
+
+        let close = current_scoreboard_test_layout(&mut app)
+            .close_button
+            .expect("scoreboard close button");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(close.x + close.w / 2),
+            f64::from(close.y + close.h / 2),
+        ))
+        .expect("hover scoreboard close");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press scoreboard close");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("close scoreboard and expose chat");
+        assert!(app.scoreboard_dialog.is_none());
+        assert!(app.running_chat_active());
+        assert_eq!(
+            app.running_active_dialog,
+            Some(RunningDialogStackEntry::Chat),
+        );
+    }
+
+    #[test]
+    fn activated_chat_under_list_top_scoreboard_does_not_gain_keyboard_focus() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        toggle_scoreboard(&mut app, ModifiersState::empty());
+        app.start_running_chat(RunningChatMode::All);
+
+        let scoreboard = current_scoreboard_test_layout(&mut app);
+        let scoreboard_body = PhysicalPosition::new(
+            f64::from(scoreboard.client.x + scoreboard.client.w / 2),
+            f64::from(scoreboard.client.y + scoreboard.client.h / 2),
+        );
+        app.handle_cursor_moved(scoreboard_body)
+            .expect("hover exposed scoreboard body");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("move default-z scoreboard to list top");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release scoreboard activation");
+
+        let chat = app.game_option_input_layout().expect("chat layout");
+        let chat_point = GuiPoint::new(
+            (chat.bounds.x + chat.bounds.w / 2) as f32,
+            (chat.bounds.y + chat.bounds.h / 2) as f32,
+        );
+        assert!(app.scoreboard_pointer_target_cached(chat_point).is_none());
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(chat_point.x),
+            f64::from(chat_point.y),
+        ))
+        .expect("hover exposed chat");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("activate z+2 chat without reordering it");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release chat activation");
+        assert!(app.running_chat_active());
+        assert!(!app.running_chat_keyboard_active());
+        assert_eq!(
+            app.running_dialog_stack.last(),
+            Some(&RunningDialogStackEntry::Scoreboard),
+        );
+
+        app.handle_text_input('x')
+            .expect("list-top nonexclusive dialog suppresses GUI text");
+        assert_eq!(app.running_chat_text(), Some(""));
+
+        assert!(app.close_scoreboard_dialog());
+        assert!(app.running_chat_keyboard_active());
+        app.handle_text_input('x')
+            .expect("chat accepts text once it is list-top again");
+        assert_eq!(app.running_chat_text(), Some("x"));
+    }
+
+    #[test]
+    fn ordinary_message_behind_scoreboard_does_not_suppress_gamepad_gameplay() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        toggle_scoreboard(&mut app, ModifiersState::empty());
+        route_primary_gamepad_to_local_owner(&mut app);
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Notice",
+                "Retained below the scoreboard",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("show ordinary shared-screen message");
+        app.activate_running_dialog(RunningDialogStackEntry::Scoreboard);
+        assert_eq!(
+            app.running_dialog_stack.last(),
+            Some(&RunningDialogStackEntry::Scoreboard)
+        );
+        assert!(!app.message_dialog_owns_gamepad_input());
+
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
+            button: ControlButton::Right,
+            state: ElementState::Pressed,
+        }])
+        .expect("list-top nonexclusive scoreboard leaves gameplay in scope");
+
+        assert_ne!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_RIGHT),
+            0,
+        );
+        assert_eq!(app.message_dialogs.len(), 1);
+    }
+
+    #[test]
+    fn scoreboard_release_clears_an_occluded_f4_button_capture() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        app.resize(1024, 768).expect("resize shared running screen");
+        let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host")]);
+        toggle_scoreboard(&mut app, ModifiersState::empty());
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("show F4 above scoreboard");
+
+        let (preferred, line_height) = app
+            .runtime_client_list_input_geometry()
+            .expect("F4 geometry");
+        let close = app
+            .runtime_client_list
+            .as_ref()
+            .expect("F4 dialog")
+            .layout(preferred, line_height)
+            .close_button;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(close.x + close.w / 2),
+            f64::from(close.y + close.h / 2),
+        ))
+        .expect("hover F4 close");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("capture F4 close");
+        assert!(app
+            .runtime_client_list
+            .as_ref()
+            .expect("F4 remains open")
+            .has_pointer_capture());
+
+        let scoreboard = current_scoreboard_test_layout(&mut app);
+        app.scoreboard_runtime
+            .presentation
+            .as_mut()
+            .expect("scoreboard presentation")
+            .layout_mut()
+            .translate(900 - scoreboard.client.x, 50 - scoreboard.client.y);
+        let scoreboard = current_scoreboard_test_layout(&mut app);
+        let release = PhysicalPosition::new(
+            f64::from(scoreboard.client.x + 4),
+            f64::from(scoreboard.client.y + 4),
+        );
+        app.handle_cursor_moved(release)
+            .expect("F4 capture retains held move over lower scoreboard");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release routes by actual scoreboard hit");
+        assert!(app.runtime_client_list.is_some());
+        assert!(!app
+            .runtime_client_list
+            .as_ref()
+            .expect("F4 remains open")
+            .has_pointer_capture());
+        assert!(app.scoreboard_dialog.is_some());
     }
 
     #[test]
@@ -162450,6 +164876,37 @@ func ControlDig() { dig_count = 1; return(1); }
         open_then_close
             .render(&mut ordinary)
             .expect("open then close in one tick leaves no render boundary");
+    }
+
+    #[test]
+    fn later_data_update_collapses_request_time_allocated_empty_title_margin() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func ShowEmptyThenInvalidate()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "");
+                   DoScoreboardShow(1);
+                   SetScoreboardData(1, SBRD_Caption, "Row");
+               }"#,
+        );
+        call_scoreboard_function_and_update(&mut app, "ShowEmptyThenInvalidate");
+        let request = app
+            .scoreboard_dialog
+            .as_ref()
+            .expect("request opened scoreboard");
+        assert!(!request.title_widget_present);
+        assert!(request.layout_revision < app.engine.scoreboard_layout_revision());
+
+        let constructor_layout = current_scoreboard_test_layout(&mut app);
+        assert!(constructor_layout.caption.is_none());
+        assert!(constructor_layout.client.y > constructor_layout.bounds.y);
+
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("Draw applies the invalidated empty-title Update");
+        let updated_layout = current_scoreboard_test_layout(&mut app);
+        assert!(updated_layout.caption.is_none());
+        assert_eq!(updated_layout.client.y, updated_layout.bounds.y);
+        assert_eq!(updated_layout.client.h, updated_layout.bounds.h);
     }
 
     #[test]
@@ -163052,7 +165509,7 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn closed_message_alias_cluster_yields_later_direction_to_game_over() {
+    fn closed_exclusive_message_alias_cluster_yields_later_direction_to_game_over() {
         let mut app = new_game_over_keyboard_app();
         app.push_message_dialog(
             lc_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -163060,7 +165517,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 "Close first",
                 lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
             ),
-            MessageDialogContinuation::None,
+            MessageDialogContinuation::LeagueSurrender,
         )
         .expect("open message over evaluation");
 
@@ -163568,7 +166025,7 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn message_dialog_raw_gamepad_clusters_precede_game_over() {
+    fn exclusive_message_dialog_raw_gamepad_clusters_precede_game_over() {
         let mut app = new_game_over_keyboard_app();
         hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
         let open_message = |app: &mut GameApp, caption: &str| {
@@ -163578,7 +166035,7 @@ func ControlDig() { dig_count = 1; return(1); }
                     "Top overlay",
                     lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
                 ),
-                MessageDialogContinuation::None,
+                MessageDialogContinuation::LeagueSurrender,
             )
             .expect("open message above evaluation");
         };
@@ -168284,9 +170741,102 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
+    fn runtime_f4_gamepad_high_requires_active_dialog_and_other_input_reaches_gameplay() {
+        let mut active = new_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut active, 0, 40, 4);
+        route_primary_gamepad_to_local_owner(&mut active);
+        active
+            .handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open active runtime F4 dialog");
+        assert!(active.runtime_client_list_strong_gamepad_callback_is_active());
+        assert!(active.runtime_client_list_draw_active());
+
+        active
+            .process_gamepad_event_batch([GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
+                button: ControlButton::Right,
+                state: ElementState::Pressed,
+            }])
+            .expect("normal F4 leaves player-control gamepad directions in base scope");
+        let submitted = commands.take_submitted_local();
+        assert_eq!(submitted.len(), 1);
+        assert!(matches!(
+            submitted[0].1,
+            ControlEvent::Press(ControlButton::Right)
+        ));
+
+        active
+            .process_gamepad_event_batch([
+                GamepadEvent::GuiButton {
+                    slot: GamepadSlot::new(0),
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Action {
+                    slot: GamepadSlot::new(0),
+                    action: GamepadActionType::MenuToggle,
+                    state: ElementState::Pressed,
+                },
+            ])
+            .expect("active F4 strong High callback owns its raw alias cluster");
+        assert!(active.runtime_client_list.is_none());
+        assert!(active.ingame_menu.is_none());
+        assert!(commands.take_submitted_local().is_empty());
+
+        let mut inactive = new_running_sandbox_app();
+        configure_runtime_network_role(&mut inactive, RuntimeNetworkRole::Host);
+        inactive
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Notice",
+                    "The older F4 dialog remains inactive",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("show ordinary dialog before F4");
+        inactive
+            .handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("insert F4 below the existing z+1 message");
+        assert!(!inactive.runtime_client_list_strong_gamepad_callback_is_active());
+        assert!(!inactive.runtime_client_list_draw_active());
+        inactive
+            .process_gamepad_event_batch([GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            }])
+            .expect("inactive F4 has no strong High callback");
+        assert!(inactive.runtime_client_list.is_some());
+        assert_eq!(inactive.message_dialogs.len(), 1);
+    }
+
+    #[test]
+    fn older_runtime_f4_dialog_renders_inactive_below_new_game_over_dialog() {
+        let mut app = new_classic_running_sandbox_app();
+        configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open F4 before evaluation");
+        assert!(app.runtime_client_list_mouse_active());
+        assert!(!app.runtime_client_list_keyboard_active());
+        assert!(app.runtime_client_list_draw_active());
+
+        app.handle_game_over()
+            .expect("show newer game-over dialog above F4");
+        assert!(app.runtime_client_list.is_some());
+        assert!(app.game_over_dialog.is_some());
+        assert!(!app.runtime_client_list_above_game_over);
+        assert!(!app.runtime_client_list_mouse_active());
+        assert!(!app.runtime_client_list_keyboard_active());
+        assert!(!app.runtime_client_list_draw_active());
+    }
+
+    #[test]
     fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
         let mut game_over = new_game_over_keyboard_app();
-        configure_runtime_network_role(&mut game_over, RuntimeNetworkRole::Host);
+        let (_events, mut game_over_commands) =
+            install_running_network_stub(&mut game_over, 0, 40, 4);
+        route_primary_gamepad_to_local_owner(&mut game_over);
         game_over
             .handle_key(VirtualKeyCode::F4, ElementState::Pressed)
             .expect("F4 opens above the older equal-z game-over dialog");
@@ -168332,6 +170882,12 @@ func ControlDig() { dig_count = 1; return(1); }
                 .and_then(GameOverState::focused),
             None
         );
+        let submitted = game_over_commands.take_submitted_local();
+        assert_eq!(submitted.len(), 1);
+        assert!(matches!(
+            submitted[0].1,
+            ControlEvent::Press(ControlButton::Right)
+        ));
         assert!(game_over.running_chat_text().is_none());
         assert!(game_over.runtime_client_list.is_some());
         game_over
@@ -168695,9 +171251,7 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn l128_f4_tab_visits_close_options_then_client_list() {
-        use lc_frontend::runtime_client_list::RuntimeClientListFocus;
-
+    fn l128_running_f4_nonexclusive_scope_does_not_receive_tab() {
         let mut app = new_classic_running_sandbox_app();
         let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
         app.control_clients
@@ -168706,63 +171260,43 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("open runtime client list");
 
         app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("focus close button");
+            .expect("nonexclusive running F4 leaves Tab outside GUI scope");
         assert_eq!(
             app.runtime_client_list
                 .as_ref()
                 .and_then(|dialog| dialog.focused()),
-            Some(RuntimeClientListFocus::Close)
+            None
         );
         app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("consume close-button Tab release");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("focus options-list shell");
-        assert_eq!(
-            app.runtime_client_list
-                .as_ref()
-                .and_then(|dialog| dialog.focused()),
-            Some(RuntimeClientListFocus::OptionsList)
-        );
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("consume options-list Tab release");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("focus client list");
-        let dialog = app.runtime_client_list.as_ref().expect("F4 dialog");
-        assert_eq!(dialog.focused(), Some(RuntimeClientListFocus::ClientList));
-        assert_eq!(dialog.selected_client_id(), Some(0));
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("consume client-list Tab release");
-        app.handle_modifiers_changed(ModifiersState::SHIFT)
-            .expect("hold Shift for backwards traversal");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("focus options-list shell backwards");
-        assert_eq!(
-            app.runtime_client_list
-                .as_ref()
-                .and_then(|dialog| dialog.focused()),
-            Some(RuntimeClientListFocus::OptionsList)
-        );
+            .expect("release remains outside the nonexclusive GUI scope");
+        assert!(app.runtime_client_list.is_some());
     }
 
     #[test]
-    fn l128_f4_keyboard_button_activates_on_release() {
+    fn l128_running_f4_only_stronger_escape_owns_keyboard_input() {
         let mut app = new_classic_running_sandbox_app();
         let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
         app.control_clients
             .replace_snapshot([message_client(0, b"Host")]);
         app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
             .expect("open runtime client list");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("focus close button");
-        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("consume Tab release");
 
         app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
-            .expect("press focused close button");
-        assert!(app.runtime_client_list.is_some());
+            .expect("Return stays outside the nonexclusive F4 GUI scope");
         app.handle_key(VirtualKeyCode::Return, ElementState::Released)
-            .expect("release focused close button");
+            .expect("Return release stays outside the nonexclusive F4 GUI scope");
+        assert!(app.runtime_client_list.is_some());
+        assert!(
+            app.running_chat_text().is_some(),
+            "the lower-priority fullscreen Return binding remains reachable"
+        );
+        app.close_running_chat()
+            .expect("close the chat opened below nonexclusive F4");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("the dedicated fullscreen Escape binding closes F4");
         assert!(app.runtime_client_list.is_none());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("consume the dedicated Escape release");
     }
 
     #[test]
@@ -168831,6 +171365,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
         let mut app = new_classic_running_sandbox_app();
         app.resize(640, 480).expect("resize client-info fixture");
+        app.mode = AppMode::Menu;
         let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
         let row = RuntimeClientRow {
             client_id: 7,

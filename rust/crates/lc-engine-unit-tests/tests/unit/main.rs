@@ -63932,31 +63932,41 @@ func Probe() {
         let empty_then_cell = engine.tick()?;
         assert_eq!(empty_then_cell.hud.scoreboard.show_count(), 1);
         assert_eq!(empty_then_cell.hud.scoreboard.row_count(), 1);
+        let requests = &empty_then_cell.hud.scoreboard_presentations;
+        assert_eq!(requests.len(), 1);
         assert_eq!(
-            empty_then_cell.hud.scoreboard_presentations,
-            vec![lc_engine::ScoreboardPresentationRequest {
-                rows: 0,
-                columns: 0,
-                show_count: 1,
-            }]
+            (
+                requests[0].rows,
+                requests[0].columns,
+                requests[0].show_count,
+                requests[0].layout_revision,
+                requests[0].title_widget_present,
+            ),
+            (0, 0, 1, 0, false),
         );
+        assert_eq!(requests[0].scoreboard.row_count(), 0);
+        assert_eq!(requests[0].scoreboard.column_count(), 0);
+        assert_eq!(requests[0].scoreboard.show_count(), 1);
 
         engine.call_scenario_script_function("OpenThenClose", Vec::new())?;
         let open_then_close = engine.tick()?;
+        let requests = &open_then_close.hud.scoreboard_presentations;
+        assert_eq!(requests.len(), 2);
         assert_eq!(
-            open_then_close.hud.scoreboard_presentations,
-            vec![
-                lc_engine::ScoreboardPresentationRequest {
-                    rows: 1,
-                    columns: 1,
-                    show_count: 2,
-                },
-                lc_engine::ScoreboardPresentationRequest {
-                    rows: 1,
-                    columns: 1,
-                    show_count: 0,
-                },
-            ]
+            requests
+                .iter()
+                .map(|request| {
+                    (
+                        request.rows,
+                        request.columns,
+                        request.show_count,
+                        request.layout_revision,
+                        request.title_widget_present,
+                        request.scoreboard.show_count(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![(1, 1, 2, 1, true, 2), (1, 1, 0, 1, true, 0)],
         );
         Ok(())
     }

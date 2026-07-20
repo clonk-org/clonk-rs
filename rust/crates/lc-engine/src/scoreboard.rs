@@ -5,17 +5,29 @@ use serde::{Deserialize, Serialize};
 pub const SCOREBOARD_CAPTION: i32 = -1;
 
 /// One ordered `C4Scoreboard::DoDlgShow` presentation reconciliation. The
-/// dimensions and refcount are captured at call time because later SetCell
-/// calls must not retroactively make an earlier empty-board request visible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// dimensions, refcount, and Update generation are captured at call time
+/// because later SetCell calls must not retroactively change an earlier
+/// dialog-lifecycle decision or its constructor title state.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoreboardPresentationRequest {
     pub rows: usize,
     pub columns: usize,
     pub show_count: i32,
+    /// SetCell generation observed when C4ScoreboardDlg was constructed or
+    /// reconciled. Later generations require another lazy Update before draw.
+    pub layout_revision: u64,
+    /// Whether constructing at this request would leave a real WoodenLabel
+    /// after SetTitle. This controls a later allocated-empty-title margin pass.
+    pub title_widget_present: bool,
+    /// Exact matrix observed by the synchronous C4ScoreboardDlg constructor.
+    /// A later SetCell may invalidate that geometry before the app sees this
+    /// request, but input before the first Draw still hits the constructor
+    /// bounds in C++.
+    pub scoreboard: ScoreboardState,
 }
 
 impl ScoreboardPresentationRequest {
-    pub fn should_be_shown(self) -> bool {
+    pub fn should_be_shown(&self) -> bool {
         self.show_count > 0 && self.rows != 0 && self.columns != 0
     }
 }
@@ -24,6 +36,7 @@ impl ScoreboardPresentationRequest {
 pub(crate) struct ScoreboardPresentationSink {
     active: bool,
     pending: Vec<ScoreboardPresentationRequest>,
+    layout_revision: u64,
 }
 
 impl ScoreboardPresentationSink {
@@ -31,7 +44,22 @@ impl ScoreboardPresentationSink {
         // Initialize/save-load script activity occurs while C4GUI is still
         // exclusive and must never be replayed after entering the game.
         self.pending.clear();
+        self.layout_revision = 0;
         self.active = true;
+    }
+
+    /// C4Scoreboard::SetCell invalidates the cached row/column layout even
+    /// when the assigned value is unchanged. Keep this signal separate from
+    /// the serialized model so app presentation can retain native placement
+    /// between actual SetCell calls.
+    pub(crate) fn invalidate_layout(&mut self) {
+        if self.active {
+            self.layout_revision = self.layout_revision.wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn layout_revision(&self) -> u64 {
+        self.layout_revision
     }
 
     pub(crate) fn apply_show_change(&mut self, scoreboard: &mut ScoreboardState, change: i32) {
@@ -45,6 +73,12 @@ impl ScoreboardPresentationSink {
             rows: scoreboard.row_count(),
             columns: scoreboard.column_count(),
             show_count: scoreboard.show_count(),
+            layout_revision: self.layout_revision,
+            title_widget_present: scoreboard
+                .cell(0, 0)
+                .and_then(ScoreboardCell::text)
+                .is_some_and(|title| !title.is_empty()),
+            scoreboard: scoreboard.clone(),
         });
     }
 

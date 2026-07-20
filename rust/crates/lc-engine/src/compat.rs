@@ -12972,6 +12972,11 @@ fn set_scoreboard_data(args: &[Value]) -> Result<Value, RuntimeError> {
                 .scoreboard
                 .borrow_mut()
                 .set_cell(column, row, text, data);
+            context
+                .world
+                .scoreboard_presentations
+                .borrow_mut()
+                .invalidate_layout();
         }
     });
     Ok(Value::Nil)
@@ -49554,6 +49559,39 @@ mod tests {
     }
 
     #[test]
+    fn scoreboard_set_cell_invalidation_is_ordered_and_sort_keeps_cached_geometry() {
+        let scoreboard = Rc::new(RefCell::new(ScoreboardState::default()));
+        let presentations = Rc::new(RefCell::new(ScoreboardPresentationSink::default()));
+        presentations.borrow_mut().begin_runtime_capture();
+        let world = HostWorldContext::default()
+            .with_scoreboard(Rc::clone(&scoreboard))
+            .with_scoreboard_presentations(Rc::clone(&presentations));
+
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            let args = [
+                Value::Int(-1),
+                Value::Int(-1),
+                Value::String("Scores".into()),
+                Value::Int(0),
+            ];
+            set_scoreboard_data(&args)?;
+            set_scoreboard_data(&args)?;
+            assert_eq!(
+                sort_scoreboard(&[Value::Int(-1), Value::Bool(false)])?,
+                Value::Bool(true)
+            );
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+        result.expect("scoreboard mutations succeed");
+
+        assert_eq!(
+            presentations.borrow().layout_revision(),
+            2,
+            "each SetCell invalidates, including an unchanged assignment"
+        );
+    }
+
+    #[test]
     fn do_scoreboard_show_targets_one_based_players_and_updates_the_refcount() {
         // FnDoScoreboardShow looks up iForPlr-1, returns false only for a
         // missing requested player, and otherwise passes iChange to the
@@ -49598,6 +49636,9 @@ mod tests {
         assert_eq!(requests.len(), 2, "missing-player calls emit no request");
         assert_eq!(requests[0].show_count, 2);
         assert_eq!(requests[1].show_count, 1);
+        assert!(requests.iter().all(|request| {
+            request.layout_revision == 1 && request.title_widget_present
+        }));
     }
 
     #[test]

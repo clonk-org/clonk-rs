@@ -562,6 +562,18 @@ impl RuntimeClientListDialog {
         self.title_drag.is_some()
     }
 
+    /// Whether CMouse's retained left-button drag element belongs to any
+    /// client-list control, including ordinary buttons and scroll controls.
+    pub const fn has_pointer_capture(&self) -> bool {
+        self.title_drag.is_some() || self.pointer_capture.is_some()
+    }
+
+    /// Current first visible client/connection row for retained wheel state.
+    pub fn scroll_row(&self, preferred: IntRect, font_line_height: i32) -> usize {
+        let layout = self.layout(preferred, font_line_height);
+        self.clamped_scroll_row(&layout)
+    }
+
     pub fn replace_snapshot(
         &mut self,
         options: Vec<LobbyOptionRow>,
@@ -1111,6 +1123,13 @@ impl RuntimeClientListDialog {
         self.pointer = None;
         self.pointer_capture = None;
         self.title_drag = None;
+        self.tooltip.pointer_left();
+    }
+
+    /// Clear hover state when a screen-level popup occludes this dialog while
+    /// preserving CMouse's retained drag element.
+    pub fn pointer_occluded(&mut self) {
+        self.pointer = None;
         self.tooltip.pointer_left();
     }
 
@@ -1709,7 +1728,34 @@ impl RuntimeClientListDialog {
         active: bool,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
-        self.render_at(surface, preferred, resources, active, gamma, Instant::now())
+        self.render_with_activity(
+            surface,
+            preferred,
+            resources,
+            active,
+            active,
+            gamma,
+        )
+    }
+
+    pub fn render_with_activity(
+        &self,
+        surface: &mut Surface,
+        preferred: IntRect,
+        resources: RuntimeClientListResources<'_>,
+        keyboard_active: bool,
+        mouse_active: bool,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
+        self.render_at_with_activity(
+            surface,
+            preferred,
+            resources,
+            keyboard_active,
+            mouse_active,
+            gamma,
+            Instant::now(),
+        )
     }
 
     pub fn render_static_info(
@@ -1753,6 +1799,27 @@ impl RuntimeClientListDialog {
         gamma: Option<&GammaRamp>,
         now: Instant,
     ) -> Result<()> {
+        self.render_at_with_activity(
+            surface,
+            preferred,
+            resources,
+            active,
+            active,
+            gamma,
+            now,
+        )
+    }
+
+    pub fn render_at_with_activity(
+        &self,
+        surface: &mut Surface,
+        preferred: IntRect,
+        resources: RuntimeClientListResources<'_>,
+        keyboard_active: bool,
+        mouse_active: bool,
+        gamma: Option<&GammaRamp>,
+        now: Instant,
+    ) -> Result<()> {
         if self.is_static_info_only() {
             return self.render_static_info_at(
                 surface,
@@ -1764,7 +1831,7 @@ impl RuntimeClientListDialog {
                     button_highlight: resources.button_highlight,
                     scroll: resources.scroll,
                 },
-                active,
+                mouse_active,
                 gamma,
                 now,
             );
@@ -1774,7 +1841,16 @@ impl RuntimeClientListDialog {
         let layout = self.layout(preferred, resources.fonts.text.line_height);
         if self.info_only {
             if let Some(info) = self.info_layout_from_parent(&layout) {
-                self.draw_client_info(surface, &layout, &info, resources, active, gamma, now);
+                self.draw_client_info(
+                    surface,
+                    &layout,
+                    &info,
+                    resources,
+                    keyboard_active,
+                    mouse_active,
+                    gamma,
+                    now,
+                );
             }
             return Ok(());
         }
@@ -1803,7 +1879,8 @@ impl RuntimeClientListDialog {
             HitTarget::Close,
             &layout,
             resources,
-            active,
+            keyboard_active,
+            mouse_active,
             gamma,
         );
 
@@ -1878,7 +1955,7 @@ impl RuntimeClientListDialog {
                     h: row_layout.value.h,
                 },
             );
-            let hovered = active
+            let hovered = mouse_active
                 && self.pointer.is_some_and(|point| {
                     self.hit_target(point, &layout)
                         == Some(HitTarget::OptionValue(row_layout.index))
@@ -1895,8 +1972,8 @@ impl RuntimeClientListDialog {
                 resources.scroll,
                 self.option_scrollbar_pin(&layout),
                 option_max_scroll,
-                self.pointer_capture == Some(HitTarget::OptionScrollUp),
-                self.pointer_capture == Some(HitTarget::OptionScrollDown),
+                mouse_active && self.pointer_capture == Some(HitTarget::OptionScrollUp),
+                mouse_active && self.pointer_capture == Some(HitTarget::OptionScrollDown),
                 gamma,
             );
         }
@@ -1911,7 +1988,14 @@ impl RuntimeClientListDialog {
             gamma,
         );
         draw_3d_frame(surface, layout.list, gamma);
-        self.draw_rows(surface, &layout, resources, active, gamma);
+        self.draw_rows(
+            surface,
+            &layout,
+            resources,
+            keyboard_active,
+            mouse_active,
+            gamma,
+        );
         draw_clipped_text(
             surface,
             &resources.fonts.text,
@@ -1925,8 +2009,17 @@ impl RuntimeClientListDialog {
         );
 
         if let Some(info) = self.info_layout_from_parent(&layout) {
-            self.draw_client_info(surface, &layout, &info, resources, active, gamma, now);
-        } else if active {
+            self.draw_client_info(
+                surface,
+                &layout,
+                &info,
+                resources,
+                keyboard_active,
+                mouse_active,
+                gamma,
+                now,
+            );
+        } else if mouse_active {
             if let Some(tooltip) = self.tooltip_state_at(now, preferred, &resources.fonts.text) {
                 draw_classic_tooltip(
                     surface,
@@ -1945,7 +2038,8 @@ impl RuntimeClientListDialog {
         surface: &mut Surface,
         layout: &RuntimeClientListLayout,
         resources: RuntimeClientListResources<'_>,
-        active: bool,
+        keyboard_active: bool,
+        mouse_active: bool,
         gamma: Option<&GammaRamp>,
     ) {
         let mut y = layout.list.y + 2;
@@ -1965,7 +2059,9 @@ impl RuntimeClientListDialog {
                             y,
                             layout.list.x + layout.list.w - 3,
                             y + layout.row_height - 1,
-                            if active && self.focus == Some(RuntimeClientListFocus::ClientList) {
+                            if keyboard_active
+                                && self.focus == Some(RuntimeClientListFocus::ClientList)
+                            {
                                 LIST_SELECTION
                             } else {
                                 LIST_SELECTION_INACTIVE
@@ -2012,7 +2108,8 @@ impl RuntimeClientListDialog {
                                 target,
                                 layout,
                                 resources,
-                                active,
+                                keyboard_active,
+                                mouse_active,
                                 gamma,
                             );
                             right -= 2;
@@ -2032,7 +2129,8 @@ impl RuntimeClientListDialog {
                             HitTarget::Mute(row.client_id),
                             layout,
                             resources,
-                            active,
+                            keyboard_active,
+                            mouse_active,
                             gamma,
                         );
                         right -= 2;
@@ -2087,7 +2185,9 @@ impl RuntimeClientListDialog {
                             y,
                             layout.list.x + layout.list.w - 3,
                             y + layout.row_height - 1,
-                            if active && self.focus == Some(RuntimeClientListFocus::ClientList) {
+                            if keyboard_active
+                                && self.focus == Some(RuntimeClientListFocus::ClientList)
+                            {
                                 LIST_SELECTION
                             } else {
                                 LIST_SELECTION_INACTIVE
@@ -2110,7 +2210,8 @@ impl RuntimeClientListDialog {
                             HitTarget::Disconnect(client_id, connection.connection_id),
                             layout,
                             resources,
-                            active,
+                            keyboard_active,
+                            mouse_active,
                             gamma,
                         );
                         connection_right -= 2;
@@ -2279,13 +2380,15 @@ impl RuntimeClientListDialog {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_client_info(
         &self,
         surface: &mut Surface,
         parent: &RuntimeClientListLayout,
         layout: &RuntimeClientInfoLayout,
         resources: RuntimeClientListResources<'_>,
-        active: bool,
+        keyboard_active: bool,
+        mouse_active: bool,
         gamma: Option<&GammaRamp>,
         now: Instant,
     ) {
@@ -2317,7 +2420,8 @@ impl RuntimeClientListDialog {
             HitTarget::InfoClose,
             parent,
             resources,
-            active,
+            keyboard_active,
+            mouse_active,
             gamma,
         );
         draw_engine_box(
@@ -2406,9 +2510,28 @@ impl RuntimeClientListDialog {
         target: HitTarget,
         layout: &RuntimeClientListLayout,
         resources: RuntimeClientListResources<'_>,
-        active: bool,
+        keyboard_active: bool,
+        mouse_active: bool,
         gamma: Option<&GammaRamp>,
     ) {
+        let (highlighted, pressed) =
+            self.icon_button_state(target, layout, keyboard_active, mouse_active);
+        if highlighted && !pressed {
+            draw_highlight(surface, rect, resources.button_highlight, gamma);
+        }
+        draw_icon(surface, rect, resources.icons, phase, gamma);
+        if pressed {
+            draw_highlight(surface, rect, resources.button_highlight, gamma);
+        }
+    }
+
+    fn icon_button_state(
+        &self,
+        target: HitTarget,
+        layout: &RuntimeClientListLayout,
+        keyboard_active: bool,
+        mouse_active: bool,
+    ) -> (bool, bool) {
         let keyboard_focused = match target {
             HitTarget::Close => self.focus == Some(RuntimeClientListFocus::Close),
             HitTarget::Mute(client_id) => {
@@ -2429,24 +2552,21 @@ impl RuntimeClientListDialog {
             }
             _ => false,
         };
-        let hovered = active
-            && (keyboard_focused
-                || self.pointer.is_some_and(|point| {
-                    self.hit_target(point, layout)
-                        .is_some_and(|hit| hit == target)
-                }));
-        let keyboard_pressed = keyboard_focused
+        let keyboard_highlighted = keyboard_active && keyboard_focused;
+        let pointer_highlighted = mouse_active
+            && self.pointer.is_some_and(|point| {
+                self.hit_target(point, layout)
+                    .is_some_and(|hit| hit == target)
+            });
+        let keyboard_pressed = keyboard_highlighted
             && self
                 .keyboard_press
                 .is_some_and(|(_, focus)| self.focus == Some(focus));
-        let pressed = hovered && (self.pointer_capture == Some(target) || keyboard_pressed);
-        if hovered && !pressed {
-            draw_highlight(surface, rect, resources.button_highlight, gamma);
-        }
-        draw_icon(surface, rect, resources.icons, phase, gamma);
-        if pressed {
-            draw_highlight(surface, rect, resources.button_highlight, gamma);
-        }
+        let pointer_pressed = pointer_highlighted && self.pointer_capture == Some(target);
+        (
+            keyboard_highlighted || pointer_highlighted,
+            keyboard_pressed || pointer_pressed,
+        )
     }
 
     fn hit_target(&self, point: GuiPoint, layout: &RuntimeClientListLayout) -> Option<HitTarget> {
@@ -2916,6 +3036,49 @@ mod tests {
     }
 
     #[test]
+    fn icon_button_visuals_keep_keyboard_and_pointer_activity_independent() {
+        let preferred = IntRect {
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 480,
+        };
+        let mut dialog = RuntimeClientListDialog::new(
+            "Network",
+            options(true),
+            vec![row()],
+            RuntimeClientListStatus::default(),
+        );
+        let layout = dialog.layout(preferred, 16);
+        dialog.focus = Some(RuntimeClientListFocus::Close);
+        dialog.pointer = Some(GuiPoint::new(
+            (layout.close_button.x + 1) as f32,
+            (layout.close_button.y + 1) as f32,
+        ));
+        dialog.pointer_capture = Some(HitTarget::Close);
+
+        assert_eq!(
+            dialog.icon_button_state(HitTarget::Close, &layout, true, false),
+            (true, false),
+            "keyboard focus must not turn an inactive pointer capture into a press"
+        );
+        assert_eq!(
+            dialog.icon_button_state(HitTarget::Close, &layout, false, true),
+            (true, true)
+        );
+        assert_eq!(
+            dialog.icon_button_state(HitTarget::Close, &layout, false, false),
+            (false, false)
+        );
+
+        dialog.keyboard_press = Some((KeyCode::Enter, RuntimeClientListFocus::Close));
+        assert_eq!(
+            dialog.icon_button_state(HitTarget::Close, &layout, true, false),
+            (true, true)
+        );
+    }
+
+    #[test]
     fn client_row_and_escape_open_then_close_the_info_child() {
         let preferred = IntRect {
             x: 0,
@@ -2935,10 +3098,12 @@ mod tests {
             (layout.list.y + layout.row_height / 2) as f32,
         );
         assert!(dialog.handle_pointer_down(point, preferred, 16));
+        assert!(dialog.has_pointer_capture());
         assert_eq!(
             dialog.handle_pointer_up(point, preferred, 16),
             Some(RuntimeClientListAction::OpenInfo(7))
         );
+        assert!(!dialog.has_pointer_capture());
         assert_eq!(dialog.info_client_id(), Some(7));
         assert_eq!(
             dialog.handle_key(KeyCode::Tab, false, preferred, 16),

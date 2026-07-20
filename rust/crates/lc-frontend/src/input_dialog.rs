@@ -1483,6 +1483,17 @@ impl InputDialogController {
         active: bool,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
+        self.render_with_activity(surface, resources, active, active, gamma)
+    }
+
+    pub fn render_with_activity(
+        &self,
+        surface: &mut Surface,
+        resources: &InputDialogResources<'_>,
+        keyboard_active: bool,
+        mouse_active: bool,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
         let now = Instant::now();
         let cursor_visible = now
             .checked_duration_since(self.last_edit_input)
@@ -1491,7 +1502,15 @@ impl InputDialogController {
             / 500
             % 2
             == 0;
-        self.render_with_cursor_at(surface, resources, active, cursor_visible, gamma, now)
+        self.render_with_cursor_at_activity(
+            surface,
+            resources,
+            keyboard_active,
+            mouse_active,
+            cursor_visible,
+            gamma,
+            now,
+        )
     }
 
     /// Deterministic rendering entry point for cached frames and tests.
@@ -1522,6 +1541,28 @@ impl InputDialogController {
         gamma: Option<&GammaRamp>,
         now: Instant,
     ) -> Result<()> {
+        self.render_with_cursor_at_activity(
+            surface,
+            resources,
+            active,
+            active,
+            cursor_visible,
+            gamma,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_cursor_at_activity(
+        &self,
+        surface: &mut Surface,
+        resources: &InputDialogResources<'_>,
+        keyboard_active: bool,
+        mouse_active: bool,
+        cursor_visible: bool,
+        gamma: Option<&GammaRamp>,
+        now: Instant,
+    ) -> Result<()> {
         resources.validate()?;
         let layout = self.layout(
             surface.width() as i32,
@@ -1543,7 +1584,7 @@ impl InputDialogController {
                 surface,
                 layout.edit,
                 &resources.fonts.text,
-                active,
+                keyboard_active,
                 cursor_visible,
                 gamma,
             );
@@ -1564,7 +1605,14 @@ impl InputDialogController {
             );
         }
         if let Some(close) = layout.close_button {
-            self.render_close(surface, close, resources, active, gamma)?;
+            self.render_close(
+                surface,
+                close,
+                resources,
+                keyboard_active,
+                mouse_active,
+                gamma,
+            )?;
         }
         draw_icon(
             surface,
@@ -1588,7 +1636,7 @@ impl InputDialogController {
             surface,
             layout.edit,
             &resources.fonts.text,
-            active,
+            keyboard_active,
             cursor_visible,
             gamma,
         );
@@ -1597,7 +1645,7 @@ impl InputDialogController {
             layout.ok_button,
             &self.button_labels.ok,
             resources.fonts,
-            self.button_state(ButtonTarget::Ok, active),
+            self.button_state(ButtonTarget::Ok, keyboard_active, mouse_active),
             Some(&resources.button_highlight),
             gamma,
         );
@@ -1606,7 +1654,7 @@ impl InputDialogController {
             layout.cancel_button,
             &self.button_labels.cancel,
             resources.fonts,
-            self.button_state(ButtonTarget::Cancel, active),
+            self.button_state(ButtonTarget::Cancel, keyboard_active, mouse_active),
             Some(&resources.button_highlight),
             gamma,
         );
@@ -1618,13 +1666,12 @@ impl InputDialogController {
         surface: &mut Surface,
         rect: IntRect,
         resources: &InputDialogResources<'_>,
-        active: bool,
+        keyboard_active: bool,
+        mouse_active: bool,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
-        let highlighted = active
-            && (self.focus == InputDialogControl::Close
-                || self.hovered == Some(ButtonTarget::Close));
-        if highlighted {
+        let state = self.button_state(ButtonTarget::Close, keyboard_active, mouse_active);
+        if state.highlighted {
             draw_highlight(surface, rect, &resources.button_highlight, gamma);
         }
         draw_icon(
@@ -1635,7 +1682,7 @@ impl InputDialogController {
             &resources.icons_extended,
             gamma,
         )?;
-        if active && self.button_is_pressed(ButtonTarget::Close) {
+        if state.pressed {
             draw_highlight(surface, rect, &resources.button_highlight, gamma);
         }
         Ok(())
@@ -2050,20 +2097,26 @@ impl InputDialogController {
         }
     }
 
-    fn button_is_pressed(&self, target: ButtonTarget) -> bool {
-        self.key_pressed
-            .is_some_and(|(pressed, _)| pressed == target)
-            || (self.pointer_pressed == Some(target) && self.hovered == Some(target))
-    }
-
     fn pointer_button_is_down(&self) -> bool {
         self.pointer_pressed.is_some() && self.pointer_pressed == self.hovered
     }
 
-    fn button_state(&self, target: ButtonTarget, active: bool) -> ClassicButtonState {
+    fn button_state(
+        &self,
+        target: ButtonTarget,
+        keyboard_active: bool,
+        mouse_active: bool,
+    ) -> ClassicButtonState {
+        let keyboard_pressed = keyboard_active
+            && self
+                .key_pressed
+                .is_some_and(|(pressed, _)| pressed == target);
+        let pointer_pressed =
+            mouse_active && self.pointer_pressed == Some(target) && self.hovered == Some(target);
         ClassicButtonState {
-            pressed: active && self.button_is_pressed(target),
-            highlighted: active && (self.focus == target.control() || self.hovered == Some(target)),
+            pressed: keyboard_pressed || pointer_pressed,
+            highlighted: (keyboard_active && self.focus == target.control())
+                || (mouse_active && self.hovered == Some(target)),
         }
     }
 }
@@ -2494,6 +2547,48 @@ mod tests {
                 InputDialogContextCommand::Clear,
                 InputDialogContextCommand::SelectAll,
             ]
+        );
+    }
+
+    #[test]
+    fn button_visuals_keep_keyboard_and_pointer_activity_independent() {
+        let mut state = controller();
+        state.focus = InputDialogControl::Ok;
+        state.hovered = Some(ButtonTarget::Cancel);
+        state.pointer_pressed = Some(ButtonTarget::Cancel);
+
+        assert_eq!(
+            state.button_state(ButtonTarget::Ok, true, false),
+            ClassicButtonState {
+                pressed: false,
+                highlighted: true,
+            }
+        );
+        assert_eq!(
+            state.button_state(ButtonTarget::Cancel, true, false),
+            ClassicButtonState::default(),
+            "an inactive shared-mouse path must not leak a retained pointer press"
+        );
+        assert_eq!(
+            state.button_state(ButtonTarget::Cancel, false, true),
+            ClassicButtonState {
+                pressed: true,
+                highlighted: true,
+            }
+        );
+
+        state.key_pressed = Some((ButtonTarget::Ok, KeyCode::Enter));
+        assert_eq!(
+            state.button_state(ButtonTarget::Ok, true, false),
+            ClassicButtonState {
+                pressed: true,
+                highlighted: true,
+            }
+        );
+        assert_eq!(
+            state.button_state(ButtonTarget::Ok, false, true),
+            ClassicButtonState::default(),
+            "pointer activity alone must not paint keyboard focus or presses"
         );
     }
 

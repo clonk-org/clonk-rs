@@ -24674,6 +24674,13 @@ impl Engine {
         self.scoreboard.borrow().clone()
     }
 
+    /// Runtime C4Scoreboard::SetCell invalidation generation. Sorting changes
+    /// row order without invalidating native geometry, so it deliberately
+    /// does not advance this value.
+    pub fn scoreboard_layout_revision(&self) -> u64 {
+        self.scoreboard_presentations.borrow().layout_revision()
+    }
+
     /// Drains ordered runtime `DoScoreboardShow` presentation requests.
     /// Synchronous input/menu callbacks may execute script between ticks, so
     /// the app must also consume this queue before scoreboard input/render.
