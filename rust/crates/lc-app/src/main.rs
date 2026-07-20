@@ -32362,15 +32362,13 @@ impl GameApp {
                                 .players()
                                 .any(|player| player.at_client().get() == local_client_id);
                         if league_self_kick {
-                            if let Some(Err(error)) = self.network.as_ref().map(|network| {
-                                network.submit_vote(
-                                    lc_engine::VOTE_TYPE_KICK,
-                                    true,
-                                    local_client_id,
-                                )
-                            }) {
-                                tracing::warn!(%error, "failed to submit league self-kick vote");
-                            }
+                            self.submit_own_league_vote(
+                                LeagueVoteSubject {
+                                    vote_type: lc_engine::VOTE_TYPE_KICK,
+                                    data: local_client_id,
+                                },
+                                true,
+                            );
                         } else {
                             let result_message = self.runtime_resource_bytes(
                                 "IDS_ERR_GAMELEFTVIAPLAYERMENU",
@@ -35566,20 +35564,22 @@ impl GameApp {
                         );
                         return Ok(true);
                     };
-                    if let Some(network) = self.network.as_ref() {
-                        let result = if self.network_is_league
-                            && self.runtime_client_has_players(target.client_id)
-                        {
-                            network.submit_vote(
-                                lc_engine::VOTE_TYPE_KICK,
-                                true,
-                                target.client_id,
-                            )
-                        } else {
-                            let reason = self.runtime_resource_text(
-                                "IDS_MSG_KICKFROMMSGBOARD",
-                                "kicked from messageboard",
-                            );
+                    if self.network_is_league
+                        && self.runtime_client_has_players(target.client_id)
+                    {
+                        self.submit_own_league_vote(
+                            LeagueVoteSubject {
+                                vote_type: lc_engine::VOTE_TYPE_KICK,
+                                data: target.client_id,
+                            },
+                            true,
+                        );
+                    } else {
+                        let reason = self.runtime_resource_text(
+                            "IDS_MSG_KICKFROMMSGBOARD",
+                            "kicked from messageboard",
+                        );
+                        if let Some(Err(error)) = self.network.as_ref().map(|network| {
                             network.submit_client_remove(lc_engine::ClientRemoveControlData {
                                 client_id: target.client_id,
                                 reason: lc_engine::LegacyCString::from_bytes(
@@ -35588,8 +35588,7 @@ impl GameApp {
                                 .unwrap_or_default(),
                                 by_client: 0,
                             })
-                        };
-                        if let Err(error) = result {
+                        }) {
                             tracing::error!(%error, "failed to submit running kick command");
                         }
                     }
@@ -57251,14 +57250,20 @@ impl GameApp {
                         .engine
                         .players()
                         .any(|player| player.at_client().get() == target.client_id);
-                if let Some(network) = self.network.as_ref() {
-                    let result = if league_vote {
-                        network.submit_vote(lc_engine::VOTE_TYPE_KICK, true, target.client_id)
-                    } else {
-                        let reason = self.classic_lobby_resource_text(
-                            "IDS_MSG_KICKFROMMSGBOARD",
-                            "kicked from messageboard",
-                        );
+                if league_vote {
+                    self.submit_own_league_vote(
+                        LeagueVoteSubject {
+                            vote_type: lc_engine::VOTE_TYPE_KICK,
+                            data: target.client_id,
+                        },
+                        true,
+                    );
+                } else {
+                    let reason = self.classic_lobby_resource_text(
+                        "IDS_MSG_KICKFROMMSGBOARD",
+                        "kicked from messageboard",
+                    );
+                    if let Some(Err(error)) = self.network.as_ref().map(|network| {
                         network.submit_client_remove(lc_engine::ClientRemoveControlData {
                             client_id: target.client_id,
                             reason: lc_engine::LegacyCString::from_bytes(
@@ -57267,8 +57272,7 @@ impl GameApp {
                             .unwrap_or_default(),
                             by_client: 0,
                         })
-                    };
-                    if let Err(error) = result {
+                    }) {
                         tracing::error!(%error, "failed to submit lobby kick command");
                     }
                 }
@@ -60854,6 +60858,29 @@ impl GameApp {
         )
     }
 
+    fn open_league_surrender_dialog(&mut self) -> Result<(), EngineError> {
+        if self.message_dialogs.iter().any(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::LeagueVote { .. }
+                    | MessageDialogContinuation::LeagueSurrender
+            )
+        }) {
+            return Ok(());
+        }
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                "It was decided that you cannot leave the game. However, you can forfeit the game instead.||Do you want to surrender?",
+                "Voting",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                true,
+            ),
+            MessageDialogContinuation::LeagueSurrender,
+        )
+    }
+
     fn league_vote_description(&self, vote: lc_engine::VoteControlData) -> String {
         match vote.vote_type {
             lc_engine::VOTE_TYPE_CANCEL => "abort the round".to_string(),
@@ -60906,17 +60933,7 @@ impl GameApp {
                 || result.vote_type == lc_engine::VOTE_TYPE_KICK
                     && result.data == local_client_id.unwrap_or(-1));
         if rejected_own_cancel {
-            let dialog = lc_frontend::message_dialog::MessageDialogState::new(
-                "It was decided that you cannot leave the game. However, you can forfeit the game instead.||Do you want to surrender?",
-                "Voting",
-                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
-                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
-                lc_frontend::message_dialog::MessageDialogSize::Regular,
-                true,
-            );
-            if let Err(error) =
-                self.push_message_dialog(dialog, MessageDialogContinuation::LeagueSurrender)
-            {
+            if let Err(error) = self.open_league_surrender_dialog() {
                 tracing::error!(%error, "failed to open league surrender dialog");
             }
         }
@@ -64576,8 +64593,21 @@ impl GameApp {
             .league_votes
             .first_ballot(local_client_id, subject)
             .is_some()
-            || !self.league_votes.try_submit_own_vote_at(subject, now)
         {
+            return false;
+        }
+        if !self.league_votes.try_submit_own_vote_at(subject, now) {
+            let message =
+                self.runtime_resource_string("IDS_TEXT_YOUCANONLYSTARTONEVOTINGE");
+            self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
+            let opens_surrender = subject.vote_type == lc_engine::VOTE_TYPE_CANCEL
+                || subject.vote_type == lc_engine::VOTE_TYPE_KICK
+                    && subject.data == local_client_id;
+            if opens_surrender {
+                if let Err(error) = self.open_league_surrender_dialog() {
+                    tracing::error!(%error, "failed to open league surrender dialog");
+                }
+            }
             return false;
         }
         let Some(network) = self.network.as_ref() else {
@@ -168721,6 +168751,131 @@ func ControlDig() { dig_count = 1; return(1); }
                 .is_none(),
             "league self-kick does not execute the ordinary Part verdict"
         );
+    }
+
+    #[test]
+    fn rate_limited_own_vote_opens_surrender_but_active_duplicate_does_not() {
+        // C4Network2::Vote applies one global 120-second limiter only to an
+        // inactive (Type,Data) subject. A blocked Cancel or local-self Kick
+        // opens the same singleton surrender prompt as a rejected own vote;
+        // an already-active local ballot takes the earlier duplicate path
+        // without opening it (src/C4Network2.cpp:2842-2868,2974-2982).
+        let local_client = 7;
+        let setup = || {
+            let mut app = new_running_sandbox_app();
+            let (manager, _events, commands) =
+                NetworkManager::test_stub_with_commands_for_client_id(local_client);
+            app.network = Some(manager);
+            (app, commands)
+        };
+
+        for subject in [
+            LeagueVoteSubject {
+                vote_type: lc_engine::VOTE_TYPE_CANCEL,
+                data: 0,
+            },
+            LeagueVoteSubject {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                data: local_client as i32,
+            },
+        ] {
+            let (mut app, mut commands) = setup();
+            assert!(app.submit_own_league_vote_at(subject, true, 100));
+            assert_eq!(commands.take_submitted_votes().len(), 1);
+
+            assert!(!app.submit_own_league_vote_at(subject, true, 219));
+            assert!(commands.take_submitted_votes().is_empty());
+            assert_eq!(
+                latest_message_board_logical_entry(&app).as_deref(),
+                Some(
+                    "Voting-Timeout: you have to wait two minutes until you can request a new vote."
+                )
+            );
+            assert_eq!(app.message_dialogs.len(), 1);
+            let prompt = &app.message_dialogs[0];
+            assert!(matches!(
+                prompt.continuation,
+                MessageDialogContinuation::LeagueSurrender
+            ));
+            assert_eq!(prompt.state.caption(), "Voting");
+            assert_eq!(
+                prompt.state.message(),
+                "It was decided that you cannot leave the game. However, you can forfeit the game instead.||Do you want to surrender?"
+            );
+            assert_eq!(
+                prompt.state.buttons(),
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO
+            );
+            assert_eq!(
+                prompt.state.icon(),
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM
+            );
+            assert_eq!(
+                prompt.state.focused_button(),
+                Some(lc_frontend::message_dialog::MessageDialogButton::No)
+            );
+        }
+
+        let subject = LeagueVoteSubject {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            data: local_client as i32,
+        };
+        let (mut app, mut commands) = setup();
+        let log_before = message_board_logical_entries(&app);
+        assert!(app.submit_own_league_vote_at(subject, true, 100));
+        let own_ballot = commands
+            .take_submitted_votes()
+            .into_iter()
+            .next()
+            .expect("initial own ballot");
+        app.league_votes.add_at(own_ballot, 100);
+
+        assert!(!app.submit_own_league_vote_at(subject, true, 101));
+        assert!(commands.take_submitted_votes().is_empty());
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(message_board_logical_entries(&app), log_before);
+
+        let mut app = new_running_sandbox_app();
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client as i32));
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(local_client);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_is_league = true;
+
+        app.apply_ingame_menu_action(MenuAction::Part)
+            .expect("submit first league Part vote");
+        app.apply_ingame_menu_action(MenuAction::Part)
+            .expect("rate-limit repeated league Part vote");
+        assert_eq!(
+            commands.take_submitted_votes(),
+            vec![lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: local_client as i32,
+                by_client: local_client as i32,
+            }]
+        );
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert!(matches!(
+            app.message_dialogs[0].continuation,
+            MessageDialogContinuation::LeagueSurrender
+        ));
+        assert_eq!(
+            app.message_dialogs[0].state.focused_button(),
+            Some(lc_frontend::message_dialog::MessageDialogButton::No)
+        );
+
+        app.apply_ingame_menu_action(MenuAction::Part)
+            .expect("keep one surrender prompt on another repeated Part");
+        assert!(commands.take_submitted_votes().is_empty());
+        assert_eq!(app.message_dialogs.len(), 1);
     }
 
     #[test]
