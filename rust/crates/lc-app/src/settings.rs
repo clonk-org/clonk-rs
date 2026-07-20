@@ -366,6 +366,34 @@ mod tests {
     }
 
     #[test]
+    fn l008_scale_fifty_uses_half_size_and_survives_resize_round_trip() {
+        let mut config = Config::new();
+        config.set_in(Some("Graphics"), "ResolutionX", "800");
+        config.set_in(Some("Graphics"), "ResolutionY", "600");
+        config.set_in(Some("Graphics"), "Scale", "50");
+
+        let mut options = DisplayOptions::default();
+        options.apply_config(&config);
+        assert_eq!(options.scale_percent(), 50);
+        assert_eq!(options.scale, 0.5);
+        assert_eq!(options.actual_size(), (400, 300));
+        assert_eq!(options.checked_loader_actual_size(), Ok((400, 300)));
+
+        options.record_actual_size(401, 301);
+        assert_eq!((options.base_width, options.base_height), (802, 602));
+        assert_eq!(options.scale_percent(), 50);
+
+        let mut persisted = Config::new();
+        options.write_config(&mut persisted);
+        assert_eq!(persisted.get_in(Some("Graphics"), "Scale"), Some("50"));
+
+        let mut reloaded = DisplayOptions::default();
+        reloaded.apply_config(&persisted);
+        assert_eq!(reloaded.scale_percent(), 50);
+        assert_eq!(reloaded.actual_size(), (401, 301));
+    }
+
+    #[test]
     fn loader_scale_validation_accepts_fractional_and_rejects_nonpositive_or_overflow() {
         for percent in [0, -100] {
             let mut cfg = Config::new();

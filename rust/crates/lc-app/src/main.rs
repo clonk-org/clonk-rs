@@ -6864,7 +6864,7 @@ fn apply_options_display_requests(
                 app.set_display_mode(mode);
             }
             OptionsDisplayRequest::SetScale { percent, persist } => {
-                let percent = percent.clamp(100, 300);
+                anyhow::ensure!(percent > 0, "application scale must remain positive");
                 presenter.set_scale(percent as f32 / 100.0);
                 app.configure_native_startup_fonts(
                     presenter.scale(),
@@ -22977,7 +22977,7 @@ impl GameApp {
                 self.loader_render_error = Some(error.to_string());
             }
         }
-        if scale <= 1.0 || !scale.is_finite() {
+        if scale <= 0.0 || scale == 1.0 || !scale.is_finite() {
             self.native_startup_fonts = None;
             return;
         }
@@ -23007,7 +23007,7 @@ impl GameApp {
         source: Option<&ClassicNativeFontSource>,
     ) -> Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>> {
         let scale = self.loader_render_config?.application_scale();
-        if scale <= 1.0 || !scale.is_finite() {
+        if scale <= 0.0 || scale == 1.0 || !scale.is_finite() {
             return None;
         }
         let source = source?;
@@ -23044,7 +23044,9 @@ impl GameApp {
                 .network_start_wait
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
-            && scale > 1.0
+            && scale > 0.0
+            && scale != 1.0
+            && scale.is_finite()
             && self
                 .loader_render_config
                 .is_some_and(|config| config.application_scale() == scale)
@@ -23056,7 +23058,9 @@ impl GameApp {
 
     fn can_defer_native_game_messages(&self, scale: f32) -> bool {
         self.mode == AppMode::Running
-            && scale > 1.0
+            && scale > 0.0
+            && scale != 1.0
+            && scale.is_finite()
             // The physical commit point is after the filtered logical frame.
             // Keep C4Viewport/C4GUI z-order authoritative whenever a layer
             // that C++ draws after game messages is visible.
@@ -23090,7 +23094,8 @@ impl GameApp {
                 .loader_render_config
                 .is_some_and(|config| config.application_scale() == scale);
         (matches!(self.mode, AppMode::Menu | AppMode::Running) || ordered_loading_overlay)
-            && scale > 1.0
+            && scale > 0.0
+            && scale != 1.0
             && scale.is_finite()
             && self
                 .native_startup_fonts
@@ -68961,7 +68966,7 @@ impl GameApp {
             .loader_render_config
             .as_ref()
             .map(|config| (*config).application_scale())
-            .filter(|scale| *scale > 1.0);
+            .filter(|scale| scale.is_finite() && *scale > 0.0 && *scale != 1.0);
         if self.startup_view == StartupView::MainMenu {
             if let Some(scale) = scaled_output {
                 match self.native_startup_fonts.as_deref() {
@@ -69136,7 +69141,7 @@ impl GameApp {
             .loader_render_config
             .ok_or_else(|| self.loader_boundary("loader render configuration is unavailable"))?;
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
-        if config.application_scale() > 1.0
+        if config.uses_scaling_correction()
             && !defer_native_text
             && !ordered_native
             && self.message_dialogs.is_empty()
@@ -119865,7 +119870,7 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn fractional_loader_scale_reaches_native_text() {
+    fn l008_fractional_loader_scales_reach_native_text() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -119877,33 +119882,152 @@ ScenInfoArea=70,5,25,90
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
         let paths = AppPaths::discover().expect("installed paths");
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            Some(&paths),
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
-        .expect("app");
-        app.configure_native_startup_fonts(1.5, false);
-        assert_eq!(app.mode, AppMode::Loading);
-        assert!(app.can_defer_native_loader_text(1.5));
-        let mut presenter = lc_scaling::FramePresenter::new(1.5, 480, 300);
-        let mut frame = vec![0_u8; 480 * 300 * 4];
-        let refreshed = presenter
-            .present(&mut frame, |logical| {
-                app.render_for_presentation(logical, false, true, false)
-            })
-            .expect("render fractional loader chrome");
-        assert!(refreshed);
-        app.render_native_loader_text(&mut frame, 480, 300)
-            .expect("render fractional native loader text");
-        assert!(frame.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        for (scale, physical_width, physical_height) in
+            [(1.5, 480_u32, 300_u32), (0.5, 160, 100)]
+        {
+            let mut app = GameApp::new(
+                320,
+                200,
+                AudioOptions::default(),
+                Some(&paths),
+                RuntimeConfig {
+                    player_owner: 1,
+                    player_name: "Player".to_string(),
+                    network: None,
+                    record_enabled: false,
+                },
+            )
+            .expect("app");
+            app.configure_native_startup_fonts(scale, false);
+            assert_eq!(app.mode, AppMode::Loading);
+            assert!(app.can_defer_native_loader_text(scale));
+            let mut presenter =
+                lc_scaling::FramePresenter::new(scale, physical_width, physical_height);
+            let mut frame =
+                vec![0_u8; physical_width as usize * physical_height as usize * 4];
+            let refreshed = presenter
+                .present(&mut frame, |logical| {
+                    app.render_for_presentation(logical, false, true, false)
+                })
+                .expect("render fractional loader chrome");
+            assert!(refreshed);
+            app.render_native_loader_text(&mut frame, physical_width, physical_height)
+                .expect("render fractional native loader text");
+            assert!(frame.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        }
+    }
+
+    #[test]
+    fn l008_scale_fifty_host_and_client_waits_keep_ordered_loader_composition() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("installed paths");
+
+        for client in [false, true] {
+            let mut app = GameApp::new(
+                640,
+                480,
+                AudioOptions::default(),
+                Some(&paths),
+                RuntimeConfig {
+                    player_owner: 1,
+                    player_name: "Player".to_string(),
+                    network: None,
+                    record_enabled: false,
+                },
+            )
+            .expect("app");
+            app.configure_native_startup_fonts(0.5, false);
+            app.loader_screen
+                .as_mut()
+                .expect("loader")
+                .update(LoaderUpdate::SetTitle("L008 scale-fifty loader".into()));
+            app.loader_screen
+                .as_mut()
+                .expect("loader")
+                .update(LoaderUpdate::ReplaceLog(vec!["L008 process".into()]));
+            app.loader_screen
+                .as_mut()
+                .expect("loader")
+                .update(LoaderUpdate::SetProcess(Some(50)));
+            let resources = app
+                .loader_screen
+                .as_ref()
+                .expect("loader")
+                .resources()
+                .clone();
+            let (_sender, receiver) = mpsc::channel();
+            app.loading_state = Some(ScenarioLoadingState::new(
+                FrontendScenario::fallback(),
+                resources,
+                HashMap::new(),
+                receiver,
+            ));
+            app.mode = AppMode::Loading;
+            if client {
+                app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+                app.show_reached_network_start_wait()
+                    .expect("show reached client wait");
+                app.push_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                        "L008 upper message",
+                        "L008 upper caption",
+                        lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                    ),
+                    MessageDialogContinuation::None,
+                )
+                .expect("stack client loading dialog");
+            } else {
+                app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+                app.begin_network_start_wait(lc_network::NetworkStatus {
+                    state: lc_network::NETWORK_STATE_GO,
+                    control_mode: 1,
+                    target_tick: 4,
+                });
+                app.show_reached_network_start_wait()
+                    .expect("show reached host wait");
+            }
+
+            let (chrome, rendered, plan) =
+                render_ordered_test_frame(&mut app, 0.5, 320, 240);
+            assert_ne!(rendered, chrome, "native text must reach the physical frame");
+            let command_batch = |needle: &str| {
+                plan.batches
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, batch)| {
+                        batch
+                            .text
+                            .iter()
+                            .any(|command| command.text == needle)
+                            .then_some(index)
+                    })
+                    .unwrap_or_else(|| panic!("captured loading text `{needle}`"))
+            };
+            let loader_batch = plan
+                .batches
+                .iter()
+                .position(|batch| batch.native_loader_text)
+                .expect("loader keeps its dedicated native renderer");
+            let wait_batch = command_batch("Waiting for start...");
+            assert_eq!(loader_batch, 0);
+            assert!(wait_batch > loader_batch);
+            assert!(plan.batches[wait_batch].logical_layer.is_some());
+            if client {
+                let upper_batch = command_batch("L008 upper message");
+                assert!(upper_batch > wait_batch);
+                assert!(plan.batches[upper_batch].logical_layer.is_some());
+            }
+        }
     }
 
     #[test]
@@ -121485,6 +121609,75 @@ ScenInfoArea=70,5,25,90
                 .show_log_timestamps,
             "the live checkbox must reflect General.ShowLogTimestamps"
         );
+    }
+
+    #[test]
+    fn l008_scale_fifty_options_close_and_rejected_test_preserve_raw_value() {
+        use lc_frontend::message_dialog::MessageDialogResult;
+        use lc_frontend::startup_options_dlg::OptionsDlgAction;
+
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        fs::write(
+            paths.config_file(),
+            "[Graphics]\nResolutionX=800\nResolutionY=600\nScale=50\nDisplayMode=0\n",
+        )
+        .expect("seed scale-fifty config");
+
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.open_options_menu();
+        let graphics = app
+            .startup_options_dialog
+            .as_ref()
+            .expect("Options dialog")
+            .graphics();
+        assert_eq!(graphics.applied_scale_percent, 50);
+        assert_eq!(graphics.proposed_scale_percent, 100);
+
+        let action = graphics
+            .request_scale_test()
+            .expect("bounded UI offers a scale-one test");
+        app.process_options_dialog_actions(vec![OptionsDlgAction::Graphics(action)])
+            .expect("begin scale test");
+        assert_eq!(
+            app.pending_options_display_requests.pop_front(),
+            Some(OptionsDisplayRequest::SetScale {
+                percent: 100,
+                persist: false,
+            })
+        );
+        app.finish_message_dialog(MessageDialogResult::No)
+            .expect("reject scale test");
+        assert_eq!(
+            app.pending_options_display_requests.pop_front(),
+            Some(OptionsDisplayRequest::SetScale {
+                percent: 50,
+                persist: false,
+            })
+        );
+        let graphics = app
+            .startup_options_dialog
+            .as_ref()
+            .expect("Options dialog after rejection")
+            .graphics();
+        assert_eq!(graphics.applied_scale_percent, 50);
+        assert_eq!(graphics.proposed_scale_percent, 100);
+
+        app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
+            .expect("save and close Options");
+        let persisted = Config::load(paths.config_file()).expect("reload saved config");
+        assert_eq!(persisted.get_in(Some("Graphics"), "Scale"), Some("50"));
     }
 
     #[test]

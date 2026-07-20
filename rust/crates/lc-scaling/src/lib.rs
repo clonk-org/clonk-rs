@@ -742,6 +742,15 @@ mod tests {
     }
 
     #[test]
+    fn l008_subunit_scale_uses_exact_logical_size_and_input_conversion() {
+        let presenter = FramePresenter::new(0.5, 400, 300);
+        assert_eq!(presenter.physical_size(), (400, 300));
+        assert_eq!(presenter.logical_size(), (800, 600));
+        assert_eq!(presenter.scale(), 0.5);
+        assert_eq!(presenter.position_to_gui(100.0, 75.0), (200.0, 150.0));
+    }
+
+    #[test]
     fn presenter_scale_test_keeps_physical_size_and_rebuilds_logical_frame() {
         let mut presenter = FramePresenter::new(1.0, 1_280, 720);
         presenter.set_scale(2.0);

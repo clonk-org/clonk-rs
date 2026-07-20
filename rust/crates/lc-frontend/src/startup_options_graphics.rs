@@ -199,11 +199,11 @@ impl GraphicsSheetState {
         smoke_level: i32,
         fire_particles: bool,
     ) -> Self {
-        let scale_percent = clamp_scale(scale_percent);
+        let proposed_scale_percent = clamp_scale(scale_percent);
         Self {
             display_mode,
             applied_scale_percent: scale_percent,
-            proposed_scale_percent: scale_percent,
+            proposed_scale_percent,
             add_new_crew_portraits,
             save_default_portraits,
             auto_frame_skip,
@@ -325,10 +325,11 @@ impl GraphicsSheetState {
 
     /// Restores both controls after No, dismissal, or timeout.
     pub fn revert_scale_test(&mut self) -> bool {
-        if self.proposed_scale_percent == self.applied_scale_percent {
+        let applied_proposal = clamp_scale(self.applied_scale_percent);
+        if self.proposed_scale_percent == applied_proposal {
             return false;
         }
-        self.proposed_scale_percent = self.applied_scale_percent;
+        self.proposed_scale_percent = applied_proposal;
         true
     }
 
@@ -881,6 +882,36 @@ mod tests {
         assert!(state.revert_scale_test());
         assert_eq!(state.proposed_scale_percent, 175);
         assert!(!state.revert_scale_test());
+    }
+
+    #[test]
+    fn l008_loaded_subunit_scale_is_preserved_while_controls_stay_bounded() {
+        let mut state = GraphicsSheetState::new(
+            GraphicsDisplayMode::Fullscreen,
+            50,
+            true,
+            true,
+            true,
+            true,
+            false,
+            200,
+            true,
+        );
+        assert_eq!(state.applied_scale_percent, 50);
+        assert_eq!(state.proposed_scale_percent, 100);
+        assert_eq!(state.scale_slider_value(), 0);
+        assert_eq!(
+            state.request_scale_test(),
+            Some(GraphicsSheetAction::TestScale {
+                old_percent: 50,
+                new_percent: 100,
+            })
+        );
+
+        state.set_proposed_scale_percent(150);
+        assert!(state.revert_scale_test());
+        assert_eq!(state.applied_scale_percent, 50);
+        assert_eq!(state.proposed_scale_percent, 100);
     }
 
     #[test]
