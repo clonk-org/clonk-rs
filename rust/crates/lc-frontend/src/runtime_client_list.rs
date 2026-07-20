@@ -4,14 +4,15 @@
 //! dialog, its one-second snapshot, and pointer/key actions.
 
 use anyhow::{ensure, Result};
-use lc_graphics::clonk_font::TextAlign;
+use lc_graphics::clonk_font::{ClonkFont, TextAlign};
 use lc_graphics::{GammaRamp, Surface};
 use std::cell::Cell;
+use std::time::{Duration, Instant};
 
 use crate::classic_gui::{
     draw_3d_frame, draw_clipped_text, draw_engine_box, draw_facet_stretch, ClassicGuiSkin, IntRect,
 };
-use crate::{ClonkFontSet, GuiPoint, ImageData};
+use crate::{ClonkFontSet, GuiPoint, ImageData, StartupTooltip};
 
 const ICON_CELL: u32 = 40;
 const ICON_CLOSE: u32 = 34;
@@ -24,6 +25,9 @@ const ICON_SOUND: u32 = 23;
 const ICON_READY: u32 = 47;
 const ICON_DISCONNECT: u32 = 49;
 const ICON_NO_SOUND: u32 = 52;
+const TITLE_LEFT_INDENT: i32 = 5;
+const TITLE_RIGHT_INDENT: i32 = 20;
+const TITLE_SCROLL_DELAY: Duration = Duration::from_millis(3000);
 
 #[derive(Clone, Copy)]
 pub struct RuntimeClientListResources<'a> {
@@ -140,6 +144,26 @@ enum HitTarget {
     Disconnect(i32, u32),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DialogTitle {
+    Main,
+    Info,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CaptionScrollState {
+    last_change: Option<Instant>,
+    position: i32,
+    direction: i8,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TitleDrag {
+    title: DialogTitle,
+    pointer: GuiPoint,
+    offset: (i32, i32),
+}
+
 #[derive(Clone, Copy)]
 enum RuntimeListEntry<'a> {
     Client(&'a RuntimeClientRow),
@@ -161,15 +185,28 @@ pub struct RuntimeClientListLayout {
     pub icon_size: i32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeClientInfoLayout {
+    pub bounds: IntRect,
+    pub caption: IntRect,
+    pub close_button: IntRect,
+    pub text: IntRect,
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeClientListDialog {
     caption: String,
     info_caption: String,
+    caption_scroll: Cell<CaptionScrollState>,
+    info_caption_scroll: Cell<CaptionScrollState>,
     options: Vec<String>,
     rows: Vec<RuntimeClientRow>,
     status: RuntimeClientListStatus,
+    dialog_offset: (i32, i32),
+    info_dialog_offset: (i32, i32),
     pointer: Option<GuiPoint>,
     pointer_capture: Option<HitTarget>,
+    title_drag: Option<TitleDrag>,
     info_client_id: Option<i32>,
     info_only: bool,
     scroll_row: Cell<usize>,
@@ -185,11 +222,16 @@ impl RuntimeClientListDialog {
         Self {
             caption: caption.into(),
             info_caption: "Client information".to_string(),
+            caption_scroll: Cell::new(CaptionScrollState::default()),
+            info_caption_scroll: Cell::new(CaptionScrollState::default()),
             options,
             rows,
             status,
+            dialog_offset: (0, 0),
+            info_dialog_offset: (0, 0),
             pointer: None,
             pointer_capture: None,
+            title_drag: None,
             info_client_id: None,
             info_only: false,
             scroll_row: Cell::new(0),
@@ -203,11 +245,16 @@ impl RuntimeClientListDialog {
         Self {
             caption: String::new(),
             info_caption: caption.into(),
+            caption_scroll: Cell::new(CaptionScrollState::default()),
+            info_caption_scroll: Cell::new(CaptionScrollState::default()),
             options: Vec::new(),
             rows: vec![row],
             status: RuntimeClientListStatus::default(),
+            dialog_offset: (0, 0),
+            info_dialog_offset: (0, 0),
             pointer: None,
             pointer_capture: None,
+            title_drag: None,
             info_client_id: Some(client_id),
             info_only: true,
             scroll_row: Cell::new(0),
@@ -239,6 +286,10 @@ impl RuntimeClientListDialog {
         self.info_only
     }
 
+    pub const fn has_positional_pointer_drag(&self) -> bool {
+        self.title_drag.is_some()
+    }
+
     pub fn replace_snapshot(
         &mut self,
         options: Vec<String>,
@@ -252,7 +303,7 @@ impl RuntimeClientListDialog {
             .info_client_id
             .is_some_and(|id| !self.rows.iter().any(|row| row.client_id == id))
         {
-            self.info_client_id = None;
+            self.close_info();
         }
         self.scroll_row.set(
             self.scroll_row
@@ -265,8 +316,8 @@ impl RuntimeClientListDialog {
         let width = (preferred.w * 3 / 4).max(180).min(preferred.w.max(1));
         let height = (preferred.h * 3 / 4).max(120).min(preferred.h.max(1));
         let bounds = IntRect {
-            x: preferred.x + (preferred.w - width) / 2,
-            y: preferred.y + (preferred.h - height) / 2,
+            x: (preferred.x + (preferred.w - width) / 2).saturating_add(self.dialog_offset.0),
+            y: (preferred.y + (preferred.h - height) / 2).saturating_add(self.dialog_offset.1),
             w: width,
             h: height,
         };
@@ -323,6 +374,47 @@ impl RuntimeClientListDialog {
         layout
     }
 
+    pub fn info_layout(
+        &self,
+        preferred: IntRect,
+        font_line_height: i32,
+    ) -> Option<RuntimeClientInfoLayout> {
+        let parent = self.layout(preferred, font_line_height);
+        self.info_layout_from_parent(&parent)
+    }
+
+    /// Returns the title/close tooltip currently owned by this dialog. The
+    /// caller supplies the pointer only after the process-global classic mouse
+    /// tracker has reached its shared 500ms threshold.
+    pub fn tooltip_at(
+        &self,
+        point: GuiPoint,
+        preferred: IntRect,
+        font_line_height: i32,
+    ) -> Option<StartupTooltip> {
+        let routed_pointer = self.pointer?;
+        if routed_pointer.x as i32 != point.x as i32 || routed_pointer.y as i32 != point.y as i32 {
+            return None;
+        }
+
+        let layout = self.layout(preferred, font_line_height);
+        if let Some(info) = self.info_layout_from_parent(&layout) {
+            if contains(info.close_button, point) {
+                Some(StartupTooltip::resource("IDS_MNU_CLOSE"))
+            } else if contains(info.caption, point) {
+                Some(StartupTooltip::text(self.info_caption.clone()))
+            } else {
+                None
+            }
+        } else if contains(layout.close_button, point) {
+            Some(StartupTooltip::resource("IDS_MNU_CLOSE"))
+        } else if contains(layout.caption, point) && !self.caption.is_empty() {
+            Some(StartupTooltip::text(self.caption.clone()))
+        } else {
+            None
+        }
+    }
+
     /// Routes the native signed wheel delta over the client-list viewport.
     /// Positive deltas scroll toward the top; nonzero partial rows advance by
     /// one complete row so rendering and hit-testing never disagree.
@@ -363,7 +455,8 @@ impl RuntimeClientListDialog {
         font_line_height: i32,
     ) -> bool {
         self.pointer = Some(point);
-        self.pointer_capture.is_some()
+        self.update_title_drag(point)
+            || self.pointer_capture.is_some()
             || self
                 .hit_target(point, &self.layout(preferred, font_line_height))
                 .is_some()
@@ -376,7 +469,18 @@ impl RuntimeClientListDialog {
         font_line_height: i32,
     ) -> bool {
         self.pointer = Some(point);
-        self.pointer_capture = self.hit_target(point, &self.layout(preferred, font_line_height));
+        let layout = self.layout(preferred, font_line_height);
+        if let Some(title) = self.title_at(point, &layout) {
+            self.pointer_capture = None;
+            self.title_drag = Some(TitleDrag {
+                title,
+                pointer: point,
+                offset: self.title_offset(title),
+            });
+            return true;
+        }
+        self.title_drag = None;
+        self.pointer_capture = self.hit_target(point, &layout);
         self.pointer_capture.is_some()
     }
 
@@ -387,6 +491,10 @@ impl RuntimeClientListDialog {
         font_line_height: i32,
     ) -> Option<RuntimeClientListAction> {
         self.pointer = Some(point);
+        if self.update_title_drag(point) {
+            self.title_drag = None;
+            return None;
+        }
         let pressed = self.pointer_capture.take()?;
         let released = self.hit_target(point, &self.layout(preferred, font_line_height));
         if released != Some(pressed) {
@@ -395,10 +503,11 @@ impl RuntimeClientListDialog {
         let action = match pressed {
             HitTarget::Close => RuntimeClientListAction::Close,
             HitTarget::InfoClose => {
-                self.info_client_id = None;
+                self.close_info();
                 RuntimeClientListAction::CloseInfo
             }
             HitTarget::ClientInfo(client_id) => {
+                self.reset_info_presentation();
                 self.info_client_id = Some(client_id);
                 RuntimeClientListAction::OpenInfo(client_id)
             }
@@ -419,17 +528,115 @@ impl RuntimeClientListDialog {
     pub fn pointer_left(&mut self) {
         self.pointer = None;
         self.pointer_capture = None;
+        self.title_drag = None;
     }
 
     pub fn handle_escape(&mut self, pressed: bool) -> Option<RuntimeClientListAction> {
         if !pressed {
             return None;
         }
-        if self.info_client_id.take().is_some() {
+        if self.info_client_id.is_some() {
+            self.close_info();
             Some(RuntimeClientListAction::CloseInfo)
         } else {
             Some(RuntimeClientListAction::Close)
         }
+    }
+
+    fn info_layout_from_parent(
+        &self,
+        parent: &RuntimeClientListLayout,
+    ) -> Option<RuntimeClientInfoLayout> {
+        self.info_client_id?;
+        let width = (parent.bounds.w * 3 / 4).max(160).min(parent.bounds.w);
+        let height = (parent.row_height * 8 + 16).max(90).min(parent.bounds.h);
+        // The information dialog is a separate modal C4GUI::Dialog. Center it
+        // in the preferred rectangle independently of a dragged F4 dialog.
+        let parent_x = parent.bounds.x.saturating_sub(self.dialog_offset.0);
+        let parent_y = parent.bounds.y.saturating_sub(self.dialog_offset.1);
+        let bounds = IntRect {
+            x: (parent_x + (parent.bounds.w - width) / 2).saturating_add(self.info_dialog_offset.0),
+            y: (parent_y + (parent.bounds.h - height) / 2)
+                .saturating_add(self.info_dialog_offset.1),
+            w: width,
+            h: height,
+        };
+        let caption = IntRect {
+            x: bounds.x,
+            y: bounds.y,
+            w: bounds.w,
+            h: (parent.row_height + 4).max(24),
+        };
+        Some(RuntimeClientInfoLayout {
+            bounds,
+            caption,
+            close_button: IntRect {
+                x: bounds.x + bounds.w - 20,
+                y: caption.y + (caption.h - 16) / 2,
+                w: 16,
+                h: 16,
+            },
+            text: IntRect {
+                x: bounds.x + 4,
+                y: caption.y + caption.h + 3,
+                w: (bounds.w - 8).max(1),
+                h: (bounds.h - caption.h - 7).max(1),
+            },
+        })
+    }
+
+    fn title_at(&self, point: GuiPoint, layout: &RuntimeClientListLayout) -> Option<DialogTitle> {
+        if let Some(info) = self.info_layout_from_parent(layout) {
+            return (!contains(info.close_button, point) && contains(info.caption, point))
+                .then_some(DialogTitle::Info);
+        }
+        (!self.info_only
+            && !contains(layout.close_button, point)
+            && contains(layout.caption, point))
+        .then_some(DialogTitle::Main)
+    }
+
+    fn title_offset(&self, title: DialogTitle) -> (i32, i32) {
+        match title {
+            DialogTitle::Main => self.dialog_offset,
+            DialogTitle::Info => self.info_dialog_offset,
+        }
+    }
+
+    fn update_title_drag(&mut self, point: GuiPoint) -> bool {
+        let Some(drag) = self.title_drag else {
+            return false;
+        };
+        let offset = (
+            drag.offset
+                .0
+                .saturating_add((point.x - drag.pointer.x) as i32),
+            drag.offset
+                .1
+                .saturating_add((point.y - drag.pointer.y) as i32),
+        );
+        match drag.title {
+            DialogTitle::Main => self.dialog_offset = offset,
+            DialogTitle::Info => self.info_dialog_offset = offset,
+        }
+        true
+    }
+
+    fn reset_info_presentation(&mut self) {
+        self.info_dialog_offset = (0, 0);
+        self.info_caption_scroll.set(CaptionScrollState::default());
+        if self
+            .title_drag
+            .is_some_and(|drag| drag.title == DialogTitle::Info)
+        {
+            self.title_drag = None;
+        }
+    }
+
+    fn close_info(&mut self) {
+        self.info_client_id = None;
+        self.pointer_capture = None;
+        self.reset_info_presentation();
     }
 
     fn list_entries(&self) -> impl Iterator<Item = RuntimeListEntry<'_>> {
@@ -464,6 +671,20 @@ impl RuntimeClientListDialog {
         scroll_row
     }
 
+    fn caption_scroll_offset_at(
+        &self,
+        now: Instant,
+        font: &ClonkFont,
+        caption: &IntRect,
+        title: DialogTitle,
+    ) -> i32 {
+        let (text, state) = match title {
+            DialogTitle::Main => (&self.caption, &self.caption_scroll),
+            DialogTitle::Info => (&self.info_caption, &self.info_caption_scroll),
+        };
+        caption_scroll_offset_at(state, now, font, text, caption.w)
+    }
+
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -472,23 +693,46 @@ impl RuntimeClientListDialog {
         active: bool,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
+        self.render_at(surface, preferred, resources, active, gamma, Instant::now())
+    }
+
+    pub fn render_at(
+        &self,
+        surface: &mut Surface,
+        preferred: IntRect,
+        resources: RuntimeClientListResources<'_>,
+        active: bool,
+        gamma: Option<&GammaRamp>,
+        now: Instant,
+    ) -> Result<()> {
         resources.validate()?;
         let layout = self.layout(preferred, resources.fonts.text.line_height);
         if self.info_only {
-            if let Some(client_id) = self.info_client_id {
-                self.draw_client_info(surface, client_id, &layout, resources, active, gamma);
+            if let (Some(client_id), Some(info)) =
+                (self.info_client_id, self.info_layout_from_parent(&layout))
+            {
+                self.draw_client_info(
+                    surface, client_id, &layout, &info, resources, active, gamma, now,
+                );
             }
             return Ok(());
         }
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
-        resources.skin.draw_caption_with_right_indent(
+        let caption_scroll = self.caption_scroll_offset_at(
+            now,
+            &resources.fonts.text,
+            &layout.caption,
+            DialogTitle::Main,
+        );
+        resources.skin.draw_caption_scrolled(
             surface,
             layout.caption,
             &self.caption,
             &resources.fonts.text,
             [255, 255, 255, 255],
             TextAlign::Left,
-            22,
+            TITLE_RIGHT_INDENT,
+            caption_scroll,
             gamma,
         );
         self.draw_icon_button(
@@ -553,8 +797,12 @@ impl RuntimeClientListDialog {
             layout.status,
         );
 
-        if let Some(client_id) = self.info_client_id {
-            self.draw_client_info(surface, client_id, &layout, resources, active, gamma);
+        if let (Some(client_id), Some(info)) =
+            (self.info_client_id, self.info_layout_from_parent(&layout))
+        {
+            self.draw_client_info(
+                surface, client_id, &layout, &info, resources, active, gamma, now,
+            );
         }
         Ok(())
     }
@@ -757,47 +1005,36 @@ impl RuntimeClientListDialog {
         surface: &mut Surface,
         client_id: i32,
         parent: &RuntimeClientListLayout,
+        layout: &RuntimeClientInfoLayout,
         resources: RuntimeClientListResources<'_>,
         active: bool,
         gamma: Option<&GammaRamp>,
+        now: Instant,
     ) {
         let Some(row) = self.rows.iter().find(|row| row.client_id == client_id) else {
             return;
         };
-        let width = (parent.bounds.w * 3 / 4).max(160).min(parent.bounds.w);
-        let height = (parent.row_height * 8 + 16).max(90).min(parent.bounds.h);
-        let bounds = IntRect {
-            x: parent.bounds.x + (parent.bounds.w - width) / 2,
-            y: parent.bounds.y + (parent.bounds.h - height) / 2,
-            w: width,
-            h: height,
-        };
-        let caption = IntRect {
-            x: bounds.x,
-            y: bounds.y,
-            w: bounds.w,
-            h: (resources.fonts.text.line_height + 8).max(24),
-        };
-        let close = IntRect {
-            x: bounds.x + bounds.w - 20,
-            y: caption.y + (caption.h - 16) / 2,
-            w: 16,
-            h: 16,
-        };
-        resources.skin.draw_dialog(surface, bounds, gamma);
-        resources.skin.draw_caption_with_right_indent(
+        resources.skin.draw_dialog(surface, layout.bounds, gamma);
+        let caption_scroll = self.caption_scroll_offset_at(
+            now,
+            &resources.fonts.text,
+            &layout.caption,
+            DialogTitle::Info,
+        );
+        resources.skin.draw_caption_scrolled(
             surface,
-            caption,
+            layout.caption,
             &self.info_caption,
             &resources.fonts.text,
             [255, 255, 255, 255],
             TextAlign::Left,
-            22,
+            TITLE_RIGHT_INDENT,
+            caption_scroll,
             gamma,
         );
         self.draw_icon_button(
             surface,
-            close,
+            layout.close_button,
             ICON_CLOSE,
             HitTarget::InfoClose,
             parent,
@@ -838,18 +1075,13 @@ impl RuntimeClientListDialog {
         draw_clipped_text(
             surface,
             &resources.fonts.text,
-            bounds.x + 6,
-            caption.y + caption.h + 5,
+            layout.bounds.x + 6,
+            layout.caption.y + layout.caption.h + 5,
             &text,
             [255, 255, 255, 255],
             TextAlign::Left,
             gamma,
-            IntRect {
-                x: bounds.x + 4,
-                y: caption.y + caption.h + 3,
-                w: (bounds.w - 8).max(1),
-                h: (bounds.h - caption.h - 7).max(1),
-            },
+            layout.text,
         );
     }
 
@@ -881,24 +1113,10 @@ impl RuntimeClientListDialog {
     }
 
     fn hit_target(&self, point: GuiPoint, layout: &RuntimeClientListLayout) -> Option<HitTarget> {
-        if self.info_client_id.is_some() {
-            let width = (layout.bounds.w * 3 / 4).max(160).min(layout.bounds.w);
-            let height = (layout.row_height * 8 + 16).max(90).min(layout.bounds.h);
-            let info = IntRect {
-                x: layout.bounds.x + (layout.bounds.w - width) / 2,
-                y: layout.bounds.y + (layout.bounds.h - height) / 2,
-                w: width,
-                h: height,
-            };
-            let close = IntRect {
-                x: info.x + info.w - 20,
-                y: info.y + ((layout.row_height + 4).max(24) - 16) / 2,
-                w: 16,
-                h: 16,
-            };
-            return if contains(close, point) {
+        if let Some(info) = self.info_layout_from_parent(layout) {
+            return if contains(info.close_button, point) {
                 Some(HitTarget::InfoClose)
-            } else if contains(info, point) {
+            } else if contains(info.bounds, point) {
                 Some(HitTarget::Dialog)
             } else {
                 None
@@ -981,6 +1199,42 @@ impl RuntimeClientListDialog {
     }
 }
 
+fn caption_scroll_offset_at(
+    state: &Cell<CaptionScrollState>,
+    now: Instant,
+    font: &ClonkFont,
+    text: &str,
+    caption_width: i32,
+) -> i32 {
+    if text.is_empty() {
+        return 0;
+    }
+    let max_scroll = (font.measure(text, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT
+        - caption_width)
+        .max(0);
+    let mut current = state.get();
+    let Some(last_change) = current.last_change else {
+        current.last_change = Some(now);
+        state.set(current);
+        return 0;
+    };
+    if now.checked_duration_since(last_change).unwrap_or_default() >= TITLE_SCROLL_DELAY {
+        if current.direction == 0 {
+            current.direction = 1;
+        }
+        if max_scroll > 0 {
+            current.position += i32::from(current.direction);
+            if current.position >= max_scroll || current.position < 0 {
+                current.direction = -current.direction;
+                current.position += i32::from(current.direction);
+                current.last_change = Some(now);
+            }
+        }
+    }
+    state.set(current);
+    current.position
+}
+
 fn status_icon_phase(row: &RuntimeClientRow) -> u32 {
     match row.status {
         RuntimeClientStatusIcon::Loading => ICON_LOADING,
@@ -1045,6 +1299,23 @@ fn contains(rect: IntRect, point: GuiPoint) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context_menu::{ClassicTooltipTracker, CLASSIC_TOOLTIP_DELAY};
+    use lc_graphics::Color;
+
+    fn unit_width_font(characters: &str) -> ClonkFont {
+        let mut font = ClonkFont::new(3);
+        font.h_space = 0;
+        for character in characters.chars() {
+            font.add_glyph(
+                character,
+                lc_graphics::clonk_font::GlyphCell {
+                    width: 1,
+                    pixels: vec![Color::opaque(255, 255, 255); 4],
+                },
+            );
+        }
+        font
+    }
 
     fn row() -> RuntimeClientRow {
         RuntimeClientRow {
@@ -1135,6 +1406,286 @@ mod tests {
         assert_eq!(
             dialog.handle_escape(true),
             Some(RuntimeClientListAction::Close)
+        );
+    }
+
+    #[test]
+    fn main_and_info_title_drags_retain_independent_offsets_across_refresh() {
+        let preferred = IntRect {
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 480,
+        };
+        let mut dialog = RuntimeClientListDialog::new(
+            "Network",
+            vec!["Network game".to_string()],
+            vec![row()],
+            RuntimeClientListStatus::default(),
+        );
+        let initial = dialog.layout(preferred, 16);
+        let main_start = GuiPoint::new(
+            (initial.caption.x + 8) as f32,
+            (initial.caption.y + initial.caption.h / 2) as f32,
+        );
+        assert!(dialog.handle_pointer_down(main_start, preferred, 16));
+        assert!(dialog.has_positional_pointer_drag());
+        let main_moved = GuiPoint::new(main_start.x + 37.0, main_start.y - 19.0);
+        assert!(dialog.handle_pointer_move(main_moved, preferred, 16));
+        let live_main = dialog.layout(preferred, 16);
+        assert_eq!(live_main.bounds.x, initial.bounds.x + 37);
+        assert_eq!(live_main.bounds.y, initial.bounds.y - 19);
+
+        let main_released = GuiPoint::new(main_moved.x + 3.0, main_moved.y + 4.0);
+        assert_eq!(dialog.handle_pointer_up(main_released, preferred, 16), None);
+        assert!(!dialog.has_positional_pointer_drag());
+        let retained_main = dialog.layout(preferred, 16);
+        assert_eq!(retained_main.bounds.x, initial.bounds.x + 40);
+        assert_eq!(retained_main.bounds.y, initial.bounds.y - 15);
+
+        dialog.replace_snapshot(
+            vec!["Refreshed options".to_string()],
+            vec![row()],
+            RuntimeClientListStatus {
+                tick: 1,
+                ..RuntimeClientListStatus::default()
+            },
+        );
+        assert_eq!(dialog.layout(preferred, 16).bounds, retained_main.bounds);
+
+        let current = dialog.layout(preferred, 16);
+        let row_point = GuiPoint::new(
+            (current.list.x + 25) as f32,
+            (current.list.y + 2 + current.row_height / 2) as f32,
+        );
+        assert!(dialog.handle_pointer_down(row_point, preferred, 16));
+        assert_eq!(
+            dialog.handle_pointer_up(row_point, preferred, 16),
+            Some(RuntimeClientListAction::OpenInfo(7))
+        );
+        let initial_info = dialog.info_layout(preferred, 16).expect("info layout");
+        assert_eq!(
+            initial_info.bounds.x + initial_info.bounds.w / 2,
+            initial.bounds.x + initial.bounds.w / 2,
+            "the separately centered info dialog must not inherit the main drag"
+        );
+        assert_eq!(
+            initial_info.bounds.y + initial_info.bounds.h / 2,
+            initial.bounds.y + initial.bounds.h / 2
+        );
+
+        let info_start = GuiPoint::new(
+            (initial_info.caption.x + 8) as f32,
+            (initial_info.caption.y + initial_info.caption.h / 2) as f32,
+        );
+        assert!(dialog.handle_pointer_down(info_start, preferred, 16));
+        let info_moved = GuiPoint::new(info_start.x - 22.0, info_start.y + 31.0);
+        assert!(dialog.handle_pointer_move(info_moved, preferred, 16));
+        let live_info = dialog
+            .info_layout(preferred, 16)
+            .expect("moved info layout");
+        assert_eq!(live_info.bounds.x, initial_info.bounds.x - 22);
+        assert_eq!(live_info.bounds.y, initial_info.bounds.y + 31);
+        assert_eq!(dialog.layout(preferred, 16).bounds, retained_main.bounds);
+
+        let info_released = GuiPoint::new(info_moved.x - 5.0, info_moved.y + 2.0);
+        assert_eq!(dialog.handle_pointer_up(info_released, preferred, 16), None);
+        let retained_info = dialog
+            .info_layout(preferred, 16)
+            .expect("retained info layout");
+        assert_eq!(retained_info.bounds.x, initial_info.bounds.x - 27);
+        assert_eq!(retained_info.bounds.y, initial_info.bounds.y + 33);
+
+        dialog.replace_snapshot(
+            vec!["Refreshed again".to_string()],
+            vec![row()],
+            RuntimeClientListStatus::default(),
+        );
+        assert_eq!(
+            dialog
+                .info_layout(preferred, 16)
+                .expect("info retained")
+                .bounds,
+            retained_info.bounds
+        );
+        assert_eq!(dialog.layout(preferred, 16).bounds, retained_main.bounds);
+
+        let moved_close = GuiPoint::new(
+            (retained_info.close_button.x + 1) as f32,
+            (retained_info.close_button.y + 1) as f32,
+        );
+        assert!(dialog.handle_pointer_down(moved_close, preferred, 16));
+        assert_eq!(
+            dialog.handle_pointer_up(moved_close, preferred, 16),
+            Some(RuntimeClientListAction::CloseInfo),
+            "rendering and hit-testing must share the dragged info geometry"
+        );
+    }
+
+    #[test]
+    fn main_and_info_titles_bounce_one_pixel_per_draw_after_three_seconds() {
+        let font = unit_width_font("W");
+        let preferred = IntRect {
+            x: 0,
+            y: 0,
+            w: 240,
+            h: 200,
+        };
+        let mut dialog = RuntimeClientListDialog::new(
+            "W".repeat(158),
+            vec!["Network game".to_string()],
+            vec![row()],
+            RuntimeClientListStatus::default(),
+        )
+        .with_info_caption("W".repeat(138));
+        let layout = dialog.layout(preferred, font.line_height);
+        assert_eq!(
+            font.measure(&dialog.caption, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT
+                - layout.caption.w,
+            3
+        );
+        let base = Instant::now();
+        assert_eq!(
+            dialog.caption_scroll_offset_at(base, &font, &layout.caption, DialogTitle::Main),
+            0
+        );
+        assert_eq!(
+            dialog.caption_scroll_offset_at(
+                base + TITLE_SCROLL_DELAY - Duration::from_millis(1),
+                &font,
+                &layout.caption,
+                DialogTitle::Main,
+            ),
+            0
+        );
+        let outbound = base + TITLE_SCROLL_DELAY;
+        assert_eq!(
+            dialog.caption_scroll_offset_at(outbound, &font, &layout.caption, DialogTitle::Main),
+            1
+        );
+        assert_eq!(
+            dialog.caption_scroll_offset_at(outbound, &font, &layout.caption, DialogTitle::Main),
+            2
+        );
+        assert_eq!(
+            dialog.caption_scroll_offset_at(outbound, &font, &layout.caption, DialogTitle::Main),
+            2,
+            "the attempted far endpoint backs off and begins its three-second dwell"
+        );
+
+        dialog.info_client_id = Some(7);
+        let info = dialog
+            .info_layout(preferred, font.line_height)
+            .expect("info layout");
+        assert_eq!(
+            font.measure(&dialog.info_caption, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT
+                - info.caption.w,
+            3
+        );
+        let info_base = outbound + Duration::from_secs(1);
+        assert_eq!(
+            dialog.caption_scroll_offset_at(info_base, &font, &info.caption, DialogTitle::Info,),
+            0,
+            "the info dialog owns an independent three-second clock"
+        );
+        assert_eq!(
+            dialog.caption_scroll_offset_at(
+                info_base + TITLE_SCROLL_DELAY,
+                &font,
+                &info.caption,
+                DialogTitle::Info,
+            ),
+            1
+        );
+        assert_eq!(
+            dialog.caption_scroll_offset_at(
+                info_base + TITLE_SCROLL_DELAY,
+                &font,
+                &info.caption,
+                DialogTitle::Info,
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn title_and_close_tooltips_use_the_shared_mouse_delay_with_info_precedence() {
+        let preferred = IntRect {
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 480,
+        };
+        let mut dialog = RuntimeClientListDialog::new(
+            "Network",
+            vec!["Network game".to_string()],
+            vec![row()],
+            RuntimeClientListStatus::default(),
+        )
+        .with_info_caption("Client information");
+        let layout = dialog.layout(preferred, 16);
+        let title_point = GuiPoint::new(
+            (layout.caption.x + 8) as f32,
+            (layout.caption.y + layout.caption.h / 2) as f32,
+        );
+        let base = Instant::now();
+        let mut tracker = ClassicTooltipTracker::new_at(base);
+        tracker.note_pointer_move_at(title_point, base);
+        assert!(dialog.handle_pointer_move(title_point, preferred, 16));
+        assert!(tracker
+            .eligible_pointer_at(base + CLASSIC_TOOLTIP_DELAY - Duration::from_millis(1))
+            .and_then(|point| dialog.tooltip_at(point, preferred, 16))
+            .is_none());
+        assert_eq!(
+            tracker
+                .eligible_pointer_at(base + CLASSIC_TOOLTIP_DELAY)
+                .and_then(|point| dialog.tooltip_at(point, preferred, 16)),
+            Some(StartupTooltip::text("Network"))
+        );
+
+        let close_point = GuiPoint::new(
+            (layout.close_button.x + 1) as f32,
+            (layout.close_button.y + 1) as f32,
+        );
+        let close_at = base + Duration::from_secs(1);
+        tracker.note_pointer_move_at(close_point, close_at);
+        assert!(dialog.handle_pointer_move(close_point, preferred, 16));
+        assert_eq!(
+            tracker
+                .eligible_pointer_at(close_at + CLASSIC_TOOLTIP_DELAY)
+                .and_then(|point| dialog.tooltip_at(point, preferred, 16)),
+            Some(StartupTooltip::resource("IDS_MNU_CLOSE")),
+            "the close child wins its overlap with the caption"
+        );
+
+        dialog.info_client_id = Some(7);
+        let info = dialog.info_layout(preferred, 16).expect("info layout");
+        let info_title = GuiPoint::new(
+            (info.caption.x + 8) as f32,
+            (info.caption.y + info.caption.h / 2) as f32,
+        );
+        let info_at = close_at + Duration::from_secs(1);
+        tracker.note_pointer_move_at(info_title, info_at);
+        assert!(dialog.handle_pointer_move(info_title, preferred, 16));
+        assert_eq!(
+            tracker
+                .eligible_pointer_at(info_at + CLASSIC_TOOLTIP_DELAY)
+                .and_then(|point| dialog.tooltip_at(point, preferred, 16)),
+            Some(StartupTooltip::text("Client information"))
+        );
+
+        let info_close = GuiPoint::new(
+            (info.close_button.x + 1) as f32,
+            (info.close_button.y + 1) as f32,
+        );
+        let info_close_at = info_at + Duration::from_secs(1);
+        tracker.note_pointer_move_at(info_close, info_close_at);
+        assert!(dialog.handle_pointer_move(info_close, preferred, 16));
+        assert_eq!(
+            tracker
+                .eligible_pointer_at(info_close_at + CLASSIC_TOOLTIP_DELAY)
+                .and_then(|point| dialog.tooltip_at(point, preferred, 16)),
+            Some(StartupTooltip::resource("IDS_MNU_CLOSE"))
         );
     }
 

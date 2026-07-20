@@ -10,11 +10,13 @@ use crate::classic_gui::{
     draw_3d_frame, draw_clipped_text, draw_engine_box, draw_facet_stretch, ClassicButtonState,
     IntRect,
 };
-use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode};
+use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode, StartupTooltip};
 use anyhow::{ensure, Result};
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
 use lc_graphics::{GammaRamp, PixelFormat, Surface};
 use lc_gui::Rect as GuiRect;
+use std::cell::Cell;
+use std::time::{Duration, Instant};
 
 const MIN_WIDTH: i32 = 300;
 const MAX_WIDTH: i32 = 600;
@@ -27,6 +29,9 @@ const SCROLLBAR_WIDTH: i32 = 16;
 const ROW_SPACING: i32 = 1;
 const PLAYER_ICON_PHASE: u32 = 9;
 const DEFINITION_ICON_PHASE: u32 = 29;
+const TITLE_LEFT_INDENT: i32 = 5;
+const TITLE_RIGHT_INDENT: i32 = 20;
+const TITLE_SCROLL_DELAY: Duration = Duration::from_millis(3000);
 
 /// The two `C4FileSelDlg` specializations exposed by this controller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,6 +286,13 @@ struct TitleDrag {
     offset_y: i32,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct CaptionScrollState {
+    last_change: Option<Instant>,
+    position: i32,
+    direction: i8,
+}
+
 #[derive(Clone, Debug)]
 pub struct DefinitionSelController {
     mode: FileSelMode,
@@ -292,6 +304,7 @@ pub struct DefinitionSelController {
     scroll_y: i32,
     scroll_pin: i32,
     dialog_offset: (i32, i32),
+    caption_scroll: Cell<CaptionScrollState>,
     pointer: Option<GuiPoint>,
     pointer_pressed: Option<ButtonTarget>,
     key_pressed: Option<ButtonTarget>,
@@ -339,6 +352,7 @@ impl DefinitionSelController {
             scroll_y: 0,
             scroll_pin: 0,
             dialog_offset: (0, 0),
+            caption_scroll: Cell::new(CaptionScrollState::default()),
             pointer: None,
             pointer_pressed: None,
             key_pressed: None,
@@ -392,6 +406,33 @@ impl DefinitionSelController {
             title.to_owned()
         } else {
             format!("{title} [{}]", self.root_path)
+        }
+    }
+
+    /// Returns the native tooltip target at `point`, without applying the
+    /// screen-global `CMouse` hover delay. The close icon wins its overlap
+    /// with the enclosing wooden caption, matching top-down element routing.
+    pub fn tooltip_at(
+        &self,
+        point: GuiPoint,
+        layout: &DefinitionSelLayout,
+    ) -> Option<StartupTooltip> {
+        let routed_pointer = self.pointer?;
+        if routed_pointer.x as i32 != point.x as i32
+            || routed_pointer.y as i32 != point.y as i32
+        {
+            return None;
+        }
+        match self.hit_target(point, layout) {
+            HitTarget::Close => Some(StartupTooltip::resource("IDS_MNU_CLOSE")),
+            HitTarget::Caption => Some(StartupTooltip::text(self.caption())),
+            HitTarget::Ok
+            | HitTarget::Cancel
+            | HitTarget::Checkbox(_)
+            | HitTarget::Row(_)
+            | HitTarget::ListBlank
+            | HitTarget::Scrollbar
+            | HitTarget::None => None,
         }
     }
 
@@ -1090,14 +1131,22 @@ impl DefinitionSelController {
         );
 
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
-        resources.skin.draw_caption_with_right_indent(
+        let caption = self.caption();
+        let caption_scroll = self.caption_scroll_offset_at(
+            Instant::now(),
+            &resources.fonts.text,
+            layout.caption.w,
+            &caption,
+        );
+        resources.skin.draw_caption_scrolled(
             surface,
             layout.caption,
-            &self.caption(),
+            &caption,
             &resources.fonts.text,
             [255, 255, 255, 255],
             TextAlign::Left,
-            20,
+            TITLE_RIGHT_INDENT,
+            caption_scroll,
             gamma,
         );
         self.draw_close_button(surface, &layout, resources, active, gamma);
@@ -1160,6 +1209,42 @@ impl DefinitionSelController {
             );
         }
         Ok(())
+    }
+
+    fn caption_scroll_offset_at(
+        &self,
+        now: Instant,
+        font: &ClonkFont,
+        caption_width: i32,
+        caption: &str,
+    ) -> i32 {
+        if caption.is_empty() {
+            return 0;
+        }
+        let max_scroll = (font.measure(caption, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT
+            - caption_width)
+            .max(0);
+        let mut state = self.caption_scroll.get();
+        let Some(last_change) = state.last_change else {
+            state.last_change = Some(now);
+            self.caption_scroll.set(state);
+            return 0;
+        };
+        if now.checked_duration_since(last_change).unwrap_or_default() >= TITLE_SCROLL_DELAY {
+            if state.direction == 0 {
+                state.direction = 1;
+            }
+            if max_scroll > 0 {
+                state.position += i32::from(state.direction);
+                if state.position >= max_scroll || state.position < 0 {
+                    state.direction = -state.direction;
+                    state.position += i32::from(state.direction);
+                    state.last_change = Some(now);
+                }
+            }
+        }
+        self.caption_scroll.set(state);
+        state.position
     }
 
     fn draw_close_button(
@@ -1618,6 +1703,22 @@ mod tests {
     use super::*;
     use crate::classic_gui::ClassicGuiSkin;
     use crate::test_support::{endeavour_font_set, load_graphics_png, standard_gamma};
+    use lc_graphics::Color;
+
+    fn unit_width_font(characters: &str) -> ClonkFont {
+        let mut font = ClonkFont::new(3);
+        font.h_space = 0;
+        for character in characters.chars() {
+            font.add_glyph(
+                character,
+                lc_graphics::clonk_font::GlyphCell {
+                    width: 1,
+                    pixels: vec![Color::opaque(255, 255, 255); 4],
+                },
+            );
+        }
+        font
+    }
 
     fn entries(count: usize) -> Vec<DefinitionSelEntry> {
         (0..count)
@@ -1986,6 +2087,104 @@ mod tests {
         controller.handle_pointer_down(title, &layout);
         controller.handle_pointer_move(GuiPoint::new(title.x + 20.0, title.y + 10.0), &layout);
         assert_eq!(controller.dialog_offset(), (20, 10));
+    }
+
+    #[test]
+    fn l080_caption_tooltips_expose_title_and_localized_close_resource() {
+        let fonts = endeavour_font_set();
+        let mut controller = DefinitionSelController::new("/Definitions", Vec::new(), Vec::new());
+        let layout = controller.layout(1280, 720, &fonts.text);
+        let title_point = GuiPoint::new(
+            (layout.caption.x + 10) as f32,
+            (layout.caption.y + 10) as f32,
+        );
+        let _ = controller.handle_pointer_move(title_point, &layout);
+        assert_eq!(
+            controller.tooltip_at(title_point, &layout),
+            Some(StartupTooltip::text(controller.caption()))
+        );
+        assert_eq!(
+            controller.tooltip_at(center(layout.close_button), &layout),
+            None,
+            "an unrouted overlapping control cannot claim the shared timer"
+        );
+        let _ = controller.handle_pointer_move(center(layout.close_button), &layout);
+        assert_eq!(
+            controller.tooltip_at(center(layout.close_button), &layout),
+            Some(StartupTooltip::resource("IDS_MNU_CLOSE")),
+            "the close icon wins its overlap with the caption"
+        );
+        let _ = controller.handle_pointer_move(center(layout.client), &layout);
+        assert_eq!(controller.tooltip_at(center(layout.client), &layout), None);
+    }
+
+    #[test]
+    fn l080_caption_autoscroll_advances_per_frame_and_dwells_at_both_ends() {
+        const CAPTION_WIDTH: i32 = 300;
+        const TARGET_TEXT_WIDTH: usize = 278;
+        let fixed_characters = "Select Object Definitions []".chars().count();
+        let root = "W".repeat(TARGET_TEXT_WIDTH - fixed_characters);
+        let controller = DefinitionSelController::new(root, Vec::new(), Vec::new());
+        let caption = controller.caption();
+        let font = unit_width_font(&caption);
+        assert_eq!(
+            font.measure(&caption, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT - CAPTION_WIDTH,
+            3
+        );
+
+        let base = Instant::now();
+        assert_eq!(
+            controller.caption_scroll_offset_at(base, &font, CAPTION_WIDTH, &caption),
+            0
+        );
+        assert_eq!(
+            controller.caption_scroll_offset_at(
+                base + TITLE_SCROLL_DELAY - Duration::from_millis(1),
+                &font,
+                CAPTION_WIDTH,
+                &caption,
+            ),
+            0
+        );
+
+        let outbound = base + TITLE_SCROLL_DELAY;
+        assert_eq!(
+            controller.caption_scroll_offset_at(outbound, &font, CAPTION_WIDTH, &caption),
+            1
+        );
+        assert_eq!(
+            controller.caption_scroll_offset_at(outbound, &font, CAPTION_WIDTH, &caption),
+            2
+        );
+        assert_eq!(
+            controller.caption_scroll_offset_at(outbound, &font, CAPTION_WIDTH, &caption),
+            2,
+            "the attempted max-scroll frame reverses and immediately backs off"
+        );
+        assert_eq!(
+            controller.caption_scroll_offset_at(
+                outbound + TITLE_SCROLL_DELAY - Duration::from_millis(1),
+                &font,
+                CAPTION_WIDTH,
+                &caption,
+            ),
+            2
+        );
+
+        let returning = outbound + TITLE_SCROLL_DELAY;
+        assert_eq!(
+            controller.caption_scroll_offset_at(returning, &font, CAPTION_WIDTH, &caption),
+            1
+        );
+        assert_eq!(
+            controller.caption_scroll_offset_at(returning, &font, CAPTION_WIDTH, &caption),
+            0
+        );
+        assert_eq!(
+            controller.caption_scroll_offset_at(returning, &font, CAPTION_WIDTH, &caption),
+            0,
+            "the attempted negative frame reverses and pauses at the start"
+        );
     }
 
     #[test]

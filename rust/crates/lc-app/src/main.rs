@@ -23803,6 +23803,9 @@ impl GameApp {
                 controller.cancel_interaction();
             }
         }
+        if let Some(dialog) = self.runtime_client_list.as_mut() {
+            dialog.pointer_left();
+        }
         if self.external_irc_dialog_visible {
             if let Some(dialog) = self.external_irc_dialog.as_mut() {
                 dialog.resize(width as i32, height as i32);
@@ -27920,11 +27923,23 @@ impl GameApp {
         if self.runtime_client_list.is_none() {
             return false;
         }
+        let info_was_open = self
+            .runtime_client_list
+            .as_ref()
+            .is_some_and(|dialog| dialog.info_client_id().is_some());
         let (options, rows, status) = self.runtime_client_list_snapshot();
         let close_info_only = self.runtime_client_list.as_mut().is_some_and(|dialog| {
             dialog.replace_snapshot(options, rows, status);
             dialog.is_info_only() && dialog.info_client_id().is_none()
         });
+        if info_was_open
+            && self
+                .runtime_client_list
+                .as_ref()
+                .is_some_and(|dialog| dialog.info_client_id().is_none())
+        {
+            self.startup_tooltip.pointer_left();
+        }
         if close_info_only {
             self.runtime_client_list = None;
             self.runtime_client_list_above_game_over = false;
@@ -27934,6 +27949,7 @@ impl GameApp {
 
     fn toggle_runtime_client_list(&mut self) -> Result<(), EngineError> {
         if self.runtime_client_list.take().is_some() {
+            self.startup_tooltip.pointer_left();
             self.runtime_client_list_consumed_keys.clear();
             self.runtime_client_list_above_game_over = false;
             return Ok(());
@@ -27979,15 +27995,18 @@ impl GameApp {
         use lc_frontend::runtime_client_list::RuntimeClientListAction;
         match action {
             RuntimeClientListAction::Close => {
+                self.startup_tooltip.pointer_left();
                 self.runtime_client_list = None;
                 self.runtime_client_list_consumed_keys.clear();
                 self.runtime_client_list_above_game_over = false;
                 return Ok(());
             }
             RuntimeClientListAction::OpenInfo(_) => {
+                self.startup_tooltip.pointer_left();
                 return Ok(());
             }
             RuntimeClientListAction::CloseInfo => {
+                self.startup_tooltip.pointer_left();
                 if self
                     .runtime_client_list
                     .as_ref()
@@ -28180,6 +28199,32 @@ impl GameApp {
             .is_some_and(|dialog| {
                 dialog.handle_pointer_move(point, preferred, line_height) || dialog.is_info_only()
             })
+    }
+
+    fn stop_runtime_client_list_title_drag_at_current_position(&mut self) {
+        if !self
+            .runtime_client_list
+            .as_ref()
+            .is_some_and(|dialog| dialog.has_positional_pointer_drag())
+        {
+            return;
+        }
+        let Some(point) = self.running_pointer_position else {
+            if let Some(dialog) = self.runtime_client_list.as_mut() {
+                dialog.pointer_left();
+            }
+            return;
+        };
+        let Some((preferred, line_height)) = self.runtime_client_list_input_geometry() else {
+            if let Some(dialog) = self.runtime_client_list.as_mut() {
+                dialog.pointer_left();
+            }
+            return;
+        };
+        if let Some(dialog) = self.runtime_client_list.as_mut() {
+            let action = dialog.handle_pointer_up(point, preferred, line_height);
+            debug_assert!(action.is_none(), "a title drag cannot activate a control");
+        }
     }
 
     fn handle_runtime_client_list_pointer_button(
@@ -37789,6 +37834,15 @@ impl GameApp {
             // higher interactive layer.
             self.handle_message_dialog_pointer_move_at(index, point);
         }
+        if self
+            .runtime_client_list
+            .as_ref()
+            .is_some_and(|dialog| dialog.has_positional_pointer_drag())
+        {
+            // `CMouse` updates its retained pDragElement before top-down
+            // routing, so a newly higher layer cannot freeze a dialog drag.
+            self.handle_runtime_client_list_pointer_move(point);
+        }
         if self.mode == AppMode::Running {
             self.ingame_gui_pointer = Some(point);
             if self.update_menu_title_drag(point) {
@@ -42048,6 +42102,9 @@ impl GameApp {
         if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
+        if button_state == ElementState::Released {
+            self.stop_runtime_client_list_title_drag_at_current_position();
+        }
         if self.mode == AppMode::Running
             && button_state == ElementState::Released
             && self.finish_menu_title_drag(self.ingame_gui_pointer)
@@ -42068,6 +42125,15 @@ impl GameApp {
         if button_state == ElementState::Pressed {
             if let Some(captured) = self.captured_message_dialog_index() {
                 self.cancel_message_dialog_pointer_capture_at(captured);
+            }
+            if self
+                .runtime_client_list
+                .as_ref()
+                .is_some_and(|dialog| dialog.has_positional_pointer_drag())
+            {
+                if let Some(dialog) = self.runtime_client_list.as_mut() {
+                    dialog.pointer_left();
+                }
             }
             self.context_menu_pointer_capture = None;
             // A fresh gesture supersedes any stale modal capture. Only the
@@ -42822,6 +42888,25 @@ impl GameApp {
         self.context_menu_pointer_dismissed_lobby_option = None;
         if self.startup_network_transition_blocks_input() {
             return Ok(());
+        }
+        if self
+            .runtime_client_list
+            .as_ref()
+            .is_some_and(|dialog| dialog.has_positional_pointer_drag())
+        {
+            match phase {
+                TouchPhase::Moved => {
+                    self.handle_runtime_client_list_pointer_move(position);
+                }
+                TouchPhase::Ended => {
+                    self.stop_runtime_client_list_title_drag_at_current_position();
+                }
+                TouchPhase::Cancelled | TouchPhase::Started => {
+                    if let Some(dialog) = self.runtime_client_list.as_mut() {
+                        dialog.pointer_left();
+                    }
+                }
+            }
         }
         if self.external_irc_dialog_visible {
             match phase {
@@ -52180,6 +52265,7 @@ impl GameApp {
         for action in actions {
             match action {
                 AdvancedConfigAction::Cancel => {
+                    self.startup_tooltip.pointer_left();
                     self.startup_options_advanced_dialog = None;
                 }
                 AdvancedConfigAction::Save => {
@@ -52193,6 +52279,7 @@ impl GameApp {
                     let saved = self.save_options_advanced_changes(&changes);
                     match saved {
                         Ok(()) => {
+                            self.startup_tooltip.pointer_left();
                             self.startup_options_advanced_dialog = None;
                             self.synchronize_advanced_options_runtime();
                             self.open_options_menu();
@@ -63073,6 +63160,87 @@ impl GameApp {
         Ok(true)
     }
 
+    /// Returns the topmost ordinary `C4GUI::Dialog::SetTitle` tooltip target.
+    /// The process-global tracker owns the 500ms delay; the individual dialog
+    /// controllers only own their current title/close hit geometry.
+    fn classic_dialog_title_tooltip_target_at(
+        &self,
+        point: GuiPoint,
+    ) -> Option<StartupTooltip> {
+        if !self.message_dialogs.is_empty() || self.context_menu.is_some() {
+            return None;
+        }
+
+        // The lobby's standalone client-info window is composited after the
+        // standalone IRC window, while the running F4 list is below it.
+        if self.mode != AppMode::Running {
+            if let Some(dialog) = self
+                .runtime_client_list
+                .as_ref()
+                .filter(|dialog| dialog.is_info_only())
+            {
+                let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
+                let preferred = scoreboard_preferred_rect(
+                    self.graphics
+                        .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                );
+                return dialog.tooltip_at(point, preferred, line_height);
+            }
+        }
+        if self.external_irc_dialog_visible || self.game_option_input_dialog.is_some() {
+            return None;
+        }
+        if self.mode == AppMode::Running {
+            if self.game_over_dialog.is_some() && !self.runtime_client_list_owns_game_over() {
+                return None;
+            }
+            if let Some(dialog) = self.runtime_client_list.as_ref() {
+                let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
+                let preferred = scoreboard_preferred_rect(
+                    self.graphics
+                        .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+                );
+                return dialog.tooltip_at(point, preferred, line_height);
+            }
+        }
+        if let Some(controller) = self.definition_selector.as_ref() {
+            let layout = self.definition_selector_layout()?;
+            return controller.tooltip_at(point, &layout);
+        }
+        self.startup_options_advanced_dialog
+            .as_ref()
+            .and_then(|pending| pending.controller.tooltip_at(point))
+    }
+
+    fn render_classic_dialog_title_tooltip(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Result<bool> {
+        let Some(pointer) = self.startup_tooltip.eligible_pointer() else {
+            return Ok(false);
+        };
+        let Some(target) = self.classic_dialog_title_tooltip_target_at(pointer) else {
+            return Ok(false);
+        };
+        let text = self.resolve_startup_tooltip_text(target);
+        if text.is_empty() {
+            return Ok(false);
+        }
+        let font = self
+            .assets
+            .global_tooltip_font
+            .clone()
+            .context("classic shadowless tooltip font is unavailable")?;
+        lc_frontend::context_menu::draw_classic_tooltip(
+            self.graphics.surface_mut(),
+            font.as_ref(),
+            pointer,
+            &text,
+            gamma,
+        );
+        Ok(true)
+    }
+
     fn render_message_dialog_tooltip(
         &mut self,
         gamma: Option<&lc_graphics::GammaRamp>,
@@ -63785,6 +63953,11 @@ impl GameApp {
                             context_menu.render(self.graphics.surface_mut(), gamma.as_ref())?;
                         }
                     }
+                    if self.render_classic_dialog_title_tooltip(gamma.as_ref())?
+                        && ordered_native
+                    {
+                        self.next_pending_native_overlay();
+                    }
                     self.render_message_dialog_tooltip(gamma.as_ref())?;
                     if !ordered_native {
                         let surface = self.graphics.surface();
@@ -64058,6 +64231,11 @@ impl GameApp {
                         context_menu
                             .render(self.graphics.surface_mut(), Some(startup_gamma()))?;
                     }
+                }
+                if self.render_classic_dialog_title_tooltip(Some(startup_gamma()))?
+                    && ordered_native
+                {
+                    self.next_pending_native_overlay();
                 }
                 self.render_message_dialog_tooltip(Some(startup_gamma()))?;
                 if !ordered_native
@@ -66076,6 +66254,9 @@ impl GameApp {
             } else if let Some(context_menu) = self.context_menu.as_ref() {
                 context_menu.render(self.graphics.surface_mut(), Some(&frame_gamma))?;
             }
+        }
+        if self.render_classic_dialog_title_tooltip(Some(&frame_gamma))? && ordered_native {
+            self.next_pending_native_overlay();
         }
         self.render_message_dialog_tooltip(Some(&frame_gamma))?;
 
@@ -105504,6 +105685,315 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(
             app.scenario_browser_tooltip_target_at(at_anchor(scenario.title_anchor)),
             Some(StartupTooltip::text("Lokales Spiel"))
+        );
+    }
+
+    #[test]
+    fn l080_dialog_titles_use_the_process_global_tooltip_delay_and_close_resource() {
+        use lc_frontend::startup_options_advanced::{
+            AdvancedConfigController, AdvancedConfigLabels,
+        };
+        use lc_frontend::startup_options_dlg::OptionsSheet;
+
+        fn assert_delayed_target(
+            app: &mut GameApp,
+            point: GuiPoint,
+            expected: StartupTooltip,
+        ) {
+            let started = Instant::now();
+            app.startup_tooltip = ClassicTooltipTracker::new_at(started);
+            app.startup_tooltip.note_pointer_move_at(point, started);
+            assert!(app
+                .startup_tooltip
+                .eligible_pointer_at(
+                    started + lc_frontend::context_menu::CLASSIC_TOOLTIP_DELAY
+                        - Duration::from_millis(1),
+                )
+                .and_then(|point| app.classic_dialog_title_tooltip_target_at(point))
+                .is_none());
+            assert_eq!(
+                app.startup_tooltip
+                    .eligible_pointer_at(
+                        started + lc_frontend::context_menu::CLASSIC_TOOLTIP_DELAY,
+                    )
+                    .and_then(|point| app.classic_dialog_title_tooltip_target_at(point)),
+                Some(expected)
+            );
+        }
+
+        let mut app = new_real_classic_menu_app(640, 480);
+        app.open_options_menu();
+        let mut controller = AdvancedConfigController::new(Vec::new());
+        controller.resize(640, 480);
+        controller.set_labels(AdvancedConfigLabels {
+            caption: "Advanced settings with a live title".into(),
+            ..AdvancedConfigLabels::default()
+        });
+        let layout = controller.layout();
+        let title_point = GuiPoint::new(
+            (layout.caption.x + 8) as f32,
+            (layout.caption.y + layout.caption.h / 2) as f32,
+        );
+        let _ = controller.handle_pointer_move(title_point);
+        app.startup_options_advanced_dialog = Some(PendingOptionsAdvancedDialog {
+            controller,
+            return_sheet: OptionsSheet::Program,
+        });
+        assert_delayed_target(
+            &mut app,
+            title_point,
+            StartupTooltip::text("Advanced settings with a live title"),
+        );
+
+        let close_point = GuiPoint::new(
+            (layout.close_button.x + 1) as f32,
+            (layout.close_button.y + 1) as f32,
+        );
+        let _ = app
+            .startup_options_advanced_dialog
+            .as_mut()
+            .expect("advanced dialog")
+            .controller
+            .handle_pointer_move(close_point);
+        assert_delayed_target(
+            &mut app,
+            close_point,
+            StartupTooltip::resource("IDS_MNU_CLOSE"),
+        );
+
+        use lc_frontend::runtime_client_list::{
+            RuntimeClientListDialog, RuntimeClientListStatus, RuntimeClientRow,
+            RuntimeClientStatusIcon,
+        };
+        let row = RuntimeClientRow {
+            client_id: 7,
+            name: "Remote".into(),
+            nick: "Nick".into(),
+            host: false,
+            local: false,
+            activated: true,
+            observer: false,
+            muted: false,
+            has_players: false,
+            player_names: Vec::new(),
+            addresses: Vec::new(),
+            status: RuntimeClientStatusIcon::Ready,
+            wait_ms: None,
+            connections: Vec::new(),
+            can_moderate: false,
+        };
+        let line_height = app
+            .assets
+            .clonk_fonts
+            .as_deref()
+            .expect("classic fonts")
+            .text
+            .line_height;
+        let mut preferred = scoreboard_preferred_rect(
+            app.graphics
+                .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
+        );
+        let mut runtime = RuntimeClientListDialog::new(
+            "Network clients",
+            Vec::new(),
+            vec![row.clone()],
+            RuntimeClientListStatus::default(),
+        );
+        let runtime_layout = runtime.layout(preferred, line_height);
+        let runtime_title = GuiPoint::new(
+            (runtime_layout.caption.x + 8) as f32,
+            (runtime_layout.caption.y + runtime_layout.caption.h / 2) as f32,
+        );
+        assert!(runtime.handle_pointer_move(runtime_title, preferred, line_height));
+        app.mode = AppMode::Running;
+        app.runtime_client_list = Some(runtime);
+        assert_delayed_target(
+            &mut app,
+            runtime_title,
+            StartupTooltip::text("Network clients"),
+        );
+        let runtime_close = GuiPoint::new(
+            (runtime_layout.close_button.x + 1) as f32,
+            (runtime_layout.close_button.y + 1) as f32,
+        );
+        assert!(app
+            .runtime_client_list
+            .as_mut()
+            .expect("runtime list")
+            .handle_pointer_move(runtime_close, preferred, line_height));
+        assert_delayed_target(
+            &mut app,
+            runtime_close,
+            StartupTooltip::resource("IDS_MNU_CLOSE"),
+        );
+
+        let dragged_point = GuiPoint::new(runtime_title.x + 15.0, runtime_title.y - 4.0);
+        assert!(app
+            .runtime_client_list
+            .as_mut()
+            .expect("runtime list")
+            .handle_pointer_down(runtime_title, preferred, line_height));
+        let before_layered_move = app
+            .runtime_client_list
+            .as_ref()
+            .expect("runtime list")
+            .layout(preferred, line_height)
+            .bounds;
+        app.external_irc_dialog_visible = true;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(dragged_point.x),
+            f64::from(dragged_point.y),
+        ))
+        .expect("move retained drag below higher layer");
+        assert_ne!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("runtime list")
+                .layout(preferred, line_height)
+                .bounds,
+            before_layered_move,
+            "CMouse updates its retained drag element before z-order routing"
+        );
+        assert!(app
+            .runtime_client_list
+            .as_ref()
+            .expect("runtime list")
+            .has_positional_pointer_drag());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release retained drag below higher layer");
+        assert!(!app
+            .runtime_client_list
+            .as_ref()
+            .expect("runtime list")
+            .has_positional_pointer_drag());
+        app.external_irc_dialog_visible = false;
+
+        let dragged_layout = app
+            .runtime_client_list
+            .as_ref()
+            .expect("runtime list")
+            .layout(preferred, line_height);
+        let resize_drag_start = GuiPoint::new(
+            (dragged_layout.caption.x + 8) as f32,
+            (dragged_layout.caption.y + dragged_layout.caption.h / 2) as f32,
+        );
+        assert!(app
+            .runtime_client_list
+            .as_mut()
+            .expect("runtime list")
+            .handle_pointer_down(resize_drag_start, preferred, line_height));
+        assert!(app
+            .runtime_client_list
+            .as_mut()
+            .expect("runtime list")
+            .handle_pointer_move(
+                GuiPoint::new(resize_drag_start.x + 7.0, resize_drag_start.y + 3.0),
+                preferred,
+                line_height,
+            ));
+        app.resize(641, 481).expect("resize active runtime dialog");
+        assert!(!app
+            .runtime_client_list
+            .as_ref()
+            .expect("runtime list")
+            .has_positional_pointer_drag());
+        preferred = scoreboard_preferred_rect(
+            app.graphics
+                .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
+        );
+        let retained_after_resize = app
+            .runtime_client_list
+            .as_ref()
+            .expect("runtime list")
+            .layout(preferred, line_height)
+            .bounds;
+        let _ = app
+            .runtime_client_list
+            .as_mut()
+            .expect("runtime list")
+            .handle_pointer_move(GuiPoint::new(3.0, 3.0), preferred, line_height);
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("runtime list")
+                .layout(preferred, line_height)
+                .bounds,
+            retained_after_resize,
+            "resize cancels capture without discarding the retained offset"
+        );
+
+        let mut info = RuntimeClientListDialog::new_info("Client information", row);
+        let info_layout = info
+            .info_layout(preferred, line_height)
+            .expect("info layout");
+        let info_title = GuiPoint::new(
+            (info_layout.caption.x + 8) as f32,
+            (info_layout.caption.y + info_layout.caption.h / 2) as f32,
+        );
+        assert!(info.handle_pointer_move(info_title, preferred, line_height));
+        app.mode = AppMode::Menu;
+        app.runtime_client_list = Some(info);
+        assert_delayed_target(
+            &mut app,
+            info_title,
+            StartupTooltip::text("Client information"),
+        );
+        let info_close = GuiPoint::new(
+            (info_layout.close_button.x + 1) as f32,
+            (info_layout.close_button.y + 1) as f32,
+        );
+        assert!(app
+            .runtime_client_list
+            .as_mut()
+            .expect("client info")
+            .handle_pointer_move(info_close, preferred, line_height));
+        assert_delayed_target(
+            &mut app,
+            info_close,
+            StartupTooltip::resource("IDS_MNU_CLOSE"),
+        );
+
+        app.runtime_client_list = None;
+        app.startup_options_advanced_dialog = None;
+        let mut definition = lc_frontend::definition_sel::DefinitionSelController::new(
+            "",
+            Vec::new(),
+            Vec::new(),
+        );
+        let (definition_width, definition_height) = {
+            let surface = app.graphics.surface();
+            (surface.width() as i32, surface.height() as i32)
+        };
+        let definition_layout = definition.layout(
+            definition_width,
+            definition_height,
+            &app.assets.clonk_fonts.as_deref().expect("classic fonts").text,
+        );
+        let definition_title = GuiPoint::new(
+            (definition_layout.caption.x + 8) as f32,
+            (definition_layout.caption.y + definition_layout.caption.h / 2) as f32,
+        );
+        let _ = definition.handle_pointer_move(definition_title, &definition_layout);
+        let definition_caption = definition.caption();
+        app.definition_selector = Some(definition);
+        assert_delayed_target(
+            &mut app,
+            definition_title,
+            StartupTooltip::text(definition_caption),
+        );
+        let definition_close = GuiPoint::new(
+            (definition_layout.close_button.x + 1) as f32,
+            (definition_layout.close_button.y + 1) as f32,
+        );
+        let _ = app
+            .definition_selector
+            .as_mut()
+            .expect("definition selector")
+            .handle_pointer_move(definition_close, &definition_layout);
+        assert_delayed_target(
+            &mut app,
+            definition_close,
+            StartupTooltip::resource("IDS_MNU_CLOSE"),
         );
     }
 

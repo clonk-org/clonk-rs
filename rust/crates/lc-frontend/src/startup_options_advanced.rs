@@ -10,10 +10,13 @@ use crate::classic_gui::{
     ClassicButtonState, ClassicGuiSkin, IntRect,
 };
 use crate::rename_edit::{RenameEdit, RenameEditCursorOperation};
+use crate::startup_main_menu::StartupTooltip;
 use crate::{expand_hotkey_markup, ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use anyhow::{ensure, Result};
-use lc_graphics::clonk_font::TextAlign;
+use lc_graphics::clonk_font::{ClonkFont, TextAlign};
 use lc_graphics::{GammaRamp, Rect, Surface};
+use std::cell::Cell;
+use std::time::{Duration, Instant};
 
 const DEFAULT_WIDTH: i32 = 800;
 const DEFAULT_HEIGHT: i32 = 600;
@@ -28,6 +31,9 @@ const BUTTON_HEIGHT: i32 = 32;
 const BUTTON_GAP: i32 = 10;
 const MAX_BUTTON_WIDTH: i32 = 200;
 const MAX_EDIT_BYTES: usize = 254;
+const TITLE_LEFT_INDENT: i32 = 5;
+const TITLE_RIGHT_INDENT: i32 = 20;
+const TITLE_SCROLL_DELAY: Duration = Duration::from_millis(3000);
 
 /// Typed value displayed by one advanced setting row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,6 +157,7 @@ pub enum AdvancedConfigFocus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdvancedConfigHit {
     Close,
+    Caption,
     Section(usize),
     Row(usize),
     Checkbox(usize),
@@ -211,12 +218,26 @@ struct ActiveEdit {
     editor: RenameEdit<()>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct CaptionScrollState {
+    last_change: Option<Instant>,
+    position: i32,
+    direction: i8,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CaptionDrag {
+    pointer: GuiPoint,
+    offset: (i32, i32),
+}
+
 /// Mutable draft and modal input controller. All pointer methods use the size
 /// last supplied to [`Self::resize`].
 #[derive(Clone, Debug)]
 pub struct AdvancedConfigController {
     width: i32,
     height: i32,
+    dialog_offset: (i32, i32),
     sections: Vec<AdvancedConfigSection>,
     original_values: Vec<Vec<String>>,
     labels: AdvancedConfigLabels,
@@ -228,6 +249,8 @@ pub struct AdvancedConfigController {
     pointer_pressed: Option<PressTarget>,
     key_pressed: Option<PressTarget>,
     scrollbar_drag_offset: Option<i32>,
+    caption_drag: Option<CaptionDrag>,
+    caption_scroll: Cell<CaptionScrollState>,
     active_edit: Option<ActiveEdit>,
     sound_events: Vec<AdvancedConfigSound>,
 }
@@ -253,6 +276,7 @@ impl AdvancedConfigController {
         Self {
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
+            dialog_offset: (0, 0),
             sections,
             original_values,
             labels: AdvancedConfigLabels::default(),
@@ -264,6 +288,8 @@ impl AdvancedConfigController {
             pointer_pressed: None,
             key_pressed: None,
             scrollbar_drag_offset: None,
+            caption_drag: None,
+            caption_scroll: Cell::new(CaptionScrollState::default()),
             active_edit: None,
             sound_events: Vec::new(),
         }
@@ -284,6 +310,9 @@ impl AdvancedConfigController {
     }
 
     pub fn set_labels(&mut self, labels: AdvancedConfigLabels) {
+        if self.labels.caption != labels.caption {
+            self.caption_scroll.set(CaptionScrollState::default());
+        }
         self.labels = labels;
     }
 
@@ -317,13 +346,22 @@ impl AdvancedConfigController {
         self.pointer
     }
 
+    pub const fn dialog_offset(&self) -> (i32, i32) {
+        self.dialog_offset
+    }
+
+    pub const fn has_positional_pointer_drag(&self) -> bool {
+        self.caption_drag.is_some()
+    }
+
     pub fn layout(&self) -> AdvancedConfigLayout {
-        advanced_config_layout(
+        advanced_config_layout_with_offset(
             self.width,
             self.height,
             &self.sections,
             self.current_section,
             self.scroll_y,
+            self.dialog_offset,
         )
     }
 
@@ -458,6 +496,9 @@ impl AdvancedConfigController {
         if rect_contains(layout.close_button, point) {
             return AdvancedConfigHit::Close;
         }
+        if rect_contains(layout.caption, point) {
+            return AdvancedConfigHit::Caption;
+        }
         if rect_contains(layout.save_button, point) {
             return AdvancedConfigHit::Save;
         }
@@ -504,6 +545,37 @@ impl AdvancedConfigController {
         AdvancedConfigHit::None
     }
 
+    /// Returns the tooltip assigned by `C4GUI::Dialog::SetTitle` at `point`.
+    /// The application owns the screen-global 500ms hover clock and resolves
+    /// the close resource in the active language.
+    pub fn tooltip_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        let routed_pointer = self.pointer?;
+        if routed_pointer.x as i32 != point.x as i32
+            || routed_pointer.y as i32 != point.y as i32
+        {
+            return None;
+        }
+        match self.hit_test(point) {
+            AdvancedConfigHit::Close => Some(StartupTooltip::resource("IDS_MNU_CLOSE")),
+            AdvancedConfigHit::Caption => (!self.labels.caption.is_empty())
+                .then(|| StartupTooltip::text(&self.labels.caption)),
+            AdvancedConfigHit::Section(_)
+            | AdvancedConfigHit::Row(_)
+            | AdvancedConfigHit::Checkbox(_)
+            | AdvancedConfigHit::Edit(_)
+            | AdvancedConfigHit::Decrement(_)
+            | AdvancedConfigHit::Increment(_)
+            | AdvancedConfigHit::Scrollbar
+            | AdvancedConfigHit::Save
+            | AdvancedConfigHit::Cancel
+            | AdvancedConfigHit::None => None,
+        }
+    }
+
+    pub fn tooltip(&self) -> Option<StartupTooltip> {
+        self.tooltip_at(self.pointer?)
+    }
+
     pub fn handle_pointer_move(&mut self, point: GuiPoint) -> Vec<AdvancedConfigAction> {
         self.handle_pointer_move_inner(point, None)
     }
@@ -522,6 +594,13 @@ impl AdvancedConfigController {
         font: Option<&lc_graphics::clonk_font::ClonkFont>,
     ) -> Vec<AdvancedConfigAction> {
         self.pointer = Some(point);
+        if let Some(drag) = self.caption_drag {
+            self.dialog_offset = (
+                drag.offset.0 + (point.x - drag.pointer.x) as i32,
+                drag.offset.1 + (point.y - drag.pointer.y) as i32,
+            );
+            return Vec::new();
+        }
         if let Some(offset) = self.scrollbar_drag_offset {
             self.set_scroll_from_thumb(point.y as i32 - offset);
         }
@@ -557,6 +636,15 @@ impl AdvancedConfigController {
                 self.focus = AdvancedConfigFocus::Close;
                 self.pointer_pressed = Some(PressTarget::Close);
                 self.sound_events.push(AdvancedConfigSound::ArrowHit);
+            }
+            AdvancedConfigHit::Caption => {
+                self.finish_edit();
+                self.pointer_pressed = None;
+                self.scrollbar_drag_offset = None;
+                self.caption_drag = Some(CaptionDrag {
+                    pointer: point,
+                    offset: self.dialog_offset,
+                });
             }
             AdvancedConfigHit::Section(index) => {
                 self.focus = AdvancedConfigFocus::SectionTabs;
@@ -641,6 +729,13 @@ impl AdvancedConfigController {
     ) -> Vec<AdvancedConfigAction> {
         self.pointer = Some(point);
         self.scrollbar_drag_offset = None;
+        if let Some(drag) = self.caption_drag.take() {
+            self.dialog_offset = (
+                drag.offset.0 + (point.x - drag.pointer.x) as i32,
+                drag.offset.1 + (point.y - drag.pointer.y) as i32,
+            );
+            return Vec::new();
+        }
         let caret = self.active_edit_caret_at(point.x, font);
         if let (Some(active), Some(caret)) = (self.active_edit.as_mut(), caret) {
             active.editor.end_pointer_selection(caret);
@@ -663,6 +758,7 @@ impl AdvancedConfigController {
         self.pointer = None;
         self.pointer_pressed = None;
         self.scrollbar_drag_offset = None;
+        self.caption_drag = None;
         if let Some(active) = self.active_edit.as_mut() {
             active.editor.cancel_pointer_selection();
         }
@@ -935,6 +1031,7 @@ impl AdvancedConfigController {
         self.pointer_pressed = None;
         self.key_pressed = None;
         self.scrollbar_drag_offset = None;
+        self.caption_drag = None;
         if let Some(active) = self.active_edit.as_mut() {
             active.editor.cancel_pointer_selection();
         }
@@ -1257,6 +1354,38 @@ impl AdvancedConfigController {
         };
         self.remember_scroll();
     }
+
+    fn caption_scroll_offset_at(&self, now: Instant, font: &ClonkFont) -> i32 {
+        if self.labels.caption.is_empty() {
+            return 0;
+        }
+        let layout = self.layout();
+        let max_scroll =
+            (font.measure(&self.labels.caption, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT
+                - layout.caption.w)
+                .max(0);
+        let mut state = self.caption_scroll.get();
+        let Some(last_change) = state.last_change else {
+            state.last_change = Some(now);
+            self.caption_scroll.set(state);
+            return 0;
+        };
+        if now.checked_duration_since(last_change).unwrap_or_default() >= TITLE_SCROLL_DELAY {
+            if state.direction == 0 {
+                state.direction = 1;
+            }
+            if max_scroll > 0 {
+                state.position += i32::from(state.direction);
+                if state.position >= max_scroll || state.position < 0 {
+                    state.direction = -state.direction;
+                    state.position += i32::from(state.direction);
+                    state.last_change = Some(now);
+                }
+            }
+        }
+        self.caption_scroll.set(state);
+        state.position
+    }
 }
 
 /// Owned image bundle used by [`AdvancedConfigScreen`].
@@ -1300,6 +1429,26 @@ impl AdvancedConfigScreen {
         active: bool,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
+        Self::render_at(
+            surface,
+            assets,
+            fonts,
+            controller,
+            active,
+            gamma,
+            Instant::now(),
+        )
+    }
+
+    pub fn render_at(
+        surface: &mut Surface,
+        assets: &AdvancedConfigAssets,
+        fonts: &ClonkFontSet,
+        controller: &mut AdvancedConfigController,
+        active: bool,
+        gamma: Option<&GammaRamp>,
+        now: Instant,
+    ) -> Result<()> {
         assets.validate()?;
         let layout = controller.layout();
         let skin = ClassicGuiSkin::new(
@@ -1309,14 +1458,15 @@ impl AdvancedConfigScreen {
             Some(&assets.button_highlight),
         );
         skin.draw_dialog(surface, layout.bounds, gamma);
-        skin.draw_caption_with_right_indent(
+        skin.draw_caption_scrolled(
             surface,
             layout.caption,
             &controller.labels.caption,
             &fonts.text,
             [255, 255, 255, 255],
             TextAlign::Left,
-            layout.close_button.w + 6,
+            TITLE_RIGHT_INDENT,
+            controller.caption_scroll_offset_at(now, &fonts.text),
             gamma,
         );
 
@@ -1683,13 +1833,31 @@ pub fn advanced_config_layout(
     current_section: usize,
     scroll_y: i32,
 ) -> AdvancedConfigLayout {
+    advanced_config_layout_with_offset(
+        screen_width,
+        screen_height,
+        sections,
+        current_section,
+        scroll_y,
+        (0, 0),
+    )
+}
+
+fn advanced_config_layout_with_offset(
+    screen_width: i32,
+    screen_height: i32,
+    sections: &[AdvancedConfigSection],
+    current_section: usize,
+    scroll_y: i32,
+    dialog_offset: (i32, i32),
+) -> AdvancedConfigLayout {
     let screen_width = screen_width.max(1);
     let screen_height = screen_height.max(1);
     let width = (screen_width * 3 / 4).max(1);
     let height = (screen_height * 3 / 4).max(1);
     let bounds = IntRect {
-        x: (screen_width - width) / 2,
-        y: (screen_height - height) / 2,
+        x: (screen_width - width) / 2 + dialog_offset.0,
+        y: (screen_height - height) / 2 + dialog_offset.1,
         w: width,
         h: height,
     };
@@ -1699,10 +1867,10 @@ pub fn advanced_config_layout(
         w: (bounds.w - 4).max(1),
         h: CAPTION_HEIGHT.min((bounds.h - 4).max(1)),
     };
-    let close_size = 22.min((caption.h - 4).max(1));
+    let close_size = 16.min((caption.w - 8).max(1)).min((caption.h - 8).max(1));
     let close_button = IntRect {
-        x: caption.x + caption.w - close_size - 3,
-        y: caption.y + (caption.h - close_size) / 2,
+        x: caption.x + caption.w - close_size - 4,
+        y: caption.y + 4,
         w: close_size,
         h: close_size,
     };
@@ -2036,6 +2204,7 @@ fn truncate_utf8(mut value: String, maximum: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lc_graphics::Color;
 
     fn controller() -> AdvancedConfigController {
         AdvancedConfigController::new(vec![
@@ -2071,6 +2240,19 @@ mod tests {
 
     fn center(rect: IntRect) -> GuiPoint {
         GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
+    }
+
+    fn unit_width_font(character: char) -> ClonkFont {
+        let mut font = ClonkFont::new(3);
+        font.h_space = 0;
+        font.add_glyph(
+            character,
+            lc_graphics::clonk_font::GlyphCell {
+                width: 1,
+                pixels: vec![Color::opaque(255, 255, 255); 4],
+            },
+        );
+        font
     }
 
     #[test]
@@ -2472,5 +2654,146 @@ mod tests {
         assert_eq!(state.scroll_y(), 0);
         state.select_section(0);
         assert_eq!(state.scroll_y(), 62, "each native ListBox retains its offset");
+    }
+
+    #[test]
+    fn advanced_config_caption_drag_moves_live_and_release_persists_offset() {
+        let mut state = controller();
+        state.resize(800, 600);
+        let centered = advanced_config_layout(800, 600, state.sections(), 0, 0);
+        let caption = state.layout().caption;
+        let start = GuiPoint::new((caption.x + 10) as f32, (caption.y + 10) as f32);
+        assert_eq!(state.hit_test(start), AdvancedConfigHit::Caption);
+
+        state.handle_pointer_down(start);
+        assert!(state.has_positional_pointer_drag());
+        let moved = GuiPoint::new(start.x + 37.0, start.y - 14.0);
+        state.handle_pointer_move(moved);
+        assert_eq!(state.dialog_offset(), (37, -14));
+        assert_eq!(state.layout().bounds.x, centered.bounds.x + 37);
+        assert_eq!(state.layout().bounds.y, centered.bounds.y - 14);
+
+        let released = GuiPoint::new(moved.x + 5.0, moved.y + 6.0);
+        assert!(state.handle_pointer_up(released).is_empty());
+        assert_eq!(state.dialog_offset(), (42, -8));
+        assert!(!state.has_positional_pointer_drag());
+        state.handle_pointer_move(GuiPoint::new(0.0, 0.0));
+        assert_eq!(state.dialog_offset(), (42, -8));
+
+        state.resize(1000, 700);
+        let resized_center = advanced_config_layout(1000, 700, state.sections(), 0, 0);
+        assert_eq!(state.layout().bounds.x, resized_center.bounds.x + 42);
+        assert_eq!(state.layout().bounds.y, resized_center.bounds.y - 8);
+
+        let second_caption = state.layout().caption;
+        let second_start = GuiPoint::new(
+            (second_caption.x + 10) as f32,
+            (second_caption.y + 10) as f32,
+        );
+        state.handle_pointer_down(second_start);
+        state.handle_pointer_move(GuiPoint::new(second_start.x + 3.0, second_start.y + 4.0));
+        assert_eq!(state.dialog_offset(), (45, -4));
+        state.cancel_interaction();
+        state.handle_pointer_move(GuiPoint::new(second_start.x + 30.0, second_start.y + 40.0));
+        assert_eq!(state.dialog_offset(), (45, -4));
+    }
+
+    #[test]
+    fn advanced_config_caption_autoscroll_advances_per_frame_and_dwells_at_ends() {
+        let mut state = controller();
+        state.resize(800, 600);
+        let font = unit_width_font('W');
+        let layout = state.layout();
+        let caption_width =
+            (layout.caption.w - TITLE_LEFT_INDENT - TITLE_RIGHT_INDENT + 3) as usize;
+        state.set_labels(AdvancedConfigLabels {
+            caption: "W".repeat(caption_width),
+            ..AdvancedConfigLabels::default()
+        });
+        let base = Instant::now();
+        assert_eq!(state.caption_scroll_offset_at(base, &font), 0);
+        assert_eq!(
+            state.caption_scroll_offset_at(
+                base + TITLE_SCROLL_DELAY - Duration::from_millis(1),
+                &font,
+            ),
+            0
+        );
+        let outbound = base + TITLE_SCROLL_DELAY;
+        assert_eq!(state.caption_scroll_offset_at(outbound, &font), 1);
+        assert_eq!(state.caption_scroll_offset_at(outbound, &font), 2);
+        assert_eq!(
+            state.caption_scroll_offset_at(outbound, &font),
+            2,
+            "the attempted maximum frame backs off and begins the end dwell"
+        );
+        assert_eq!(
+            state.caption_scroll_offset_at(
+                outbound + TITLE_SCROLL_DELAY - Duration::from_millis(1),
+                &font,
+            ),
+            2
+        );
+        let returning = outbound + TITLE_SCROLL_DELAY;
+        assert_eq!(state.caption_scroll_offset_at(returning, &font), 1);
+        assert_eq!(state.caption_scroll_offset_at(returning, &font), 0);
+        assert_eq!(
+            state.caption_scroll_offset_at(returning, &font),
+            0,
+            "the attempted negative frame backs off and begins the start dwell"
+        );
+        assert_eq!(
+            state.caption_scroll_offset_at(returning + TITLE_SCROLL_DELAY, &font),
+            1
+        );
+    }
+
+    #[test]
+    fn advanced_config_caption_and_close_expose_only_native_tooltips() {
+        let mut state = controller();
+        state.resize(800, 600);
+        state.set_labels(AdvancedConfigLabels {
+            caption: "Erweiterte Einstellungen".into(),
+            ..AdvancedConfigLabels::default()
+        });
+        let layout = state.layout();
+        assert_eq!(
+            layout.close_button,
+            IntRect {
+                x: layout.caption.x + layout.caption.w - 20,
+                y: layout.caption.y + 4,
+                w: 16,
+                h: 16,
+            },
+            "Dialog::SetTitle uses a 16px close button inset four pixels"
+        );
+        let title_point = GuiPoint::new(
+            (layout.caption.x + 8) as f32,
+            (layout.caption.y + layout.caption.h / 2) as f32,
+        );
+        let _ = state.handle_pointer_move(title_point);
+        assert_eq!(
+            state.tooltip_at(title_point),
+            Some(StartupTooltip::text("Erweiterte Einstellungen"))
+        );
+        assert_eq!(
+            state.tooltip_at(center(layout.close_button)),
+            None,
+            "an unrouted overlapping control cannot claim the shared timer"
+        );
+        let _ = state.handle_pointer_move(center(layout.close_button));
+        assert_eq!(
+            state.tooltip_at(center(layout.close_button)),
+            Some(StartupTooltip::resource("IDS_MNU_CLOSE")),
+            "the close control wins its overlap with the wooden caption"
+        );
+        let _ = state.handle_pointer_move(center(layout.save_button));
+        assert_eq!(state.tooltip_at(center(layout.save_button)), None);
+
+        let _ = state.handle_pointer_move(title_point);
+        assert_eq!(
+            state.tooltip(),
+            Some(StartupTooltip::text("Erweiterte Einstellungen"))
+        );
     }
 }
