@@ -398,6 +398,10 @@ enum LeagueRuntimeCommand {
     End {
         reference: lc_network::HostGameReference,
         record: Option<lc_network::LeagueEndRecord>,
+        completion: tokio::sync::oneshot::Sender<LeagueEndAttempt>,
+    },
+    FinalizeEndFailure {
+        packet: lc_network::LeagueRoundResultsPacket,
         completion: tokio::sync::oneshot::Sender<Option<lc_network::LeagueRoundResultsPacket>>,
     },
     ReportDisconnect {
@@ -407,6 +411,29 @@ enum LeagueRuntimeCommand {
         completion: Sender<std::result::Result<(), String>>,
     },
     Invalidate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeagueEndFailurePhase {
+    Start,
+    Send,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LeagueEndAttempt {
+    Finished(Option<lc_network::LeagueRoundResultsPacket>),
+    Rejected(lc_network::LeagueRoundResultsPacket),
+    Retryable {
+        phase: LeagueEndFailurePhase,
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LeaguePlayerCheck {
+    Accepted,
+    Rejected(lc_engine::LegacyCString),
+    Unavailable,
 }
 
 #[derive(Debug, Default)]
@@ -1011,6 +1038,30 @@ pub(crate) struct PendingMasterserverSignup {
     transition: Arc<std::sync::atomic::AtomicU8>,
 }
 
+#[derive(Debug)]
+pub(crate) struct PendingLeaguePlayerAuth {
+    completion: Receiver<std::result::Result<lc_network::LeagueAuthResponse, String>>,
+}
+
+impl PendingLeaguePlayerAuth {
+    pub(crate) fn try_complete(&self) -> Option<Result<lc_network::LeagueAuthResponse>> {
+        match self.completion.try_recv() {
+            Ok(result) => Some(result.map_err(|message| anyhow!(message))),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err(anyhow!(
+                "league runtime ended before authenticating the player"
+            ))),
+        }
+    }
+
+    fn wait(self) -> Result<lc_network::LeagueAuthResponse> {
+        self.completion
+            .recv_timeout(lc_network::LEAGUE_HTTP_TIMEOUT + Duration::from_secs(1))
+            .map_err(|_| anyhow!("league runtime did not finish authenticating the player"))?
+            .map_err(|message| anyhow!(message))
+    }
+}
+
 impl PendingMasterserverSignup {
     pub(crate) fn enabled(&self) -> bool {
         self.enabled
@@ -1080,6 +1131,23 @@ pub(crate) struct TestMasterserverSignupCommand {
 }
 
 #[cfg(test)]
+pub(crate) struct TestLeaguePlayerAuthCommand {
+    pub(crate) auth: lc_network::LeagueAuthRequestHead,
+    pub(crate) player: lc_engine::ControlPlayerInfoEntry,
+    completion: Sender<std::result::Result<lc_network::LeagueAuthResponse, String>>,
+}
+
+#[cfg(test)]
+impl TestLeaguePlayerAuthCommand {
+    pub(crate) fn complete(
+        self,
+        result: std::result::Result<lc_network::LeagueAuthResponse, String>,
+    ) -> bool {
+        self.completion.send(result).is_ok()
+    }
+}
+
+#[cfg(test)]
 impl TestMasterserverSignupCommand {
     pub(crate) fn complete(
         self,
@@ -1135,6 +1203,14 @@ pub(crate) enum TestRuntimeStatusCommand {
 }
 
 #[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct TestLeagueEndFlowResult {
+    pub(crate) attempts: usize,
+    pub(crate) finalizations: Vec<Vec<u8>>,
+    pub(crate) broadcasts: Vec<lc_network::LeagueRoundResultsPacket>,
+}
+
+#[cfg(test)]
 type RuntimeHostJoinResult = (
     Vec<&'static str>,
     Vec<ClientPlayerResourceRequest>,
@@ -1144,6 +1220,65 @@ type RuntimeHostJoinResult = (
 
 #[cfg(test)]
 impl TestNetworkCommands {
+    pub(crate) fn receive_league_player_auth(&mut self) -> TestLeaguePlayerAuthCommand {
+        match self.command_rx.blocking_recv() {
+            Some(NetworkCommand::LeagueAuthenticatePlayer {
+                auth,
+                player,
+                completion,
+            }) => TestLeaguePlayerAuthCommand {
+                auth,
+                player,
+                completion,
+            },
+            Some(command) => panic!("unexpected league auth command: {command:?}"),
+            None => panic!("network command channel ended before league auth command"),
+        }
+    }
+
+    pub(crate) fn complete_league_end_flow(
+        mut self,
+        outcomes: Vec<LeagueEndAttempt>,
+    ) -> TestLeagueEndFlowResult {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut observed = TestLeagueEndFlowResult::default();
+        while std::time::Instant::now() < deadline {
+            match self.command_rx.try_recv() {
+                Ok(NetworkCommand::LeagueEnd { completion, .. }) => {
+                    let outcome = outcomes
+                        .get(observed.attempts)
+                        .cloned()
+                        .expect("test did not provide a league End outcome");
+                    observed.attempts += 1;
+                    completion.send(Ok(outcome)).expect("complete league End");
+                }
+                Ok(NetworkCommand::LeagueFinalizeEndFailure {
+                    packet,
+                    completion,
+                }) => {
+                    observed
+                        .finalizations
+                        .push(packet.result_string.as_bytes().to_vec());
+                    completion
+                        .send(Ok(Some(packet)))
+                        .expect("complete league End failure finalization");
+                }
+                Ok(NetworkCommand::BroadcastLeagueRoundResults(packet)) => {
+                    observed.broadcasts.push(packet);
+                    break;
+                }
+                Ok(NetworkCommand::SubmitLocal { .. }) => {}
+                Ok(NetworkCommand::Shutdown) => break,
+                Ok(command) => panic!("unexpected league End command: {command:?}"),
+                Err(tokio_mpsc::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(tokio_mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        observed
+    }
+
     pub(crate) fn take_finalized_ticks(&mut self) -> Vec<Tick> {
         let mut ticks = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -2200,6 +2335,10 @@ enum NetworkCommand {
     LeagueEnd {
         reference: lc_network::HostGameReference,
         record: Option<lc_network::LeagueEndRecord>,
+        completion: Sender<std::result::Result<LeagueEndAttempt, String>>,
+    },
+    LeagueFinalizeEndFailure {
+        packet: lc_network::LeagueRoundResultsPacket,
         completion: Sender<
             std::result::Result<Option<lc_network::LeagueRoundResultsPacket>, String>,
         >,
@@ -3103,8 +3242,20 @@ impl NetworkManager {
         auth: lc_network::LeagueAuthRequestHead,
         player: &mut lc_engine::ControlPlayerInfoEntry,
     ) -> Result<bool> {
-        if !self.league_runtime_available.load(Ordering::Acquire) {
+        let Some(pending) = self.begin_authenticate_league_player(auth, player)? else {
             return Ok(false);
+        };
+        let response = pending.wait()?;
+        Ok(response.apply_player_auth(player))
+    }
+
+    pub(crate) fn begin_authenticate_league_player(
+        &self,
+        auth: lc_network::LeagueAuthRequestHead,
+        player: &lc_engine::ControlPlayerInfoEntry,
+    ) -> Result<Option<PendingLeaguePlayerAuth>> {
+        if !self.league_runtime_available.load(Ordering::Acquire) {
+            return Ok(None);
         }
         let (completion, completed) = mpsc::channel();
         self.command_tx
@@ -3114,11 +3265,9 @@ impl NetworkManager {
                 completion,
             })
             .map_err(|_| anyhow!("network worker is not accepting league authentication"))?;
-        let response = completed
-            .recv_timeout(lc_network::LEAGUE_HTTP_TIMEOUT + Duration::from_secs(1))
-            .map_err(|_| anyhow!("league runtime did not finish authenticating the player"))?
-            .map_err(|message| anyhow!(message))?;
-        Ok(response.apply_player_auth(player))
+        Ok(Some(PendingLeaguePlayerAuth {
+            completion: completed,
+        }))
     }
 
     /// Runs the host's `Action=Join` check and applies the synchronized league
@@ -3127,12 +3276,12 @@ impl NetworkManager {
         &self,
         league: &lc_engine::LegacyCString,
         player: &mut lc_engine::ControlPlayerInfoEntry,
-    ) -> Result<bool> {
+    ) -> Result<LeaguePlayerCheck> {
         if self.role != NetworkRole::Host {
             return Err(anyhow!("only the network host may check league players"));
         }
         if !self.league_runtime_available.load(Ordering::Acquire) {
-            return Ok(false);
+            return Ok(LeaguePlayerCheck::Unavailable);
         }
         let (completion, completed) = mpsc::channel();
         self.command_tx
@@ -3145,7 +3294,11 @@ impl NetworkManager {
             .recv_timeout(lc_network::LEAGUE_HTTP_TIMEOUT + Duration::from_secs(1))
             .map_err(|_| anyhow!("league runtime did not finish checking the player"))?
             .map_err(|message| anyhow!(message))?;
-        Ok(response.apply_auth_check(league, player))
+        if response.apply_auth_check(league, player) {
+            Ok(LeaguePlayerCheck::Accepted)
+        } else {
+            Ok(LeaguePlayerCheck::Rejected(response.head.message))
+        }
     }
 
     pub fn update_league_reference(
@@ -3166,10 +3319,10 @@ impl NetworkManager {
         &self,
         reference: lc_network::HostGameReference,
         record: Option<lc_network::LeagueEndRecord>,
-    ) -> Result<Option<lc_network::LeagueRoundResultsPacket>> {
+    ) -> Result<LeagueEndAttempt> {
         if self.role != NetworkRole::Host || !self.league_runtime_available.load(Ordering::Acquire)
         {
-            return Ok(None);
+            return Ok(LeagueEndAttempt::Finished(None));
         }
         let (completion, completed) = mpsc::channel();
         self.command_tx
@@ -3182,6 +3335,27 @@ impl NetworkManager {
         completed
             .recv()
             .map_err(|_| anyhow!("league runtime ended before finishing the game"))?
+            .map_err(|message| anyhow!(message))
+    }
+
+    pub fn finalize_league_end_failure(
+        &self,
+        packet: lc_network::LeagueRoundResultsPacket,
+    ) -> Result<Option<lc_network::LeagueRoundResultsPacket>> {
+        if self.role != NetworkRole::Host || !self.league_runtime_available.load(Ordering::Acquire)
+        {
+            return Ok(None);
+        }
+        let (completion, completed) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::LeagueFinalizeEndFailure {
+                packet,
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting league end finalization"))?;
+        completed
+            .recv()
+            .map_err(|_| anyhow!("league runtime ended before finalizing the game"))?
             .map_err(|message| anyhow!(message))
     }
 
@@ -3967,11 +4141,11 @@ fn league_runtime_channels() -> (
     )
 }
 
-async fn finish_league_runtime(
+async fn finish_league_runtime_attempt(
     runtime: &LeagueRuntimeHandle,
     reference: lc_network::HostGameReference,
     record: Option<lc_network::LeagueEndRecord>,
-) -> std::result::Result<Option<lc_network::LeagueRoundResultsPacket>, String> {
+) -> std::result::Result<LeagueEndAttempt, String> {
     let (completion, completed) = tokio::sync::oneshot::channel();
     runtime
         .send_priority(LeagueRuntimeCommand::End {
@@ -3984,6 +4158,70 @@ async fn finish_league_runtime(
     completed
         .await
         .map_err(|_| "league runtime ended before finishing the game".to_string())
+}
+
+async fn finish_league_runtime(
+    runtime: &LeagueRuntimeHandle,
+    reference: lc_network::HostGameReference,
+    record: Option<lc_network::LeagueEndRecord>,
+) -> std::result::Result<Option<lc_network::LeagueRoundResultsPacket>, String> {
+    let mut last_rejected_players = Vec::new();
+    for attempt in 0..10 {
+        match finish_league_runtime_attempt(runtime, reference.clone(), record.clone()).await? {
+            LeagueEndAttempt::Finished(packet) => return Ok(packet),
+            LeagueEndAttempt::Rejected(packet) if attempt < 9 => {
+                last_rejected_players = packet.players;
+                continue;
+            }
+            LeagueEndAttempt::Rejected(mut packet) => {
+                let error = lc_resources::decode_legacy_script_text(
+                    packet.result_string.as_bytes(),
+                );
+                packet.result_string = league_end_failure_message(
+                    LeagueEndFailurePhase::Send,
+                    &error,
+                );
+                return finalize_league_end_failure_runtime(runtime, packet).await;
+            }
+            LeagueEndAttempt::Retryable {
+                phase,
+                error: _,
+            }
+                if phase == LeagueEndFailurePhase::Send && attempt < 9 =>
+            {
+                continue;
+            }
+            LeagueEndAttempt::Retryable { phase, error } => {
+                return finalize_league_end_failure_runtime(
+                    runtime,
+                    lc_network::LeagueRoundResultsPacket {
+                        success: false,
+                        result_string: league_end_failure_message(phase, &error),
+                        players: last_rejected_players,
+                    },
+                )
+                .await;
+            }
+        }
+    }
+    unreachable!("the fixed league End retry loop always returns")
+}
+
+async fn finalize_league_end_failure_runtime(
+    runtime: &LeagueRuntimeHandle,
+    packet: lc_network::LeagueRoundResultsPacket,
+) -> std::result::Result<Option<lc_network::LeagueRoundResultsPacket>, String> {
+    let (completion, completed) = tokio::sync::oneshot::channel();
+    runtime
+        .send_priority(LeagueRuntimeCommand::FinalizeEndFailure {
+            packet,
+            completion,
+        })
+        .await
+        .map_err(|_| "league runtime is unavailable".to_string())?;
+    completed
+        .await
+        .map_err(|_| "league runtime ended before finalizing the game".to_string())
 }
 
 async fn authenticate_league_runtime_player(
@@ -4069,6 +4307,9 @@ async fn run_league_runtime(
                 let _ = completion.send(result);
             }
             LeagueRuntimeCommand::Update { now, reference } => {
+                if state.end_sent {
+                    continue;
+                }
                 let (Some(session), Some(heartbeat)) =
                     (state.session.as_ref(), state.heartbeat.as_mut())
                 else {
@@ -4111,11 +4352,11 @@ async fn run_league_runtime(
             }
             LeagueRuntimeCommand::End { reference, record, completion } => {
                 if state.end_sent {
-                    let _ = completion.send(None);
+                    let _ = completion.send(LeagueEndAttempt::Finished(None));
                     continue;
                 }
                 let Some(session) = state.session.as_ref() else {
-                    let _ = completion.send(None);
+                    let _ = completion.send(LeagueEndAttempt::Finished(None));
                     continue;
                 };
                 let reference = match reference_with_projected_gains(
@@ -4128,52 +4369,79 @@ async fn run_league_runtime(
                         reference
                     }
                 };
-                let mut success = false;
-                let mut players = Vec::new();
-                let mut result_message = "League result upload failed".to_string();
-                for _ in 0..10 {
-                    let request = match session.encode_end_request(
-                        &reference,
-                        record.as_ref(),
-                        league_checksum_start(),
-                    ) {
-                        Ok(request) => request,
-                        Err(error) => {
-                            result_message = error.to_string();
-                            break;
-                        }
-                    };
-                    match state
-                        .transport
-                        .post(&state.config.endpoint, &request, &state.config.transport)
-                        .await
-                    {
-                        Ok(reply) => match lc_network::decode_league_end_response(&reply) {
-                            Ok(response) => {
-                                success = true;
-                                players = response.players;
-                                result_message = "League evaluation successful".to_string();
-                                break;
-                            }
-                            Err(lc_network::LeagueResponseDecodeError::EndRejected(response)) => {
-                                players = response.players;
-                                result_message = if response.head.message.is_empty() {
-                                    "League End response was rejected".to_string()
-                                } else {
-                                    response.head.message.to_string_lossy().into_owned()
-                                };
-                            }
-                            Err(error) => result_message = error.to_string(),
-                        },
-                        Err(error) => result_message = error.to_string(),
+                let request = match session.encode_end_request(
+                    &reference,
+                    record.as_ref(),
+                    league_checksum_start(),
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        let _ = completion.send(LeagueEndAttempt::Retryable {
+                            phase: LeagueEndFailurePhase::Start,
+                            error: error.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                let reply = match state
+                    .transport
+                    .post(&state.config.endpoint, &request, &state.config.transport)
+                    .await
+                {
+                    Ok(reply) => reply,
+                    Err(error) => {
+                        let _ = completion.send(LeagueEndAttempt::Retryable {
+                            phase: LeagueEndFailurePhase::Send,
+                            error: error.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                match lc_network::decode_league_end_response(&reply) {
+                    Ok(response) => {
+                        state.end_sent = true;
+                        let result_message = if state.config.league_server_signup {
+                            "League: evaluation successful."
+                        } else {
+                            "Internet game evaluated."
+                        };
+                        let _ = completion.send(LeagueEndAttempt::Finished(Some(
+                            lc_network::LeagueRoundResultsPacket {
+                                success: true,
+                                result_string: legacy_runtime_message(result_message),
+                                players: response.players,
+                            },
+                        )));
+                    }
+                    Err(lc_network::LeagueResponseDecodeError::EndRejected(response)) => {
+                        let _ = completion.send(LeagueEndAttempt::Rejected(
+                            lc_network::LeagueRoundResultsPacket {
+                                success: false,
+                                result_string: response.head.message,
+                                players: response.players,
+                            },
+                        ));
+                    }
+                    Err(error) => {
+                        let _ = completion.send(LeagueEndAttempt::Rejected(
+                            lc_network::LeagueRoundResultsPacket {
+                                success: false,
+                                result_string: legacy_runtime_message(&error.to_string()),
+                                players: Vec::new(),
+                            },
+                        ));
                     }
                 }
+            }
+            LeagueRuntimeCommand::FinalizeEndFailure {
+                packet,
+                completion,
+            } => {
+                if state.end_sent {
+                    let _ = completion.send(None);
+                    continue;
+                }
                 state.end_sent = true;
-                let packet = lc_network::LeagueRoundResultsPacket {
-                    success,
-                    result_string: legacy_runtime_message(&result_message),
-                    players,
-                };
                 let _ = completion.send(Some(packet));
             }
             LeagueRuntimeCommand::ReportDisconnect {
@@ -4256,15 +4524,23 @@ fn reference_with_projected_gains(
 }
 
 fn legacy_runtime_message(message: &str) -> lc_engine::LegacyCString {
-    let bytes = message
-        .as_bytes()
-        .iter()
-        .copied()
-        .filter(|byte| *byte != 0)
-        .take(1_024)
-        .collect();
+    let mut bytes = lc_resources::encode_legacy_script_text(message)
+        .unwrap_or_else(|| message.as_bytes().to_vec());
+    bytes.retain(|byte| *byte != 0);
     lc_engine::LegacyCString::from_bytes(bytes)
         .expect("filtered runtime league message contains no interior NUL")
+}
+
+fn league_end_failure_message(
+    phase: LeagueEndFailurePhase,
+    error: &str,
+) -> lc_engine::LegacyCString {
+    let error = if error.is_empty() { "Empty reply" } else { error };
+    let prefix = match phase {
+        LeagueEndFailurePhase::Start => "Could not finish game",
+        LeagueEndFailurePhase::Send => "Could not send game result",
+    };
+    legacy_runtime_message(&format!("{prefix}: {error}"))
 }
 
 const DEFAULT_NETPUNCHER_PORT: u16 = 11_115;
@@ -4890,25 +5166,18 @@ async fn run_host_worker(
                     NetworkCommand::LeagueEnd { reference, record, completion } => {
                         if let Some(runtime) = league_runtime.as_ref() {
                             latest_league_reference = Some(reference.clone());
-                            match finish_league_runtime(runtime, reference, record).await {
-                                Ok(Some(packet)) => {
-                                    if let Err(error) =
-                                        host.broadcast_league_round_results(packet.clone()).await
-                                    {
-                                        tracing::error!(
-                                            %error,
-                                            "host league-result broadcast failed"
-                                        );
-                                    }
-                                    let _ = completion.send(Ok(Some(packet)));
-                                }
-                                Ok(None) => {
-                                    let _ = completion.send(Ok(None));
-                                }
-                                Err(error) => {
-                                    let _ = completion.send(Err(error));
-                                }
-                            }
+                            let _ = completion.send(
+                                finish_league_runtime_attempt(runtime, reference, record).await,
+                            );
+                        } else {
+                            let _ = completion.send(Ok(LeagueEndAttempt::Finished(None)));
+                        }
+                    }
+                    NetworkCommand::LeagueFinalizeEndFailure { packet, completion } => {
+                        if let Some(runtime) = league_runtime.as_ref() {
+                            let _ = completion.send(
+                                finalize_league_end_failure_runtime(runtime, packet).await,
+                            );
                         } else {
                             let _ = completion.send(Ok(None));
                         }
@@ -5891,6 +6160,9 @@ async fn run_client_worker(
                         NetworkCommand::LeagueEnd { completion, .. } => {
                             let _ = completion.send(Err(unavailable));
                         }
+                        NetworkCommand::LeagueFinalizeEndFailure { completion, .. } => {
+                            let _ = completion.send(Err(unavailable));
+                        }
                         NetworkCommand::Shutdown => break,
                         _ => {}
                     }
@@ -6068,6 +6340,11 @@ async fn run_client_worker(
                         ));
                     }
                     NetworkCommand::LeagueEnd { completion, .. } => {
+                        let _ = completion.send(Err(
+                            "client attempted a host league lifecycle request".to_string(),
+                        ));
+                    }
+                    NetworkCommand::LeagueFinalizeEndFailure { completion, .. } => {
                         let _ = completion.send(Err(
                             "client attempted a host league lifecycle request".to_string(),
                         ));
@@ -7554,7 +7831,7 @@ mod tests {
         let (endpoint, server) = league_http_fixture(vec![
             b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\nSeed=12\r\nMaxPlayers=4\r\n",
             b"[Response]\r\nStatus=Failure\r\n",
-            b"[Response]\r\nStatus=Success\r\n",
+            b"[Response]\r\nStatus=Success\r\nLeague=done\r\n",
         ]);
         let (event_tx, event_rx) = mpsc::channel();
         let reference = minimal_league_reference();
@@ -7584,7 +7861,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(first_done.await.expect("first End completes").is_some());
+        assert!(matches!(
+            first_done.await.expect("first End completes"),
+            LeagueEndAttempt::Finished(Some(_))
+        ));
         let (second_complete, second_done) = tokio::sync::oneshot::channel();
         command_tx
             .send_priority(LeagueRuntimeCommand::End {
@@ -7594,7 +7874,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(second_done.await.expect("latched End completes").is_none());
+        assert_eq!(
+            second_done.await.expect("latched End completes"),
+            LeagueEndAttempt::Finished(None)
+        );
         drop(command_tx);
         tokio::task::yield_now().await;
 
@@ -7611,6 +7894,230 @@ mod tests {
         assert!(bodies[2]
             .windows(b"Action=End".len())
             .any(|window| window == b"Action=End"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn league_end_transport_failure_remains_retryable_until_explicit_finalization() {
+        let (endpoint, server) = league_http_fixture(vec![
+            b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\n",
+        ]);
+        let (event_tx, _event_rx) = mpsc::channel();
+        let reference = minimal_league_reference();
+        let (_start, command_tx) = register_league_host(
+            PreparedLeagueHostConfig {
+                endpoint,
+                transport: lc_network::LeagueHttpTransportConfig::default(),
+                update_period_secs: 120,
+                league_server_signup: true,
+            },
+            &reference,
+            event_tx,
+        )
+        .await
+        .expect("register league host");
+        assert_eq!(server.join().expect("join one-request fixture").len(), 1);
+
+        for _ in 0..2 {
+            let (completion, completed) = tokio::sync::oneshot::channel();
+            command_tx
+                .send_priority(LeagueRuntimeCommand::End {
+                    reference: reference.clone(),
+                    record: None,
+                    completion,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                completed.await.expect("retryable End completes"),
+                LeagueEndAttempt::Retryable {
+                    phase: LeagueEndFailurePhase::Send,
+                    ..
+                }
+            ));
+        }
+
+        let (completion, completed) = tokio::sync::oneshot::channel();
+        command_tx
+            .send_priority(LeagueRuntimeCommand::FinalizeEndFailure {
+                packet: lc_network::LeagueRoundResultsPacket {
+                    success: false,
+                    result_string: legacy_runtime_message(
+                        "Could not send game result: offline",
+                    ),
+                    players: Vec::new(),
+                },
+                completion,
+            })
+            .await
+            .unwrap();
+        let packet = completed
+            .await
+            .expect("failure finalization completes")
+            .expect("failure packet");
+        assert!(!packet.success);
+        assert_eq!(
+            packet.result_string.as_bytes(),
+            b"Could not send game result: offline"
+        );
+
+        let (completion, completed) = tokio::sync::oneshot::channel();
+        command_tx
+            .send_priority(LeagueRuntimeCommand::End {
+                reference,
+                record: None,
+                completion,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            completed.await.expect("latched End completes"),
+            LeagueEndAttempt::Finished(None)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn league_end_rejection_preserves_results_and_latches_only_after_finalization() {
+        let rejected = b"[Response]\r\n\
+Status=Failure\r\n\
+Message=Server says Andr\xe9\r\n\
+\r\n\
+\x20\x20[PlayerInfos]\r\n\
+\r\n\
+\x20\x20\x20\x20[Player]\r\n\
+\x20\x20\x20\x20ID=17\r\n\
+\x20\x20\x20\x20Status=Won\r\n";
+        let (endpoint, server) = league_http_fixture(vec![
+            b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\n",
+            rejected,
+            rejected,
+        ]);
+        let (event_tx, _event_rx) = mpsc::channel();
+        let reference = minimal_league_reference();
+        let (_start, command_tx) = register_league_host(
+            PreparedLeagueHostConfig {
+                endpoint,
+                transport: lc_network::LeagueHttpTransportConfig::default(),
+                update_period_secs: 120,
+                league_server_signup: true,
+            },
+            &reference,
+            event_tx,
+        )
+        .await
+        .expect("register league host");
+
+        let mut first_rejection = None;
+        for _ in 0..2 {
+            let (completion, completed) = tokio::sync::oneshot::channel();
+            command_tx
+                .send_priority(LeagueRuntimeCommand::End {
+                    reference: reference.clone(),
+                    record: None,
+                    completion,
+                })
+                .await
+                .unwrap();
+            let LeagueEndAttempt::Rejected(packet) =
+                completed.await.expect("rejected End completes")
+            else {
+                panic!("server rejection must remain an explicit terminal choice");
+            };
+            assert_eq!(packet.result_string.as_bytes(), b"Server says Andr\xe9");
+            assert_eq!(packet.players.len(), 1);
+            assert_eq!(packet.players[0].player_info_id, 17);
+            first_rejection.get_or_insert(packet);
+        }
+        assert_eq!(server.join().expect("join rejection fixture").len(), 3);
+
+        let (completion, completed) = tokio::sync::oneshot::channel();
+        command_tx
+            .send_priority(LeagueRuntimeCommand::FinalizeEndFailure {
+                packet: first_rejection.expect("first rejection packet"),
+                completion,
+            })
+            .await
+            .unwrap();
+        assert!(completed
+            .await
+            .expect("rejection finalization completes")
+            .is_some());
+
+        let (completion, completed) = tokio::sync::oneshot::channel();
+        command_tx
+            .send_priority(LeagueRuntimeCommand::End {
+                reference,
+                record: None,
+                completion,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            completed.await.expect("latched rejected End completes"),
+            LeagueEndAttempt::Finished(None)
+        );
+        drop(command_tx);
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    async fn headless_league_end_wraps_the_last_error_and_keeps_prior_results() {
+        let (runtime, mut commands, _gate) = league_runtime_channels();
+        let observer = tokio::spawn(async move {
+            for attempt in 0..10 {
+                let LeagueRuntimeCommand::End { completion, .. } =
+                    commands.recv().await.expect("headless End attempt")
+                else {
+                    panic!("unexpected headless league command");
+                };
+                let outcome = if attempt == 0 {
+                    LeagueEndAttempt::Rejected(lc_network::LeagueRoundResultsPacket {
+                        success: false,
+                        result_string: legacy_runtime_message("initial rejection"),
+                        players: vec![lc_network::LeagueRoundResultsPlayer {
+                            player_info_id: 17,
+                            total_playing_time: 0,
+                            settlement_score_old: -1,
+                            settlement_score_new: -1,
+                            league_score_new: -1,
+                            league_score_gain: -1,
+                            league_rank_new: 0,
+                            league_rank_symbol_new: 0,
+                            league_progress_data: lc_engine::LegacyCString::default(),
+                            status: lc_network::LeagueRoundPlayerStatus::Lost,
+                        }],
+                    })
+                } else {
+                    LeagueEndAttempt::Retryable {
+                        phase: LeagueEndFailurePhase::Send,
+                        error: "offline".to_string(),
+                    }
+                };
+                completion.send(outcome).expect("complete headless End");
+            }
+            let LeagueRuntimeCommand::FinalizeEndFailure { packet, completion } =
+                commands.recv().await.expect("headless failure finalization")
+            else {
+                panic!("unexpected final headless league command");
+            };
+            completion
+                .send(Some(packet.clone()))
+                .expect("complete headless finalization");
+            packet
+        });
+
+        let packet = finish_league_runtime(&runtime, minimal_league_reference(), None)
+            .await
+            .expect("headless End loop")
+            .expect("headless failure packet");
+        drop(runtime);
+        let observed = observer.await.expect("join headless End observer");
+        assert_eq!(packet, observed);
+        assert_eq!(
+            packet.result_string.as_bytes(),
+            b"Could not send game result: offline"
+        );
+        assert_eq!(packet.players.len(), 1);
+        assert_eq!(packet.players[0].player_info_id, 17);
     }
 
     #[tokio::test]
@@ -7830,6 +8337,55 @@ mod tests {
         assert_eq!(
             without_random_checksum(bodies[3].clone()),
             without_random_checksum(expected_disconnect)
+        );
+    }
+
+    #[test]
+    fn league_player_auth_exchange_is_pollable_and_abort_drops_its_completion() {
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        let auth = lc_network::LeagueAuthRequestHead {
+            account: lc_engine::LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
+            password: lc_engine::LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let player = lc_engine::ControlPlayerInfoEntry {
+            name: lc_engine::LegacyCString::from_bytes(b"Player".to_vec()).unwrap(),
+            ..Default::default()
+        };
+
+        let pending = manager
+            .begin_authenticate_league_player(auth.clone(), &player)
+            .expect("begin Auth")
+            .expect("league runtime available");
+        assert!(pending.try_complete().is_none());
+        let command = commands.receive_league_player_auth();
+        assert_eq!(command.auth, auth);
+        assert_eq!(command.player, player);
+        let response = lc_network::decode_league_auth_response(
+            b"[Response]\r\nStatus=Success\r\nAUID=one-use-token\r\nMessage=Welcome\r\n",
+        );
+        assert!(command.complete(Ok(response.clone())));
+        assert_eq!(
+            pending
+                .try_complete()
+                .expect("completed Auth is ready")
+                .expect("successful Auth"),
+            response
+        );
+
+        let abandoned = manager
+            .begin_authenticate_league_player(
+                lc_network::LeagueAuthRequestHead::default(),
+                &player,
+            )
+            .expect("begin abandoned Auth")
+            .expect("league runtime available");
+        let command = commands.receive_league_player_auth();
+        drop(abandoned);
+        assert!(
+            !command.complete(Ok(lc_network::LeagueAuthResponse::default())),
+            "Abort abandons the completion without waiting for HTTP"
         );
     }
 

@@ -171,8 +171,9 @@ use lc_resources::{
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
 use menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
 use network::{
-    ClientSettings, HostSettings, NetworkControl, NetworkControlClock, NetworkEvent,
-    LeagueRecordStreamStatus, NetworkManager, NetworkMode, NetworkStartError,
+    ClientSettings, HostSettings, LeagueEndAttempt, LeagueEndFailurePhase, LeagueRecordStreamStatus,
+    NetworkControl, NetworkControlClock, NetworkEvent, NetworkManager, NetworkMode,
+    NetworkStartError,
 };
 use network_host_preparation::NetworkHostPreparation;
 use network_team_assignment::{NetworkTeamAssignmentState, NetworkTeamControlError};
@@ -6749,6 +6750,7 @@ fn handle_window_event(
 ) -> Result<()> {
     match event {
         WindowEvent::CloseRequested => {
+            app.finalize_pending_league_end_for_teardown();
             control_flow.set_exit();
         }
         WindowEvent::Resized(size)
@@ -9306,6 +9308,12 @@ enum MessageDialogContinuation {
     NetworkScenarioPlayerCountWarning { scenario: FrontendScenario },
     LobbyReadyCheck { remaining_seconds: u32 },
     LiveMasterserverSignup,
+    LeaguePlayerAuthWait,
+    LeaguePlayerAuthWelcome,
+    LeaguePlayerAuthError,
+    LeaguePlayerAuthCancelled,
+    LeagueEndRetry,
+    LeagueEndRejected,
     LeagueVote { subject: LeagueVoteSubject },
     LeagueSurrender,
     OptionsScaleTest {
@@ -9317,6 +9325,58 @@ enum MessageDialogContinuation {
     OptionsAlternateServerNotice,
     OptionsResetConfiguration,
     OptionsAdvancedWarning,
+}
+
+const LEAGUE_END_MAX_ATTEMPTS: u8 = 10;
+
+#[derive(Clone)]
+struct PendingLeagueEnd {
+    reference: lc_network::HostGameReference,
+    record: Option<lc_network::LeagueEndRecord>,
+    attempts: u8,
+    last_failure: Option<String>,
+    terminal_packet: Option<lc_network::LeagueRoundResultsPacket>,
+}
+
+enum LeaguePlayerAuthContinuation {
+    InitialClient {
+        request: lc_network::PlayerInfoUpdateRequest,
+        index: usize,
+        server_name: String,
+    },
+    StartupHost {
+        mode: NetworkMode,
+        manager: NetworkManager,
+        selected_scenario: Option<(String, String)>,
+        purpose: StartupNetworkPurpose,
+        players: Vec<lc_engine::ControlPlayerInfoEntry>,
+        index: usize,
+        server_name: String,
+    },
+    RuntimePlayer {
+        request: lc_network::PlayerInfoUpdateRequest,
+        index: usize,
+        server_name: String,
+        host: bool,
+        alternate_resource_id: i32,
+        alternate_color: u32,
+    },
+}
+
+enum PendingLeaguePlayerAuthStage {
+    Waiting(network::PendingLeaguePlayerAuth),
+    Decision,
+}
+
+struct PendingLeaguePlayerAuth {
+    continuation: LeaguePlayerAuthContinuation,
+    stage: PendingLeaguePlayerAuthStage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeaguePlayerAuthStatus {
+    Pending,
+    Completed(bool),
 }
 
 #[derive(Clone)]
@@ -11714,6 +11774,7 @@ struct GameApp {
     // before NetworkManager joins its worker so shutdown cannot wait for the
     // HTTP timeout.
     pending_lobby_internet_signup: Option<network::PendingMasterserverSignup>,
+    pending_league_player_auth: Option<PendingLeaguePlayerAuth>,
     network: Option<NetworkManager>,
     network_mode: Option<NetworkMode>,
     network_lobby: Option<NetworkLobbyState>,
@@ -11884,6 +11945,7 @@ struct GameApp {
     configuration_reset_requested: bool,
     game_over_dialog: Option<GameOverState>,
     game_over_handled: bool,
+    pending_league_end: Option<PendingLeagueEnd>,
     /// `C4GraphicsSystem::ShowHelp`; reset by GraphicsSystem::Default for a
     /// new game and toggled by each in-scope F1 down edge.
     runtime_help_visible: bool,
@@ -12111,6 +12173,7 @@ struct StartupNetworkConnection {
     receiver: Receiver<std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>>,
     selected_scenario: Option<(String, String)>,
     purpose: StartupNetworkPurpose,
+    authenticated_league_players: Option<Vec<lc_engine::ControlPlayerInfoEntry>>,
 }
 
 impl RecordingSession {
@@ -20086,6 +20149,45 @@ fn load_league_auth_settings(paths: Option<&AppPaths>) -> lc_network::LeagueAuth
     }
 }
 
+fn load_league_auto_login(paths: Option<&AppPaths>) -> bool {
+    let config = load_native_config_bytes(paths);
+    lc_app::configured_native_value(&config, "Network", "LeagueAutoLogin")
+        .map(|value| parse_config_bool(&legacy_presentation_text(value.as_bytes())))
+        .unwrap_or(true)
+}
+
+fn league_server_name(endpoint: &str) -> String {
+    let authority = endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, remainder)| remainder)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .rsplit_once('@')
+        .map_or_else(
+            || {
+                endpoint
+                    .split_once("://")
+                    .map_or(endpoint, |(_, remainder)| remainder)
+                    .split('/')
+                    .next()
+                    .unwrap_or_default()
+            },
+            |(_, host)| host,
+        );
+    if let Some(host) = authority.strip_prefix('[') {
+        return host
+            .split_once(']')
+            .map_or(host, |(host, _)| host)
+            .to_string();
+    }
+    authority
+        .rsplit_once(':')
+        .filter(|(_, port)| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+        .map_or(authority, |(host, _)| host)
+        .to_string()
+}
+
 fn load_network_advertiser_settings(
     paths: Option<&AppPaths>,
 ) -> lc_network::NetworkGameAdvertiserConfig {
@@ -21009,6 +21111,14 @@ fn c4_presentation_text(text: &str) -> String {
 
 fn legacy_presentation_text(bytes: &[u8]) -> String {
     lc_resources::decode_legacy_script_text(bytes)
+}
+
+fn league_result_message(message: &str) -> LegacyCString {
+    let mut bytes = lc_resources::encode_legacy_script_text(message)
+        .unwrap_or_else(|| message.as_bytes().to_vec());
+    bytes.retain(|byte| *byte != 0);
+    LegacyCString::from_bytes(bytes)
+        .expect("filtered league result message contains no interior NUL")
 }
 
 /// `C4ObjectInfo::Draw` resolves the portrait tint from the object passed as
@@ -22258,6 +22368,7 @@ impl GameApp {
             configured_client_player_selection: None,
             material_library: None,
             pending_lobby_internet_signup: None,
+            pending_league_player_auth: None,
             network,
             network_mode,
             network_lobby,
@@ -22348,6 +22459,7 @@ impl GameApp {
             configuration_reset_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
+            pending_league_end: None,
             runtime_help_visible: false,
             runtime_help_text_cache,
             runtime_key_config_cache: OnceLock::new(),
@@ -22836,11 +22948,469 @@ impl GameApp {
         }
     }
 
+    fn current_league_server_name(&self) -> String {
+        if let Some(NetworkMode::Host(HostSettings {
+            prepared: Some(prepared),
+            ..
+        })) = self.network_mode.as_ref()
+        {
+            return prepared
+                .league_config()
+                .map(|league| league_server_name(&league.endpoint))
+                .unwrap_or_default();
+        }
+        self.pending_network_join_data
+            .as_ref()
+            .map(|join_data| {
+                legacy_presentation_text(join_data.parameters.league_address.as_bytes())
+            })
+            .map(|endpoint| league_server_name(&endpoint))
+            .unwrap_or_default()
+    }
+
+    fn league_auth_continuation_has_current(
+        continuation: &LeaguePlayerAuthContinuation,
+    ) -> bool {
+        match continuation {
+            LeaguePlayerAuthContinuation::InitialClient { request, index, .. } => {
+                *index < request.players.len()
+            }
+            LeaguePlayerAuthContinuation::StartupHost { players, index, .. } => {
+                *index < players.len()
+            }
+            LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
+                *index < request.players.len()
+            }
+        }
+    }
+
+    fn league_auth_continuation_player_name(
+        continuation: &LeaguePlayerAuthContinuation,
+    ) -> String {
+        let player = match continuation {
+            LeaguePlayerAuthContinuation::InitialClient { request, index, .. } => {
+                &request.players[*index]
+            }
+            LeaguePlayerAuthContinuation::StartupHost { players, index, .. } => &players[*index],
+            LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
+                &request.players[*index]
+            }
+        };
+        legacy_presentation_text(player.name.as_bytes())
+    }
+
+    fn league_auth_continuation_server_name(
+        continuation: &LeaguePlayerAuthContinuation,
+    ) -> &str {
+        match continuation {
+            LeaguePlayerAuthContinuation::InitialClient { server_name, .. }
+            | LeaguePlayerAuthContinuation::StartupHost { server_name, .. }
+            | LeaguePlayerAuthContinuation::RuntimePlayer { server_name, .. } => server_name,
+        }
+    }
+
+    fn advance_league_auth_continuation(continuation: &mut LeaguePlayerAuthContinuation) {
+        match continuation {
+            LeaguePlayerAuthContinuation::InitialClient { index, .. }
+            | LeaguePlayerAuthContinuation::StartupHost { index, .. }
+            | LeaguePlayerAuthContinuation::RuntimePlayer { index, .. } => *index += 1,
+        }
+    }
+
+    fn reject_league_auth_continuation_player(
+        continuation: &mut LeaguePlayerAuthContinuation,
+    ) {
+        match continuation {
+            LeaguePlayerAuthContinuation::InitialClient { request, index, .. } => {
+                request.players.swap_remove(*index);
+            }
+            LeaguePlayerAuthContinuation::StartupHost { players, index, .. } => {
+                players.swap_remove(*index);
+            }
+            LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
+                request.players.swap_remove(*index);
+            }
+        }
+    }
+
+    fn apply_league_auth_response(
+        continuation: &mut LeaguePlayerAuthContinuation,
+        response: &lc_network::LeagueAuthResponse,
+    ) -> bool {
+        match continuation {
+            LeaguePlayerAuthContinuation::InitialClient { request, index, .. } => {
+                response.apply_player_auth(&mut request.players[*index])
+            }
+            LeaguePlayerAuthContinuation::StartupHost { players, index, .. } => {
+                response.apply_player_auth(&mut players[*index])
+            }
+            LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
+                response.apply_player_auth(&mut request.players[*index])
+            }
+        }
+    }
+
+    fn finish_league_auth_continuation(
+        &mut self,
+        continuation: LeaguePlayerAuthContinuation,
+    ) -> LeaguePlayerAuthStatus {
+        match continuation {
+            LeaguePlayerAuthContinuation::InitialClient { request, .. } => {
+                let submitted = self.network.as_ref().is_some_and(|network| {
+                    network
+                        .submit_player_info_update(request)
+                        .inspect_err(
+                            |error| tracing::error!(%error, "failed to submit initial PlayerInfo"),
+                        )
+                        .is_ok()
+                });
+                if self.pending_network_join_data.is_some() {
+                    self.initial_lobby_status_ack_pending = submitted
+                        && self
+                            .pending_network_join_data
+                            .as_ref()
+                            .is_some_and(|join_data| {
+                                join_data.status.state == lc_network::NETWORK_STATE_LOBBY
+                            });
+                    self.acknowledge_initial_lobby_status_if_ready();
+                }
+                LeaguePlayerAuthStatus::Completed(submitted)
+            }
+            LeaguePlayerAuthContinuation::StartupHost {
+                mode,
+                manager,
+                selected_scenario,
+                purpose,
+                players,
+                ..
+            } => {
+                let (sender, receiver) = mpsc::channel();
+                if sender.send(Ok((mode, manager))).is_err() {
+                    return LeaguePlayerAuthStatus::Completed(false);
+                }
+                self.startup_network_connection = Some(StartupNetworkConnection {
+                    receiver,
+                    selected_scenario,
+                    purpose,
+                    authenticated_league_players: Some(players),
+                });
+                LeaguePlayerAuthStatus::Completed(true)
+            }
+            LeaguePlayerAuthContinuation::RuntimePlayer {
+                request,
+                host,
+                alternate_resource_id,
+                alternate_color,
+                ..
+            } => {
+                if request.players.is_empty() {
+                    return LeaguePlayerAuthStatus::Completed(false);
+                }
+                let completed = self
+                    .finish_runtime_network_player_add(
+                        request,
+                        host,
+                        alternate_resource_id,
+                        alternate_color,
+                    )
+                    .inspect_err(|error| {
+                        tracing::error!(%error, "failed to finish authenticated runtime player add")
+                    })
+                    .is_ok();
+                LeaguePlayerAuthStatus::Completed(completed)
+            }
+        }
+    }
+
+    fn continue_league_player_auth(
+        &mut self,
+        mut continuation: LeaguePlayerAuthContinuation,
+    ) -> Result<LeaguePlayerAuthStatus, EngineError> {
+        if self.pending_league_player_auth.is_some() {
+            tracing::warn!("refusing to replace an in-flight league player authentication");
+            return Ok(LeaguePlayerAuthStatus::Completed(false));
+        }
+        loop {
+            if !Self::league_auth_continuation_has_current(&continuation) {
+                return Ok(self.finish_league_auth_continuation(continuation));
+            }
+            let auth = self.league_player_auth_settings();
+            let exchange = match &continuation {
+                LeaguePlayerAuthContinuation::InitialClient { request, index, .. } => {
+                    match self.network.as_ref() {
+                        Some(network) => network.begin_authenticate_league_player(
+                            auth.clone(),
+                            &request.players[*index],
+                        ),
+                        None => Ok(None),
+                    }
+                }
+                LeaguePlayerAuthContinuation::StartupHost {
+                    manager,
+                    players,
+                    index,
+                    ..
+                } => manager.begin_authenticate_league_player(auth, &players[*index]),
+                LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
+                    match self.network.as_ref() {
+                        Some(network) => network.begin_authenticate_league_player(
+                            auth,
+                            &request.players[*index],
+                        ),
+                        None => Ok(None),
+                    }
+                }
+            };
+            let exchange = match exchange {
+                Ok(Some(exchange)) => exchange,
+                Ok(None) => {
+                    Self::reject_league_auth_continuation_player(&mut continuation);
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to begin league player authentication");
+                    Self::reject_league_auth_continuation_player(&mut continuation);
+                    continue;
+                }
+            };
+            let player = Self::league_auth_continuation_player_name(&continuation);
+            let server = Self::league_auth_continuation_server_name(&continuation).to_string();
+            let message = format_resource_string(
+                self.runtime_resource_text(
+                    "IDS_MSG_TRYLEAGUESIGNUP",
+                    "League login for player %s on %s...",
+                ),
+                &[&player, &server],
+            );
+            let caption = self.runtime_resource_text("IDS_DLG_LEAGUESIGNUP", "League Login");
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::new(
+                    message,
+                    caption,
+                    lc_frontend::message_dialog::MessageDialogButtons::CANCEL,
+                    lc_frontend::message_dialog::MessageDialogIcon::Standard(3),
+                    lc_frontend::message_dialog::MessageDialogSize::Regular,
+                    false,
+                ),
+                MessageDialogContinuation::LeaguePlayerAuthWait,
+            )?;
+            self.pending_league_player_auth = Some(PendingLeaguePlayerAuth {
+                continuation,
+                stage: PendingLeaguePlayerAuthStage::Waiting(exchange),
+            });
+            return Ok(LeaguePlayerAuthStatus::Pending);
+        }
+    }
+
+    fn begin_startup_host_league_auth(
+        &mut self,
+        mode: NetworkMode,
+        manager: NetworkManager,
+        selected_scenario: Option<(String, String)>,
+        purpose: StartupNetworkPurpose,
+    ) -> Result<LeaguePlayerAuthStatus, EngineError> {
+        let (players, server_name) = match &mode {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => (
+                prepared
+                    .pending_initial_league_players()
+                    .unwrap_or_default()
+                    .to_vec(),
+                prepared
+                    .league_config()
+                    .map(|league| league_server_name(&league.endpoint))
+                    .unwrap_or_default(),
+            ),
+            NetworkMode::Host(_) | NetworkMode::Client(_) => (Vec::new(), String::new()),
+        };
+        self.continue_league_player_auth(LeaguePlayerAuthContinuation::StartupHost {
+            mode,
+            manager,
+            selected_scenario,
+            purpose,
+            players,
+            index: 0,
+            server_name,
+        })
+    }
+
+    fn dismiss_league_player_auth_wait(&mut self) {
+        let Some(index) = self.message_dialogs.iter().rposition(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::LeaguePlayerAuthWait
+            )
+        }) else {
+            return;
+        };
+        self.remove_message_dialog_at(index);
+        self.mark_menu_dirty();
+    }
+
+    fn clear_pending_league_player_auth(&mut self) {
+        self.pending_league_player_auth = None;
+        let mut removed = false;
+        while let Some(index) = self.message_dialogs.iter().rposition(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::LeaguePlayerAuthWait
+                    | MessageDialogContinuation::LeaguePlayerAuthWelcome
+                    | MessageDialogContinuation::LeaguePlayerAuthError
+                    | MessageDialogContinuation::LeaguePlayerAuthCancelled
+            )
+        }) {
+            self.remove_message_dialog_at(index);
+            removed = true;
+        }
+        if removed {
+            self.mark_menu_dirty();
+        }
+    }
+
+    fn push_league_player_check_error(&mut self, message: String) -> Result<(), EngineError> {
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                message,
+                self.runtime_resource_text("IDS_DLG_ERROR", "Error"),
+                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        )
+    }
+
+    fn poll_league_player_auth(&mut self) -> Result<(), EngineError> {
+        let Some(pending) = self.pending_league_player_auth.as_ref() else {
+            return Ok(());
+        };
+        let PendingLeaguePlayerAuthStage::Waiting(exchange) = &pending.stage else {
+            return Ok(());
+        };
+        let Some(result) = exchange.try_complete() else {
+            return Ok(());
+        };
+        let mut pending = self
+            .pending_league_player_auth
+            .take()
+            .expect("polled league Auth state exists");
+        self.dismiss_league_player_auth_wait();
+        match result {
+            Ok(response)
+                if Self::apply_league_auth_response(
+                    &mut pending.continuation,
+                    &response,
+                ) =>
+            {
+                if load_league_auto_login(self.app_paths.as_ref()) {
+                    Self::advance_league_auth_continuation(&mut pending.continuation);
+                    let _ = self.continue_league_player_auth(pending.continuation)?;
+                    return Ok(());
+                }
+                let player = Self::league_auth_continuation_player_name(&pending.continuation);
+                let server =
+                    Self::league_auth_continuation_server_name(&pending.continuation).to_string();
+                let message = if response.message.is_empty() {
+                    if response.account.is_empty() {
+                        format_resource_string(
+                            self.runtime_resource_text(
+                                "IDS_MSG_LEAGUEPLAYERSIGNUP",
+                                "Player: %s|Server: %s",
+                            ),
+                            &[&player, &server],
+                        )
+                    } else {
+                        let account = legacy_presentation_text(response.account.as_bytes());
+                        format_resource_string(
+                            self.runtime_resource_text(
+                                "IDS_MSG_LEAGUEPLAYERSIGNUPAS",
+                                "Player: %s|League user name: %s|Server: %s",
+                            ),
+                            &[&player, &account, &server],
+                        )
+                    }
+                } else {
+                    legacy_presentation_text(response.message.as_bytes())
+                };
+                pending.stage = PendingLeaguePlayerAuthStage::Decision;
+                self.push_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogState::new(
+                        message,
+                        self.runtime_resource_text(
+                            "IDS_DLG_LEAGUESIGNUPCONFIRM",
+                            "Confirm League Login",
+                        ),
+                        lc_frontend::message_dialog::MessageDialogButtons::OK_CANCEL,
+                        lc_frontend::message_dialog::MessageDialogIcon::Extended(8),
+                        lc_frontend::message_dialog::MessageDialogSize::Regular,
+                        false,
+                    ),
+                    MessageDialogContinuation::LeaguePlayerAuthWelcome,
+                )?;
+                self.pending_league_player_auth = Some(pending);
+            }
+            Ok(response) => {
+                let server_message = if response.message.is_empty() {
+                    self.runtime_resource_text(
+                        "IDS_NET_ERR_LEAGUE_EMPTYREPLY",
+                        "Empty reply",
+                    )
+                } else {
+                    legacy_presentation_text(response.message.as_bytes())
+                };
+                let message = format_resource_string(
+                    self.runtime_resource_text(
+                        "IDS_MSG_LEAGUESERVERMSG",
+                        "League server reply: %s",
+                    ),
+                    &[&server_message],
+                );
+                pending.stage = PendingLeaguePlayerAuthStage::Decision;
+                self.push_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                        message,
+                        self.runtime_resource_text(
+                            "IDS_DLG_LEAGUESIGNUPFAILED",
+                            "League Login Failed",
+                        ),
+                        lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                    ),
+                    MessageDialogContinuation::LeaguePlayerAuthError,
+                )?;
+                self.pending_league_player_auth = Some(pending);
+            }
+            Err(error) => {
+                let message = format_resource_string(
+                    self.runtime_resource_text(
+                        "IDS_MSG_LEAGUESERVERMSG",
+                        "League server reply: %s",
+                    ),
+                    &[&error.to_string()],
+                );
+                pending.stage = PendingLeaguePlayerAuthStage::Decision;
+                self.push_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                        message,
+                        self.runtime_resource_text(
+                            "IDS_DLG_LEAGUESIGNUPFAILED",
+                            "League Login Failed",
+                        ),
+                        lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                    ),
+                    MessageDialogContinuation::LeaguePlayerAuthError,
+                )?;
+                self.pending_league_player_auth = Some(pending);
+            }
+        }
+        Ok(())
+    }
+
     fn finalize_prepared_host_players(
-        &self,
+        &mut self,
         manager: &NetworkManager,
         prepared: &mut prepared_host_bootstrap::PreparedHostBootstrap,
         is_league: bool,
+        authenticated_league_players: Option<Vec<lc_engine::ControlPlayerInfoEntry>>,
     ) -> Result<(), String> {
         let auth = self.league_player_auth_settings();
         let league = prepared
@@ -22850,13 +23420,16 @@ impl GameApp {
             .map(|snapshot| synchronized_league_name(&snapshot.parameters))
             .and_then(lc_engine::LegacyCString::from_bytes)
             .unwrap_or_default();
-        let mut players = prepared
-            .pending_initial_league_players()
-            .unwrap_or_default()
-            .to_vec();
+        let already_authenticated = authenticated_league_players;
+        let mut players = already_authenticated.clone().unwrap_or_else(|| {
+            prepared
+                .pending_initial_league_players()
+                .unwrap_or_default()
+                .to_vec()
+        });
         // JoinLocalPlayer obtains AUIDs before ID allocation, team assignment,
         // or attribute conflict resolution.
-        if is_league {
+        if is_league && already_authenticated.is_none() {
             retain_player_infos_with_cpp_swap_remove(&mut players, |player| {
                 match manager.authenticate_league_player(auth.clone(), player) {
                     Ok(true) => true,
@@ -22871,7 +23444,12 @@ impl GameApp {
         let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
             self.generated_team_name_template.clone(),
         );
-        prepared
+        let refusal_template = self.runtime_resource_text(
+            "IDS_MSG_LEAGUEJOINREFUSED",
+            "League server has refused the join of player %s: %s",
+        );
+        let mut check_errors = Vec::new();
+        let finalized = prepared
             .finalize_initial_league_players(
                 players,
                 &mut oracle,
@@ -22882,15 +23460,30 @@ impl GameApp {
                         return true;
                     }
                     match manager.check_league_player(&league, player) {
-                        Ok(accepted) => accepted,
+                        Ok(network::LeaguePlayerCheck::Accepted) => true,
+                        Ok(network::LeaguePlayerCheck::Unavailable) => false,
+                        Ok(network::LeaguePlayerCheck::Rejected(message)) => {
+                            let player_name = legacy_presentation_text(player.name.as_bytes());
+                            let message = legacy_presentation_text(message.as_bytes());
+                            check_errors.push(format_resource_string(
+                                refusal_template.clone(),
+                                &[&player_name, &message],
+                            ));
+                            false
+                        }
                         Err(error) => {
                             tracing::warn!(player_id = player.id, %error, "host league player check failed");
+                            check_errors.push(error.to_string());
                             false
                         }
                     }
                 },
-            )
-            .map_err(|error| error.to_string())?;
+            );
+        for message in check_errors {
+            self.push_league_player_check_error(message)
+                .map_err(|error| error.to_string())?;
+        }
+        finalized.map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -32759,11 +33352,14 @@ impl GameApp {
         Ok(())
     }
 
-    fn submit_initial_client_player_info(&mut self, client_id: i32) -> bool {
-        let league_auth = self.league_player_auth_settings();
+    fn submit_initial_client_player_info(
+        &mut self,
+        client_id: i32,
+        league_server_name: String,
+    ) -> LeaguePlayerAuthStatus {
         let authenticate_players = self.network_is_league;
         let Some(network) = self.network.as_ref() else {
-            return false;
+            return LeaguePlayerAuthStatus::Completed(false);
         };
         let mut completed_resources = Vec::new();
         let empty_request = || lc_network::PlayerInfoUpdateRequest {
@@ -32771,7 +33367,7 @@ impl GameApp {
             flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
             players: Vec::new(),
         };
-        let mut request = self
+        let request = self
             .app_paths
             .as_ref()
             .zip(self.configured_client_player_selection.as_ref())
@@ -32803,23 +33399,26 @@ impl GameApp {
             self.admission_resources.mark_complete(core.id, path);
         }
         if authenticate_players {
-            retain_player_infos_with_cpp_swap_remove(&mut request.players, |player| {
-                match network.authenticate_league_player(league_auth.clone(), player) {
-                    Ok(accepted) => accepted,
-                    Err(error) => {
-                        tracing::warn!(name = ?player.name, %error, "league player authentication failed");
-                        false
-                    }
+            let continuation = LeaguePlayerAuthContinuation::InitialClient {
+                request,
+                index: 0,
+                server_name: league_server_name,
+            };
+            return match self.continue_league_player_auth(continuation) {
+                Ok(status) => status,
+                Err(error) => {
+                    tracing::error!(%error, "failed to open league player authentication");
+                    LeaguePlayerAuthStatus::Completed(false)
                 }
-            });
+            };
         }
-        match network.submit_player_info_update(request) {
+        LeaguePlayerAuthStatus::Completed(match network.submit_player_info_update(request) {
             Ok(()) => true,
             Err(error) => {
                 tracing::error!(%error, "failed to submit initial PlayerInfo");
                 false
             }
-        }
+        })
     }
 
     fn apply_direct_player_info_control(
@@ -33014,18 +33613,39 @@ impl GameApp {
         };
         let league = lc_engine::LegacyCString::from_bytes(self.network_league_name.clone())
             .unwrap_or_default();
+        let refusal_template = self.runtime_resource_text(
+            "IDS_MSG_LEAGUEJOINREFUSED",
+            "League server has refused the join of player %s: %s",
+        );
+        let mut check_errors = Vec::new();
         retain_player_infos_with_cpp_swap_remove(&mut admission.admitted.players, |player| {
             if self.control_player_infos.get(player.id).is_some() {
                 return true;
             }
             match network.check_league_player(&league, player) {
-                Ok(accepted) => accepted,
+                Ok(network::LeaguePlayerCheck::Accepted) => true,
+                Ok(network::LeaguePlayerCheck::Unavailable) => false,
+                Ok(network::LeaguePlayerCheck::Rejected(message)) => {
+                    let player_name = legacy_presentation_text(player.name.as_bytes());
+                    let message = legacy_presentation_text(message.as_bytes());
+                    check_errors.push(format_resource_string(
+                        refusal_template.clone(),
+                        &[&player_name, &message],
+                    ));
+                    false
+                }
                 Err(error) => {
                     tracing::warn!(player_id = player.id, %error, "league player check failed");
+                    check_errors.push(error.to_string());
                     false
                 }
             }
         });
+        for message in check_errors {
+            if let Err(error) = self.push_league_player_check_error(message) {
+                tracing::error!(%error, "failed to show league player-check error");
+            }
+        }
         Some(admission)
     }
 
@@ -33139,7 +33759,6 @@ impl GameApp {
         wire_filename: &str,
         require_activated_client: bool,
     ) -> Result<(), String> {
-        let league_auth = self.league_player_auth_settings();
         let fallback_group_maker = || {
             self.configured_client_player_selection
                 .as_ref()
@@ -33195,7 +33814,7 @@ impl GameApp {
             network.publish_client_player_resource(publication)
         }
         .map_err(|error| error.to_string())?;
-        let mut request = selected
+        let request = selected
             .runtime_add_player_info_update(client_id, resource)
             .map_err(|error| error.to_string())?;
         // A locally published resource keeps its original file for this
@@ -33215,17 +33834,47 @@ impl GameApp {
         self.admission_resources
             .mark_complete(resource_core.id, source_path);
         if self.network_is_league {
-            let Some(player) = request.players.first_mut() else {
+            if request.players.is_empty() {
                 return Err("runtime player request has no player".to_string());
-            };
-            match network.authenticate_league_player(league_auth, player) {
-                Ok(true) => {}
-                Ok(false) => return Err("league player authentication was rejected".to_string()),
-                Err(error) => {
-                    return Err(format!("league player authentication failed: {error}"));
-                }
             }
+            let server_name = self.current_league_server_name();
+            return match self.continue_league_player_auth(
+                LeaguePlayerAuthContinuation::RuntimePlayer {
+                    request,
+                    index: 0,
+                    server_name,
+                    host,
+                    alternate_resource_id,
+                    alternate_color,
+                },
+            ) {
+                Ok(LeaguePlayerAuthStatus::Pending)
+                | Ok(LeaguePlayerAuthStatus::Completed(true)) => Ok(()),
+                Ok(LeaguePlayerAuthStatus::Completed(false)) => {
+                    Err("league player authentication was rejected".to_string())
+                }
+                Err(error) => Err(format!("league player authentication failed: {error}")),
+            };
         }
+        self.finish_runtime_network_player_add(
+            request,
+            host,
+            alternate_resource_id,
+            alternate_color,
+        )
+    }
+
+    fn finish_runtime_network_player_add(
+        &mut self,
+        request: lc_network::PlayerInfoUpdateRequest,
+        host: bool,
+        alternate_resource_id: i32,
+        alternate_color: u32,
+    ) -> Result<(), String> {
+        let network = self
+            .network
+            .as_ref()
+            .ok_or_else(|| "network session is unavailable".to_string())?;
         if !host {
             return network
                 .submit_player_info_update(request)
@@ -34990,7 +35639,16 @@ impl GameApp {
                         let local_is_observer =
                             self.control_clients.is_observer(join_data.client_id);
                         let initial_player_info_ready = if is_client && !local_is_observer {
-                            self.submit_initial_client_player_info(join_data.client_id)
+                            let endpoint = legacy_presentation_text(
+                                join_data.parameters.league_address.as_bytes(),
+                            );
+                            match self.submit_initial_client_player_info(
+                                join_data.client_id,
+                                league_server_name(&endpoint),
+                            ) {
+                                LeaguePlayerAuthStatus::Completed(submitted) => submitted,
+                                LeaguePlayerAuthStatus::Pending => false,
+                            }
                         } else {
                             is_client && local_is_observer
                         };
@@ -45047,6 +45705,7 @@ impl GameApp {
             receiver,
             selected_scenario,
             purpose,
+            authenticated_league_players: None,
         });
         if purpose == StartupNetworkPurpose::StagedHost {
             let initial_fonts = self
@@ -45936,6 +46595,7 @@ impl GameApp {
         self.loader_screen = None;
         self.loader_error = None;
         self.abandon_live_masterserver_signup();
+        self.clear_pending_league_player_auth();
         self.network_game_advertiser = None;
         self.advertised_game_reference = None;
         self.host_reference_paused = false;
@@ -46020,7 +46680,11 @@ impl GameApp {
                 "network worker disconnected before reporting readiness".to_string(),
             )),
         };
-        self.startup_network_connection = None;
+        let mut authenticated_league_players = self
+            .startup_network_connection
+            .take()
+            .expect("completed startup network connection remains installed")
+            .authenticated_league_players;
         if purpose == StartupNetworkPurpose::Join {
             // Resolution owns silent dismissal. Finishing the dialog would
             // run its continuation and incorrectly turn success into abort.
@@ -46045,6 +46709,40 @@ impl GameApp {
                     if response.max_players != 0 {
                         if let Some(staged) = self.staged_network_host_scenario.as_mut() {
                             staged.lobby.max_players = response.max_players;
+                        }
+                    }
+                }
+                let needs_initial_host_league_auth = purpose == StartupNetworkPurpose::StagedHost
+                    && authenticated_league_players.is_none()
+                    && matches!(
+                        &mode,
+                        NetworkMode::Host(HostSettings {
+                            prepared: Some(prepared),
+                            ..
+                        }) if prepared.pending_initial_league_players().is_some()
+                            && prepared
+                                .host_config()
+                                .initial_join_snapshot
+                                .as_ref()
+                                .is_some_and(|snapshot| synchronized_parameters_are_league(
+                                    &snapshot.parameters
+                                ))
+                    );
+                if needs_initial_host_league_auth {
+                    match self.begin_startup_host_league_auth(
+                        mode,
+                        manager,
+                        selected_scenario,
+                        purpose,
+                    )? {
+                        LeaguePlayerAuthStatus::Pending
+                        | LeaguePlayerAuthStatus::Completed(true) => return Ok(()),
+                        LeaguePlayerAuthStatus::Completed(false) => {
+                            return self.finish_startup_network_failure(
+                                purpose,
+                                "Unable to finalize initial host player authentication"
+                                    .to_string(),
+                            );
                         }
                     }
                 }
@@ -46077,9 +46775,12 @@ impl GameApp {
                                 synchronized_parameters_are_league(&snapshot.parameters)
                             });
                         if prepared.pending_initial_league_players().is_some() {
-                            if let Err(error) = self
-                                .finalize_prepared_host_players(&manager, prepared, is_league)
-                            {
+                            if let Err(error) = self.finalize_prepared_host_players(
+                                &manager,
+                                prepared,
+                                is_league,
+                                authenticated_league_players.take(),
+                            ) {
                                 return self.finish_startup_network_failure(
                                     purpose,
                                     format!(
@@ -56182,6 +56883,7 @@ impl GameApp {
         self.definition_selector_last_click = None;
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
+        self.clear_pending_league_player_auth();
         self.startup_network_connection = None;
         self.startup_game_search = None;
         self.startup_network_last_refresh = None;
@@ -56891,6 +57593,7 @@ impl GameApp {
         // C4GameControl::ChangeToLocal preserves FrameCounter, ControlTick and
         // Game.Parameters while changing only the cadence to ControlRate=1
         // (C4GameControl.cpp:93-127).
+        self.finalize_pending_league_end_for_teardown();
         self.clear_lobby_preload();
         let control_tick = self.engine.sync_check(local_client_id).control_tick;
         self.remove_remote_runtime_players(local_client_id);
@@ -58550,6 +59253,7 @@ impl GameApp {
         self.poll_startup_irc()?;
         self.poll_startup_network_connection()?;
         self.poll_live_masterserver_signup()?;
+        self.poll_league_player_auth()?;
         self.process_network_events()?;
         self.poll_blocking_resource_wait_at(Instant::now())?;
         // C4Network2::Execute probes the runtime status target before
@@ -58570,6 +59274,9 @@ impl GameApp {
             AppMode::Running => {
                 self.reconcile_initial_scoreboard();
                 if self.game_over_dialog.is_some() {
+                    return Ok(());
+                }
+                if self.pending_league_end.is_some() {
                     return Ok(());
                 }
                 self.reconcile_message_board_input_dialog()?;
@@ -58943,7 +59650,9 @@ impl GameApp {
     }
 
     fn tick_league_update_at(&self, now: i64) {
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+        if self.pending_league_end.is_some()
+            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+        {
             return;
         }
         let (Some(network), Some(reference)) =
@@ -59306,31 +60015,231 @@ impl GameApp {
         let league_record = self.finish_recording();
         self.game_over_handled = true;
         self.publish_game_over_host_reference();
-        let league_result = if self.network_is_league && league_record.is_none() {
+        if self.network_is_league && league_record.is_none() {
             // A league game is admitted only after its forced recorder has
             // materialized. Never downgrade a failed close into a recordless
             // End request, which the league server cannot validate.
             tracing::error!("refusing to finish league game without its required record");
-            None
+            return self.finish_game_over_after_league();
         } else if self.network_is_league {
-            match (self.network.as_ref(), self.advertised_game_reference.clone()) {
-                (Some(network), Some(reference)) => {
-                    match network.end_league(reference, league_record) {
+            if let (Some(_), Some(reference)) = (
+                self.network.as_ref(),
+                self.advertised_game_reference.clone(),
+            ) {
+                self.pending_league_end = Some(PendingLeagueEnd {
+                    reference,
+                    record: league_record,
+                    attempts: 0,
+                    last_failure: None,
+                    terminal_packet: None,
+                });
+                return self.run_pending_league_end_attempt();
+            }
+        }
+        self.finish_game_over_after_league()
+    }
+
+    fn run_pending_league_end_attempt(&mut self) -> Result<(), EngineError> {
+        let Some(pending) = self.pending_league_end.as_mut() else {
+            return Ok(());
+        };
+        pending.attempts = pending.attempts.saturating_add(1);
+        let reference = pending.reference.clone();
+        let record = pending.record.clone();
+        let attempt = match self
+            .network
+            .as_ref()
+            .map(|network| network.end_league(reference, record))
+        {
+            Some(Ok(attempt)) => attempt,
+            Some(Err(error)) => LeagueEndAttempt::Retryable {
+                phase: LeagueEndFailurePhase::Send,
+                error: error.to_string(),
+            },
+            None => LeagueEndAttempt::Finished(None),
+        };
+        match attempt {
+            LeagueEndAttempt::Finished(None) => {
+                self.pending_league_end = None;
+                self.finish_game_over_after_league()
+            }
+            LeagueEndAttempt::Finished(Some(mut packet)) if packet.success => {
+                packet.result_string = league_result_message(&self.runtime_resource_text(
+                    "IDS_MSG_LEAGUEEVALUATIONSUCCESSFU",
+                    "League: evaluation successful.",
+                ));
+                self.pending_league_end = None;
+                self.apply_and_broadcast_league_result(packet);
+                self.finish_game_over_after_league()
+            }
+            LeagueEndAttempt::Rejected(mut packet)
+            | LeagueEndAttempt::Finished(Some(mut packet)) => {
+                let message = self.league_end_error_message(
+                    LeagueEndFailurePhase::Send,
+                    &legacy_presentation_text(packet.result_string.as_bytes()),
+                );
+                packet.result_string = league_result_message(&message);
+                if let Some(pending) = self.pending_league_end.as_mut() {
+                    pending.last_failure = Some(message.clone());
+                    pending.terminal_packet = Some(packet);
+                }
+                tracing::error!(%message, "league server rejected the round result");
+                self.push_league_end_error_dialog(
+                    message,
+                    lc_frontend::message_dialog::MessageDialogButtons::CANCEL,
+                    MessageDialogContinuation::LeagueEndRejected,
+                )
+            }
+            LeagueEndAttempt::Retryable { phase, error } => {
+                let message = self.league_end_error_message(phase, &error);
+                if let Some(pending) = self.pending_league_end.as_mut() {
+                    pending.last_failure = Some(message.clone());
+                }
+                tracing::error!(%message, "league round-result request failed");
+                self.push_league_end_error_dialog(
+                    message,
+                    lc_frontend::message_dialog::MessageDialogButtons::RETRY_CANCEL,
+                    MessageDialogContinuation::LeagueEndRetry,
+                )
+            }
+        }
+    }
+
+    fn league_end_error_message(&self, phase: LeagueEndFailurePhase, error: &str) -> String {
+        let error = if error.is_empty() {
+            self.runtime_resource_text("IDS_NET_ERR_LEAGUE_EMPTYREPLY", "Empty reply")
+        } else {
+            error.to_string()
+        };
+        let (key, fallback) = match phase {
+            LeagueEndFailurePhase::Start => (
+                "IDS_NET_ERR_LEAGUE_FINISHGAME",
+                "Could not finish game: %s",
+            ),
+            LeagueEndFailurePhase::Send => (
+                "IDS_NET_ERR_LEAGUE_SENDRESULT",
+                "Could not send game result: %s",
+            ),
+        };
+        format_resource_string(self.runtime_resource_text(key, fallback), &[&error])
+    }
+
+    fn push_league_end_error_dialog(
+        &mut self,
+        message: String,
+        buttons: lc_frontend::message_dialog::MessageDialogButtons,
+        continuation: MessageDialogContinuation,
+    ) -> Result<(), EngineError> {
+        let caption = self.runtime_resource_text("IDS_NET_ERR_LEAGUE", "League error");
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                message,
+                caption,
+                buttons,
+                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            continuation,
+        )
+    }
+
+    fn finalize_pending_league_end_failure(&mut self) -> Result<(), EngineError> {
+        let Some(message) = self
+            .pending_league_end
+            .as_ref()
+            .and_then(|pending| pending.last_failure.clone())
+        else {
+            return Ok(());
+        };
+        let fallback = lc_network::LeagueRoundResultsPacket {
+            success: false,
+            result_string: league_result_message(&message),
+            players: Vec::new(),
+        };
+        let packet = self
+            .network
+            .as_ref()
+            .and_then(|network| match network.finalize_league_end_failure(fallback.clone()) {
+                Ok(packet) => packet,
+                Err(error) => {
+                    tracing::error!(%error, "failed to finalize league round-result failure");
+                    None
+                }
+            })
+            .unwrap_or(fallback);
+        self.pending_league_end = None;
+        self.apply_and_broadcast_league_result(packet);
+        self.finish_game_over_after_league()
+    }
+
+    fn finish_pending_league_end_terminal(&mut self) -> Result<(), EngineError> {
+        let packet = self
+            .pending_league_end
+            .take()
+            .and_then(|pending| pending.terminal_packet);
+        if let Some(fallback) = packet {
+            let packet = self
+                .network
+                .as_ref()
+                .and_then(|network| {
+                    match network.finalize_league_end_failure(fallback.clone()) {
                         Ok(packet) => packet,
                         Err(error) => {
-                            tracing::error!(%error, "failed to finish league game");
+                            tracing::error!(%error, "failed to finalize rejected league result");
                             None
                         }
                     }
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
-        if let Some(packet) = league_result {
-            self.apply_league_round_results_packet(&packet);
+                })
+                .unwrap_or(fallback);
+            self.apply_and_broadcast_league_result(packet);
         }
+        self.finish_game_over_after_league()
+    }
+
+    fn finalize_pending_league_end_for_teardown(&mut self) {
+        let Some(pending) = self.pending_league_end.take() else {
+            return;
+        };
+        let fallback = pending.terminal_packet.unwrap_or_else(|| {
+            let message = pending.last_failure.unwrap_or_else(|| {
+                self.league_end_error_message(LeagueEndFailurePhase::Send, "")
+            });
+            lc_network::LeagueRoundResultsPacket {
+                success: false,
+                result_string: league_result_message(&message),
+                players: Vec::new(),
+            }
+        });
+        let packet = self
+            .network
+            .as_ref()
+            .and_then(|network| {
+                match network.finalize_league_end_failure(fallback.clone()) {
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        tracing::error!(%error, "failed to finalize league result during teardown");
+                        None
+                    }
+                }
+            })
+            .unwrap_or(fallback);
+        self.apply_and_broadcast_league_result(packet);
+    }
+
+    fn apply_and_broadcast_league_result(
+        &mut self,
+        packet: lc_network::LeagueRoundResultsPacket,
+    ) {
+        self.apply_league_round_results_packet(&packet);
+        if let Some(network) = self.network.as_ref() {
+            if let Err(error) = network.broadcast_league_round_results(packet) {
+                tracing::error!(%error, "host league-result broadcast failed");
+            }
+        }
+    }
+
+    fn finish_game_over_after_league(&mut self) -> Result<(), EngineError> {
         // C4GameOverDlg::OnShown hides the scoreboard and closes each
         // player's fullscreen C4MainMenu before evaluation becomes
         // interactive. The synchronized object/cursor menu survives
@@ -60946,6 +61855,10 @@ impl GameApp {
         if matches!(
             continuation,
             MessageDialogContinuation::StartupIrcDisconnectConfirm
+                | MessageDialogContinuation::LeaguePlayerAuthWait
+                | MessageDialogContinuation::LeaguePlayerAuthWelcome
+                | MessageDialogContinuation::LeagueEndRetry
+                | MessageDialogContinuation::LeagueEndRejected
         ) {
             state.set_button_label(
                 MessageDialogButton::Cancel,
@@ -61219,6 +62132,70 @@ impl GameApp {
             }
             MessageDialogContinuation::LiveMasterserverSignup => {
                 self.abort_live_masterserver_signup();
+            }
+            MessageDialogContinuation::LeaguePlayerAuthWait => {
+                if let Some(mut pending) = self.pending_league_player_auth.take() {
+                    Self::reject_league_auth_continuation_player(
+                        &mut pending.continuation,
+                    );
+                    let _ = self.continue_league_player_auth(pending.continuation)?;
+                }
+            }
+            MessageDialogContinuation::LeaguePlayerAuthWelcome => {
+                if result == lc_frontend::message_dialog::MessageDialogResult::Ok {
+                    if let Some(mut pending) = self.pending_league_player_auth.take() {
+                        Self::advance_league_auth_continuation(
+                            &mut pending.continuation,
+                        );
+                        let _ = self.continue_league_player_auth(pending.continuation)?;
+                    }
+                } else if let Some(pending) = self.pending_league_player_auth.as_ref() {
+                    let player = Self::league_auth_continuation_player_name(
+                        &pending.continuation,
+                    );
+                    self.clear_remembered_league_password();
+                    let message = format_resource_string(
+                        self.runtime_resource_text(
+                            "IDS_MSG_LEAGUESIGNUPCANCELLED",
+                            "League login for player %s cancelled. Without login this player can not take part in this round!",
+                        ),
+                        &[&player],
+                    );
+                    self.push_message_dialog(
+                        lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                            message,
+                            self.runtime_resource_text(
+                                "IDS_DLG_LEAGUESIGNUP",
+                                "League Login",
+                            ),
+                            lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                        ),
+                        MessageDialogContinuation::LeaguePlayerAuthCancelled,
+                    )?;
+                }
+            }
+            MessageDialogContinuation::LeaguePlayerAuthError
+            | MessageDialogContinuation::LeaguePlayerAuthCancelled => {
+                self.clear_remembered_league_password();
+                if let Some(pending) = self.pending_league_player_auth.take() {
+                    let _ = self.continue_league_player_auth(pending.continuation)?;
+                }
+            }
+            MessageDialogContinuation::LeagueEndRetry => {
+                let retry = result
+                    == lc_frontend::message_dialog::MessageDialogResult::Retry
+                    && self
+                        .pending_league_end
+                        .as_ref()
+                        .is_some_and(|pending| pending.attempts < LEAGUE_END_MAX_ATTEMPTS);
+                if retry {
+                    self.run_pending_league_end_attempt()?;
+                } else {
+                    self.finalize_pending_league_end_failure()?;
+                }
+            }
+            MessageDialogContinuation::LeagueEndRejected => {
+                self.finish_pending_league_end_terminal()?;
             }
             MessageDialogContinuation::LeagueVote { subject } => {
                 self.complete_league_vote_response(
@@ -66372,6 +67349,7 @@ impl GameApp {
 
     fn return_to_menu_with_dialog_restore(&mut self, restore_dialog: bool) {
         let last_startup_dialog = self.last_startup_dialog;
+        self.finalize_pending_league_end_for_teardown();
         self.clear_lobby_preload();
         self.restart_restore_roster_items.clear();
         // C4Game::Clear starts the fade before tearing down game state.
@@ -66409,6 +67387,8 @@ impl GameApp {
         self.save_browser = None;
         self.save_browser_return_to_menu = false;
         self.game_over_dialog = None;
+        self.pending_league_end = None;
+        self.pending_league_player_auth = None;
         self.runtime_help_visible = false;
         self.ingame_mouse_help = false;
         self.ingame_mouse_help_caption = None;
@@ -69095,6 +70075,8 @@ impl GameApp {
         self.ingame_menu.clear();
         self.script_menu_presentations.clear();
         self.game_over_handled = false;
+        self.pending_league_end = None;
+        self.clear_pending_league_player_auth();
         self.runtime_help_visible = false;
         self.runtime_flash_message = None;
         self.runtime_client_list = None;
@@ -91647,6 +92629,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             receiver: blocker_receiver,
             selected_scenario: None,
             purpose: StartupNetworkPurpose::StagedHost,
+            authenticated_league_players: None,
         });
         app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
             .expect("warning OK stages the selected network scenario");
@@ -93388,6 +94371,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             receiver,
             selected_scenario: None,
             purpose: StartupNetworkPurpose::StagedHost,
+            authenticated_league_players: None,
         });
         app.poll_startup_network_connection()
             .expect("poll unstaged host transition");
@@ -100581,6 +101565,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             receiver,
             selected_scenario: None,
             purpose: StartupNetworkPurpose::Join,
+            authenticated_league_players: None,
         });
         app.poll_startup_network_connection()
             .expect("poll joined network transition");
@@ -120334,6 +121319,7 @@ ScenInfoArea=70,5,25,90
             receiver,
             selected_scenario: None,
             purpose: StartupNetworkPurpose::Join,
+            authenticated_league_players: None,
         });
 
         app.poll_startup_network_connection()
@@ -120376,6 +121362,7 @@ ScenInfoArea=70,5,25,90
             receiver,
             selected_scenario: None,
             purpose: StartupNetworkPurpose::Join,
+            authenticated_league_players: None,
         });
         app.poll_startup_network_connection()
             .expect("poll terminal join rejection");
@@ -133831,21 +134818,47 @@ ScenInfoArea=70,5,25,90
             commands.complete_initial_league_client_join(cores, responses)
         });
 
-        assert!(app.submit_initial_client_player_info(7));
+        assert_eq!(
+            app.submit_initial_client_player_info(7, "league.example".to_string()),
+            LeaguePlayerAuthStatus::Pending
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.message_dialogs.last().is_none_or(|dialog| {
+            !matches!(
+                dialog.continuation,
+                MessageDialogContinuation::LeaguePlayerAuthError
+            )
+        }) {
+            assert!(Instant::now() < deadline, "timed out waiting for Auth error");
+            app.poll_league_player_auth().expect("poll Auth exchange");
+            thread::sleep(Duration::from_millis(1));
+        }
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("acknowledge rejected Auth");
+        assert!(matches!(
+            app.message_dialogs.last().map(|dialog| &dialog.continuation),
+            Some(MessageDialogContinuation::LeaguePlayerAuthWait)
+        ));
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("Abort drops the rejected player");
         let (order, auth_heads, auth_players, requests) =
             observer.join().expect("league command observer");
 
         assert_eq!(
             order,
-            vec!["publish", "publish", "auth", "auth", "player-info"]
+            vec!["publish", "publish", "auth", "auth", "auth", "player-info"]
         );
-        assert_eq!(auth_heads, vec![auth.clone(), auth]);
+        assert_eq!(&auth_heads[..2], &[auth.clone(), auth.clone()]);
         assert_eq!(
             auth_players
                 .iter()
                 .map(|player| player.name.as_bytes())
                 .collect::<Vec<_>>(),
-            vec![b"Accepted".as_slice(), b"Rejected".as_slice()]
+            vec![
+                b"Accepted".as_slice(),
+                b"Rejected".as_slice(),
+                b"Rejected".as_slice(),
+            ]
         );
         let [request] = requests.as_slice() else {
             panic!("expected one initial PlayerInfo request");
@@ -133860,6 +134873,9 @@ ScenInfoArea=70,5,25,90
         let (manager, _event_tx, commands) =
             NetworkManager::test_stub_with_league_commands_for_client_id(7);
         app.network = Some(manager);
+        if let Some(NetworkMode::Client(settings)) = app.network_mode.as_mut() {
+            settings.league_auth = auth;
+        }
         let observer = thread::spawn(move || {
             commands.complete_initial_league_client_join(
                 all_rejected_cores,
@@ -133873,13 +134889,394 @@ ScenInfoArea=70,5,25,90
                 ],
             )
         });
-        assert!(app.submit_initial_client_player_info(7));
+        assert_eq!(
+            app.submit_initial_client_player_info(7, "league.example".to_string()),
+            LeaguePlayerAuthStatus::Pending
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.message_dialogs.last().is_none_or(|dialog| {
+            !matches!(
+                dialog.continuation,
+                MessageDialogContinuation::LeaguePlayerAuthError
+            )
+        }) {
+            assert!(Instant::now() < deadline, "timed out waiting for Auth error");
+            app.poll_league_player_auth().expect("poll Auth exchange");
+            thread::sleep(Duration::from_millis(1));
+        }
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("acknowledge first rejected Auth");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("Abort drops the first rejected player");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("Abort drops the second rejected player");
         let (_, _, _, requests) = observer.join().expect("all-rejected observer");
         assert_eq!(requests.len(), 1);
         assert!(
             requests[0].players.is_empty(),
             "an initial all-failed auth still sends the empty observer packet"
         );
+    }
+
+    #[test]
+    fn league_auth_wait_is_abortable_and_success_uses_exact_welcome_confirmation() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated league Auth configuration");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "Network", "LeagueAutoLogin", "0")
+            .expect("disable league auto-login");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(
+            ClientSettings::new(
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+                "Client",
+            )
+            .with_league_auth(lc_network::LeagueAuthRequestHead {
+                account: LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
+                password: LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+                ..Default::default()
+            }),
+        ));
+        let player = lc_engine::ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"Exact Player".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let request = || lc_network::PlayerInfoUpdateRequest {
+            client_id: 7,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![player.clone()],
+        };
+
+        assert_eq!(
+            app.continue_league_player_auth(LeaguePlayerAuthContinuation::InitialClient {
+                request: request(),
+                index: 0,
+                server_name: "league.example".to_string(),
+            })
+            .expect("begin league Auth"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        let replacement = lc_network::PlayerInfoUpdateRequest {
+            client_id: 7,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                name: LegacyCString::from_bytes(b"Replacement".to_vec()).unwrap(),
+                ..Default::default()
+            }],
+        };
+        assert_eq!(
+            app.continue_league_player_auth(LeaguePlayerAuthContinuation::InitialClient {
+                request: replacement,
+                index: 0,
+                server_name: "other.example".to_string(),
+            })
+            .expect("reject overlapping Auth without replacing it"),
+            LeaguePlayerAuthStatus::Completed(false)
+        );
+        assert_eq!(
+            app.pending_league_player_auth
+                .as_ref()
+                .map(|pending| GameApp::league_auth_continuation_player_name(
+                    &pending.continuation
+                )),
+            Some("Exact Player".to_string())
+        );
+        let wait = app.message_dialogs.last().expect("Auth wait dialog");
+        assert_eq!(
+            wait.state.message(),
+            "League login for player Exact Player on league.example..."
+        );
+        assert_eq!(wait.state.caption(), "League Login");
+        assert_eq!(
+            wait.state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::Standard(3)
+        );
+        assert_eq!(
+            wait.state.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::CANCEL
+        );
+        assert_eq!(
+            wait.state.button_label(
+                lc_frontend::message_dialog::MessageDialogButton::Cancel
+            ),
+            "Abort"
+        );
+        let command = commands.receive_league_player_auth();
+        assert!(command.complete(Ok(lc_network::decode_league_auth_response(
+            b"[Response]\r\nStatus=Success\r\nAUID=one-use-token\r\nMessage=Server welcome\r\n",
+        ))));
+        app.poll_league_player_auth()
+            .expect("resolve successful Auth");
+
+        let welcome = app.message_dialogs.last().expect("welcome confirmation");
+        assert_eq!(welcome.state.message(), "Server welcome");
+        assert_eq!(welcome.state.caption(), "Confirm League Login");
+        assert_eq!(
+            welcome.state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::Extended(8)
+        );
+        assert_eq!(
+            welcome.state.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::OK_CANCEL
+        );
+        assert_eq!(
+            welcome.state.button_label(
+                lc_frontend::message_dialog::MessageDialogButton::Cancel
+            ),
+            "Abort"
+        );
+        assert!(commands.take_player_info_updates().is_empty());
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("approve welcome");
+        let updates = commands.take_player_info_updates();
+        let [submitted] = updates.as_slice() else {
+            panic!("welcome approval submits one initial PlayerInfo");
+        };
+        assert_eq!(submitted.players[0].auth_id.as_bytes(), b"one-use-token");
+
+        assert_eq!(
+            app.continue_league_player_auth(LeaguePlayerAuthContinuation::InitialClient {
+                request: request(),
+                index: 0,
+                server_name: "league.example".to_string(),
+            })
+            .expect("begin abandoned league Auth"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        let abandoned = commands.receive_league_player_auth();
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("Abort wait drops current player without hanging");
+        assert!(!abandoned.complete(Ok(
+            lc_network::LeagueAuthResponse::default()
+        )));
+        let updates = commands.take_player_info_updates();
+        let [submitted] = updates.as_slice() else {
+            panic!("aborted Auth submits the empty observer packet");
+        };
+        assert!(submitted.players.is_empty());
+    }
+
+    #[test]
+    fn league_auth_error_dialog_retries_with_cleared_password() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated league Auth configuration");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "Network", "LeagueAutoLogin", "0")
+            .expect("disable league auto-login");
+        persist_config_value(&paths, "Network", "LeaguePassword", "password")
+            .expect("seed remembered password");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(
+            ClientSettings::new(
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+                "Client",
+            )
+            .with_league_auth(lc_network::LeagueAuthRequestHead {
+                account: LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
+                password: LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+                ..Default::default()
+            }),
+        ));
+        let player = lc_engine::ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"Exact Player".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        app.continue_league_player_auth(LeaguePlayerAuthContinuation::InitialClient {
+            request: lc_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![player.clone()],
+            },
+            index: 0,
+            server_name: "league.example".to_string(),
+        })
+        .expect("begin league Auth");
+        let rejected = commands.receive_league_player_auth();
+        assert_eq!(rejected.auth.password.as_bytes(), b"password");
+        assert!(rejected.complete(Ok(lc_network::decode_league_auth_response(
+            b"[Response]\r\nStatus=Failure\r\nMessage=Wrong password\r\n",
+        ))));
+        app.poll_league_player_auth()
+            .expect("resolve rejected Auth");
+        let error = app.message_dialogs.last().expect("Auth error dialog");
+        assert_eq!(error.state.message(), "League server reply: Wrong password");
+        assert_eq!(error.state.caption(), "League Login Failed");
+        assert_eq!(
+            error.state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("acknowledge server error and retry");
+        let retry = commands.receive_league_player_auth();
+        assert_eq!(retry.player, player);
+        assert!(retry.auth.password.is_empty());
+        assert!(retry.complete(Ok(lc_network::decode_league_auth_response(
+            b"[Response]\r\nStatus=Success\r\nAUID=retry-token\r\nAccount=Master\r\n",
+        ))));
+        app.poll_league_player_auth()
+            .expect("resolve retried Auth");
+        let welcome = app.message_dialogs.last().expect("derived welcome dialog");
+        assert_eq!(
+            welcome.state.message(),
+            "Player: Exact Player|League user name: Master|Server: league.example"
+        );
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("approve retried Auth");
+        let updates = commands.take_player_info_updates();
+        let [submitted] = updates.as_slice() else {
+            panic!("retry success submits initial PlayerInfo");
+        };
+        assert_eq!(submitted.players[0].auth_id.as_bytes(), b"retry-token");
+        assert!(load_league_auth_settings(Some(&paths)).password.is_empty());
+    }
+
+    #[test]
+    fn league_runtime_player_auth_defers_add_until_welcome_approval() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated runtime Auth configuration");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "Network", "LeagueAutoLogin", "0")
+            .expect("disable league auto-login");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(
+            ClientSettings::new(
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+                "Client",
+            )
+            .with_league_auth(lc_network::LeagueAuthRequestHead {
+                account: LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
+                password: LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+                ..Default::default()
+            }),
+        ));
+        let player = lc_engine::ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"Runtime Player".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(
+            app.continue_league_player_auth(LeaguePlayerAuthContinuation::RuntimePlayer {
+                request: lc_network::PlayerInfoUpdateRequest {
+                    client_id: 7,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![player.clone()],
+                },
+                index: 0,
+                server_name: "league.example".to_string(),
+                host: false,
+                alternate_resource_id: 0,
+                alternate_color: 0,
+            })
+            .expect("begin runtime league Auth"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        let command = commands.receive_league_player_auth();
+        assert_eq!(command.player, player);
+        assert!(command.complete(Ok(lc_network::decode_league_auth_response(
+            b"[Response]\r\nStatus=Success\r\nAUID=runtime-token\r\nMessage=Welcome runtime player\r\n",
+        ))));
+        app.poll_league_player_auth()
+            .expect("resolve runtime league Auth");
+        assert!(commands.take_player_info_updates().is_empty());
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("approve runtime welcome");
+        let updates = commands.take_player_info_updates();
+        let [submitted] = updates.as_slice() else {
+            panic!("runtime approval submits exactly one add request");
+        };
+        assert_eq!(submitted.flags, lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS);
+        assert_eq!(submitted.players[0].auth_id.as_bytes(), b"runtime-token");
+    }
+
+    #[test]
+    fn startup_host_auth_players_stay_with_their_connection_and_cancel_cleanly() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated startup Auth configuration");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "Network", "LeagueAutoLogin", "0")
+            .expect("disable league auto-login");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let player = |name: &[u8]| lc_engine::ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            ..Default::default()
+        };
+
+        let (first_manager, _events, mut first_commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        assert_eq!(
+            app.continue_league_player_auth(LeaguePlayerAuthContinuation::StartupHost {
+                mode: NetworkMode::Host(host_network_settings()),
+                manager: first_manager,
+                selected_scenario: None,
+                purpose: StartupNetworkPurpose::StagedHost,
+                players: vec![player(b"First Host")],
+                index: 0,
+                server_name: "league.example".to_string(),
+            })
+            .expect("begin first host Auth"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        assert!(first_commands.receive_league_player_auth().complete(Ok(
+            lc_network::decode_league_auth_response(
+                b"[Response]\r\nStatus=Success\r\nAUID=first-token\r\n",
+            ),
+        )));
+        app.poll_league_player_auth()
+            .expect("resolve first host Auth");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("approve first host Auth");
+        let first_connection = app
+            .startup_network_connection
+            .take()
+            .expect("first manager is requeued with its players");
+        let first_players = first_connection
+            .authenticated_league_players
+            .as_ref()
+            .expect("authenticated players are connection-scoped");
+        assert_eq!(first_players[0].name.as_bytes(), b"First Host");
+        assert_eq!(first_players[0].auth_id.as_bytes(), b"first-token");
+        drop(first_connection);
+
+        let (second_manager, _events, mut second_commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        assert_eq!(
+            app.continue_league_player_auth(LeaguePlayerAuthContinuation::StartupHost {
+                mode: NetworkMode::Host(host_network_settings()),
+                manager: second_manager,
+                selected_scenario: None,
+                purpose: StartupNetworkPurpose::StagedHost,
+                players: vec![player(b"Second Host")],
+                index: 0,
+                server_name: "league.example".to_string(),
+            })
+            .expect("begin replacement host Auth"),
+            LeaguePlayerAuthStatus::Pending
+        );
+        let abandoned = second_commands.receive_league_player_auth();
+        assert_eq!(abandoned.player.name.as_bytes(), b"Second Host");
+        app.show_main_menu();
+        assert!(app.pending_league_player_auth.is_none());
+        assert!(app.startup_network_connection.is_none());
+        assert!(!app.message_dialogs.iter().any(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::LeaguePlayerAuthWait
+                | MessageDialogContinuation::LeaguePlayerAuthWelcome
+                | MessageDialogContinuation::LeaguePlayerAuthError
+                | MessageDialogContinuation::LeaguePlayerAuthCancelled
+        )));
+        assert!(!abandoned.complete(Ok(
+            lc_network::LeagueAuthResponse::default()
+        )));
     }
 
     #[test]
@@ -134579,7 +135976,7 @@ ScenInfoArea=70,5,25,90
         let legacy = |bytes: &[u8]| {
             lc_engine::LegacyCString::from_bytes(bytes.to_vec()).expect("NUL-free fixture")
         };
-        let mut app = new_state_only_menu_app(320, 200);
+        let mut app = new_menu_app(320, 200);
         app.network_is_league = true;
         app.network_league_name = b"Cup".to_vec();
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -134653,6 +136050,20 @@ ScenInfoArea=70,5,25,90
         app.process_network_events()
             .expect("process league PlayerInfo request");
         let (checked, broadcasts) = observer.join().expect("league check observer");
+
+        let refusal = app
+            .message_dialogs
+            .last()
+            .expect("league check refusal is shown");
+        assert_eq!(
+            refusal.state.message(),
+            "League server has refused the join of player Rejected: Rejected"
+        );
+        assert_eq!(refusal.state.caption(), "Error");
+        assert_eq!(
+            refusal.state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
 
         assert_eq!(
             checked
@@ -156051,6 +157462,232 @@ func ControlDig() { dig_count = 1; return(1); }
             .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("pending client Escape is allowed");
         assert!(client.game_over_dialog.is_none());
+    }
+
+    #[test]
+    fn league_end_transport_retry_reissues_and_broadcasts_the_successful_result() {
+        let mut app = new_classic_running_sandbox_app();
+        let (_, reference) = default_exact_host_reference();
+        let (network, _events, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.network_is_league = true;
+        app.pending_league_end = Some(PendingLeagueEnd {
+            reference,
+            record: None,
+            attempts: 0,
+            last_failure: None,
+            terminal_packet: None,
+        });
+        let success = lc_network::LeagueRoundResultsPacket {
+            success: true,
+            result_string: LegacyCString::from_bytes(b"runtime placeholder".to_vec()).unwrap(),
+            players: Vec::new(),
+        };
+        let expected_success = success.clone();
+        let observer = thread::spawn(move || {
+            commands.complete_league_end_flow(vec![
+                LeagueEndAttempt::Retryable {
+                    phase: LeagueEndFailurePhase::Send,
+                    error: "temporary outage".to_string(),
+                },
+                LeagueEndAttempt::Finished(Some(success)),
+            ])
+        });
+
+        app.run_pending_league_end_attempt()
+            .expect("first End attempt opens retry dialog");
+        let retry = app.message_dialogs.last().expect("Retry/Abort dialog");
+        assert_eq!(retry.state.caption(), "League error");
+        assert_eq!(
+            retry.state.message(),
+            "Could not send game result: temporary outage"
+        );
+        assert_eq!(
+            retry.state.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::RETRY_CANCEL
+        );
+        assert_eq!(
+            retry.state.button_label(
+                lc_frontend::message_dialog::MessageDialogButton::Cancel
+            ),
+            "Abort"
+        );
+        assert!(app.game_over_dialog.is_none());
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Retry)
+            .expect("Retry reissues End and opens evaluation");
+        let observed = observer.join().expect("join End command observer");
+        assert_eq!(observed.attempts, 2);
+        assert!(observed.finalizations.is_empty());
+        assert_eq!(observed.broadcasts.len(), 1);
+        assert_eq!(observed.broadcasts[0].success, expected_success.success);
+        assert_eq!(
+            observed.broadcasts[0].result_string.as_bytes(),
+            b"League: evaluation successful."
+        );
+        assert!(app.game_over_dialog.is_some());
+        assert_eq!(
+            app.snapshot.round_results.network_result,
+            Some(lc_engine::RoundResultsNetworkResult::LeagueOk)
+        );
+    }
+
+    #[test]
+    fn league_end_retry_is_capped_at_ten_attempts_before_failed_broadcast() {
+        let mut app = new_classic_running_sandbox_app();
+        let (_, reference) = default_exact_host_reference();
+        let (network, _events, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.network_is_league = true;
+        app.pending_league_end = Some(PendingLeagueEnd {
+            reference,
+            record: None,
+            attempts: 0,
+            last_failure: None,
+            terminal_packet: None,
+        });
+        let outcomes = (0..LEAGUE_END_MAX_ATTEMPTS)
+            .map(|_| LeagueEndAttempt::Retryable {
+                phase: LeagueEndFailurePhase::Send,
+                error: "offline".to_string(),
+            })
+            .collect();
+        let observer =
+            thread::spawn(move || commands.complete_league_end_flow(outcomes));
+
+        app.run_pending_league_end_attempt()
+            .expect("first End attempt opens retry dialog");
+        for attempt in 1..=LEAGUE_END_MAX_ATTEMPTS {
+            assert_eq!(
+                app.pending_league_end
+                    .as_ref()
+                    .expect("End remains pending")
+                    .attempts,
+                attempt
+            );
+            app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Retry)
+                .expect("Retry advances or finalizes the capped End loop");
+        }
+
+        let observed = observer.join().expect("join capped End observer");
+        assert_eq!(observed.attempts, usize::from(LEAGUE_END_MAX_ATTEMPTS));
+        assert_eq!(
+            observed.finalizations,
+            vec![b"Could not send game result: offline".to_vec()]
+        );
+        assert_eq!(observed.broadcasts.len(), 1);
+        assert!(!observed.broadcasts[0].success);
+        assert!(app.pending_league_end.is_none());
+        assert!(app.game_over_dialog.is_some());
+        assert_eq!(
+            app.snapshot.round_results.network_result,
+            Some(lc_engine::RoundResultsNetworkResult::LeagueError)
+        );
+    }
+
+    #[test]
+    fn league_end_server_rejection_is_abort_only_and_preserves_legacy_text() {
+        let mut app = new_classic_running_sandbox_app();
+        let (_, reference) = default_exact_host_reference();
+        let (network, _events, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.network_is_league = true;
+        app.pending_league_end = Some(PendingLeagueEnd {
+            reference,
+            record: None,
+            attempts: 0,
+            last_failure: None,
+            terminal_packet: None,
+        });
+        let rejection = lc_network::LeagueRoundResultsPacket {
+            success: false,
+            result_string: LegacyCString::from_bytes(b"Server says Andr\xe9".to_vec()).unwrap(),
+            players: Vec::new(),
+        };
+        let observer = thread::spawn(move || {
+            commands.complete_league_end_flow(vec![LeagueEndAttempt::Rejected(rejection)])
+        });
+
+        app.run_pending_league_end_attempt()
+            .expect("server rejection opens Abort dialog");
+        let rejected = app.message_dialogs.last().expect("Abort-only dialog");
+        assert_eq!(
+            rejected.state.message(),
+            "Could not send game result: Server says André"
+        );
+        assert_eq!(
+            rejected.state.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::CANCEL
+        );
+        assert_eq!(
+            rejected.state.button_label(
+                lc_frontend::message_dialog::MessageDialogButton::Cancel
+            ),
+            "Abort"
+        );
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("Abort records terminal rejection");
+        let observed = observer.join().expect("join End rejection observer");
+        assert_eq!(observed.attempts, 1);
+        assert_eq!(
+            observed.finalizations,
+            vec![b"Could not send game result: Server says Andr\xe9".to_vec()]
+        );
+        assert_eq!(observed.broadcasts.len(), 1);
+        assert_eq!(
+            observed.broadcasts[0].result_string.as_bytes(),
+            b"Could not send game result: Server says Andr\xe9"
+        );
+        assert_eq!(
+            app.snapshot.round_results.network_result,
+            Some(lc_engine::RoundResultsNetworkResult::LeagueError)
+        );
+    }
+
+    #[test]
+    fn league_end_network_teardown_finalizes_and_broadcasts_an_open_retry() {
+        let mut app = new_classic_running_sandbox_app();
+        let (_, reference) = default_exact_host_reference();
+        let (network, _events, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.network_is_league = true;
+        app.pending_league_end = Some(PendingLeagueEnd {
+            reference,
+            record: None,
+            attempts: 0,
+            last_failure: None,
+            terminal_packet: None,
+        });
+        let observer = thread::spawn(move || {
+            commands.complete_league_end_flow(vec![LeagueEndAttempt::Retryable {
+                phase: LeagueEndFailurePhase::Send,
+                error: "closing outage".to_string(),
+            }])
+        });
+
+        app.run_pending_league_end_attempt()
+            .expect("open Retry/Abort dialog");
+        app.change_network_control_to_local(0);
+
+        let observed = observer.join().expect("join teardown observer");
+        assert_eq!(observed.attempts, 1);
+        assert_eq!(
+            observed.finalizations,
+            vec![b"Could not send game result: closing outage".to_vec()]
+        );
+        assert_eq!(observed.broadcasts.len(), 1);
+        assert!(!observed.broadcasts[0].success);
+        assert!(app.pending_league_end.is_none());
+        assert!(app.network.is_none());
     }
 
     #[test]
