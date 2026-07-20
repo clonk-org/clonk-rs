@@ -1388,9 +1388,9 @@ impl Engine {
             .map_err(ScriptError::from)
     }
 
-    /// Like [`call_with_locals`], but also provides the `this` object context
-    /// returned by `Expr::This`. Pass `Value::Object(id)` for an object context
-    /// or `Value::Nil` for no context.
+    /// Like [`call_with_locals`], but also provides the object context returned
+    /// by an unbound script `this`. Pass `Value::Object(id)` for an object
+    /// context or `Value::Nil` for no context.
     /// Like [`call_with_locals_and_this`], against SHARED live cells: the
     /// session mutates them in place (C++ object locals), so callers fold
     /// via [`crate::vm::LocalCells::snapshot`] instead of a return map.

@@ -1555,8 +1555,8 @@ pub struct Vm<'a> {
     /// keeps the historical own-root dispatch used by synthetic callbacks;
     /// a captured C4AulFunc pointer skips unnamed own global links.
     exact_global_link_lookup: bool,
-    /// The object context the call runs on, returned by `Expr::This`
-    /// (`Value::Object` in lc-engine). Nil when the call has no object
+    /// The object context the call runs on, returned by an unbound script
+    /// `this` (`Value::Object` in lc-engine). Nil when the call has no object
     /// context (e.g. global functions).
     this_value: Value,
     /// The cross-object resolver for `obj->Method(args)` (AB_CALL,
@@ -3143,6 +3143,10 @@ impl<'a> Vm<'a> {
             .and_then(|table| table.borrow().get(name).cloned())
     }
 
+    fn has_bound_this(&self, env: &Environment) -> bool {
+        env.lvalue("this").is_some() || self.global_variable_cell("this").is_some()
+    }
+
     fn global_constant(&self, name: &str) -> Option<Value> {
         self.global_constant_cell(name)
             .map(|cell| cell.borrow().clone())
@@ -3198,11 +3202,14 @@ impl<'a> Vm<'a> {
                 Some(value) => Ok(value),
                 // Engine-global statics (GlobalNamed) resolve next; script
                 // constants last ("global constants have lowest priority",
-                // C4AulParse.cpp:2836-2839). C++ emits a constant's value
-                // through AddBCC, so zero-valued constants fold like literals.
+                // C4AulParse.cpp:2836-2839). `this` is the context-function
+                // fallback between mutable variables and constants.
                 None => {
                     if let Some(value) = self.global_variable(name) {
                         return Ok(value);
+                    }
+                    if name == "this" {
+                        return Ok(self.this_value.clone());
                     }
                     if let Some(value) = self
                         .constants
@@ -3323,6 +3330,34 @@ impl<'a> Vm<'a> {
                     // functions — route reads to the same slot accessor as the
                     // lvalue path (lc-engine registers neither as a host function).
                     if let Expr::Variable(name) = callee.as_ref() {
+                        if name == "this" {
+                            let function = if env.engine_scope && !env.linked_host_lookup {
+                                self.engine_script_function(name)
+                            } else {
+                                self.own_or_global_script_function(name)
+                            };
+                            // C4Aul resolves variables before the builtin
+                            // context function. A bound `this()` therefore
+                            // cannot escape to that function. Without a
+                            // binding, every explicit argument still runs
+                            // before the zero-arity builtin discards it. This
+                            // lookup also precedes old-style constants.
+                            if self.has_bound_this(env) {
+                                return Err(RuntimeError::new(
+                                    "cannot call bound variable 'this'",
+                                ));
+                            }
+                            if function.is_none() && !self.has_host_function(name) {
+                                let _ = self.build_call_args(
+                                    Some(name),
+                                    None,
+                                    args,
+                                    env,
+                                    depth + 1,
+                                )?;
+                                return Ok(self.this_value.clone());
+                            }
+                        }
                         if (name == "Var" || name == "Local")
                             && (args.is_empty() || args.len() == 1)
                             && !self.functions.contains_key(name)
@@ -3850,6 +3885,8 @@ impl<'a> Vm<'a> {
                 None => {
                     if let Some(cell) = self.global_variable_cell(name) {
                         Ok(self.read_tracked_named_cell(name, &cell))
+                    } else if name == "this" {
+                        Ok(TrackedValue::runtime(self.this_value.clone()))
                     } else if let Some(cell) = self.global_constant_cell(name) {
                         Ok(Self::fold_legacy_zero_tracked(
                             self.read_tracked_named_cell(name, &cell),
@@ -4004,6 +4041,13 @@ impl<'a> Vm<'a> {
                     } else {
                         self.own_or_global_script_function(name)
                     };
+                    let bound_context_name = name == "this" && self.has_bound_this(env);
+                    if name == "this"
+                        && (bound_context_name
+                            || function.is_none() && !self.has_host_function(name))
+                    {
+                        return self.evaluate(expr, env, depth).map(TrackedValue::runtime);
+                    }
                     if name == "SetLocal"
                         && (1..=3).contains(&args.len())
                         && function.is_none()
@@ -5517,7 +5561,14 @@ impl<'a> Vm<'a> {
                 && name
                     .and_then(|name| self.host_reference_function(name))
                     .is_some_and(|function| function.wants_reference(index));
-            let can_be_reference = if host_wants_reference {
+            // An unresolved `this` is the context-function result, an rvalue;
+            // a parameter/function-var/object-local named `this` remains the
+            // ordinary live reference found by the same syntax.
+            let unbound_context_this = matches!(arg, Expr::Variable(name) if name == "this")
+                && !self.has_bound_this(env);
+            let can_be_reference = if unbound_context_this {
+                false
+            } else if host_wants_reference {
                 self.expr_can_be_host_reference(arg)
             } else {
                 Self::expr_can_be_lvalue(arg)
@@ -6144,6 +6195,9 @@ impl<'a> Vm<'a> {
                     .unwrap_or_else(|| Binding::direct(Value::Nil).lvalue()))
             }
             AssignmentTarget::FunctionCall { name, args } => {
+                if name == "this" && self.has_bound_this(env) {
+                    return Err(RuntimeError::new("cannot call bound variable 'this'"));
+                }
                 let function = self.own_or_global_script_function(name);
                 let args =
                     self.build_call_args(Some(name), function, args, env, depth + 1)?;
@@ -6327,6 +6381,12 @@ impl<'a> Vm<'a> {
         let Expr::Variable(name) = callee.as_ref() else {
             return Ok(None);
         };
+        // Reference-retaining contexts take this fast path before ordinary
+        // call evaluation. Preserve the same identifier precedence here: a
+        // parameter/variable named `this` must not escape to a `func &this`.
+        if name == "this" && self.has_bound_this(env) {
+            return Err(RuntimeError::new("cannot call bound variable 'this'"));
+        }
         if *is_optional {
             return Ok(None);
         }

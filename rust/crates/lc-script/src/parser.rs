@@ -2094,22 +2094,11 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::True) => Ok(Expr::Literal(Literal::Bool(true))),
             TokenKind::Keyword(Keyword::False) => Ok(Expr::Literal(Literal::Bool(false))),
             TokenKind::Keyword(Keyword::Nil) => Ok(Expr::Literal(Literal::Nil)),
-            TokenKind::Keyword(Keyword::This) => {
-                // Handle both `this` and `this()` (legacy form)
-                if self.check_symbol(Symbol::LParen)? {
-                    self.consume()?; // consume '('
-                                     // Must be empty argument list
-                    if !self.check_symbol(Symbol::RParen)? {
-                        return Err(ParseError::new(
-                            "this does not accept arguments".to_string(),
-                            token.line,
-                            token.column,
-                        ));
-                    }
-                    self.consume()?; // consume ')'
-                }
-                Ok(Expr::This)
-            }
+            // `this` is an ordinary ATT_IDTF in C4Aul. Named bindings win
+            // normal variable lookup; only an unresolved name falls back to
+            // the context function. Generic postfix parsing also retains the
+            // legacy `this(...)` call form and its argument side effects.
+            TokenKind::Keyword(Keyword::This) => Ok(Expr::Variable("this".to_string())),
             TokenKind::GlobalCall => {
                 let failsafe = self.consume_if_symbol(Symbol::Tilde)?.is_some();
                 let (name, _) = self.expect_identifier("expected function name after 'global->'")?;
