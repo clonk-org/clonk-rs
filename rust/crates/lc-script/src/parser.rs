@@ -2049,7 +2049,7 @@ impl<'a> Parser<'a> {
                 ));
             }
             let (name, _) = self.expect_identifier("expected property name after '.'")?;
-            self.lexer.record_string_operand(name.clone());
+            self.record_synthesized_string_operand(name.clone());
             return Ok(Some(NavigationOperation::Property(name)));
         }
         if self.consume_if_symbol(Symbol::Arrow)?.is_some() {
@@ -2079,7 +2079,7 @@ impl<'a> Parser<'a> {
                     token.column,
                 ));
             }
-            self.lexer.record_string_operand(name.clone());
+            self.record_synthesized_string_operand(name.clone());
             return Ok(Some(NavigationOperation::Property(name)));
         }
         Ok(None)
@@ -2299,7 +2299,20 @@ impl<'a> Parser<'a> {
         let token = self.consume()?;
         match token.kind {
             TokenKind::Identifier(name) => {
-                self.lexer.record_string_operand(name.clone());
+                self.record_synthesized_string_operand(name.clone());
+                Ok(Expr::Literal(Literal::String(name)))
+            }
+            // C4Aul's parser accepts every ATT_IDTF spelling as a bare map
+            // key. Most language words are contextual there; Rust gives
+            // those words dedicated tokens, so lower them to the same held
+            // string literal as an ordinary identifier. The three literal
+            // spellings have distinct native tokens and remain invalid as
+            // bare keys (quoted and computed forms are handled above/below).
+            TokenKind::Keyword(keyword)
+                if !matches!(keyword, Keyword::True | Keyword::False | Keyword::Nil) =>
+            {
+                let name = keyword.lexeme().to_string();
+                self.record_synthesized_string_operand(name.clone());
                 Ok(Expr::Literal(Literal::String(name)))
             }
             TokenKind::String(value) => Ok(Expr::Literal(Literal::String(value))),
@@ -2308,6 +2321,16 @@ impl<'a> Parser<'a> {
                 token.line,
                 token.column,
             )),
+        }
+    }
+
+    /// Identifier-backed map/property operands are synthesized by the
+    /// parser, unlike quoted strings that the lexer records when first read.
+    /// Speculative tokens are replayed without re-lexing, so defer only these
+    /// synthesized side effects until the real parse to avoid duplicates.
+    fn record_synthesized_string_operand(&mut self, value: String) {
+        if self.speculative_tokens.is_none() {
+            self.lexer.record_string_operand(value);
         }
     }
 
@@ -3295,6 +3318,136 @@ func Ok() { return 1; }
             &entries[4].0,
             Expr::Variable(name) if name == "object_key"
         ));
+    }
+
+    #[test]
+    fn contextual_keyword_map_keys_match_att_idtf() {
+        // C++ tokenizes all of these spellings as ATT_IDTF. The first group
+        // exercises every contextual word that the Rust lexer currently
+        // promotes to Keyword; the rest pin already-identifier spellings and
+        // case-sensitive literal lookalikes at the same map-key boundary.
+        let expected_keys = [
+            "func",
+            "global",
+            "private",
+            "protected",
+            "public",
+            "local",
+            "var",
+            "static",
+            "const",
+            "if",
+            "else",
+            "while",
+            "for",
+            "in",
+            "return",
+            "break",
+            "continue",
+            "this",
+            "int",
+            "bool",
+            "string",
+            "object",
+            "id",
+            "array",
+            "proplist",
+            "effect",
+            "eq",
+            "ne",
+            "lt",
+            "le",
+            "gt",
+            "ge",
+            "and",
+            "or",
+            "not",
+            "True",
+            "False",
+            "Nil",
+            "NIL",
+            "Global",
+            "GLOBAL",
+        ];
+        let entries = expected_keys
+            .iter()
+            .enumerate()
+            .map(|(value, key)| format!("{key} = {value}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let script = parse_script(&format!(
+            "#strict 3\nfunc Test() {{ return {{ {entries} }}; }}"
+        ))
+        .expect("native ATT_IDTF spellings parse as bare map keys");
+        let Stmt::Return(Some(Expr::Proplist(parsed_entries))) = &script.functions[0].body[0]
+        else {
+            panic!("expected returned map literal");
+        };
+        let parsed_keys = parsed_entries
+            .iter()
+            .map(|(key, _)| match key {
+                Expr::Literal(Literal::String(key)) => key.as_str(),
+                other => panic!("expected string map key, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(parsed_keys, expected_keys);
+        assert_eq!(
+            script.string_literals, expected_keys,
+            "contextual bare keys are held in native encounter order"
+        );
+
+        let preserved = parse_script(
+            r#"#strict 3
+               func Test() {
+                   return { "true" = 1, "false" = 2, "nil" = 3,
+                            [true] = 4, [false] = 5, [nil] = 6 };
+               }"#,
+        )
+        .expect("reserved literal spellings remain valid when quoted or computed");
+        assert!(matches!(
+            &preserved.functions[0].body[0],
+            Stmt::Return(Some(Expr::Proplist(entries))) if entries.len() == 6
+        ));
+        assert_eq!(preserved.string_literals, ["true", "false", "nil"]);
+
+        for key in ["true", "false", "nil"] {
+            let error = parse_script(&format!(
+                "#strict 3\nfunc Test() {{ return {{ {key} = 1 }}; }}"
+            ))
+            .expect_err("native boolean/nil tokens are not bare map keys");
+            assert_eq!(
+                error.message(),
+                "expected identifier, string, or computed key for map key"
+            );
+        }
+
+        for key in ["global->Call()", "CLNK", "TRUE"] {
+            let error = parse_script(&format!(
+                "#strict 3\nfunc Test() {{ return {{ {key} = 1 }}; }}"
+            ))
+            .expect_err("non-ATT_IDTF tokens are not bare map keys");
+            assert_eq!(
+                error.message(),
+                "expected identifier, string, or computed key for map key"
+            );
+        }
+    }
+
+    #[test]
+    fn speculative_unary_records_synthesized_string_operands_once() {
+        let script = parse_script(
+            r#"#strict 3
+               func Test(object) {
+                   return [!{if = 1}, !{"quoted" = 2}, !object.dot, !object->arrow];
+               }"#,
+        )
+        .expect("unary operands parse after their speculative preflight");
+
+        assert_eq!(
+            script.string_literals,
+            ["if", "quoted", "dot", "arrow"],
+            "replayed identifier-backed operands are held exactly once"
+        );
     }
 
     #[test]
