@@ -1,12 +1,16 @@
 use std::collections::HashMap;
 
 use gilrs::ev::Code;
-use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs};
+use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs, GilrsBuilder};
 use lc_engine::ControlButton;
 use winit::event::ElementState;
 
-const AXIS_PRESS_THRESHOLD: f32 = 0.6;
-const AXIS_RELEASE_THRESHOLD: f32 = 0.4;
+/// Normalized equivalent of the strict +/-13337 comparison in
+/// `C4GamePadControl::FeedEvent`; gilrs exposes device axes in `[-1, 1]`.
+const LEGACY_AXIS_DEAD_ZONE: f32 = 13_337.0 / i16::MAX as f32;
+const LEGACY_AXIS_COUNT: usize = 8;
+const LEGACY_HAT_X_AXIS: u8 = 6;
+const LEGACY_HAT_Y_AXIS: u8 = 7;
 const GAMEPAD_SLOT_COUNT: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,6 +58,37 @@ impl LegacyGamepadButton {
     }
 }
 
+/// Raw C++ `KEY_JOY_Axis` identity. `high == false` is the minimum extent
+/// and `high == true` is the maximum extent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct LegacyGamepadAxis {
+    index: u8,
+    high: bool,
+}
+
+impl LegacyGamepadAxis {
+    pub(crate) const fn new(index: u8, high: bool) -> Self {
+        Self { index, high }
+    }
+
+    pub(crate) const fn index(self) -> u8 {
+        self.index
+    }
+
+    pub(crate) const fn high(self) -> bool {
+        self.high
+    }
+
+    pub(crate) const fn direction(self) -> ControlButton {
+        match (self.index % 2 == 0, self.high) {
+            (true, false) => ControlButton::Left,
+            (true, true) => ControlButton::Right,
+            (false, false) => ControlButton::Up,
+            (false, true) => ControlButton::Down,
+        }
+    }
+}
+
 pub(crate) struct GamepadManager {
     gilrs: Option<Gilrs>,
     states: HashMap<GamepadSlot, GamepadState>,
@@ -66,7 +101,11 @@ pub(crate) struct GamepadManager {
 
 impl GamepadManager {
     pub(crate) fn new() -> Self {
-        let gilrs = match Gilrs::new() {
+        // C++ owns the only gamepad dead zone. Gilrs' defaults would first
+        // apply a device-specific radial dead zone, jitter suppression, and
+        // axis-to-D-pad conversion, changing both the threshold and raw hat
+        // identity before `FeedEvent` parity can be reproduced here.
+        let gilrs = match GilrsBuilder::new().with_default_filters(false).build() {
             Ok(instance) => Some(instance),
             Err(error) => {
                 tracing::warn!(error = %error, "failed to initialise gamepad input");
@@ -206,53 +245,13 @@ impl GamepadManager {
         if let Some(class) = gui_button_class(button) {
             output.push(GamepadEvent::GuiButton { slot, class, state });
         }
-        let pad_state = self.states.entry(slot).or_default();
         let pressed = state == ElementState::Pressed;
         match button {
-            Button::DPadLeft => {
-                if let Some(change) = pad_state
-                    .direction_mut(ControlButton::Left)
-                    .set_dpad(pressed)
-                {
-                    output.push(GamepadEvent::Direction {
-                        slot,
-                        button: ControlButton::Left,
-                        state: change,
-                    });
-                }
-            }
-            Button::DPadRight => {
-                if let Some(change) = pad_state
-                    .direction_mut(ControlButton::Right)
-                    .set_dpad(pressed)
-                {
-                    output.push(GamepadEvent::Direction {
-                        slot,
-                        button: ControlButton::Right,
-                        state: change,
-                    });
-                }
-            }
-            Button::DPadUp => {
-                if let Some(change) = pad_state.direction_mut(ControlButton::Up).set_dpad(pressed) {
-                    output.push(GamepadEvent::Direction {
-                        slot,
-                        button: ControlButton::Up,
-                        state: change,
-                    });
-                }
-            }
-            Button::DPadDown => {
-                if let Some(change) = pad_state
-                    .direction_mut(ControlButton::Down)
-                    .set_dpad(pressed)
-                {
-                    output.push(GamepadEvent::Direction {
-                        slot,
-                        button: ControlButton::Down,
-                        state: change,
-                    });
-                }
+            Button::DPadLeft
+            | Button::DPadRight
+            | Button::DPadUp
+            | Button::DPadDown => {
+                self.handle_dpad_button_for_slot(slot, button, pressed, output);
             }
             Button::South => {
                 output.push(GamepadEvent::Action {
@@ -286,6 +285,37 @@ impl GamepadManager {
         }
     }
 
+    fn handle_dpad_button_for_slot(
+        &mut self,
+        slot: GamepadSlot,
+        button: Button,
+        pressed: bool,
+        output: &mut Vec<GamepadEvent>,
+    ) {
+        let (axis, value) = {
+            let pad_state = self.states.entry(slot).or_default();
+            match button {
+                Button::DPadLeft => pad_state.hat.left = pressed,
+                Button::DPadRight => pad_state.hat.right = pressed,
+                Button::DPadUp => pad_state.hat.up = pressed,
+                Button::DPadDown => pad_state.hat.down = pressed,
+                _ => return,
+            }
+            match button {
+                Button::DPadLeft | Button::DPadRight => (
+                    LEGACY_HAT_X_AXIS,
+                    f32::from(pad_state.hat.right as i8 - pad_state.hat.left as i8),
+                ),
+                Button::DPadUp | Button::DPadDown => (
+                    LEGACY_HAT_Y_AXIS,
+                    f32::from(pad_state.hat.down as i8 - pad_state.hat.up as i8),
+                ),
+                _ => unreachable!(),
+            }
+        };
+        self.handle_legacy_axis_for_slot(slot, axis, value, output);
+    }
+
     fn handle_axis_for_slot(
         &mut self,
         slot: GamepadSlot,
@@ -293,54 +323,63 @@ impl GamepadManager {
         value: f32,
         output: &mut Vec<GamepadEvent>,
     ) {
+        // Gilrs normalizes Y axes so positive points up. SDL joystick axes,
+        // which the C++ keycodes describe, use negative for up.
+        let Some((legacy_axis, value)) = (match axis {
+            Axis::LeftStickX => Some((0, value)),
+            Axis::LeftStickY => Some((1, -value)),
+            Axis::RightStickX => Some((2, value)),
+            Axis::RightStickY => Some((3, -value)),
+            Axis::LeftZ => Some((4, value)),
+            Axis::RightZ => Some((5, value)),
+            Axis::DPadX => Some((LEGACY_HAT_X_AXIS, value)),
+            Axis::DPadY => Some((LEGACY_HAT_Y_AXIS, -value)),
+            Axis::Unknown => None,
+        }) else {
+            return;
+        };
+        self.handle_legacy_axis_for_slot(slot, legacy_axis, value, output);
+    }
+
+    fn handle_legacy_axis_for_slot(
+        &mut self,
+        slot: GamepadSlot,
+        index: u8,
+        value: f32,
+        output: &mut Vec<GamepadEvent>,
+    ) {
         let pad_state = self.states.entry(slot).or_default();
-        match axis {
-            Axis::LeftStickX | Axis::DPadX => {
-                if let Some(change) = pad_state
-                    .direction_mut(ControlButton::Left)
-                    .update_axis((-value).max(0.0))
-                {
-                    output.push(GamepadEvent::Direction {
-                        slot,
-                        button: ControlButton::Left,
-                        state: change,
-                    });
-                }
-                if let Some(change) = pad_state
-                    .direction_mut(ControlButton::Right)
-                    .update_axis(value.max(0.0))
-                {
-                    output.push(GamepadEvent::Direction {
-                        slot,
-                        button: ControlButton::Right,
-                        state: change,
-                    });
-                }
+        if usize::from(index) >= pad_state.axes.len() {
+            return;
+        }
+        let desired_min = value < -LEGACY_AXIS_DEAD_ZONE;
+        let desired_max = value > LEGACY_AXIS_DEAD_ZONE;
+        for (high, desired) in [(false, desired_min), (true, desired_max)] {
+            let axis = LegacyGamepadAxis::new(index, high);
+            let direction = axis.direction();
+            let direction_was_active = pad_state.direction_active(direction);
+            let active = if high {
+                &mut pad_state.axes[usize::from(index)].max_active
+            } else {
+                &mut pad_state.axes[usize::from(index)].min_active
+            };
+            if *active == desired {
+                continue;
             }
-            Axis::LeftStickY | Axis::DPadY => {
-                // Positive values point down on most controllers.
-                if let Some(change) = pad_state
-                    .direction_mut(ControlButton::Up)
-                    .update_axis((-value).max(0.0))
-                {
-                    output.push(GamepadEvent::Direction {
-                        slot,
-                        button: ControlButton::Up,
-                        state: change,
-                    });
-                }
-                if let Some(change) = pad_state
-                    .direction_mut(ControlButton::Down)
-                    .update_axis(value.max(0.0))
-                {
-                    output.push(GamepadEvent::Direction {
-                        slot,
-                        button: ControlButton::Down,
-                        state: change,
-                    });
-                }
+            *active = desired;
+            let state = if desired {
+                ElementState::Pressed
+            } else {
+                ElementState::Released
+            };
+            output.push(GamepadEvent::Axis { slot, axis, state });
+            if direction_was_active != pad_state.direction_active(direction) {
+                output.push(GamepadEvent::Direction {
+                    slot,
+                    button: direction,
+                    state,
+                });
             }
-            _ => {}
         }
     }
 }
@@ -351,19 +390,25 @@ fn append_sourced_events(
     next_cluster: &mut u64,
     output: &mut Vec<SourcedGamepadEvent>,
 ) {
-    let mut gui_cluster = None;
+    let mut physical_cluster = None;
+    let mut previous_was_axis = false;
     for event in events {
-        let starts_gui_cluster = matches!(event, GamepadEvent::GuiButton { .. });
+        let starts_physical_cluster = matches!(
+            event,
+            GamepadEvent::GuiButton { .. } | GamepadEvent::Axis { .. }
+        );
         let direction = matches!(event, GamepadEvent::Direction { .. });
-        let cluster = match (starts_gui_cluster, direction, gui_cluster) {
+        let cluster = match (starts_physical_cluster, direction, physical_cluster) {
             (false, false, Some(cluster)) => cluster,
+            (false, true, Some(cluster)) if previous_was_axis => cluster,
             _ => {
                 let cluster = *next_cluster;
                 *next_cluster = (*next_cluster).wrapping_add(1);
-                gui_cluster = starts_gui_cluster.then_some(cluster);
+                physical_cluster = starts_physical_cluster.then_some(cluster);
                 cluster
             }
         };
+        previous_was_axis = matches!(event, GamepadEvent::Axis { .. });
         output.push(SourcedGamepadEvent {
             gamepad,
             cluster,
@@ -457,61 +502,36 @@ fn emit_disconnect_clear(slot: GamepadSlot, output: &mut Vec<GamepadEvent>) {
 
 #[derive(Default)]
 struct GamepadState {
-    left: DirectionState,
-    right: DirectionState,
-    up: DirectionState,
-    down: DirectionState,
+    axes: [LegacyAxisState; LEGACY_AXIS_COUNT],
+    hat: HatButtonState,
 }
 
 impl GamepadState {
-    fn direction_mut(&mut self, button: ControlButton) -> &mut DirectionState {
-        match button {
-            ControlButton::Left => &mut self.left,
-            ControlButton::Right => &mut self.right,
-            ControlButton::Up => &mut self.up,
-            ControlButton::Down => &mut self.down,
-        }
+    fn direction_active(&self, direction: ControlButton) -> bool {
+        self.axes.iter().enumerate().any(|(index, axis)| {
+            let even = index % 2 == 0;
+            match direction {
+                ControlButton::Left => even && axis.min_active,
+                ControlButton::Right => even && axis.max_active,
+                ControlButton::Up => !even && axis.min_active,
+                ControlButton::Down => !even && axis.max_active,
+            }
+        })
     }
 }
 
 #[derive(Default)]
-struct DirectionState {
-    dpad_active: bool,
-    axis_active: bool,
+struct LegacyAxisState {
+    min_active: bool,
+    max_active: bool,
 }
 
-impl DirectionState {
-    fn set_dpad(&mut self, pressed: bool) -> Option<ElementState> {
-        let previous = self.is_active();
-        self.dpad_active = pressed;
-        self.diff_state(previous)
-    }
-
-    fn update_axis(&mut self, magnitude: f32) -> Option<ElementState> {
-        let previous = self.is_active();
-        let desired = if self.axis_active {
-            magnitude >= AXIS_RELEASE_THRESHOLD
-        } else {
-            magnitude >= AXIS_PRESS_THRESHOLD
-        };
-        self.axis_active = desired;
-        self.diff_state(previous)
-    }
-
-    fn diff_state(&self, previous_overall: bool) -> Option<ElementState> {
-        let now = self.is_active();
-        if previous_overall == now {
-            None
-        } else if now {
-            Some(ElementState::Pressed)
-        } else {
-            Some(ElementState::Released)
-        }
-    }
-
-    fn is_active(&self) -> bool {
-        self.dpad_active || self.axis_active
-    }
+#[derive(Default)]
+struct HatButtonState {
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -529,6 +549,11 @@ pub(crate) enum GuiButtonClass {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GamepadEvent {
+    Axis {
+        slot: GamepadSlot,
+        axis: LegacyGamepadAxis,
+        state: ElementState,
+    },
     Direction {
         slot: GamepadSlot,
         button: ControlButton,
@@ -564,7 +589,8 @@ pub(crate) struct SourcedGamepadEvent {
 impl GamepadEvent {
     pub(crate) const fn slot(self) -> GamepadSlot {
         match self {
-            Self::Direction { slot, .. }
+            Self::Axis { slot, .. }
+            | Self::Direction { slot, .. }
             | Self::Button { slot, .. }
             | Self::Clear { slot }
             | Self::GuiButton { slot, .. }
@@ -638,36 +664,214 @@ mod tests {
     }
 
     #[test]
-    fn dpad_changes_direction_state() {
-        let mut direction = DirectionState::default();
-        assert_eq!(direction.set_dpad(true), Some(ElementState::Pressed));
-        assert_eq!(direction.set_dpad(true), None);
-        assert_eq!(direction.set_dpad(false), Some(ElementState::Released));
+    fn l026_axis_uses_cpp_strict_dead_zone_without_hysteresis() {
+        let slot = GamepadSlot::new(0);
+        let mut manager = GamepadManager::disabled();
+        let mut output = Vec::new();
+
+        manager.handle_axis_for_slot(slot, Axis::LeftStickX, -LEGACY_AXIS_DEAD_ZONE, &mut output);
+        assert!(output.is_empty(), "the C++ comparison is strict");
+
+        manager.handle_axis_for_slot(
+            slot,
+            Axis::LeftStickX,
+            -(LEGACY_AXIS_DEAD_ZONE + 0.001),
+            &mut output,
+        );
+        assert_eq!(
+            output,
+            [
+                GamepadEvent::Axis {
+                    slot,
+                    axis: LegacyGamepadAxis::new(0, false),
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Direction {
+                    slot,
+                    button: ControlButton::Left,
+                    state: ElementState::Pressed,
+                },
+            ]
+        );
+
+        output.clear();
+        manager.handle_axis_for_slot(slot, Axis::LeftStickX, -LEGACY_AXIS_DEAD_ZONE, &mut output);
+        assert_eq!(
+            output,
+            [
+                GamepadEvent::Axis {
+                    slot,
+                    axis: LegacyGamepadAxis::new(0, false),
+                    state: ElementState::Released,
+                },
+                GamepadEvent::Direction {
+                    slot,
+                    button: ControlButton::Left,
+                    state: ElementState::Released,
+                },
+            ],
+            "there is no separate release threshold"
+        );
     }
 
     #[test]
-    fn axis_uses_thresholds() {
-        let mut direction = DirectionState::default();
-        // Below press threshold, no activation.
-        assert_eq!(direction.update_axis(0.3), None);
-        // Above press threshold, activates.
-        assert_eq!(direction.update_axis(0.7), Some(ElementState::Pressed));
-        // Small change above release threshold keeps state.
-        assert_eq!(direction.update_axis(0.45), None);
-        // Drop below release threshold, release.
-        assert_eq!(direction.update_axis(0.1), Some(ElementState::Released));
+    fn l026_gilrs_axes_map_to_cpp_axis_zero_through_hat_zero() {
+        let slot = GamepadSlot::new(0);
+        let mut manager = GamepadManager::disabled();
+        let mut output = Vec::new();
+        for (axis, value) in [
+            (Axis::LeftStickX, -1.0),
+            (Axis::LeftStickY, 1.0),
+            (Axis::RightStickX, -1.0),
+            (Axis::RightStickY, 1.0),
+            (Axis::LeftZ, -1.0),
+            (Axis::RightZ, -1.0),
+            (Axis::DPadX, -1.0),
+            (Axis::DPadY, 1.0),
+        ] {
+            manager.handle_axis_for_slot(slot, axis, value, &mut output);
+        }
+        assert_eq!(
+            output
+                .iter()
+                .filter_map(|event| match event {
+                    GamepadEvent::Axis { axis, .. } => Some((axis.index(), axis.high())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [
+                (0, false),
+                (1, false),
+                (2, false),
+                (3, false),
+                (4, false),
+                (5, false),
+                (6, false),
+                (7, false),
+            ]
+        );
     }
 
     #[test]
-    fn combining_dpad_and_axis_keeps_direction_active() {
-        let mut direction = DirectionState::default();
-        assert_eq!(direction.set_dpad(true), Some(ElementState::Pressed));
-        // Axis activation should not emit a press because direction already active.
-        assert_eq!(direction.update_axis(0.8), None);
-        // Releasing dpad while axis still active keeps direction active.
-        assert_eq!(direction.set_dpad(false), None);
-        // Releasing axis now emits release.
-        assert_eq!(direction.update_axis(0.0), Some(ElementState::Released));
+    fn l026_dpad_buttons_share_hat_axis_state_with_raw_dpad_axes() {
+        let slot = GamepadSlot::new(0);
+        let mut manager = GamepadManager::disabled();
+        let mut output = Vec::new();
+
+        manager.handle_button_for_slot(slot, Button::DPadLeft, ElementState::Pressed, &mut output);
+        assert_eq!(
+            output,
+            [
+                GamepadEvent::Axis {
+                    slot,
+                    axis: LegacyGamepadAxis::new(LEGACY_HAT_X_AXIS, false),
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Direction {
+                    slot,
+                    button: ControlButton::Left,
+                    state: ElementState::Pressed,
+                },
+            ]
+        );
+
+        output.clear();
+        manager.handle_axis_for_slot(slot, Axis::DPadX, -1.0, &mut output);
+        assert!(
+            output.is_empty(),
+            "button and axis representations of one hat transition are deduplicated"
+        );
+
+        manager.handle_button_for_slot(slot, Button::DPadLeft, ElementState::Released, &mut output);
+        assert_eq!(
+            output,
+            [
+                GamepadEvent::Axis {
+                    slot,
+                    axis: LegacyGamepadAxis::new(LEGACY_HAT_X_AXIS, false),
+                    state: ElementState::Released,
+                },
+                GamepadEvent::Direction {
+                    slot,
+                    button: ControlButton::Left,
+                    state: ElementState::Released,
+                },
+            ]
+        );
+        output.clear();
+        manager.handle_axis_for_slot(slot, Axis::DPadX, 0.0, &mut output);
+        assert!(output.is_empty());
+
+        manager.handle_button_for_slot(slot, Button::DPadUp, ElementState::Pressed, &mut output);
+        assert!(matches!(
+            output.first(),
+            Some(GamepadEvent::Axis {
+                axis,
+                state: ElementState::Pressed,
+                ..
+            }) if *axis == LegacyGamepadAxis::new(LEGACY_HAT_Y_AXIS, false)
+        ));
+    }
+
+    #[test]
+    fn l026_stick_and_hat_share_the_semantic_direction_state() {
+        let slot = GamepadSlot::new(0);
+        let mut manager = GamepadManager::disabled();
+        let mut output = Vec::new();
+
+        manager.handle_axis_for_slot(slot, Axis::LeftStickX, -1.0, &mut output);
+        assert!(matches!(
+            output.as_slice(),
+            [GamepadEvent::Axis { .. }, GamepadEvent::Direction {
+                button: ControlButton::Left,
+                state: ElementState::Pressed,
+                ..
+            }]
+        ));
+
+        output.clear();
+        manager.handle_button_for_slot(slot, Button::DPadLeft, ElementState::Pressed, &mut output);
+        assert!(matches!(output.as_slice(), [GamepadEvent::Axis { .. }]));
+
+        output.clear();
+        manager.handle_axis_for_slot(slot, Axis::LeftStickX, 0.0, &mut output);
+        assert!(matches!(output.as_slice(), [GamepadEvent::Axis { .. }]));
+
+        output.clear();
+        manager.handle_button_for_slot(slot, Button::DPadLeft, ElementState::Released, &mut output);
+        assert!(matches!(
+            output.as_slice(),
+            [GamepadEvent::Axis { .. }, GamepadEvent::Direction {
+                button: ControlButton::Left,
+                state: ElementState::Released,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn l026_raw_axis_precedes_its_ui_alias_in_one_source_cluster() {
+        let slot = GamepadSlot::new(0);
+        let events = [
+            GamepadEvent::Axis {
+                slot,
+                axis: LegacyGamepadAxis::new(0, false),
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                slot,
+                button: ControlButton::Left,
+                state: ElementState::Pressed,
+            },
+        ];
+        let mut next_cluster = 12;
+        let mut output = Vec::new();
+        append_sourced_events(0, events, &mut next_cluster, &mut output);
+
+        assert!(matches!(output[0].event, GamepadEvent::Axis { .. }));
+        assert!(matches!(output[1].event, GamepadEvent::Direction { .. }));
+        assert_eq!(output[0].cluster, output[1].cluster);
+        assert_eq!(next_cluster, 13);
     }
 
     #[test]

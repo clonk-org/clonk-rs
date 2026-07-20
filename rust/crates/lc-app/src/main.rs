@@ -63,7 +63,7 @@ use game_over::{
 };
 use gamepad::{
     GamepadActionType, GamepadEvent, GamepadManager, GamepadSlot, GuiButtonClass,
-    LegacyGamepadButton, SourcedGamepadEvent,
+    LegacyGamepadAxis, LegacyGamepadButton, SourcedGamepadEvent,
 };
 use ingame_menu::{
     DisplayFlags, DisplayToggle, GoalRuleEntry, HostDisconnectClientEntry, HostilityEntry,
@@ -30209,6 +30209,27 @@ impl GameApp {
             })
     }
 
+    fn gamepad_player_axis_in_scope(
+        &self,
+        slot: GamepadSlot,
+        axis: LegacyGamepadAxis,
+    ) -> bool {
+        self.gamepad_bindings
+            .control_candidates_for_axis(
+                slot.index(),
+                axis.index(),
+                axis.high(),
+                ElementState::Pressed,
+            )
+            .any(|(control_set, _)| {
+                i32::try_from(control_set)
+                    .ok()
+                    .and_then(|control_set| self.local_controls.owner_for_set(control_set))
+                    .and_then(|owner| self.engine.player(owner))
+                    .is_some()
+            })
+    }
+
     fn handle_network_chart_key(
         &mut self,
         key: VirtualKeyCode,
@@ -41737,19 +41758,23 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         let mut cluster = 0_u64;
         let mut started = false;
+        let mut previous_was_axis = false;
         let mut sourced = Vec::new();
         for event in events {
-            if !started
-                || matches!(
-                    event,
-                    GamepadEvent::Direction { .. } | GamepadEvent::GuiButton { .. }
-                )
-            {
+            let starts_physical_cluster = matches!(
+                event,
+                GamepadEvent::GuiButton { .. } | GamepadEvent::Axis { .. }
+            );
+            let starts_cluster = !started
+                || starts_physical_cluster
+                || matches!(event, GamepadEvent::Direction { .. }) && !previous_was_axis;
+            if starts_cluster {
                 if started {
                     cluster = cluster.wrapping_add(1);
                 }
                 started = true;
             }
+            previous_was_axis = matches!(event, GamepadEvent::Axis { .. });
             sourced.push(SourcedGamepadEvent {
                 gamepad: 0,
                 cluster,
@@ -41831,6 +41856,9 @@ impl GameApp {
                 && cluster_events.iter().any(|event| match event {
                     GamepadEvent::Button { slot, button, .. } => {
                         self.gamepad_player_button_in_scope(*slot, *button)
+                    }
+                    GamepadEvent::Axis { slot, axis, .. } => {
+                        self.gamepad_player_axis_in_scope(*slot, *axis)
                     }
                     _ => false,
                 });
@@ -41915,8 +41943,12 @@ impl GameApp {
             };
             let mut suppress_base_select_alias = false;
             let mut suppress_base_cancel_alias = false;
+            let mut previous_was_axis = false;
 
             for event in cluster_events {
+                let axis_alias = previous_was_axis
+                    && matches!(event, GamepadEvent::Direction { .. });
+                previous_was_axis = matches!(event, GamepadEvent::Axis { .. });
                 let mut pending = Some(event);
                 while let Some(event) = pending.take() {
                     match owner {
@@ -41927,50 +41959,22 @@ impl GameApp {
                             // before the raw button must neither cancel nor
                             // activate the modal, and a wrong-pad raw button is
                             // consumed while leaving capture open.
-                            if let GamepadEvent::Button {
-                                slot,
-                                button,
-                                state,
-                            } = event
-                            {
-                                self.handle_gamepad_button(slot, button, state)?;
-                            }
+                            self.handle_gamepad_raw_event(event)?;
                         }
                         ClusterOwner::OptionsDevice => {
                             // Preserve the selected device's raw-key path
                             // without turning selection into permission to
                             // operate C4GUI. In startup mode this currently
                             // has no gameplay receiver, just like C++.
-                            if let GamepadEvent::Button {
-                                slot,
-                                button,
-                                state,
-                            } = event
-                            {
-                                self.handle_gamepad_button(slot, button, state)?;
-                            }
+                            self.handle_gamepad_raw_event(event)?;
                         }
                         ClusterOwner::Message => {
-                            if let GamepadEvent::Button {
-                                slot,
-                                button,
-                                state,
-                            } = event
-                            {
-                                self.handle_gamepad_button(slot, button, state)?;
-                            } else {
+                            if !self.handle_gamepad_raw_event(event)? {
                                 self.handle_message_dialog_gamepad_event(event)?;
                             }
                         }
                         ClusterOwner::LeagueSignup => {
-                            if let GamepadEvent::Button {
-                                slot,
-                                button,
-                                state,
-                            } = event
-                            {
-                                self.handle_gamepad_button(slot, button, state)?;
-                            } else {
+                            if !self.handle_gamepad_raw_event(event)? {
                                 self.handle_league_signup_gamepad_event(event)?;
                             }
                         }
@@ -42000,7 +42004,8 @@ impl GameApp {
                                     dialog.pointer_left();
                                 }
                             }
-                            GamepadEvent::Direction { .. }
+                            GamepadEvent::Axis { .. }
+                            | GamepadEvent::Direction { .. }
                             | GamepadEvent::Button { .. }
                             | GamepadEvent::GuiButton { .. }
                             | GamepadEvent::Action { .. } => {}
@@ -42009,6 +42014,12 @@ impl GameApp {
                             self.handle_definition_selector_gamepad_event(event)?;
                         }
                         ClusterOwner::ContextPending => {
+                            if matches!(event, GamepadEvent::Axis { .. }) {
+                                // A raw axis precedes its semantic GUI alias
+                                // in the same physical-input cluster. Keep the
+                                // context pending until that direction arrives.
+                                continue;
+                            }
                             if self.handle_context_menu_gamepad_event(event)? {
                                 owner = ClusterOwner::Context;
                             } else {
@@ -42070,14 +42081,14 @@ impl GameApp {
                                 class: GuiButtonClass::Low,
                                 ..
                             } => {
-                                self.handle_gamepad_event(event)?;
+                                self.handle_gamepad_event_with_axis_alias(event, axis_alias)?;
                                 suppress_base_select_alias = true;
                             }
                             GamepadEvent::GuiButton {
                                 class: GuiButtonClass::High,
                                 ..
                             } => {
-                                self.handle_gamepad_event(event)?;
+                                self.handle_gamepad_event_with_axis_alias(event, axis_alias)?;
                                 suppress_base_cancel_alias = true;
                             }
                             GamepadEvent::Action {
@@ -42088,21 +42099,23 @@ impl GameApp {
                                 action: GamepadActionType::Cancel,
                                 ..
                             } if suppress_base_cancel_alias => {}
-                            event => self.handle_gamepad_event(event)?,
+                            event => {
+                                self.handle_gamepad_event_with_axis_alias(event, axis_alias)?
+                            }
                         },
                         ClusterOwner::Advanced => match event {
                             GamepadEvent::GuiButton {
                                 class: GuiButtonClass::Low,
                                 ..
                             } => {
-                                self.handle_gamepad_event(event)?;
+                                self.handle_gamepad_event_with_axis_alias(event, axis_alias)?;
                                 suppress_base_select_alias = true;
                             }
                             GamepadEvent::GuiButton {
                                 class: GuiButtonClass::High,
                                 ..
                             } => {
-                                self.handle_gamepad_event(event)?;
+                                self.handle_gamepad_event_with_axis_alias(event, axis_alias)?;
                                 suppress_base_cancel_alias = true;
                             }
                             GamepadEvent::Action {
@@ -42113,26 +42126,22 @@ impl GameApp {
                                 action: GamepadActionType::Cancel,
                                 ..
                             } if suppress_base_cancel_alias => {}
-                            event => self.handle_gamepad_event(event)?,
+                            event => {
+                                self.handle_gamepad_event_with_axis_alias(event, axis_alias)?
+                            }
                         },
                         ClusterOwner::Chat => match event {
-                            event @ (GamepadEvent::Direction { .. }
+                            event @ (GamepadEvent::Axis { .. }
+                            | GamepadEvent::Direction { .. }
                             | GamepadEvent::Button { .. }
                             | GamepadEvent::Clear { .. }) => {
-                                self.handle_gamepad_event(event)?;
+                                self.handle_gamepad_event_with_axis_alias(event, axis_alias)?;
                             }
                             GamepadEvent::GuiButton { .. } | GamepadEvent::Action { .. } => {}
                         },
                         ClusterOwner::NetworkChart => {
                             if chart_player_control_owns_cluster {
-                                if let GamepadEvent::Button {
-                                    slot,
-                                    button,
-                                    state,
-                                } = event
-                                {
-                                    self.handle_gamepad_button(slot, button, state)?;
-                                }
+                                self.handle_gamepad_raw_event(event)?;
                             } else {
                                 match event {
                                     GamepadEvent::GuiButton {
@@ -42151,7 +42160,8 @@ impl GameApp {
                                         action: GamepadActionType::Cancel,
                                         ..
                                     } => {}
-                                    event => self.handle_gamepad_event(event)?,
+                                    event => self
+                                        .handle_gamepad_event_with_axis_alias(event, axis_alias)?,
                                 }
                             }
                         }
@@ -42309,7 +42319,8 @@ impl GameApp {
                                     self.process_options_dialog_actions(actions)?;
                                     suppress_base_cancel_alias = true;
                                 }
-                                event => self.handle_gamepad_event(event)?,
+                                event => self
+                                    .handle_gamepad_event_with_axis_alias(event, axis_alias)?,
                             }
                         }
                     }
@@ -42363,7 +42374,8 @@ impl GameApp {
                     controller.cancel_interaction();
                     Vec::new()
                 }
-                GamepadEvent::Direction { .. }
+                GamepadEvent::Axis { .. }
+                | GamepadEvent::Direction { .. }
                 | GamepadEvent::Button { .. }
                 | GamepadEvent::Action { .. }
                 | GamepadEvent::GuiButton { .. } => Vec::new(),
@@ -42419,7 +42431,8 @@ impl GameApp {
                     dialog.controller.cancel_interaction();
                     Vec::new()
                 }
-                GamepadEvent::Direction { .. }
+                GamepadEvent::Axis { .. }
+                | GamepadEvent::Direction { .. }
                 | GamepadEvent::Button { .. }
                 | GamepadEvent::Action { .. }
                 | GamepadEvent::GuiButton { .. } => Vec::new(),
@@ -42473,7 +42486,8 @@ impl GameApp {
                 }
                 None
             }
-            GamepadEvent::Direction { .. }
+            GamepadEvent::Axis { .. }
+            | GamepadEvent::Direction { .. }
             | GamepadEvent::Button { .. }
             | GamepadEvent::Action { .. }
             | GamepadEvent::GuiButton { .. } => None,
@@ -42542,7 +42556,8 @@ impl GameApp {
                     dialog.controller.cancel_interaction();
                     Vec::new()
                 }
-                GamepadEvent::Direction { .. }
+                GamepadEvent::Axis { .. }
+                | GamepadEvent::Direction { .. }
                 | GamepadEvent::Button { .. }
                 | GamepadEvent::Action { .. }
                 | GamepadEvent::GuiButton { .. } => Vec::new(),
@@ -42632,14 +42647,41 @@ impl GameApp {
                 }
                 Ok(())
             }
-            GamepadEvent::Direction { .. }
+            GamepadEvent::Axis { .. }
+            | GamepadEvent::Direction { .. }
             | GamepadEvent::Button { .. }
             | GamepadEvent::GuiButton { .. }
             | GamepadEvent::Action { .. } => Ok(()),
         }
     }
 
+    fn handle_gamepad_raw_event(&mut self, event: GamepadEvent) -> Result<bool, EngineError> {
+        match event {
+            GamepadEvent::Axis { slot, axis, state } => {
+                self.handle_gamepad_axis(slot, axis, state)?;
+                Ok(true)
+            }
+            GamepadEvent::Button {
+                slot,
+                button,
+                state,
+            } => {
+                self.handle_gamepad_button(slot, button, state)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn handle_gamepad_event(&mut self, event: GamepadEvent) -> Result<(), EngineError> {
+        self.handle_gamepad_event_with_axis_alias(event, false)
+    }
+
+    fn handle_gamepad_event_with_axis_alias(
+        &mut self,
+        event: GamepadEvent,
+        axis_alias: bool,
+    ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.note_classic_host_lobby_non_pointer_input();
         self.context_menu_pointer_dismissed_lobby_team_player = None;
@@ -42674,12 +42716,15 @@ impl GameApp {
             return Ok(());
         }
         match event {
+            GamepadEvent::Axis { slot, axis, state } => {
+                self.handle_gamepad_axis(slot, axis, state)?;
+            }
             GamepadEvent::Direction {
                 slot,
                 button,
                 state,
             } => {
-                self.handle_gamepad_direction(slot, button, state)?;
+                self.handle_gamepad_direction_inner(slot, button, state, !axis_alias)?;
             }
             GamepadEvent::Button {
                 slot,
@@ -42784,6 +42829,109 @@ impl GameApp {
             } => {
                 self.handle_gamepad_action(slot, action, state)?;
             }
+        }
+        Ok(())
+    }
+
+    fn handle_gamepad_axis(
+        &mut self,
+        slot: GamepadSlot,
+        axis: LegacyGamepadAxis,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        use lc_frontend::startup_options_controls::ControlDevice;
+
+        let capture = self
+            .message_dialogs
+            .last()
+            .and_then(|pending| match pending.continuation {
+                MessageDialogContinuation::OptionsControlCapture(target)
+                    if target.device == ControlDevice::Gamepad =>
+                {
+                    Some(target)
+                }
+                _ => None,
+            });
+        if let Some(target) = capture {
+            if state == ElementState::Pressed && target.set == usize::from(slot.index()) {
+                if let (Some(id), Some(raw_key)) = (
+                    ControlBindingId::ALL.get(target.control).copied(),
+                    input::legacy_gamepad_axis_key(slot.index(), axis.index(), axis.high()),
+                ) {
+                    if self.gamepad_bindings.rebind_raw(target.set, id, raw_key) {
+                        let label = self.gamepad_bindings.key_label_for_set(target.set, id);
+                        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                            dialog.controls_mut().set_label(target, label);
+                        }
+                        self.finish_message_dialog(
+                            lc_frontend::message_dialog::MessageDialogResult::Ok,
+                        )?;
+                    }
+                }
+            }
+            return Ok(());
+        }
+        if self.message_dialog_owns_gamepad_input()
+            || self
+                .network_start_wait
+                .as_ref()
+                .is_some_and(|wait| wait.visible)
+            || self.startup_options_advanced_dialog.is_some()
+            || self.startup_player_properties_dialog.is_some()
+            || self.definition_selector.is_some()
+            || self.game_over_dialog_is_active() && self.running_chat_controller().is_none()
+            || !matches!(self.mode, AppMode::Running)
+        {
+            return Ok(());
+        }
+
+        let direction = axis.direction();
+        let mut candidates = Vec::new();
+        if let Some(raw_key) =
+            input::legacy_gamepad_axis_key(slot.index(), axis.index(), axis.high())
+        {
+            candidates.extend(
+                self.gamepad_bindings
+                    .control_candidates_for_raw_key(raw_key, state),
+            );
+        }
+        candidates.extend(self.runtime_control_candidates_for_gamepad_direction(
+            slot.index(),
+            direction,
+            state,
+        ));
+        if let Some(raw_key) =
+            input::legacy_gamepad_axis_alias_key(slot.index(), axis.index(), axis.high())
+        {
+            candidates.extend(
+                self.gamepad_bindings
+                    .control_candidates_for_raw_key(raw_key, state),
+            );
+        }
+        let routing = self.local_controls.route_keyboard_candidates(
+            candidates,
+            state,
+            false,
+            |owner| {
+                self.engine
+                    .player(owner)
+                    .map(|player| player.control_style())
+            },
+        );
+        if let KeyboardRoutingOutcome::Consumed {
+            owner: Some(owner),
+            event: Some(event),
+        } = routing
+        {
+            self.dispatch_control_event_for_local_player(owner, event)?;
+        }
+        if !matches!(routing, KeyboardRoutingOutcome::Unhandled) {
+            return Ok(());
+        }
+        if let Some(action) =
+            self.runtime_custom_gamepad_direction_action(slot.index(), direction)
+        {
+            self.execute_runtime_custom_gamepad_action(action, state)?;
         }
         Ok(())
     }
@@ -42895,6 +43043,16 @@ impl GameApp {
         slot: GamepadSlot,
         button: ControlButton,
         state: ElementState,
+    ) -> Result<(), EngineError> {
+        self.handle_gamepad_direction_inner(slot, button, state, true)
+    }
+
+    fn handle_gamepad_direction_inner(
+        &mut self,
+        slot: GamepadSlot,
+        button: ControlButton,
+        state: ElementState,
+        route_runtime_gameplay: bool,
     ) -> Result<(), EngineError> {
         if self.message_dialog_owns_gamepad_input() {
             return self.handle_message_dialog_gamepad_event(GamepadEvent::Direction {
@@ -43146,18 +43304,14 @@ impl GameApp {
                 }
             }
             AppMode::Running => {
-                let event = match state {
-                    ElementState::Pressed => ControlEvent::Press(button),
-                    ElementState::Released => ControlEvent::Release(button),
-                };
-                let mut candidates = self.runtime_control_candidates_for_gamepad_direction(
+                if !route_runtime_gameplay {
+                    return Ok(());
+                }
+                let candidates = self.runtime_control_candidates_for_gamepad_direction(
                     slot.index(),
                     button,
                     state,
                 );
-                if let Ok(control_set) = usize::try_from(slot.control_set()) {
-                    candidates.push((control_set, Some(event)));
-                }
                 let routing = self.local_controls.route_keyboard_candidates(
                     candidates,
                     state,
@@ -57767,7 +57921,8 @@ impl GameApp {
                     ..
                 } => Some(menu.handle_gamepad_high()),
                 GamepadEvent::Clear { .. } => Some(menu.dismiss(false)),
-                GamepadEvent::Direction { .. }
+                GamepadEvent::Axis { .. }
+                | GamepadEvent::Direction { .. }
                 | GamepadEvent::Button { .. }
                 | GamepadEvent::Action { .. }
                 | GamepadEvent::GuiButton { .. } => None,
@@ -129050,6 +129205,54 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn l026_options_gamepad_capture_records_the_exact_axis_key() {
+        use lc_frontend::startup_options_controls::{ControlCaptureTarget, ControlDevice};
+        use lc_frontend::startup_options_dlg::OptionsDlgAction;
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_options_menu();
+        let target = ControlCaptureTarget {
+            device: ControlDevice::Gamepad,
+            set: 0,
+            control: ControlBindingId::Dig as usize,
+        };
+        app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(target)])
+            .expect("open gamepad axis capture");
+        let slot = GamepadSlot::new(0);
+        app.process_sourced_gamepad_event_batch(
+            [
+                SourcedGamepadEvent {
+                    gamepad: 0,
+                    cluster: 4,
+                    event: GamepadEvent::Axis {
+                        slot,
+                        axis: LegacyGamepadAxis::new(1, false),
+                        state: ElementState::Pressed,
+                    },
+                },
+                SourcedGamepadEvent {
+                    gamepad: 0,
+                    cluster: 4,
+                    event: GamepadEvent::Direction {
+                        slot,
+                        button: ControlButton::Up,
+                        state: ElementState::Pressed,
+                    },
+                },
+            ],
+            true,
+        )
+        .expect("capture exact axis before its semantic alias");
+
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(
+            app.gamepad_bindings
+                .raw_key_for_set(0, ControlBindingId::Dig),
+            input::legacy_gamepad_axis_key(0, 1, false)
+        );
+    }
+
+    #[test]
     fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
         use lc_frontend::message_dialog::{MessageDialogIcon, MessageDialogResult};
         use lc_frontend::startup_options_dlg::OptionsDlgAction;
@@ -134680,13 +134883,17 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn gamepad_slot_routes_to_matching_local_control_set() {
-        // Physical gamepad N is registered as control set GamePad1 + N;
-        // LocalControlKey resolves the player owning that set before it
-        // emits any player control (pristine 9ffa0a5d
-        // src/C4Game.cpp:3439-3452,3535-3567;
-        // src/C4Constants.h:84-93).
+    fn l026_axis_binding_routes_to_configured_set_not_physical_slot() {
+        let mut config = Config::new();
+        config.set_in(
+            Some("Gamepad0"),
+            "Button7",
+            input::legacy_gamepad_axis_key(1, 0, false)
+                .expect("physical gamepad two axis key")
+                .to_string(),
+        );
         let mut app = new_running_sandbox_app();
+        app.gamepad_bindings = GamepadBindings::from_config(&config);
         let primary = app.local_owner;
         let secondary = primary + 1;
         app.engine
@@ -134711,12 +134918,20 @@ ScenInfoArea=70,5,25,90
             disable_mouse: false,
         });
 
-        app.process_gamepad_event_batch([GamepadEvent::Direction {
-            slot: GamepadSlot::new(1),
-            button: ControlButton::Left,
-            state: ElementState::Pressed,
-        }])
-        .expect("press gamepad two left");
+        let slot = GamepadSlot::new(1);
+        app.process_gamepad_event_batch([
+            GamepadEvent::Axis {
+                slot,
+                axis: LegacyGamepadAxis::new(0, false),
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                slot,
+                button: ControlButton::Left,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("press configured gamepad-two axis");
 
         let pressed = |app: &GameApp, owner| {
             app.engine
@@ -134728,8 +134943,136 @@ ScenInfoArea=70,5,25,90
                 .control
                 .pressed_coms
         };
-        assert_eq!(pressed(&app, primary) & (1 << lc_engine::COM_LEFT), 0);
-        assert_ne!(pressed(&app, secondary) & (1 << lc_engine::COM_LEFT), 0);
+        assert_ne!(pressed(&app, primary) & (1 << lc_engine::COM_LEFT), 0);
+        assert_eq!(pressed(&app, secondary) & (1 << lc_engine::COM_LEFT), 0);
+    }
+
+    #[test]
+    fn l026_unconfigured_stick_and_hat_emit_no_gameplay_controls() {
+        let mut app = new_running_sandbox_app();
+        app.gamepad_bindings = GamepadBindings::from_config(&Config::new());
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: app.local_owner,
+            preferred_set: 4,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        let slot = GamepadSlot::new(0);
+
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot,
+            button: ControlButton::Left,
+            state: ElementState::Pressed,
+        }])
+        .expect("route standalone semantic direction");
+        assert_eq!(
+            app.engine
+                .player(app.local_owner)
+                .expect("control-set four player")
+                .control
+                .pressed_coms,
+            0,
+            "semantic direction alone must not restore the hardwired gameplay path"
+        );
+
+        app.process_gamepad_event_batch([
+            GamepadEvent::Axis {
+                slot,
+                axis: LegacyGamepadAxis::new(0, false),
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                slot,
+                button: ControlButton::Left,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Axis {
+                slot,
+                axis: LegacyGamepadAxis::new(6, false),
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                slot,
+                button: ControlButton::Left,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("route unconfigured stick and hat axes");
+
+        let pressed = app
+            .engine
+            .player(app.local_owner)
+            .expect("control-set four player")
+            .control
+            .pressed_coms;
+        assert_eq!(pressed, 0);
+    }
+
+    #[test]
+    fn l026_axis_up_fires_dig_and_hat_zero_fires_configured_left() {
+        let mut config = Config::new();
+        config.set_in(
+            Some("Gamepad0"),
+            "Button6",
+            input::legacy_gamepad_axis_key(0, 1, false)
+                .expect("axis-up key")
+                .to_string(),
+        );
+        config.set_in(
+            Some("Gamepad0"),
+            "Button7",
+            input::legacy_gamepad_axis_key(0, 6, false)
+                .expect("hat-zero-left key")
+                .to_string(),
+        );
+        let mut app = new_running_sandbox_app();
+        app.gamepad_bindings = GamepadBindings::from_config(&config);
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: app.local_owner,
+            preferred_set: 4,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        let slot = GamepadSlot::new(0);
+
+        app.process_gamepad_event_batch([
+            GamepadEvent::Axis {
+                slot,
+                axis: LegacyGamepadAxis::new(1, false),
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                slot,
+                button: ControlButton::Up,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Axis {
+                slot,
+                axis: LegacyGamepadAxis::new(6, false),
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                slot,
+                button: ControlButton::Left,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("route configured axis and hat controls");
+
+        let pressed = app
+            .engine
+            .player(app.local_owner)
+            .expect("control-set four player")
+            .control
+            .pressed_coms;
+        assert_ne!(pressed & (1 << lc_engine::COM_DIG), 0);
+        assert_ne!(pressed & (1 << lc_engine::COM_LEFT), 0);
     }
 
     #[test]
@@ -138359,6 +138702,15 @@ ScenInfoArea=70,5,25,90
     #[test]
     fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
         let mut app = new_game_over_keyboard_app();
+        let mut config = Config::new();
+        config.set_in(
+            Some("Gamepad1"),
+            "Button7",
+            input::legacy_gamepad_axis_key(1, 0, false)
+                .expect("gamepad-two left-axis key")
+                .to_string(),
+        );
+        app.gamepad_bindings = GamepadBindings::from_config(&config);
         app.local_controls.remove(app.local_owner);
         app.local_controls.initialize(LocalControlInit {
             owner: app.local_owner,
@@ -138376,15 +138728,26 @@ ScenInfoArea=70,5,25,90
             .pressed_coms = 0;
 
         app.process_sourced_gamepad_event_batch(
-            [SourcedGamepadEvent {
-                gamepad: 1,
-                cluster: 17,
-                event: GamepadEvent::Direction {
-                    slot: GamepadSlot::new(1),
-                    button: ControlButton::Left,
-                    state: ElementState::Pressed,
+            [
+                SourcedGamepadEvent {
+                    gamepad: 1,
+                    cluster: 17,
+                    event: GamepadEvent::Axis {
+                        slot: GamepadSlot::new(1),
+                        axis: LegacyGamepadAxis::new(0, false),
+                        state: ElementState::Pressed,
+                    },
                 },
-            }],
+                SourcedGamepadEvent {
+                    gamepad: 1,
+                    cluster: 17,
+                    event: GamepadEvent::Direction {
+                        slot: GamepadSlot::new(1),
+                        button: ControlButton::Left,
+                        state: ElementState::Pressed,
+                    },
+                },
+            ],
             false,
         )
         .expect("chat forwards raw input from a non-GUI gamepad above evaluation");
@@ -143492,6 +143855,15 @@ ScenInfoArea=70,5,25,90
             .set(Ok(parse_runtime_key_config(b"[Keys]\nChatOpen=Joy1A\n")
                 .expect("parse colliding gamepad chat chord")))
             .expect("install colliding gamepad chat chord");
+        let mut gamepad_config = Config::new();
+        gamepad_config.set_in(
+            Some("Gamepad0"),
+            "Button7",
+            input::legacy_gamepad_axis_key(0, 0, false)
+                .expect("primary left-axis key")
+                .to_string(),
+        );
+        gamepad_priority.gamepad_bindings = GamepadBindings::from_config(&gamepad_config);
         gamepad_priority.local_controls = LocalControlRegistry::default();
         gamepad_priority.local_controls.initialize(LocalControlInit {
             owner: gamepad_priority.local_owner,
@@ -143502,11 +143874,18 @@ ScenInfoArea=70,5,25,90
             disable_mouse: false,
         });
         gamepad_priority
-            .handle_gamepad_direction(
-                GamepadSlot::new(0),
-                ControlButton::Left,
-                ElementState::Pressed,
-            )
+            .process_gamepad_event_batch([
+                GamepadEvent::Axis {
+                    slot: GamepadSlot::new(0),
+                    axis: LegacyGamepadAxis::new(0, false),
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Direction {
+                    slot: GamepadSlot::new(0),
+                    button: ControlButton::Left,
+                    state: ElementState::Pressed,
+                },
+            ])
             .expect("assigned gamepad player callback precedes custom chat");
         assert!(!gamepad_priority.running_chat_active());
         assert_ne!(
@@ -170494,6 +170873,15 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     fn route_primary_gamepad_to_local_owner(app: &mut GameApp) {
+        let mut config = Config::new();
+        config.set_in(
+            Some("Gamepad0"),
+            "Button9",
+            input::legacy_gamepad_axis_key(0, 0, true)
+                .expect("primary right-axis key")
+                .to_string(),
+        );
+        app.gamepad_bindings = GamepadBindings::from_config(&config);
         app.local_controls.remove(app.local_owner);
         app.local_controls.initialize(LocalControlInit {
             owner: app.local_owner,
@@ -171584,11 +171972,18 @@ func ControlDig() { dig_count = 1; return(1); }
         );
         assert!(!app.message_dialog_owns_gamepad_input());
 
-        app.process_gamepad_event_batch([GamepadEvent::Direction {
-            slot: GamepadSlot::new(0),
-            button: ControlButton::Right,
-            state: ElementState::Pressed,
-        }])
+        app.process_gamepad_event_batch([
+            GamepadEvent::Axis {
+                slot: GamepadSlot::new(0),
+                axis: LegacyGamepadAxis::new(0, true),
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
+                button: ControlButton::Right,
+                state: ElementState::Pressed,
+            },
+        ])
         .expect("list-top nonexclusive scoreboard leaves gameplay in scope");
 
         assert_ne!(
@@ -172820,10 +173215,28 @@ func ControlDig() { dig_count = 1; return(1); }
                     SourcedGamepadEvent {
                         gamepad: 0,
                         cluster: 40,
+                        event: GamepadEvent::Axis {
+                            slot: GamepadSlot::new(0),
+                            axis: LegacyGamepadAxis::new(0, false),
+                            state: ElementState::Released,
+                        },
+                    },
+                    SourcedGamepadEvent {
+                        gamepad: 0,
+                        cluster: 40,
                         event: GamepadEvent::Direction {
                             slot: GamepadSlot::new(0),
                             button: ControlButton::Left,
                             state: ElementState::Released,
+                        },
+                    },
+                    SourcedGamepadEvent {
+                        gamepad: 0,
+                        cluster: 41,
+                        event: GamepadEvent::Axis {
+                            slot: GamepadSlot::new(0),
+                            axis: LegacyGamepadAxis::new(0, true),
+                            state: ElementState::Pressed,
                         },
                     },
                     SourcedGamepadEvent {
@@ -178215,11 +178628,18 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(active.runtime_client_list_draw_active());
 
         active
-            .process_gamepad_event_batch([GamepadEvent::Direction {
-                slot: GamepadSlot::new(0),
-                button: ControlButton::Right,
-                state: ElementState::Pressed,
-            }])
+            .process_gamepad_event_batch([
+                GamepadEvent::Axis {
+                    slot: GamepadSlot::new(0),
+                    axis: LegacyGamepadAxis::new(0, true),
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Direction {
+                    slot: GamepadSlot::new(0),
+                    button: ControlButton::Right,
+                    state: ElementState::Pressed,
+                },
+            ])
             .expect("normal F4 leaves player-control gamepad directions in base scope");
         let submitted = commands.take_submitted_local();
         assert_eq!(submitted.len(), 1);
@@ -178326,6 +178746,11 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("release Alt");
         game_over
             .process_gamepad_event_batch([
+                GamepadEvent::Axis {
+                    slot: GamepadSlot::new(0),
+                    axis: LegacyGamepadAxis::new(0, true),
+                    state: ElementState::Pressed,
+                },
                 GamepadEvent::Direction {
                     slot: GamepadSlot::new(0),
                     button: ControlButton::Right,

@@ -78,6 +78,8 @@ const LEGACY_GAMEPAD_BUTTON_OFFSET: u8 = 10;
 const LEGACY_GAMEPAD_BUTTON_COUNT: u8 = 32;
 const LEGACY_GAMEPAD_BUTTON_MAX: u8 =
     LEGACY_GAMEPAD_BUTTON_OFFSET + LEGACY_GAMEPAD_BUTTON_COUNT - 1;
+const LEGACY_GAMEPAD_AXIS_OFFSET: u8 = 0x30;
+const LEGACY_GAMEPAD_AXIS_MAX: u8 = 0x50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Binding {
@@ -503,17 +505,16 @@ impl GamepadBindings {
     }
 
     /// Reproduce the callbacks installed by the outer gamepad-set and inner
-    /// logical-control loops in `C4Game::InitKeyboard`. The physical slot is
-    /// encoded into the candidate key; the config section determines control
-    /// set 4..7. Keeping those identities separate also preserves handwritten
-    /// configs whose full keycode names a different physical pad.
-    pub fn control_candidates_for_button(
+    /// logical-control loops in `C4Game::InitKeyboard` for one complete raw
+    /// gamepad key. The physical slot is encoded into `raw_key`; the config
+    /// section determines control set 4..7. Keeping those identities separate
+    /// also preserves handwritten configs whose full keycode names a different
+    /// physical pad.
+    pub fn control_candidates_for_raw_key(
         &self,
-        physical_slot: u8,
-        physical_button: u8,
+        raw_key: i32,
         state: ElementState,
     ) -> impl Iterator<Item = (usize, Option<ControlEvent>)> + '_ {
-        let physical_key = legacy_gamepad_button_key(physical_slot, physical_button);
         self.keys
             .iter()
             .enumerate()
@@ -521,7 +522,7 @@ impl GamepadBindings {
                 keys.iter()
                     .enumerate()
                     .filter_map(move |(control_index, configured_key)| {
-                        if physical_key.is_none() || *configured_key != physical_key {
+                        if *configured_key != Some(raw_key) {
                             return None;
                         }
                         let binding = CONTROL_BINDING_SPECS[control_index].binding;
@@ -532,6 +533,37 @@ impl GamepadBindings {
                         Some((GAMEPAD_CONTROL_SET_OFFSET + gamepad_set, event))
                     })
             })
+    }
+
+    /// Return the configured callbacks for one physical button key.
+    pub fn control_candidates_for_button(
+        &self,
+        physical_slot: u8,
+        physical_button: u8,
+        state: ElementState,
+    ) -> impl Iterator<Item = (usize, Option<ControlEvent>)> + '_ {
+        legacy_gamepad_button_key(physical_slot, physical_button)
+            .into_iter()
+            .flat_map(move |raw_key| self.control_candidates_for_raw_key(raw_key, state))
+    }
+
+    /// Return the exact `KEY_JOY_Axis` callbacks before the synthetic
+    /// Left/Up/Right/Down callbacks, matching `C4KeyboardInput::DoInput`'s
+    /// key-range order. Axis parity selects the generic direction alias.
+    pub fn control_candidates_for_axis(
+        &self,
+        physical_slot: u8,
+        axis: u8,
+        high: bool,
+        state: ElementState,
+    ) -> impl Iterator<Item = (usize, Option<ControlEvent>)> + '_ {
+        [
+            legacy_gamepad_axis_key(physical_slot, axis, high),
+            legacy_gamepad_axis_alias_key(physical_slot, axis, high),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(move |raw_key| self.control_candidates_for_raw_key(raw_key, state))
     }
 }
 
@@ -756,15 +788,55 @@ fn parse_raw_key_code_value(raw: &str) -> Option<i32> {
     }
 }
 
-pub(crate) fn legacy_gamepad_button_key(physical_slot: u8, physical_button: u8) -> Option<i32> {
-    if physical_slot >= GAMEPAD_SET_COUNT as u8 || physical_button >= LEGACY_GAMEPAD_BUTTON_COUNT {
+fn legacy_gamepad_key(physical_slot: u8, key: u8) -> Option<i32> {
+    if physical_slot >= GAMEPAD_SET_COUNT as u8 {
         return None;
     }
     Some(
         LEGACY_GAMEPAD_KEY_PREFIX
             + (i32::from(physical_slot) << 8)
-            + i32::from(LEGACY_GAMEPAD_BUTTON_OFFSET + physical_button),
+            + i32::from(key),
     )
+}
+
+pub(crate) fn legacy_gamepad_button_key(physical_slot: u8, physical_button: u8) -> Option<i32> {
+    if physical_button >= LEGACY_GAMEPAD_BUTTON_COUNT {
+        return None;
+    }
+    legacy_gamepad_key(
+        physical_slot,
+        LEGACY_GAMEPAD_BUTTON_OFFSET + physical_button,
+    )
+}
+
+fn legacy_gamepad_axis_code(axis: u8, high: bool) -> Option<u8> {
+    let code = u16::from(LEGACY_GAMEPAD_AXIS_OFFSET)
+        .checked_add(u16::from(axis).checked_mul(2)?)?
+        .checked_add(if high { 1 } else { 0 })?;
+    (code <= u16::from(LEGACY_GAMEPAD_AXIS_MAX)).then_some(code as u8)
+}
+
+/// Exact `KEY_Gamepad(slot, KEY_JOY_Axis(axis, high))` encoding.
+pub(crate) fn legacy_gamepad_axis_key(physical_slot: u8, axis: u8, high: bool) -> Option<i32> {
+    legacy_gamepad_key(physical_slot, legacy_gamepad_axis_code(axis, high)?)
+}
+
+/// Synthetic direction key emitted alongside an exact axis key by
+/// `C4KeyboardInput::DoInput`: even axes are horizontal and odd axes vertical.
+pub(crate) fn legacy_gamepad_axis_alias_key(
+    physical_slot: u8,
+    axis: u8,
+    high: bool,
+) -> Option<i32> {
+    legacy_gamepad_axis_code(axis, high)?;
+    let key = match (axis % 2, high) {
+        (0, false) => 1,
+        (1, false) => 2,
+        (0, true) => 3,
+        (1, true) => 4,
+        _ => unreachable!("axis parity is zero or one"),
+    };
+    legacy_gamepad_key(physical_slot, key)
 }
 
 /// Human-readable gamepad key label from
@@ -1528,6 +1600,144 @@ mod tests {
                 .control_candidates_for_button(1, 0, ElementState::Pressed)
                 .collect::<Vec<_>>(),
             Vec::new()
+        );
+    }
+
+    #[test]
+    fn l026_legacy_axis_and_hat_keycodes_match_cpp_encoding() {
+        assert_eq!(legacy_gamepad_axis_key(0, 0, false), Some(0x0042_0030));
+        assert_eq!(legacy_gamepad_axis_key(0, 0, true), Some(0x0042_0031));
+        assert_eq!(legacy_gamepad_axis_key(0, 1, false), Some(0x0042_0032));
+        assert_eq!(legacy_gamepad_axis_key(0, 1, true), Some(0x0042_0033));
+
+        // SDL hat zero becomes axes 6 and 7 before entering DoInput.
+        assert_eq!(legacy_gamepad_axis_key(0, 6, false), Some(0x0042_003c));
+        assert_eq!(legacy_gamepad_axis_key(0, 6, true), Some(0x0042_003d));
+        assert_eq!(legacy_gamepad_axis_key(0, 7, false), Some(0x0042_003e));
+        assert_eq!(legacy_gamepad_axis_key(0, 7, true), Some(0x0042_003f));
+        assert_eq!(
+            legacy_gamepad_axis_alias_key(0, 6, false),
+            Some(0x0042_0001)
+        );
+        assert_eq!(
+            legacy_gamepad_axis_alias_key(0, 6, true),
+            Some(0x0042_0003)
+        );
+        assert_eq!(
+            legacy_gamepad_axis_alias_key(0, 7, false),
+            Some(0x0042_0002)
+        );
+        assert_eq!(
+            legacy_gamepad_axis_alias_key(0, 7, true),
+            Some(0x0042_0004)
+        );
+
+        assert_eq!(legacy_gamepad_axis_key(4, 0, false), None);
+        assert_eq!(legacy_gamepad_axis_alias_key(4, 0, false), None);
+        assert_eq!(legacy_gamepad_axis_key(0, 16, false), Some(0x0042_0050));
+        assert_eq!(legacy_gamepad_axis_key(0, 16, true), None);
+        assert_eq!(legacy_gamepad_axis_alias_key(0, 16, true), None);
+        assert_eq!(legacy_gamepad_axis_key(0, 17, false), None);
+    }
+
+    #[test]
+    fn l026_unconfigured_axis_registers_no_gameplay_candidates() {
+        let bindings = GamepadBindings::from_config(&Config::new());
+        assert_eq!(
+            bindings
+                .control_candidates_for_axis(0, 0, false, ElementState::Pressed)
+                .collect::<Vec<_>>(),
+            Vec::new()
+        );
+        assert_eq!(
+            bindings
+                .control_candidates_for_axis(0, 6, false, ElementState::Pressed)
+                .collect::<Vec<_>>(),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn l026_axis_key_bound_to_left_routes_the_configured_logical_control() {
+        let mut config = Config::new();
+        config.set_in(Some("Gamepad0"), "Button7", "0x00420030");
+        let bindings = GamepadBindings::from_config(&config);
+
+        assert_eq!(
+            bindings
+                .control_candidates_for_axis(0, 0, false, ElementState::Pressed)
+                .collect::<Vec<_>>(),
+            vec![(4, Some(ControlEvent::Press(ControlButton::Left)))]
+        );
+        assert_eq!(
+            bindings
+                .control_candidates_for_axis(0, 0, false, ElementState::Released)
+                .collect::<Vec<_>>(),
+            vec![(4, Some(ControlEvent::Release(ControlButton::Left)))]
+        );
+    }
+
+    #[test]
+    fn l026_axis_key_can_route_a_non_direction_logical_control() {
+        let mut config = Config::new();
+        config.set_in(Some("Gamepad0"), "Button6", "0x00420032");
+        let bindings = GamepadBindings::from_config(&config);
+
+        assert_eq!(
+            bindings
+                .control_candidates_for_axis(0, 1, false, ElementState::Pressed)
+                .collect::<Vec<_>>(),
+            vec![(
+                4,
+                Some(ControlEvent::Command {
+                    command: ControlCommand::Dig,
+                    kind: CommandKind::Press,
+                }),
+            )]
+        );
+        assert_eq!(
+            bindings
+                .control_candidates_for_axis(0, 1, false, ElementState::Released)
+                .collect::<Vec<_>>(),
+            vec![(
+                4,
+                Some(ControlEvent::Command {
+                    command: ControlCommand::Dig,
+                    kind: CommandKind::Release,
+                }),
+            )]
+        );
+    }
+
+    #[test]
+    fn l026_axis_candidates_keep_exact_range_before_synthetic_alias() {
+        let mut config = Config::new();
+        // Registration order alone would put Button1 first. DoInput instead
+        // exhausts the exact 0x30 range before the generic Left range.
+        config.set_in(Some("Gamepad0"), "Button1", "0x00420001");
+        config.set_in(Some("Gamepad0"), "Button12", "0x00420030");
+        let bindings = GamepadBindings::from_config(&config);
+
+        assert_eq!(
+            bindings
+                .control_candidates_for_axis(0, 0, false, ElementState::Pressed)
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    4,
+                    Some(ControlEvent::Command {
+                        command: ControlCommand::Special2,
+                        kind: CommandKind::Press,
+                    }),
+                ),
+                (
+                    4,
+                    Some(ControlEvent::Command {
+                        command: ControlCommand::CursorLeft,
+                        kind: CommandKind::Press,
+                    }),
+                ),
+            ]
         );
     }
 
