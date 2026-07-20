@@ -13419,6 +13419,7 @@ fn is_rejected_definition_error(error: &ResourceDefinitionError) -> bool {
             | ResourceDefinitionError::InvalidCategoryValue(_)
             | ResourceDefinitionError::DefCoreParse(_)
             | ResourceDefinitionError::ActMapParse(_)
+            | ResourceDefinitionError::Graphics { .. }
             | ResourceDefinitionError::ColorByOwnerOverlay { .. }
     )
 }
@@ -19078,7 +19079,7 @@ global func Step(state, frame, random)
         let modern_gfx = write_core(&defs, "ModernGfx", "[DefCore]\nid=MODN\nNeededGfxMode=3\n");
         write_test_definition_graphics(&modern_gfx);
 
-        write_core(&defs, "Missing", "[DefCore]\nid=MISS\n");
+        let missing = write_core(&defs, "Missing", "[DefCore]\nid=MISS\n");
 
         let variant_only = write_core(&defs, "VariantOnly", "[DefCore]\nid=VARI\n");
         image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 255]))
@@ -19101,6 +19102,15 @@ global func Step(state, frame, random)
         image::RgbaImage::from_pixel(1, 1, image::Rgba([16, 17, 18, 255]))
             .save(mislabeled_png.join("Graphics.bmp"))
             .expect("write valid BMP fallback candidate");
+
+        let corrupt_additional =
+            write_core(&defs, "CorruptAdditional", "[DefCore]\nid=CADD\n");
+        write_test_definition_graphics(&corrupt_additional);
+        std::fs::write(
+            corrupt_additional.join("GraphicsBad.png"),
+            b"not a png",
+        )
+        .expect("write corrupt recognized additional Graphics");
 
         let dual_base = write_core(&defs, "DualBase", "[DefCore]\nid=DUAL\nColorByOwner=1\n");
         write_test_definition_graphics(&dual_base);
@@ -19155,16 +19165,41 @@ global func Step(state, frame, random)
                     .as_deref()
                     .is_some_and(|error| error.contains("Overlay.png"))
         }));
-        for rejected in [&corrupt_png, &mislabeled_png, &variant_only] {
+        assert!(warnings.iter().any(|warning| {
+            warning.message.as_deref() == Some("definition failed to load; skipping")
+                && warning.group.as_deref() == Some(missing.to_string_lossy().as_ref())
+                && warning
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("Graphics.png/Graphics.bmp"))
+        }));
+        for rejected in [&corrupt_png, &mislabeled_png] {
             assert!(warnings.iter().any(|warning| {
                 warning.message.as_deref() == Some("definition failed to load; skipping")
                     && warning.group.as_deref() == Some(rejected.to_string_lossy().as_ref())
                     && warning
                         .error
                         .as_deref()
-                        .is_some_and(|error| error.contains("Graphics.png/Graphics.bmp"))
+                        .is_some_and(|error| error.contains("Graphics.png"))
             }));
         }
+        assert!(warnings.iter().any(|warning| {
+            warning.message.as_deref() == Some("definition failed to load; skipping")
+                && warning.group.as_deref()
+                    == Some(corrupt_additional.to_string_lossy().as_ref())
+                && warning
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("GraphicsBad.png"))
+        }));
+        assert!(warnings.iter().any(|warning| {
+            warning.message.as_deref() == Some("definition failed to load; skipping")
+                && warning.group.as_deref() == Some(variant_only.to_string_lossy().as_ref())
+                && warning
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("Graphics.png/Graphics.bmp"))
+        }));
     }
 
     fn write_definition_localization_fixture(

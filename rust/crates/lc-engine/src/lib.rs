@@ -27420,6 +27420,20 @@ impl Engine {
             .and_then(|definition| definition.picture_image().cloned())
     }
 
+    /// Checked menu-facing lookup: a loaded definition may legitimately have
+    /// no drawable Picture facet, while an unknown ID violates the caller's
+    /// definition-list invariant.
+    pub fn try_definition_picture_image(
+        &self,
+        definition_id: &str,
+    ) -> Result<Option<DefinitionPictureImage>, EngineError> {
+        let definition = self
+            .definitions
+            .get(definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.to_string()))?;
+        Ok(definition.picture_image().cloned())
+    }
+
     /// `C4MouseControl::CreateDragImage`: use the definition picture when
     /// `DragImagePicture` is set, otherwise use the main Graphics facet at
     /// `(0, 0, Shape.Wdt, Shape.Hgt)` in its raw facet dimensions.

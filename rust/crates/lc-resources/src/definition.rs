@@ -158,13 +158,7 @@ impl Definition {
 
         let (graphics_image, color_by_owner_mask, additional_graphics) =
             load_definition_graphics(group, core.color_by_owner)?;
-        let picture_image = load_definition_picture(
-            group,
-            &core,
-            color_by_owner_mask
-                .as_ref()
-                .and(graphics_image.as_ref()),
-        );
+        let picture_image = crop_definition_picture(&core, graphics_image.as_ref());
         let picture_color_by_owner_mask = crop_definition_picture_mask(
             &core,
             picture_image.as_ref(),
@@ -534,21 +528,29 @@ fn decode_definition_image(
     data: &[u8],
     format: image::ImageFormat,
 ) -> Option<image::RgbaImage> {
+    decode_definition_image_result(data, format).ok()
+}
+
+fn decode_definition_image_result(
+    data: &[u8],
+    format: image::ImageFormat,
+) -> Result<image::RgbaImage, String> {
     let bit_count = data
         .get(28..30)
         .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]));
     if format == image::ImageFormat::Bmp && bit_count == Some(8) {
-        let bitmap = IndexedBitmap::decode(data).ok()?;
+        let bitmap = IndexedBitmap::decode(data).map_err(|error| error.to_string())?;
         let pixels = bitmap
             .indices
             .iter()
             .flat_map(|index| definition_game_palette_pixel(*index))
             .collect();
-        return image::RgbaImage::from_raw(bitmap.width, bitmap.height, pixels);
+        return image::RgbaImage::from_raw(bitmap.width, bitmap.height, pixels)
+            .ok_or_else(|| "indexed bitmap dimensions do not match its pixel data".to_string());
     }
     image::load_from_memory_with_format(data, format)
-        .ok()
         .map(|image| image.into_rgba8())
+        .map_err(|error| error.to_string())
 }
 
 /// `C4MaxPhysical` (C4InfoCore.h:31): the 100% value of every physical.
@@ -1138,6 +1140,8 @@ pub enum DefinitionError {
     ActMapParse(String),
     #[error("ColorByOwner overlay `{path}` could not be loaded: {reason}")]
     ColorByOwnerOverlay { path: PathBuf, reason: String },
+    #[error("definition graphics `{path}` could not be loaded: {reason}")]
+    Graphics { path: PathBuf, reason: String },
     #[error(transparent)]
     Resources(#[from] GroupError),
 }
@@ -2472,37 +2476,21 @@ fn cross_map_act_map(actions: &mut [(String, ActionDefinition)]) {
     }
 }
 
-fn load_definition_picture(
-    group: &Group,
+fn crop_definition_picture(
     core: &DefCore,
-    processed_graphics: Option<&GraphicsImage>,
+    graphics: Option<&GraphicsImage>,
 ) -> Option<GraphicsImage> {
-    let path = find_picture_entry(group).ok().flatten()?;
-    let data = group.read_file(&path).ok()?;
-    let image = decode_definition_image(&data, definition_image_format(&path)?)?;
-    let (width, height) = image.dimensions();
-    if width == 0 || height == 0 {
-        return None;
-    }
-
-    let (crop_x, crop_y, crop_w, crop_h) = match core.picture {
-        Some(rect) => normalize_crop(rect, width, height).unwrap_or((0, 0, width, height)),
-        None => (0, 0, width, height),
-    };
-
-    let pixels = processed_graphics
-        .filter(|graphics| (graphics.width(), graphics.height()) == (width, height))
-        .map(|graphics| {
-            extract_rgba_bytes(
-                graphics.pixels(),
-                width,
-                crop_x,
-                crop_y,
-                crop_w,
-                crop_h,
-            )
-        })
-        .unwrap_or_else(|| extract_rgba_region(&image, crop_x, crop_y, crop_w, crop_h));
+    let graphics = graphics?;
+    let (crop_x, crop_y, crop_w, crop_h) =
+        normalize_crop(core.picture?, graphics.width(), graphics.height())?;
+    let pixels = extract_rgba_bytes(
+        graphics.pixels(),
+        graphics.width(),
+        crop_x,
+        crop_y,
+        crop_w,
+        crop_h,
+    );
     Some(GraphicsImage::new(crop_w, crop_h, pixels))
 }
 
@@ -2544,47 +2532,6 @@ fn crop_definition_picture_mask(
         })
 }
 
-fn find_picture_entry(group: &Group) -> Result<Option<PathBuf>, GroupError> {
-    const PRIORITY_FILES: [&str; 4] = ["Graphics32.png", "Graphics.png", "Picture.png", "Icon.png"];
-    for candidate in PRIORITY_FILES {
-        if group.exists(candidate) {
-            return Ok(Some(PathBuf::from(candidate)));
-        }
-    }
-
-    const PRIORITY_GROUPS: [&str; 3] = ["Graphics.ocg", "Graphics.c4d", "Graphics.c4g"];
-    for candidate in PRIORITY_GROUPS {
-        if let Ok(child) = group.open_child(candidate) {
-            if let Some(found) = find_picture_entry(&child)? {
-                let mut combined = PathBuf::from(candidate);
-                combined.push(found);
-                return Ok(Some(combined));
-            }
-        }
-    }
-
-    find_picture_entry_recursive(group, PathBuf::new())
-}
-
-fn find_picture_entry_recursive(
-    group: &Group,
-    base: PathBuf,
-) -> Result<Option<PathBuf>, GroupError> {
-    for entry in group.entries()? {
-        let mut combined = base.clone();
-        combined.push(&entry.relative_path);
-        if entry.is_directory {
-            let child = group.open_child(&entry.relative_path)?;
-            if let Some(found) = find_picture_entry_recursive(&child, combined.clone())? {
-                return Ok(Some(found));
-            }
-        } else if is_image_path(&entry.relative_path) {
-            return Ok(Some(combined));
-        }
-    }
-    Ok(None)
-}
-
 const BASE_GRAPHICS_FILES: [&str; 2] = ["graphics.png", "graphics.bmp"];
 
 fn load_definition_graphics(
@@ -2624,19 +2571,22 @@ fn load_definition_graphics(
     });
 
     for path in candidates {
+        let Some(name) = derive_variant_name(&path).filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        let key = normalize_variant_key(&name);
+        if additional.contains_key(&key) {
+            continue;
+        }
         if let Some((image, mask)) = load_graphics_entry(group, &path, color_by_owner)? {
-            if let Some(name) = derive_variant_name(&path) {
-                if !name.is_empty() {
-                    let key = normalize_variant_key(&name);
-                    additional
-                        .entry(key)
-                        .or_insert_with(|| DefinitionGraphicsVariant {
-                            name,
-                            image,
-                            color_by_owner_mask: mask,
-                        });
-                }
-            }
+            additional.insert(
+                key,
+                DefinitionGraphicsVariant {
+                    name,
+                    image,
+                    color_by_owner_mask: mask,
+                },
+            );
         }
     }
 
@@ -2685,42 +2635,43 @@ fn load_portrait_graphics(
 }
 
 fn collect_graphics_entries(group: &Group) -> Result<Vec<PathBuf>, GroupError> {
-    let mut entries = Vec::new();
-    collect_graphics_entries_recursive(group, PathBuf::new(), false, &mut entries)?;
-    Ok(entries)
-}
-
-fn collect_graphics_entries_recursive(
-    group: &Group,
-    base: PathBuf,
-    in_graphics_dir: bool,
-    entries: &mut Vec<PathBuf>,
-) -> Result<(), GroupError> {
+    let mut png_entries = Vec::new();
+    let mut bmp_entries = Vec::new();
     for entry in group.entries()? {
-        let mut combined = base.clone();
-        combined.push(&entry.relative_path);
-        let name_lower = entry
+        if entry.is_directory || entry.relative_path.components().count() != 1 {
+            continue;
+        }
+        let Some(stem) = entry
             .relative_path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default();
-        let next_in_graphics_dir =
-            in_graphics_dir || name_lower.contains("graphics") || name_lower.starts_with("gfx");
-        if entry.is_directory {
-            let child = group.open_child(&entry.relative_path)?;
-            collect_graphics_entries_recursive(
-                &child,
-                combined.clone(),
-                next_in_graphics_dir,
-                entries,
-            )?;
-        } else if (next_in_graphics_dir && is_image_path(&entry.relative_path))
-            && (name_lower.starts_with("graphics") || name_lower.starts_with("gfx"))
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+        else {
+            continue;
+        };
+        if !stem
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Graphics"))
         {
-            entries.push(combined);
+            continue;
+        }
+        match entry
+            .relative_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some(extension) if extension.eq_ignore_ascii_case("png") => {
+                png_entries.push(entry.relative_path);
+            }
+            Some(extension) if extension.eq_ignore_ascii_case("bmp") => {
+                bmp_entries.push(entry.relative_path);
+            }
+            _ => {}
         }
     }
-    Ok(())
+    // LoadAllGraphics walks the PNG wildcard before the BMP wildcard and
+    // keeps the PNG when both formats provide the same additional name.
+    png_entries.extend(bmp_entries);
+    Ok(png_entries)
 }
 
 fn select_base_graphics(paths: &[PathBuf]) -> Option<PathBuf> {
@@ -2748,17 +2699,32 @@ fn load_graphics_entry(
     path: &Path,
     color_by_owner: bool,
 ) -> Result<Option<(GraphicsImage, Option<ColorByOwnerMask>)>, DefinitionError> {
-    let Some(data) = group.read_file(path).ok() else {
+    if !group.exists(path) {
         return Ok(None);
-    };
-    let Some(mut image) = definition_image_format(path)
-        .and_then(|format| decode_definition_image(&data, format))
-    else {
-        return Ok(None);
-    };
+    }
+    let data = group
+        .read_file(path)
+        .map_err(|error| DefinitionError::Graphics {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    let format =
+        definition_image_format(path).ok_or_else(|| DefinitionError::Graphics {
+            path: path.to_path_buf(),
+            reason: "unsupported image format".to_string(),
+        })?;
+    let mut image = decode_definition_image_result(&data, format).map_err(|reason| {
+        DefinitionError::Graphics {
+            path: path.to_path_buf(),
+            reason,
+        }
+    })?;
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
-        return Ok(None);
+        return Err(DefinitionError::Graphics {
+            path: path.to_path_buf(),
+            reason: format!("invalid image dimensions {width}x{height}"),
+        });
     }
     // C4Surface::ReadPNG/SetPixDw canonicalizes the decoded surface before
     // C4DefGraphics derives a ColorByOwner surface from its blue shades.
@@ -3013,16 +2979,6 @@ fn detect_color_by_owner(dw_clr: u32) -> Option<u8> {
     Some((dw_clr & 0xff) as u8)
 }
 
-fn is_image_path(path: &Path) -> bool {
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) => matches!(
-            ext.to_ascii_lowercase().as_str(),
-            "png" | "bmp" | "jpg" | "jpeg" | "tga"
-        ),
-        None => false,
-    }
-}
-
 fn normalize_crop(
     rect: PictureRect,
     image_width: u32,
@@ -3047,23 +3003,6 @@ fn normalize_crop(
     let crop_width = width.min(image_width - x);
     let crop_height = height.min(image_height - y);
     Some((x, y, crop_width.max(1), crop_height.max(1)))
-}
-
-fn extract_rgba_region(
-    image: &image::RgbaImage,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-) -> Vec<u8> {
-    let stride = image.width();
-    let mut output = Vec::with_capacity((width * height * 4) as usize);
-    for row in y..(y + height) {
-        let row_start = ((row * stride) + x) as usize * 4;
-        let row_end = row_start + (width as usize * 4);
-        output.extend_from_slice(&image.as_raw()[row_start..row_end]);
-    }
-    output
 }
 
 fn extract_rgba_bytes(
@@ -3788,6 +3727,75 @@ Entrance=1,2,,4
     }
 
     #[test]
+    fn l136_picture_uses_decoded_base_graphics_and_corrupt_graphics_is_typed() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Picture.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=PICT\nPicture=0,0,1,1\n",
+        )
+        .expect("DefCore");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]))
+            .save(def_dir.join("Graphics.png"))
+            .expect("base graphics");
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([200, 210, 220, 255]))
+            .save(def_dir.join("Graphics32.png"))
+            .expect("additional graphics");
+        fs::write(def_dir.join("Graphics32.bmp"), b"not a bitmap")
+            .expect("ignored losing additional bitmap");
+        fs::write(def_dir.join("GraphicsIgnored.jpg"), b"not a jpeg")
+            .expect("ignored non-native graphics format");
+        fs::create_dir(def_dir.join("Graphics.c4g")).expect("nested graphics directory");
+        fs::write(
+            def_dir.join("Graphics.c4g/GraphicsNested.png"),
+            b"not a png",
+        )
+        .expect("ignored nested graphics");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let definition = Definition::load(&group).expect("valid graphics load");
+        let picture = definition.picture_image.expect("base picture crop");
+        assert_eq!((picture.width(), picture.height()), (1, 1));
+        assert_eq!(picture.pixels(), &[10, 20, 30, 255]);
+
+        fs::write(def_dir.join("Graphics32.png"), b"not a png")
+            .expect("corrupt recognized additional Graphics");
+        assert!(matches!(
+            Definition::load(&group),
+            Err(DefinitionError::Graphics { path, reason })
+                if path == Path::new("Graphics32.png") && !reason.is_empty()
+        ));
+
+        let blank_dir = temp.path().join("Blank.c4d");
+        fs::create_dir(&blank_dir).expect("blank definition directory");
+        fs::write(blank_dir.join("DefCore.txt"), b"[DefCore]\nid=BLNK\n")
+            .expect("blank DefCore");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]))
+            .save(blank_dir.join("Graphics.png"))
+            .expect("transparent base graphics");
+        let blank = Definition::load(&Group::open(&blank_dir).expect("open blank definition"))
+            .expect("zero-sized effective picture remains a valid loaded definition");
+        assert!(blank.picture_image.is_none());
+
+        let transparent_dir = temp.path().join("Transparent.c4d");
+        fs::create_dir(&transparent_dir).expect("transparent definition directory");
+        fs::write(
+            transparent_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=TRNS\nPicture=0,0,1,1\n",
+        )
+        .expect("transparent DefCore");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([99, 88, 77, 0]))
+            .save(transparent_dir.join("Graphics.png"))
+            .expect("transparent base graphics");
+        let transparent =
+            Definition::load(&Group::open(&transparent_dir).expect("open transparent definition"))
+                .expect("transparent picture remains a valid loaded definition");
+        let transparent_picture = transparent.picture_image.expect("nonzero picture crop");
+        assert_eq!(transparent_picture.pixels(), &[0, 0, 0, 0]);
+    }
+
+    #[test]
     fn definition_picture_carries_its_cropped_color_by_owner_mask() {
         // C4Def::Picture2Facet takes PictureRect from the definition's
         // ColorByOwner-aware Graphics.GetBitmap(color) surface
@@ -4093,7 +4101,11 @@ Entrance=1,2,,4
         let temp = tempdir().expect("tempdir");
         let def_dir = temp.path().join("Indexed.c4d");
         fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=IBMP\n").expect("DefCore");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=IBMP\nPicture=0,0,4,1\n",
+        )
+        .expect("DefCore");
         let bmp = indexed_definition_bmp(vec![0, 1, 191, 255]);
         fs::write(def_dir.join("Graphics.bmp"), &bmp).expect("Graphics.bmp");
         fs::write(def_dir.join("Rank.bmp"), &bmp).expect("Rank.bmp");
@@ -4123,7 +4135,7 @@ Entrance=1,2,,4
                 .expect("picture image")
                 .pixels(),
             expected,
-            "the separately decoded definition picture uses the same palette"
+            "the cropped definition picture uses the same decoded palette"
         );
         assert_eq!(
             definition

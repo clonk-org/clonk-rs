@@ -13374,6 +13374,10 @@ enum ClassicParityBoundary {
     HudResources {
         missing: Vec<&'static str>,
     },
+    IngameMenuDefinitionIcon {
+        definition_id: String,
+        detail: String,
+    },
     GameOverResources {
         missing: Vec<&'static str>,
     },
@@ -13495,6 +13499,13 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic HUD resources are unavailable (missing {}); refusing generic Rust fallback",
                 missing.join(", ")
+            ),
+            Self::IngameMenuDefinitionIcon {
+                definition_id,
+                detail,
+            } => write!(
+                f,
+                "classic in-game goal/rule symbol definition `{definition_id}` is unavailable: {detail}; refusing a blank symbol substitute"
             ),
             Self::GameOverResources { missing } => write!(
                 f,
@@ -32079,12 +32090,12 @@ impl GameApp {
                     ));
                     self.engine
                         .execute_activate_game_goal_menu_control(&control)?;
-                    self.apply_game_goal_menu_requests();
+                    self.apply_game_goal_menu_requests()?;
                 }
             }
             MenuAction::ActivateRules => {
                 let rules = self.goal_rule_entries(C4D_RULE);
-                self.cache_definition_icons(&rules);
+                self.cache_definition_icons(&rules)?;
                 self.ingame_menu
                     .replace(player, Some(IngameMenuState::rules_menu(&rules)));
             }
@@ -32582,7 +32593,7 @@ impl GameApp {
         entries
     }
 
-    fn apply_game_goal_menu_requests(&mut self) {
+    fn apply_game_goal_menu_requests(&mut self) -> Result<(), EngineError> {
         for request in self.engine.take_game_goal_menu_requests() {
             if !request.open_menu {
                 continue;
@@ -32604,12 +32615,13 @@ impl GameApp {
                     definition_id,
                 })
                 .collect::<Vec<_>>();
-            self.cache_definition_icons(&entries);
+            self.cache_definition_icons(&entries)?;
             self.ingame_menu.replace(
                 request.player,
                 Some(IngameMenuState::goals_menu(&entries)),
             );
         }
+        Ok(())
     }
 
     /// Reconcile legacy/direct-fixture ownership, then apply the ordered
@@ -32807,19 +32819,31 @@ impl GameApp {
 
     /// Loads the definition pictures for goal/rule menu symbols
     /// (`pDef->Draw(fctSymbol)`, C4MainMenu.cpp:367,397).
-    fn cache_definition_icons(&mut self, entries: &[GoalRuleEntry]) {
-        let icons: Vec<(String, ImageData)> = entries
+    fn cache_definition_icons(&mut self, entries: &[GoalRuleEntry]) -> Result<(), EngineError> {
+        let icons = entries
             .iter()
-            .filter_map(|entry| {
-                self.engine
-                    .definition_picture_image(&entry.definition_id)
-                    .map(|image| (entry.definition_id.clone(), definition_menu_picture(image)))
+            .map(|entry| {
+                let image = self
+                    .engine
+                    .try_definition_picture_image(&entry.definition_id)
+                    .map_err(|error| {
+                        classic_parity_engine_error(report_classic_parity_boundary(
+                            ClassicParityBoundary::IngameMenuDefinitionIcon {
+                                definition_id: entry.definition_id.clone(),
+                                detail: error.to_string(),
+                            },
+                        ))
+                    })?;
+                Ok(image.map(|image| {
+                    (entry.definition_id.clone(), definition_menu_picture(image))
+                }))
             })
-            .collect();
+            .collect::<std::result::Result<Vec<_>, EngineError>>()?;
         let gfx = self.ensure_ingame_menu_gfx();
-        for (id, image) in icons {
+        for (id, image) in icons.into_iter().flatten() {
             gfx.definition_icons.insert(id, image);
         }
+        Ok(())
     }
 
     /// The ten savegame slots (C4MainMenu.cpp:474-494).
@@ -60134,12 +60158,10 @@ impl GameApp {
                     .engine
                     .execute_em_drop_def_control(&control)
                     .map(|_| ()),
-                NetworkControl::ActivateGameGoalMenu(control) => {
-                    self.engine
-                        .execute_activate_game_goal_menu_control(&control)?;
-                    self.apply_game_goal_menu_requests();
-                    Ok(())
-                }
+                NetworkControl::ActivateGameGoalMenu(control) => self
+                    .engine
+                    .execute_activate_game_goal_menu_control(&control)
+                    .and_then(|_| self.apply_game_goal_menu_requests()),
                 NetworkControl::ToggleHostility(control) => self
                     .engine
                     .execute_toggle_hostility_control(&control)
@@ -60384,7 +60406,10 @@ impl GameApp {
                 break;
             }
         }
-        self.apply_game_goal_menu_requests();
+        let goal_menu_result = self.apply_game_goal_menu_requests();
+        if result.is_ok() {
+            result = goal_menu_result;
+        }
         // A script/control callback may have called
         // EliminatePlayer(plr, true). While the current ready marker is live,
         // local_control_submission_tick selects tick + 1, matching Game.Input.
@@ -61303,7 +61328,7 @@ impl GameApp {
                 if let Some(network) = self.network.as_ref() {
                     network.refresh_current_frame(self.current_network_input_frame());
                 }
-                self.apply_game_goal_menu_requests();
+                self.apply_game_goal_menu_requests()?;
                 // Requests made by simulation scripts belong to a later
                 // control tick, never to the frame that just executed them.
                 self.flush_pending_remove_player_controls(false)?;
@@ -76536,6 +76561,7 @@ fn is_rejected_install_definition_error(error: &ResourceDefinitionError) -> bool
             | ResourceDefinitionError::InvalidCategoryValue(_)
             | ResourceDefinitionError::DefCoreParse(_)
             | ResourceDefinitionError::ActMapParse(_)
+            | ResourceDefinitionError::Graphics { .. }
             | ResourceDefinitionError::ColorByOwnerOverlay { .. }
     )
 }
@@ -142874,6 +142900,110 @@ protected func InputCallback(string answer, int player)
                 )
             );
         }
+    }
+
+    #[test]
+    fn cache_definition_icons_distinguishes_blank_from_malformed_picture() {
+        let mut app = new_running_sandbox_app();
+        let mut blank = Definition::from_script("BLNK", "Blank rule", "#strict 3\n")
+            .expect("blank definition compiles");
+        blank.set_category(C4D_RULE);
+        app.engine
+            .register_definition(blank)
+            .expect("blank definition registers");
+        let blank_entry = GoalRuleEntry {
+            definition_id: "BLNK".to_string(),
+            name: "Blank rule".to_string(),
+            description: None,
+            fulfilled: false,
+        };
+        app.cache_definition_icons(std::slice::from_ref(&blank_entry))
+            .expect("a loaded definition with a blank facet is valid");
+        assert!(
+            !app
+                .ingame_menu_gfx
+                .as_ref()
+                .expect("blank cache initializes menu graphics")
+                .definition_icons
+                .contains_key("BLNK")
+        );
+
+        let temp = tempdir().expect("tempdir");
+        let valid_dir = temp.path().join("Valid.c4d");
+        fs::create_dir(&valid_dir).expect("valid definition directory");
+        fs::write(
+            valid_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=PCTR\nPicture=0,0,1,1\n",
+        )
+        .expect("valid DefCore");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]))
+            .save(valid_dir.join("Graphics.png"))
+            .expect("valid preferred graphics");
+        let valid_resource = ResourceDefinitionData::load(
+            &Group::open(&valid_dir).expect("open valid definition"),
+        )
+        .expect("valid definition resource loads");
+        let mut valid = Definition::from_resource(&valid_resource)
+            .expect("valid definition converts to engine data");
+        valid.set_category(C4D_RULE);
+        app.engine
+            .register_definition(valid)
+            .expect("valid definition registers");
+        assert!(app
+            .engine
+            .try_definition_picture_image("PCTR")
+            .expect("valid definition resolves")
+            .is_some());
+        let valid_entry = GoalRuleEntry {
+            definition_id: "PCTR".to_string(),
+            name: "Pictured rule".to_string(),
+            description: None,
+            fulfilled: false,
+        };
+
+        let malformed_dir = temp.path().join("Malformed.c4d");
+        fs::create_dir(&malformed_dir).expect("malformed definition directory");
+        fs::write(
+            malformed_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=BADG\nWidth=1\nHeight=1\n",
+        )
+        .expect("malformed DefCore");
+        fs::write(malformed_dir.join("Graphics.png"), b"not a png")
+            .expect("malformed preferred graphics");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]))
+            .save(malformed_dir.join("Graphics.bmp"))
+            .expect("valid losing BMP");
+        let malformed_group = Group::open(&malformed_dir).expect("open malformed definition");
+        assert!(matches!(
+            ResourceDefinitionData::load(&malformed_group),
+            Err(ResourceDefinitionError::Graphics { path, reason })
+                if path == Path::new("Graphics.png") && !reason.is_empty()
+        ));
+
+        let malformed_entry = GoalRuleEntry {
+            definition_id: "BADG".to_string(),
+            name: "Malformed rule".to_string(),
+            description: None,
+            fulfilled: false,
+        };
+        let error = app
+            .cache_definition_icons(&[valid_entry, blank_entry, malformed_entry])
+            .expect_err("a rejected graphics definition must not become a blank menu symbol");
+        let EngineError::ClassicMenuParityBoundary { detail } = error else {
+            panic!("unexpected malformed definition error: {error:?}");
+        };
+        assert_eq!(
+            detail,
+            "classic in-game goal/rule symbol definition `BADG` is unavailable: unknown definition `BADG`; refusing a blank symbol substitute"
+        );
+        assert!(
+            app.ingame_menu_gfx
+                .as_ref()
+                .expect("menu graphics remain allocated")
+                .definition_icons
+                .is_empty(),
+            "validation must complete before mutating the icon cache"
+        );
     }
 
     #[test]
