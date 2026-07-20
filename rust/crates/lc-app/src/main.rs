@@ -8982,6 +8982,7 @@ fn resolve_scenario_fair_crew_parameters(
 struct ClassicHostLobbyState {
     controller: ClassicGameLobby,
     pointer: Option<GuiPoint>,
+    last_roster_click: Option<(LobbyRosterId, Instant)>,
     chat_history_index: i32,
     /// Retained Config.Network.NoRuntimeJoin inverse. Prepared hosts mirror
     /// this into admission so lobby exit can apply the selection atomically
@@ -9234,12 +9235,14 @@ fn classic_lobby_roster_projection(
     player_infos: &ControlPlayerInfoRegistry,
     teams: Option<&lc_engine::InitialNetworkTeamMetadata>,
     local_client_id: i32,
+    sheet: LobbySheet,
 ) -> (Vec<LobbyRosterRow>, i32) {
     let (_, packets) = player_infos.retained_rows_snapshot();
     let players_by_client = packets
         .into_iter()
         .map(|(client_id, _, players)| (client_id, players))
         .collect::<BTreeMap<_, _>>();
+    let client_snapshot = clients.snapshot();
     let team_value = |client_id: i32, player: &lc_engine::ControlPlayerInfoEntry| {
         let metadata = teams?;
         if !metadata.active {
@@ -9349,7 +9352,7 @@ fn classic_lobby_roster_projection(
         }));
         rows.extend(script_players);
     }
-    for core in clients.snapshot() {
+    for core in &client_snapshot {
         let players = players_by_client.get(&core.client_id);
         let hide_random_colors = teams.is_some_and(|metadata| {
             metadata.active
@@ -9412,6 +9415,75 @@ fn classic_lobby_roster_projection(
                 rows.push(player_row(core.client_id, player));
             }
         }
+    }
+    if sheet == LobbySheet::Teams {
+        let Some(metadata) = teams.filter(|metadata| metadata.active) else {
+            return (rows, active_players);
+        };
+        let mut team_rows = Vec::new();
+        if matches!(
+            metadata.team_distribution,
+            lc_engine::InitialNetworkTeamDistribution::RandomInvisible
+        ) {
+            let mut header_emitted = false;
+            for core in &client_snapshot {
+                if !core.activated {
+                    continue;
+                }
+                let Some(players) = players_by_client.get(&core.client_id) else {
+                    continue;
+                };
+                for player in players {
+                    if player.flags & lc_engine::PLAYER_INFO_FLAG_INVISIBLE != 0 {
+                        continue;
+                    }
+                    if !header_emitted {
+                        team_rows.push(LobbyRosterRow::Header(LobbyHeaderRow {
+                            kind: LobbyRosterHeader::RandomTeam,
+                            label: "Random team".to_string(),
+                            icon: LobbyRosterIcon::Standard(19),
+                            can_add_player: false,
+                        }));
+                        header_emitted = true;
+                    }
+                    team_rows.push(player_row(core.client_id, player));
+                }
+            }
+        } else {
+            let players_by_id = players_by_client
+                .iter()
+                .flat_map(|(&client_id, players)| {
+                    players
+                        .iter()
+                        .map(move |player| (player.id, (client_id, player)))
+                })
+                .collect::<HashMap<_, _>>();
+            for team in &metadata.teams {
+                if metadata.auto_generate_teams && team.player_ids.is_empty() {
+                    continue;
+                }
+                team_rows.push(LobbyRosterRow::Header(LobbyHeaderRow {
+                    kind: LobbyRosterHeader::Team(team.id),
+                    label: legacy_presentation_text(team.name.as_bytes()),
+                    icon: LobbyRosterIcon::Standard(19),
+                    can_add_player: false,
+                }));
+                for player_id in &team.player_ids {
+                    let Some((client_id, player)) = players_by_id.get(player_id).copied() else {
+                        continue;
+                    };
+                    if player.flags & lc_engine::PLAYER_INFO_FLAG_INVISIBLE != 0
+                        || !client_snapshot
+                            .iter()
+                            .any(|client| client.client_id == client_id && client.activated)
+                    {
+                        continue;
+                    }
+                    team_rows.push(player_row(client_id, player));
+                }
+            }
+        }
+        return (team_rows, active_players);
     }
     (rows, active_players)
 }
@@ -42410,6 +42482,8 @@ impl GameApp {
         );
         labels.tooltip_replay_players =
             resource("IDS_MSG_REPLAYPLRS_DESC", &labels.tooltip_replay_players);
+        labels.tooltip_team_template = resource("IDS_DESC_TEAM", "Team %s")
+            .replacen("%s", "{team}", 1);
         labels
     }
 
@@ -42916,6 +42990,7 @@ impl GameApp {
             ClassicHostLobbyState {
                 controller,
                 pointer: None,
+                last_roster_click: None,
                 chat_history_index: -1,
                 runtime_join_allowed,
                 resource_rows,
@@ -43871,6 +43946,11 @@ impl GameApp {
 
     fn sync_classic_lobby_roster(&mut self) {
         self.submit_restart_restore_team_updates_for_new_roster_items();
+        let active_sheet = self
+            .classic_host_lobby
+            .as_ref()
+            .map(|lobby| lobby.controller.active_sheet())
+            .unwrap_or(LobbySheet::Players);
         let local_client_id = self
             .network
             .as_ref()
@@ -43941,7 +44021,21 @@ impl GameApp {
             &self.control_player_infos,
             teams,
             local_client_id,
+            active_sheet,
         );
+        if active_sheet == LobbySheet::Teams {
+            let random_team = self.runtime_resource_text("IDS_MSG_RNDTEAM", "Random team");
+            for row in &mut rows {
+                if let LobbyRosterRow::Header(LobbyHeaderRow {
+                    kind: LobbyRosterHeader::RandomTeam,
+                    label,
+                    ..
+                }) = row
+                {
+                    label.clone_from(&random_team);
+                }
+            }
+        }
         let active_players = if has_rich_projection {
             rich_active_players
         } else {
@@ -44174,6 +44268,7 @@ impl GameApp {
             let Some(lobby) = self.classic_host_lobby.as_mut() else {
                 return false;
             };
+            lobby.last_roster_click = None;
             lobby.controller.set_active_sheet(sheet);
             if sheet == LobbySheet::Resources {
                 lobby
@@ -45012,6 +45107,76 @@ impl GameApp {
         };
         if let Err(error) = network.submit_player_info_update(request) {
             tracing::error!(%error, player_id, team_id, "failed to submit lobby team selection");
+        }
+    }
+
+    fn move_local_classic_lobby_players_into_team(&mut self, team_id: i32) {
+        if self
+            .classic_host_lobby
+            .as_ref()
+            .is_none_or(|lobby| lobby.controller.countdown().is_any())
+        {
+            return;
+        }
+        let Some(metadata) = self
+            .network_team_assignment
+            .as_ref()
+            .map(NetworkTeamAssignmentState::teams)
+        else {
+            return;
+        };
+        if !metadata.active {
+            return;
+        }
+        let distribution_allows_change = match metadata.team_distribution {
+            lc_engine::InitialNetworkTeamDistribution::Free => true,
+            lc_engine::InitialNetworkTeamDistribution::Host => {
+                matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            }
+            lc_engine::InitialNetworkTeamDistribution::None
+            | lc_engine::InitialNetworkTeamDistribution::Random
+            | lc_engine::InitialNetworkTeamDistribution::RandomInvisible => false,
+        };
+        let has_available_team = metadata.auto_generate_teams
+            || metadata.teams.iter().any(|team| {
+                team.max_players == 0
+                    || i32::try_from(team.player_ids.len()).unwrap_or(i32::MAX)
+                        < team.max_players
+            });
+        if !distribution_allows_change
+            || !has_available_team
+            || !metadata.teams.iter().any(|team| team.id == team_id)
+        {
+            return;
+        }
+        let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        else {
+            return;
+        };
+        let Some(mut request) = self
+            .control_player_infos
+            .client_update_request(local_client_id)
+        else {
+            return;
+        };
+        let mut changed = false;
+        for player in &mut request.players {
+            if player.player_type == lc_engine::PLAYER_INFO_TYPE_USER && player.team != team_id {
+                player.team = team_id;
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        if let Err(error) = network.submit_player_info_update(request) {
+            tracing::error!(%error, team_id, "failed to move local lobby players into team");
         }
     }
 
@@ -49080,6 +49245,7 @@ impl GameApp {
             return false;
         };
         lobby.pointer = None;
+        lobby.last_roster_click = None;
         lobby.controller.cancel_interaction();
         self.scenario_game_options.cancel_interaction();
         self.play_classic_lobby_sounds();
@@ -49092,6 +49258,7 @@ impl GameApp {
             return false;
         };
         lobby.pointer = None;
+        lobby.last_roster_click = None;
         lobby.controller.pointer_left();
         self.scenario_game_options.pointer_left();
         self.play_classic_lobby_sounds();
@@ -49329,6 +49496,9 @@ impl GameApp {
                 }
                 ClassicLobbyAction::TeamSelectionRequested { player_id } => {
                     self.open_classic_lobby_team_combo(player_id)?;
+                }
+                ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { team_id } => {
+                    self.move_local_classic_lobby_players_into_team(team_id);
                 }
                 ClassicLobbyAction::OptionSelectionRequested {
                     option,
@@ -50503,9 +50673,33 @@ impl GameApp {
                 .classic_host_lobby
                 .as_mut()
                 .map(|lobby| {
-                    lobby
+                    let now = Instant::now();
+                    let clicked = lobby
                         .controller
-                        .pointer_up(point, &layout, &roster, Instant::now())
+                        .accepted_roster_click_id(point, &layout, &roster);
+                    let double_click = clicked.as_ref().is_some_and(|clicked| {
+                        lobby.last_roster_click.as_ref().is_some_and(|(last, at)| {
+                            last == clicked
+                                && now.saturating_duration_since(*at)
+                                    < CPP_DOUBLE_CLICK_INTERVAL
+                        })
+                    });
+                    lobby.last_roster_click = if double_click {
+                        None
+                    } else {
+                        clicked.map(|row| (row, now))
+                    };
+                    let mut actions = lobby
+                        .controller
+                        .pointer_up(point, &layout, &roster, now);
+                    if double_click {
+                        actions.extend(
+                            lobby
+                                .controller
+                                .pointer_double_click(point, &layout, &roster),
+                        );
+                    }
+                    actions
                 })
                 .unwrap_or_default(),
         };
@@ -87744,6 +87938,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 })],
             ),
             pointer: None,
+            last_roster_click: None,
             chat_history_index: -1,
             runtime_join_allowed: false,
             resource_rows: BTreeMap::new(),
@@ -91983,6 +92178,415 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn team_header_double_click_moves_all_local_users_once_and_obeys_bulk_gates() {
+        let mut app = new_menu_app(640, 480);
+        let (chooser, companion) = install_test_classic_host_team_lobby(&mut app);
+        let script = lc_engine::ControlPlayerInfoEntry {
+            id: 9,
+            team: 1,
+            player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+            name: LegacyCString::from_bytes(b"Script player".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        app.control_player_infos.replace_snapshot(
+            8,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![chooser.clone(), companion.clone(), script.clone()],
+                by_client: 0,
+            }],
+        );
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+
+        assert!(app.select_classic_lobby_sheet(LobbySheet::Teams));
+        let (_, roster) = app
+            .classic_host_lobby_layouts()
+            .expect("Teams roster layout");
+        let point_for_team = |team_id| {
+            let header = roster
+                .rows
+                .iter()
+                .find(|layout_row| {
+                    matches!(
+                        app.classic_host_lobby
+                            .as_ref()
+                            .expect("test lobby")
+                            .controller
+                            .rows()
+                            .get(layout_row.index),
+                        Some(LobbyRosterRow::Header(LobbyHeaderRow {
+                            kind: LobbyRosterHeader::Team(id),
+                            ..
+                        })) if *id == team_id
+                    )
+                })
+                .expect("team header");
+            GuiPoint::new(
+                (header.rect.x + 2) as f32,
+                (header.rect.y + 2) as f32,
+            )
+        };
+        let other_point = point_for_team(1);
+        let point = point_for_team(2);
+
+        app.handle_classic_lobby_pointer_move(other_point)
+            .expect("hover other team header");
+        app.handle_classic_lobby_pointer_button(ElementState::Pressed)
+            .expect("press other team header");
+        app.handle_classic_lobby_pointer_move(point)
+            .expect("drag onto target team header");
+        app.handle_classic_lobby_pointer_button(ElementState::Released)
+            .expect("release canceled cross-row gesture");
+        app.handle_classic_lobby_pointer_button(ElementState::Pressed)
+            .expect("press target team header once");
+        app.handle_classic_lobby_pointer_button(ElementState::Released)
+            .expect("release target team header once");
+        assert!(
+            commands.take_player_info_updates().is_empty(),
+            "a drag release must not seed a later single click as a double click"
+        );
+        app.handle_classic_lobby_pointer_button(ElementState::Pressed)
+            .expect("press target team header twice");
+        app.handle_classic_lobby_pointer_button(ElementState::Released)
+            .expect("release target team header twice");
+
+        let mut moved_chooser = chooser.clone();
+        moved_chooser.team = 2;
+        let mut moved_companion = companion.clone();
+        moved_companion.team = 2;
+        assert_eq!(
+            commands.take_player_info_updates(),
+            vec![lc_network::PlayerInfoUpdateRequest {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![moved_chooser, moved_companion, script],
+            }],
+            "the physical double click clones one full packet and mutates every local User"
+        );
+        assert_eq!(
+            app.control_player_infos
+                .client_update_request(0)
+                .expect("authoritative packet")
+                .players,
+            vec![chooser, companion, lc_engine::ControlPlayerInfoEntry {
+                id: 9,
+                team: 1,
+                player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                name: LegacyCString::from_bytes(b"Script player".to_vec()).unwrap(),
+                ..Default::default()
+            }],
+            "the roster waits for the authoritative player-info echo"
+        );
+
+        app.classic_host_lobby
+            .as_mut()
+            .expect("test lobby")
+            .controller
+            .apply_countdown_packet(lc_frontend::game_lobby::LobbyCountdownPacket::Seconds(11));
+        app.process_classic_lobby_actions(vec![
+            ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: 2 },
+        ])
+        .expect("long countdown request is inert");
+        assert!(commands.take_player_info_updates().is_empty());
+
+        app.classic_host_lobby
+            .as_mut()
+            .expect("test lobby")
+            .controller
+            .apply_countdown_packet(lc_frontend::game_lobby::LobbyCountdownPacket::Abort);
+        app.network_team_assignment
+            .as_mut()
+            .expect("team assignment")
+            .teams_mut()
+            .team_distribution = lc_engine::InitialNetworkTeamDistribution::Random;
+        app.process_classic_lobby_actions(vec![
+            ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: 2 },
+        ])
+        .expect("random distribution request is inert");
+        assert!(commands.take_player_info_updates().is_empty());
+    }
+
+    #[test]
+    fn teams_sheet_groups_in_team_member_order_and_filters_inactive_or_invisible_players() {
+        let mut clients = ControlClientRegistry::default();
+        clients.replace_snapshot([
+            lc_engine::ClientCoreControlData {
+                client_id: 0,
+                activated: true,
+                ..Default::default()
+            },
+            lc_engine::ClientCoreControlData {
+                client_id: 7,
+                activated: false,
+                ..Default::default()
+            },
+            lc_engine::ClientCoreControlData {
+                client_id: 8,
+                activated: true,
+                ..Default::default()
+            },
+        ]);
+        let player = |id, team, flags, player_type| lc_engine::ControlPlayerInfoEntry {
+            id,
+            team,
+            flags,
+            player_type,
+            name: LegacyCString::from_bytes(format!("Player {id}").into_bytes()).unwrap(),
+            ..Default::default()
+        };
+        let mut infos = ControlPlayerInfoRegistry::default();
+        infos.replace_snapshot(
+            1,
+            [
+                lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    players: vec![
+                        player(10, 1, 0, lc_engine::PLAYER_INFO_TYPE_USER),
+                        player(
+                            11,
+                            2,
+                            lc_engine::PLAYER_INFO_FLAG_INVISIBLE,
+                            lc_engine::PLAYER_INFO_TYPE_USER,
+                        ),
+                        player(99, 0, 0, lc_engine::PLAYER_INFO_TYPE_USER),
+                    ],
+                    ..Default::default()
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    players: vec![player(20, 2, 0, lc_engine::PLAYER_INFO_TYPE_USER)],
+                    ..Default::default()
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 8,
+                    players: vec![
+                        player(30, 2, 0, lc_engine::PLAYER_INFO_TYPE_USER),
+                        player(31, 1, 0, lc_engine::PLAYER_INFO_TYPE_SCRIPT),
+                    ],
+                    ..Default::default()
+                },
+            ],
+        );
+        let team = |id, name: &[u8], player_ids| lc_engine::InitialNetworkTeam {
+            id,
+            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            player_start_index: 0,
+            player_ids,
+            color: 0,
+            icon_spec: LegacyCString::default(),
+            max_players: 0,
+        };
+        let metadata = lc_engine::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 3,
+            team_distribution: lc_engine::InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: vec![
+                team(2, b"Second", vec![20, 30, 11]),
+                team(1, b"First", vec![31, 10]),
+                team(3, b"Configured empty", Vec::new()),
+            ],
+        };
+
+        let rows = classic_lobby_roster_projection(
+            &clients,
+            &infos,
+            Some(&metadata),
+            0,
+            LobbySheet::Teams,
+        )
+        .0;
+        assert_eq!(
+            rows.iter().map(LobbyRosterRow::id).collect::<Vec<_>>(),
+            vec![
+                LobbyRosterId::Header(LobbyRosterHeader::Team(2)),
+                LobbyRosterId::Player(30),
+                LobbyRosterId::Header(LobbyRosterHeader::Team(1)),
+                LobbyRosterId::Player(31),
+                LobbyRosterId::Player(10),
+                LobbyRosterId::Header(LobbyRosterHeader::Team(3)),
+            ]
+        );
+        assert!(rows.iter().all(|row| !matches!(row, LobbyRosterRow::Client(_))));
+
+        let mut generated = metadata.clone();
+        generated.auto_generate_teams = true;
+        let generated = classic_lobby_roster_projection(
+            &clients,
+            &infos,
+            Some(&generated),
+            0,
+            LobbySheet::Teams,
+        )
+        .0;
+        assert!(!generated.iter().any(|row| matches!(
+            row,
+            LobbyRosterRow::Header(LobbyHeaderRow {
+                kind: LobbyRosterHeader::Team(3),
+                ..
+            })
+        )));
+    }
+
+    #[test]
+    fn invisible_random_teams_sheet_uses_one_lazy_header_and_client_packet_order() {
+        let mut clients = ControlClientRegistry::default();
+        clients.replace_snapshot([
+            lc_engine::ClientCoreControlData {
+                client_id: 0,
+                activated: true,
+                ..Default::default()
+            },
+            lc_engine::ClientCoreControlData {
+                client_id: 7,
+                activated: false,
+                ..Default::default()
+            },
+            lc_engine::ClientCoreControlData {
+                client_id: 8,
+                activated: true,
+                ..Default::default()
+            },
+        ]);
+        let player = |id, flags, player_type| lc_engine::ControlPlayerInfoEntry {
+            id,
+            flags,
+            player_type,
+            name: LegacyCString::from_bytes(format!("Player {id}").into_bytes()).unwrap(),
+            ..Default::default()
+        };
+        let mut infos = ControlPlayerInfoRegistry::default();
+        infos.replace_snapshot(
+            1,
+            [
+                lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    players: vec![
+                        player(10, 0, lc_engine::PLAYER_INFO_TYPE_USER),
+                        player(
+                            11,
+                            lc_engine::PLAYER_INFO_FLAG_INVISIBLE,
+                            lc_engine::PLAYER_INFO_TYPE_USER,
+                        ),
+                        player(
+                            12,
+                            lc_engine::PLAYER_INFO_FLAG_REMOVED,
+                            lc_engine::PLAYER_INFO_TYPE_USER,
+                        ),
+                    ],
+                    ..Default::default()
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    players: vec![player(20, 0, lc_engine::PLAYER_INFO_TYPE_USER)],
+                    ..Default::default()
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 8,
+                    players: vec![
+                        player(30, 0, lc_engine::PLAYER_INFO_TYPE_SCRIPT),
+                        player(31, 0, lc_engine::PLAYER_INFO_TYPE_USER),
+                    ],
+                    ..Default::default()
+                },
+            ],
+        );
+        let metadata = lc_engine::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 0,
+            team_distribution: lc_engine::InitialNetworkTeamDistribution::RandomInvisible,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: Vec::new(),
+        };
+        let rows = classic_lobby_roster_projection(
+            &clients,
+            &infos,
+            Some(&metadata),
+            0,
+            LobbySheet::Teams,
+        )
+        .0;
+        assert_eq!(
+            rows.iter().map(LobbyRosterRow::id).collect::<Vec<_>>(),
+            vec![
+                LobbyRosterId::Header(LobbyRosterHeader::RandomTeam),
+                LobbyRosterId::Player(10),
+                LobbyRosterId::Player(12),
+                LobbyRosterId::Player(30),
+                LobbyRosterId::Player(31),
+            ]
+        );
+        let [LobbyRosterRow::Header(header), ..] = rows.as_slice() else {
+            panic!("random-team projection must start with one header");
+        };
+        assert_eq!(header.label, "Random team");
+        assert_eq!(header.icon, LobbyRosterIcon::Standard(19));
+
+        infos.replace_snapshot(
+            2,
+            [
+                lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    players: vec![player(
+                        40,
+                        lc_engine::PLAYER_INFO_FLAG_INVISIBLE,
+                        lc_engine::PLAYER_INFO_TYPE_USER,
+                    )],
+                    ..Default::default()
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    players: vec![player(41, 0, lc_engine::PLAYER_INFO_TYPE_USER)],
+                    ..Default::default()
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 8,
+                    players: vec![player(
+                        42,
+                        lc_engine::PLAYER_INFO_FLAG_INVISIBLE,
+                        lc_engine::PLAYER_INFO_TYPE_USER,
+                    )],
+                    ..Default::default()
+                },
+            ],
+        );
+        assert!(
+            classic_lobby_roster_projection(
+                &clients,
+                &infos,
+                Some(&metadata),
+                0,
+                LobbySheet::Teams,
+            )
+            .0
+            .is_empty(),
+            "the Random team header is created lazily only for a visible active-client player"
+        );
+    }
+
+    #[test]
     fn client_roster_projection_hides_foreign_team_controls_and_random_assignments() {
         let teams = vec![
             lc_engine::InitialNetworkTeam {
@@ -92089,7 +92693,14 @@ public func Grant(password) { return GainMissionAccess(password); }
                     },
                 ],
             );
-            classic_lobby_roster_projection(&clients, &infos, Some(metadata), local_client_id).0
+            classic_lobby_roster_projection(
+                &clients,
+                &infos,
+                Some(metadata),
+                local_client_id,
+                LobbySheet::Players,
+            )
+            .0
         };
         let selectable = |rows: &[LobbyRosterRow], player_id| {
             rows.iter().find_map(|row| match row {

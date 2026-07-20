@@ -281,6 +281,7 @@ pub struct LobbyLabels {
     pub tooltip_unassigned_savegame_players: String,
     pub tooltip_script_players: String,
     pub tooltip_replay_players: String,
+    pub tooltip_team_template: String,
 }
 
 impl Default for LobbyLabels {
@@ -312,6 +313,7 @@ impl Default for LobbyLabels {
             tooltip_unassigned_savegame_players: "Unassociated savegame players.".into(),
             tooltip_script_players: "Players controlled by computer.".into(),
             tooltip_replay_players: "Starring".into(),
+            tooltip_team_template: "Team {team}".into(),
         }
     }
 }
@@ -389,6 +391,8 @@ pub enum LobbyRosterId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LobbyRosterHeader {
+    Team(i32),
+    RandomTeam,
     ScriptPlayers,
     ReplayPlayers,
     UnassignedSavegamePlayers,
@@ -581,7 +585,9 @@ impl LobbyRosterRow {
             self,
             Self::Client(_)
                 | Self::Header(LobbyHeaderRow {
-                    kind: LobbyRosterHeader::ReplayPlayers,
+                    kind: LobbyRosterHeader::ReplayPlayers
+                        | LobbyRosterHeader::Team(_)
+                        | LobbyRosterHeader::RandomTeam,
                     ..
                 })
         )
@@ -744,6 +750,9 @@ pub enum LobbyAction {
     AddScriptPlayerRequested,
     TeamSelectionRequested {
         player_id: i32,
+    },
+    MoveLocalPlayersIntoTeamRequested {
+        team_id: i32,
     },
     /// Open the app-owned context menu used as this ComboBox's dropdown.
     OptionSelectionRequested {
@@ -1657,6 +1666,24 @@ impl GameLobby {
         self.selected_roster_id.as_ref()
     }
 
+    pub fn accepted_roster_click_id(
+        &self,
+        point: GuiPoint,
+        layout: &LobbyLayout,
+        roster: &LobbyRosterLayout,
+    ) -> Option<LobbyRosterId> {
+        let hit = self.hit_test(point, layout, roster);
+        if self.pointer_pressed != Some(hit) || !self.pointer_inside_pressed {
+            return None;
+        }
+        let index = match hit {
+            HitTarget::RosterRow(index) => index,
+            _ => return None,
+        };
+        let id = self.rows.get(index).map(LobbyRosterRow::id)?;
+        (self.selected_roster_id.as_ref() == Some(&id)).then_some(id)
+    }
+
     /// Mirrors the per-row C4GUI::ComboBox `iOpenMenu` presentation state.
     /// Menu ownership remains app-side because the shared context-menu tree
     /// is rendered above the lobby.
@@ -2363,6 +2390,8 @@ impl GameLobby {
                 let changed = self.focus != LobbyControl::Roster;
                 self.change_focus(LobbyControl::Roster, false);
                 let mut actions = self.select_row(Some(index), true, layout, roster);
+                self.pointer_pressed = Some(hit);
+                self.pointer_inside_pressed = true;
                 if changed {
                     actions.insert(0, LobbyAction::FocusChanged(LobbyControl::Roster));
                 }
@@ -2686,6 +2715,23 @@ impl GameLobby {
             }
             self.append_game_option_focus_clear(previous, &mut actions);
             actions
+        } else if let HitTarget::RosterRow(index) = hit {
+            match self.rows.get(index) {
+                Some(LobbyRosterRow::Header(LobbyHeaderRow {
+                    kind: LobbyRosterHeader::Team(team_id),
+                    ..
+                })) => vec![LobbyAction::MoveLocalPlayersIntoTeamRequested {
+                    team_id: *team_id,
+                }],
+                Some(LobbyRosterRow::Header(LobbyHeaderRow {
+                    kind: LobbyRosterHeader::RandomTeam,
+                    ..
+                }))
+                | Some(LobbyRosterRow::Client(_))
+                | Some(LobbyRosterRow::Player(_))
+                | Some(LobbyRosterRow::Header(_))
+                | None => Vec::new(),
+            }
         } else {
             Vec::new()
         }
@@ -4035,6 +4081,10 @@ impl GameLobby {
                         LobbyRosterHeader::ReplayPlayers => {
                             self.labels.tooltip_replay_players.clone()
                         }
+                        LobbyRosterHeader::Team(_) | LobbyRosterHeader::RandomTeam => self
+                            .labels
+                            .tooltip_team_template
+                            .replace("{team}", &crate::c4_presentation_text(&header.label)),
                     },
                     _ => return None,
                 }
@@ -6522,6 +6572,57 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Some(LobbySheet::Teams)]
         );
+    }
+
+    #[test]
+    fn team_header_double_click_requests_one_bulk_move_and_random_header_is_inert() {
+        let fonts = endeavour_font_set();
+        let mut lobby = GameLobby::new(
+            LobbyRole::Host,
+            "Gold Mine",
+            2,
+            4,
+            true,
+            false,
+            true,
+            false,
+            5,
+            vec![header(LobbyRosterHeader::Team(7), false), player(2)],
+        );
+        lobby.set_active_sheet(LobbySheet::Teams);
+        let layout = lobby.layout(1280, 720, &fonts);
+        let roster = lobby.roster_layout(&layout, fonts.text.line_height);
+        let point = GuiPoint::new(
+            (roster.rows[0].rect.x + 1) as f32,
+            (roster.rows[0].rect.y + 1) as f32,
+        );
+        lobby.pointer_down(point, &layout, &roster);
+        assert_eq!(
+            lobby.accepted_roster_click_id(point, &layout, &roster),
+            Some(LobbyRosterId::Header(LobbyRosterHeader::Team(7)))
+        );
+        assert_eq!(
+            lobby.pointer_double_click(point, &layout, &roster),
+            [LobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: 7 }]
+        );
+
+        lobby.set_rows(vec![header(LobbyRosterHeader::Team(8), false)]);
+        assert_eq!(
+            lobby.accepted_roster_click_id(point, &layout, &roster),
+            None,
+            "a row replacement between down and up must invalidate the semantic click"
+        );
+        lobby.cancel_interaction();
+
+        lobby.set_rows(vec![header(LobbyRosterHeader::RandomTeam, false)]);
+        let roster = lobby.roster_layout(&layout, fonts.text.line_height);
+        let point = GuiPoint::new(
+            (roster.rows[0].rect.x + 1) as f32,
+            (roster.rows[0].rect.y + 1) as f32,
+        );
+        assert!(lobby
+            .pointer_double_click(point, &layout, &roster)
+            .is_empty());
     }
 
     #[test]
