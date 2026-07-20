@@ -1,7 +1,7 @@
 // C4Script has no generic comma operator. Commas remain delimiters, including
 // the legacy pre-STRICT2 `return(first, unused...)` compatibility form.
 
-use lc_script::{Engine, Script, Value};
+use lc_script::{Engine, Script, ScriptError, Value, ValueMap};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
@@ -213,6 +213,562 @@ fn comma_in_while_condition() {
     assert_function_quarantined(
         "func Test() { var x; while ((x = x + 1, x < 10)) {} }",
         "Test",
+    );
+}
+
+#[test]
+fn legacy_if_while_parameter_lists_keep_first_and_evaluate_surplus() {
+    for directive in ["", "#strict\n"] {
+        let evaluation_order = Arc::new(Mutex::new(Vec::new()));
+        let observed_order = Arc::clone(&evaluation_order);
+        let mut engine = Engine::new();
+        engine.register_host_function("Mark", move |args| {
+            let [Value::Int(marker), value] = args else {
+                panic!("Mark requires an integer marker and a value")
+            };
+            observed_order.lock().expect("order lock").push(*marker);
+            Ok(value.clone())
+        });
+
+        let script = Script::compile(&format!(
+            r#"{directive}
+            func EmptyIf() {{ if() return 90; return 11; }}
+            func EmptyWhile() {{ while() return 90; return 12; }}
+            func SurplusIf() {{
+                if(Mark(1, 1), Mark(2, 1), Mark(3, 1)) return 13;
+                return 90;
+            }}
+            func FalseFirst() {{
+                if(Mark(4, 1 - 1), Mark(5, 1)) return 90;
+                return 14;
+            }}
+            func MissingFirst() {{
+                if(, Mark(6, 1)) return 90;
+                return 15;
+            }}
+            func TrailingSlot() {{
+                if(Mark(7, 1),) return 16;
+                return 90;
+            }}
+            func LateReferenceTrue() {{
+                var value = 1 - 1;
+                if(value, value = 1) return 17;
+                return 90;
+            }}
+            func LateReferenceFalse() {{
+                var value = 1;
+                if(value, value = 1 - 1) return 90;
+                return 18;
+            }}
+            func SurplusWhile() {{
+                var i = 1 - 1;
+                while(Mark(10 + i, 2 - i), Mark(20 + i, 1), Mark(30 + i, 1))
+                    i += 1;
+                return i;
+            }}
+            func Forward(first, ...) {{ if(...) return 19; return 0; }}
+            "#
+        ))
+        .expect("legacy condition parameter lists compile");
+
+        let warning_messages = script
+            .parse_diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            warning_messages
+                .iter()
+                .filter(|message| { **message == "if: passing 2 parameters, but only 1 are used" })
+                .count(),
+            5
+        );
+        assert_eq!(
+            warning_messages
+                .iter()
+                .filter(|message| { **message == "if: passing 3 parameters, but only 1 are used" })
+                .count(),
+            1
+        );
+        assert_eq!(
+            warning_messages
+                .iter()
+                .filter(|message| {
+                    **message == "while: passing 3 parameters, but only 1 are used"
+                })
+                .count(),
+            1
+        );
+        assert_eq!(warning_messages.len(), 7);
+
+        engine.add_script(script);
+        for (function, expected) in [
+            ("EmptyIf", Value::Int(11)),
+            ("EmptyWhile", Value::Int(12)),
+            ("SurplusIf", Value::Int(13)),
+            ("FalseFirst", Value::Int(14)),
+            ("MissingFirst", Value::Int(15)),
+            ("TrailingSlot", Value::Int(16)),
+            ("LateReferenceTrue", Value::Int(17)),
+            ("LateReferenceFalse", Value::Int(18)),
+            ("SurplusWhile", Value::Int(2)),
+        ] {
+            assert_eq!(
+                engine.call(function, &[]).expect("condition executes"),
+                expected
+            );
+        }
+        assert_eq!(
+            engine
+                .call("Forward", &[Value::Nil, Value::Int(1)])
+                .expect("ellipsis forwards the first unnamed parameter"),
+            Value::Int(19)
+        );
+        assert_eq!(
+            engine
+                .call("Forward", &[Value::Nil])
+                .expect("missing unnamed parameter is nil"),
+            Value::Nil
+        );
+        assert_eq!(
+            *evaluation_order.lock().expect("order lock"),
+            vec![1, 2, 3, 4, 5, 6, 7, 10, 20, 30, 11, 21, 31, 12, 22, 32]
+        );
+    }
+
+    for level in [2, 3] {
+        let mut exact_engine = Engine::new();
+        exact_engine
+            .load_script(&format!(
+                "#strict {level}\n\
+                 func Exact() {{ var i = 0; if (1) i = 1; while (i < 2) i += 1; return i; }}"
+            ))
+            .expect("modern exact-one conditions compile");
+        assert_eq!(
+            exact_engine
+                .call("Exact", &[])
+                .expect("exact conditions run"),
+            Value::Int(2)
+        );
+
+        for body in [
+            "if() return 1;",
+            "if(1, 2) return 1;",
+            "if(1,) return 1;",
+            "while() return 1;",
+            "while(1, 2) return 1;",
+            "while(1,) return 1;",
+        ] {
+            assert_function_quarantined(
+                &format!("#strict {level}\nfunc Invalid() {{ {body} }}"),
+                "Invalid",
+            );
+        }
+    }
+}
+
+#[test]
+fn legacy_condition_path_references_pin_cpp_container_elements() {
+    let script = Script::compile(
+        r#"
+        #strict
+        func SameArraySlot() {
+            var values = [0];
+            if(values[0], values[0] = 1) return 20;
+            return 90;
+        }
+        func PinnedArrayRoot() {
+            var values = [1];
+            if(values[0], values = [0]) return 21;
+            return 90;
+        }
+        func PinnedArrayAncestor() {
+            var values = [[1]];
+            if(values[0][0], values[0] = [0]) return 22;
+            return 90;
+        }
+        func SamePropertySlot(values) {
+            if(values["item"], values["item"] = 1) return 23;
+            return 90;
+        }
+        func PinnedPropertyRoot(values, replacement) {
+            if(values["item"], values = replacement) return 24;
+            return 90;
+        }
+        func PinnedPropertyAncestor(values, replacement) {
+            if(values["nested"]["item"], values["nested"] = replacement) return 25;
+            return 90;
+        }
+        func Rebind(&values) { values = [1]; return 0; }
+        func ReentrantRhs() {
+            var values = [1];
+            if(values[0], values[0] = Rebind(values)) return 90;
+            return 26;
+        }
+        func RebindAncestor(&values) { values[0] = [1]; return 0; }
+        func ReentrantAncestorRhs() {
+            var values = [[1]];
+            if(values[0][0], values[0][0] = RebindAncestor(values)) return 90;
+            return 27;
+        }
+        func SingleReentrantRhs() {
+            var values = [1];
+            if(values[0] = Rebind(values)) return 90;
+            return 27;
+        }
+        func ReentrantCompound() {
+            var values = [1];
+            if(1, values[0] += Rebind(values)) {}
+            return 27;
+        }
+        func DiscardedArrayReferenceGrows() {
+            var values = [];
+            if(1, values[2]) {}
+            return values;
+        }
+        func MissingMapSlot(values) {
+            if(1, values["missing"]) {}
+            return values;
+        }
+        func DiscardedReferenceDetaches() {
+            var values = [1], alias = values;
+            if(1, values[0]) {}
+            return values == alias;
+        }
+        func CopyAfterPin() {
+            var values = [1], alias;
+            if(values[0], alias = values) {}
+            return values == alias;
+        }
+        func DiscardedRefLivesThroughList() {
+            var values = [1], alias;
+            if(1, values[0], alias = values) {}
+            return values == alias;
+        }
+        func RootSelfCopyReplacesPinnedContainer() {
+            var values = [1];
+            if(values[0], values = values, values[0] = 0) return 90;
+            return 28;
+        }
+        func PrefixRefs() {
+            var up = -1, down = 1;
+            if(++up, up = 1) {
+                if(--down, down = 1) return 29;
+            }
+            return 90;
+        }
+        func Identity(value) { return value; }
+        func NestedValueDoesNotGrow() {
+            var values = [], alias = values;
+            if(1, Identity(values[2])) {}
+            return [values, values == alias];
+        }
+        func NestedBinaryDoesNotGrow() {
+            var values = [];
+            if(1, values[2] + 0) {}
+            return values;
+        }
+        func ReadPinnedValue(&slot) { return slot[2]; }
+        func NestedPinnedValueDoesNotGrow() {
+            var values = [[]];
+            if(1, ReadPinnedValue(values[0])) {}
+            return values[0];
+        }
+        func SetZero(&value) { value = 0; return 1; }
+        func ReferenceArgumentsStayLive() {
+            var prefix = 0, assignment = 0;
+            if(1, SetZero(++prefix), SetZero(assignment = 2)) {}
+            return [prefix, assignment];
+        }
+        func InvalidDiscardedIndex() {
+            var value = 1;
+            if(1, value[0]) {}
+            return 90;
+        }
+        func CopyWithPinned(&slot, &root) {
+            var alias;
+            if(1, alias = root) {}
+            return root == alias;
+        }
+        func ExistingPinnedRefCopy() {
+            var values = [1];
+            return CopyWithPinned(values[0], values);
+        }
+        func RebindRootForIndex(&values) { values = [[9]]; return 0; }
+        func ResolvedContainerIndexedAgain() {
+            var values = [[2]];
+            if(1, values[0][RebindRootForIndex(values)] = 3) {}
+            return 31;
+        }
+        func AcceptCollapsedReference(&slot, marker) { return 32; }
+        func CollapsedReferenceArgument() {
+            var values = [[2]];
+            if(1, AcceptCollapsedReference(values[0][RebindRootForIndex(values)], MarkCollapsed())) {}
+            return 33;
+        }
+        "#,
+    )
+    .expect("legacy container-reference conditions compile");
+
+    assert_eq!(
+        script
+            .parse_diagnostics()
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.message() == "if: passing 2 parameters, but only 1 are used"
+            })
+            .count(),
+        22
+    );
+    assert_eq!(
+        script
+            .parse_diagnostics()
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.message() == "if: passing 3 parameters, but only 1 are used"
+            })
+            .count(),
+        3
+    );
+    assert_eq!(script.parse_diagnostics().len(), 25);
+
+    let collapsed_mark_count = Arc::new(AtomicUsize::new(0));
+    let observed_collapsed_mark_count = Arc::clone(&collapsed_mark_count);
+    let mut engine = Engine::new();
+    engine.register_host_function("MarkCollapsed", move |args| {
+        assert!(args.is_empty());
+        observed_collapsed_mark_count.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Nil)
+    });
+    engine.add_script(script);
+    for (function, expected) in [
+        ("SameArraySlot", Value::Int(20)),
+        ("PinnedArrayRoot", Value::Int(21)),
+        ("PinnedArrayAncestor", Value::Int(22)),
+        (
+            "DiscardedArrayReferenceGrows",
+            Value::Array(vec![Value::Nil, Value::Nil, Value::Nil]),
+        ),
+        ("DiscardedReferenceDetaches", Value::Bool(false)),
+        ("CopyAfterPin", Value::Bool(false)),
+        ("DiscardedRefLivesThroughList", Value::Bool(false)),
+        ("RootSelfCopyReplacesPinnedContainer", Value::Int(90)),
+        ("PrefixRefs", Value::Int(29)),
+        (
+            "NestedValueDoesNotGrow",
+            Value::Array(vec![Value::Array(Vec::new()), Value::Bool(true)]),
+        ),
+        ("NestedBinaryDoesNotGrow", Value::Array(Vec::new())),
+        ("NestedPinnedValueDoesNotGrow", Value::Array(Vec::new())),
+        (
+            "ReferenceArgumentsStayLive",
+            Value::Array(vec![Value::Nil, Value::Nil]),
+        ),
+        ("ExistingPinnedRefCopy", Value::Bool(false)),
+    ] {
+        assert_eq!(
+            engine.call(function, &[]).expect("condition executes"),
+            expected,
+            "{function} must retain the C++ element-reference behavior"
+        );
+    }
+
+    let item_map =
+        |value| Value::Proplist(ValueMap::from([("item".to_string(), Value::Int(value))]));
+    assert_eq!(
+        engine
+            .call("SamePropertySlot", &[item_map(0)])
+            .expect("same map slot remains referenced"),
+        Value::Int(23)
+    );
+    assert_eq!(
+        engine
+            .call("PinnedPropertyRoot", &[item_map(1), item_map(0)])
+            .expect("map root replacement resolves the old element"),
+        Value::Int(24)
+    );
+    let nested = Value::Proplist(ValueMap::from([("nested".to_string(), item_map(1))]));
+    assert_eq!(
+        engine
+            .call("PinnedPropertyAncestor", &[nested, item_map(0)])
+            .expect("map ancestor replacement resolves the old element"),
+        Value::Int(25)
+    );
+    assert_eq!(
+        engine
+            .call("MissingMapSlot", &[Value::Proplist(ValueMap::new())])
+            .expect("a reference read inserts the missing map slot"),
+        Value::Proplist(ValueMap::from([("missing".to_string(), Value::Nil)]))
+    );
+    for function in [
+        "ReentrantRhs",
+        "ReentrantAncestorRhs",
+        "SingleReentrantRhs",
+        "ResolvedContainerIndexedAgain",
+    ] {
+        let error = engine
+            .call(function, &[])
+            .expect_err("container destruction resolves the assignment target to a value");
+        let ScriptError::Runtime(error) = error else {
+            panic!("expected runtime error for {function}, got {error}");
+        };
+        assert_eq!(
+            error.message(),
+            "operator \"=\" left side: got \"int\", but expected \"&\"!",
+            "{function}"
+        );
+    }
+    let error = engine
+        .call("ReentrantCompound", &[])
+        .expect_err("container destruction invalidates a compound target");
+    let ScriptError::Runtime(error) = error else {
+        panic!("expected runtime error, got {error}");
+    };
+    assert_eq!(
+        error.message(),
+        "operator \"+=\" left side: got \"int\", but expected \"int&\"!"
+    );
+    let error = engine
+        .call("InvalidDiscardedIndex", &[])
+        .expect_err("AB_ARRAYA_R validates a discarded reference immediately");
+    let ScriptError::Runtime(error) = error else {
+        panic!("expected runtime error, got {error}");
+    };
+    assert_eq!(
+        error.message(),
+        "indexed access: can't access int by index!"
+    );
+    let error = engine
+        .call("CollapsedReferenceArgument", &[])
+        .expect_err("a resolved value cannot satisfy a reference parameter");
+    let ScriptError::Runtime(error) = error else {
+        panic!("expected runtime error, got {error}");
+    };
+    assert_eq!(
+        error.message(),
+        "call to \"AcceptCollapsedReference\" parameter 1: got \"int\", but expected \"&\"!"
+    );
+    assert_eq!(collapsed_mark_count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn legacy_condition_effectvar_host_paths_pin_cpp_container_elements() {
+    let slot = Arc::new(Mutex::new(Value::Nil));
+    let host_slot = Arc::clone(&slot);
+    let mut engine = Engine::new();
+    engine.register_host_function_with_arity("EffectVar", 3, move |args| {
+        let mut slot = host_slot.lock().expect("EffectVar slot lock");
+        match args {
+            [_, _, _] => Ok(slot.clone()),
+            [_, _, _, replacement] => {
+                *slot = replacement.clone();
+                Ok(replacement.clone())
+            }
+            _ => panic!("invalid EffectVar frame: {args:?}"),
+        }
+    });
+    let script = Script::compile(
+        r#"
+        #strict
+        func DiscardedEffectVarReferenceGrows() {
+            EffectVar(0, 0, 1) = [];
+            if(1, EffectVar(0, 0, 1)[2]) {}
+            return EffectVar(0, 0, 1);
+        }
+        func PinnedEffectVarRoot() {
+            EffectVar(0, 0, 1) = [1];
+            if(EffectVar(0, 0, 1)[0], EffectVar(0, 0, 1) = [0]) return 34;
+            return 90;
+        }
+        func PinnedEffectVarAncestor() {
+            EffectVar(0, 0, 1) = [[1]];
+            if(EffectVar(0, 0, 1)[0][0], EffectVar(0, 0, 1)[0] = [0]) return 35;
+            return 90;
+        }
+        func SameEffectVarSlotStaysLive() {
+            EffectVar(0, 0, 1) = [0];
+            if(EffectVar(0, 0, 1)[0], EffectVar(0, 0, 1)[0] = 1) return 36;
+            return 90;
+        }
+        func ConvertedEffectVarAddressMatches() {
+            EffectVar(1, 0, 1) = [0];
+            if(EffectVar(1 == 1, 0, 1)[0], EffectVar(1, 0, 1)[0] = 1) return 37;
+            return 90;
+        }
+        func ReplaceEffectVarRoot() {
+            EffectVar(0, 0, 1) = [9];
+            return 0;
+        }
+        func EffectVarValueAccessStaysLive() {
+            EffectVar(0, 0, 1) = [1];
+            return EffectVar(0, 0, 1)[ReplaceEffectVarRoot()];
+        }
+        func InvalidDiscardedEffectVarIndex() {
+            EffectVar(0, 0, 1) = 1;
+            if(1, EffectVar(0, 0, 1)[0]) {}
+            return 90;
+        }
+        "#,
+    )
+    .expect("EffectVar path conditions compile");
+    assert_eq!(
+        script
+            .parse_diagnostics()
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.message() == "if: passing 2 parameters, but only 1 are used"
+            })
+            .count(),
+        6
+    );
+    assert_eq!(script.parse_diagnostics().len(), 6);
+    engine.add_script(script);
+
+    assert_eq!(
+        engine
+            .call("DiscardedEffectVarReferenceGrows", &[])
+            .expect("a discarded host-backed reference grows its array"),
+        Value::Array(vec![Value::Nil, Value::Nil, Value::Nil])
+    );
+    assert_eq!(
+        engine
+            .call("PinnedEffectVarRoot", &[])
+            .expect("host root replacement resolves the old element"),
+        Value::Int(34)
+    );
+    assert_eq!(
+        engine
+            .call("PinnedEffectVarAncestor", &[])
+            .expect("host ancestor replacement resolves the old element"),
+        Value::Int(35)
+    );
+    assert_eq!(
+        engine
+            .call("SameEffectVarSlotStaysLive", &[])
+            .expect("same host slot replacement keeps the reference live"),
+        Value::Int(36)
+    );
+    assert_eq!(
+        engine
+            .call("ConvertedEffectVarAddressMatches", &[])
+            .expect("converted host arguments identify the same EffectVar slot"),
+        Value::Int(37)
+    );
+    assert_eq!(
+        engine
+            .call("EffectVarValueAccessStaysLive", &[])
+            .expect("SetNoRef does not rewrite a reference-returning call"),
+        Value::Int(9)
+    );
+    let error = engine
+        .call("InvalidDiscardedEffectVarIndex", &[])
+        .expect_err("a discarded host-backed reference validates eagerly");
+    let ScriptError::Runtime(error) = error else {
+        panic!("expected runtime error, got {error}");
+    };
+    assert_eq!(
+        error.message(),
+        "indexed access: can't access int by index!"
     );
 }
 

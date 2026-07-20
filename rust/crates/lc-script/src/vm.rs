@@ -1,6 +1,6 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -550,7 +550,9 @@ impl CallerVarSlots {
     }
 
     pub fn set(&self, index: i32, value: Value) {
-        *slot_cell(&self.0, index).borrow_mut() = value;
+        let cell = slot_cell(&self.0, index);
+        notify_legacy_path_pins_before_cell_write(&cell, None, false);
+        *cell.borrow_mut() = value;
     }
 }
 
@@ -857,10 +859,14 @@ impl Binding {
 
     fn read_tracked(&self) -> Result<TrackedValue, RuntimeError> {
         match self {
-            Binding::Direct { value, identity } => Ok(TrackedValue {
-                value: value.borrow().clone(),
-                identity: identity.borrow().clone(),
-            }),
+            Binding::Direct { value, identity } => {
+                let identity =
+                    legacy_identity_for_value_copy(value, &[], identity.borrow().clone());
+                Ok(TrackedValue {
+                    value: value.borrow().clone(),
+                    identity,
+                })
+            }
             Binding::Reference(reference) => reference.read_tracked(),
         }
     }
@@ -872,6 +878,16 @@ impl Binding {
     fn write_tracked(&self, tracked: TrackedValue) -> Result<(), RuntimeError> {
         match self {
             Binding::Direct { value, identity } => {
+                let preserves_container = identity
+                    .borrow()
+                    .as_ref()
+                    .zip(tracked.identity.as_ref())
+                    .is_some_and(|(current, replacement)| current == replacement);
+                notify_legacy_path_pins_before_cell_write(
+                    value,
+                    Some(identity),
+                    preserves_container,
+                );
                 *value.borrow_mut() = tracked.value;
                 *identity.borrow_mut() = tracked.identity;
                 Ok(())
@@ -900,6 +916,7 @@ pub(crate) enum LValueRef {
         root: ValueCell,
         root_identity: Option<RawIdentityCell>,
         segments: Vec<PathSegment>,
+        legacy_pin: Option<Rc<RefCell<LegacyPathPin>>>,
     },
     /// A reference returned by a value-style host getter/setter. The engine's
     /// `EffectVar` host uses three addressing arguments for reads and accepts
@@ -912,6 +929,7 @@ pub(crate) enum LValueRef {
         caller: ScriptCallerContext,
         global_call_context_hook: Option<GlobalCallContextHook>,
         segments: Vec<PathSegment>,
+        legacy_pin: Option<Rc<RefCell<LegacyHostPathPin>>>,
     },
 }
 
@@ -952,54 +970,165 @@ impl LValueRef {
             Self::Cell {
                 value,
                 identity: Some(identity),
-            } => (identity, value, &[][..]),
+            } => (identity.clone(), value.clone(), &[][..]),
             Self::Path {
                 root,
-                root_identity: Some(identity),
+                root_identity,
                 segments,
-            } => (identity, root, segments.as_slice()),
+                legacy_pin,
+            } => {
+                if resolved_legacy_path_value(legacy_pin).is_some() {
+                    return;
+                }
+                let Some(identity) = root_identity.clone() else {
+                    return;
+                };
+                (identity, root.clone(), segments.as_slice())
+            }
             _ => return,
         };
-        let mut identity = identity.borrow_mut();
-        let Some(RawIdentity::Heap(heap)) = identity
-            .as_ref()
-            .and_then(|identity| identity.identity_ref_at_path(segments))
+        detach_container_identity_at_path(&root, &identity, segments);
+    }
+
+    fn prepare_legacy_path_step(&self) -> Result<(), RuntimeError> {
+        let Self::Path {
+            root,
+            root_identity,
+            segments,
+            legacy_pin: Some(legacy_pin),
+        } = self
         else {
-            return;
+            return Ok(());
         };
-        if Rc::strong_count(heap) <= 1 {
-            return;
+        let Some((last, parent_segments)) = segments.split_last() else {
+            return Ok(());
+        };
+        if legacy_pin.borrow().resolved.is_some() {
+            return Ok(());
         }
-        let detached = RawIdentity::Heap(Rc::new(heap.as_ref().clone()));
-        *identity = if segments.is_empty() {
-            Some(detached)
-        } else {
-            RawIdentity::after_path_write(
-                identity.as_ref(),
-                &root.borrow(),
-                segments,
-                Some(detached),
-            )
+        if let Some(identity) = root_identity {
+            detach_container_identity_at_path(root, identity, parent_segments);
+        }
+
+        let parent = read_path(&root.borrow(), parent_segments)?;
+        let needs_slot = match (&parent, last) {
+            (Value::Array(elements), PathSegment::Index(index)) => {
+                let index = array_index(index)?;
+                if index >= ARRAY_MAX_SIZE {
+                    return Err(RuntimeError::new("out of memory"));
+                }
+                index >= elements.len()
+            }
+            (Value::Proplist(entries), PathSegment::Property(property)) => {
+                entries.get(property).is_none()
+            }
+            (Value::Proplist(entries), PathSegment::Index(key)) => entries.get_key(key).is_none(),
+            (other, PathSegment::Property(_)) => {
+                return Err(RuntimeError::new(format!(
+                    "map access with .: map expected, but got \"{}\"!",
+                    other.type_name()
+                )))
+            }
+            (other, PathSegment::Index(_)) => {
+                return Err(RuntimeError::new(format!(
+                    "indexed access: can't access {} by index!",
+                    other.type_name()
+                )))
+            }
         };
+        if needs_slot {
+            self.write(Value::Nil)?;
+        }
+        Ok(())
+    }
+
+    fn prepare_legacy_host_path_step(&self) -> Result<(), RuntimeError> {
+        let Self::HostPath {
+            segments,
+            legacy_pin: Some(legacy_pin),
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        let Some((last, parent_segments)) = segments.split_last() else {
+            return Ok(());
+        };
+        if legacy_pin.borrow().resolved.is_some() {
+            return Ok(());
+        }
+
+        let parent = {
+            let legacy_pin = legacy_pin.borrow();
+            read_path(&legacy_pin.root.value, parent_segments)?
+        };
+        let needs_slot = match (&parent, last) {
+            (Value::Array(elements), PathSegment::Index(index)) => {
+                let index = array_index(index)?;
+                if index >= ARRAY_MAX_SIZE {
+                    return Err(RuntimeError::new("out of memory"));
+                }
+                index >= elements.len()
+            }
+            (Value::Proplist(entries), PathSegment::Property(property)) => {
+                entries.get(property).is_none()
+            }
+            (Value::Proplist(entries), PathSegment::Index(key)) => entries.get_key(key).is_none(),
+            (other, PathSegment::Property(_)) => {
+                return Err(RuntimeError::new(format!(
+                    "map access with .: map expected, but got \"{}\"!",
+                    other.type_name()
+                )))
+            }
+            (other, PathSegment::Index(_)) => {
+                return Err(RuntimeError::new(format!(
+                    "indexed access: can't access {} by index!",
+                    other.type_name()
+                )))
+            }
+        };
+        if needs_slot {
+            self.write(Value::Nil)?;
+        }
+        Ok(())
     }
 
     fn read(&self) -> Result<Value, RuntimeError> {
         self.read_tracked().map(|tracked| tracked.value)
     }
 
+    fn resolved_legacy_value(&self) -> Option<TrackedValue> {
+        match self {
+            Self::Path { legacy_pin, .. } => resolved_legacy_path_value(legacy_pin),
+            Self::HostPath { legacy_pin, .. } => resolved_legacy_host_path_value(legacy_pin),
+            _ => None,
+        }
+    }
+
     fn read_tracked(&self) -> Result<TrackedValue, RuntimeError> {
         match self {
-            LValueRef::Cell { value, identity } => Ok(TrackedValue {
-                value: value.borrow().clone(),
-                identity: identity
-                    .as_ref()
-                    .and_then(|identity| identity.borrow().clone()),
-            }),
+            LValueRef::Cell { value, identity } => {
+                let identity = legacy_identity_for_value_copy(
+                    value,
+                    &[],
+                    identity
+                        .as_ref()
+                        .and_then(|identity| identity.borrow().clone()),
+                );
+                Ok(TrackedValue {
+                    value: value.borrow().clone(),
+                    identity,
+                })
+            }
             LValueRef::Path {
                 root,
                 root_identity,
                 segments,
+                legacy_pin,
             } => {
+                if let Some(resolved) = resolved_legacy_path_value(legacy_pin) {
+                    return Ok(resolved);
+                }
                 let value = read_path(&root.borrow(), segments)?;
                 let identity = root_identity.as_ref().and_then(|identity| {
                     identity
@@ -1007,6 +1136,7 @@ impl LValueRef {
                         .as_ref()
                         .and_then(|identity| identity.identity_at_path(segments))
                 });
+                let identity = legacy_identity_for_value_copy(root, segments, identity);
                 Ok(TrackedValue { value, identity })
             }
             LValueRef::HostPath {
@@ -1015,7 +1145,15 @@ impl LValueRef {
                 caller,
                 global_call_context_hook,
                 segments,
+                legacy_pin,
             } => {
+                if let Some(resolved) = resolved_legacy_host_path_value(legacy_pin) {
+                    return Ok(resolved);
+                }
+                if let Some(legacy_pin) = legacy_pin {
+                    let legacy_pin = legacy_pin.borrow();
+                    return tracked_value_at_path(&legacy_pin.root, &legacy_pin.segments);
+                }
                 let _context =
                     GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
                 let _guard = CallerContextGuard::enter(Some(caller.clone()));
@@ -1031,6 +1169,21 @@ impl LValueRef {
     fn write_tracked(&self, tracked: TrackedValue) -> Result<(), RuntimeError> {
         match self {
             LValueRef::Cell { value, identity } => {
+                let preserves_container = identity
+                    .as_ref()
+                    .and_then(|identity| {
+                        identity
+                            .borrow()
+                            .as_ref()
+                            .zip(tracked.identity.as_ref())
+                            .map(|(current, replacement)| current == replacement)
+                    })
+                    .unwrap_or(false);
+                notify_legacy_path_pins_before_cell_write(
+                    value,
+                    identity.as_ref(),
+                    preserves_container,
+                );
                 *value.borrow_mut() = tracked.value;
                 if let Some(identity) = identity {
                     *identity.borrow_mut() = tracked.identity;
@@ -1041,11 +1194,30 @@ impl LValueRef {
                 root,
                 root_identity,
                 segments,
+                legacy_pin,
             } => {
+                if let Some(resolved) = resolved_legacy_path_value(legacy_pin) {
+                    return Err(RuntimeError::new(format!(
+                        "resolved container reference is a {}, not an lvalue",
+                        resolved.value.type_name()
+                    )));
+                }
                 let TrackedValue {
                     value,
                     identity: replacement_identity,
                 } = tracked;
+                let preserves_container = root_identity
+                    .as_ref()
+                    .and_then(|identity| {
+                        identity
+                            .borrow()
+                            .as_ref()
+                            .and_then(|identity| identity.identity_at_path(segments))
+                    })
+                    .as_ref()
+                    .zip(replacement_identity.as_ref())
+                    .is_some_and(|(current, replacement)| current == replacement);
+                notify_legacy_path_pins_before_path_write(root, segments, preserves_container);
                 write_path(&mut root.borrow_mut(), segments, value)?;
                 if let Some(identity) = root_identity {
                     let next_identity = {
@@ -1067,44 +1239,87 @@ impl LValueRef {
                 caller,
                 global_call_context_hook,
                 segments,
+                legacy_pin,
             } => {
+                if let Some(resolved) = resolved_legacy_host_path_value(legacy_pin) {
+                    return Err(RuntimeError::new(format!(
+                        "resolved container reference is a {}, not an lvalue",
+                        resolved.value.type_name()
+                    )));
+                }
                 let _context =
                     GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
                 let _guard = CallerContextGuard::enter(Some(caller.clone()));
                 let replacement = if segments.is_empty() {
                     tracked.value
                 } else {
-                    let mut root = function(args)?;
+                    let mut root = if let Some(legacy_pin) = legacy_pin {
+                        legacy_pin.borrow().root.value.clone()
+                    } else {
+                        function(args)?
+                    };
                     write_path(&mut root, segments, tracked.value)?;
                     root
                 };
+                notify_legacy_host_path_pins_before_write(args, segments);
                 let mut write_args = args.clone();
                 write_args.truncate(3);
                 write_args.resize(3, Value::Nil);
-                write_args.push(replacement);
-                function(&write_args).map(|_| ())
+                write_args.push(replacement.clone());
+                function(&write_args)?;
+                update_legacy_host_path_pins_after_write(args, replacement);
+                Ok(())
             }
         }
     }
 
-    fn append(&self, segment: PathSegment) -> Self {
-        match self {
-            LValueRef::Cell { value, identity } => LValueRef::Path {
-                root: value.clone(),
-                root_identity: identity.clone(),
-                segments: vec![segment],
-            },
+    fn append(&self, segment: PathSegment) -> Result<Self, RuntimeError> {
+        let appended = match self {
+            LValueRef::Cell { value, identity } => {
+                let segments = vec![segment];
+                LValueRef::Path {
+                    root: value.clone(),
+                    root_identity: identity.clone(),
+                    legacy_pin: legacy_path_pin_for_append(value, identity, &segments),
+                    segments,
+                }
+            }
             LValueRef::Path {
                 root,
                 root_identity,
                 segments,
+                legacy_pin,
             } => {
-                let mut segments = segments.clone();
-                segments.push(segment);
-                LValueRef::Path {
-                    root: root.clone(),
-                    root_identity: root_identity.clone(),
-                    segments,
+                if let Some(resolved) = resolved_legacy_path_value(legacy_pin) {
+                    // Once container destruction resolves a C4Value ref, a
+                    // subsequent `_R` traversal operates on that stack value
+                    // itself. Replacing it with a child ref releases its sole
+                    // container owner, so the child immediately resolves to a
+                    // value as well (C4Value.cpp:217-227).
+                    let resolved = resolved_legacy_path_step(&resolved, &segment)?;
+                    let root = value_cell(resolved.value.clone());
+                    let root_identity = Some(Rc::new(RefCell::new(resolved.identity.clone())));
+                    let legacy_pin = Some(Rc::new(RefCell::new(LegacyPathPin {
+                        root: root.clone(),
+                        root_identity: root_identity.clone(),
+                        segments: Vec::new(),
+                        resolved: Some(resolved),
+                    })));
+                    LValueRef::Path {
+                        root,
+                        root_identity,
+                        segments: Vec::new(),
+                        legacy_pin,
+                    }
+                } else {
+                    let mut segments = segments.clone();
+                    segments.push(segment);
+                    LValueRef::Path {
+                        root: root.clone(),
+                        root_identity: root_identity.clone(),
+                        legacy_pin: legacy_path_pin_for_append(root, root_identity, &segments),
+                        segments,
+                    }
                 }
             }
             LValueRef::HostPath {
@@ -1113,25 +1328,577 @@ impl LValueRef {
                 caller,
                 global_call_context_hook,
                 segments,
+                legacy_pin,
             } => {
+                if let Some(resolved) = resolved_legacy_host_path_value(legacy_pin) {
+                    let resolved = resolved_legacy_path_step(&resolved, &segment)?;
+                    let root = value_cell(resolved.value.clone());
+                    let root_identity = Some(Rc::new(RefCell::new(resolved.identity.clone())));
+                    let legacy_pin = Some(Rc::new(RefCell::new(LegacyPathPin {
+                        root: root.clone(),
+                        root_identity: root_identity.clone(),
+                        segments: Vec::new(),
+                        resolved: Some(resolved),
+                    })));
+                    return Ok(LValueRef::Path {
+                        root,
+                        root_identity,
+                        segments: Vec::new(),
+                        legacy_pin,
+                    });
+                }
                 let mut segments = segments.clone();
                 segments.push(segment);
+                let legacy_pin = legacy_host_path_pin_for_append(
+                    function,
+                    args,
+                    caller,
+                    global_call_context_hook,
+                    legacy_pin,
+                    &segments,
+                )?;
                 LValueRef::HostPath {
                     function: function.clone(),
                     args: args.clone(),
                     caller: caller.clone(),
                     global_call_context_hook: global_call_context_hook.clone(),
                     segments,
+                    legacy_pin,
                 }
             }
-        }
+        };
+        appended.prepare_legacy_path_step()?;
+        appended.prepare_legacy_host_path_step()?;
+        Ok(appended)
     }
+
 }
 
 #[derive(Clone)]
 pub(crate) enum PathSegment {
     Property(String),
     Index(Value),
+}
+
+/// C++ container references retain the concrete element reached by
+/// `AB_ARRAYA_R`. Rust paths normally re-resolve from their root cell, so a
+/// short-lived pin records when replacement destroys that element. C++ then
+/// resolves the stack reference to an ordinary value; `resolved` mirrors that
+/// transition instead of retargeting the path into the replacement container.
+pub(crate) struct LegacyPathPin {
+    root: ValueCell,
+    root_identity: Option<RawIdentityCell>,
+    segments: Vec<PathSegment>,
+    resolved: Option<TrackedValue>,
+}
+
+pub(crate) struct LegacyHostPathPin {
+    args: Vec<Value>,
+    root: TrackedValue,
+    segments: Vec<PathSegment>,
+    resolved: Option<TrackedValue>,
+}
+
+thread_local! {
+    static LEGACY_PATH_PIN_SCOPE_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static LEGACY_PATH_PIN_CREATION_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static LEGACY_PATH_PINS: RefCell<Vec<Weak<RefCell<LegacyPathPin>>>> =
+        const { RefCell::new(Vec::new()) };
+    static LEGACY_HOST_PATH_PINS: RefCell<Vec<Weak<RefCell<LegacyHostPathPin>>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+struct LegacyPathPinCreationGuard {
+    previous: usize,
+}
+
+struct LegacyPathPinRegistryGuard {
+    previous: usize,
+}
+
+impl LegacyPathPinCreationGuard {
+    fn enter() -> Self {
+        LEGACY_PATH_PIN_CREATION_DEPTH.with(|depth| {
+            let previous = depth.get();
+            depth.set(previous + 1);
+            Self { previous }
+        })
+    }
+
+    fn suspend() -> Self {
+        LEGACY_PATH_PIN_CREATION_DEPTH.with(|depth| {
+            let previous = depth.replace(0);
+            Self { previous }
+        })
+    }
+}
+
+impl LegacyPathPinRegistryGuard {
+    fn enter() -> Self {
+        LEGACY_PATH_PIN_SCOPE_DEPTH.with(|depth| {
+            let previous = depth.get();
+            depth.set(previous + 1);
+            Self { previous }
+        })
+    }
+}
+
+impl Drop for LegacyPathPinCreationGuard {
+    fn drop(&mut self) {
+        LEGACY_PATH_PIN_CREATION_DEPTH.with(|depth| depth.set(self.previous));
+    }
+}
+
+impl Drop for LegacyPathPinRegistryGuard {
+    fn drop(&mut self) {
+        LEGACY_PATH_PIN_SCOPE_DEPTH.with(|depth| depth.set(self.previous));
+        LEGACY_PATH_PINS.with(|pins| {
+            pins.borrow_mut().retain(|pin| pin.strong_count() > 0);
+        });
+        LEGACY_HOST_PATH_PINS.with(|pins| {
+            pins.borrow_mut().retain(|pin| pin.strong_count() > 0);
+        });
+    }
+}
+
+fn legacy_path_pin_scope_active() -> bool {
+    LEGACY_PATH_PIN_SCOPE_DEPTH.with(|depth| depth.get() > 0)
+}
+
+fn legacy_path_pin_creation_active() -> bool {
+    LEGACY_PATH_PIN_CREATION_DEPTH.with(|depth| depth.get() > 0)
+}
+
+fn live_legacy_path_pins() -> Vec<Rc<RefCell<LegacyPathPin>>> {
+    LEGACY_PATH_PINS.with(|pins| {
+        let mut pins = pins.borrow_mut();
+        let live = pins.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+        pins.retain(|pin| pin.strong_count() > 0);
+        live
+    })
+}
+
+fn live_legacy_host_path_pins() -> Vec<Rc<RefCell<LegacyHostPathPin>>> {
+    LEGACY_HOST_PATH_PINS.with(|pins| {
+        let mut pins = pins.borrow_mut();
+        let live = pins.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+        pins.retain(|pin| pin.strong_count() > 0);
+        live
+    })
+}
+
+fn legacy_path_pin_for_append(
+    root: &ValueCell,
+    root_identity: &Option<RawIdentityCell>,
+    segments: &[PathSegment],
+) -> Option<Rc<RefCell<LegacyPathPin>>> {
+    if !legacy_path_pin_creation_active() {
+        return None;
+    }
+    let pin = Rc::new(RefCell::new(LegacyPathPin {
+        root: root.clone(),
+        root_identity: root_identity.clone(),
+        segments: segments.to_vec(),
+        resolved: None,
+    }));
+    LEGACY_PATH_PINS.with(|pins| {
+        let mut pins = pins.borrow_mut();
+        pins.retain(|pin| pin.strong_count() > 0);
+        pins.push(Rc::downgrade(&pin));
+    });
+    Some(pin)
+}
+
+fn resolved_legacy_path_value(pin: &Option<Rc<RefCell<LegacyPathPin>>>) -> Option<TrackedValue> {
+    pin.as_ref().and_then(|pin| pin.borrow().resolved.clone())
+}
+
+fn legacy_host_path_pin_for_append(
+    function: &HostFunction,
+    args: &[Value],
+    caller: &ScriptCallerContext,
+    global_call_context_hook: &Option<GlobalCallContextHook>,
+    previous: &Option<Rc<RefCell<LegacyHostPathPin>>>,
+    segments: &[PathSegment],
+) -> Result<Option<Rc<RefCell<LegacyHostPathPin>>>, RuntimeError> {
+    if !legacy_path_pin_creation_active() {
+        return Ok(None);
+    }
+    let root = if let Some(previous) = previous {
+        previous.borrow().root.clone()
+    } else {
+        let _context = GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
+        let _guard = CallerContextGuard::enter(Some(caller.clone()));
+        TrackedValue::runtime(function(args)?)
+    };
+    let pin = Rc::new(RefCell::new(LegacyHostPathPin {
+        args: args.to_vec(),
+        root,
+        segments: segments.to_vec(),
+        resolved: None,
+    }));
+    LEGACY_HOST_PATH_PINS.with(|pins| {
+        let mut pins = pins.borrow_mut();
+        pins.retain(|pin| pin.strong_count() > 0);
+        pins.push(Rc::downgrade(&pin));
+    });
+    Ok(Some(pin))
+}
+
+fn resolved_legacy_host_path_value(
+    pin: &Option<Rc<RefCell<LegacyHostPathPin>>>,
+) -> Option<TrackedValue> {
+    pin.as_ref().and_then(|pin| pin.borrow().resolved.clone())
+}
+
+fn tracked_value_at_path(
+    root: &TrackedValue,
+    segments: &[PathSegment],
+) -> Result<TrackedValue, RuntimeError> {
+    let value = read_path(&root.value, segments)?;
+    let identity = root
+        .identity
+        .as_ref()
+        .and_then(|identity| identity.identity_at_path(segments));
+    Ok(TrackedValue { value, identity })
+}
+
+fn host_path_address_args(args: &[Value]) -> [Value; 3] {
+    let integer = |index| {
+        Value::Int(
+            args.get(index)
+                .and_then(Value::as_c4_int)
+                .unwrap_or(0),
+        )
+    };
+    let target = match args.get(1) {
+        Some(Value::Object(id)) => Value::Object(*id),
+        None
+        | Some(
+            Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0),
+        ) => Value::Object(0),
+        Some(value) => value.clone(),
+    };
+    [integer(0), target, integer(2)]
+}
+
+fn legacy_host_path_roots_match(
+    pin: &LegacyHostPathPin,
+    args: &[Value],
+) -> bool {
+    host_path_address_args(&pin.args) == host_path_address_args(args)
+}
+
+fn notify_legacy_host_path_pins_before_write(
+    args: &[Value],
+    segments: &[PathSegment],
+) {
+    if !legacy_path_pin_scope_active() {
+        return;
+    }
+    let pins = live_legacy_host_path_pins()
+        .into_iter()
+        .filter(|pin| {
+            let pin = pin.borrow();
+            pin.resolved.is_none()
+                && legacy_host_path_roots_match(&pin, args)
+                && path_is_strict_prefix(&pin.root.value, segments, &pin.segments)
+        })
+        .collect::<Vec<_>>();
+    for pin in pins {
+        let resolved = {
+            let pin = pin.borrow();
+            tracked_value_at_path(&pin.root, &pin.segments)
+        };
+        if let Ok(resolved) = resolved {
+            pin.borrow_mut().resolved = Some(resolved);
+        }
+    }
+}
+
+fn update_legacy_host_path_pins_after_write(
+    args: &[Value],
+    replacement: Value,
+) {
+    let replacement = TrackedValue::runtime(replacement);
+    for pin in live_legacy_host_path_pins() {
+        let mut pin = pin.borrow_mut();
+        if pin.resolved.is_none() && legacy_host_path_roots_match(&pin, args) {
+            pin.root = replacement.clone();
+        }
+    }
+}
+
+fn resolved_legacy_path_step(
+    resolved: &TrackedValue,
+    segment: &PathSegment,
+) -> Result<TrackedValue, RuntimeError> {
+    if let (Value::Array(_), PathSegment::Index(index)) = (&resolved.value, segment) {
+        if array_index(index)? >= ARRAY_MAX_SIZE {
+            return Err(RuntimeError::new("out of memory"));
+        }
+    }
+    let value = read_path(&resolved.value, std::slice::from_ref(segment))?;
+    Ok(TrackedValue {
+        value,
+        identity: resolved.identity_at(segment),
+    })
+}
+
+fn resolve_legacy_path_pin(pin: &Rc<RefCell<LegacyPathPin>>) {
+    let (root, root_identity, segments) = {
+        let pin = pin.borrow();
+        if pin.resolved.is_some() {
+            return;
+        }
+        (
+            pin.root.clone(),
+            pin.root_identity.clone(),
+            pin.segments.clone(),
+        )
+    };
+    let Ok(value) = read_path(&root.borrow(), &segments) else {
+        return;
+    };
+    let identity = root_identity.as_ref().and_then(|identity| {
+        identity
+            .borrow()
+            .as_ref()
+            .and_then(|identity| identity.identity_at_path(&segments))
+    });
+    let identity = legacy_identity_for_value_copy(&root, &segments, identity);
+    pin.borrow_mut().resolved = Some(TrackedValue { value, identity });
+}
+
+fn detach_container_identity_at_path(
+    root: &ValueCell,
+    identity: &RawIdentityCell,
+    segments: &[PathSegment],
+) {
+    let mut identity = identity.borrow_mut();
+    let Some(RawIdentity::Heap(heap)) = identity
+        .as_ref()
+        .and_then(|identity| identity.identity_ref_at_path(segments))
+    else {
+        return;
+    };
+    if Rc::strong_count(heap) <= 1 {
+        return;
+    }
+    let detached = RawIdentity::Heap(Rc::new(clone_heap_identity_for_container_copy(
+        root, segments, heap,
+    )));
+    *identity = if segments.is_empty() {
+        Some(detached)
+    } else {
+        RawIdentity::after_path_write(identity.as_ref(), &root.borrow(), segments, Some(detached))
+    };
+}
+
+fn path_segments_target_same(container: &Value, left: &PathSegment, right: &PathSegment) -> bool {
+    match container {
+        Value::Array(_) => match (left, right) {
+            (PathSegment::Index(left), PathSegment::Index(right)) => {
+                matches!(
+                    (array_index(left), array_index(right)),
+                    (Ok(left), Ok(right)) if left == right
+                )
+            }
+            _ => false,
+        },
+        Value::Proplist(_) => match (left, right) {
+            (PathSegment::Property(left), PathSegment::Property(right)) => {
+                c4_strings_equal(left, right)
+            }
+            (PathSegment::Property(left), PathSegment::Index(Value::String(right)))
+            | (PathSegment::Index(Value::String(right)), PathSegment::Property(left)) => {
+                c4_strings_equal(left, right)
+            }
+            (PathSegment::Index(left), PathSegment::Index(right)) => left == right,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn path_child<'a>(container: &'a Value, segment: &PathSegment) -> Option<&'a Value> {
+    match (container, segment) {
+        (Value::Array(elements), PathSegment::Index(index)) => {
+            elements.get(array_index(index).ok()?)
+        }
+        (Value::Proplist(entries), PathSegment::Property(property)) => entries.get(property),
+        (Value::Proplist(entries), PathSegment::Index(key)) => entries.get_key(key),
+        _ => None,
+    }
+}
+
+fn path_is_strict_prefix(root: &Value, prefix: &[PathSegment], path: &[PathSegment]) -> bool {
+    if prefix.len() >= path.len() {
+        return false;
+    }
+    let mut container = root;
+    for (prefix_segment, path_segment) in prefix.iter().zip(path) {
+        if !path_segments_target_same(container, prefix_segment, path_segment) {
+            return false;
+        }
+        let Some(child) = path_child(container, path_segment) else {
+            return false;
+        };
+        container = child;
+    }
+    true
+}
+
+fn legacy_container_has_element_reference(
+    root: &ValueCell,
+    root_value: &Value,
+    segments: &[PathSegment],
+) -> bool {
+    live_legacy_path_pins().into_iter().any(|pin| {
+        let pin = pin.borrow();
+        pin.resolved.is_none()
+            && Rc::ptr_eq(&pin.root, root)
+            && pin.segments.len() == segments.len() + 1
+            && path_is_strict_prefix(root_value, segments, &pin.segments)
+    })
+}
+
+fn clone_c4value_identity_for_container_copy(
+    root: &ValueCell,
+    root_value: &Value,
+    segments: &[PathSegment],
+    identity: Option<RawIdentity>,
+) -> Option<RawIdentity> {
+    let heap = match identity {
+        Some(RawIdentity::Heap(heap)) => heap,
+        identity => return identity,
+    };
+    if !legacy_container_has_element_reference(root, root_value, segments) {
+        return Some(RawIdentity::Heap(heap));
+    }
+    Some(RawIdentity::Heap(Rc::new(
+        clone_heap_identity_for_container_copy(root, segments, &heap),
+    )))
+}
+
+fn clone_heap_identity_for_container_copy(
+    root: &ValueCell,
+    segments: &[PathSegment],
+    heap: &HeapIdentity,
+) -> HeapIdentity {
+    let root_value = root.borrow();
+    match heap {
+        HeapIdentity::Opaque => HeapIdentity::Opaque,
+        HeapIdentity::Array(identities) => HeapIdentity::Array(
+            identities
+                .iter()
+                .enumerate()
+                .map(|(index, identity)| {
+                    let mut child_segments = segments.to_vec();
+                    child_segments.push(PathSegment::Index(Value::Int(
+                        i32::try_from(index).expect("array identity index fits C4 int"),
+                    )));
+                    clone_c4value_identity_for_container_copy(
+                        root,
+                        &root_value,
+                        &child_segments,
+                        identity.clone(),
+                    )
+                })
+                .collect(),
+        ),
+        HeapIdentity::Proplist(identities) => HeapIdentity::Proplist(
+            identities
+                .iter()
+                .map(|(key, identity)| {
+                    let mut child_segments = segments.to_vec();
+                    child_segments.push(PathSegment::Index(key.clone()));
+                    (
+                        key.clone(),
+                        clone_c4value_identity_for_container_copy(
+                            root,
+                            &root_value,
+                            &child_segments,
+                            identity.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// Copying a C++ array/map while one of its elements is referenced does not
+/// share that container: `IncRef` clones whenever `elementReferenceCount` is
+/// nonzero. Raw identities model that copy-on-write distinction for equality
+/// and later mutation. A live pin targets an element of `segments` exactly
+/// when its path is one segment longer and has the same prefix.
+fn legacy_identity_for_value_copy(
+    root: &ValueCell,
+    segments: &[PathSegment],
+    identity: Option<RawIdentity>,
+) -> Option<RawIdentity> {
+    if !legacy_path_pin_scope_active() {
+        return identity;
+    }
+    let heap = match identity {
+        Some(RawIdentity::Heap(heap)) => heap,
+        identity => return identity,
+    };
+    let has_element_reference =
+        legacy_container_has_element_reference(root, &root.borrow(), segments);
+    if has_element_reference {
+        Some(RawIdentity::Heap(Rc::new(
+            clone_heap_identity_for_container_copy(root, segments, &heap),
+        )))
+    } else {
+        Some(RawIdentity::Heap(heap))
+    }
+}
+
+fn notify_legacy_path_pins_before_cell_write(
+    root: &ValueCell,
+    _root_identity: Option<&RawIdentityCell>,
+    preserves_container: bool,
+) {
+    if preserves_container || !legacy_path_pin_scope_active() {
+        return;
+    }
+    let pins = live_legacy_path_pins()
+        .into_iter()
+        .filter(|pin| {
+            let pin = pin.borrow();
+            pin.resolved.is_none() && Rc::ptr_eq(&pin.root, root)
+        })
+        .collect::<Vec<_>>();
+    for pin in pins {
+        resolve_legacy_path_pin(&pin);
+    }
+}
+
+fn notify_legacy_path_pins_before_path_write(
+    root: &ValueCell,
+    segments: &[PathSegment],
+    preserves_container: bool,
+) {
+    if preserves_container || !legacy_path_pin_scope_active() {
+        return;
+    }
+    let pins = {
+        let root_value = root.borrow();
+        live_legacy_path_pins()
+            .into_iter()
+            .filter(|pin| {
+                let pin = pin.borrow();
+                pin.resolved.is_none()
+                    && Rc::ptr_eq(&pin.root, root)
+                    && path_is_strict_prefix(&root_value, segments, &pin.segments)
+            })
+            .collect::<Vec<_>>()
+    };
+    for pin in pins {
+        resolve_legacy_path_pin(&pin);
+    }
 }
 
 fn array_index(index: &Value) -> Result<usize, RuntimeError> {
@@ -1772,9 +2539,14 @@ impl<'a> Vm<'a> {
     }
 
     fn read_tracked_cell(&self, cell: &ValueCell) -> TrackedValue {
+        let identity = legacy_identity_for_value_copy(
+            cell,
+            &[],
+            self.identity_for_cell(cell).borrow().clone(),
+        );
         TrackedValue {
             value: cell.borrow().clone(),
-            identity: self.identity_for_cell(cell).borrow().clone(),
+            identity,
         }
     }
 
@@ -3153,6 +3925,7 @@ impl<'a> Vm<'a> {
             let expression = expression.ok_or_else(|| {
                 RuntimeError::new("reference-returning function must return an lvalue")
             })?;
+            let _pin_creation = LegacyPathPinCreationGuard::enter();
             self.evaluate_reference_or_value(expression, env, depth)
         } else {
             Ok(ReturnValue::Value(match expression {
@@ -3211,9 +3984,65 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<Value, RuntimeError> {
+        let _pin_creation = LegacyPathPinCreationGuard::suspend();
         let value = self.evaluate_inner(expr, env, depth)?;
         self.register_runtime_value(&value);
         Ok(value)
+    }
+
+    fn evaluate_legacy_parameter_list(
+        &self,
+        args: &[Expr],
+        forward_rest: bool,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        let Some((first, discarded)) = args.split_first() else {
+            if !forward_rest {
+                return Ok(Value::Nil);
+            }
+            return env
+                .call_args
+                .get(env.named_param_count)
+                .map(Binding::read)
+                .transpose()
+                .map(|value| value.unwrap_or(Value::Nil));
+        };
+
+        // Even an exact-one legacy condition can contain internal `_R`
+        // operations (assignment targets and reference parameters). Its final
+        // SetNoRef only converts the expression result, not those lifetimes.
+        let _pin_registry = LegacyPathPinRegistryGuard::enter();
+
+        if discarded.is_empty() {
+            // With exactly one parameter, Parse_If/Parse_While's SetNoRef
+            // rewrites the expression to a value before execution.
+            return self.evaluate(first, env, depth);
+        }
+
+        // Parse_Params leaves references intact, evaluates every surplus
+        // expression, then AB_STACK drops the surplus. Because that stack
+        // opcode blocks the later SetNoRef rewrite, a first lvalue must stay
+        // live until all later side effects finish.
+        let first = {
+            let _pin_creation = LegacyPathPinCreationGuard::enter();
+            self.evaluate_reference_or_value(first, env, depth)?
+        };
+        let mut discarded_values = Vec::with_capacity(discarded.len());
+        for expression in discarded {
+            let value = {
+                let _pin_creation = LegacyPathPinCreationGuard::enter();
+                self.evaluate_reference_or_value(expression, env, depth)?
+            };
+            discarded_values.push(value);
+        }
+        // AB_STACK pops surplus results in reverse order before AB_CONDN
+        // dereferences the retained first result. Keeping every temporary
+        // alive until this point also preserves C++ element-reference COW.
+        while let Some(value) = discarded_values.pop() {
+            drop(value);
+        }
+        first.into_value()
     }
 
     fn evaluate_inner(
@@ -3224,6 +4053,9 @@ impl<'a> Vm<'a> {
     ) -> Result<Value, RuntimeError> {
         match expr {
             Expr::Literal(literal) => Ok(self.literal_value(literal, env.strict_level)),
+            Expr::LegacyParameterList { args, forward_rest } => {
+                self.evaluate_legacy_parameter_list(args, *forward_rest, env, depth)
+            }
             // `this` yields the object context the call runs on (host-provided),
             // mirroring C4Script's `this` (C4V_C4Object); Nil for global calls.
             Expr::This => Ok(self.this_value.clone()),
@@ -3902,6 +4734,7 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<TrackedValue, RuntimeError> {
+        let _pin_creation = LegacyPathPinCreationGuard::suspend();
         let tracked = self.evaluate_tracked_inner(expr, env, depth)?;
         self.register_runtime_value(&tracked.value);
         Ok(tracked)
@@ -3914,12 +4747,13 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<TrackedValue, RuntimeError> {
         match expr {
-            Expr::Literal(literal) => {
-                Ok(TrackedValue::literal(
-                    self.literal_value(literal, env.strict_level),
-                    literal,
-                ))
-            }
+            Expr::Literal(literal) => Ok(TrackedValue::literal(
+                self.literal_value(literal, env.strict_level),
+                literal,
+            )),
+            Expr::LegacyParameterList { args, forward_rest } => self
+                .evaluate_legacy_parameter_list(args, *forward_rest, env, depth)
+                .map(TrackedValue::runtime),
             Expr::Variable(name) => match env.get_tracked(name)? {
                 Some(tracked) => Ok(tracked),
                 None => {
@@ -4276,7 +5110,13 @@ impl<'a> Vm<'a> {
         // C++ evaluates an assignment target into one reference before its
         // RHS. Compound bytecodes read and mutate that retained reference;
         // re-evaluating the target would repeat address-side effects.
-        let reference = match self.assignment_target_to_reference_or_value(env, target, depth)? {
+        let target = {
+            // Even inside a value-producing expression, the assignment's
+            // left operand is compiled as `_R` and must survive its RHS.
+            let _pin_creation = LegacyPathPinCreationGuard::enter();
+            self.assignment_target_to_reference_or_value(env, target, depth)?
+        };
+        let reference = match target {
             ReturnValue::Reference(reference) => reference,
             ReturnValue::Value(left) => {
                 if matches!(operation, Some(BinaryOp::NilCoalescing))
@@ -4298,6 +5138,19 @@ impl<'a> Vm<'a> {
                 )));
             }
         };
+        let invalidated_error = |left: TrackedValue| {
+            let expected = if operation.is_some()
+                && !matches!(operation, Some(BinaryOp::Concat | BinaryOp::NilCoalescing))
+            {
+                "int&"
+            } else {
+                "&"
+            };
+            RuntimeError::new(format!(
+                "operator \"{operator}\" left side: got \"{}\", but expected \"{expected}\"!",
+                Self::c4v_type_name(left.value.c4v_type())
+            ))
+        };
         let result = if matches!(operation, Some(BinaryOp::NilCoalescing)) {
             let left = reference.read_tracked()?;
             if !matches!(left.value, Value::Nil) {
@@ -4308,11 +5161,18 @@ impl<'a> Vm<'a> {
                     ReturnValue::Value(left)
                 });
             }
-            self.evaluate_tracked(value, env, depth)?
+            let right = self.evaluate_tracked(value, env, depth)?;
+            if let Some(left) = reference.resolved_legacy_value() {
+                return Err(invalidated_error(left));
+            }
+            right
         } else if let Some(operation) = operation {
             // The RHS runs while the reference is live. Read only afterward:
             // it may have changed the referenced slot before AB_*It executes.
             let right = self.evaluate_tracked(value, env, depth)?;
+            if let Some(left) = reference.resolved_legacy_value() {
+                return Err(invalidated_error(left));
+            }
             let left = reference.read_tracked()?;
             if matches!(operation, BinaryOp::Concat) {
                 self.eval_concat_tracked(left, right, env.strict_level, operator)?
@@ -4330,7 +5190,11 @@ impl<'a> Vm<'a> {
             // append target now so a nested nil access errors before the RHS,
             // as AB_ARRAYA_R does while evaluating the target.
             reference.read_tracked()?;
-            self.evaluate_tracked(value, env, depth)?
+            let right = self.evaluate_tracked(value, env, depth)?;
+            if let Some(left) = reference.resolved_legacy_value() {
+                return Err(invalidated_error(left));
+            }
+            right
         };
         reference.write_tracked(result.clone())?;
         Ok(if preserve_reference {
@@ -4353,18 +5217,21 @@ impl<'a> Vm<'a> {
         return_old: bool,
         operation: &str,
     ) -> Result<Value, RuntimeError> {
-        if Self::expression_contains_array_append(expr) {
+        self.update_counter_raw(expr, env, delta, return_old, operation)?
+            .into_value()
+    }
+
+    fn update_counter_raw(
+        &self,
+        expr: &Expr,
+        env: &mut Environment,
+        delta: i32,
+        return_old: bool,
+        operation: &str,
+    ) -> Result<ReturnValue, RuntimeError> {
+        let reference = if Self::expression_contains_array_append(expr) {
             match self.evaluate_reference_or_value(expr, env, 0)? {
-                ReturnValue::Reference(reference) => {
-                    let old_value = Self::counter_operand(reference.read()?, operation)?;
-                    let new_value = old_value.wrapping_add(delta);
-                    reference.write(Value::Int(new_value))?;
-                    return Ok(Value::Int(if return_old {
-                        old_value
-                    } else {
-                        new_value
-                    }));
-                }
+                ReturnValue::Reference(reference) => reference,
                 ReturnValue::Value(value) => {
                     let operator = if delta > 0 { "++" } else { "--" };
                     return Err(RuntimeError::new(format!(
@@ -4373,82 +5240,31 @@ impl<'a> Vm<'a> {
                     )));
                 }
             }
-        }
-
-        let target = Self::expr_to_assignment_target(expr)?;
-
-        // EffectVar is exposed by the engine as a value-style read/write host
-        // pair rather than a retained ValueReference. Evaluate its addressing
-        // arguments once and reuse those values for both halves.
-        if let AssignmentTarget::EffectSlot(args) = &target {
-            let raw_arg_values = args
-                .iter()
-                .map(|arg| self.evaluate(arg, env, 0))
-                .collect::<Result<Vec<_>, _>>()?;
-            let _guard = CallerContextGuard::enter(Some(env.caller_context()));
-            let host = self.host_functions.get("EffectVar");
-            let arg_values = if let Some(host) = host {
-                self.prepare_registered_host_values("EffectVar", host, &raw_arg_values)?
-            } else {
-                raw_arg_values
-            };
-            let old_value = if let Some(host) = host {
-                self.invoke_host_function_raw("EffectVar", host, &arg_values)?
-            } else {
-                env.get(&format!(
-                    "__effect_{}",
-                    arg_values
-                        .iter()
-                        .map(|value| match value {
-                            Value::Int(value) => value.to_string(),
-                            Value::String(value) => value.to_string(),
-                            other => format!("{other:?}"),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("_")
-                ))?
-                .unwrap_or(Value::Nil)
-            };
-            let old_value = Self::counter_operand(old_value, operation)?;
-            let new_value = old_value.wrapping_add(delta);
-            if let Some(host) = host {
-                let mut write_args = arg_values;
-                write_args.push(Value::Int(new_value));
-                // The fourth argument is Rust's internal write-through seam
-                // for the C4Value reference returned by the three-parameter
-                // native. It is not another native call boundary.
-                (host.callback())(&write_args)?;
-            } else {
-                let slot_name = format!(
-                    "__effect_{}",
-                    arg_values
-                        .iter()
-                        .map(|value| match value {
-                            Value::Int(value) => value.to_string(),
-                            Value::String(value) => value.to_string(),
-                            other => format!("{other:?}"),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("_")
-                );
-                env.define(&slot_name, Value::Int(new_value));
+        } else {
+            let target = Self::expr_to_assignment_target(expr)?;
+            let _pin_creation = LegacyPathPinCreationGuard::enter();
+            match self.assignment_target_to_reference_or_value(env, &target, 0)? {
+                ReturnValue::Reference(reference) => reference,
+                ReturnValue::Value(value) => {
+                    let operator = if delta > 0 { "++" } else { "--" };
+                    return Err(RuntimeError::new(format!(
+                        "operator \"{operator}\": got \"{}\", but expected \"int&\"!",
+                        Self::c4v_type_name(value.value.c4v_type())
+                    )));
+                }
             }
-            return Ok(Value::Int(if return_old {
-                old_value
-            } else {
-                new_value
-            }));
-        }
-
-        let reference = self.assignment_target_to_lvalue(env, &target, 0)?;
+        };
         let old_value = Self::counter_operand(reference.read()?, operation)?;
         let new_value = old_value.wrapping_add(delta);
         reference.write(Value::Int(new_value))?;
-        Ok(Value::Int(if return_old {
-            old_value
+        Ok(if return_old {
+            ReturnValue::Value(TrackedValue::runtime(Value::Int(old_value)))
         } else {
-            new_value
-        }))
+            // Prefix AB_Inc1/AB_Dec1 mutates through the stack reference and
+            // leaves that same reference in place. Postfix explicitly turns
+            // it into the old integer value instead.
+            ReturnValue::Reference(reference)
+        })
     }
 
     /// `++`/`--` operand conversion: CheckOpPar<C4V_Int> converts nil to 0 and
@@ -5367,6 +6183,7 @@ impl<'a> Vm<'a> {
                     caller,
                     global_call_context_hook: global_vm.global_call_context_hook.cloned(),
                     segments: Vec::new(),
+                    legacy_pin: None,
                 }));
             }
         }
@@ -5637,16 +6454,37 @@ impl<'a> Vm<'a> {
             if (script_wants_reference || host_wants_reference)
                 && (Self::expression_contains_array_append(arg)
                     || matches!(arg, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Variable(_)))
-                    || matches!(arg, Expr::GlobalCall { .. }))
+                    || matches!(arg, Expr::GlobalCall { .. })
+                    || matches!(arg, Expr::PreIncrement(_) | Expr::PreDecrement(_))
+                    || matches!(
+                        arg,
+                        Expr::Assignment(target, _)
+                            if !matches!(target, AssignmentTarget::InvalidValue { .. })
+                    )
+                    || matches!(
+                        arg,
+                        Expr::CompoundAssignment { .. } | Expr::ArrayAppendAssignment { .. }
+                    ))
             {
-                evaluated_args.push(match self.evaluate_reference_or_value(arg, env, depth)? {
+                let argument = {
+                    let _pin_creation = LegacyPathPinCreationGuard::enter();
+                    self.evaluate_reference_or_value(arg, env, depth)?
+                };
+                evaluated_args.push(match argument {
                     ReturnValue::Reference(reference) => CallArg::Reference(reference),
                     ReturnValue::Value(value) => CallArg::Value(value),
                 });
                 continue;
             }
             if (script_wants_reference || host_wants_reference) && can_be_reference {
-                evaluated_args.push(CallArg::Reference(self.expr_to_lvalue(arg, env, depth)?));
+                let argument = {
+                    let _pin_creation = LegacyPathPinCreationGuard::enter();
+                    self.evaluate_reference_or_value(arg, env, depth)?
+                };
+                evaluated_args.push(match argument {
+                    ReturnValue::Reference(reference) => CallArg::Reference(reference),
+                    ReturnValue::Value(value) => CallArg::Value(value),
+                });
             } else {
                 evaluated_args.push(CallArg::Value(self.evaluate_tracked(arg, env, depth)?));
             }
@@ -5815,7 +6653,13 @@ impl<'a> Vm<'a> {
         // AB_Set receives one already-evaluated reference, followed by the
         // RHS. Retain that reference across RHS evaluation without reading it:
         // value-style host references need only their address arguments here.
-        let reference = match self.assignment_target_to_reference_or_value(env, target, depth)? {
+        let target = {
+            // AB_Set always receives a reference, even when a surrounding
+            // operator later turns the assignment result into a value.
+            let _pin_creation = LegacyPathPinCreationGuard::enter();
+            self.assignment_target_to_reference_or_value(env, target, depth)?
+        };
+        let reference = match target {
             ReturnValue::Reference(reference) => reference,
             ReturnValue::Value(left) => {
                 self.evaluate_tracked(value_expr, env, depth)?;
@@ -5826,6 +6670,12 @@ impl<'a> Vm<'a> {
             }
         };
         let tracked = self.evaluate_tracked(value_expr, env, depth)?;
+        if let Some(left) = reference.resolved_legacy_value() {
+            return Err(RuntimeError::new(format!(
+                "operator \"=\" left side: got \"{}\", but expected \"&\"!",
+                Self::c4v_type_name(left.value.c4v_type())
+            )));
+        }
         reference.write_tracked(tracked.clone())?;
         Ok(ReturnValue::Reference(reference))
     }
@@ -5930,16 +6780,6 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn assignment_target_contains_array_append(target: &AssignmentTarget) -> bool {
-        match target {
-            AssignmentTarget::ArrayAppend(_) => true,
-            AssignmentTarget::Property(base, _) | AssignmentTarget::Index(base, _) => {
-                Self::assignment_target_contains_array_append(base)
-            }
-            _ => false,
-        }
-    }
-
     fn assignment_target_to_reference_or_value(
         &self,
         env: &mut Environment,
@@ -5974,18 +6814,26 @@ impl<'a> Vm<'a> {
             _ => {}
         }
 
-        if !Self::assignment_target_contains_array_append(target) {
-            return self
-                .assignment_target_to_lvalue(env, target, depth)
-                .map(ReturnValue::Reference);
-        }
-
         match target {
-            AssignmentTarget::ArrayAppend(base) => {
-                self.evaluate_array_append(base, env, depth)
-            }
+            AssignmentTarget::ArrayAppend(base) => self.evaluate_array_append(base, env, depth),
             AssignmentTarget::Property(base, property) => {
                 let base = self.assignment_target_to_reference_or_value(env, base, depth)?;
+                if let ReturnValue::Reference(reference) = &base {
+                    if reference.resolved_legacy_value().is_none()
+                        && !matches!(reference, LValueRef::HostPath { .. })
+                    {
+                        let collection = reference.read()?;
+                        if !matches!(
+                            collection,
+                            Value::Nil | Value::Object(_) | Value::Proplist(_)
+                        ) {
+                            return Err(RuntimeError::new(format!(
+                                "cannot assign property '{property}' on value of type {}",
+                                collection.type_name()
+                            )));
+                        }
+                    }
+                }
                 self.property_reference_or_value(base, property, env)
             }
             AssignmentTarget::Index(base, index) => {
@@ -6039,7 +6887,7 @@ impl<'a> Vm<'a> {
                     }
                 }
                 reference.detach_container_identity_if_shared();
-                Ok(reference.append(PathSegment::Property(property.clone())))
+                reference.append(PathSegment::Property(property.clone()))
             }
             AssignmentTarget::Index(base, index_expr) => {
                 let reference = self.assignment_target_to_lvalue(env, base, depth)?;
@@ -6069,13 +6917,13 @@ impl<'a> Vm<'a> {
                         }
                         _ => {
                             reference.detach_container_identity_if_shared();
-                            return Ok(reference.append(PathSegment::Index(index)));
+                            return reference.append(PathSegment::Index(index));
                         }
                     }
                 }
                 let index = self.evaluate(index_expr, env, depth)?;
                 reference.detach_container_identity_if_shared();
-                Ok(reference.append(PathSegment::Index(index)))
+                reference.append(PathSegment::Index(index))
             }
             AssignmentTarget::ArrayAppend(base) => {
                 match self.evaluate_array_append(base, env, depth)? {
@@ -6120,6 +6968,7 @@ impl<'a> Vm<'a> {
                             .then(|| self.global_call_context_hook.cloned())
                             .flatten(),
                         segments: Vec::new(),
+                        legacy_pin: None,
                     });
                 }
 
@@ -6412,16 +7261,22 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<LValueRef, RuntimeError> {
-        if Self::expression_contains_array_append(expr) {
-            return match self.evaluate_reference_or_value(expr, env, depth)? {
-                ReturnValue::Reference(reference) => Ok(reference),
-                ReturnValue::Value(_) => Err(RuntimeError::new(
-                    "this assignment target is a value, not a reference",
-                )),
-            };
-        }
         let target = Self::expr_to_assignment_target(expr)?;
-        self.assignment_target_to_lvalue(env, &target, depth)
+        // A direct call is already the terminal lvalue-producing operation.
+        // Sending it through `assignment_target_to_reference_or_value` would
+        // reconstruct the same call and re-enter `expr_to_lvalue` forever for
+        // built-ins such as Global() and LocalN(). Nested property/index
+        // targets still need the reference-or-value path so legacy element
+        // pins can resolve while their trailing operations are evaluated.
+        if matches!(&target, AssignmentTarget::FunctionCall { .. }) {
+            return self.assignment_target_to_lvalue(env, &target, depth);
+        }
+        match self.assignment_target_to_reference_or_value(env, &target, depth)? {
+            ReturnValue::Reference(reference) => Ok(reference),
+            ReturnValue::Value(_) => Err(RuntimeError::new(
+                "this assignment target is a value, not a reference",
+            )),
+        }
     }
 
     fn evaluate_reference_function_call(
@@ -6701,6 +7556,8 @@ impl<'a> Vm<'a> {
                         .map(ReturnValue::Value)
                 }
             }
+            Expr::PreIncrement(expr) => self.update_counter_raw(expr, env, 1, false, "increment"),
+            Expr::PreDecrement(expr) => self.update_counter_raw(expr, env, -1, false, "decrement"),
             Expr::Assignment(target, value)
                 if !matches!(target, AssignmentTarget::InvalidValue { .. }) =>
             {
@@ -6758,9 +7615,19 @@ impl<'a> Vm<'a> {
                 .eval_property_tracked(value, property, env)
                 .map(ReturnValue::Value),
             ReturnValue::Reference(reference) => {
+                if let Some(resolved) = reference.resolved_legacy_value() {
+                    return self
+                        .eval_property_tracked(resolved, property, env)
+                        .map(ReturnValue::Value);
+                }
+                if !legacy_path_pin_creation_active() {
+                    return self
+                        .eval_property_tracked(reference.read_tracked()?, property, env)
+                        .map(ReturnValue::Value);
+                }
                 if matches!(&reference, LValueRef::HostPath { .. }) {
                     return Ok(ReturnValue::Reference(
-                        reference.append(PathSegment::Property(property.to_string())),
+                        reference.append(PathSegment::Property(property.to_string()))?,
                     ));
                 }
                 let collection = reference.read()?;
@@ -6775,8 +7642,11 @@ impl<'a> Vm<'a> {
                         .unwrap_or_else(|| value_cell(Value::Nil));
                     return Ok(ReturnValue::Reference(self.tracked_cell(cell)));
                 }
+                if legacy_path_pin_creation_active() {
+                    reference.detach_container_identity_if_shared();
+                }
                 Ok(ReturnValue::Reference(
-                    reference.append(PathSegment::Property(property.to_string())),
+                    reference.append(PathSegment::Property(property.to_string()))?,
                 ))
             }
         }
@@ -6790,6 +7660,32 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<ReturnValue, RuntimeError> {
         let index = self.evaluate(index_expr, env, depth)?;
+        if !legacy_path_pin_creation_active() {
+            let base = match base {
+                ReturnValue::Value(value) => value,
+                ReturnValue::Reference(reference) => {
+                    if let Some(resolved) = reference.resolved_legacy_value() {
+                        resolved
+                    } else {
+                        let collection = reference.read()?;
+                        Self::grow_empty_negative_array(
+                            Some(&reference),
+                            &collection,
+                            &index,
+                        )?;
+                        reference.read_tracked()?
+                    }
+                }
+            };
+            if matches!(&base.value, Value::Nil | Value::Object(0)) {
+                return Err(RuntimeError::new(
+                    "indexed access [index]: array, map or string expected, but got nil",
+                ));
+            }
+            return self
+                .eval_index_tracked(base, index, env)
+                .map(ReturnValue::Value);
+        }
         match base {
             ReturnValue::Value(value)
                 if matches!(value.value, Value::Nil | Value::Object(0)) =>
@@ -6802,6 +7698,11 @@ impl<'a> Vm<'a> {
                 .eval_index_tracked(value, index, env)
                 .map(ReturnValue::Value),
             ReturnValue::Reference(reference) => {
+                if let Some(resolved) = reference.resolved_legacy_value() {
+                    return self
+                        .eval_index_tracked(resolved, index, env)
+                        .map(ReturnValue::Value);
+                }
                 let collection = reference.read()?;
                 if matches!(collection, Value::Nil | Value::Object(0)) {
                     return Err(RuntimeError::new(
@@ -6824,9 +7725,12 @@ impl<'a> Vm<'a> {
                         .eval_index_tracked(reference.read_tracked()?, index, env)
                         .map(ReturnValue::Value);
                 }
-                Self::grow_empty_negative_array(Some(&reference), &collection, &index)?;
+                if legacy_path_pin_creation_active() {
+                    Self::grow_empty_negative_array(Some(&reference), &collection, &index)?;
+                    reference.detach_container_identity_if_shared();
+                }
                 Ok(ReturnValue::Reference(
-                    reference.append(PathSegment::Index(index)),
+                    reference.append(PathSegment::Index(index))?,
                 ))
             }
         }
@@ -6888,7 +7792,7 @@ impl<'a> Vm<'a> {
             return Err(RuntimeError::new("out of memory"));
         }
         let index = i32::try_from(length).map_err(|_| RuntimeError::new("out of memory"))?;
-        let appended = reference.append(PathSegment::Index(Value::Int(index)));
+        let appended = reference.append(PathSegment::Index(Value::Int(index)))?;
         appended.write(Value::Nil)?;
         Ok(appended)
     }

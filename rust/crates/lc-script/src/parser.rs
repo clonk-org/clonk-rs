@@ -1174,9 +1174,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {
-        self.expect_symbol(Symbol::LParen, "expected '(' after 'if'")?;
-        let condition = self.parse_expression()?;
-        self.expect_symbol(Symbol::RParen, "expected ')' after condition")?;
+        let condition = self.parse_condition_parameters("if")?;
 
         // Parse either a single statement or a braced block for the 'then' part.
         let then_branch = self.parse_stmt_or_block_vec()?;
@@ -1197,14 +1195,37 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_while(&mut self) -> Result<Stmt, ParseError> {
-        self.expect_symbol(Symbol::LParen, "expected '(' after 'while'")?;
-        let condition = self.parse_expression()?;
-        self.expect_symbol(Symbol::RParen, "expected ')' after condition")?;
+        let condition = self.parse_condition_parameters("while")?;
 
         // Parse either a single statement or a braced block for the loop body.
         let body = self.parse_loop_body()?;
 
         Ok(Stmt::While { condition, body })
+    }
+
+    fn parse_condition_parameters(&mut self, statement: &str) -> Result<Expr, ParseError> {
+        let opening = self.peek()?.clone();
+        self.expect_symbol(Symbol::LParen, &format!("expected '(' after '{statement}'"))?;
+
+        if self.strict_level >= 2 {
+            let condition = self.parse_expression()?;
+            self.expect_symbol(Symbol::RParen, "expected ')' after condition")?;
+            return Ok(condition);
+        }
+
+        let (args, forward_rest) = self.parse_argument_list()?;
+        self.expect_symbol(Symbol::RParen, "expected ')' after condition parameters")?;
+        if args.len() > 1 {
+            self.non_fatal_diagnostics.push(ParseError::new(
+                format!(
+                    "{statement}: passing {} parameters, but only 1 are used",
+                    args.len()
+                ),
+                opening.line,
+                opening.column,
+            ));
+        }
+        Ok(Expr::LegacyParameterList { args, forward_rest })
     }
 
     /// Probe the tokens after `for (` without consuming them. C4Aul has two

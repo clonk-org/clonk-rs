@@ -410,6 +410,14 @@ pub enum Expr {
         is_optional: bool,
         forward_rest: bool,
     },
+    /// NONSTRICT/STRICT1 `if` and `while` headers use `Parse_Params(1)`.
+    /// Every explicit slot is evaluated before all but the first are dropped;
+    /// `...` supplies the first unnamed caller parameter when no explicit
+    /// slot already fills the one-value frame.
+    LegacyParameterList {
+        args: Vec<Expr>,
+        forward_rest: bool,
+    },
     /// Strict-3 `global->Fn(...)` / `global->~Fn(...)`: engine-owner lookup
     /// with no object or definition context (C4Aul AB_CALLGLOBAL).
     GlobalCall {
