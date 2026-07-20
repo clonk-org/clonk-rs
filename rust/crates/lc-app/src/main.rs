@@ -60898,7 +60898,6 @@ impl GameApp {
         if matches!(
             continuation,
             MessageDialogContinuation::StartupIrcDisconnectConfirm
-                | MessageDialogContinuation::BlockingResourceWait { .. }
         ) {
             state.set_button_label(
                 MessageDialogButton::Cancel,
@@ -74967,6 +74966,127 @@ mod tests {
             app.message_dialogs[0].state.icon(),
             lc_frontend::message_dialog::MessageDialogIcon::ERROR
         );
+    }
+
+    #[test]
+    fn l126_headless_client_join_tracks_slow_resource_then_cancel_aborts() {
+        let mut app = new_menu_app(800, 600);
+        let (manager, event_tx, _commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+
+        let resource = |resource_type: lc_network::HostResourceType, id, name: &[u8]| {
+            lc_engine::NetworkResourceCore {
+                resource_type: resource_type as u8,
+                id,
+                loadable: true,
+                filename: lc_engine::LegacyCString::from_bytes(name.to_vec())
+                    .expect("fixture filename is NUL-free"),
+                ..Default::default()
+            }
+        };
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot.parameters.scenario =
+            resource(lc_network::HostResourceType::Scenario, 70, b"Scenario.c4s");
+        snapshot.dynamic = resource(lc_network::HostResourceType::Dynamic, 71, b"Dynamic.c4s");
+        snapshot.parameters.game_resources.clear();
+        let mut reference_status = host_config.initial_status;
+        reference_status.target_tick = -1;
+        let go = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 23,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(lc_network::JoinDataEnvelope {
+                client_id: 7,
+                start_control_tick: 23,
+                status: reference_status,
+                dynamic: snapshot.dynamic,
+                parameters: snapshot.parameters,
+            }))
+            .expect("queue client JoinData");
+        event_tx
+            .send(NetworkEvent::StatusRequested(go))
+            .expect("queue client GO request");
+        app.process_network_events()
+            .expect("open scenario resource wait");
+
+        let progress = app
+            .message_dialogs
+            .iter()
+            .find(|dialog| {
+                matches!(
+                    dialog.continuation,
+                    MessageDialogContinuation::BlockingResourceWait {
+                        scope: BlockingResourceScope::ClientStart,
+                        resource_id: 70,
+                    }
+                )
+            })
+            .expect("client start progress dialog");
+        assert_eq!(progress.state.message(), "Waiting for Scenario...");
+        assert_eq!(progress.state.progress(), Some(0));
+        assert_eq!(
+            progress.state.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::CANCEL
+        );
+        assert_eq!(
+            progress.state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::Standard(3)
+        );
+        assert_eq!(progress.state.focused_button(), None);
+        assert_eq!(
+            progress.state.button_label(
+                lc_frontend::message_dialog::MessageDialogButton::Cancel
+            ),
+            "Cancel"
+        );
+
+        for present_percent in [17, 63] {
+            event_tx
+                .send(NetworkEvent::ResourceProgress {
+                    resource_id: 70,
+                    present_percent,
+                })
+                .expect("advance slow scenario resource");
+            app.update().expect("refresh scenario resource progress");
+            assert_eq!(
+                app.message_dialogs
+                    .iter()
+                    .find(|dialog| matches!(
+                        dialog.continuation,
+                        MessageDialogContinuation::BlockingResourceWait { .. }
+                    ))
+                    .and_then(|dialog| dialog.state.progress()),
+                Some(present_percent)
+            );
+        }
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("Cancel aborts the client resource wait");
+
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app.pending_network_join_data.is_none());
+        assert!(app.pending_client_start_status.is_none());
+        assert!(app.blocking_resource_wait.is_none());
+        assert!(app.admission_resources.resources.is_empty());
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.message_dialogs.iter().all(|dialog| !matches!(
+            dialog.continuation,
+            MessageDialogContinuation::BlockingResourceWait { .. }
+        )));
+        let [failure] = app.message_dialogs.as_slice() else {
+            panic!("Cancel should report one startup-network failure");
+        };
+        assert_eq!(failure.state.caption(), "Error Log");
+        assert_eq!(failure.state.message(), "Waiting for Scenario was aborted.");
     }
 
     #[test]
