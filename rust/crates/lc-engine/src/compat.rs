@@ -2081,6 +2081,34 @@ impl Default for HostWorldContext {
 }
 
 impl HostWorldContext {
+    /// Replace the live object/landscape portion of a partially built host
+    /// context. Engine movement uses this to defer the expensive object-state
+    /// materialization until a Contact* callback actually fires.
+    pub(crate) fn with_objects_and_landscape<I>(
+        mut self,
+        objects: I,
+        landscape: Option<Landscape>,
+    ) -> Self
+    where
+        I: IntoIterator<Item = HostWorldObject>,
+    {
+        let map = objects.into_iter().collect::<Vec<HostWorldObject>>();
+        let mut order = Vec::with_capacity(map.len());
+        let mut lookup = HashMap::with_capacity(map.len());
+        for object in map {
+            let id = object.id;
+            order.push(id);
+            lookup.insert(id, object);
+        }
+        self.objects = Rc::new(lookup);
+        self.order = Rc::new(order);
+        if self.landscape.is_none() {
+            self.landscape = landscape.map(Rc::new);
+        }
+        self.sectors = RefCell::new(None);
+        self
+    }
+
     pub(crate) fn with_definition_tables(
         mut self,
         tables: Rc<HostDefinitionTables>,

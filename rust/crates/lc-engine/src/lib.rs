@@ -786,7 +786,7 @@ use material::{
 use message::{MessageCommand, MessageManager, MessageSpec, PersistedMessage};
 use ocf::NORMAL as OCF_NORMAL;
 use sector::{SectorMap, SectorObject};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
@@ -796,6 +796,11 @@ use std::ops::AddAssign;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
+
+#[cfg(test)]
+std::thread_local! {
+    static HOST_WORLD_OBJECT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+}
 
 use crate::math::{
     fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed, FixedVec2,
@@ -6883,7 +6888,7 @@ impl Object {
         landscape: Option<&mut Landscape>,
         materials: &MaterialSet,
         movement: MovementContactConfig<'_>,
-        mut on_contact: impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+        mut on_contact: impl FnMut(&mut Object, &Landscape, u32) -> Result<(), EngineError>,
         mut on_do_motion: impl FnMut(&mut Object, &mut Landscape) -> Result<(), EngineError>,
     ) -> Result<MovementStepOutcome, EngineError> {
         let Some(landscape) = landscape else {
@@ -6978,7 +6983,7 @@ impl Object {
                 }
                 outcome.any_contact = true;
                 outcome.contact_cnat |= contact.contact_cnat;
-                on_contact(self, contact.contact_cnat)?;
+                on_contact(self, landscape, contact.contact_cnat)?;
                 self.fixed_position.x = itofix(self.state.position.x);
                 redirect_force(&mut self.fixed_velocity.x, &mut self.fixed_velocity.y, -1);
                 apply_contact_friction(&mut self.fixed_velocity.y, contact.first_friction());
@@ -7021,7 +7026,7 @@ impl Object {
                 }
                 outcome.any_contact = true;
                 outcome.contact_cnat |= contact.contact_cnat;
-                on_contact(self, contact.contact_cnat)?;
+                on_contact(self, landscape, contact.contact_cnat)?;
                 self.fixed_position.y = itofix(self.state.position.y);
                 apply_contact_friction(&mut self.fixed_velocity.x, contact.first_friction());
                 if !contact.has_vertex_cnat(CNAT_LEFT) {
@@ -7116,7 +7121,7 @@ impl Object {
         landscape: &mut Landscape,
         materials: &MaterialSet,
         movement: MovementContactConfig<'_>,
-        on_contact: &mut impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+        on_contact: &mut impl FnMut(&mut Object, &Landscape, u32) -> Result<(), EngineError>,
         on_do_motion: &mut impl FnMut(&mut Object, &mut Landscape) -> Result<(), EngineError>,
     ) -> Result<MovementStepOutcome, EngineError> {
         self.fixed_position += self.fixed_velocity;
@@ -7176,7 +7181,7 @@ impl Object {
                 }
                 any_contact = true;
                 contact_cnat |= contact.contact_cnat;
-                on_contact(self, contact.contact_cnat)?;
+                on_contact(self, landscape, contact.contact_cnat)?;
                 self.fixed_position =
                     FixedVec2::from_ints(self.state.position.x, self.state.position.y);
                 // The at_xovr/at_yovr override bookkeeping runs AFTER the
@@ -7247,7 +7252,7 @@ impl Object {
         target_x: &mut i32,
         landscape: &Landscape,
         movement: MovementContactConfig<'_>,
-        on_contact: &mut impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+        on_contact: &mut impl FnMut(&mut Object, &Landscape, u32) -> Result<(), EngineError>,
     ) -> Result<(), EngineError> {
         if let Some(layer) = movement.layer_bounds {
             if layer.border_bound & C4D_BORDER_LAYER != 0
@@ -7272,7 +7277,7 @@ impl Object {
                 {
                     self.fixed_velocity.x = C4Fixed::ZERO;
                     self.state.velocity = self.velocity_pixels();
-                    on_contact(self, cnat)?;
+                    on_contact(self, landscape, cnat)?;
                 }
             }
         }
@@ -7293,7 +7298,7 @@ impl Object {
         {
             self.fixed_velocity.x = C4Fixed::ZERO;
             self.state.velocity = self.velocity_pixels();
-            on_contact(self, cnat)?;
+            on_contact(self, landscape, cnat)?;
         }
         Ok(())
     }
@@ -7303,7 +7308,7 @@ impl Object {
         target_y: &mut i32,
         landscape: &Landscape,
         movement: MovementContactConfig<'_>,
-        on_contact: &mut impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+        on_contact: &mut impl FnMut(&mut Object, &Landscape, u32) -> Result<(), EngineError>,
     ) -> Result<(), EngineError> {
         let shape_y = movement.shape_rect.map(|shape| shape.y).unwrap_or(0);
         if let Some(layer) = movement.layer_bounds {
@@ -7328,7 +7333,7 @@ impl Object {
                 {
                     self.fixed_velocity.y = C4Fixed::ZERO;
                     self.state.velocity = self.velocity_pixels();
-                    on_contact(self, cnat)?;
+                    on_contact(self, landscape, cnat)?;
                 }
             }
         }
@@ -7340,7 +7345,7 @@ impl Object {
             {
                 self.fixed_velocity.y = C4Fixed::ZERO;
                 self.state.velocity = self.velocity_pixels();
-                on_contact(self, cnat)?;
+                on_contact(self, landscape, cnat)?;
             }
         }
         if movement.border_bound & C4D_BORDER_BOTTOM != 0 {
@@ -7351,7 +7356,7 @@ impl Object {
             {
                 self.fixed_velocity.y = C4Fixed::ZERO;
                 self.state.velocity = self.velocity_pixels();
-                on_contact(self, cnat)?;
+                on_contact(self, landscape, cnat)?;
             }
         }
         self.state.velocity = self.velocity_pixels();
@@ -7385,7 +7390,7 @@ impl Object {
         no_attach: bool,
         redirect_yr: bool,
         solid_mask_removed: bool,
-        mut on_contact: impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+        mut on_contact: impl FnMut(&mut Object, &Landscape, u32) -> Result<(), EngineError>,
     ) -> Result<(bool, u32), EngineError> {
         if self.state.ocf & crate::ocf::ROTATE == 0 {
             return Ok((false, 0));
@@ -7460,7 +7465,7 @@ impl Object {
         no_attach: bool,
         redirect_yr: bool,
         solid_mask_removed: bool,
-        on_contact: &mut impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+        on_contact: &mut impl FnMut(&mut Object, &Landscape, u32) -> Result<(), EngineError>,
     ) -> Result<(bool, u32), EngineError> {
         let mut any_contact = false;
         let mut contact_cnat = 0;
@@ -7510,7 +7515,7 @@ impl Object {
             if contact.is_contact() {
                 any_contact = true;
                 contact_cnat |= contact.contact_cnat;
-                on_contact(self, contact.contact_cnat)?;
+                on_contact(self, landscape, contact.contact_cnat)?;
                 self.state.rotation = previous_rotation;
                 self.state.vertices = previous_vertices;
                 self.state.shape_vertices = previous_shape_vertices;
@@ -9345,7 +9350,7 @@ fn movement_circle_wrap_retains_pre_wrap_live_shape() {
             false,
             false,
             false,
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
         )
         .expect("rotation step succeeds");
 
@@ -24509,8 +24514,85 @@ impl Engine {
         table
     }
 
-    fn host_world_context(&self) -> HostWorldContext {
-        let landscape = self.landscape.clone();
+    fn host_world_object(
+        definitions: &HashMap<DefinitionId, Definition>,
+        object: &Object,
+    ) -> HostWorldObject {
+        #[cfg(test)]
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        let definition = definitions.get(&object.definition_id);
+        let procedure = definition
+            .and_then(|definition| {
+                definition.action_library().procedure_name_for_entry(
+                    &object.state.action.name,
+                    object.state.action.act_map_index,
+                )
+            })
+            .map(str::to_string);
+        // World objects expose the cached mask like C++ obj->OCF
+        // (FindObject criteria, host functions).
+        let ocf = object.state.ocf;
+        HostWorldObject::with_category(
+            object.id,
+            object.definition_id.clone(),
+            object.state.status,
+            object.state.action.name.clone(),
+            object.state.action.target,
+            object.state.action.target2,
+            procedure,
+            object.state.owner,
+            object.state.category,
+            object.state.energy,
+            object.state.construction,
+            object.state.damage,
+            object.state.position,
+            object.state.velocity,
+            object.state.rotation,
+            object.state.vertices.clone(),
+            object.state.action.data,
+            object.state.action.time,
+            object.state.action.phase,
+            object.state.container,
+            object.state.draw_transform,
+        )
+        .with_action_index(object.state.action.act_map_index)
+        .with_unsorted(object.unsorted)
+        .with_fixed_motion(object.fixed_position, object.fixed_velocity)
+        .with_fixed_rotation(object.fixed_rotation)
+        .with_rotation_velocity(object.rotation_velocity)
+        .with_own_vertices(object.own_shape_vertices.is_some())
+        .with_move_to_range(definition.map_or(0, Definition::move_to_range))
+        .with_pathfinder(definition.map_or(0, Definition::pathfinder))
+        .with_no_transfer_zones(definition.map_or(0, Definition::no_transfer_zones))
+        .with_no_push_enter(definition.map_or(0, Definition::no_push_enter))
+        .with_contact_density(object.state.contact_density)
+        .with_direction(object.state.direction.to_script_value())
+        .with_selected(object.state.selected)
+        .with_crew_disabled(object.state.crew_disabled)
+        .with_contents(object.state.contents.clone())
+        .with_alive(object.state.alive)
+        .with_need_energy(object.state.need_energy)
+        .with_collectible(definition.is_some_and(Definition::is_collectible))
+        .with_collection_available_ignoring_delay(definition.is_some_and(|definition| {
+            definition.collection_ocf_enabled(&object.state, object.state.contents.len(), 0)
+        }))
+        .with_collection_enabled(definition.is_some_and(|definition| {
+            definition.collection_ocf_enabled(&object.state, 0, 0)
+        }))
+        .with_no_collect_delay(object.state.no_collect_delay)
+        .with_collection_limit(definition.and_then(Definition::collection_limit))
+        .with_in_liquid(object.state.in_liquid)
+        .with_ocf(ocf)
+        .with_commands(object.commands.command_views())
+        .with_command_stack(object.commands.snapshot())
+        .with_full_state(Rc::new(object.script_state_snapshot()))
+        .with_last_energy_loss_cause(object.last_energy_loss_cause)
+    }
+
+    /// Build the shared/static portion of a script host context without
+    /// materializing every object's mutable script state or cloning the
+    /// landscape shell. Movement can finish this lazily on first contact.
+    fn host_world_context_base(&self) -> HostWorldContext {
         let definition_metadata = self.definition_metadata_table();
         let host_definition_tables = self.host_definition_tables();
         let solid_mask_metadata = self.solid_mask_metadata_table();
@@ -24538,82 +24620,8 @@ impl Engine {
             |sky| [sky.settings().fade_top, sky.settings().fade_bottom],
         );
         let mut world = HostWorldContext::with_landscape_shared(
-            self.objects.iter().map(|object| {
-                let definition = self.definitions.get(&object.definition_id);
-                let procedure = definition
-                    .and_then(|definition| {
-                        definition
-                            .action_library()
-                            .procedure_name_for_entry(
-                                &object.state.action.name,
-                                object.state.action.act_map_index,
-                            )
-                    })
-                    .map(|name| name.to_string());
-                // World objects expose the cached mask like C++ obj->OCF
-                // (FindObject criteria, host functions).
-                let ocf = object.state.ocf;
-                HostWorldObject::with_category(
-                    object.id,
-                    object.definition_id.clone(),
-                    object.state.status,
-                    object.state.action.name.clone(),
-                    object.state.action.target,
-                    object.state.action.target2,
-                    procedure,
-                    object.state.owner,
-                    object.state.category,
-                    object.state.energy,
-                    object.state.construction,
-                    object.state.damage,
-                    object.state.position,
-                    object.state.velocity,
-                    object.state.rotation,
-                    object.state.vertices.clone(),
-                    object.state.action.data,
-                    object.state.action.time,
-                    object.state.action.phase,
-                    object.state.container,
-                    object.state.draw_transform,
-                )
-                .with_action_index(object.state.action.act_map_index)
-                .with_unsorted(object.unsorted)
-                .with_fixed_motion(object.fixed_position, object.fixed_velocity)
-                .with_fixed_rotation(object.fixed_rotation)
-                .with_rotation_velocity(object.rotation_velocity)
-                .with_own_vertices(object.own_shape_vertices.is_some())
-                .with_move_to_range(definition.map_or(0, Definition::move_to_range))
-                .with_pathfinder(definition.map_or(0, Definition::pathfinder))
-                .with_no_transfer_zones(definition.map_or(0, Definition::no_transfer_zones))
-                .with_no_push_enter(definition.map_or(0, Definition::no_push_enter))
-                .with_contact_density(object.state.contact_density)
-                .with_direction(object.state.direction.to_script_value())
-                .with_selected(object.state.selected)
-                .with_crew_disabled(object.state.crew_disabled)
-                .with_contents(object.state.contents.clone())
-                .with_alive(object.state.alive)
-                .with_need_energy(object.state.need_energy)
-                .with_collectible(definition.is_some_and(Definition::is_collectible))
-                .with_collection_available_ignoring_delay(definition.is_some_and(|definition| {
-                    definition.collection_ocf_enabled(
-                        &object.state,
-                        object.state.contents.len(),
-                        0,
-                    )
-                }))
-                .with_collection_enabled(definition.is_some_and(|definition| {
-                    definition.collection_ocf_enabled(&object.state, 0, 0)
-                }))
-                .with_no_collect_delay(object.state.no_collect_delay)
-                .with_collection_limit(definition.and_then(Definition::collection_limit))
-                .with_in_liquid(object.state.in_liquid)
-                .with_ocf(ocf)
-                .with_commands(object.commands.command_views())
-                .with_command_stack(object.commands.snapshot())
-                .with_full_state(Rc::new(object.script_state_snapshot()))
-                .with_last_energy_loss_cause(object.last_energy_loss_cause)
-            }),
-            landscape,
+            std::iter::empty(),
+            None,
             definition_metadata,
             Rc::clone(&self.scenario_values),
             Rc::clone(&self.default_rank_names),
@@ -24730,6 +24738,15 @@ impl Engine {
             }
         }
         world
+    }
+
+    fn host_world_context(&self) -> HostWorldContext {
+        self.host_world_context_base().with_objects_and_landscape(
+            self.objects
+                .iter()
+                .map(|object| Self::host_world_object(&self.definitions, object)),
+            self.landscape.clone(),
+        )
     }
 
     /// The shared definition-script table host contexts carry (nested
@@ -37128,11 +37145,16 @@ impl Engine {
         let mut contact_audio = self.audio_registry.clone();
         let mut contact_next_object_id = self.next_object_id;
         let contact_global_effects = self.global_effects.clone();
-        let contact_world = RefCell::new(if movement.contact_function_calls {
-            self.host_world_context()
-        } else {
-            HostWorldContext::default()
-        });
+        // C++ calls Contact* directly against the live game. Build our
+        // snapshot adapter only if movement discovers a real contact and a
+        // matching callback. In object-heavy scenarios, eagerly cloning the
+        // whole world for every freely swimming ContactCalls object is an
+        // accidental O(movers * objects) cost.
+        let contact_world_base = movement
+            .contact_function_calls
+            .then(|| self.host_world_context_base());
+        let contact_world = RefCell::new(None::<HostWorldContext>);
+        let contact_did_motion = Cell::new(false);
         let contact_physics = self.physics;
         let contact_environment = self.environment;
         let contact_frame = self.frame;
@@ -37147,8 +37169,16 @@ impl Engine {
         let contact_material_capacity = self.materials.len();
         let mut mask_attachments = None;
         let mut movement_outcome = {
+            let mut landscape = self.landscape.as_mut();
+            let materials = &self.materials;
+            let mass_movers = &mut self.mass_movers;
+            let sectors = self.sectors.as_ref();
+            let (objects_before, objects_tail) = self.objects.split_at_mut(idx);
+            let (object, objects_after) = objects_tail.split_first_mut().expect("index checked");
+            let movement_others = RefCell::new((objects_before, objects_after));
             let definition_for_contact = definition_for_contact.as_ref();
             let mut run_contact_callback = |object: &mut Object,
+                                            landscape: &Landscape,
                                             contact_cnat: u32|
              -> Result<(), EngineError> {
                 if !contact_function_calls_enabled {
@@ -37180,9 +37210,43 @@ impl Engine {
                             object.state.position.x, object.state.position.y
                         ));
                     }
+                    if contact_world.borrow().is_none() {
+                        let Some(base) = contact_world_base.as_ref() else {
+                            return Ok(());
+                        };
+                        let others = movement_others.borrow();
+                        let (objects_before, objects_after) = &*others;
+                        let mut world = base.clone().with_objects_and_landscape(
+                            objects_before
+                                .iter()
+                                .chain(std::iter::once(&*object))
+                                .chain(objects_after.iter())
+                                .map(|world_object| {
+                                    Self::host_world_object(contact_definitions, world_object)
+                                }),
+                            Some(landscape.clone()),
+                        );
+                        if contact_did_motion.get() {
+                            let bakes = objects_before
+                                .iter()
+                                .chain(std::iter::once(&*object))
+                                .chain(objects_after.iter())
+                                .filter_map(|world_object| {
+                                    world_object
+                                        .solid_mask_bake
+                                        .clone()
+                                        .map(|bake| (world_object.id, bake))
+                                })
+                                .collect();
+                            world.refresh_after_do_motion(object.id, landscape, bakes);
+                        }
+                        *contact_world.borrow_mut() = Some(world);
+                    }
                     let state_snapshot = object.script_state_snapshot();
                     let world = contact_world
                         .borrow()
+                        .as_ref()
+                        .expect("contact world initialized for matching callback")
                         .clone()
                         .with_next_object_id(contact_next_object_id);
                     let (value, mut outcome, audio_state, new_rng) = definition
@@ -37205,10 +37269,16 @@ impl Engine {
                     contact_next_object_id = outcome.next_object_id;
 
                     if let Some(preview) = outcome.host_raster_preview.clone() {
-                        contact_world.borrow_mut().apply_host_raster_preview(preview);
+                        contact_world
+                            .borrow_mut()
+                            .as_mut()
+                            .expect("contact world remains initialized")
+                            .apply_host_raster_preview(preview);
                     } else {
                         contact_world
                             .borrow_mut()
+                            .as_mut()
+                            .expect("contact world remains initialized")
                             .preview_solid_mask_operations(&outcome.solid_mask_operations);
                     }
 
@@ -37291,15 +37361,11 @@ impl Engine {
                 }
                 Ok(())
             };
-            let mut landscape = self.landscape.as_mut();
-            let materials = &self.materials;
-            let mass_movers = &mut self.mass_movers;
-            let sectors = self.sectors.as_ref();
-            let (objects_before, objects_tail) = self.objects.split_at_mut(idx);
-            let (object, objects_after) = objects_tail.split_first_mut().expect("index checked");
             let mut on_do_motion = |object: &mut Object,
                                     landscape: &mut Landscape|
              -> Result<(), EngineError> {
+                let mut others = movement_others.borrow_mut();
+                let (objects_before, objects_after) = &mut *others;
                 mask_attachments = Self::remove_solid_mask_from_fields(
                     object,
                     objects_before,
@@ -37312,7 +37378,8 @@ impl Engine {
                     true,
                     true,
                 );
-                if contact_function_calls_enabled {
+                contact_did_motion.set(true);
+                if let Some(world) = contact_world.borrow_mut().as_mut() {
                     let bakes = objects_before
                         .iter()
                         .chain(std::iter::once(&*object))
@@ -37324,11 +37391,7 @@ impl Engine {
                                 .map(|bake| (object.id, bake))
                         })
                         .collect();
-                    contact_world.borrow_mut().refresh_after_do_motion(
-                        object.id,
-                        landscape,
-                        bakes,
-                    );
+                    world.refresh_after_do_motion(object.id, landscape, bakes);
                 }
                 Ok(())
             };
@@ -59960,6 +60023,138 @@ mod command_contact_regression {
         assert_eq!(snapshot.no_push_enter, -2);
         assert!(snapshot.action_disabled);
         assert_eq!(snapshot.ocf & ocf::CREW_MEMBER, 0);
+    }
+
+    #[test]
+    fn contact_world_materialization_is_lazy_until_a_callback_fires() {
+        let mut engine = Engine::with_seed(0);
+        let mut landscape = Landscape::with_default_material(100, vec![100; 100], None)
+            .expect("contact landscape");
+        landscape.set_world_height(100);
+        landscape.set_pixel_grid(PixelGrid::new(
+            100,
+            100,
+            vec![0; 100 * 100],
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+        engine.set_landscape(landscape);
+
+        engine
+            .register_definition(
+                Definition::from_script("FILL", "Filler", "#strict\n")
+                    .expect("filler compiles"),
+            )
+            .expect("filler registers");
+        let mut swimmer = Definition::from_script(
+            "SWIM",
+            "Contact swimmer",
+            r#"#strict
+local contact_calls, world_count, wall_seen;
+protected func ContactRight()
+{
+    contact_calls++;
+    world_count = ObjectCount();
+    wall_seen = GBackSolid(2, 0);
+    return(0);
+}
+"#,
+        )
+        .expect("swimmer compiles");
+        swimmer.set_c4_callback_convention(true);
+        swimmer.set_contact_function_calls(true);
+        swimmer.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
+        swimmer.set_shape_vertices(vec![ObjectVertex::new(1, 0).with_cnat(CNAT_RIGHT)]);
+        engine
+            .register_definition(swimmer)
+            .expect("swimmer registers");
+
+        for x in 0..128 {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("FILL").with_position(Vector2::new(x % 100, 10)),
+                )
+                .expect("filler spawns");
+        }
+        let swimmer = engine
+            .spawn_object(
+                SpawnConfig::new("SWIM")
+                    .with_position(Vector2::new(50, 50))
+                    .with_velocity(Vector2::new(1, 0))
+                    .with_mobile(true),
+            )
+            .expect("swimmer spawns");
+        let swimmer_index = engine
+            .find_object_index(swimmer)
+            .expect("swimmer exists");
+        let definition_id = engine.objects[swimmer_index].definition_id.clone();
+        let action_library = engine
+            .definitions
+            .get(&definition_id)
+            .expect("swimmer definition exists")
+            .action_library()
+            .clone();
+        let solid_mask_indices = engine.active_solid_mask_indices();
+
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        engine
+            .exec_object_movement(
+                swimmer_index,
+                &action_library,
+                &definition_id,
+                &solid_mask_indices,
+            )
+            .expect("free movement executes");
+        assert_eq!(
+            HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+            0,
+            "free movement must not snapshot the world merely because ContactCalls=1"
+        );
+
+        engine
+            .landscape
+            .as_mut()
+            .expect("landscape exists")
+            .grid_write_byte(53, 50, 1);
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        engine
+            .exec_object_movement(
+                swimmer_index,
+                &action_library,
+                &definition_id,
+                &solid_mask_indices,
+            )
+            .expect("contact movement executes");
+        assert_eq!(
+            HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+            engine.objects.len(),
+            "the first real Contact* call materializes one complete world"
+        );
+        assert_eq!(
+            engine.objects[swimmer_index]
+                .state
+                .local_vars
+                .get("contact_calls"),
+            Some(&Value::Int(1)),
+            "the deferred world preserves Contact* callback execution"
+        );
+        assert_eq!(
+            engine.objects[swimmer_index]
+                .state
+                .local_vars
+                .get("world_count"),
+            Some(&Value::Int(engine.objects.len() as i32 - 1)),
+            "ObjectCount sees every other live object (C++ excludes the caller)"
+        );
+        assert_eq!(
+            engine.objects[swimmer_index]
+                .state
+                .local_vars
+                .get("wall_seen"),
+            Some(&Value::Bool(true)),
+            "the deferred callback sees the contact-time landscape"
+        );
     }
 
     #[test]
