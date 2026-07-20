@@ -9151,6 +9151,10 @@ enum AppContextMenuCommand {
     LobbyTeam { player_id: i32, team_id: i32 },
     LobbyControlRate(i32),
     LobbyRuntimeJoin(bool),
+    LobbyPlayerTakeOver {
+        savegame_player_id: i32,
+        player_id: i32,
+    },
     LobbyPlayerRemove { client_id: i32, player_id: i32 },
     LobbyPlayerNewColor { client_id: i32, player_id: i32 },
     LobbyKick(i32),
@@ -44224,6 +44228,54 @@ impl GameApp {
                 == Some(client_id)
     }
 
+    fn classic_lobby_takeover_entries(
+        &self,
+        savegame_player_id: i32,
+    ) -> Vec<ContextMenuEntry<AppContextMenuCommand>> {
+        let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        else {
+            return Vec::new();
+        };
+        let Some(request) = self
+            .control_player_infos
+            .client_update_request(local_client_id)
+        else {
+            return Vec::new();
+        };
+        let using_player = self.runtime_resource_text("IDS_MSG_USINGPLR", "Using %s");
+        let tooltip = self.runtime_resource_text(
+            "IDS_MSG_USINGPLR_DESC",
+            "Use this player to continue the savegame",
+        );
+        request
+            .players
+            .into_iter()
+            .filter(|player| {
+                player.flags
+                    & (lc_engine::PLAYER_INFO_FLAG_JOINED
+                        | lc_engine::PLAYER_INFO_FLAG_JOIN_ISSUED)
+                    == 0
+                    && player.savegame_player == 0
+            })
+            .map(|player| {
+                let name = legacy_presentation_text(control_player_effective_name(&player));
+                ContextMenuEntry::new(format_resource_string(
+                    using_player.clone(),
+                    &[&name],
+                ))
+                .with_tooltip(tooltip.clone())
+                .with_icon(ContextMenuIcon::Phase(9))
+                .with_action(AppContextMenuCommand::LobbyPlayerTakeOver {
+                    savegame_player_id,
+                    player_id: player.id,
+                })
+            })
+            .collect()
+    }
+
     fn classic_lobby_player_context_entries(
         &self,
         player_id: i32,
@@ -44248,8 +44300,7 @@ impl GameApp {
                     "Control the player in the game",
                 ))
                 .with_icon(ContextMenuIcon::Phase(9))
-                // The separately tracked nested-takeover ticket owns these rows.
-                .with_submenu(Vec::new())],
+                .with_submenu(self.classic_lobby_takeover_entries(player_id))],
             ));
         }
 
@@ -44988,6 +45039,54 @@ impl GameApp {
         }
     }
 
+    fn take_over_classic_lobby_savegame_player(
+        &mut self,
+        savegame_player_id: i32,
+        player_id: i32,
+    ) {
+        let target_is_free = self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+            lobby.controller.rows().iter().any(|row| {
+                matches!(row, LobbyRosterRow::Player(player)
+                    if player.id == savegame_player_id && player.client_id == -1)
+            })
+        });
+        if !target_is_free || player_id == 0 {
+            return;
+        }
+        let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        else {
+            return;
+        };
+        let Some(mut request) = self
+            .control_player_infos
+            .client_update_request(local_client_id)
+        else {
+            return;
+        };
+        let Some(player) = request
+            .players
+            .iter_mut()
+            .find(|player| player.id == player_id)
+        else {
+            return;
+        };
+        player.savegame_player = savegame_player_id;
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        if let Err(error) = network.submit_player_info_update(request) {
+            tracing::error!(
+                %error,
+                savegame_player_id,
+                player_id,
+                "failed to submit lobby savegame-player takeover"
+            );
+        }
+    }
+
     fn remove_classic_lobby_player(&mut self, client_id: i32, player_id: i32) {
         if !self.classic_lobby_player_action_is_allowed(client_id, player_id) {
             return;
@@ -45380,6 +45479,15 @@ impl GameApp {
                     }
                     AppContextMenuCommand::LobbyRuntimeJoin(allowed) => {
                         self.set_classic_lobby_runtime_join(allowed);
+                    }
+                    AppContextMenuCommand::LobbyPlayerTakeOver {
+                        savegame_player_id,
+                        player_id,
+                    } => {
+                        self.take_over_classic_lobby_savegame_player(
+                            savegame_player_id,
+                            player_id,
+                        );
                     }
                     AppContextMenuCommand::LobbyPlayerRemove {
                         client_id,
@@ -90779,6 +90887,255 @@ public func Grant(password) { return GainMissionAccess(password); }
             .admission_resources
             .resources
             .contains_key(&remote_resource));
+    }
+
+    fn install_test_free_savegame_player_row(app: &mut GameApp, player_id: i32) {
+        install_test_classic_host_lobby(app);
+        let client = app
+            .classic_host_lobby
+            .as_ref()
+            .expect("test lobby")
+            .controller
+            .rows()[0]
+            .clone();
+        app.classic_host_lobby
+            .as_mut()
+            .expect("test lobby")
+            .controller
+            .set_rows(vec![
+                LobbyRosterRow::Player(LobbyPlayerRow {
+                    id: player_id,
+                    client_id: -1,
+                    name: "Free restore".to_string(),
+                    color: [0xff; 4],
+                    icon: LobbyRosterIcon::Standard(7),
+                    joined_player_overlay: None,
+                    team: None,
+                    league_score: None,
+                    league_rank: None,
+                }),
+                client,
+            ]);
+    }
+
+    #[test]
+    fn l098_takeover_submenu_lists_only_local_unissued_unassociated_players() {
+        let mut app = new_menu_app(640, 480);
+        install_test_free_savegame_player_row(&mut app, 50);
+        let (network, _events, _commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+
+        let eligible_league = lc_engine::ControlPlayerInfoEntry {
+            id: 11,
+            name: LegacyCString::from_bytes(b"Raw A".to_vec()).unwrap(),
+            forced_name: LegacyCString::from_bytes(b"Forced A".to_vec()).unwrap(),
+            league_account: LegacyCString::from_bytes(b"League A".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let join_issued = lc_engine::ControlPlayerInfoEntry {
+            id: 12,
+            name: LegacyCString::from_bytes(b"Issued".to_vec()).unwrap(),
+            flags: lc_engine::PLAYER_INFO_FLAG_JOIN_ISSUED,
+            ..Default::default()
+        };
+        let joined_and_removed = lc_engine::ControlPlayerInfoEntry {
+            id: 13,
+            name: LegacyCString::from_bytes(b"Joined".to_vec()).unwrap(),
+            flags: lc_engine::PLAYER_INFO_FLAG_JOINED | lc_engine::PLAYER_INFO_FLAG_REMOVED,
+            ..Default::default()
+        };
+        let associated = lc_engine::ControlPlayerInfoEntry {
+            id: 14,
+            name: LegacyCString::from_bytes(b"Associated".to_vec()).unwrap(),
+            savegame_player: 90,
+            ..Default::default()
+        };
+        let eligible_forced = lc_engine::ControlPlayerInfoEntry {
+            id: 15,
+            name: LegacyCString::from_bytes(b"Raw B".to_vec()).unwrap(),
+            forced_name: LegacyCString::from_bytes(b"Forced B".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        app.control_player_infos.replace_snapshot(
+            99,
+            [
+                lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 21,
+                        name: LegacyCString::from_bytes(b"Foreign".to_vec()).unwrap(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                    players: vec![
+                        eligible_league,
+                        join_issued,
+                        joined_and_removed,
+                        associated,
+                        eligible_forced,
+                    ],
+                    by_client: 7,
+                },
+            ],
+        );
+
+        let entries = app.classic_lobby_takeover_entries(50);
+        assert_eq!(
+            entries.iter().map(|entry| entry.text.as_str()).collect::<Vec<_>>(),
+            vec!["Using League A", "Using Forced B"]
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.tooltip.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("Use this player to continue the savegame"),
+                Some("Use this player to continue the savegame"),
+            ]
+        );
+        assert!(entries.iter().all(|entry| entry.icon == ContextMenuIcon::Phase(9)));
+        assert_eq!(
+            entries.iter().map(|entry| entry.action.clone()).collect::<Vec<_>>(),
+            vec![
+                Some(AppContextMenuCommand::LobbyPlayerTakeOver {
+                    savegame_player_id: 50,
+                    player_id: 11,
+                }),
+                Some(AppContextMenuCommand::LobbyPlayerTakeOver {
+                    savegame_player_id: 50,
+                    player_id: 15,
+                }),
+            ]
+        );
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
+            row: LobbyRosterId::Player(50),
+            position: GuiPoint::new(200.0, 150.0),
+        }])
+        .expect("free savegame player context opens");
+        let root = app.context_menu.as_ref().unwrap().layout().panels[0].rows[0].rect;
+        app.handle_context_menu_pointer_move(GuiPoint::new(
+            (root.x + 1) as f32,
+            (root.y + 1) as f32,
+        ))
+        .expect("open takeover submenu");
+        let layout = app.context_menu.as_ref().unwrap().layout();
+        assert_eq!(layout.panels.len(), 2);
+        assert_eq!(layout.panels[1].rows.len(), 2);
+    }
+
+    #[test]
+    fn l098_takeover_selection_submits_full_local_packet_with_savegame_association() {
+        let mut app = new_menu_app(640, 480);
+        install_test_free_savegame_player_row(&mut app, 50);
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        let chosen = lc_engine::ControlPlayerInfoEntry {
+            id: 31,
+            name: LegacyCString::from_bytes(b"Chooser".to_vec()).unwrap(),
+            color: 0x0012_3456,
+            original_color: 0x0065_4321,
+            team: 3,
+            extra_data: [1, 2, 3, 4],
+            ..Default::default()
+        };
+        let sibling = lc_engine::ControlPlayerInfoEntry {
+            id: 32,
+            name: LegacyCString::from_bytes(b"Sibling".to_vec()).unwrap(),
+            flags: lc_engine::PLAYER_INFO_FLAG_JOIN_ISSUED,
+            color: 0x0000_00aa,
+            ..Default::default()
+        };
+        let packet_flags = lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL;
+        app.control_player_infos.replace_snapshot(
+            99,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                flags: packet_flags,
+                players: vec![chosen.clone(), sibling.clone()],
+                by_client: 7,
+            }],
+        );
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
+            row: LobbyRosterId::Player(50),
+            position: GuiPoint::new(200.0, 150.0),
+        }])
+        .expect("free savegame player context opens");
+        let root = app.context_menu.as_ref().unwrap().layout().panels[0].rows[0].rect;
+        app.handle_context_menu_pointer_move(GuiPoint::new(
+            (root.x + 1) as f32,
+            (root.y + 1) as f32,
+        ))
+        .expect("open takeover submenu");
+
+        let mut live_sibling = sibling.clone();
+        live_sibling.color = 0x0000_00bb;
+        app.control_player_infos.replace_snapshot(
+            99,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                flags: packet_flags,
+                players: vec![chosen.clone(), live_sibling.clone()],
+                by_client: 7,
+            }],
+        );
+        let child = app.context_menu.as_ref().unwrap().layout().panels[1].rows[0].rect;
+        app.handle_context_menu_pointer_move(GuiPoint::new(
+            (child.x + 1) as f32,
+            (child.y + 1) as f32,
+        ))
+        .expect("select takeover child");
+        assert!(
+            app.handle_context_menu_pointer_button(
+                ElementState::Pressed,
+                ContextMenuPointerButton::Left,
+            )
+            .expect("activate takeover child")
+        );
+        assert!(app.context_menu.is_none());
+
+        let mut expected_chosen = chosen.clone();
+        expected_chosen.savegame_player = 50;
+        assert_eq!(
+            commands.take_player_info_updates(),
+            vec![lc_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: packet_flags,
+                players: vec![expected_chosen, live_sibling],
+            }]
+        );
+        assert_eq!(
+            app.control_player_infos
+                .client_update_request(7)
+                .unwrap()
+                .players[0]
+                .savegame_player,
+            0,
+            "takeover waits for the authoritative PlayerInfo echo"
+        );
+        assert!(
+            app.handle_context_menu_pointer_button(
+                ElementState::Released,
+                ContextMenuPointerButton::Left,
+            )
+            .expect("consume takeover activation release")
+        );
     }
 
     #[test]
