@@ -1587,10 +1587,19 @@ pub fn break_message_with_options(
 /// HUD font abstraction. Inline images have no provider on this path and
 /// therefore occupy zero width, matching an unhooked C++ font image source.
 pub fn break_hud_message(font: &HudFont<'_>, text: &str, max_width: i32) -> String {
+    break_hud_message_max_lines(font, text, max_width, 0)
+}
+
+pub(crate) fn break_hud_message_max_lines(
+    font: &HudFont<'_>,
+    text: &str,
+    max_width: i32,
+    max_lines: usize,
+) -> String {
     break_message_in_units(
         text,
         max_width as f32,
-        0,
+        max_lines,
         |character| {
             if character >= ' ' {
                 font.character_advance(character) as f32

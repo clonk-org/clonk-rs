@@ -65,9 +65,9 @@ use gamepad::{
     LegacyGamepadButton, SourcedGamepadEvent,
 };
 use ingame_menu::{
-    DisplayFlags, GoalRuleEntry, HostDisconnectClientEntry, HostilityEntry, IngameMenuGraphics,
-    IngameMenuPointerTarget, IngameMenuState, MainMenuConditions, MenuAction, MenuOutcome,
-    NewPlayerEntry, ObserverPlayerEntry, ObserverTarget, OptionFlags, SaveSlotState,
+    DisplayFlags, DisplayToggle, GoalRuleEntry, HostDisconnectClientEntry, HostilityEntry,
+    IngameMenuGraphics, IngameMenuPointerTarget, IngameMenuState, MainMenuConditions, MenuAction,
+    MenuOutcome, NewPlayerEntry, ObserverPlayerEntry, ObserverTarget, OptionFlags, SaveSlotState,
     TeamSelectionEntry, UpperBoardMode,
 };
 use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
@@ -19202,6 +19202,15 @@ fn load_display_flags(paths: Option<&AppPaths>) -> DisplayFlags {
     flags
 }
 
+fn frontend_upper_board_mode(mode: UpperBoardMode) -> lc_frontend::hud::UpperBoardMode {
+    match mode {
+        UpperBoardMode::Hide => lc_frontend::hud::UpperBoardMode::Hide,
+        UpperBoardMode::Full => lc_frontend::hud::UpperBoardMode::Full,
+        UpperBoardMode::Small => lc_frontend::hud::UpperBoardMode::Small,
+        UpperBoardMode::Mini => lc_frontend::hud::UpperBoardMode::Mini,
+    }
+}
+
 fn load_white_lobby_chat(paths: Option<&AppPaths>) -> bool {
     paths
         .and_then(|paths| Config::load(paths.config_file()).ok())
@@ -26637,19 +26646,20 @@ impl GameApp {
 
     fn runtime_help_resources(&self) -> Result<&RuntimeHelpColumns> {
         anyhow::ensure!(
-            self.display_flags.upper_board == UpperBoardMode::Full,
-            "runtime F1 help cannot use the unported {:?} upper-board viewport geometry",
-            self.display_flags.upper_board
-        );
-        anyhow::ensure!(
             self.graphics.hud_graphics().upper_board.is_some(),
-            "runtime F1 help requires the classic UpperBoard resource for Full-mode viewport geometry"
+            "runtime F1 help requires the classic UpperBoard resource for viewport geometry"
         );
-        let viewport_area = self.graphics.preferred_dialog_rect(None);
+        let mode = frontend_upper_board_mode(self.display_flags.upper_board);
+        let viewport_area = self
+            .graphics
+            .preferred_dialog_rect_for_upper_board_mode(None, mode);
+        let expected_top = lc_frontend::hud::upper_board_reserved_height(mode);
         anyhow::ensure!(
-            viewport_area.y == lc_frontend::hud::UPPER_BOARD_HEIGHT,
-            "runtime F1 help cannot establish the Full-mode {}px viewport origin on this surface",
-            lc_frontend::hud::UPPER_BOARD_HEIGHT
+            viewport_area.y == expected_top
+                && viewport_area.height < self.graphics.surface().height(),
+            "runtime F1 help cannot establish the {:?}-mode {}px viewport origin and message-board bounds on this surface",
+            self.display_flags.upper_board,
+            expected_top
         );
         self.runtime_key_config()?;
         self.runtime_help_columns()
@@ -30746,6 +30756,13 @@ impl GameApp {
                 // (C4MainMenu.cpp:855-884).
                 let selection = self.ingame_menu_selection(player);
                 self.display_flags.toggle(toggle);
+                if toggle == DisplayToggle::UpperBoard {
+                    let game_time_seconds = self.game_time_seconds();
+                    self.graphics.set_upper_board_mode(
+                        frontend_upper_board_mode(self.display_flags.upper_board),
+                        game_time_seconds,
+                    );
+                }
                 self.ingame_menu.replace(
                     player,
                     Some(IngameMenuState::display_menu(
@@ -64063,6 +64080,7 @@ impl GameApp {
                 .display_flags
                 .fps
                 .then_some(self.frames_per_second),
+            upper_board_mode: frontend_upper_board_mode(self.display_flags.upper_board),
             // Config.Graphics.ShowPortraits/ShowCommands/ShowCommandKeys
             // from the Display menu (src/C4Config.cpp:448-450).
             show_portraits: self.display_flags.portraits,
@@ -65121,7 +65139,14 @@ impl GameApp {
     }
 
     fn enqueue_control_message_board_line(&mut self, line: String) {
-        self.message_board.enqueue(line);
+        let game_time_seconds = self.game_time_seconds();
+        self.graphics.set_upper_board_mode(
+            frontend_upper_board_mode(self.display_flags.upper_board),
+            game_time_seconds,
+        );
+        for physical_line in self.graphics.prepare_message_board_lines(&line) {
+            self.message_board.enqueue(physical_line);
+        }
     }
 
     fn scroll_message_board(&mut self, older: bool) {
@@ -78625,6 +78650,7 @@ mod tests {
             crew_name_labels: Vec::new(),
             clock_text: None,
             frames_per_second: None,
+            upper_board_mode: lc_frontend::hud::UpperBoardMode::Full,
             show_portraits: false,
             show_commands: true,
             show_command_keys: false,
@@ -122914,6 +122940,27 @@ ScenInfoArea=70,5,25,90
         }
     }
 
+    fn message_board_logical_entries(app: &GameApp) -> Vec<String> {
+        let mut entries: Vec<String> = Vec::new();
+        for physical_line in &app.message_board.log_history {
+            if let Some(continuation) = physical_line.strip_prefix("  ") {
+                if let Some(entry) = entries.last_mut() {
+                    entry.push(' ');
+                    entry.push_str(continuation);
+                } else {
+                    entries.push(continuation.to_string());
+                }
+            } else {
+                entries.push(physical_line.clone());
+            }
+        }
+        entries
+    }
+
+    fn latest_message_board_logical_entry(app: &GameApp) -> Option<String> {
+        message_board_logical_entries(app).pop()
+    }
+
     fn install_message_fixture(app: &mut GameApp) {
         app.control_clients.replace_snapshot([
             message_client(0, b"Ali"),
@@ -123215,8 +123262,8 @@ ScenInfoArea=70,5,25,90
         ));
         assert!(missing_player.displayed);
         assert_eq!(
-            app.message_board_line().as_deref(),
-            Some("<Remote> client message")
+            latest_message_board_logical_entry(&app).as_deref(),
+            Some("<Remote> client message"),
         );
 
         app.clear_message_board_log();
@@ -123346,29 +123393,20 @@ ScenInfoArea=70,5,25,90
         app.enqueue_control_message_board_line("old line".to_string());
 
         app.process_running_chat_text("/help");
-        assert!(app
-            .message_board
-            .log_history
+        let help_entries = message_board_logical_entries(&app);
+        assert!(help_entries
             .iter()
             .any(|line| line.contains("Commands available during game")));
-        assert!(app
-            .message_board
-            .log_history
+        assert!(help_entries
             .iter()
             .any(|line| line.starts_with("/clear - ")));
-        assert!(app
-            .message_board
-            .log_history
+        assert!(help_entries
             .iter()
             .any(|line| line.starts_with("/fast [x] - ")));
-        assert!(app
-            .message_board
-            .log_history
+        assert!(help_entries
             .iter()
             .any(|line| line.starts_with("/slow - ")));
-        assert!(app
-            .message_board
-            .log_history
+        assert!(help_entries
             .iter()
             .all(|line| !line.contains("Unknown command")));
 
@@ -123377,10 +123415,8 @@ ScenInfoArea=70,5,25,90
         assert!(app.message_board.current_line().is_none());
 
         app.process_running_chat_text("/Clear");
-        assert!(app
-            .message_board
-            .log_history
-            .back()
+        assert!(latest_message_board_logical_entry(&app)
+            .as_deref()
             .is_some_and(|line| line.contains("Unknown command") && line.contains("Clear")));
     }
 
@@ -123421,14 +123457,10 @@ ScenInfoArea=70,5,25,90
 
         app.process_running_chat_text("/kick remote");
         assert!(commands.take_submitted_votes().is_empty());
-        assert!(app
-            .message_board
-            .log_history
-            .back()
+        assert!(latest_message_board_logical_entry(&app)
+            .as_deref()
             .is_some_and(|line| line.contains("remote") && line.contains("not found")));
-        assert!(app
-            .message_board
-            .log_history
+        assert!(message_board_logical_entries(&app)
             .iter()
             .all(|line| !line.contains("Unknown command")));
     }
@@ -123462,8 +123494,8 @@ ScenInfoArea=70,5,25,90
             b"live runtime comment"
         );
         assert_eq!(
-            app.message_board.log_history.back().map(String::as_str),
-            Some(lc_frontend::game_option_buttons::COMMENT_CHANGED_LOG)
+            latest_message_board_logical_entry(&app).as_deref(),
+            Some(lc_frontend::game_option_buttons::COMMENT_CHANGED_LOG),
         );
         assert!(commands.take_submitted_decided_controls().is_empty());
 
@@ -123481,9 +123513,7 @@ ScenInfoArea=70,5,25,90
         assert!(client_commands
             .take_submitted_decided_controls()
             .is_empty());
-        assert!(client
-            .message_board
-            .log_history
+        assert!(message_board_logical_entries(&client)
             .iter()
             .all(|line| line != lc_frontend::game_option_buttons::COMMENT_CHANGED_LOG));
     }
@@ -123637,10 +123667,8 @@ ScenInfoArea=70,5,25,90
         app.network_is_league = true;
         app.process_running_chat_text("/asyncctrl");
         assert!(commands.take_runtime_status_commands().is_empty());
-        assert!(app
-            .message_board
-            .log_history
-            .back()
+        assert!(latest_message_board_logical_entry(&app)
+            .as_deref()
             .is_some_and(|line| line.contains("not allowed in league")));
     }
 
@@ -158758,7 +158786,7 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn runtime_f1_refuses_unported_upper_board_modes_before_state_or_pixels() {
+    fn runtime_f1_supports_every_upper_board_mode_and_mode_aware_geometry() {
         let _lock = env_lock().lock();
         let install = tempdir().expect("upper-board config install fixture");
         let user_data = tempdir().expect("upper-board config user fixture");
@@ -158778,21 +158806,25 @@ func ControlDig() { dig_count = 1; return(1); }
             "the production guard must see the persisted mode"
         );
 
-        for mode in [
-            UpperBoardMode::Hide,
-            UpperBoardMode::Small,
-            UpperBoardMode::Mini,
+        for (mode, expected_top) in [
+            (UpperBoardMode::Hide, 0),
+            (UpperBoardMode::Full, 50),
+            (UpperBoardMode::Small, 25),
+            (UpperBoardMode::Mini, 0),
         ] {
-            let mut app = new_running_sandbox_app();
+            let mut app = new_classic_running_sandbox_app();
             app.display_flags.upper_board = mode;
-            let error = app
-                .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
-                .expect_err("unsupported viewport geometry must refuse the toggle");
-            assert!(matches!(
-                error,
-                EngineError::ClassicMenuParityBoundary { .. }
-            ));
-            assert!(!app.runtime_help_visible, "mode {mode:?} mutated ShowHelp");
+            app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                .expect("all native upper-board modes support F1 before a sync frame");
+            assert!(app.runtime_help_visible, "mode {mode:?}");
+            let mut frame = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut frame)
+                .expect("mode-aware help and viewport render");
+            assert_eq!(
+                app.graphics.preferred_dialog_rect(None).y,
+                expected_top,
+                "mode {mode:?}"
+            );
         }
 
         let mut missing_board = new_running_sandbox_app();
@@ -158834,21 +158866,38 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(error.to_string().contains("50px viewport origin"));
         assert!(!tiny.runtime_help_visible);
 
-        let mut visible = new_running_sandbox_app();
+        let mut tiny_hide = new_classic_running_sandbox_app();
+        tiny_hide.display_flags.upper_board = UpperBoardMode::Hide;
+        tiny_hide.graphics = GraphicsSystem::new(
+            320,
+            1,
+            DEFAULT_GROUND_HEIGHT,
+            "Tiny hidden-board help surface",
+            tiny_hide.assets.font_arc(),
+            Arc::clone(&tiny_hide.sprite_cache),
+            tiny_hide.assets.cursor_atlas(),
+            tiny_hide.assets.hud_graphics(),
+        );
+        tiny_hide
+            .graphics
+            .set_clonk_fonts(tiny_hide.assets.clonk_fonts.clone());
+        let error = tiny_hide
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect_err("tiny Hide-mode fallback cannot masquerade as valid geometry");
+        assert!(error.to_string().contains("message-board bounds"));
+        assert!(!tiny_hide.runtime_help_visible);
+
+        let mut visible = new_classic_running_sandbox_app();
         visible.runtime_help_visible = true;
         visible.display_flags.upper_board = UpperBoardMode::Small;
-        let before_surface = visible.graphics.surface().pixels().to_vec();
         let mut frame = vec![0x6d; 320 * 200 * 4];
         let sentinel = frame.clone();
-        let error = visible
+        visible
             .render(&mut frame)
-            .expect_err("visible help cannot use a stale Full-mode anchor");
-        assert!(error.to_string().contains("upper-board viewport geometry"));
-        assert_eq!(frame, sentinel);
-        assert_eq!(
-            visible.graphics.surface().pixels(),
-            before_surface.as_slice()
-        );
+            .expect("visible help follows a mode change without stale geometry");
+        assert_ne!(frame, sentinel);
+        assert!(visible.runtime_help_visible);
+        assert_eq!(visible.graphics.preferred_dialog_rect(None).y, 25);
 
         let mut recover = new_classic_running_sandbox_app();
         recover
@@ -158856,10 +158905,101 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("show help with supported Full geometry");
         assert!(recover.runtime_help_visible);
         recover.display_flags.upper_board = UpperBoardMode::Small;
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        recover
+            .render(&mut frame)
+            .expect("visible help moves to Small geometry");
+        assert!(recover.runtime_help_visible);
+        assert_eq!(recover.graphics.preferred_dialog_rect(None).y, 25);
         recover
             .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
-            .expect("hiding help remains safe after the geometry changes");
+            .expect("hide help after the geometry change");
         assert!(!recover.runtime_help_visible);
+    }
+
+    #[test]
+    fn upper_board_display_toggle_reinitializes_geometry_synchronously() {
+        let mut app = new_classic_running_sandbox_app();
+        let owner = app.local_owner;
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("establish the Full-mode active viewport");
+        let initial_strip_width = app.graphics.upper_board_text_strip_width();
+        assert_eq!(app.graphics.preferred_dialog_rect(None).y, 50);
+        assert_eq!(app.graphics.viewport_rect(owner).expect("viewport").y, 50);
+
+        app.snapshot.game_time = 100 * 60 * 60;
+
+        app.apply_ingame_menu_action(MenuAction::Display(DisplayToggle::UpperBoard))
+            .expect("cycle Full to Small");
+
+        assert_eq!(app.display_flags.upper_board, UpperBoardMode::Small);
+        assert!(
+            app.graphics.upper_board_text_strip_width() > initial_strip_width,
+            "the synchronous reinitialization latches the current 100-hour game time"
+        );
+        assert_eq!(
+            app.graphics.preferred_dialog_rect(None).y,
+            25,
+            "Display:UpperBoard reinitializes viewport/dialog geometry before the next render"
+        );
+        assert_eq!(app.graphics.viewport_rect(owner).expect("viewport").y, 25);
+        assert_eq!(
+            app.graphics
+                .preferred_dialog_rect(Some(owner))
+                .y,
+            25
+        );
+        assert_eq!(
+            app.active_ingame_mouse_viewport()
+                .expect("active mouse viewport")
+                .rect
+                .y,
+            25
+        );
+    }
+
+    #[test]
+    fn message_board_history_keeps_append_time_width_across_upper_board_modes() {
+        let mut app = new_classic_running_sandbox_app();
+        let full_message = "X".repeat(200);
+        app.enqueue_control_message_board_line(full_message.clone());
+        let full_lines = app.message_board.log_history.len();
+        assert!(full_lines > 1, "Full mode stores wrapped physical lines");
+        assert_ne!(
+            app.message_board_line().as_deref(),
+            Some(full_message.as_str())
+        );
+        let visible_len = lc_script::c4_string_byte_len(
+            app.message_board_line().as_deref().expect("physical tail"),
+        );
+        app.message_board.empty = false;
+        app.message_board.fader = 0;
+        app.message_board.delay = -1;
+        app.advance_message_board_overlay();
+        assert_eq!(
+            app.message_board.delay,
+            visible_len as i32 - 1,
+            "the native delay uses the selected physical line's C4 byte length"
+        );
+        let full_history = app.message_board.log_history.clone();
+
+        app.apply_ingame_menu_action(MenuAction::Display(DisplayToggle::UpperBoard))
+            .expect("cycle Full to Small");
+        app.apply_ingame_menu_action(MenuAction::Display(DisplayToggle::UpperBoard))
+            .expect("cycle Small to Mini");
+        assert_eq!(
+            app.message_board.log_history, full_history,
+            "reinitializing LBWidth does not reflow existing native log lines"
+        );
+
+        let before_mini = app.message_board.log_history.len();
+        app.enqueue_control_message_board_line("Y".repeat(200));
+        let mini_lines = app.message_board.log_history.len() - before_mini;
+        assert!(
+            mini_lines > full_lines,
+            "future Mini messages use the newly shortened log-buffer width"
+        );
     }
 
     #[test]
@@ -160060,8 +160200,8 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("league refusal is nonfatal");
         assert!(commands.take_submitted_client_updates().is_empty());
         assert_eq!(
-            app.message_board.log_history.back().map(String::as_str),
-            Some("Command not allowed in league games!")
+            latest_message_board_logical_entry(&app).as_deref(),
+            Some("Command not allowed in league games!"),
         );
 
         app.handle_runtime_client_list_action(RuntimeClientListAction::Kick(7))

@@ -29,6 +29,46 @@ use lc_graphics::{
 /// above the viewports in `C4GraphicsSystem::RecalculateViewports`
 /// (src/C4GraphicsSystem.cpp:345).
 pub const UPPER_BOARD_HEIGHT: i32 = 50;
+
+/// `C4UpperBoard::DisplayMode` (`src/C4UpperBoard.h:26-33`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UpperBoardMode {
+    Hide,
+    #[default]
+    Full,
+    Small,
+    Mini,
+}
+
+/// The strip removed from the viewport area by `C4UpperBoard::Height`.
+pub const fn upper_board_reserved_height(mode: UpperBoardMode) -> i32 {
+    match mode {
+        UpperBoardMode::Hide | UpperBoardMode::Mini => 0,
+        UpperBoardMode::Full => UPPER_BOARD_HEIGHT,
+        UpperBoardMode::Small => UPPER_BOARD_HEIGHT / 2,
+    }
+}
+
+/// The actual top-board raster height established by `C4UpperBoard::Init`.
+/// This may overlap the viewport when the loaded texture is taller than the
+/// fixed strip returned by [`upper_board_reserved_height`].
+pub fn upper_board_output_height(mode: UpperBoardMode, hud: &HudGraphics) -> i32 {
+    let reserved = upper_board_reserved_height(mode);
+    match mode {
+        UpperBoardMode::Hide | UpperBoardMode::Mini => 0,
+        UpperBoardMode::Full => hud
+            .upper_board
+            .as_ref()
+            .map(|image| (image.height() as i32).max(reserved))
+            .unwrap_or(reserved),
+        UpperBoardMode::Small => hud
+            .upper_board
+            .as_ref()
+            .map(|image| (image.height() as i32 / 2).max(reserved))
+            .unwrap_or(reserved),
+    }
+}
+
 /// `C4SymbolSize` / `C4SymbolBorder` (src/C4Constants.h:75-76).
 pub const SYMBOL_SIZE: i32 = 35;
 pub const SYMBOL_BORDER: i32 = 5;
@@ -386,6 +426,68 @@ fn blit_tile(
     }
 }
 
+/// `CStdDDraw::BlitSurfaceTile(..., scale)`: tile after applying the same
+/// geometric scale to each source tile. Small upper boards pass `0.5f` here;
+/// despite stale ticket wording, this parameter is not an opacity value.
+#[allow(clippy::too_many_arguments)]
+fn blit_tile_scaled(
+    surface: &mut Surface,
+    image: &ImageData,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    scale: f32,
+    gamma: Option<&GammaRamp>,
+) {
+    if width <= 0 || height <= 0 || !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    if scale == 1.0 {
+        blit_tile(surface, image, x, y, width, height, 0, 0, gamma);
+        return;
+    }
+    let tile_width = image.width() as f32 * scale;
+    let tile_height = image.height() as f32 * scale;
+    if tile_width <= 0.0 || tile_height <= 0.0 {
+        return;
+    }
+
+    let previous_clip = surface.clip();
+    let target_clip = SurfaceRect::new(x, y, width as u32, height as u32);
+    let effective_clip = previous_clip
+        .and_then(|clip| clip.intersection(target_clip))
+        .unwrap_or_else(|| {
+            if previous_clip.is_some() {
+                SurfaceRect::new(x, y, 0, 0)
+            } else {
+                target_clip
+            }
+        });
+    surface.set_clip(effective_clip);
+
+    let mut tile_y = y as f32;
+    while tile_y < (y + height) as f32 {
+        let mut tile_x = x as f32;
+        while tile_x < (x + width) as f32 {
+            draw_hud_image_bilinear(
+                surface,
+                &lc_gui::Rect::new(tile_x, tile_y, tile_width, tile_height),
+                image,
+                gamma,
+            );
+            tile_x += tile_width;
+        }
+        tile_y += tile_height;
+    }
+
+    if let Some(clip) = previous_clip {
+        surface.set_clip(clip);
+    } else {
+        surface.clear_clip();
+    }
+}
+
 /// `C4Facet::Draw(cgo, fAspect=true)` (src/C4Facet.cpp:100-128): fit the
 /// whole `image` into `rect` preserving aspect (integer math like C++),
 /// returning the target rect actually covered.
@@ -515,11 +617,54 @@ pub fn colorize_by_owner(image: &ImageData, owner: Color) -> ImageData {
     ImageData::new(image.width(), image.height(), out)
 }
 
-/// `C4UpperBoard::Draw` (src/C4UpperBoard.cpp:46-96) in `Full` mode.
+/// Width reserved at the right edge of the message board by Mini mode.
+pub fn upper_board_text_strip_width(font: &HudFont<'_>, game_time_seconds: u64) -> i32 {
+    upper_board_text_strip_width_for_text_width(
+        font.text_width(&format_game_time(game_time_seconds)),
+    )
+}
+
+/// Mini's fixed three-column strip after `C4UpperBoard::Init` has latched
+/// `TextWidth` (src/C4UpperBoard.cpp:104-109).
+pub fn upper_board_text_strip_width_for_text_width(text_width: i32) -> i32 {
+    text_width.max(0).saturating_mul(3).saturating_add(30)
+}
+
+/// Logical width left to `C4MessageBoard` after `C4UpperBoard::Init`.
+pub fn message_board_available_width(
+    surface_width: i32,
+    font: &HudFont<'_>,
+    mode: UpperBoardMode,
+    game_time_seconds: u64,
+) -> i32 {
+    message_board_available_width_for_text_width(
+        surface_width,
+        mode,
+        font.text_width(&format_game_time(game_time_seconds)),
+    )
+}
+
+/// Logical message-board width using the `TextWidth` cached by
+/// `C4UpperBoard::Init`.
+pub fn message_board_available_width_for_text_width(
+    surface_width: i32,
+    mode: UpperBoardMode,
+    text_width: i32,
+) -> i32 {
+    match mode {
+        UpperBoardMode::Mini => surface_width
+            .saturating_sub(upper_board_text_strip_width_for_text_width(text_width))
+            .max(0),
+        _ => surface_width.max(0),
+    }
+}
+
+/// `C4UpperBoard::Draw` (src/C4UpperBoard.cpp:46-96).
 pub fn draw_upper_board(
     surface: &mut Surface,
     font: &HudFont<'_>,
     hud: &HudGraphics,
+    mode: UpperBoardMode,
     scenario_title: &str,
     game_time_seconds: u64,
 ) {
@@ -527,6 +672,7 @@ pub fn draw_upper_board(
         surface,
         font,
         hud,
+        mode,
         scenario_title,
         game_time_seconds,
         None,
@@ -539,58 +685,105 @@ pub(crate) fn draw_upper_board_with_gamma(
     surface: &mut Surface,
     font: &HudFont<'_>,
     hud: &HudGraphics,
+    mode: UpperBoardMode,
     scenario_title: &str,
     game_time_seconds: u64,
     clock_text: Option<&str>,
     frames_per_second: Option<i32>,
     gamma: Option<&GammaRamp>,
 ) {
-    let width = surface.width() as i32;
-    // Output.Hgt = max(C4UpperBoardHeight, fctUpperBoard.Hgt)
-    // (C4UpperBoard::Init, src/C4UpperBoard.cpp:117-120).
-    let board_height = hud
-        .upper_board
-        .as_ref()
-        .map(|image| (image.height() as i32).max(UPPER_BOARD_HEIGHT))
-        .unwrap_or(UPPER_BOARD_HEIGHT);
+    let text_width = font.text_width(&format_game_time(game_time_seconds));
+    draw_upper_board_with_initialized_text_width(
+        surface,
+        font,
+        hud,
+        mode,
+        scenario_title,
+        game_time_seconds,
+        text_width,
+        clock_text,
+        frames_per_second,
+        gamma,
+    );
+}
 
-    match hud.upper_board.as_ref() {
-        Some(board) => blit_tile(surface, board, 0, 0, width, board_height, 0, 0, gamma),
-        None => fill_hud_rect(
-            surface,
-            &lc_gui::Rect::new(0.0, 0.0, width as f32, board_height as f32),
-            Color::opaque(66, 44, 24),
-            gamma,
-        ),
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_upper_board_with_initialized_text_width(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    hud: &HudGraphics,
+    mode: UpperBoardMode,
+    scenario_title: &str,
+    game_time_seconds: u64,
+    text_width: i32,
+    clock_text: Option<&str>,
+    frames_per_second: Option<i32>,
+    gamma: Option<&GammaRamp>,
+) {
+    if mode == UpperBoardMode::Hide {
+        return;
     }
+    let width = surface.width() as i32;
 
-    // Logo (src/C4UpperBoard.cpp:54-71).
-    if let Some(logo) = hud.logo.as_ref() {
-        let (logo_w, logo_h) = (logo.width() as f32, logo.height() as f32);
-        if logo_w > 0.0 && logo_h > 0.0 {
-            let mut zoom = if logo_w / logo_h != 3.0 { 0.25 } else { 0.21 };
-            zoom *= 960.0 / logo_w;
-            let dst_w = (logo_w * zoom) as i32;
-            let dst_h = (logo_h * zoom) as i32;
-            let dst_x = (width as f32 / 2.0 - (logo_w / 2.0) * zoom) as i32;
-            draw_hud_image_bilinear(
+    if mode != UpperBoardMode::Mini {
+        let board_height = upper_board_output_height(mode, hud);
+        match hud.upper_board.as_ref() {
+            Some(board) => blit_tile_scaled(
                 surface,
-                &lc_gui::Rect::new(dst_x as f32, 0.0, dst_w as f32, dst_h as f32),
-                logo,
+                board,
+                0,
+                0,
+                width,
+                board_height,
+                if mode == UpperBoardMode::Small {
+                    0.5
+                } else {
+                    1.0
+                },
                 gamma,
-            );
+            ),
+            None => fill_hud_rect(
+                surface,
+                &lc_gui::Rect::new(0.0, 0.0, width as f32, board_height as f32),
+                Color::opaque(66, 44, 24),
+                gamma,
+            ),
+        }
+
+        // Logo (src/C4UpperBoard.cpp:54-71).
+        if let Some(logo) = hud.logo.as_ref() {
+            let (logo_w, logo_h) = (logo.width() as f32, logo.height() as f32);
+            if logo_w > 0.0 && logo_h > 0.0 {
+                let mut zoom = if logo_w / logo_h != 3.0 { 0.25 } else { 0.21 };
+                zoom *= 960.0 / logo_w;
+                if mode == UpperBoardMode::Small {
+                    zoom *= 8.0 / 15.0;
+                }
+                let dst_w = (logo_w * zoom) as i32;
+                let dst_h = (logo_h * zoom) as i32;
+                let dst_x = (width as f32 / 2.0 - (logo_w / 2.0) * zoom) as i32;
+                draw_hud_image_bilinear(
+                    surface,
+                    &lc_gui::Rect::new(dst_x as f32, 0.0, dst_w as f32, dst_h as f32),
+                    logo,
+                    gamma,
+                );
+            }
         }
     }
 
-    // Text rows center on the reserved 50px strip, not the texture height
-    // (TextYPosition, src/C4UpperBoard.cpp:126).
-    let text_y = UPPER_BOARD_HEIGHT / 2 - font.line_height() / 2;
+    // Mini's Output facet is the right side of the bottom message strip.
+    // Other modes center on their fixed reserved height, not texture height.
+    let text_y = if mode == UpperBoardMode::Mini {
+        surface.height() as i32 - font.line_height()
+    } else {
+        upper_board_reserved_height(mode) / 2 - font.line_height() / 2
+    };
     let time_text = format_game_time(game_time_seconds);
-    let time_width = font.text_width(&time_text);
     let mut right_offset = 1;
     font.draw_with_gamma(
         surface,
-        width - right_offset * time_width - 10,
+        width - right_offset * text_width - 10,
         text_y,
         &time_text,
         MESSAGE_COLOR,
@@ -601,7 +794,7 @@ pub(crate) fn draw_upper_board_with_gamma(
     if let Some(clock_text) = clock_text {
         font.draw_with_gamma(
             surface,
-            width - right_offset * time_width - 30,
+            width - right_offset * text_width - 30,
             text_y,
             clock_text,
             MESSAGE_COLOR,
@@ -614,7 +807,7 @@ pub(crate) fn draw_upper_board_with_gamma(
         let fps_text = format!("{frames_per_second} FPS");
         font.draw_with_gamma(
             surface,
-            width - right_offset * time_width - 30,
+            width - right_offset * text_width - 30,
             text_y,
             &fps_text,
             MESSAGE_COLOR,
@@ -622,15 +815,19 @@ pub(crate) fn draw_upper_board_with_gamma(
             gamma,
         );
     }
-    font.draw_with_gamma(
-        surface,
-        10,
-        text_y,
-        scenario_title,
-        MESSAGE_COLOR,
-        TextAlign::Left,
-        gamma,
-    );
+    if mode != UpperBoardMode::Mini {
+        let title_y =
+            upper_board_output_height(mode, hud) / 2 - font.line_height() / 2;
+        font.draw_with_gamma(
+            surface,
+            10,
+            title_y,
+            scenario_title,
+            MESSAGE_COLOR,
+            TextAlign::Left,
+            gamma,
+        );
+    }
 }
 
 /// `C4Facet::DrawValue` with `C4FCT_Center` (src/C4Facet.cpp:240-250):
@@ -2277,6 +2474,7 @@ pub fn draw_message_board(
     draw_message_board_with_gamma(surface, font, hud, board, None);
 }
 
+/// Draws one physical line already admitted to `C4LogBuffer`.
 pub(crate) fn draw_message_board_with_gamma(
     surface: &mut Surface,
     font: &HudFont<'_>,
@@ -2373,6 +2571,46 @@ pub(crate) fn draw_message_board_with_gamma(
             gamma,
         );
     }
+}
+
+/// `C4LogBuffer::AppendLines` wraps each message to `LBWidth` before adding
+/// its physical lines to message-board history. Continuations use the
+/// buffer's two-space indent (src/C4LogBuf.cpp:174-254).
+fn message_board_tail_line(font: &HudFont<'_>, line: &str, width: i32) -> String {
+    message_board_physical_lines(font, line, width)
+        .pop()
+        .unwrap_or_default()
+}
+
+pub(crate) fn message_board_physical_lines(
+    font: &HudFont<'_>,
+    line: &str,
+    width: i32,
+) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    let continuation_width = width.saturating_sub(font.text_width_markup("  "));
+    let mut lines = Vec::new();
+    for paragraph in line
+        .split(['\r', '\n', '|'])
+        .filter(|part| !part.is_empty())
+    {
+        let first_pass =
+            crate::message_dialog::break_hud_message_max_lines(font, paragraph, width, 1);
+        let Some((first, remainder)) = first_pass.split_once('\n') else {
+            lines.push(first_pass);
+            continue;
+        };
+        lines.push(first.to_string());
+        lines.extend(
+            crate::message_dialog::break_hud_message(font, remainder, continuation_width)
+                .split('\n')
+                .filter(|line| !line.is_empty())
+                .map(|line| format!("  {line}")),
+        );
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -3309,6 +3547,172 @@ mod tests {
     }
 
     #[test]
+    fn upper_board_modes_match_cpp_reserved_and_output_geometry() {
+        let hud = HudGraphics {
+            upper_board: Some(solid_image(8, 55, [120, 80, 40, 255])),
+            ..HudGraphics::default()
+        };
+        assert_eq!(upper_board_reserved_height(UpperBoardMode::Hide), 0);
+        assert_eq!(upper_board_reserved_height(UpperBoardMode::Full), 50);
+        assert_eq!(upper_board_reserved_height(UpperBoardMode::Small), 25);
+        assert_eq!(upper_board_reserved_height(UpperBoardMode::Mini), 0);
+        assert_eq!(upper_board_output_height(UpperBoardMode::Hide, &hud), 0);
+        assert_eq!(upper_board_output_height(UpperBoardMode::Full, &hud), 55);
+        assert_eq!(upper_board_output_height(UpperBoardMode::Small, &hud), 27);
+        assert_eq!(upper_board_output_height(UpperBoardMode::Mini, &hud), 0);
+
+        let marker = FixedWidthMarkerFont;
+        let font = HudFont::Fallback(&marker);
+        let mut hidden = surface(400, 60);
+        hidden.fill(Color::opaque(7, 11, 13));
+        let before = hidden.pixels().to_vec();
+        draw_upper_board_with_gamma(
+            &mut hidden,
+            &font,
+            &hud,
+            UpperBoardMode::Hide,
+            "Hidden title",
+            0,
+            Some("[12:34:56]"),
+            Some(42),
+            None,
+        );
+        assert_eq!(hidden.pixels(), before);
+    }
+
+    #[test]
+    fn small_upper_board_scales_tiles_logo_and_text_row() {
+        let mut tile_pixels = Vec::new();
+        for _ in 0..2 {
+            for x in 0..4 {
+                tile_pixels.extend_from_slice(if x < 2 {
+                    &[220, 20, 20, 255]
+                } else {
+                    &[20, 20, 220, 255]
+                });
+            }
+        }
+        let hud = HudGraphics {
+            upper_board: Some(ImageData::new(4, 2, tile_pixels)),
+            ..HudGraphics::default()
+        };
+        let marker = FixedWidthMarkerFont;
+        let font = HudFont::Fallback(&marker);
+        let mut tiled = surface(16, 30);
+        draw_upper_board(&mut tiled, &font, &hud, UpperBoardMode::Small, "", 0);
+        assert_eq!(tiled.get_pixel(0, 0), tiled.get_pixel(2, 0));
+        assert_eq!(tiled.get_pixel(1, 0), tiled.get_pixel(3, 0));
+        assert_ne!(tiled.get_pixel(0, 0), tiled.get_pixel(1, 0));
+        assert_eq!(tiled.get_pixel(0, 0).expect("scaled tile").a, 255);
+
+        let hud = HudGraphics {
+            upper_board: Some(solid_image(8, 55, [120, 80, 40, 255])),
+            logo: Some(solid_image(960, 320, [10, 200, 30, 255])),
+            ..HudGraphics::default()
+        };
+        let mut target = surface(400, 60);
+        draw_upper_board_with_gamma(
+            &mut target,
+            &font,
+            &hud,
+            UpperBoardMode::Small,
+            "T",
+            0,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(target.get_pixel(145, 10), Some(Color::opaque(120, 80, 40)));
+        assert_eq!(target.get_pixel(146, 10), Some(Color::opaque(10, 200, 30)));
+        assert_eq!(target.get_pixel(252, 10), Some(Color::opaque(10, 200, 30)));
+        assert_eq!(target.get_pixel(253, 10), Some(Color::opaque(120, 80, 40)));
+        assert_eq!(target.get_pixel(10, 10), Some(MESSAGE_COLOR));
+        assert_eq!(target.get_pixel(358, 9), Some(MESSAGE_COLOR));
+        assert_eq!(target.get_pixel(20, 26), Some(Color::opaque(120, 80, 40)));
+        assert_eq!(target.get_pixel(20, 27), Some(Color::opaque(0, 0, 0)));
+    }
+
+    #[test]
+    fn mini_upper_board_carves_message_width_and_draws_only_bottom_text() {
+        let marker = FixedWidthMarkerFont;
+        let font = HudFont::Fallback(&marker);
+        assert_eq!(upper_board_text_strip_width(&font, 0), 126);
+        assert_eq!(
+            message_board_available_width(400, &font, UpperBoardMode::Mini, 0),
+            274
+        );
+
+        let hud = HudGraphics {
+            upper_board: Some(solid_image(8, 50, [120, 80, 40, 255])),
+            background: Some(solid_image(8, 8, [30, 50, 70, 255])),
+            logo: Some(solid_image(960, 320, [10, 200, 30, 255])),
+            ..HudGraphics::default()
+        };
+        let mut target = surface(400, 60);
+        let long_line = "X".repeat(136);
+        assert_eq!(
+            message_board_tail_line(&font, &long_line, 274),
+            "  XX"
+        );
+        assert_eq!(
+            message_board_physical_lines(&font, &format!("{} ", "X".repeat(68)), 274),
+            vec!["X".repeat(68)]
+        );
+        let tail = message_board_tail_line(&font, &long_line, 274);
+        let board = MessageBoardOverlay {
+            log_lines: vec![tail],
+            back_scroll: 0,
+            ..MessageBoardOverlay::default()
+        };
+        draw_message_board_with_gamma(
+            &mut target,
+            &font,
+            &hud,
+            &board,
+            None,
+        );
+        assert_eq!(target.get_pixel(0, 54), Some(MESSAGE_COLOR));
+        assert_eq!(target.get_pixel(273, 54), Some(Color::opaque(30, 50, 70)));
+        assert_eq!(target.get_pixel(274, 54), Some(Color::opaque(30, 50, 70)));
+
+        let mut unclipped = surface(400, 60);
+        let unclipped_board = MessageBoardOverlay {
+            log_lines: vec!["X".repeat(70)],
+            back_scroll: 0,
+            ..MessageBoardOverlay::default()
+        };
+        draw_message_board_with_gamma(
+            &mut unclipped,
+            &font,
+            &hud,
+            &unclipped_board,
+            None,
+        );
+        assert_eq!(
+            unclipped.get_pixel(275, 54),
+            Some(MESSAGE_COLOR),
+            "the shortened facet wraps at append time but does not clip StringOut"
+        );
+        draw_upper_board_with_gamma(
+            &mut target,
+            &font,
+            &hud,
+            UpperBoardMode::Mini,
+            "Must not draw",
+            0,
+            Some("[12:34:56]"),
+            Some(42),
+            None,
+        );
+
+        assert_eq!(target.get_pixel(10, 10), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(target.get_pixel(100, 54), Some(Color::opaque(30, 50, 70)));
+        assert_eq!(target.get_pixel(358, 54), Some(MESSAGE_COLOR));
+        assert_eq!(target.get_pixel(306, 54), Some(MESSAGE_COLOR));
+        assert_eq!(target.get_pixel(274, 54), Some(MESSAGE_COLOR));
+    }
+
+    #[test]
     fn upper_board_draws_clock_and_fps_rows_when_enabled() {
         // iRightOff advances once for each enabled right-hand section:
         // playing time at 1*TextWidth-10, then Clock/FPS at successive
@@ -3324,6 +3728,7 @@ mod tests {
             &mut target,
             &font,
             &hud,
+            UpperBoardMode::Full,
             "",
             0,
             Some("[12:34:56]"),
@@ -3348,6 +3753,7 @@ mod tests {
             &mut disabled,
             &font,
             &hud,
+            UpperBoardMode::Full,
             "",
             0,
             None,
@@ -3375,7 +3781,7 @@ mod tests {
         };
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
-        draw_upper_board(&mut target, &font, &hud, "", 0);
+        draw_upper_board(&mut target, &font, &hud, UpperBoardMode::Full, "", 0);
         // Tiles cover x beyond one tile width and the full 55px height...
         assert_eq!(target.get_pixel(40, 54), Some(Color::opaque(120, 80, 40)));
         // ...but not below the texture height.
@@ -3394,7 +3800,7 @@ mod tests {
         };
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
-        draw_upper_board(&mut target, &font, &hud, "", 0);
+        draw_upper_board(&mut target, &font, &hud, UpperBoardMode::Full, "", 0);
         // dst x = 400/2 - 480*0.21 = 99.2 -> 99, width 201, height 67.
         assert_eq!(target.get_pixel(98, 30), Some(Color::opaque(120, 80, 40)));
         assert_eq!(target.get_pixel(100, 30), Some(Color::opaque(10, 200, 30)));

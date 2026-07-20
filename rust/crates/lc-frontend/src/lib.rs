@@ -2409,6 +2409,8 @@ pub struct GraphicsOverlay<'a> {
     pub clock_text: Option<String>,
     /// Sampled `C4Game::FPS`; `None` is `Config.General.FPS == false`.
     pub frames_per_second: Option<i32>,
+    /// `Config.Graphics.UpperBoard`, including its viewport/message split.
+    pub upper_board_mode: hud::UpperBoardMode,
     /// `Config.Graphics.ShowPortraits` (src/C4Config.cpp:448) — shifts the
     /// viewport bars down ten pixels when portraits are enabled.
     pub show_portraits: bool,
@@ -2818,6 +2820,10 @@ pub struct GraphicsSystem {
     message_board: MessageBoardOverlay,
     clock_text: Option<String>,
     frames_per_second: Option<i32>,
+    upper_board_mode: hud::UpperBoardMode,
+    /// `C4UpperBoard::TextWidth`, fixed by `Init` until fullscreen chrome is
+    /// reinitialized (src/C4UpperBoard.cpp:102-121).
+    upper_board_text_width: Option<i32>,
     /// `Config.Graphics.ShowPortraits` / `ShowCommands` / `ShowCommandKeys`
     /// (src/C4Config.cpp:448-450, default true).
     show_portraits: bool,
@@ -2920,6 +2926,8 @@ impl GraphicsSystem {
             message_board: MessageBoardOverlay::default(),
             clock_text: None,
             frames_per_second: None,
+            upper_board_mode: hud::UpperBoardMode::Full,
+            upper_board_text_width: None,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -3174,6 +3182,16 @@ impl GraphicsSystem {
     /// boards. A mouse-controlled player's viewport replaces it when that
     /// viewport is laid out (`C4Viewport::SetOutputSize`).
     pub fn preferred_dialog_rect(&self, mouse_owner: Option<i32>) -> SurfaceRect {
+        self.preferred_dialog_rect_for_upper_board_mode(mouse_owner, self.upper_board_mode)
+    }
+
+    /// Mode-explicit form used when app configuration has changed before the
+    /// next frame's [`GraphicsOverlay`] has synchronized renderer state.
+    pub fn preferred_dialog_rect_for_upper_board_mode(
+        &self,
+        mouse_owner: Option<i32>,
+        upper_board_mode: hud::UpperBoardMode,
+    ) -> SurfaceRect {
         if let Some(rect) = mouse_owner.and_then(|owner| self.viewport_rect(owner)) {
             return rect;
         }
@@ -3182,7 +3200,8 @@ impl GraphicsSystem {
             return SurfaceRect::new(0, 0, self.surface_width, self.surface_height);
         }
 
-        let top = hud::UPPER_BOARD_HEIGHT.clamp(0, self.surface_height as i32);
+        let top = hud::upper_board_reserved_height(upper_board_mode)
+            .clamp(0, self.surface_height as i32);
         let bottom = self
             .message_board_height()
             .clamp(0, self.surface_height as i32);
@@ -3976,6 +3995,7 @@ impl GraphicsSystem {
         self.message_board = overlay.message_board.clone();
         self.clock_text = overlay.clock_text.clone();
         self.frames_per_second = overlay.frames_per_second;
+        self.set_upper_board_mode(overlay.upper_board_mode, overlay.game_time_seconds);
         self.show_portraits = overlay.show_portraits;
         self.show_commands = overlay.show_commands;
         self.show_command_keys = overlay.show_command_keys;
@@ -3987,6 +4007,146 @@ impl GraphicsSystem {
     /// Installs the CStdFont-faithful HUD fonts (FontRegular et al).
     pub fn set_clonk_fonts(&mut self, fonts: Option<Arc<ClonkFontSet>>) {
         self.clonk_fonts = fonts;
+        if self.upper_board_text_width.is_some() {
+            self.initialize_upper_board_text_width();
+        }
+    }
+
+    /// Reinitializes fullscreen upper-board geometry immediately, matching
+    /// `Game.InitFullscreenComponents(true)` in Display:UpperBoard.
+    pub fn set_upper_board_mode(&mut self, mode: hud::UpperBoardMode, game_time_seconds: u64) {
+        self.game_time_seconds = game_time_seconds;
+        let mode_changed = self.upper_board_mode != mode;
+        if mode_changed || self.upper_board_text_width.is_none() {
+            self.upper_board_mode = mode;
+            self.initialize_upper_board_text_width();
+            if mode_changed {
+                self.relayout_active_viewports();
+            }
+        }
+    }
+
+    /// Breaks a newly appended message using the current initialized
+    /// `C4MessageBoard::LogBuffer` width. The returned strings are physical
+    /// history lines and must not be reflowed after a later mode change.
+    pub fn prepare_message_board_lines(&self, line: &str) -> Vec<String> {
+        let font = self.hud_font();
+        let width = hud::message_board_available_width_for_text_width(
+            self.surface_width as i32,
+            self.upper_board_mode,
+            self.initialized_upper_board_text_width(),
+        );
+        hud::message_board_physical_lines(&font, line, width)
+    }
+
+    pub fn upper_board_text_strip_width(&self) -> i32 {
+        hud::upper_board_text_strip_width_for_text_width(
+            self.initialized_upper_board_text_width(),
+        )
+    }
+
+    fn initialize_upper_board_text_width(&mut self) {
+        let width = self
+            .hud_font()
+            .text_width(&hud::format_game_time(self.game_time_seconds));
+        self.upper_board_text_width = Some(width.max(0));
+    }
+
+    fn initialized_upper_board_text_width(&self) -> i32 {
+        self.upper_board_text_width.unwrap_or_else(|| {
+            self.hud_font()
+                .text_width(&hud::format_game_time(self.game_time_seconds))
+                .max(0)
+        })
+    }
+
+    fn relayout_active_viewports(&mut self) {
+        let rects = self
+            .layout_viewports(self.active_viewports.len())
+            .into_iter()
+            .zip(&self.active_viewports)
+            .map(|(rect, viewport)| {
+                Self::centered_viewport_rect_for_world(
+                    rect,
+                    viewport.world_width,
+                    viewport.world_height,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (viewport, rect) in self.active_viewports.iter_mut().zip(rects) {
+            let logical_width = ((rect.width as f32 / viewport.zoom).ceil() as i32).max(1);
+            let logical_height = ((rect.height as f32 / viewport.zoom).ceil() as i32).max(1);
+            let shifted_x = viewport
+                .target_x
+                .saturating_add((viewport.logical_width - logical_width) / 2);
+            let shifted_y = viewport
+                .target_y
+                .saturating_add((viewport.logical_height - logical_height) / 2);
+            viewport.logical_width = logical_width;
+            viewport.logical_height = logical_height;
+            if let Some(state) = self.camera_states.get_mut(&viewport.camera_key) {
+                if viewport.is_no_owner_viewport {
+                    (viewport.target_x, viewport.target_y) = state.no_owner_position(
+                        logical_width,
+                        logical_height,
+                        viewport.world_width,
+                        viewport.world_height,
+                    );
+                } else {
+                    state.resize_output(logical_width, logical_height);
+                    viewport.target_x = shifted_x;
+                    viewport.target_y = shifted_y;
+                }
+            } else if viewport.is_no_owner_viewport {
+                viewport.target_x = if viewport.world_width < logical_width {
+                    (viewport.world_width - logical_width) / 2
+                } else {
+                    shifted_x.clamp(0, viewport.world_width - logical_width)
+                };
+                viewport.target_y = if viewport.world_height < logical_height {
+                    (viewport.world_height - logical_height) / 2
+                } else {
+                    shifted_y.clamp(0, viewport.world_height - logical_height)
+                };
+            } else {
+                viewport.target_x = shifted_x;
+                viewport.target_y = shifted_y;
+            }
+
+            let border_left = (-viewport.target_x).max(0).min(logical_width);
+            let border_top = (-viewport.target_y).max(0).min(logical_height);
+            let border_right = (logical_width - viewport.world_width + viewport.target_x)
+                .max(0)
+                .min(logical_width - border_left);
+            let border_bottom = (logical_height - viewport.world_height + viewport.target_y)
+                .max(0)
+                .min(logical_height - border_top);
+            let offset_x = scaled_camera_border(border_left, viewport.zoom, rect.width) as i32;
+            let offset_y = scaled_camera_border(border_top, viewport.zoom, rect.height) as i32;
+            let right_pixels = scaled_camera_border(border_right, viewport.zoom, rect.width);
+            let bottom_pixels = scaled_camera_border(border_bottom, viewport.zoom, rect.height);
+            let content_width = rect
+                .width
+                .saturating_sub(offset_x as u32)
+                .saturating_sub(right_pixels)
+                .max(1);
+            let content_height = rect
+                .height
+                .saturating_sub(offset_y as u32)
+                .saturating_sub(bottom_pixels)
+                .max(1);
+
+            viewport.rect = rect;
+            viewport.content_rect = SurfaceRect::new(
+                rect.x + offset_x,
+                rect.y + offset_y,
+                content_width,
+                content_height,
+            );
+            viewport.viewport_x = (viewport.target_x + border_left) as f32;
+            viewport.viewport_y = (viewport.target_y + border_top) as f32;
+        }
     }
 
     /// Installs the current scenario controls immediately, matching the
@@ -4648,9 +4808,17 @@ impl GraphicsSystem {
     /// output to the landscape plus the two scroll borders and centers the
     /// result inside its layout cell (src/C4GraphicsSystem.cpp:384-396).
     fn centered_viewport_rect(&self, area: SurfaceRect) -> SurfaceRect {
+        Self::centered_viewport_rect_for_world(area, self.world_width, self.world_height)
+    }
+
+    fn centered_viewport_rect_for_world(
+        area: SurfaceRect,
+        world_width: i32,
+        world_height: i32,
+    ) -> SurfaceRect {
         let border = VIEWPORT_SCROLL_BORDER.saturating_mul(2);
-        let max_width = self.world_width.max(1).saturating_add(border) as u32;
-        let max_height = self.world_height.max(1).saturating_add(border) as u32;
+        let max_width = world_width.max(1).saturating_add(border) as u32;
+        let max_height = world_height.max(1).saturating_add(border) as u32;
         let width = area.width.min(max_width);
         let height = area.height.min(max_height);
         SurfaceRect::new(
@@ -4796,7 +4964,8 @@ impl GraphicsSystem {
         // src/C4GraphicsSystem.cpp:343-348).
         let chrome = self.hud_chrome_active();
         let mut overlay_height = if chrome {
-            hud::UPPER_BOARD_HEIGHT.clamp(0, self.surface_height as i32)
+            hud::upper_board_reserved_height(self.upper_board_mode)
+                .clamp(0, self.surface_height as i32)
         } else {
             0
         };
@@ -8219,15 +8388,71 @@ impl GraphicsSystem {
         self.hud_graphics.upper_board.is_some()
     }
 
-    /// The pixels the upper board texture actually covers —
-    /// `Output.Hgt = max(C4UpperBoardHeight, fctUpperBoard.Hgt)`
-    /// (src/C4UpperBoard.cpp:117-120).
+    /// The drawn top-board raster height. Small uses half the texture height;
+    /// Hide/Mini draw no top board (src/C4UpperBoard.cpp:38-99).
     fn upper_board_pixel_height(&self) -> i32 {
-        self.hud_graphics
-            .upper_board
-            .as_ref()
-            .map(|image| (image.height() as i32).max(hud::UPPER_BOARD_HEIGHT))
-            .unwrap_or(hud::UPPER_BOARD_HEIGHT)
+        hud::upper_board_output_height(self.upper_board_mode, &self.hud_graphics)
+    }
+
+    /// `C4UpperBoard::Output`, including Mini's bottom-right message strip.
+    fn upper_board_output_rect(&self) -> Option<SurfaceRect> {
+        let surface_width = self.surface_width as i32;
+        let surface_height = self.surface_height as i32;
+        match self.upper_board_mode {
+            // Hide has zero reserved/drawn height, but Init still takes the
+            // non-Mini branch and expands its raw Output facet to the full
+            // upper-board texture height. Execute alone suppresses drawing.
+            hud::UpperBoardMode::Hide => {
+                let height = self
+                    .hud_graphics
+                    .upper_board
+                    .as_ref()
+                    .map_or(0, |board| board.height() as i32)
+                    .clamp(0, surface_height) as u32;
+                (height > 0).then(|| SurfaceRect::new(0, 0, self.surface_width, height))
+            }
+            hud::UpperBoardMode::Full | hud::UpperBoardMode::Small => {
+                let height = self
+                    .upper_board_pixel_height()
+                    .clamp(0, surface_height) as u32;
+                (height > 0).then(|| SurfaceRect::new(0, 0, self.surface_width, height))
+            }
+            hud::UpperBoardMode::Mini => {
+                let width = hud::upper_board_text_strip_width_for_text_width(
+                    self.initialized_upper_board_text_width(),
+                )
+                .clamp(0, surface_width);
+                let height = self.message_board_height().clamp(0, surface_height);
+                (width > 0 && height > 0).then(|| {
+                    SurfaceRect::new(
+                        surface_width - width,
+                        surface_height - height,
+                        width as u32,
+                        height as u32,
+                    )
+                })
+            }
+        }
+    }
+
+    /// `C4MessageBoard::Output`, shortened on the right by Mini mode.
+    fn message_board_output_rect(&self) -> Option<SurfaceRect> {
+        let width = hud::message_board_available_width_for_text_width(
+            self.surface_width as i32,
+            self.upper_board_mode,
+            self.initialized_upper_board_text_width(),
+        );
+        let height = self
+            .message_board_height()
+            .clamp(0, self.surface_height as i32);
+        (width > 0 && height > 0).then(|| {
+            SurfaceRect::new(
+                0,
+                self.surface_height as i32 - height,
+                width as u32,
+                height as u32,
+            )
+        })
     }
 
     /// Per-viewport player HUD, which precedes the fullscreen boards in
@@ -8452,6 +8677,7 @@ impl GraphicsSystem {
     fn draw_hud_chrome(&mut self, gamma: Option<&lc_graphics::GammaRamp>) {
         let font = hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref());
         if self.hud_chrome_active() {
+            let text_width = self.initialized_upper_board_text_width();
             hud::draw_message_board_with_gamma(
                 &mut self.surface,
                 &font,
@@ -8459,12 +8685,14 @@ impl GraphicsSystem {
                 &self.message_board,
                 gamma,
             );
-            hud::draw_upper_board_with_gamma(
+            hud::draw_upper_board_with_initialized_text_width(
                 &mut self.surface,
                 &font,
                 &self.hud_graphics,
+                self.upper_board_mode,
                 &self.scenario_label_text,
                 self.game_time_seconds,
+                text_width,
                 self.clock_text.as_deref(),
                 self.frames_per_second,
                 gamma,
@@ -8582,7 +8810,7 @@ impl GraphicsSystem {
 
     fn collect_sprite_atlas(&self, snapshot: &SimulationSnapshot) -> Vec<EngineSurfaceSnapshot> {
         let mut atlas = Vec::with_capacity(
-            2 + snapshot
+            3 + snapshot
                 .objects
                 .len()
                 .saturating_add(self.active_viewports.len()),
@@ -8606,18 +8834,22 @@ impl GraphicsSystem {
             }
         }
 
-        let overlay_height = self
-            .upper_board_pixel_height()
-            .clamp(0, self.surface_height as i32) as u32;
-        if overlay_height > 0 {
-            if let Some(snapshot) = self.surface.snapshot_region(SurfaceRect::new(
-                0,
-                0,
-                self.surface_width,
-                overlay_height,
-            )) {
+        if self.hud_chrome_active() {
+            if let Some(snapshot) = self
+                .upper_board_output_rect()
+                .and_then(|rect| self.surface.snapshot_region(rect))
+            {
                 atlas.push(Self::make_engine_surface(
                     "upper_board".to_string(),
+                    snapshot,
+                ));
+            }
+            if let Some(snapshot) = self
+                .message_board_output_rect()
+                .and_then(|rect| self.surface.snapshot_region(rect))
+            {
+                atlas.push(Self::make_engine_surface(
+                    "message_board".to_string(),
                     snapshot,
                 ));
             }
@@ -16993,6 +17225,7 @@ mod tests {
             },
             clock_text: None,
             frames_per_second: None,
+            upper_board_mode: hud::UpperBoardMode::Full,
             show_portraits: false,
             show_commands: true,
             show_command_keys: true,
@@ -17067,6 +17300,7 @@ mod tests {
             message_board: MessageBoardOverlay::default(),
             clock_text: None,
             frames_per_second: None,
+            upper_board_mode: hud::UpperBoardMode::Full,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -17185,6 +17419,223 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn chrome_layout_tracks_hide_small_and_mini_upper_board_modes() {
+        let mut snapshot = make_snapshot();
+        snapshot.landscape = None;
+        let focus = &snapshot.objects[0];
+        for (mode, expected_top) in [
+            (hud::UpperBoardMode::Hide, 0),
+            (hud::UpperBoardMode::Full, 50),
+            (hud::UpperBoardMode::Small, 25),
+            (hud::UpperBoardMode::Mini, 0),
+        ] {
+            let hud_graphics = Arc::new(HudGraphics {
+                upper_board: Some(ImageData::new(4, 55, vec![120; 4 * 55 * 4])),
+                ..HudGraphics::default()
+            });
+            let mut graphics = GraphicsSystem::new(
+                800,
+                240,
+                1_000,
+                "Chrome modes",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                hud_graphics,
+            );
+            graphics.update_overlay(&GraphicsOverlay {
+                frame_text: "",
+                status_text: "",
+                debug_hud: false,
+                viewport_overlays_visible: true,
+                players: Vec::new(),
+                crew_name_labels: Vec::new(),
+                game_time_seconds: 0,
+                message_board: MessageBoardOverlay::default(),
+                clock_text: None,
+                frames_per_second: None,
+                upper_board_mode: mode,
+                show_portraits: true,
+                show_commands: true,
+                show_command_keys: true,
+            });
+            assert_eq!(graphics.upper_board_mode, mode);
+            let atlas = graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+            assert_eq!(graphics.upper_board_mode, mode);
+
+            let message_height = graphics.message_board_height();
+            let viewport = graphics.active_viewports[0].rect;
+            assert_eq!(viewport.y, expected_top, "mode {mode:?}");
+            assert_eq!(
+                viewport.height as i32,
+                240 - expected_top - message_height,
+                "mode {mode:?}"
+            );
+            assert_eq!(
+                graphics.preferred_dialog_rect(None),
+                SurfaceRect::new(
+                    0,
+                    expected_top,
+                    800,
+                    (240 - expected_top - message_height) as u32,
+                ),
+                "mode {mode:?}"
+            );
+
+            let upper = atlas.iter().find(|entry| entry.label == "upper_board");
+            let message = atlas
+                .iter()
+                .find(|entry| entry.label == "message_board")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "classic message-board output facet for {mode:?} at {:?}; labels: {:?}",
+                        graphics.message_board_output_rect(),
+                        atlas.iter().map(|entry| &entry.label).collect::<Vec<_>>()
+                    )
+                });
+            match mode {
+                hud::UpperBoardMode::Hide => {
+                    let upper = upper.expect("Hide retains native raw Output facet");
+                    assert_eq!((upper.width, upper.height), (800, 55));
+                    assert_eq!(message.width, 800);
+                }
+                hud::UpperBoardMode::Full => {
+                    let upper = upper.expect("Full upper-board output facet");
+                    assert_eq!((upper.width, upper.height), (800, 55));
+                    assert_eq!(message.width, 800);
+                }
+                hud::UpperBoardMode::Small => {
+                    let upper = upper.expect("Small upper-board output facet");
+                    assert_eq!((upper.width, upper.height), (800, 27));
+                    assert_eq!(message.width, 800);
+                }
+                hud::UpperBoardMode::Mini => {
+                    let upper = upper.expect("Mini upper-board output facet");
+                    assert_eq!(upper.width + message.width, 800);
+                    assert_eq!(upper.height, message.height);
+
+                    let initialized_width = upper.width as u32;
+                    graphics.set_upper_board_mode(
+                        hud::UpperBoardMode::Mini,
+                        100 * 60 * 60,
+                    );
+                    assert_eq!(
+                        graphics
+                            .upper_board_output_rect()
+                            .expect("latched Mini facet")
+                            .width,
+                        initialized_width,
+                        "TextWidth stays fixed between fullscreen-component initializations"
+                    );
+                    graphics.set_upper_board_mode(
+                        hud::UpperBoardMode::Full,
+                        100 * 60 * 60,
+                    );
+                    graphics.set_upper_board_mode(
+                        hud::UpperBoardMode::Mini,
+                        100 * 60 * 60,
+                    );
+                    assert!(
+                        graphics
+                            .upper_board_output_rect()
+                            .expect("reinitialized Mini facet")
+                            .width
+                            > initialized_width,
+                        "a reinitialization latches the wider 100-hour time string"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn upper_board_relayout_keeps_small_world_centered_synchronously() {
+        let mut snapshot = make_snapshot();
+        snapshot.landscape = Some(Landscape::flat(40, 40));
+        snapshot.objects[0].position = Vector2::new(20, 20);
+        let focus = &snapshot.objects[0];
+        let hud_graphics = Arc::new(HudGraphics {
+            upper_board: Some(ImageData::new(4, 50, vec![120; 4 * 50 * 4])),
+            ..HudGraphics::default()
+        });
+        let mut graphics = GraphicsSystem::new(
+            320,
+            200,
+            1_000,
+            "Small world chrome",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            hud_graphics,
+        );
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+
+        let stored_world = (
+            graphics.active_viewports[0].world_width,
+            graphics.active_viewports[0].world_height,
+        );
+        assert_ne!(stored_world.1, graphics.world_height);
+        graphics.set_upper_board_mode(hud::UpperBoardMode::Small, 0);
+
+        let cell = graphics.layout_viewports(1)[0];
+        let expected = GraphicsSystem::centered_viewport_rect_for_world(
+            cell,
+            stored_world.0,
+            stored_world.1,
+        );
+        assert_eq!(graphics.active_viewports[0].rect, expected);
+        assert_eq!((expected.width, expected.height), (120, 120));
+    }
+
+    #[test]
+    fn upper_board_relayout_clamps_no_owner_camera_at_large_world_edge() {
+        let mut snapshot = make_snapshot();
+        snapshot.landscape = Some(Landscape::flat(1_000, 1_000));
+        let hud_graphics = Arc::new(HudGraphics {
+            upper_board: Some(ImageData::new(4, 50, vec![120; 4 * 50 * 4])),
+            ..HudGraphics::default()
+        });
+        let mut graphics = GraphicsSystem::new(
+            320,
+            200,
+            1_000,
+            "Observer edge chrome",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            hud_graphics,
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::ownerless(Vector2::new(500, 500), 1.0)],
+        );
+
+        let viewport = &mut graphics.active_viewports[0];
+        viewport.target_x = viewport.world_width - viewport.logical_width;
+        viewport.target_y = viewport.world_height - viewport.logical_height;
+        let key = viewport.camera_key;
+        let state = graphics.camera_states.get_mut(&key).expect("observer camera");
+        state.view_x = viewport.target_x;
+        state.view_y = viewport.target_y;
+
+        graphics.set_upper_board_mode(hud::UpperBoardMode::Small, 0);
+
+        let viewport = &graphics.active_viewports[0];
+        assert_eq!(
+            (viewport.target_x, viewport.target_y),
+            (
+                viewport.world_width - viewport.logical_width,
+                viewport.world_height - viewport.logical_height,
+            )
+        );
+        assert_eq!(
+            viewport.content_rect,
+            viewport.rect,
+            "a large-world observer gains no synthetic scroll border"
+        );
     }
 
     fn viewport_layout(width: u32, height: u32, count: usize) -> Vec<SurfaceRect> {
@@ -20563,6 +21014,7 @@ mod tests {
             message_board: MessageBoardOverlay::default(),
             clock_text: None,
             frames_per_second: None,
+            upper_board_mode: hud::UpperBoardMode::Full,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -20680,6 +21132,7 @@ mod tests {
                 message_board: MessageBoardOverlay::default(),
                 clock_text: None,
                 frames_per_second: None,
+                upper_board_mode: hud::UpperBoardMode::Full,
                 show_portraits: true,
                 show_commands: true,
                 show_command_keys: true,
@@ -20792,6 +21245,7 @@ mod tests {
             message_board: MessageBoardOverlay::default(),
             clock_text: None,
             frames_per_second: None,
+            upper_board_mode: hud::UpperBoardMode::Full,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -20927,6 +21381,7 @@ mod tests {
             message_board: MessageBoardOverlay::default(),
             clock_text: None,
             frames_per_second: None,
+            upper_board_mode: hud::UpperBoardMode::Full,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -21012,6 +21467,7 @@ mod tests {
             message_board: MessageBoardOverlay::default(),
             clock_text: None,
             frames_per_second: None,
+            upper_board_mode: hud::UpperBoardMode::Full,
             show_portraits: false,
             show_commands: true,
             show_command_keys: true,
