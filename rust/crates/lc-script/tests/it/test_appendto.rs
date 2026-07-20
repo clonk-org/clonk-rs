@@ -13,7 +13,8 @@ fn appended_functions_override_and_reach_the_original_via_inherited() {
 
     let mut append = Engine::new();
     append.add_script(
-        Script::compile("public func Probe() { return 10 + inherited(); }").expect("compiles"),
+        Script::compile("#strict\npublic func Probe() { return 10 + inherited(); }")
+            .expect("compiles"),
     );
 
     target.append_overrides_from(&append);

@@ -3657,6 +3657,17 @@ impl<'a> Vm<'a> {
                                     );
                                 }
                                 return if name == "_inherited" {
+                                    // Even the failsafe no-parent path parses
+                                    // and evaluates every explicit argument
+                                    // before discarding it and pushing nil
+                                    // (C4AulParse.cpp:2793-2797).
+                                    let _ = self.build_call_args(
+                                        None,
+                                        None,
+                                        args,
+                                        env,
+                                        depth + 1,
+                                    )?;
                                     Ok(Value::Nil)
                                 } else {
                                     Err(RuntimeError::new(format!(

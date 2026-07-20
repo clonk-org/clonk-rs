@@ -62946,7 +62946,7 @@ mod script_relink_regression {
         register(
             &mut engine,
             "INCB",
-            "func Layer() { return 10 + inherited(); }",
+            "#strict\nfunc Layer() { return 10 + inherited(); }",
         );
         register(
             &mut engine,
@@ -62963,12 +62963,12 @@ mod script_relink_regression {
         register(
             &mut engine,
             "APNX",
-            "#appendto BASE\nfunc Layer() { return 1000 + inherited(); }",
+            "#strict\n#appendto BASE\nfunc Layer() { return 1000 + inherited(); }",
         );
         register(
             &mut engine,
             "APNY",
-            "#appendto BASE\nfunc Layer() { return 10000 + inherited(); }",
+            "#strict\n#appendto BASE\nfunc Layer() { return 10000 + inherited(); }",
         );
         register(&mut engine, "CHLD", "#include BASE");
 
@@ -62987,7 +62987,7 @@ mod script_relink_regression {
             engine
                 .reload_definition_script(
                     "APNY",
-                    "#appendto BASE\nfunc Layer() { return 20000 + inherited(); }",
+                    "#strict\n#appendto BASE\nfunc Layer() { return 20000 + inherited(); }",
                 )
                 .expect("append source reloads")
         );
@@ -63052,7 +63052,8 @@ mod script_relink_regression {
         register(
             &mut engine,
             "OWNR",
-            "global func GlobalLayer() { return inherited() * 10 + 2; }\n\
+            "#strict\n\
+             global func GlobalLayer() { return inherited() * 10 + 2; }\n\
              func Probe() { return GlobalLayer(); }",
         );
         register(
@@ -63063,7 +63064,8 @@ mod script_relink_regression {
         engine
             .load_scenario_script_with_convention(
                 "Scenario/Script.c",
-                "global func GlobalLayer() { return inherited() * 10 + 3; }\n\
+                "#strict\n\
+                 global func GlobalLayer() { return inherited() * 10 + 3; }\n\
                  func Probe() { return GlobalLayer(); }",
                 true,
             )
@@ -63071,7 +63073,7 @@ mod script_relink_regression {
         assert_eq!(
             engine.install_scenario_global_scripts(&[(
                 "Scenario/System/Last.c".into(),
-                "global func GlobalLayer() { return inherited() * 10 + 4; }".into(),
+                "#strict\nglobal func GlobalLayer() { return inherited() * 10 + 4; }".into(),
             )]),
             1
         );
@@ -63120,7 +63122,7 @@ mod script_relink_regression {
     fn declaring_definition_calls_use_the_latest_engine_global_chain() {
         for (later_source, expected) in [
             ("global func F() { return 2; }", 2),
-            ("global func F() { return _inherited() + 10; }", 11),
+            ("#strict\nglobal func F() { return _inherited() + 10; }", 11),
         ] {
             let mut engine = Engine::new();
             register(
@@ -63387,13 +63389,15 @@ mod script_relink_regression {
         register(
             &mut engine,
             "EARL",
-            "global func Layer() { return inherited() * 10 + 2; }\n\
+            "#strict\n\
+             global func Layer() { return inherited() * 10 + 2; }\n\
              func Own() { return Layer(); }",
         );
         register(
             &mut engine,
             "LATE",
-            "global func Layer() { return inherited() * 10 + 3; }\n\
+            "#strict\n\
+             global func Layer() { return inherited() * 10 + 3; }\n\
              func Own() { return Layer(); }",
         );
         register(&mut engine, "CALL", "func Probe() { return Layer(); }");
@@ -63415,7 +63419,8 @@ mod script_relink_regression {
             engine
                 .reload_definition_script(
                     "EARL",
-                    "global func Layer() { return inherited() * 10 + 4; }\n\
+                    "#strict\n\
+                     global func Layer() { return inherited() * 10 + 4; }\n\
                      func Own() { return Layer(); }",
                 )
                 .expect("early definition reloads")

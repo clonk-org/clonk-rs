@@ -2041,7 +2041,22 @@ impl<'a> Parser<'a> {
                     forward_rest,
                 })
             }
-            TokenKind::Identifier(name) => Ok(Expr::Variable(name)),
+            TokenKind::Identifier(name) => {
+                // C4Aul reserves the two unqualified inherited-call names in
+                // expression position: the origin script must opt into at
+                // least STRICT1 before either form can be parsed
+                // (C4AulParse.cpp:2775-2798). Arrow and `global->` calls take
+                // separate parser paths and remain ordinary named calls.
+                if self.strict_level == 0 && matches!(name.as_str(), "inherited" | "_inherited")
+                {
+                    return Err(ParseError::new(
+                        "inherited disabled; use #strict syntax!",
+                        token.line,
+                        token.column,
+                    ));
+                }
+                Ok(Expr::Variable(name))
+            }
             // Contextual keywords: declaration words carry no expression
             // meaning, so in expression position they are ordinary variable
             // references (the C++ tokenizer emits plain identifiers) —

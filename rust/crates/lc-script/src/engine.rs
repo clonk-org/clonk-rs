@@ -2111,7 +2111,7 @@ mod tests {
             .load_script("func Probe() { return 1; }")
             .expect("base script loads");
         engine
-            .load_script("func Probe() { return inherited() + 1; }")
+            .load_script("#strict\nfunc Probe() { return inherited() + 1; }")
             .expect("overload script loads");
         engine.register_host_function("Native", |_| Ok(Value::Int(41)));
 

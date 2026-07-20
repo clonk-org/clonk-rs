@@ -137,6 +137,7 @@ fn inherited_reaches_reference_aware_host_with_the_callers_lvalue() {
     engine
         .load_script(
             r#"
+            #strict
             func SetRef(&value) { return inherited(value); }
             func Test() {
                 var value = 2;

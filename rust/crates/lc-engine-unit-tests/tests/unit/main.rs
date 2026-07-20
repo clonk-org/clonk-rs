@@ -20933,7 +20933,7 @@ public func RemoveCaptain(int player)
                 Definition::from_script(
                     "TSTD",
                     "Test",
-                    "global func Override() { return inherited() * 10 + 4; }\n\
+                    "#strict\nglobal func Override() { return inherited() * 10 + 4; }\n\
                      func Probe() { return Override(); }",
                 )
                 .expect("script compiles"),
@@ -46619,7 +46619,7 @@ func Probe() {
                 Definition::from_script(
                     "INCB",
                     "B",
-                    "public func Foo() { return(_inherited()+10); }",
+                    "#strict\npublic func Foo() { return(_inherited()+10); }",
                 )
                 .expect("B compiles"),
             )
@@ -46666,7 +46666,7 @@ func Probe() {
                 Definition::from_script(
                     "INCB",
                     "B",
-                    "public func Foo() { order=order*10+2; return(_inherited()); }",
+                    "#strict\npublic func Foo() { order=order*10+2; return(_inherited()); }",
                 )
                 .expect("B compiles"),
             )
@@ -46676,7 +46676,7 @@ func Probe() {
                 Definition::from_script(
                     "CHLD",
                     "Child",
-                    "#include INCA\n#include INCB\npublic func Foo() { order=order*10+3; return(inherited()); }",
+                    "#strict\n#include INCA\n#include INCB\npublic func Foo() { order=order*10+3; return(inherited()); }",
                 )
                 .expect("child compiles"),
             )
@@ -46703,7 +46703,7 @@ func Probe() {
         // bodies are byte-identical; structural equality must not collapse
         // the two declarations.
         let identical =
-            "public func Foo() { hits=hits+1; _inherited(); return(hits); }";
+            "#strict\npublic func Foo() { hits=hits+1; _inherited(); return(hits); }";
         let mut engine = Engine::with_seed(0);
         for (id, name) in [("INCA", "A"), ("INCB", "B")] {
             engine
@@ -46717,7 +46717,7 @@ func Probe() {
                 Definition::from_script(
                     "CHLD",
                     "Child",
-                    "#include INCA\n#include INCB\nlocal hits; public func Foo() { return(_inherited()); } public func Hits() { return(hits); }",
+                    "#strict\n#include INCA\n#include INCB\nlocal hits; public func Foo() { return(_inherited()); } public func Hits() { return(hits); }",
                 )
                 .expect("child compiles"),
             )
