@@ -1,6 +1,5 @@
-use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
+#[cfg(not(target_endian = "little"))]
+compile_error!("the checked-in C++ control codec goldens require little-endian targets");
 
 use lc_engine::{
     ControlPacket as EngineControlPacket, JoinPlayerSource, CLIENT_UPDATE_ACTIVATE,
@@ -12,37 +11,13 @@ use lc_network::{
 };
 
 #[test]
-#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn synchronize_matches_cpp_control_packet_codec() {
     // C4ControlSynchronize is CID_First|0x06 and writes SavePlrs,
     // SyncClear, then the base ByClient field in that order
     // (pristine 9ffa0a5d src/C4PacketBase.h:145-156;
     // src/C4Control.cpp:537-550; src/StdCompiler.cpp:104-131).
-    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
-        .map(PathBuf::from)
-        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/synchronize.ini")
-        .canonicalize()
-        .expect("C++ Synchronize fixture exists");
-    let output = std::env::temp_dir().join(format!(
-        "legacyclonk-control-packet-synchronize-{}.bin",
-        std::process::id()
-    ));
-
-    let result = Command::new(oracle)
-        .args(["--control-packet-codec-oracle", "1"])
-        .arg(fixture)
-        .arg(&output)
-        .output()
-        .expect("C++ synchronized-control codec oracle starts");
-    assert!(
-        result.status.success(),
-        "C++ oracle failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
-    let _ = fs::remove_file(&output);
+    let cpp_bytes: &[u8] =
+        include_bytes!("fixtures/cpp_control_goldens/synchronize_delivery_1.bin");
 
     assert_eq!(cpp_bytes.first(), Some(&1));
     let control = decode_control_entry_payload(&cpp_bytes[1..])
@@ -60,37 +35,13 @@ fn synchronize_matches_cpp_control_packet_codec() {
 }
 
 #[test]
-#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn synchronized_client_activation_matches_cpp_control_packet_codec() {
     // The host sends C4ControlClientUpdate as one CDT_Sync C4IDPacket. Its
     // conditional Activate body is Type, ClientID, Data, then ByClient
     // (src/C4Network2.cpp:1553-1571; src/C4Control.cpp:626-633;
     // src/C4Network2IO.cpp:1787-1793).
-    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
-        .map(PathBuf::from)
-        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/client_update_activate.ini")
-        .canonicalize()
-        .expect("C++ ClientUpdate fixture exists");
-    let output = std::env::temp_dir().join(format!(
-        "legacyclonk-control-packet-client-update-{}.bin",
-        std::process::id()
-    ));
-
-    let result = Command::new(oracle)
-        .args(["--control-packet-codec-oracle", "1"])
-        .arg(fixture)
-        .arg(&output)
-        .output()
-        .expect("C++ synchronized-control codec oracle starts");
-    assert!(
-        result.status.success(),
-        "C++ oracle failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
-    let _ = fs::remove_file(&output);
+    let cpp_bytes: &[u8] =
+        include_bytes!("fixtures/cpp_control_goldens/client_update_activate_delivery_1.bin");
 
     assert_eq!(cpp_bytes.first(), Some(&1));
     let control = decode_control_entry_payload(&cpp_bytes[1..])
@@ -99,7 +50,12 @@ fn synchronized_client_activation_matches_cpp_control_packet_codec() {
         panic!("expected one synchronized ClientUpdate control, got {control:?}");
     };
     assert_eq!(
-        (update.update_type, update.client_id, update.data, update.by_client),
+        (
+            update.update_type,
+            update.client_id,
+            update.data,
+            update.by_client
+        ),
         (CLIENT_UPDATE_ACTIVATE, 3, 1, 0)
     );
     assert_eq!(
@@ -110,36 +66,12 @@ fn synchronized_client_activation_matches_cpp_control_packet_codec() {
 }
 
 #[test]
-#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn direct_client_join_matches_cpp_control_packet_codec() {
     // ClientJoin is a host-authored CDT_Direct C4IDPacket carrying the exact
     // C4ClientCore, then the base ByClient field
     // (src/C4Network2.cpp:1395-1438; src/C4Control.cpp:552-573).
-    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
-        .map(PathBuf::from)
-        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/client_join.ini")
-        .canonicalize()
-        .expect("C++ ClientJoin fixture exists");
-    let output = std::env::temp_dir().join(format!(
-        "legacyclonk-control-packet-client-join-{}.bin",
-        std::process::id()
-    ));
-
-    let result = Command::new(oracle)
-        .args(["--control-packet-codec-oracle", "2"])
-        .arg(fixture)
-        .arg(&output)
-        .output()
-        .expect("C++ direct-control codec oracle starts");
-    assert!(
-        result.status.success(),
-        "C++ oracle failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
-    let _ = fs::remove_file(&output);
+    let cpp_bytes: &[u8] =
+        include_bytes!("fixtures/cpp_control_goldens/client_join_delivery_2.bin");
 
     assert_eq!(cpp_bytes.first(), Some(&2));
     let control = decode_control_entry_payload(&cpp_bytes[1..])
@@ -160,37 +92,13 @@ fn direct_client_join_matches_cpp_control_packet_codec() {
 }
 
 #[test]
-#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn synchronized_client_removal_matches_cpp_control_packet_codec() {
     // The host sends C4ControlClientRemove as CDT_Sync. Its C4IDPacket body is
     // ClientID, a byte-preserving NUL string reason, and ByClient
     // (src/C4Client.cpp:293-304; src/C4Control.cpp:682-687;
     // src/C4Network2IO.cpp:1787-1793).
-    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
-        .map(PathBuf::from)
-        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/client_remove.ini")
-        .canonicalize()
-        .expect("C++ ClientRemove fixture exists");
-    let output = std::env::temp_dir().join(format!(
-        "legacyclonk-control-packet-client-remove-{}.bin",
-        std::process::id()
-    ));
-
-    let result = Command::new(oracle)
-        .args(["--control-packet-codec-oracle", "1"])
-        .arg(fixture)
-        .arg(&output)
-        .output()
-        .expect("C++ synchronized-control codec oracle starts");
-    assert!(
-        result.status.success(),
-        "C++ oracle failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
-    let _ = fs::remove_file(&output);
+    let cpp_bytes: &[u8] =
+        include_bytes!("fixtures/cpp_control_goldens/client_remove_delivery_1.bin");
 
     assert_eq!(cpp_bytes.first(), Some(&1));
     let control = decode_control_entry_payload(&cpp_bytes[1..])
@@ -208,36 +116,12 @@ fn synchronized_client_removal_matches_cpp_control_packet_codec() {
 }
 
 #[test]
-#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn player_info_update_request_matches_cpp_packet_codec() {
     // PID_PlayerInfoUpdReq (0x16) serializes C4ClientPlayerInfos directly and
     // carries no C4ControlPacket ByClient field (src/C4PacketBase.h:121-123;
     // src/C4PlayerInfo.cpp:601-630,1800-1803).
-    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
-        .map(PathBuf::from)
-        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/player_info_update_request_add.ini")
-        .canonicalize()
-        .expect("C++ PlayerInfo update request fixture exists");
-    let output = std::env::temp_dir().join(format!(
-        "legacyclonk-player-info-update-request-{}.bin",
-        std::process::id()
-    ));
-
-    let result = Command::new(oracle)
-        .arg("--player-info-update-codec-oracle")
-        .arg(fixture)
-        .arg(&output)
-        .output()
-        .expect("C++ PlayerInfo update request oracle starts");
-    assert!(
-        result.status.success(),
-        "C++ oracle failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
-    let _ = fs::remove_file(&output);
+    let cpp_bytes: &[u8] =
+        include_bytes!("fixtures/cpp_control_goldens/player_info_update_request_add.bin");
 
     assert_eq!(cpp_bytes.first(), Some(&0x16));
     let request = decode_player_info_update_payload(&cpp_bytes[1..])
@@ -255,37 +139,13 @@ fn player_info_update_request_matches_cpp_packet_codec() {
 }
 
 #[test]
-#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn direct_player_info_matches_cpp_control_packet_codec() {
     // C4PacketControlPkt serializes its one-byte delivery before one C4IDPacket;
     // PlayerInfo is sent with CDT_Direct by the host during admission
     // (src/C4Network2IO.cpp:1787-1793;
     // src/C4Network2Players.cpp:232-239).
-    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
-        .map(PathBuf::from)
-        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/player_info_minimal.ini")
-        .canonicalize()
-        .expect("C++ PlayerInfo fixture exists");
-    let output = std::env::temp_dir().join(format!(
-        "legacyclonk-control-packet-player-info-{}.bin",
-        std::process::id()
-    ));
-
-    let result = Command::new(oracle)
-        .args(["--control-packet-codec-oracle", "2"])
-        .arg(fixture)
-        .arg(&output)
-        .output()
-        .expect("C++ direct-control codec oracle starts");
-    assert!(
-        result.status.success(),
-        "C++ oracle failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
-    let _ = fs::remove_file(&output);
+    let cpp_bytes: &[u8] =
+        include_bytes!("fixtures/cpp_control_goldens/player_info_minimal_delivery_2.bin");
 
     assert_eq!(cpp_bytes.first(), Some(&2));
     let control = decode_control_entry_payload(&cpp_bytes[1..])
@@ -301,39 +161,15 @@ fn direct_player_info_matches_cpp_control_packet_codec() {
 }
 
 #[test]
-#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn embedded_join_player_matches_cpp_control_codec() {
     // The C++ oracle parses the semantic C4Control fixture and serializes a
     // real C4GameControlPacket (src/C4GameControlNetwork.cpp:855-872;
-    // src/C4Control.cpp:852-863). Rust must decode that live output without a
-    // hand-authored binary fixture standing in for the golden implementation.
-    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
-        .map(PathBuf::from)
-        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/join_player_embedded.ini")
-        .canonicalize()
-        .expect("C++ control fixture exists");
-    let output = std::env::temp_dir().join(format!(
-        "legacyclonk-control-codec-join-{}.bin",
-        std::process::id()
-    ));
+    // src/C4Control.cpp:852-863). This checked-in output is emitted by that
+    // implementation, not hand-authored by the Rust codec.
+    let cpp_bytes: &[u8] =
+        include_bytes!("fixtures/cpp_control_goldens/join_player_embedded_client_4_tick_64.bin");
 
-    let result = Command::new(oracle)
-        .args(["--control-codec-oracle", "4", "64"])
-        .arg(fixture)
-        .arg(&output)
-        .output()
-        .expect("C++ control codec oracle starts");
-    assert!(
-        result.status.success(),
-        "C++ oracle failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
-    let _ = fs::remove_file(&output);
-
-    let frame = decode_control_payload(&cpp_bytes).expect("Rust decodes live C++ bytes");
+    let frame = decode_control_payload(cpp_bytes).expect("Rust decodes C++ golden bytes");
     assert_eq!((frame.client_id, frame.tick), (4, 64));
     let [EngineControlPacket::JoinPlayer(join)] = frame.controls.as_slice() else {
         panic!("expected one JoinPlayer control, got {:?}", frame.controls);
@@ -351,38 +187,14 @@ fn embedded_join_player_matches_cpp_control_codec() {
 }
 
 #[test]
-#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn minimal_player_info_matches_cpp_control_codec() {
     // C4ControlPlayerInfo wraps C4ClientPlayerInfos and serializes its players
     // before the base ByClient field (src/C4Control.cpp:1284-1288;
     // src/C4PlayerInfo.cpp:177-268,601-633).
-    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
-        .map(PathBuf::from)
-        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/player_info_minimal.ini")
-        .canonicalize()
-        .expect("C++ control fixture exists");
-    let output = std::env::temp_dir().join(format!(
-        "legacyclonk-control-codec-player-info-{}.bin",
-        std::process::id()
-    ));
+    let cpp_bytes: &[u8] =
+        include_bytes!("fixtures/cpp_control_goldens/player_info_minimal_client_4_tick_7.bin");
 
-    let result = Command::new(oracle)
-        .args(["--control-codec-oracle", "4", "7"])
-        .arg(fixture)
-        .arg(&output)
-        .output()
-        .expect("C++ control codec oracle starts");
-    assert!(
-        result.status.success(),
-        "C++ oracle failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
-    let _ = fs::remove_file(&output);
-
-    let frame = decode_control_payload(&cpp_bytes).expect("Rust decodes live C++ bytes");
+    let frame = decode_control_payload(cpp_bytes).expect("Rust decodes C++ golden bytes");
     assert_eq!((frame.client_id, frame.tick), (4, 7));
     let [EngineControlPacket::PlayerInfo(info)] = frame.controls.as_slice() else {
         panic!("expected one PlayerInfo control, got {:?}", frame.controls);
@@ -416,38 +228,14 @@ fn minimal_player_info_matches_cpp_control_codec() {
 }
 
 #[test]
-#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn resource_join_player_matches_cpp_control_codec() {
     // C4ControlJoinPlayer selects C4Network2ResCore when ByRes is true;
     // loadable cores conditionally carry file size/CRC/chunk fields
     // (src/C4Control.cpp:852-863; src/C4Network2Res.cpp:114-143).
-    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
-        .map(PathBuf::from)
-        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/join_player_resource.ini")
-        .canonicalize()
-        .expect("C++ control fixture exists");
-    let output = std::env::temp_dir().join(format!(
-        "legacyclonk-control-codec-resource-join-{}.bin",
-        std::process::id()
-    ));
+    let cpp_bytes: &[u8] =
+        include_bytes!("fixtures/cpp_control_goldens/join_player_resource_client_4_tick_7.bin");
 
-    let result = Command::new(oracle)
-        .args(["--control-codec-oracle", "4", "7"])
-        .arg(fixture)
-        .arg(&output)
-        .output()
-        .expect("C++ control codec oracle starts");
-    assert!(
-        result.status.success(),
-        "C++ oracle failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
-    let _ = fs::remove_file(&output);
-
-    let frame = decode_control_payload(&cpp_bytes).expect("Rust decodes live C++ bytes");
+    let frame = decode_control_payload(cpp_bytes).expect("Rust decodes C++ golden bytes");
     let [EngineControlPacket::JoinPlayer(join)] = frame.controls.as_slice() else {
         panic!("expected one JoinPlayer control, got {:?}", frame.controls);
     };
@@ -479,38 +267,14 @@ fn resource_join_player_matches_cpp_control_codec() {
 }
 
 #[test]
-#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn sha_resource_join_player_matches_cpp_control_codec() {
     // C4Network2ResCore prefixes the optional SHA with a packed naming count,
     // then StdHexAdapt serializes its 20-byte digest
     // (src/C4Network2Res.cpp:137-142; src/StdAdaptors.h:1001-1055).
-    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
-        .map(PathBuf::from)
-        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/join_player_resource_sha.ini")
-        .canonicalize()
-        .expect("C++ SHA resource fixture exists");
-    let output = std::env::temp_dir().join(format!(
-        "legacyclonk-control-codec-resource-sha-{}.bin",
-        std::process::id()
-    ));
+    let cpp_bytes: &[u8] =
+        include_bytes!("fixtures/cpp_control_goldens/join_player_resource_sha_client_4_tick_7.bin");
 
-    let result = Command::new(oracle)
-        .args(["--control-codec-oracle", "4", "7"])
-        .arg(fixture)
-        .arg(&output)
-        .output()
-        .expect("C++ control codec oracle starts");
-    assert!(
-        result.status.success(),
-        "C++ oracle failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
-    let _ = fs::remove_file(&output);
-
-    let frame = decode_control_payload(&cpp_bytes).expect("Rust decodes live C++ SHA bytes");
+    let frame = decode_control_payload(cpp_bytes).expect("Rust decodes C++ SHA golden bytes");
     let [EngineControlPacket::JoinPlayer(join)] = frame.controls.as_slice() else {
         panic!("expected one JoinPlayer control, got {:?}", frame.controls);
     };
@@ -531,37 +295,14 @@ fn sha_resource_join_player_matches_cpp_control_codec() {
 }
 
 #[test]
-#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn resource_player_info_matches_cpp_control_codec() {
     // C4PlayerInfo serializes ResCore after the league fields whenever its
     // synchronized HasResource flag is set (src/C4PlayerInfo.cpp:177-268).
-    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
-        .map(PathBuf::from)
-        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/player_info_resource.ini")
-        .canonicalize()
-        .expect("C++ resource PlayerInfo fixture exists");
-    let output = std::env::temp_dir().join(format!(
-        "legacyclonk-control-codec-player-info-resource-{}.bin",
-        std::process::id()
-    ));
+    let cpp_bytes: &[u8] =
+        include_bytes!("fixtures/cpp_control_goldens/player_info_resource_client_4_tick_7.bin");
 
-    let result = Command::new(oracle)
-        .args(["--control-codec-oracle", "4", "7"])
-        .arg(fixture)
-        .arg(&output)
-        .output()
-        .expect("C++ control codec oracle starts");
-    assert!(
-        result.status.success(),
-        "C++ oracle failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
-    let _ = fs::remove_file(&output);
-
-    let frame = decode_control_payload(&cpp_bytes).expect("Rust decodes live C++ PlayerInfo bytes");
+    let frame =
+        decode_control_payload(cpp_bytes).expect("Rust decodes C++ PlayerInfo golden bytes");
     let [EngineControlPacket::PlayerInfo(info)] = frame.controls.as_slice() else {
         panic!("expected one PlayerInfo control, got {:?}", frame.controls);
     };
