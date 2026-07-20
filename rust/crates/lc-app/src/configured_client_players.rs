@@ -23,6 +23,8 @@ pub enum NativeConfigValue<'a> {
     /// applies C++'s NUL termination and `CFG_MaxString` bound.
     CppEscapedString(&'a [u8]),
     /// An unquoted, single-line ASCII scalar such as `"0"` or `"1"`.
+    /// Existing assignments are canonicalized to `Key=value` because C++'s
+    /// Boolean reader does not skip whitespace after the equals sign.
     RawAscii(&'a str),
 }
 
@@ -37,6 +39,7 @@ struct NativeConfigLine {
 struct EncodedNativeConfigUpdate {
     line: Vec<u8>,
     value: Vec<u8>,
+    canonical_assignment: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +128,55 @@ pub fn configured_native_dynamic_value(
     configured_native_value_with_limit(config, section, key, usize::MAX)
 }
 
+/// Reads one native Boolean with `StdCompilerINIRead::Boolean`'s exact value
+/// grammar. In particular, the value starts immediately after `=` and the
+/// textual forms are case-sensitive prefixes.
+pub fn configured_native_boolean(config: &[u8], section: &str, key: &str) -> Option<bool> {
+    let value = configured_native_boolean_value(config, section, key)?;
+    if value.first() == Some(&b'1') && !value.get(1).is_some_and(u8::is_ascii_digit) {
+        Some(true)
+    } else if value.first() == Some(&b'0') && !value.get(1).is_some_and(u8::is_ascii_digit) {
+        Some(false)
+    } else if value.starts_with(b"true") {
+        Some(true)
+    } else if value.starts_with(b"false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn configured_native_boolean_value<'a>(
+    config: &'a [u8],
+    section: &str,
+    key: &str,
+) -> Option<&'a [u8]> {
+    let mut in_section = false;
+    let mut selected_section = false;
+    for raw_line in native_config_lines(config) {
+        let line = &config[raw_line.start..raw_line.content_end];
+        if let Some(name) = native_config_section_name(line) {
+            if in_section {
+                break;
+            }
+            let matches = name == section.as_bytes();
+            in_section = matches && !selected_section;
+            selected_section |= matches;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((name, value)) = native_config_assignment(line) else {
+            continue;
+        };
+        if name == key.as_bytes() {
+            return Some(value);
+        }
+    }
+    None
+}
+
 fn configured_native_value_with_limit(
     config: &[u8],
     section: &str,
@@ -184,6 +236,7 @@ pub fn update_configured_native_values(
                 format!("duplicate native config update key: {key}"),
             ));
         }
+        let canonical_assignment = matches!(value, NativeConfigValue::RawAscii(_));
         let mut encoded_value = Vec::new();
         match value {
             NativeConfigValue::CppEscapedString(value) => {
@@ -216,6 +269,7 @@ pub fn update_configured_native_values(
         encoded_updates.push(EncodedNativeConfigUpdate {
             line,
             value: encoded_value,
+            canonical_assignment,
         });
     }
 
@@ -291,8 +345,13 @@ pub fn update_configured_native_values(
             append_missing_native_config_values(&mut output, &encoded_updates, &found, line_ending);
         }
         if let Some((update_index, value_span)) = &replacements[index] {
-            output.extend_from_slice(&config[line.start..line.start + value_span.start]);
-            output.extend_from_slice(&encoded_updates[*update_index].value);
+            let update = &encoded_updates[*update_index];
+            if update.canonical_assignment {
+                output.extend_from_slice(&update.line);
+            } else {
+                output.extend_from_slice(&config[line.start..line.start + value_span.start]);
+                output.extend_from_slice(&update.value);
+            }
             output.extend_from_slice(&config[line.start + value_span.end..line.end]);
         } else {
             output.extend_from_slice(&config[line.start..line.end]);
@@ -369,6 +428,28 @@ fn native_config_section_name(line: &[u8]) -> Option<&[u8]> {
         cursor += 1;
     }
     (structural.get(cursor) == Some(&b']')).then_some(&structural[1..name_end])
+}
+
+fn native_config_assignment(line: &[u8]) -> Option<(&[u8], &[u8])> {
+    let start = line
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))
+        .unwrap_or(line.len());
+    if !line.get(start).is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let mut cursor = start + 1;
+    while line
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_'))
+    {
+        cursor += 1;
+    }
+    let name_end = cursor;
+    while matches!(line.get(cursor), Some(b' ' | b'\t')) {
+        cursor += 1;
+    }
+    (line.get(cursor) == Some(&b'=')).then_some((&line[start..name_end], &line[cursor + 1..]))
 }
 
 fn native_config_value_span(line: &[u8], equals: usize) -> std::ops::Range<usize> {
@@ -1808,6 +1889,48 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
                 .as_bytes(),
             b"1"
         );
+    }
+
+    #[test]
+    fn native_config_update_canonicalizes_raw_ascii_for_cpp_boolean_reader() {
+        let updated = super::update_configured_native_values(
+            b"[General]\r\n  NoCrew = true # keep\r\nName=Clonker\r\n",
+            "General",
+            &[("NoCrew", super::NativeConfigValue::RawAscii("false"))],
+        )
+        .expect("update native Boolean");
+
+        assert_eq!(
+            updated,
+            b"[General]\r\nNoCrew=false # keep\r\nName=Clonker\r\n"
+        );
+    }
+
+    #[test]
+    fn configured_native_boolean_matches_cpp_value_grammar() {
+        for (assignment, expected) in [
+            ("NoCrew=true", Some(true)),
+            ("NoCrew=false", Some(false)),
+            ("NoCrew=1", Some(true)),
+            ("NoCrew=0", Some(false)),
+            ("NoCrew=trueSuffix", Some(true)),
+            ("NoCrew=falseSuffix", Some(false)),
+            ("NoCrew=1x", Some(true)),
+            ("NoCrew=10", None),
+            ("NoCrew= true", None),
+            ("NoCrew=\"true\"", None),
+            ("NoCrew=TRUE", None),
+            ("NoCrew=yes", None),
+            ("NoCrew=on", None),
+            ("NoCrew =true", None),
+        ] {
+            let config = format!("[General]\n{assignment}\n");
+            assert_eq!(
+                super::configured_native_boolean(config.as_bytes(), "General", "NoCrew"),
+                expected,
+                "assignment {assignment:?}"
+            );
+        }
     }
 
     #[test]

@@ -20145,16 +20145,10 @@ fn load_gamepad_gui_control(paths: Option<&AppPaths>) -> bool {
 }
 
 /// Native `Config.General.NoCrew` (`C4Config.cpp:384`) drives the scen-sel
-/// fair-crew icon. `FairCrew` remains a read fallback for older Rust configs.
+/// fair-crew icon. The field name is `FairCrew`, but the serialized key is not.
 fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
-    paths
-        .and_then(|paths| Config::load(paths.config_file()).ok())
-        .and_then(|config| {
-            config
-                .get_in(Some("General"), "NoCrew")
-                .or_else(|| config.get_in(Some("General"), "FairCrew"))
-                .map(parse_config_bool)
-        })
+    let config = load_native_config_bytes(paths);
+    lc_app::configured_native_boolean(&config, "General", "NoCrew")
         .unwrap_or(false)
 }
 
@@ -21158,10 +21152,7 @@ fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> GameOptionValue
         password: String::new(),
         last_password: string_value("Network", "LastPassword", "Wipf"),
         comment: string_value("Network", "Comment", ""),
-        fair_crew: native_config_text(&config, "General", "NoCrew")
-            .or_else(|| native_config_text(&config, "General", "FairCrew"))
-            .as_deref()
-            .map(parse_config_bool)
+        fair_crew: lc_app::configured_native_boolean(&config, "General", "NoCrew")
             .unwrap_or(false),
         fair_crew_strength,
         record: bool_value("General", "Record", false),
@@ -58452,10 +58443,26 @@ impl GameApp {
         }
         advanced_config::canonicalize_existing(&mut config);
         advanced_config::apply_changes(&mut config, changes);
+        let fair_crew = changes
+            .iter()
+            .rev()
+            .find(|change| change.section == "General" && change.key == "NoCrew")
+            .map(|change| parse_config_bool(&change.value));
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        config.save(path)
+        config.save(&path)?;
+        if let Some(enabled) = fair_crew {
+            persist_native_config_values(
+                paths,
+                "General",
+                &[(
+                    "NoCrew",
+                    lc_app::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
+                )],
+            )?;
+        }
+        Ok(())
     }
 
     fn synchronize_advanced_options_runtime(&mut self) {
@@ -67211,6 +67218,25 @@ impl GameApp {
         }
     }
 
+    fn persist_fair_crew_preference(&mut self, enabled: bool) {
+        let Some(paths) = self.app_paths.as_ref() else {
+            return;
+        };
+        let section = "General";
+        let key = "NoCrew";
+        if let Err(error) = persist_native_config_values(
+            paths,
+            section,
+            &[(
+                key,
+                lc_app::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
+            )],
+        ) {
+            tracing::error!(%error, section, key, "failed to persist game option");
+            self.status_text = format!("Unable to save game option: {error}");
+        }
+    }
+
     fn publish_lobby_game_option_reference(
         &mut self,
         password_needed: bool,
@@ -67775,11 +67801,7 @@ impl GameApp {
                 }
                 GameOptionAction::FairCrewPreferenceChanged(enabled) => {
                     self.startup_view_flags.fair_crew = enabled;
-                    self.persist_game_option_value(
-                        "General",
-                        "NoCrew",
-                        i32::from(enabled).to_string(),
-                    );
+                    self.persist_fair_crew_preference(enabled);
                 }
                 GameOptionAction::RecordPreferenceChanged(enabled) => {
                     self.startup_view_flags.record = enabled;
@@ -77531,7 +77553,7 @@ struct NativePresentationBatch {
 /// Config-driven bits the startup parity renderers display.
 #[derive(Clone, Copy, Debug, Default)]
 struct StartupViewFlags {
-    /// `Config.General.FairCrew`.
+    /// `Config.General.FairCrew`, serialized by C++ as `General.NoCrew`.
     fair_crew: bool,
     /// `Config.General.Record`.
     record: bool,
@@ -100935,8 +100957,16 @@ public func Grant(password) { return GainMissionAccess(password); }
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
         let paths = AppPaths::discover().expect("discover app paths");
+        if let Some(parent) = paths.config_file().parent() {
+            fs::create_dir_all(parent).expect("create native config directory");
+        }
+        fs::write(paths.config_file(), b"[General]\r\nFairCrew=true\r\n")
+            .expect("seed non-native fair-crew spelling");
+        assert!(!load_fair_crew_flag(Some(&paths)));
+        assert!(!load_scenario_game_option_values(Some(&paths)).fair_crew);
+        fs::remove_file(paths.config_file()).expect("remove non-native fair-crew config");
+
         for (section, key, value) in [
-            ("General", "NoCrew", "1"),
             ("General", "DefCrewStrength", "777"),
             ("General", "Record", "0"),
             ("Network", "MasterServerSignUp", "0"),
@@ -100946,6 +100976,16 @@ public func Grant(password) { return GainMissionAccess(password); }
         ] {
             persist_config_value(&paths, section, key, value).expect("seed game option");
         }
+        persist_native_config_values(
+            &paths,
+            "General",
+            &[("NoCrew", lc_app::NativeConfigValue::RawAscii("true"))],
+        )
+        .expect("seed C++ NoCrew Boolean");
+        assert!(
+            load_fair_crew_flag(Some(&paths)),
+            "the scen-sel flag reads C4ConfigGeneral's native NoCrew key"
+        );
         let values = load_scenario_game_option_values(Some(&paths));
         assert!(values.fair_crew);
         assert_eq!(values.fair_crew_strength, 777);
@@ -101021,8 +101061,19 @@ public func Grant(password) { return GainMissionAccess(password); }
             Some(scensel_layout.record_button)
         );
 
+        app.process_game_option_actions(vec![GameOptionAction::FairCrewPreferenceChanged(false)])
+            .expect("persist disabled native fair-crew preference");
+        let native_config = fs::read(paths.config_file()).expect("read disabled native preference");
+        assert!(native_config
+            .split(|byte| matches!(*byte, b'\r' | b'\n'))
+            .any(|line| line == b"NoCrew=false"));
+        assert!(!native_config
+            .windows(b"FairCrew=".len())
+            .any(|window| window == b"FairCrew="));
+        assert!(!load_fair_crew_flag(Some(&paths)));
+        assert!(!load_scenario_game_option_values(Some(&paths)).fair_crew);
+
         app.process_game_option_actions(vec![
-            GameOptionAction::FairCrewPreferenceChanged(false),
             GameOptionAction::RecordPreferenceChanged(true),
             GameOptionAction::InternetSignupChanged {
                 enabled: true,
@@ -101033,7 +101084,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         ])
         .expect("persist selector options");
         let config = Config::load(paths.config_file()).expect("reload persisted options");
-        assert_eq!(config.get_in(Some("General"), "NoCrew"), Some("0"));
+        assert_eq!(config.get_in(Some("General"), "NoCrew"), Some("false"));
+        assert_eq!(config.get_in(Some("General"), "FairCrew"), None);
         assert_eq!(config.get_in(Some("General"), "Record"), Some("1"));
         assert_eq!(
             config.get_in(Some("General"), "DefCrewStrength"),
@@ -101051,6 +101103,21 @@ public func Grant(password) { return GainMissionAccess(password); }
             config.get_in(Some("Network"), "Comment"),
             Some("new comment")
         );
+
+        app.process_game_option_actions(vec![GameOptionAction::FairCrewPreferenceChanged(true)])
+            .expect("persist native fair-crew preference");
+        let config = Config::load(paths.config_file()).expect("reload native fair-crew key");
+        assert_eq!(config.get_in(Some("General"), "NoCrew"), Some("true"));
+        assert_eq!(config.get_in(Some("General"), "FairCrew"), None);
+        let native_config = fs::read(paths.config_file()).expect("read enabled native preference");
+        assert!(native_config
+            .split(|byte| matches!(*byte, b'\r' | b'\n'))
+            .any(|line| line == b"NoCrew=true"));
+        assert!(!native_config
+            .windows(b"FairCrew=".len())
+            .any(|window| window == b"FairCrew="));
+        assert!(load_fair_crew_flag(Some(&paths)));
+        assert!(load_scenario_game_option_values(Some(&paths)).fair_crew);
 
         app.scenario_game_options =
             GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
@@ -125212,7 +125279,11 @@ ScenInfoArea=70,5,25,90
         assert_eq!(saved.get_in(Some("General"), "Name"), Some("New name"));
         assert_eq!(saved.get_in(Some("General"), "FPS"), Some("1"));
         assert_eq!(saved.get_in(Some("General"), "Record"), Some("1"));
-        assert_eq!(saved.get_in(Some("General"), "NoCrew"), Some("1"));
+        assert_eq!(saved.get_in(Some("General"), "NoCrew"), Some("true"));
+        assert!(fs::read(paths.config_file())
+            .expect("read native advanced NoCrew")
+            .split(|byte| matches!(*byte, b'\r' | b'\n'))
+            .any(|line| line == b"NoCrew=true"));
         assert_eq!(
             saved.get_in(Some("Graphics"), "SmokeLevel"),
             Some("321")
