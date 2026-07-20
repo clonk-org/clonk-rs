@@ -12,7 +12,9 @@ use crate::ast::{
     Parameter, SafeNavigationStep, Stmt, TypeAnnotation, UnaryOp, VarDecl,
 };
 use crate::debugger::DebuggerHooks;
-use crate::engine::{GlobalCallContextHook, HostFunction, HostReferenceFunction};
+use crate::engine::{
+    GlobalCallContextHook, HostFunction, HostReferenceFunction, RegisteredHostFunction,
+};
 use crate::error::RuntimeError;
 use crate::value::{
     c4_id_text, c4_string_bytes, c4_string_from_bytes, c4_strings_equal, C4VType, Literal, Value,
@@ -1538,7 +1540,7 @@ pub struct Vm<'a> {
     /// this bare VM has no configured base script; Some(None) is an
     /// explicitly NONSTRICT destination.
     owner_strict_level: Option<Option<u8>>,
-    host_functions: &'a HashMap<String, HostFunction>,
+    host_functions: &'a HashMap<String, RegisteredHostFunction>,
     host_reference_functions: Option<&'a HashMap<String, HostReferenceFunction>>,
     var_decls: &'a [VarDecl], // Script-level variable declarations
     debugger: Option<DebuggerHooks>,
@@ -1588,9 +1590,9 @@ pub struct Vm<'a> {
 }
 
 impl<'a> Vm<'a> {
-    pub fn new(
+    pub(crate) fn new(
         functions: &'a HashMap<String, Function>,
-        host_functions: &'a HashMap<String, HostFunction>,
+        host_functions: &'a HashMap<String, RegisteredHostFunction>,
         var_decls: &'a [VarDecl],
         debugger: Option<DebuggerHooks>,
     ) -> Self {
@@ -2232,10 +2234,9 @@ impl<'a> Vm<'a> {
             }
 
             if let Some(function) = self.host_functions.get(name) {
-                let values = self.call_args_to_values(&args)?;
                 let _guard = CallerContextGuard::enter(caller);
                 return self
-                    .invoke_host_function(name, function, &values)
+                    .invoke_host_function_call_args(name, function, &args)
                     .map(TrackedValue::runtime)
                     .map(ReturnValue::Value);
             }
@@ -2295,10 +2296,9 @@ impl<'a> Vm<'a> {
             }
 
             if let Some(function) = self.host_functions.get(name) {
-                let values = self.call_args_to_values(&args)?;
                 let _guard = CallerContextGuard::enter(caller);
                 return self
-                    .invoke_host_function(name, function, &values)
+                    .invoke_host_function_call_args(name, function, &args)
                     .map(TrackedValue::runtime)
                     .map(ReturnValue::Value);
             }
@@ -2435,13 +2435,12 @@ impl<'a> Vm<'a> {
             }
 
             if let Some(function) = self.host_functions.get(name) {
-                let values = self.call_args_to_values(&args)?;
                 // Host functions run under the CALLER's var-slot table
                 // (cthr->Caller->NumVars) for the FindConstructionSite
                 // write-back seam (C4Script.cpp:1966-1978).
                 let _guard = CallerContextGuard::enter(caller);
                 return self
-                    .invoke_host_function(name, function, &values)
+                    .invoke_host_function_call_args(name, function, &args)
                     .map(TrackedValue::runtime)
                     .map(ReturnValue::Value);
             }
@@ -2682,7 +2681,45 @@ impl<'a> Vm<'a> {
     fn invoke_host_function(
         &self,
         name: &str,
-        function: &HostFunction,
+        function: &RegisteredHostFunction,
+        args: &[Value],
+    ) -> Result<Value, RuntimeError> {
+        let normalized;
+        let args = match function.parameter_count() {
+            Some(parameter_count) if args.len() != parameter_count => {
+                normalized = Self::normalize_host_values(args, parameter_count);
+                normalized.as_slice()
+            }
+            _ => args,
+        };
+        self.invoke_host_function_raw(name, function, args)
+    }
+
+    fn invoke_host_function_call_args(
+        &self,
+        name: &str,
+        function: &RegisteredHostFunction,
+        args: &[CallArg],
+    ) -> Result<Value, RuntimeError> {
+        let normalized;
+        let args = match function.parameter_count() {
+            Some(parameter_count) if args.len() != parameter_count => {
+                normalized = Self::normalize_host_call_args(args, parameter_count);
+                normalized.as_slice()
+            }
+            _ => args,
+        };
+        let values = self.call_args_to_values(args)?;
+        self.invoke_host_function(name, function, &values)
+    }
+
+    /// Invoke the callback without applying its public script signature.
+    /// EffectVar's retained-lvalue bridge uses a private fourth write value
+    /// even though the script-visible native declares three parameters.
+    fn invoke_host_function_raw(
+        &self,
+        name: &str,
+        function: &RegisteredHostFunction,
         args: &[Value],
     ) -> Result<Value, RuntimeError> {
         if let Some(debugger) = &self.debugger {
@@ -2691,7 +2728,7 @@ impl<'a> Vm<'a> {
             }
         }
 
-        let outcome = function(args);
+        let outcome = (function.callback())(args);
         let result = outcome?;
 
         if let Some(debugger) = &self.debugger {
@@ -2709,6 +2746,14 @@ impl<'a> Vm<'a> {
         function: &HostReferenceFunction,
         args: &[CallArg],
     ) -> Result<Value, RuntimeError> {
+        let normalized;
+        let args = match function.parameter_count() {
+            Some(parameter_count) if args.len() != parameter_count => {
+                normalized = Self::normalize_host_call_args(args, parameter_count);
+                normalized.as_slice()
+            }
+            _ => args,
+        };
         let args = args
             .iter()
             .cloned()
@@ -2732,6 +2777,26 @@ impl<'a> Vm<'a> {
             }
         }
         Ok(result)
+    }
+
+    fn normalize_host_values(args: &[Value], parameter_count: usize) -> Vec<Value> {
+        let mut normalized = args
+            .iter()
+            .take(parameter_count)
+            .cloned()
+            .collect::<Vec<_>>();
+        normalized.resize(parameter_count, Value::Nil);
+        normalized
+    }
+
+    fn normalize_host_call_args(args: &[CallArg], parameter_count: usize) -> Vec<CallArg> {
+        let mut normalized = args
+            .iter()
+            .take(parameter_count)
+            .cloned()
+            .collect::<Vec<_>>();
+        normalized.resize_with(parameter_count, || CallArg::runtime(Value::Nil));
+        normalized
     }
 
     fn execute_statements(
@@ -3407,19 +3472,21 @@ impl<'a> Vm<'a> {
                                             depth + 1,
                                         )?;
                                     if *forward_rest {
-                                        Self::append_forwarded_args(&mut evaluated_args, env)?;
+                                        Self::append_forwarded_args(
+                                            &mut evaluated_args,
+                                            env,
+                                            host.parameter_count().unwrap_or(MAX_CALL_PARAMETERS),
+                                        )?;
                                     }
-                                    let values = self.call_args_to_values(&evaluated_args)?;
                                     // The overriding script function is the
                                     // host fn's cthr->Caller.
                                     let _guard =
                                         CallerContextGuard::enter(Some(env.caller_context()));
-                                    return self
-                                        .invoke_host_function(
-                                            &env.function_name.clone(),
-                                            host,
-                                            &values,
-                                        );
+                                    return self.invoke_host_function_call_args(
+                                        &env.function_name.clone(),
+                                        host,
+                                        &evaluated_args,
+                                    );
                                 }
                                 if let Some(host) =
                                     self.host_reference_function(&inherited_name)
@@ -3432,7 +3499,11 @@ impl<'a> Vm<'a> {
                                         depth + 1,
                                     )?;
                                     if *forward_rest {
-                                        Self::append_forwarded_args(&mut evaluated_args, env)?;
+                                        Self::append_forwarded_args(
+                                            &mut evaluated_args,
+                                            env,
+                                            host.parameter_count().unwrap_or(MAX_CALL_PARAMETERS),
+                                        )?;
                                     }
                                     let _guard =
                                         CallerContextGuard::enter(Some(env.caller_context()));
@@ -3460,7 +3531,11 @@ impl<'a> Vm<'a> {
                                     depth + 1,
                                 )?;
                             if *forward_rest {
-                                Self::append_forwarded_args(&mut evaluated_args, env)?;
+                                Self::append_forwarded_args(
+                                    &mut evaluated_args,
+                                    env,
+                                    MAX_CALL_PARAMETERS,
+                                )?;
                             }
                             self.invoke_script_function(
                                 &target.name.clone(),
@@ -3519,7 +3594,11 @@ impl<'a> Vm<'a> {
                             let mut evaluated_args =
                                 self.build_call_args(Some(name), function, args, env, depth + 1)?;
                             if *forward_rest {
-                                Self::append_forwarded_args(&mut evaluated_args, env)?;
+                                Self::append_forwarded_args(
+                                    &mut evaluated_args,
+                                    env,
+                                    self.direct_call_parameter_limit(name, function),
+                                )?;
                             }
                             if env.engine_scope && !env.linked_host_lookup {
                                 self.invoke_engine_value(
@@ -3871,7 +3950,11 @@ impl<'a> Vm<'a> {
                         let mut evaluated_args =
                             self.build_call_args(Some(name), function, args, env, depth + 1)?;
                         if *forward_rest {
-                            Self::append_forwarded_args(&mut evaluated_args, env)?;
+                            Self::append_forwarded_args(
+                                &mut evaluated_args,
+                                env,
+                                self.direct_call_parameter_limit(name, function),
+                            )?;
                         }
                         return if env.engine_scope && !env.linked_host_lookup {
                             self.invoke_engine_tracked_value(
@@ -4131,10 +4214,15 @@ impl<'a> Vm<'a> {
             let old_value = Self::counter_operand(old_value, operation)?;
             let new_value = old_value.wrapping_add(delta);
             if let Some(host) = self.host_functions.get("EffectVar") {
-                let mut write_args = arg_values;
+                let mut write_args = match host.parameter_count() {
+                    Some(parameter_count) => {
+                        Self::normalize_host_values(&arg_values, parameter_count)
+                    }
+                    None => arg_values,
+                };
                 write_args.push(Value::Int(new_value));
                 let _guard = CallerContextGuard::enter(Some(env.caller_context()));
-                self.invoke_host_function("EffectVar", host, &write_args)?;
+                self.invoke_host_function_raw("EffectVar", host, &write_args)?;
             } else {
                 let slot_name = format!(
                     "__effect_{}",
@@ -5039,7 +5127,7 @@ impl<'a> Vm<'a> {
         // stack down to C4AUL_MAX_Par before AB_CALLGLOBAL dispatches.
         evaluated_args.truncate(MAX_CALL_PARAMETERS);
         if forward_rest {
-            Self::append_forwarded_args(&mut evaluated_args, env)?;
+            Self::append_forwarded_args(&mut evaluated_args, env, MAX_CALL_PARAMETERS)?;
         }
 
         let _context = GlobalCallContextGuard::enter(self.global_call_context_hook);
@@ -5049,9 +5137,19 @@ impl<'a> Vm<'a> {
         }
         if function.is_none() && name == "EffectVar" {
             if let Some(host) = global_vm.host_functions.get(name) {
+                let normalized_args;
+                let evaluated_args = match host.parameter_count() {
+                    Some(parameter_count) if evaluated_args.len() != parameter_count => {
+                        normalized_args =
+                            Self::normalize_host_call_args(&evaluated_args, parameter_count);
+                        normalized_args.as_slice()
+                    }
+                    _ => evaluated_args.as_slice(),
+                };
+                let args = global_vm.call_args_to_values(evaluated_args)?;
                 return Ok(ReturnValue::Reference(LValueRef::HostPath {
-                    function: host.clone(),
-                    args: global_vm.call_args_to_values(&evaluated_args)?,
+                    function: host.callback().clone(),
+                    args,
                     caller: env.caller_context(),
                     global_call_context_hook: global_vm.global_call_context_hook.cloned(),
                     segments: Vec::new(),
@@ -5214,7 +5312,7 @@ impl<'a> Vm<'a> {
                 let mut evaluated_args =
                     self.build_call_args(Some(name), function, args, env, depth + 1)?;
                 if forward_rest {
-                    Self::append_forwarded_args(&mut evaluated_args, env)?;
+                    Self::append_forwarded_args(&mut evaluated_args, env, MAX_CALL_PARAMETERS)?;
                 }
                 let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
                 dispatch_args.push(target.clone());
@@ -5282,7 +5380,7 @@ impl<'a> Vm<'a> {
         let mut evaluated_args =
             self.build_call_args(Some(name), function, args, env, depth + 1)?;
         if forward_rest {
-            Self::append_forwarded_args(&mut evaluated_args, env)?;
+            Self::append_forwarded_args(&mut evaluated_args, env, MAX_CALL_PARAMETERS)?;
         }
         self.invoke_value(
             name,
@@ -5337,13 +5435,16 @@ impl<'a> Vm<'a> {
 
     /// `Callee(args, ...)`: after the explicit arguments, forward every
     /// parameter slot of the executing function past its named parameters,
-    /// stopping at the 10-slot frame limit (C4AulParse.cpp:2293-2306).
+    /// stopping at the resolved callee's declared frame size
+    /// (C4AulParse.cpp:2293-2306). Direct native calls use their exact arity;
+    /// script, object and global calls retain the 10-slot frame.
     fn append_forwarded_args(
         evaluated_args: &mut Vec<CallArg>,
         env: &Environment,
+        parameter_limit: usize,
     ) -> Result<(), RuntimeError> {
         let mut index = env.named_param_count;
-        while evaluated_args.len() < MAX_CALL_PARAMETERS && index < MAX_CALL_PARAMETERS {
+        while evaluated_args.len() < parameter_limit && index < MAX_CALL_PARAMETERS {
             let tracked = env
                 .call_args
                 .get(index)
@@ -5366,6 +5467,20 @@ impl<'a> Vm<'a> {
             evaluated_args.pop();
         }
         Ok(())
+    }
+
+    fn direct_call_parameter_limit(&self, name: &str, script_function: Option<&Function>) -> usize {
+        if script_function.is_some() {
+            return MAX_CALL_PARAMETERS;
+        }
+        self.host_functions
+            .get(name)
+            .and_then(RegisteredHostFunction::parameter_count)
+            .or_else(|| {
+                self.host_reference_function(name)
+                    .and_then(HostReferenceFunction::parameter_count)
+            })
+            .unwrap_or(MAX_CALL_PARAMETERS)
     }
 
     fn expr_can_be_lvalue(expr: &Expr) -> bool {
@@ -5768,8 +5883,14 @@ impl<'a> Vm<'a> {
                     .map(|arg| self.evaluate(arg, env, depth + 1))
                     .collect::<Result<Vec<_>, _>>()?;
                 if let Some(function) = self.host_functions.get("EffectVar") {
+                    let arg_values = match function.parameter_count() {
+                        Some(parameter_count) => {
+                            Self::normalize_host_values(&arg_values, parameter_count)
+                        }
+                        None => arg_values,
+                    };
                     return Ok(LValueRef::HostPath {
-                        function: function.clone(),
+                        function: function.callback().clone(),
                         args: arg_values,
                         caller: env.caller_context(),
                         global_call_context_hook: self
@@ -6111,7 +6232,7 @@ impl<'a> Vm<'a> {
         let mut evaluated_args =
             self.build_call_args(Some(name), Some(function), args, env, depth + 1)?;
         if *forward_rest {
-            Self::append_forwarded_args(&mut evaluated_args, env)?;
+            Self::append_forwarded_args(&mut evaluated_args, env, MAX_CALL_PARAMETERS)?;
         }
         let value = if env.engine_scope && !env.linked_host_lookup {
             self.invoke_engine_raw(
@@ -6639,7 +6760,7 @@ impl<'a> Vm<'a> {
         let mut evaluated_args =
             self.build_call_args(Some("SetGlobal"), None, args, env, depth)?;
         if forward_rest {
-            Self::append_forwarded_args(&mut evaluated_args, env)?;
+            Self::append_forwarded_args(&mut evaluated_args, env, 2)?;
         }
         self.invoke_global_builtin_raw("SetGlobal", &evaluated_args, env, depth)?
             .into_tracked()

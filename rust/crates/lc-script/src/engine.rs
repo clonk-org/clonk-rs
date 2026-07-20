@@ -12,6 +12,40 @@ use crate::vm::{HostCallArg, ValueReference, Vm};
 
 pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync>;
 
+/// A native callback together with the parameter count declared by its C++
+/// registration. Legacy embedding-only callbacks may remain variadic, but
+/// engine natives use an exact count so the VM can balance their call frame
+/// after evaluating every supplied expression.
+#[derive(Clone)]
+pub(crate) struct RegisteredHostFunction {
+    callback: HostFunction,
+    parameter_count: Option<usize>,
+}
+
+impl RegisteredHostFunction {
+    fn variadic(callback: HostFunction) -> Self {
+        Self {
+            callback,
+            parameter_count: None,
+        }
+    }
+
+    fn declared(callback: HostFunction, parameter_count: usize) -> Self {
+        Self {
+            callback,
+            parameter_count: Some(parameter_count),
+        }
+    }
+
+    pub(crate) fn callback(&self) -> &HostFunction {
+        &self.callback
+    }
+
+    pub(crate) fn parameter_count(&self) -> Option<usize> {
+        self.parameter_count
+    }
+}
+
 type HostReferenceCallback =
     Arc<dyn Fn(&[HostCallArg]) -> Result<Value, RuntimeError> + Send + Sync>;
 
@@ -21,10 +55,11 @@ type HostReferenceCallback =
 pub(crate) struct HostReferenceFunction {
     callback: HostReferenceCallback,
     reference_parameters: Vec<usize>,
+    parameter_count: Option<usize>,
 }
 
 impl HostReferenceFunction {
-    fn new<F, I>(reference_parameters: I, callback: F) -> Self
+    fn new<F, I>(reference_parameters: I, parameter_count: Option<usize>, callback: F) -> Self
     where
         F: Fn(&[HostCallArg]) -> Result<Value, RuntimeError> + Send + Sync + 'static,
         I: IntoIterator<Item = usize>,
@@ -35,15 +70,26 @@ impl HostReferenceFunction {
         Self {
             callback: Arc::new(callback),
             reference_parameters,
+            parameter_count,
         }
     }
 
     pub(crate) fn wants_reference(&self, index: usize) -> bool {
+        if self
+            .parameter_count
+            .is_some_and(|parameter_count| index >= parameter_count)
+        {
+            return false;
+        }
         self.reference_parameters.binary_search(&index).is_ok()
     }
 
     pub(crate) fn call(&self, args: &[HostCallArg]) -> Result<Value, RuntimeError> {
         (self.callback)(args)
+    }
+
+    pub(crate) fn parameter_count(&self) -> Option<usize> {
+        self.parameter_count
     }
 }
 
@@ -515,7 +561,7 @@ pub struct Engine {
     /// The outer Option distinguishes an uninitialized bare Engine from a
     /// deliberately NONSTRICT base script.
     owner_strict_level: Option<Option<u8>>,
-    host_functions: HashMap<String, HostFunction>,
+    host_functions: HashMap<String, RegisteredHostFunction>,
     host_reference_functions: HashMap<String, HostReferenceFunction>,
     debugger_hooks: Option<DebuggerHooks>,
     var_decls: Vec<VarDecl>, // Script-level variable declarations (local variables)
@@ -856,13 +902,40 @@ impl Engine {
     where
         F: Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync + 'static,
     {
-        self.register_host_function_erased(name.into(), Arc::new(func));
+        self.register_host_function_erased(name.into(), Arc::new(func), None);
+    }
+
+    /// Register a C++-style native host function with its exact declared
+    /// parameter count. Script calls evaluate every supplied expression, then
+    /// the VM trims surplus values or appends `nil` values to this count.
+    pub fn register_host_function_with_arity<F>(
+        &mut self,
+        name: impl Into<String>,
+        parameter_count: usize,
+        func: F,
+    ) where
+        F: Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync + 'static,
+    {
+        assert!(
+            parameter_count <= 10,
+            "C4Aul native functions cannot declare more than 10 parameters"
+        );
+        self.register_host_function_erased(name.into(), Arc::new(func), Some(parameter_count));
     }
 
     #[inline(never)]
-    fn register_host_function_erased(&mut self, name: String, func: HostFunction) {
+    fn register_host_function_erased(
+        &mut self,
+        name: String,
+        func: HostFunction,
+        parameter_count: Option<usize>,
+    ) {
         self.host_reference_functions.remove(&name);
-        self.host_functions.insert(name, func);
+        let function = match parameter_count {
+            Some(parameter_count) => RegisteredHostFunction::declared(func, parameter_count),
+            None => RegisteredHostFunction::variadic(func),
+        };
+        self.host_functions.insert(name, function);
     }
 
     /// Register a native function whose listed zero-based parameters receive
@@ -883,8 +956,52 @@ impl Engine {
         self.host_functions.remove(&name);
         self.host_reference_functions.insert(
             name,
-            HostReferenceFunction::new(reference_parameters, func),
+            HostReferenceFunction::new(reference_parameters, None, func),
         );
+    }
+
+    /// Reference-aware counterpart to
+    /// [`Engine::register_host_function_with_arity`].
+    pub fn register_host_reference_function_with_arity<F, I>(
+        &mut self,
+        name: impl Into<String>,
+        parameter_count: usize,
+        reference_parameters: I,
+        func: F,
+    ) where
+        F: Fn(&[HostCallArg]) -> Result<Value, RuntimeError> + Send + Sync + 'static,
+        I: IntoIterator<Item = usize>,
+    {
+        assert!(
+            parameter_count <= 10,
+            "C4Aul native functions cannot declare more than 10 parameters"
+        );
+        let reference_parameters = reference_parameters.into_iter().collect::<Vec<_>>();
+        assert!(
+            reference_parameters
+                .iter()
+                .all(|index| *index < parameter_count),
+            "native reference parameters must be inside the declared parameter list"
+        );
+        let name = name.into();
+        self.host_functions.remove(&name);
+        self.host_reference_functions.insert(
+            name,
+            HostReferenceFunction::new(reference_parameters, Some(parameter_count), func),
+        );
+    }
+
+    /// The declared native parameter count, or `None` for an embedding-only
+    /// variadic callback or an unknown name.
+    pub fn host_function_parameter_count(&self, name: &str) -> Option<usize> {
+        self.host_functions
+            .get(name)
+            .and_then(RegisteredHostFunction::parameter_count)
+            .or_else(|| {
+                self.host_reference_functions
+                    .get(name)
+                    .and_then(HostReferenceFunction::parameter_count)
+            })
     }
 
     pub fn host_function_names(&self) -> Vec<String> {
@@ -909,7 +1026,9 @@ impl Engine {
     /// removing a reference-aware registration succeeds with `None`.
     pub fn remove_host_function(&mut self, name: &str) -> Option<HostFunction> {
         self.host_reference_functions.remove(name);
-        self.host_functions.remove(name)
+        self.host_functions
+            .remove(name)
+            .map(|function| function.callback)
     }
 
     /// Registers the cross-object method resolver for `obj->Method(args)`

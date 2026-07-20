@@ -14635,10 +14635,508 @@ pub(crate) fn public_console_host_function_names(script: &ScriptEngine) -> Vec<S
         .collect()
 }
 
+/// Registers the engine's C++-backed native surface without letting a call
+/// site omit its oracle-declared parameter count. The raw callbacks remain
+/// untouched because EffectVar uses a private fourth argument for retained
+/// lvalue writes; the script VM applies this metadata only at public calls.
+struct CppNativeHostRegistrar<'a> {
+    engine: &'a mut ScriptEngine,
+}
+
+/// Exact `GetParCount()` values from C++ `InitFunctionMap`. The five
+/// System.c4g fallbacks keep ten slots because C4Aul script functions inherit
+/// the base `C4AUL_MAX_Par` count; the two Rust-only helpers use their public
+/// compatibility signatures.
+fn cpp_native_parameter_count(name: &str) -> usize {
+    match name {
+        "AnyContainer"
+        | "DeathAnnounce"
+        | "EditCursor"
+        | "FrameCounter"
+        | "GetClimate"
+        | "GetGravity"
+        | "GetMatAdjust"
+        | "GetMaxPlayer"
+        | "GetSeason"
+        | "GetTeamCount"
+        | "GetTemperature"
+        | "GetTime"
+        | "IsNetwork"
+        | "IsNewgfx"
+        | "LandscapeHeight"
+        | "LandscapeWidth"
+        | "NoContainer"
+        | "RemoveUnusedTexMapEntries"
+        | "ScriptCounter"
+        | "StartCallTrace"
+        | "StopScriptProfiler" => 0,
+        "Abs"
+        | "ActIdle"
+        | "ActivateGameGoalMenu"
+        | "AsyncRandom"
+        | "C4Id"
+        | "CastAny"
+        | "CastBool"
+        | "CastC4ID"
+        | "CastInt"
+        | "CheckEnergyNeedChain"
+        | "ClearLastPlrCom"
+        | "ClearMenuItems"
+        | "CloseMenu"
+        | "Contained"
+        | "CreateArray"
+        | "CrewMember"
+        | "DecVar"
+        | "ExecuteCommand"
+        | "Extinguish"
+        | "FatalError"
+        | "GainMissionAccess"
+        | "GameOver"
+        | "GetActTime"
+        | "GetAction"
+        | "GetActionData"
+        | "GetAlive"
+        | "GetBase"
+        | "GetBreath"
+        | "GetCaptain"
+        | "GetColor"
+        | "GetColorDw"
+        | "GetComDir"
+        | "GetCon"
+        | "GetController"
+        | "GetCrewCount"
+        | "GetCrewEnabled"
+        | "GetDamage"
+        | "GetDefBottom"
+        | "GetDir"
+        | "GetEnergy"
+        | "GetEntrance"
+        | "GetHiRank"
+        | "GetID"
+        | "GetKeys"
+        | "GetKiller"
+        | "GetLeague"
+        | "GetLeagueProgressData"
+        | "GetLeagueScore"
+        | "GetLength"
+        | "GetMagicEnergy"
+        | "GetMenu"
+        | "GetMenuSelection"
+        | "GetMissionAccess"
+        | "GetNeededMatStr"
+        | "GetOCF"
+        | "GetObjectLayer"
+        | "GetObjectStatus"
+        | "GetOwner"
+        | "GetPhase"
+        | "GetPlayerCount"
+        | "GetPlayerID"
+        | "GetPlayerName"
+        | "GetPlayerTeam"
+        | "GetPlayerType"
+        | "GetPlrColorDw"
+        | "GetPlrDownDouble"
+        | "GetPlrJumpAndRunControl"
+        | "GetPlrValue"
+        | "GetPlrValueGain"
+        | "GetPlrView"
+        | "GetPlrViewMode"
+        | "GetProcedure"
+        | "GetR"
+        | "GetRank"
+        | "GetScore"
+        | "GetSelectCount"
+        | "GetSkyAdjust"
+        | "GetSystemTime"
+        | "GetTaggedPlayerName"
+        | "GetTeamByIndex"
+        | "GetTeamColor"
+        | "GetTeamConfig"
+        | "GetTeamName"
+        | "GetType"
+        | "GetValues"
+        | "GetVertexNum"
+        | "GetViewCursor"
+        | "GetVisibility"
+        | "GetWealth"
+        | "GetX"
+        | "GetY"
+        | "HideSettlementScoreInEvaluation"
+        | "InLiquid"
+        | "IncVar"
+        | "Incinerate"
+        | "IsRef"
+        | "Jump"
+        | "LaunchVolcano"
+        | "Material"
+        | "MaterialName"
+        | "MusicLevel"
+        | "Not"
+        | "Object"
+        | "ObjectNumber"
+        | "OnFire"
+        | "PauseGame"
+        | "PlaceAnimal"
+        | "Random"
+        | "ReloadDef"
+        | "ReloadParticle"
+        | "ResetGamma"
+        | "Resort"
+        | "ScoreboardCol"
+        | "ScriptGo"
+        | "ScrollContents"
+        | "SetClimate"
+        | "SetFilmView"
+        | "SetGameSpeed"
+        | "SetGravity"
+        | "SetMatAdjust"
+        | "SetMaxPlayer"
+        | "SetRestoreInfos"
+        | "SetSeason"
+        | "SetTemperature"
+        | "SetWind"
+        | "ShowInfo"
+        | "Split2Components"
+        | "Sqrt"
+        | "StartScriptProfiler"
+        | "Stuck"
+        | "SurrenderPlayer"
+        | "UnselectCrew"
+        | "Value"
+        | "goto" => 1,
+        "AbortMessageBoard"
+        | "AddEvaluationData"
+        | "And"
+        | "ArcCos"
+        | "ArcSin"
+        | "AssignVar"
+        | "BitAnd"
+        | "Bubble"
+        | "ChangeDef"
+        | "ClearParticles"
+        | "Collect"
+        | "ComponentAll"
+        | "ComposeContents"
+        | "ContentsCount"
+        | "Dec"
+        | "Div"
+        | "DoBreath"
+        | "DoCon"
+        | "DoCrewExp"
+        | "DoScore"
+        | "DoScoreboardShow"
+        | "EliminatePlayer"
+        | "EnergyCheck"
+        | "Enter"
+        | "Equal"
+        | "ExtractLiquid"
+        | "FightWith"
+        | "FindBase"
+        | "FindContents"
+        | "FindOtherContents"
+        | "FlameConsumeMaterial"
+        | "FxFireInfo"
+        | "GBackLiquid"
+        | "GBackSemiSolid"
+        | "GBackSky"
+        | "GBackSolid"
+        | "GetActionTarget"
+        | "GetCategory"
+        | "GetChar"
+        | "GetClrModulation"
+        | "GetCrew"
+        | "GetCrewExtraData"
+        | "GetCursor"
+        | "GetDefinition"
+        | "GetDesc"
+        | "GetIndexOf"
+        | "GetMass"
+        | "GetMaterial"
+        | "GetMaterialCount"
+        | "GetName"
+        | "GetObjectBlitMode"
+        | "GetPlayerByIndex"
+        | "GetPlrExtraData"
+        | "GetRDir"
+        | "GetScoreboardData"
+        | "GetScoreboardString"
+        | "GetSkyColor"
+        | "GetTexture"
+        | "GetUnusedOverlayID"
+        | "GetXDir"
+        | "GetYDir"
+        | "GrabContents"
+        | "GrabObjectInfo"
+        | "GreaterThan"
+        | "Inc"
+        | "IncinerateLandscape"
+        | "InitScenarioPlayer"
+        | "Kill"
+        | "LaunchEarthquake"
+        | "LessThan"
+        | "LoadScenarioSection"
+        | "MakeCrewMember"
+        | "Max"
+        | "Min"
+        | "Mod"
+        | "ModulateColor"
+        | "Mul"
+        | "Music"
+        | "ObjectDistance"
+        | "Pow"
+        | "Punch"
+        | "RemoveObject"
+        | "RemoveVertex"
+        | "ResetPhysical"
+        | "ResortObject"
+        | "ResortObjects"
+        | "SEqual"
+        | "SelectMenuItem"
+        | "Sell"
+        | "Set"
+        | "SetActionData"
+        | "SetAlive"
+        | "SetCategory"
+        | "SetColor"
+        | "SetColorDw"
+        | "SetComDir"
+        | "SetContactDensity"
+        | "SetController"
+        | "SetCrewEnabled"
+        | "SetDir"
+        | "SetEntrance"
+        | "SetFoW"
+        | "SetKiller"
+        | "SetLeaguePerformance"
+        | "SetLeagueProgressData"
+        | "SetLength"
+        | "SetMass"
+        | "SetMenuDecoration"
+        | "SetMenuTextProgress"
+        | "SetObjectLayer"
+        | "SetOwner"
+        | "SetPhase"
+        | "SetPlayList"
+        | "SetPlrShowCommand"
+        | "SetPlrShowControl"
+        | "SetPlrShowControlPos"
+        | "SetPlrView"
+        | "SetPreSend"
+        | "SetR"
+        | "SetSkyAdjust"
+        | "SetVar"
+        | "SetViewCursor"
+        | "SetVisibility"
+        | "SetWealth"
+        | "SortScoreboard"
+        | "TestMessageBoard"
+        | "WildcardMatch" => 2,
+        "AddMsgBoardCmd"
+        | "AddVertex"
+        | "BlastObject"
+        | "BoundBy"
+        | "Contents"
+        | "Cos"
+        | "CreateContents"
+        | "DoHomebaseMaterial"
+        | "DoHomebaseProduction"
+        | "DoMagicEnergy"
+        | "EffectVar"
+        | "FindConstructionSite"
+        | "FinishCommand"
+        | "FxFireTimer"
+        | "GetCommand"
+        | "GetContact"
+        | "GetEffectCount"
+        | "GetMaterialColor"
+        | "GetPlrControlName"
+        | "GetPlrMagic"
+        | "GetPortrait"
+        | "GetScenarioVal"
+        | "GetVertex"
+        | "GetVertexContact"
+        | "GetWind"
+        | "Hostile"
+        | "Inside"
+        | "LocateFunc"
+        | "OnMessageBoardAnswer"
+        | "PushParticles"
+        | "SetActionTargets"
+        | "SetClrModulation"
+        | "SetComponent"
+        | "SetCrewExtraData"
+        | "SetCrewStatus"
+        | "SetLandscapePixel"
+        | "SetMenuSize"
+        | "SetNextMission"
+        | "SetObjectBlitMode"
+        | "SetObjectOrder"
+        | "SetObjectStatus"
+        | "SetPlayerTeam"
+        | "SetPlrExtraData"
+        | "SetPlrKnowledge"
+        | "SetPlrMagic"
+        | "SetPlrViewRange"
+        | "SetRDir"
+        | "SetTextureIndex"
+        | "SetViewOffset"
+        | "SetXDir"
+        | "SetYDir"
+        | "ShakeFree"
+        | "ShakeObjects"
+        | "Sin"
+        | "SoundLevel" => 3,
+        "AdjustWalkRotation"
+        | "BlastFree"
+        | "CallMessageBoard"
+        | "CreateObject"
+        | "DigFree"
+        | "Distance"
+        | "DoDamage"
+        | "ExtractMaterialAmount"
+        | "FxFireStop"
+        | "GetActMapVal"
+        | "GetComponent"
+        | "GetDefCoreVal"
+        | "GetHomebaseMaterial"
+        | "GetHomebaseProduction"
+        | "GetMaterialVal"
+        | "GetObjectInfoCoreVal"
+        | "GetObjectVal"
+        | "GetPath"
+        | "GetPhysical"
+        | "GetPlayerInfoCoreVal"
+        | "GetPlayerVal"
+        | "GetPlrKnowledge"
+        | "GetValue"
+        | "PathFree"
+        | "PathFree2"
+        | "RemoveEffect"
+        | "SelectCrew"
+        | "SetAction"
+        | "SetGamma"
+        | "SetPhysical"
+        | "SetPosition"
+        | "SetScoreboardData"
+        | "SetSkyColor"
+        | "ShiftContents"
+        | "Smoke"
+        | "Sub"
+        | "Sum"
+        | "TrainPhysical" => 4,
+        "Angle"
+        | "BlastObjects"
+        | "Buy"
+        | "CastObjects"
+        | "CastPXS"
+        | "ChangeEffect"
+        | "CreateScriptPlayer"
+        | "DigFreeRect"
+        | "DoEnergy"
+        | "DrawDefMap"
+        | "DrawMap"
+        | "Fling"
+        | "FreeRect"
+        | "GetEffect"
+        | "InsertMaterial"
+        | "ObjectSetAction"
+        | "Or"
+        | "SetBridgeActionData"
+        | "SetCursor"
+        | "SetHostility"
+        | "SetName"
+        | "SetPicture"
+        | "SetPortrait"
+        | "SetShape"
+        | "SetTransferZone"
+        | "SetVertex" => 5,
+        "DrawVolcanoBranch" | "FxFireStart" | "PlaceVegetation" | "SetSkyFade" => 6,
+        "CreateConstruction"
+        | "Exit"
+        | "LaunchLightning"
+        | "PlayerObjectCommand"
+        | "SetSkyParallax"
+        | "SetSolidMask" => 7,
+        "CheckEffect"
+        | "SetCommand"
+        | "SetGraphics"
+        | "SetObjDrawTransform"
+        | "SimFlight"
+        | "Sound" => 8,
+        "CreateMenu" | "CreateParticle" | "DrawMatChunks" => 9,
+        "AddCommand"
+        | "AddEffect"
+        | "AddMenuItem"
+        | "AddMessage"
+        | "AppendCommand"
+        | "Call"
+        | "CastBackParticles"
+        | "CastParticles"
+        | "CustomMessage"
+        | "DebugLog"
+        | "DefinitionCall"
+        | "DrawMaterialQuad"
+        | "EffectCall"
+        | "FindObject"
+        | "FindObject2"
+        | "FindObjectOwner"
+        | "FindObjects"
+        | "Find_AtPoint"
+        | "Find_Category"
+        | "Find_ID"
+        | "Format"
+        | "GameCall"
+        | "GameCallEx"
+        | "GetObjHeight"
+        | "GetObjWidth"
+        | "Log"
+        | "Message"
+        | "ObjectCall"
+        | "ObjectCount"
+        | "ObjectCount2"
+        | "PlayerMessage"
+        | "PlrMessage"
+        | "PrivateCall"
+        | "ProtectedCall"
+        | "SetMaterialColor"
+        | "SetObjDrawTransform2" => 10,
+        _ => panic!("missing C++ native arity for {name}"),
+    }
+}
+
+impl CppNativeHostRegistrar<'_> {
+    fn register_host_function<F>(&mut self, name: &'static str, func: F)
+    where
+        F: Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync + 'static,
+    {
+        self.engine
+            .register_host_function_with_arity(name, cpp_native_parameter_count(name), func);
+    }
+
+    fn register_host_reference_function<F, I>(
+        &mut self,
+        name: &'static str,
+        reference_parameters: I,
+        func: F,
+    ) where
+        F: Fn(&[lc_script::HostCallArg]) -> Result<Value, RuntimeError> + Send + Sync + 'static,
+        I: IntoIterator<Item = usize>,
+    {
+        self.engine.register_host_reference_function_with_arity(
+            name,
+            cpp_native_parameter_count(name),
+            reference_parameters,
+            func,
+        );
+    }
+}
+
 pub fn register_host_functions(script: &mut ScriptEngine) {
     // Every script host knows the engine constant table
     // (RegisterGlobalConstant, C4Script.cpp:6580-6581).
     crate::script_constants::register_script_constants(script);
+    let mut registrar = CppNativeHostRegistrar { engine: script };
+    let script = &mut registrar;
     script.register_host_function("AddEffect", add_effect);
     script.register_host_function("CheckEffect", check_effect);
     script.register_host_function("ChangeEffect", change_effect);
@@ -14969,12 +15467,14 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Contained", contained);
     script.register_host_function("GetCategory", get_category);
     script.register_host_function("SetCategory", set_category);
-    script.register_method_dispatch(std::sync::Arc::new(arrow_method_dispatch));
-    script.register_method_reference_dispatch(std::rc::Rc::new(
+    script.engine.register_method_dispatch(std::sync::Arc::new(arrow_method_dispatch));
+    script.engine.register_method_reference_dispatch(std::rc::Rc::new(
         arrow_method_reference_dispatch,
     ));
-    script.register_global_call_context_hook(std::sync::Arc::new(global_call_context_hook));
-    script.register_local_cell_hook(std::rc::Rc::new(foreign_local_cell_hook));
+    script.engine
+        .register_global_call_context_hook(std::sync::Arc::new(global_call_context_hook));
+    script.engine
+        .register_local_cell_hook(std::rc::Rc::new(foreign_local_cell_hook));
     script.register_host_function("NoContainer", no_container);
     script.register_host_function("AnyContainer", any_container);
     script.register_host_function("ActIdle", act_idle);
@@ -18954,6 +19454,12 @@ fn add_effect_constructor(
         vars.push(value_to_effect_var(value));
         idx += 1;
     }
+    // The native frame always carries all four rVal slots. EffectState uses
+    // a variable-length vector, so collapse only its indistinguishable nil
+    // suffix while retaining interior nils and every evaluated expression.
+    while matches!(vars.last(), Some(EffectVarValue::Nil)) {
+        vars.pop();
+    }
 
     // C4Effect::AssignCallbackFunctions immediately resolves an object
     // command target and overwrites idCommandTarget with that object's
@@ -19407,13 +19913,10 @@ fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
-    // FnEffectVar reads/writes the effect list of the GIVEN object
-    // (C4Script.cpp:5576-5586) — a foreign target re-dispatches into its
-    // own scope like the other effect host functions (Fx callbacks write
-    // vars on the effect carrier, not on their command-target context).
-    if let Some(result) = redirect_foreign_effect_target("EffectVar", args) {
-        return result;
-    }
+    // FnEffectVar reads/writes the effect list of the GIVEN object directly
+    // (C4Script.cpp:5576-5586). A foreign carrier therefore uses its
+    // materialized object scope; no script redispatch may intercept this
+    // already-resolved native.
     // Unfilled iVarIndex is nil -> 0 (FnEffectVar, C4Script.cpp:5577).
     let var_index = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) if *value >= 0 => *value as usize,
@@ -19447,6 +19950,18 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_mut() else {
             return Ok(None);
         };
+
+        // The VM's retained-lvalue bridge supplies a private fourth write
+        // value after resolving the public three-parameter native. Re-entering
+        // a foreign object's ScriptEngine would correctly normalize a public
+        // call back to three slots and therefore discard that private value.
+        // C++ FnEffectVar writes pObj->pEffects directly, so materialize the
+        // foreign scope and perform the same direct write here.
+        if let EffectScope::Object(Some(target)) = scope {
+            if !context.ensure_object_scope(target) {
+                return Ok(None);
+            }
+        }
 
         match context.scope_mut(scope) {
             Ok(stack) => Ok(stack.effect_var(effect_number, var_index, new_value.clone())),
@@ -33948,6 +34463,15 @@ enum VelocityComponent {
     Y,
 }
 
+/// Native call frames include every declared slot, so the Rust shorthand
+/// parsers below may leave only VM-padded nil values after consuming their
+/// compact argument form. Those slots are indistinguishable from omitted
+/// parameters in C++ and must not be diagnosed as surplus arguments.
+fn has_remaining_native_argument(args: &[Value], start: usize) -> bool {
+    args.get(start..)
+        .is_some_and(|tail| tail.iter().any(|value| !matches!(value, Value::Nil)))
+}
+
 impl VelocityComponent {
     fn get_function_name(&self) -> &'static str {
         match self {
@@ -34008,7 +34532,7 @@ fn get_velocity_component(
         index += 1;
     }
 
-    if index < args.len() {
+    if has_remaining_native_argument(args, index) {
         return Err(RuntimeError::new(format!(
             "{}: additional arguments are not supported",
             component.get_function_name()
@@ -34082,7 +34606,7 @@ fn set_velocity_component(
         index += 1;
     }
 
-    if index < args.len() {
+    if has_remaining_native_argument(args, index) {
         return Err(RuntimeError::new(format!(
             "{}: additional arguments are not supported",
             component.set_function_name()
@@ -34251,7 +34775,7 @@ fn set_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         index += 1;
     }
 
-    if index < args.len() {
+    if has_remaining_native_argument(args, index) {
         return Err(RuntimeError::new(
             "SetRDir: additional arguments are not supported",
         ));
@@ -34308,7 +34832,7 @@ fn get_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         index += 1;
     }
 
-    if index < args.len() {
+    if has_remaining_native_argument(args, index) {
         return Err(RuntimeError::new(
             "GetRDir: additional arguments are not supported",
         ));
@@ -49446,6 +49970,22 @@ mod tests {
             .map(|name| name.to_string())
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn every_production_host_registration_carries_its_cpp_arity() {
+        let mut engine = lc_script::Engine::new();
+        register_host_functions(&mut engine);
+
+        let names = engine.host_function_names();
+        assert_eq!(names.len(), 456);
+        for name in names {
+            assert_eq!(
+                engine.host_function_parameter_count(&name),
+                Some(cpp_native_parameter_count(&name)),
+                "native arity drift for {name}"
+            );
+        }
     }
 
     #[test]
