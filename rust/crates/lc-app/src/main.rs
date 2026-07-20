@@ -3197,6 +3197,17 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
             b'X' => Some(VirtualKeyCode::X),
             b'Y' => Some(VirtualKeyCode::Y),
             b'Z' => Some(VirtualKeyCode::Z),
+            b'-' => Some(VirtualKeyCode::Minus),
+            b'=' => Some(VirtualKeyCode::Equals),
+            b'[' => Some(VirtualKeyCode::LBracket),
+            b']' => Some(VirtualKeyCode::RBracket),
+            b'\\' => Some(VirtualKeyCode::Backslash),
+            b';' => Some(VirtualKeyCode::Semicolon),
+            b'\'' => Some(VirtualKeyCode::Apostrophe),
+            b'`' => Some(VirtualKeyCode::Grave),
+            b',' => Some(VirtualKeyCode::Comma),
+            b'.' => Some(VirtualKeyCode::Period),
+            b'/' => Some(VirtualKeyCode::Slash),
             _ => None,
         };
     }
@@ -3217,6 +3228,126 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
     }
 
     let lower_name = name.to_ascii_lowercase();
+    let named_key = if name.eq_ignore_ascii_case("Return") {
+        Some(VirtualKeyCode::Return)
+    } else if name.eq_ignore_ascii_case("Escape") {
+        Some(VirtualKeyCode::Escape)
+    } else if name.eq_ignore_ascii_case("Backspace") {
+        Some(VirtualKeyCode::Back)
+    } else if name.eq_ignore_ascii_case("Tab") {
+        Some(VirtualKeyCode::Tab)
+    } else if name.eq_ignore_ascii_case("Space") {
+        Some(VirtualKeyCode::Space)
+    } else if name.eq_ignore_ascii_case("Pause") {
+        Some(VirtualKeyCode::Pause)
+    } else if name.eq_ignore_ascii_case("Insert") {
+        Some(VirtualKeyCode::Insert)
+    } else if name.eq_ignore_ascii_case("Home") {
+        Some(VirtualKeyCode::Home)
+    } else if name.eq_ignore_ascii_case("PageUp") {
+        Some(VirtualKeyCode::PageUp)
+    } else if name.eq_ignore_ascii_case("Delete") {
+        Some(VirtualKeyCode::Delete)
+    } else if name.eq_ignore_ascii_case("End") {
+        Some(VirtualKeyCode::End)
+    } else if name.eq_ignore_ascii_case("PageDown") {
+        Some(VirtualKeyCode::PageDown)
+    } else if name.eq_ignore_ascii_case("Minus") {
+        Some(VirtualKeyCode::Minus)
+    } else if name.eq_ignore_ascii_case("Equals") {
+        Some(VirtualKeyCode::Equals)
+    } else if name.eq_ignore_ascii_case("Left Bracket") {
+        Some(VirtualKeyCode::LBracket)
+    } else if name.eq_ignore_ascii_case("Right Bracket") {
+        Some(VirtualKeyCode::RBracket)
+    } else if name.eq_ignore_ascii_case("Backslash") {
+        Some(VirtualKeyCode::Backslash)
+    } else if name.eq_ignore_ascii_case("Semicolon") {
+        Some(VirtualKeyCode::Semicolon)
+    } else if name.eq_ignore_ascii_case("Apostrophe") {
+        Some(VirtualKeyCode::Apostrophe)
+    } else if name.eq_ignore_ascii_case("Grave") {
+        Some(VirtualKeyCode::Grave)
+    } else if name.eq_ignore_ascii_case("Comma") {
+        Some(VirtualKeyCode::Comma)
+    } else if name.eq_ignore_ascii_case("Period") {
+        Some(VirtualKeyCode::Period)
+    } else if name.eq_ignore_ascii_case("Slash") {
+        Some(VirtualKeyCode::Slash)
+    } else if name.eq_ignore_ascii_case("CapsLock") {
+        Some(VirtualKeyCode::Capital)
+    } else if name.eq_ignore_ascii_case("PrintScreen") {
+        Some(VirtualKeyCode::Snapshot)
+    } else if name.eq_ignore_ascii_case("ScrollLock") {
+        Some(VirtualKeyCode::Scroll)
+    } else if name.eq_ignore_ascii_case("NumLockClear") {
+        Some(VirtualKeyCode::Numlock)
+    } else if name.eq_ignore_ascii_case("Application") {
+        Some(VirtualKeyCode::Apps)
+    } else if name.eq_ignore_ascii_case("Keypad /")
+        || name.eq_ignore_ascii_case("Keypad Divide")
+        || name.eq_ignore_ascii_case("KP_Divide")
+    {
+        Some(VirtualKeyCode::NumpadDivide)
+    } else if name.eq_ignore_ascii_case("Keypad *")
+        || name.eq_ignore_ascii_case("Keypad Multiply")
+        || name.eq_ignore_ascii_case("KP_Multiply")
+    {
+        Some(VirtualKeyCode::NumpadMultiply)
+    } else if name.eq_ignore_ascii_case("Keypad -")
+        || name.eq_ignore_ascii_case("Keypad Minus")
+        || name.eq_ignore_ascii_case("KP_Subtract")
+    {
+        Some(VirtualKeyCode::NumpadSubtract)
+    } else if name.eq_ignore_ascii_case("Keypad +")
+        || name.eq_ignore_ascii_case("Keypad Plus")
+        || name.eq_ignore_ascii_case("KP_Add")
+    {
+        Some(VirtualKeyCode::NumpadAdd)
+    } else if name.eq_ignore_ascii_case("Keypad Enter")
+        || name.eq_ignore_ascii_case("KP_Enter")
+    {
+        Some(VirtualKeyCode::NumpadEnter)
+    } else if name.eq_ignore_ascii_case("Keypad .")
+        || name.eq_ignore_ascii_case("Keypad Period")
+        || name.eq_ignore_ascii_case("KP_Decimal")
+    {
+        Some(VirtualKeyCode::NumpadDecimal)
+    } else if name.eq_ignore_ascii_case("Keypad =")
+        || name.eq_ignore_ascii_case("Keypad Equals")
+        || name.eq_ignore_ascii_case("KP_Equal")
+    {
+        Some(VirtualKeyCode::NumpadEquals)
+    } else if name.eq_ignore_ascii_case("Keypad ,")
+        || name.eq_ignore_ascii_case("Keypad Comma")
+        || name.eq_ignore_ascii_case("KP_Separator")
+    {
+        Some(VirtualKeyCode::NumpadComma)
+    } else if let Some(number) = lower_name
+        .strip_prefix("keypad ")
+        .or_else(|| lower_name.strip_prefix("kp_"))
+        .and_then(|number| number.parse::<u8>().ok())
+    {
+        match number {
+            0 => Some(VirtualKeyCode::Numpad0),
+            1 => Some(VirtualKeyCode::Numpad1),
+            2 => Some(VirtualKeyCode::Numpad2),
+            3 => Some(VirtualKeyCode::Numpad3),
+            4 => Some(VirtualKeyCode::Numpad4),
+            5 => Some(VirtualKeyCode::Numpad5),
+            6 => Some(VirtualKeyCode::Numpad6),
+            7 => Some(VirtualKeyCode::Numpad7),
+            8 => Some(VirtualKeyCode::Numpad8),
+            9 => Some(VirtualKeyCode::Numpad9),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if named_key.is_some() {
+        return named_key;
+    }
+
     if let Some(number) = lower_name
         .strip_prefix('f')
         .filter(|number| !number.starts_with('0'))
@@ -3258,9 +3389,73 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
     None
 }
 
-fn parse_runtime_key_chord(raw: &str, action: &str) -> Result<Option<RuntimeKeyChord>> {
+fn runtime_raw_physical_key(raw: u32) -> RuntimePhysicalKey {
+    if raw & 0x00ff_0000 == 0x0042_0000 {
+        return RuntimePhysicalKey::Gamepad {
+            slot: ((raw >> 8) & 0xff) as u8,
+            button: (raw & 0xff) as u8,
+        };
+    }
+    input::decode_platform_key_code(raw as i32)
+        .map(RuntimePhysicalKey::Keyboard)
+        .unwrap_or(RuntimePhysicalKey::Raw(raw))
+}
+
+fn parse_runtime_physical_key(raw: &str) -> RuntimePhysicalKey {
+    if raw.eq_ignore_ascii_case("None") {
+        return RuntimePhysicalKey::Disabled;
+    }
+    if let Some(hex) = raw.strip_prefix("\\x") {
+        let digits = hex.bytes().take_while(u8::is_ascii_hexdigit).collect::<Vec<_>>();
+        if !digits.is_empty() {
+            if let Ok(digits) = std::str::from_utf8(&digits) {
+                if let Ok(value) = u32::from_str_radix(digits, 16) {
+                    return runtime_raw_physical_key(value);
+                }
+            }
+        }
+    }
+    // Preserve the source oracle's `sscanf("Joy%dLeft") == 1` behavior:
+    // after the integer assignment, a suffix mismatch still reports one
+    // conversion, so every canonical `Joy` + integer spelling becomes Left.
+    if let Some(rest) = raw.strip_prefix("Joy") {
+        let number = rest
+            .strip_prefix('-')
+            .map(|rest| (true, rest))
+            .unwrap_or((false, rest));
+        let digits = number.1.bytes().take_while(u8::is_ascii_digit).collect::<Vec<_>>();
+        if !digits.is_empty() {
+            if let Ok(digits) = std::str::from_utf8(&digits) {
+                if let Ok(mut gamepad) = digits.parse::<i32>() {
+                    if number.0 {
+                        gamepad = -gamepad;
+                    }
+                    return RuntimePhysicalKey::Gamepad {
+                        slot: gamepad.wrapping_sub(1) as u8,
+                        button: 1,
+                    };
+                }
+            }
+        }
+    }
+    if let Some(key) = runtime_key_name(raw) {
+        return RuntimePhysicalKey::Keyboard(key);
+    }
+    let identifier_len = raw
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-'))
+        .count();
+    runtime_key_name(&raw[..identifier_len])
+        .map(RuntimePhysicalKey::Keyboard)
+        // SDL_GetScancodeFromName returns SDL_SCANCODE_UNKNOWN/KEY_Default
+        // for an unknown spelling. A nonempty custom vector containing zero
+        // disables the named registration rather than falling back.
+        .unwrap_or(RuntimePhysicalKey::Disabled)
+}
+
+fn parse_runtime_key_chord(raw: &str) -> Result<Option<RuntimeKeyChord>> {
     let raw = raw.trim();
-    if raw.is_empty() || raw.eq_ignore_ascii_case("None") {
+    if raw.is_empty() {
         return Ok(None);
     }
     let mut sections = raw.split('+').map(str::trim).peekable();
@@ -3275,76 +3470,120 @@ fn parse_runtime_key_chord(raw: &str, action: &str) -> Result<Option<RuntimeKeyC
             } else if section.eq_ignore_ascii_case("Shift") {
                 ModifiersState::SHIFT
             } else {
-                anyhow::bail!("undefined {action} key modifier `{section}`");
+                anyhow::bail!("undefined key shift state `{section}`");
             };
             modifiers |= modifier;
         } else {
-            key = runtime_key_name(section);
-            anyhow::ensure!(
-                key.is_some(),
-                "unsupported {action} keyboard key `{section}`"
-            );
+            key = Some(parse_runtime_physical_key(section));
         }
     }
-    Ok(key.map(|key| RuntimeKeyChord { key, modifiers }))
+    Ok(key.map(|physical| RuntimeKeyChord { physical, modifiers }))
+}
+
+const RUNTIME_REGISTERED_GLOBAL_KEYS: &[&str] = &[
+    "MusicToggle", "SoundToggle", "Screenshot", "ScreenshotEx", "ToggleChat",
+    "ToggleShowHelp", "NetClientListDlgToggle", "MsgBoardScrollUp", "MsgBoardScrollDown",
+    "DbgModeToggle", "DbgShowVtxToggle", "DbgShowActionToggle", "DbgShowSolidMaskToggle",
+    "GameSpeedUp", "GameSlowDown", "FullscreenMenuLeft", "FullscreenMenuRight",
+    "FullscreenMenuUp", "FullscreenMenuDown", "FullscreenMenuOK", "FullscreenMenuCancel",
+    "FullscreenMenuOpen", "FilmNextPlayer", "ChatOpen", "ChatOpen2Allies", "ChatOpen2Say",
+    "FreeViewScrollLeft", "FreeViewScrollRight", "FreeViewScrollUp", "FreeViewScrollDown",
+    "ScoreboardToggle", "GameAbort", "FullscreenPauseToggle", "ConsolePauseToggle",
+    "EditCursorModeToggle", "ToolsDlgGradeUp", "ToolsDlgGradeDown", "ToolsDlgPopMaterial",
+    "ToolsDlgPopTextures", "ToolsDlgIFTToggle", "ToolsDlgToolToggle", "EditCursorDelete",
+    "ChartToggle", "NetObsNextPlayer", "CtrlRateDown", "CtrlRateUp", "NetAllowJoinToggle",
+    "NetStatsToggle",
+];
+
+fn runtime_player_key_slot(name: &str) -> Option<(usize, ControlBindingId)> {
+    let rest = name.strip_prefix("Kbd")?;
+    let (set, control) = rest.split_once("Key")?;
+    let set_number = set.parse::<usize>().ok()?;
+    let control_number = control.parse::<usize>().ok()?;
+    if set != set_number.to_string() || control != control_number.to_string() {
+        return None;
+    }
+    let set = set_number.checked_sub(1)?;
+    let control = control_number.checked_sub(1)?;
+    (set < KeyboardBindings::SET_COUNT)
+        .then(|| ControlBindingId::ALL.get(control).copied())
+        .flatten()
+        .map(|control| (set, control))
+}
+
+fn runtime_registered_key_name(name: &str) -> bool {
+    RUNTIME_REGISTERED_GLOBAL_KEYS.contains(&name)
+        || runtime_player_key_slot(name).is_some()
+        || (1..=4).any(|gamepad| {
+            (1..=12).any(|control| name == format!("Joy{gamepad}Btn{control}"))
+        })
 }
 
 fn parse_runtime_key_config(bytes: &[u8]) -> Result<RuntimeKeyConfig> {
     let text = String::from_utf8_lossy(bytes);
+    let mut found_keys = false;
     let mut in_keys = false;
-    let mut net_observer_seen = false;
-    let mut chart_toggle_seen = false;
-    let mut config = RuntimeKeyConfig::default();
-    for (line_index, raw_line) in text.lines().enumerate() {
-        let line = raw_line.trim().trim_start_matches('\u{feff}');
+    let mut raw_overrides = BTreeMap::new();
+    for raw_line in text.lines() {
+        let line = raw_line.trim_start_matches('\u{feff}').trim_start();
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
             continue;
         }
-        if line.starts_with('[') && line.ends_with(']') {
-            in_keys = &line[1..line.len() - 1] == "Keys";
+        let structural = line.split_once(';').map_or(line, |(head, _)| head).trim_end();
+        if structural.starts_with('[') && structural.ends_with(']') {
+            if in_keys {
+                break;
+            }
+            if &structural[1..structural.len() - 1] == "Keys" && !found_keys {
+                found_keys = true;
+                in_keys = true;
+            }
             continue;
         }
         if !in_keys {
             continue;
         }
         let Some((name, value)) = line.split_once('=') else {
-            anyhow::bail!(
-                "invalid Extra.c4g/KeyConfig.txt line {} in [Keys]",
-                line_index + 1
-            );
+            tracing::warn!(line, "ignoring malformed custom key configuration line");
+            continue;
         };
-        match name.trim() {
-            "NetObsNextPlayer" => {
-                if net_observer_seen {
-                    // StdCompilerINIRead retains the first value for a duplicate
-                    // entry, including duplicates in a later [Keys] section.
-                    continue;
+        let name = name.trim();
+        raw_overrides
+            .entry(name.to_string())
+            .or_insert_with(|| value.trim().to_string());
+    }
+
+    let mut config = RuntimeKeyConfig::default();
+    for (name, value) in raw_overrides {
+        if !runtime_registered_key_name(&name) {
+            tracing::warn!(key_name = name, "unexpected custom key configuration value");
+            continue;
+        }
+        let mut codes = Vec::new();
+        let mut corrupt = None;
+        for raw_code in value.split(',') {
+            match parse_runtime_key_chord(raw_code) {
+                Ok(Some(code)) => codes.push(code),
+                Ok(None) => break,
+                Err(error) => {
+                    corrupt = Some(error);
+                    break;
                 }
-                net_observer_seen = true;
-                config.net_observer_next_player = value
-                    .split(',')
-                    .map(|raw| parse_runtime_key_chord(raw, "NetObsNextPlayer"))
-                    .collect::<Result<Vec<_>>>()?
-                    .into_iter()
-                    .flatten()
-                    .collect();
             }
-            "ChartToggle" => {
-                if chart_toggle_seen {
-                    continue;
-                }
-                chart_toggle_seen = true;
-                config.chart_toggle = value
-                    .split(',')
-                    .map(|raw| parse_runtime_key_chord(raw, "ChartToggle"))
-                    .collect::<Result<Vec<_>>>()?
-                    .into_iter()
-                    .flatten()
-                    .collect();
+        }
+        // An empty custom vector falls back to the registration defaults.
+        if !codes.is_empty() {
+            if name == "NetObsNextPlayer" {
+                config.net_observer_next_player = codes.clone();
             }
-            _ => anyhow::bail!(
-                "Extra.c4g/KeyConfig.txt custom global-key remapping is not represented"
-            ),
+            if name == "ChartToggle" {
+                config.chart_toggle = codes.clone();
+            }
+            config.overrides.insert(name.clone(), codes);
+        }
+        if let Some(error) = corrupt {
+            tracing::warn!(key_name = name, %error, "failed to compile custom key configuration");
+            break;
         }
     }
     Ok(config)
@@ -3354,12 +3593,29 @@ fn load_runtime_global_key_config(paths: Option<&AppPaths>) -> Result<RuntimeKey
     let Some(paths) = paths else {
         return Ok(RuntimeKeyConfig::default());
     };
-    let Some(extra_path) = mapped_classic_extra_group_path(paths)? else {
-        return Ok(RuntimeKeyConfig::default());
+    let extra_path = match mapped_classic_extra_group_path(paths) {
+        Ok(Some(path)) => path,
+        Ok(None) => return Ok(RuntimeKeyConfig::default()),
+        Err(error) => {
+            tracing::warn!(%error, "could not locate classic Extra.c4g custom key configuration");
+            return Ok(RuntimeKeyConfig::default());
+        }
     };
-    let extra = Group::open(&extra_path)
-        .with_context(|| format!("opening classic Extra.c4g at {}", extra_path.display()))?;
-    let key_config = extra.entries()?.into_iter().find(|entry| {
+    let extra = match Group::open(&extra_path) {
+        Ok(extra) => extra,
+        Err(error) => {
+            tracing::warn!(path = %extra_path.display(), %error, "could not open classic Extra.c4g custom key configuration");
+            return Ok(RuntimeKeyConfig::default());
+        }
+    };
+    let entries = match extra.entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(path = %extra_path.display(), %error, "could not enumerate classic Extra.c4g custom key configuration");
+            return Ok(RuntimeKeyConfig::default());
+        }
+    };
+    let key_config = entries.into_iter().find(|entry| {
         entry.relative_path.components().count() == 1
             && entry
                 .relative_path
@@ -3370,9 +3626,13 @@ fn load_runtime_global_key_config(paths: Option<&AppPaths>) -> Result<RuntimeKey
     let Some(key_config) = key_config else {
         return Ok(RuntimeKeyConfig::default());
     };
-    let bytes = extra
-        .read_file(&key_config.relative_path)
-        .with_context(|| format!("reading {}/KeyConfig.txt", extra_path.display()))?;
+    let bytes = match extra.read_file(&key_config.relative_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(path = %extra_path.display(), %error, "could not read classic Extra.c4g custom key configuration");
+            return Ok(RuntimeKeyConfig::default());
+        }
+    };
     parse_runtime_key_config(&bytes)
 }
 
@@ -13494,23 +13754,100 @@ struct RuntimeFlashMessage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimePhysicalKey {
+    Keyboard(VirtualKeyCode),
+    Gamepad { slot: u8, button: u8 },
+    Raw(u32),
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RuntimeKeyChord {
-    key: VirtualKeyCode,
+    physical: RuntimePhysicalKey,
     modifiers: ModifiersState,
 }
 
 impl RuntimeKeyChord {
+    fn keyboard(key: VirtualKeyCode, modifiers: ModifiersState) -> Self {
+        Self { physical: RuntimePhysicalKey::Keyboard(key), modifiers }
+    }
+
     fn matches(self, key: VirtualKeyCode, modifiers: ModifiersState) -> bool {
         let c4_modifiers =
             modifiers & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        self.key == key && self.modifiers == c4_modifiers
+        if self.modifiers != c4_modifiers {
+            return false;
+        }
+        match self.physical {
+            RuntimePhysicalKey::Keyboard(configured) => configured == key,
+            RuntimePhysicalKey::Raw(configured) => input::encode_virtual_key_code(key)
+                .is_some_and(|raw| raw as u32 == configured),
+            RuntimePhysicalKey::Gamepad { .. } | RuntimePhysicalKey::Disabled => false,
+        }
+    }
+
+    fn matches_gamepad_button(self, slot: u8, button: u8) -> bool {
+        if !self.modifiers.is_empty() {
+            return false;
+        }
+        match self.physical {
+            RuntimePhysicalKey::Gamepad {
+                slot: configured_slot,
+                button: configured_button,
+            } => configured_slot == slot
+                && (configured_button == 10 + button
+                    || configured_button == 0xff
+                    || (configured_button == 0xfc && button < 4)
+                    || (configured_button == 0xfb && button >= 4)
+                    || (configured_button == 0xfe && button % 2 == 0)
+                    || (configured_button == 0xfd && button % 2 == 1)),
+            RuntimePhysicalKey::Keyboard(_)
+            | RuntimePhysicalKey::Raw(_)
+            | RuntimePhysicalKey::Disabled => false,
+        }
+    }
+
+    fn matches_gamepad_direction(self, slot: u8, direction: ControlButton) -> bool {
+        if !self.modifiers.is_empty() {
+            return false;
+        }
+        let button = match direction {
+            ControlButton::Left => 1,
+            ControlButton::Up => 2,
+            ControlButton::Right => 3,
+            ControlButton::Down => 4,
+        };
+        matches!(
+            self.physical,
+            RuntimePhysicalKey::Gamepad {
+                slot: configured_slot,
+                button: configured_button,
+            } if configured_slot == slot && configured_button == button
+        )
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RuntimeKeyConfig {
+    overrides: BTreeMap<String, Vec<RuntimeKeyChord>>,
     net_observer_next_player: Vec<RuntimeKeyChord>,
     chart_toggle: Vec<RuntimeKeyChord>,
+}
+
+impl RuntimeKeyConfig {
+    fn override_for(&self, name: &str) -> Option<&[RuntimeKeyChord]> {
+        self.overrides.get(name).map(Vec::as_slice)
+    }
+
+    fn keyboard_override_matches(
+        &self,
+        name: &str,
+        key: VirtualKeyCode,
+        modifiers: ModifiersState,
+    ) -> Option<bool> {
+        self.override_for(name)
+            .map(|codes| codes.iter().any(|code| code.matches(key, modifiers)))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13518,6 +13855,16 @@ enum RuntimeGlobalKeyOutcome {
     Unhandled,
     Handled,
     DownstreamWithoutEngineDispatch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeCustomGamepadAction {
+    Chat(RunningChatMode),
+    Scoreboard,
+    Abort,
+    Chart,
+    Menu(ControlCommand),
+    MenuOpen,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29236,9 +29583,138 @@ impl GameApp {
             .map_err(|detail| anyhow!(detail.clone()))
     }
 
-    /// Extra.c4g/KeyConfig.txt can replace any process-global binding. This
-    /// cache models NetObsNextPlayer and ChartToggle; every other represented
-    /// override still rejects keyboard edges before any UI or control mutation.
+    fn runtime_keyboard_binding_matches(
+        &self,
+        name: &str,
+        key: VirtualKeyCode,
+        default_matches: bool,
+    ) -> bool {
+        self.runtime_key_config()
+            .ok()
+            .and_then(|config| {
+                config.keyboard_override_matches(name, key, self.keyboard_modifiers)
+            })
+            .unwrap_or(default_matches)
+    }
+
+    fn runtime_control_candidates_for_keyboard(
+        &self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Vec<(usize, Option<ControlEvent>)> {
+        let config = self.runtime_key_config().ok();
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let mut candidates = Vec::new();
+        for control_set in 0..KeyboardBindings::SET_COUNT {
+            for (control_index, id) in ControlBindingId::ALL.into_iter().enumerate() {
+                let name = format!("Kbd{}Key{}", control_set + 1, control_index + 1);
+                let matches = config
+                    .and_then(|config| config.override_for(&name))
+                    .map(|codes| codes.iter().any(|code| code.matches(key, modifiers)))
+                    .unwrap_or_else(|| {
+                        modifiers.is_empty()
+                            && self.bindings.key_for_set(control_set, id) == Some(key)
+                    });
+                if matches {
+                    if let Some(candidate) =
+                        KeyboardBindings::control_candidate_for_set(control_set, id, state)
+                    {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+        candidates
+    }
+
+    fn runtime_control_candidates_for_gamepad_button(
+        &self,
+        slot: u8,
+        button: u8,
+        state: ElementState,
+    ) -> Vec<(usize, Option<ControlEvent>)> {
+        let mut candidates = Vec::new();
+        let Some(config) = self.runtime_key_config().ok() else {
+            return candidates;
+        };
+        for control_set in 0..KeyboardBindings::SET_COUNT {
+            for (control_index, id) in ControlBindingId::ALL.into_iter().enumerate() {
+                let name = format!("Kbd{}Key{}", control_set + 1, control_index + 1);
+                let matches = config.override_for(&name).is_some_and(|codes| {
+                    codes.iter().any(|code| code.matches_gamepad_button(slot, button))
+                });
+                if matches {
+                    if let Some(candidate) =
+                        KeyboardBindings::control_candidate_for_set(control_set, id, state)
+                    {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+        candidates
+    }
+
+    fn runtime_control_candidates_for_gamepad_direction(
+        &self,
+        slot: u8,
+        direction: ControlButton,
+        state: ElementState,
+    ) -> Vec<(usize, Option<ControlEvent>)> {
+        let mut candidates = Vec::new();
+        let Some(config) = self.runtime_key_config().ok() else {
+            return candidates;
+        };
+        for control_set in 0..KeyboardBindings::SET_COUNT {
+            for (control_index, id) in ControlBindingId::ALL.into_iter().enumerate() {
+                let name = format!("Kbd{}Key{}", control_set + 1, control_index + 1);
+                let matches = config.override_for(&name).is_some_and(|codes| {
+                    codes.iter().any(|code| code.matches_gamepad_direction(slot, direction))
+                });
+                if matches {
+                    if let Some(candidate) =
+                        KeyboardBindings::control_candidate_for_set(control_set, id, state)
+                    {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+        candidates
+    }
+
+    fn runtime_gamepad_button_override_matches(
+        &self,
+        name: &str,
+        slot: u8,
+        button: u8,
+    ) -> bool {
+        self.runtime_key_config()
+            .ok()
+            .and_then(|config| config.override_for(name))
+            .is_some_and(|codes| {
+                codes.iter().any(|code| code.matches_gamepad_button(slot, button))
+            })
+    }
+
+    fn runtime_gamepad_direction_override_matches(
+        &self,
+        name: &str,
+        slot: u8,
+        direction: ControlButton,
+    ) -> bool {
+        self.runtime_key_config()
+            .ok()
+            .and_then(|config| config.override_for(name))
+            .is_some_and(|codes| {
+                codes.iter().any(|code| code.matches_gamepad_direction(slot, direction))
+            })
+    }
+
+    /// Keep resource/group ownership failures ahead of keyboard mutation.
+    /// Individual unknown or malformed entries are warning-only like
+    /// `CompileFromBuf_LogWarn` and therefore never reach this boundary.
     fn guard_runtime_key_dispatch(&self, key: VirtualKeyCode) -> Result<(), EngineError> {
         self.runtime_key_config().map(|_| ()).map_err(|error| {
             let boundary = match key {
@@ -29390,21 +29866,28 @@ impl GameApp {
             })
     }
 
+    fn local_player_key_binding_owner_in_scope(&self, key: VirtualKeyCode) -> Option<i32> {
+        if self.game_over_dialog.is_some()
+            || (self.runtime_gui_has_keyboard_focus() && !self.network_chart_elevated)
+            || self.runtime_top_default_dialog_is_exclusive()
+        {
+            return None;
+        }
+        self.runtime_control_candidates_for_keyboard(key, ElementState::Pressed)
+            .into_iter()
+            .find_map(|(control_set, _)| {
+                i32::try_from(control_set)
+                    .ok()
+                    .and_then(|control_set| self.local_controls.owner_for_set(control_set))
+                    .filter(|owner| {
+                        self.snapshot.hud.local_players.contains(owner)
+                            && self.engine.player(*owner).is_some()
+                    })
+            })
+    }
+
     fn local_player_key_binding_in_scope(&self, key: VirtualKeyCode) -> bool {
-        self.game_over_dialog.is_none()
-            && (!self.runtime_gui_has_keyboard_focus() || self.network_chart_elevated)
-            && !self.runtime_top_default_dialog_is_exclusive()
-            && self
-                .bindings
-                .control_candidates_for_key(key, ElementState::Pressed)
-                .any(|(control_set, _)| {
-                    i32::try_from(control_set)
-                        .ok()
-                        .and_then(|control_set| self.local_controls.owner_for_set(control_set))
-                        .filter(|owner| self.snapshot.hud.local_players.contains(owner))
-                        .and_then(|owner| self.engine.player(owner))
-                        .is_some()
-                })
+        self.local_player_key_binding_owner_in_scope(key).is_some()
     }
 
     fn scoreboard_request(&self) -> ScoreboardPresentationRequest {
@@ -30218,14 +30701,35 @@ impl GameApp {
         // Configured player controls are PRIO_PlrControl. They are outside the
         // input scope while an exclusive dialog has keyboard focus. Ordinary
         // dialogs remain non-exclusive on the shared running Screen.
-        self.game_over_dialog.is_none()
-            && (!self.runtime_gui_has_keyboard_focus() || self.network_chart_elevated)
-            && !self.runtime_top_default_dialog_is_exclusive()
-            && self.snapshot.hud.local_players.contains(&self.local_owner)
-            && self.engine.player(self.local_owner).is_some()
-            && ControlBindingId::ALL
-                .iter()
-                .any(|binding| self.bindings.key_for(*binding) == Some(VirtualKeyCode::Tab))
+        self.local_player_key_binding_in_scope(VirtualKeyCode::Tab)
+    }
+
+    fn custom_scoreboard_key_has_higher_priority_route(&self, key: VirtualKeyCode) -> bool {
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if self.game_over_dialog_is_active() || self.definition_selector.is_some() {
+            return true;
+        }
+        if self.context_menu.is_some() {
+            return true;
+        }
+        if self.running_chat_active() && !modifiers.contains(ModifiersState::ALT) {
+            return true;
+        }
+        if self.game_option_input_dialog.is_some()
+            && modifiers.is_empty()
+            && map_key_code(key).is_some()
+        {
+            return true;
+        }
+        if self.active_message_dialog_index().is_some()
+            && self.top_message_dialog_is_exclusive_vote()
+            && (modifiers.is_empty()
+                || (key == VirtualKeyCode::Tab && modifiers == ModifiersState::SHIFT))
+        {
+            return true;
+        }
+        false
     }
 
     /// Process-global F3/Ctrl+F3 remain registered while C4Game is not
@@ -30296,6 +30800,23 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
+        self.handle_scoreboard_key_inner(key, state, false)
+    }
+
+    fn handle_scoreboard_key_after_higher_priority(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        self.handle_scoreboard_key_inner(key, state, true)
+    }
+
+    fn handle_scoreboard_key_inner(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+        higher_priority_checked: bool,
+    ) -> Result<bool, EngineError> {
         if self.context_menu.is_none()
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
             && self.message_dialogs.is_empty()
@@ -30303,7 +30824,27 @@ impl GameApp {
         {
             return Ok(false);
         }
-        if !matches!(self.mode, AppMode::Running) || key != VirtualKeyCode::Tab {
+        if !matches!(self.mode, AppMode::Running) {
+            return Ok(false);
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let custom_binding = self
+            .runtime_key_config()
+            .ok()
+            .is_some_and(|config| config.override_for("ScoreboardToggle").is_some());
+        if !self.runtime_keyboard_binding_matches(
+            "ScoreboardToggle",
+            key,
+            key == VirtualKeyCode::Tab,
+        ) {
+            return Ok(false);
+        }
+        if custom_binding
+            && !higher_priority_checked
+            && self.custom_scoreboard_key_has_higher_priority_route(key)
+            && !self.local_player_key_binding_in_scope(key)
+        {
             return Ok(false);
         }
         let raw_repeated = match state {
@@ -30314,13 +30855,11 @@ impl GameApp {
                 // may still emit its release callback; a newly exclusive
                 // dialog suppresses that callback without a stuck latch.
                 self.scoreboard_tab_raw_pressed = false;
-                self.pressed_engine_keys.remove(&VirtualKeyCode::Tab);
+                self.pressed_engine_keys.remove(&key);
                 false
             }
         };
-        let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        if !c4_modifiers.is_empty() {
+        if !c4_modifiers.is_empty() && !custom_binding {
             if self.game_over_dialog.is_some()
                 || self.context_menu.is_some()
                 || (self.runtime_client_list.is_some()
@@ -30341,7 +30880,7 @@ impl GameApp {
             // scope is absent here even when the physical Tab was rebound.
             return Ok(true);
         }
-        if self.local_tab_player_control_in_scope() {
+        if self.local_player_key_binding_in_scope(key) {
             // Run this directly: the app's context-menu release barrier is an
             // input-safety latch, but C++ PRIO_PlrControl precedes PRIO_Context
             // and must still receive a rebound Tab on both edges.
@@ -31429,15 +31968,12 @@ impl GameApp {
         Ok(captured)
     }
 
-    /// Handles the currently modeled unmodified runtime-global keys.
+    /// Handles modeled runtime-global keys through the per-game named
+    /// registry, including exact Alt/Ctrl/Shift custom chords.
     /// `C4KeyCodeEx` masks Alt/Ctrl/Shift but has no platform Logo bit, so
     /// Logo alone retains the bare-key route. F1/F3 first give an exact
     /// custom local-player binding its higher `PRIO_PlrControl` refusal.
     ///
-    /// Rust's `KeyboardBindings` currently models only the player-control
-    /// slots from `Config.Controls`; it has no `C4KeyConfig` equivalent for
-    /// custom player/global remaps. Until that priority-aware registry is
-    /// ported, this guard can represent only the modeled physical defaults.
     fn handle_runtime_global_key(
         &mut self,
         key: VirtualKeyCode,
@@ -31446,11 +31982,26 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(RuntimeGlobalKeyOutcome::Unhandled);
         }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let help_binding = self.runtime_keyboard_binding_matches(
+            "ToggleShowHelp",
+            key,
+            key == VirtualKeyCode::F1 && c4_modifiers.is_empty(),
+        );
+        let music_binding = self.runtime_keyboard_binding_matches(
+            "MusicToggle",
+            key,
+            key == VirtualKeyCode::F3 && c4_modifiers.is_empty(),
+        );
         // X11/SDL update C4KeyboardInput::PressedKeys from the raw physical
         // edge before scope/priority dispatch. Keep the latch even when the
         // first down belongs to a global or modified route, so a later
         // in-scope AutoStop player binding sees the held-key repeat.
-        let raw_repeated = matches!(key, VirtualKeyCode::F1 | VirtualKeyCode::F3)
+        let raw_repeated = (help_binding
+            || music_binding
+            || (!c4_modifiers.is_empty()
+                && matches!(key, VirtualKeyCode::F1 | VirtualKeyCode::F3)))
             && match state {
                 ElementState::Pressed => !self.pressed_engine_keys.insert(key),
                 ElementState::Released => {
@@ -31458,13 +32009,19 @@ impl GameApp {
                     false
                 }
             };
-        let c4_modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        if key == VirtualKeyCode::F9
-            && (c4_modifiers.is_empty() || c4_modifiers == ModifiersState::CTRL)
-        {
+        let screenshot = self.runtime_keyboard_binding_matches(
+            "Screenshot",
+            key,
+            key == VirtualKeyCode::F9 && c4_modifiers.is_empty(),
+        );
+        let screenshot_ex = self.runtime_keyboard_binding_matches(
+            "ScreenshotEx",
+            key,
+            key == VirtualKeyCode::F9 && c4_modifiers == ModifiersState::CTRL,
+        );
+        if screenshot || screenshot_ex {
             if state == ElementState::Pressed {
-                let kind = if c4_modifiers == ModifiersState::CTRL {
+                let kind = if screenshot_ex {
                     ScreenshotKind::FullLandscape
                 } else {
                     ScreenshotKind::PresentedFrame
@@ -31477,36 +32034,60 @@ impl GameApp {
             }
             return Ok(RuntimeGlobalKeyOutcome::Handled);
         }
-        if !self.runtime_top_default_dialog_is_exclusive()
-            && c4_modifiers == ModifiersState::SHIFT
-            && matches!(key, VirtualKeyCode::Up | VirtualKeyCode::Down)
-        {
+        let scroll_up = self.runtime_keyboard_binding_matches(
+            "MsgBoardScrollUp",
+            key,
+            key == VirtualKeyCode::Up && c4_modifiers == ModifiersState::SHIFT,
+        );
+        let scroll_down = self.runtime_keyboard_binding_matches(
+            "MsgBoardScrollDown",
+            key,
+            key == VirtualKeyCode::Down && c4_modifiers == ModifiersState::SHIFT,
+        );
+        if !self.runtime_top_default_dialog_is_exclusive() && (scroll_up || scroll_down) {
             if state == ElementState::Pressed {
-                self.scroll_message_board(key == VirtualKeyCode::Up);
+                self.scroll_message_board(scroll_up);
             }
             return Ok(RuntimeGlobalKeyOutcome::Handled);
         }
-        let unavailable_flash_producer = match key {
-            VirtualKeyCode::F5 if c4_modifiers == ModifiersState::CTRL => {
-                Some(RuntimeFlashProducerBoundary::DebugMode)
-            }
-            VirtualKeyCode::F6 if c4_modifiers == ModifiersState::CTRL => {
-                Some(RuntimeFlashProducerBoundary::DebugVertices)
-            }
-            VirtualKeyCode::F7 if c4_modifiers == ModifiersState::CTRL => {
-                Some(RuntimeFlashProducerBoundary::DebugActionCycle)
-            }
-            VirtualKeyCode::F8 if c4_modifiers == ModifiersState::CTRL => {
-                Some(RuntimeFlashProducerBoundary::DebugSolidMask)
-            }
-            VirtualKeyCode::NumpadAdd if c4_modifiers == ModifiersState::SHIFT => {
-                Some(RuntimeFlashProducerBoundary::SpeedUp)
-            }
-            VirtualKeyCode::NumpadSubtract if c4_modifiers == ModifiersState::SHIFT => {
-                Some(RuntimeFlashProducerBoundary::SpeedDown)
-            }
-            _ => None,
-        };
+        let unavailable_flash_producer = [
+            (
+                "DbgModeToggle",
+                RuntimeFlashProducerBoundary::DebugMode,
+                key == VirtualKeyCode::F5 && c4_modifiers == ModifiersState::CTRL,
+            ),
+            (
+                "DbgShowVtxToggle",
+                RuntimeFlashProducerBoundary::DebugVertices,
+                key == VirtualKeyCode::F6 && c4_modifiers == ModifiersState::CTRL,
+            ),
+            (
+                "DbgShowActionToggle",
+                RuntimeFlashProducerBoundary::DebugActionCycle,
+                key == VirtualKeyCode::F7 && c4_modifiers == ModifiersState::CTRL,
+            ),
+            (
+                "DbgShowSolidMaskToggle",
+                RuntimeFlashProducerBoundary::DebugSolidMask,
+                key == VirtualKeyCode::F8 && c4_modifiers == ModifiersState::CTRL,
+            ),
+            (
+                "GameSpeedUp",
+                RuntimeFlashProducerBoundary::SpeedUp,
+                key == VirtualKeyCode::NumpadAdd && c4_modifiers == ModifiersState::SHIFT,
+            ),
+            (
+                "GameSlowDown",
+                RuntimeFlashProducerBoundary::SpeedDown,
+                key == VirtualKeyCode::NumpadSubtract
+                    && c4_modifiers == ModifiersState::SHIFT,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(name, producer, default_matches)| {
+            self.runtime_keyboard_binding_matches(name, key, default_matches)
+                .then_some(producer)
+        });
         if let Some(producer) = unavailable_flash_producer {
             if state == ElementState::Pressed {
                 return Err(classic_parity_engine_error(report_classic_parity_boundary(
@@ -31518,35 +32099,25 @@ impl GameApp {
             // controls after the refused Down action.
             return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
         }
-        if !c4_modifiers.is_empty() {
-            if key == VirtualKeyCode::F3 && c4_modifiers == ModifiersState::CTRL {
-                if state == ElementState::Pressed {
-                    self.toggle_sound_option()?;
-                    return Ok(RuntimeGlobalKeyOutcome::Handled);
-                }
-                return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
+        let sound_binding = self.runtime_keyboard_binding_matches(
+            "SoundToggle",
+            key,
+            key == VirtualKeyCode::F3 && c4_modifiers == ModifiersState::CTRL,
+        );
+        if sound_binding {
+            if state == ElementState::Pressed {
+                self.toggle_sound_option()?;
+                return Ok(RuntimeGlobalKeyOutcome::Handled);
             }
-            // Config.Controls stores the physical player key without a
-            // modifier mask. C4KeyCodeEx therefore lets other modified
-            // function keys continue to lower-priority UI handlers, but they
-            // must not subsequently be interpreted by Rust's modifier-blind
-            // player bindings.
-            if matches!(key, VirtualKeyCode::F1 | VirtualKeyCode::F3) {
-                return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
-            }
-            return Ok(RuntimeGlobalKeyOutcome::Unhandled);
+            return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
         }
-        if key == VirtualKeyCode::F1 {
-            if self.local_player_key_binding_in_scope(key) {
+        if help_binding {
+            if let Some(owner) = self.local_player_key_binding_owner_in_scope(key) {
                 let control_style = self
                     .engine
-                    .player(self.local_owner)
+                    .player(owner)
                     .is_some_and(|player| player.control_style());
                 if state == ElementState::Released && !control_style {
-                    // LocalControlKeyUp rejects classic-control releases
-                    // before LocalPlayerControl. Clear only the raw physical
-                    // latch, then let lower priorities run without dispatching
-                    // a second player event or hiding the startup hint.
                     self.pressed_engine_keys.remove(&key);
                     return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
                 }
@@ -31554,15 +32125,9 @@ impl GameApp {
                 return Ok(RuntimeGlobalKeyOutcome::Handled);
             }
             if state == ElementState::Released {
-                // C4KeyCB has no Up callback. Let lower-priority bindings see
-                // the release instead of inventing a help-owned key latch.
                 return Ok(RuntimeGlobalKeyOutcome::Unhandled);
             }
             if self.runtime_help_visible {
-                // ToggleShowHelp can always turn an existing overlay off.
-                // In particular, Display:UpperBoard may have changed while
-                // help was visible; hiding must remain the recovery path even
-                // when the new geometry cannot yet be drawn faithfully.
                 self.runtime_help_visible = false;
                 return Ok(RuntimeGlobalKeyOutcome::Handled);
             }
@@ -31576,11 +32141,11 @@ impl GameApp {
             self.runtime_help_visible = true;
             return Ok(RuntimeGlobalKeyOutcome::Handled);
         }
-        if key == VirtualKeyCode::F3 {
-            if self.local_player_key_binding_in_scope(key) {
+        if music_binding {
+            if let Some(owner) = self.local_player_key_binding_owner_in_scope(key) {
                 let control_style = self
                     .engine
-                    .player(self.local_owner)
+                    .player(owner)
                     .is_some_and(|player| player.control_style());
                 if state == ElementState::Released && !control_style {
                     self.pressed_engine_keys.remove(&key);
@@ -31595,25 +32160,42 @@ impl GameApp {
             self.toggle_runtime_music_playback()?;
             return Ok(RuntimeGlobalKeyOutcome::Handled);
         }
-        match key {
-            VirtualKeyCode::F4 => {
-                if state == ElementState::Released {
-                    return Ok(RuntimeGlobalKeyOutcome::Handled);
-                }
-                self.toggle_runtime_client_list()?;
+        let client_list_binding = self.runtime_keyboard_binding_matches(
+            "NetClientListDlgToggle",
+            key,
+            key == VirtualKeyCode::F4 && c4_modifiers.is_empty(),
+        );
+        let pause_binding = self.runtime_keyboard_binding_matches(
+            "FullscreenPauseToggle",
+            key,
+            key == VirtualKeyCode::Pause && c4_modifiers.is_empty(),
+        );
+        if client_list_binding {
+            if state == ElementState::Released {
                 return Ok(RuntimeGlobalKeyOutcome::Handled);
             }
-            VirtualKeyCode::Pause => {
-                // C4Game::TogglePause is disabled while C4GameOverDlg is
-                // shown. Consume both edges before the dialog key handler.
-                if state == ElementState::Released || self.game_over_dialog.is_some() {
-                    return Ok(RuntimeGlobalKeyOutcome::Handled);
-                }
-                self.toggle_runtime_pause();
-                Ok(RuntimeGlobalKeyOutcome::Handled)
-            }
-            _ => Ok(RuntimeGlobalKeyOutcome::Unhandled),
+            self.toggle_runtime_client_list()?;
+            return Ok(RuntimeGlobalKeyOutcome::Handled);
         }
+        if pause_binding {
+            if state == ElementState::Released || self.game_over_dialog.is_some() {
+                return Ok(RuntimeGlobalKeyOutcome::Handled);
+            }
+            self.toggle_runtime_pause();
+            return Ok(RuntimeGlobalKeyOutcome::Handled);
+        }
+        if !c4_modifiers.is_empty() {
+            // Config.Controls stores the physical player key without a
+            // modifier mask. C4KeyCodeEx therefore lets other modified
+            // function keys continue to lower-priority UI handlers, but they
+            // must not subsequently be interpreted by Rust's modifier-blind
+            // player bindings.
+            if matches!(key, VirtualKeyCode::F1 | VirtualKeyCode::F3) {
+                return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
+            }
+            return Ok(RuntimeGlobalKeyOutcome::Unhandled);
+        }
+        Ok(RuntimeGlobalKeyOutcome::Unhandled)
     }
 
     /// Runs the default-unbound PRIO_Base ChartToggle after the modeled
@@ -31700,18 +32282,82 @@ impl GameApp {
                         && context_menu_hotkey(key)
                             .is_some_and(|hotkey| dialog.chat_dialog_has_hotkey(hotkey)))
             });
+        let chat_open_binding = !self.running_chat_active()
+            && self.runtime_running_chat_open_mode(key).is_some();
+        let toggle_chat_binding = self.runtime_keyboard_binding_matches(
+            "ToggleChat",
+            key,
+            key == VirtualKeyCode::C && c4_modifiers == ModifiersState::ALT,
+        );
+        let film_next_player_binding = self.engine.film_replay()
+            && self.viewport_cycle_scope_available()
+            && self.runtime_keyboard_binding_matches(
+                "FilmNextPlayer",
+                key,
+                key == VirtualKeyCode::Right && c4_modifiers.is_empty(),
+            );
+        let free_view_scroll_binding = !self.engine.film_replay()
+            && self.primary_physical_viewport_is_no_owner()
+            && self.viewport_cycle_scope_available()
+            && [
+                ("FreeViewScrollLeft", VirtualKeyCode::Left),
+                ("FreeViewScrollRight", VirtualKeyCode::Right),
+                ("FreeViewScrollUp", VirtualKeyCode::Up),
+                ("FreeViewScrollDown", VirtualKeyCode::Down),
+            ]
+            .into_iter()
+            .any(|(name, default_key)| {
+                self.runtime_keyboard_binding_matches(
+                    name,
+                    key,
+                    key == default_key && c4_modifiers.is_empty(),
+                )
+            });
+        let ownerless_fullscreen = self.primary_physical_viewport_is_no_owner();
+        let fullscreen_menu_binding = self.game_over_dialog.is_none()
+            && self.running_chat_controller().is_none()
+            && if self.ingame_menu_belongs_to(OWNER_NONE)
+                || (ownerless_fullscreen && self.ingame_menu.is_some())
+            {
+                [
+                    ("FullscreenMenuLeft", VirtualKeyCode::Left),
+                    ("FullscreenMenuRight", VirtualKeyCode::Right),
+                    ("FullscreenMenuUp", VirtualKeyCode::Up),
+                    ("FullscreenMenuDown", VirtualKeyCode::Down),
+                    ("FullscreenMenuOK", VirtualKeyCode::Space),
+                    ("FullscreenMenuOK", VirtualKeyCode::Return),
+                    ("FullscreenMenuCancel", VirtualKeyCode::Escape),
+                ]
+                .into_iter()
+                .any(|(name, default_key)| {
+                    self.runtime_keyboard_binding_matches(
+                        name,
+                        key,
+                        key == default_key && c4_modifiers.is_empty(),
+                    )
+                })
+            } else {
+                ownerless_fullscreen
+                    && self.runtime_keyboard_binding_matches(
+                        "FullscreenMenuOpen",
+                        key,
+                        key == VirtualKeyCode::Space && c4_modifiers.is_empty(),
+                    )
+            };
+        let game_abort_binding = self.runtime_keyboard_binding_matches(
+            "GameAbort",
+            key,
+            key == VirtualKeyCode::Escape && c4_modifiers.is_empty(),
+        );
         // These built-ins are registered before ChartToggle at PRIO_Base (or
         // are represented by a stronger callback) and therefore win an exact
         // duplicate custom chord.
-        if (c4_modifiers.is_empty()
-            && key == VirtualKeyCode::F2)
-            || (c4_modifiers == ModifiersState::ALT && key == VirtualKeyCode::C)
-            || (unmodified_arrow
-                && self.viewport_cycle_scope_available()
-                && self.viewport_scope_excludes_player_control())
-            || (unmodified_arrow
-                && self.primary_physical_viewport_is_no_owner()
-                && self.ingame_menu.is_some())
+        if chat_open_binding
+            || toggle_chat_binding
+            || film_next_player_binding
+            || free_view_scroll_binding
+            || fullscreen_menu_binding
+            || game_abort_binding
             || (dialog_callbacks_active
                 && self.running_chat_active()
                 && (c4_modifiers == ModifiersState::CTRL
@@ -31737,9 +32383,7 @@ impl GameApp {
                 .iter()
                 .any(|binding| binding.matches(key, self.keyboard_modifiers))
         });
-        if !matches
-            || (c4_modifiers.is_empty() && self.local_player_key_binding_in_scope(key))
-        {
+        if !matches || self.local_player_key_binding_in_scope(key) {
             return false;
         }
         if state == ElementState::Pressed {
@@ -31758,7 +32402,11 @@ impl GameApp {
         }
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        if key != VirtualKeyCode::C || c4_modifiers != ModifiersState::ALT {
+        if !self.runtime_keyboard_binding_matches(
+            "ToggleChat",
+            key,
+            key == VirtualKeyCode::C && c4_modifiers == ModifiersState::ALT,
+        ) {
             return Ok(false);
         }
         if state == ElementState::Pressed {
@@ -31769,6 +32417,189 @@ impl GameApp {
         // exact modified release after higher-priority GUI owners without
         // clearing a modifier-blind player control also bound to physical C.
         Ok(true)
+    }
+
+    fn handle_runtime_fullscreen_menu_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running)
+            || self.game_over_dialog.is_some()
+            || self.running_chat_controller().is_some()
+        {
+            return Ok(false);
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if self.ingame_menu_belongs_to(OWNER_NONE) {
+            let command = [
+                ("FullscreenMenuLeft", ControlCommand::MenuLeft,
+                    key == VirtualKeyCode::Left && modifiers.is_empty()),
+                ("FullscreenMenuRight", ControlCommand::MenuRight,
+                    key == VirtualKeyCode::Right && modifiers.is_empty()),
+                ("FullscreenMenuUp", ControlCommand::MenuUp,
+                    key == VirtualKeyCode::Up && modifiers.is_empty()),
+                ("FullscreenMenuDown", ControlCommand::MenuDown,
+                    key == VirtualKeyCode::Down && modifiers.is_empty()),
+                ("FullscreenMenuOK", ControlCommand::MenuEnter,
+                    matches!(key, VirtualKeyCode::Space | VirtualKeyCode::Return)
+                        && modifiers.is_empty()),
+                ("FullscreenMenuCancel", ControlCommand::MenuClose,
+                    key == VirtualKeyCode::Escape && modifiers.is_empty()),
+            ]
+            .into_iter()
+            .find_map(|(name, command, default_matches)| {
+                self.runtime_keyboard_binding_matches(name, key, default_matches)
+                    .then_some(command)
+            });
+            if let Some(command) = command {
+                if state == ElementState::Pressed {
+                    self.handle_menu_command_failsafe(
+                        OWNER_NONE,
+                        command,
+                        CommandKind::Press,
+                    )?;
+                }
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        if !self.primary_physical_viewport_is_no_owner()
+            || !self.runtime_keyboard_binding_matches(
+                "FullscreenMenuOpen",
+                key,
+                key == VirtualKeyCode::Space && modifiers.is_empty(),
+            )
+        {
+            return Ok(false);
+        }
+        if state == ElementState::Pressed {
+            self.ingame_menu.replace(
+                OWNER_NONE,
+                IngameMenuState::main_menu(&self.main_menu_conditions_for(OWNER_NONE)),
+            );
+        }
+        Ok(true)
+    }
+
+    fn runtime_custom_gamepad_button_action(
+        &self,
+        slot: u8,
+        button: u8,
+    ) -> Option<RuntimeCustomGamepadAction> {
+        self.runtime_custom_gamepad_action(|name| {
+            self.runtime_gamepad_button_override_matches(name, slot, button)
+        })
+    }
+
+    fn runtime_custom_gamepad_direction_action(
+        &self,
+        slot: u8,
+        direction: ControlButton,
+    ) -> Option<RuntimeCustomGamepadAction> {
+        self.runtime_custom_gamepad_action(|name| {
+            self.runtime_gamepad_direction_override_matches(name, slot, direction)
+        })
+    }
+
+    fn runtime_custom_gamepad_action(
+        &self,
+        matches: impl Fn(&str) -> bool,
+    ) -> Option<RuntimeCustomGamepadAction> {
+        if !matches!(self.mode, AppMode::Running)
+            || self.running_chat_active()
+            || self.game_over_dialog.is_some()
+            || self.external_irc_dialog_visible
+        {
+            return None;
+        }
+        if self.ingame_menu_belongs_to(OWNER_NONE) {
+            for (name, command) in [
+                ("FullscreenMenuLeft", ControlCommand::MenuLeft),
+                ("FullscreenMenuRight", ControlCommand::MenuRight),
+                ("FullscreenMenuUp", ControlCommand::MenuUp),
+                ("FullscreenMenuDown", ControlCommand::MenuDown),
+                ("FullscreenMenuOK", ControlCommand::MenuEnter),
+                ("FullscreenMenuCancel", ControlCommand::MenuClose),
+            ] {
+                if matches(name) {
+                    return Some(RuntimeCustomGamepadAction::Menu(command));
+                }
+            }
+        } else if self.primary_physical_viewport_is_no_owner()
+            && matches("FullscreenMenuOpen")
+        {
+            return Some(RuntimeCustomGamepadAction::MenuOpen);
+        }
+        for (name, mode) in [
+            ("ChatOpen", RunningChatMode::All),
+            ("ChatOpen2Allies", RunningChatMode::Allies),
+            ("ChatOpen2Say", RunningChatMode::Say),
+        ] {
+            if matches(name) {
+                return Some(RuntimeCustomGamepadAction::Chat(mode));
+            }
+        }
+        if matches("ScoreboardToggle") {
+            return Some(RuntimeCustomGamepadAction::Scoreboard);
+        }
+        if matches("GameAbort") {
+            return Some(RuntimeCustomGamepadAction::Abort);
+        }
+        matches("ChartToggle").then_some(RuntimeCustomGamepadAction::Chart)
+    }
+
+    fn execute_runtime_custom_gamepad_action(
+        &mut self,
+        action: RuntimeCustomGamepadAction,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        if state == ElementState::Released {
+            return Ok(());
+        }
+        match action {
+            RuntimeCustomGamepadAction::Chat(mode) => {
+                if !self.running_chat_active() {
+                    self.start_running_chat(mode);
+                }
+            }
+            RuntimeCustomGamepadAction::Scoreboard => {
+                self.reconcile_initial_scoreboard();
+                self.sync_scoreboard_presentation();
+                if !self.close_scoreboard_dialog()
+                    && self.snapshot.hud.scoreboard.can_be_shown()
+                    && !self.scoreboard_opening_blocked_by_game_over()
+                {
+                    self.open_scoreboard_dialog(self.scoreboard_request());
+                }
+            }
+            RuntimeCustomGamepadAction::Abort => {
+                if self.game_over_dialog.is_none() {
+                    let dialog_owner = if self.primary_physical_viewport_is_no_owner() {
+                        OWNER_NONE
+                    } else {
+                        self.local_owner
+                    };
+                    self.show_abort_dialog(dialog_owner);
+                }
+            }
+            RuntimeCustomGamepadAction::Chart => self.toggle_network_chart(),
+            RuntimeCustomGamepadAction::Menu(command) => {
+                self.handle_menu_command_failsafe(
+                    OWNER_NONE,
+                    command,
+                    CommandKind::Press,
+                )?;
+            }
+            RuntimeCustomGamepadAction::MenuOpen => {
+                self.ingame_menu.replace(
+                    OWNER_NONE,
+                    IngameMenuState::main_menu(&self.main_menu_conditions_for(OWNER_NONE)),
+                );
+            }
+        }
+        Ok(())
     }
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
@@ -31802,12 +32633,11 @@ impl GameApp {
         if self.running_chat_keyboard_active() && self.context_menu.is_none() {
             let modifiers = self.keyboard_modifiers
                 & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-            let replacement_mode = match modifiers {
-                ModifiersState::SHIFT => Some(RunningChatMode::Allies),
-                ModifiersState::ALT => Some(RunningChatMode::Say),
-                _ => None,
-            };
-            if key == VirtualKeyCode::Return && replacement_mode.is_some() {
+            let replacement_mode = self
+                .runtime_running_chat_open_mode(key)
+                .filter(|mode| !matches!(mode, RunningChatMode::All))
+                .filter(|_| !self.running_chat_key_has_higher_priority_route(key));
+            if replacement_mode.is_some() {
                 if state == ElementState::Pressed
                     && self.running_chat_text().is_some_and(str::is_empty)
                 {
@@ -31921,25 +32751,20 @@ impl GameApp {
                 // A popup makes its parent Edit and chat callbacks inactive,
                 // but the lower-priority global chat-open bindings still run.
                 // Reopening is only permitted while the existing input is
-                // empty; Return without a modifier belongs to the popup.
-                let replacement_mode = match (key, modifiers) {
-                    (VirtualKeyCode::F2, modifiers) if modifiers.is_empty() => {
-                        Some(RunningChatMode::All)
-                    }
-                    (VirtualKeyCode::Return, ModifiersState::SHIFT) => {
-                        Some(RunningChatMode::Allies)
-                    }
-                    (VirtualKeyCode::Return, ModifiersState::ALT) => {
-                        Some(RunningChatMode::Say)
-                    }
-                    _ => None,
-                };
+                // empty; custom lists replace the three default chords here
+                // just as they do without the popup.
+                let replacement_mode = self.runtime_running_chat_open_mode(key);
                 if state == ElementState::Pressed
                     && replacement_mode.is_some()
                     && self.running_chat_text().is_some_and(str::is_empty)
                 {
                     self.close_running_chat()?;
                     self.start_running_chat(replacement_mode.expect("checked replacement mode"));
+                }
+                if replacement_mode.is_none()
+                    && self.handle_scoreboard_key_after_higher_priority(key, state)?
+                {
+                    return Ok(());
                 }
                 return Ok(());
             }
@@ -32204,7 +33029,12 @@ impl GameApp {
             return Ok(());
         }
         if context_menu_was_open {
-            self.handle_running_chat_open_key(key, state);
+            if self.handle_running_chat_open_key(key, state) {
+                return Ok(());
+            }
+            if self.handle_scoreboard_key_after_higher_priority(key, state)? {
+                return Ok(());
+            }
             return Ok(());
         }
         if self.handle_game_option_input_dialog_key(key, state)? {
@@ -32271,17 +33101,19 @@ impl GameApp {
                 }
                 (VirtualKeyCode::Tab, modifiers, ElementState::Released)
                     if modifiers.is_empty() || modifiers == ModifiersState::SHIFT => {}
-                (VirtualKeyCode::Return | VirtualKeyCode::F2, modifiers, event_state)
+                (VirtualKeyCode::F2, modifiers, event_state) if modifiers.is_empty() => {
+                    self.handle_running_chat_open_key(key, event_state);
+                }
+                (VirtualKeyCode::Return, modifiers, event_state)
                     if modifiers.is_empty()
-                    && (key == VirtualKeyCode::F2
-                        || self.game_over_dialog.as_ref().is_some_and(|dialog| {
+                        && self.game_over_dialog.as_ref().is_some_and(|dialog| {
                             !matches!(
                                 dialog.focused(),
                                 Some(GameOverFocus::Close | GameOverFocus::Button(_))
                             )
-                        })) =>
+                        }) =>
                 {
-                    self.handle_running_chat_open_key(key, event_state);
+                    self.handle_game_over_enter_chat(event_state);
                 }
                 (VirtualKeyCode::Return, ModifiersState::SHIFT, event_state) => {
                     self.handle_running_chat_open_key(key, event_state);
@@ -32299,7 +33131,7 @@ impl GameApp {
                         .unwrap_or_default();
                     self.play_game_over_sound_events(sounds);
                     if !captured {
-                        self.handle_running_chat_open_key(key, state);
+                        self.handle_game_over_enter_chat(state);
                     }
                 }
                 (VirtualKeyCode::Return, modifiers, ElementState::Released)
@@ -32360,6 +33192,10 @@ impl GameApp {
                 }
                 _ => {}
             }
+            // Unrecognized dialog keys continue to the lower-priority
+            // Generic chat registrations. This also covers custom physical
+            // chords that are absent from the hard-coded dialog key arms.
+            self.handle_running_chat_open_key(key, state);
             return Ok(());
         }
         if self.handle_runtime_irc_toggle_key(key, state)? {
@@ -32773,10 +33609,22 @@ impl GameApp {
             AppMode::Running => {
                 let c4_modifiers = self.keyboard_modifiers
                     & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-                if key == VirtualKeyCode::Escape
-                    && state == ElementState::Pressed
-                    && c4_modifiers.is_empty()
-                {
+                if self.handle_runtime_fullscreen_menu_key(key, state)? {
+                    return Ok(());
+                }
+                let game_abort = self.runtime_keyboard_binding_matches(
+                    "GameAbort",
+                    key,
+                    key == VirtualKeyCode::Escape && c4_modifiers.is_empty(),
+                );
+                if game_abort {
+                    if self.local_player_key_binding_in_scope(key) {
+                        self.handle_engine_key(key, state)?;
+                        return Ok(());
+                    }
+                    if state == ElementState::Released {
+                        return Ok(());
+                    }
                     if self.object_menu.is_some() {
                         self.close_object_menu();
                     } else if self.ingame_menu_belongs_to(self.local_owner) {
@@ -32919,8 +33767,9 @@ impl GameApp {
         state: ElementState,
         repeated: bool,
     ) -> Result<bool, EngineError> {
+        let candidates = self.runtime_control_candidates_for_keyboard(key, state);
         let routing = self.local_controls.route_keyboard_candidates(
-            self.bindings.control_candidates_for_key(key, state),
+            candidates,
             state,
             repeated,
             |owner| {
@@ -35070,25 +35919,27 @@ impl GameApp {
         }
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        if c4_modifiers.is_empty() {
-            let requested = match key {
-                VirtualKeyCode::Left => Some(Vector2::new(-5, 0)),
-                VirtualKeyCode::Right => Some(Vector2::new(5, 0)),
-                VirtualKeyCode::Up => Some(Vector2::new(0, -5)),
-                VirtualKeyCode::Down => Some(Vector2::new(0, 5)),
-                _ => None,
-            };
-            if let Some(requested) = requested {
-                let applied = self.free_view_scroll_momentum.apply(requested, now);
-                // Native mutates Viewports.front() after checking that a
-                // NO_OWNER-classified viewport exists. The active camera may
-                // not be projected yet, but the built-in callback still owns
-                // this key ahead of a custom NetObsNextPlayer binding.
-                if !self.graphics.scroll_observer_viewport(0, applied) {
-                    self.graphics.queue_primary_observer_scroll(applied);
-                }
-                return true;
+        let requested = [
+            ("FreeViewScrollLeft", Vector2::new(-5, 0), key == VirtualKeyCode::Left && c4_modifiers.is_empty()),
+            ("FreeViewScrollRight", Vector2::new(5, 0), key == VirtualKeyCode::Right && c4_modifiers.is_empty()),
+            ("FreeViewScrollUp", Vector2::new(0, -5), key == VirtualKeyCode::Up && c4_modifiers.is_empty()),
+            ("FreeViewScrollDown", Vector2::new(0, 5), key == VirtualKeyCode::Down && c4_modifiers.is_empty()),
+        ]
+        .into_iter()
+        .find_map(|(name, requested, default_matches)| {
+            self.runtime_keyboard_binding_matches(name, key, default_matches)
+                .then_some(requested)
+        });
+        if let Some(requested) = requested {
+            let applied = self.free_view_scroll_momentum.apply(requested, now);
+            // Native mutates Viewports.front() after checking that a
+            // NO_OWNER-classified viewport exists. The active camera may
+            // not be projected yet, but the built-in callback still owns
+            // this key ahead of a custom NetObsNextPlayer binding.
+            if !self.graphics.scroll_observer_viewport(0, applied) {
+                self.graphics.queue_primary_observer_scroll(applied);
             }
+            return true;
         }
         let binding_matches = self.runtime_key_config().is_ok_and(|config| {
             config
@@ -35114,8 +35965,11 @@ impl GameApp {
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         if !film_replay
-            || key != VirtualKeyCode::Right
-            || !c4_modifiers.is_empty()
+            || !self.runtime_keyboard_binding_matches(
+                "FilmNextPlayer",
+                key,
+                key == VirtualKeyCode::Right && c4_modifiers.is_empty(),
+            )
             || state != ElementState::Pressed
             || !self.viewport_cycle_scope_available()
             || self.physical_viewports.is_empty()
@@ -38513,6 +39367,70 @@ impl GameApp {
         self.submit_running_chat_text(text)
     }
 
+    fn runtime_running_chat_open_mode(&self, key: VirtualKeyCode) -> Option<RunningChatMode> {
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        [
+            (
+                "ChatOpen",
+                RunningChatMode::All,
+                modifiers.is_empty()
+                    && matches!(key, VirtualKeyCode::Return | VirtualKeyCode::F2),
+            ),
+            (
+                "ChatOpen2Allies",
+                RunningChatMode::Allies,
+                key == VirtualKeyCode::Return && modifiers == ModifiersState::SHIFT,
+            ),
+            (
+                "ChatOpen2Say",
+                RunningChatMode::Say,
+                key == VirtualKeyCode::Return && modifiers == ModifiersState::ALT,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(name, mode, default_matches)| {
+            self.runtime_keyboard_binding_matches(name, key, default_matches)
+                .then_some(mode)
+        })
+    }
+
+    fn running_chat_key_has_higher_priority_route(&self, key: VirtualKeyCode) -> bool {
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if modifiers.contains(ModifiersState::CTRL) {
+            return true;
+        }
+        if modifiers.contains(ModifiersState::ALT) {
+            return false;
+        }
+        if key == VirtualKeyCode::Return && modifiers == ModifiersState::SHIFT {
+            return false;
+        }
+        matches!(
+            key,
+            VirtualKeyCode::Escape
+                | VirtualKeyCode::F2
+                | VirtualKeyCode::Return
+                | VirtualKeyCode::NumpadEnter
+                | VirtualKeyCode::Tab
+                | VirtualKeyCode::Up
+                | VirtualKeyCode::Down
+                | VirtualKeyCode::Back
+                | VirtualKeyCode::Delete
+                | VirtualKeyCode::Left
+                | VirtualKeyCode::Right
+                | VirtualKeyCode::Home
+                | VirtualKeyCode::End
+        )
+    }
+
+    fn handle_game_over_enter_chat(&mut self, state: ElementState) {
+        if state == ElementState::Pressed && !self.running_chat_active() {
+            self.start_running_chat(RunningChatMode::All);
+        }
+    }
+
     fn handle_running_chat_open_key(
         &mut self,
         key: VirtualKeyCode,
@@ -38521,18 +39439,10 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) || self.running_chat_active() {
             return false;
         }
-        let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        let mode = match (key, modifiers) {
-            (VirtualKeyCode::Return | VirtualKeyCode::F2, modifiers)
-                if modifiers.is_empty() =>
-            {
-                Some(RunningChatMode::All)
-            }
-            (VirtualKeyCode::Return, ModifiersState::SHIFT) => Some(RunningChatMode::Allies),
-            (VirtualKeyCode::Return, ModifiersState::ALT) => Some(RunningChatMode::Say),
-            _ => None,
-        };
+        let mode = self.runtime_running_chat_open_mode(key);
+        if mode.is_some() && self.local_player_key_binding_in_scope(key) {
+            return false;
+        }
         if let Some(mode) = mode {
             if state == ElementState::Pressed {
                 if self.running_chat.is_some() {
@@ -40912,12 +41822,18 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(());
         }
+        let mut candidates = self.runtime_control_candidates_for_gamepad_button(
+            slot.index(),
+            button.index(),
+            state,
+        );
+        candidates.extend(self.gamepad_bindings.control_candidates_for_button(
+            slot.index(),
+            button.index(),
+            state,
+        ));
         let routing = self.local_controls.route_keyboard_candidates(
-            self.gamepad_bindings.control_candidates_for_button(
-                slot.index(),
-                button.index(),
-                state,
-            ),
+            candidates,
             state,
             false,
             |owner| {
@@ -40932,6 +41848,14 @@ impl GameApp {
         } = routing
         {
             self.dispatch_control_event_for_local_player(owner, event)?;
+        }
+        if !matches!(routing, KeyboardRoutingOutcome::Unhandled) {
+            return Ok(());
+        }
+        if let Some(action) =
+            self.runtime_custom_gamepad_button_action(slot.index(), button.index())
+        {
+            self.execute_runtime_custom_gamepad_action(action, state)?;
         }
         Ok(())
     }
@@ -41196,8 +42120,39 @@ impl GameApp {
                     ElementState::Pressed => ControlEvent::Press(button),
                     ElementState::Released => ControlEvent::Release(button),
                 };
-                if let Some(owner) = self.local_controls.owner_for_set(slot.control_set()) {
+                let mut candidates = self.runtime_control_candidates_for_gamepad_direction(
+                    slot.index(),
+                    button,
+                    state,
+                );
+                if let Ok(control_set) = usize::try_from(slot.control_set()) {
+                    candidates.push((control_set, Some(event)));
+                }
+                let routing = self.local_controls.route_keyboard_candidates(
+                    candidates,
+                    state,
+                    false,
+                    |owner| {
+                        self.engine
+                            .player(owner)
+                            .map(|player| player.control_style())
+                    },
+                );
+                if let KeyboardRoutingOutcome::Consumed {
+                    owner: Some(owner),
+                    event: Some(event),
+                } = routing
+                {
                     self.dispatch_control_event_for_local_player(owner, event)?;
+                }
+                if !matches!(routing, KeyboardRoutingOutcome::Unhandled) {
+                    return Ok(());
+                }
+                if let Some(action) =
+                    self.runtime_custom_gamepad_direction_action(slot.index(), button)
+                {
+                    self.execute_runtime_custom_gamepad_action(action, state)?;
+                    return Ok(());
                 }
             }
             AppMode::Loading => {}
@@ -133230,10 +134185,10 @@ ScenInfoArea=70,5,25,90
         .expect("parse the represented default-unbound chart action");
         assert_eq!(
             parsed.chart_toggle,
-            vec![RuntimeKeyChord {
-                key: VirtualKeyCode::F8,
-                modifiers: ModifiersState::empty(),
-            }],
+            vec![RuntimeKeyChord::keyboard(
+                VirtualKeyCode::F8,
+                ModifiersState::empty(),
+            )],
             "StdCompilerINIRead keeps the first action value"
         );
 
@@ -133312,6 +134267,21 @@ ScenInfoArea=70,5,25,90
             .expect("earlier ChatOpen binding wins duplicate ChartToggle chord");
         assert!(priority.running_chat_active());
         assert!(priority.network_chart_dialog.is_none());
+
+        let mut remapped_priority = new_running_sandbox_app();
+        remapped_priority.runtime_key_config_cache = OnceLock::new();
+        remapped_priority
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nChatOpen=F8\nChartToggle=F8\n",
+            )
+            .unwrap()))
+            .expect("install duplicate remapped base-priority chord");
+        remapped_priority
+            .handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+            .expect("earlier remapped ChatOpen binding wins duplicate ChartToggle chord");
+        assert!(remapped_priority.running_chat_active());
+        assert!(remapped_priority.network_chart_dialog.is_none());
     }
 
     #[test]
@@ -138881,21 +139851,106 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn l051_runtime_key_config_keeps_first_duplicate_and_rejects_noncanonical_f_keys() {
-        let parsed =
-            parse_runtime_key_config(b"[Keys]\nNetObsNextPlayer=F5\n[Keys]\nNetObsNextPlayer=F6\n")
-                .expect("duplicate observer keys follow classic first-value ownership");
+    fn l006_runtime_key_config_compiles_lists_modifiers_raw_joy_and_disable_codes() {
+        let parsed = parse_runtime_key_config(
+            b"[Keys]\nNetObsNextPlayer=F5\nChatOpen=Ctrl+Shift+F2,Return\nScoreboardToggle=None\nGameAbort=Joy2A\nKbd1Key1=\\x0042010a\nUnknownAction=F9\n[Keys]\nNetObsNextPlayer=F6\n",
+        )
+        .expect("compile the first classic Keys node");
         assert_eq!(
             parsed.net_observer_next_player,
-            vec![RuntimeKeyChord {
-                key: VirtualKeyCode::F5,
-                modifiers: ModifiersState::empty(),
-            }]
+            vec![RuntimeKeyChord::keyboard(
+                VirtualKeyCode::F5,
+                ModifiersState::empty(),
+            )]
+        );
+        assert_eq!(
+            parsed.override_for("ChatOpen"),
+            Some(
+                [
+                    RuntimeKeyChord::keyboard(
+                        VirtualKeyCode::F2,
+                        ModifiersState::CTRL | ModifiersState::SHIFT,
+                    ),
+                    RuntimeKeyChord::keyboard(
+                        VirtualKeyCode::Return,
+                        ModifiersState::empty(),
+                    ),
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            parsed.override_for("ScoreboardToggle").unwrap()[0].physical,
+            RuntimePhysicalKey::Disabled
+        );
+        assert_eq!(
+            parsed.override_for("GameAbort").unwrap()[0].physical,
+            RuntimePhysicalKey::Gamepad { slot: 1, button: 1 },
+            "the first sscanf Joy branch owns every canonical JoyN suffix"
+        );
+        assert_eq!(
+            parsed.override_for("Kbd1Key1").unwrap()[0].physical,
+            RuntimePhysicalKey::Gamepad { slot: 1, button: 10 }
+        );
+        assert!(parsed.override_for("UnknownAction").is_none());
+
+        let unknown = parse_runtime_key_config(b"[Keys]\nNetObsNextPlayer=F01\n")
+            .expect("SDL unknown names compile as KEY_Default");
+        assert_eq!(
+            unknown.net_observer_next_player[0].physical,
+            RuntimePhysicalKey::Disabled
         );
 
-        let error = parse_runtime_key_config(b"[Keys]\nNetObsNextPlayer=F01\n")
-            .expect_err("noncanonical SDL/X11 function-key names fail closed");
-        assert!(error.to_string().contains("F01"), "unexpected {error:#}");
+        let partial = parse_runtime_key_config(
+            b"[Keys] ; comment\nChatOpen=CapsLock,F2 ; trailing,Bogus+Q\nGameAbort=Keypad Enter\n",
+        )
+        .expect("compiler warnings retain the already-compiled prefix");
+        assert_eq!(
+            partial.override_for("ChatOpen"),
+            Some(
+                [
+                    RuntimeKeyChord::keyboard(
+                        VirtualKeyCode::Capital,
+                        ModifiersState::empty(),
+                    ),
+                    RuntimeKeyChord::keyboard(
+                        VirtualKeyCode::F2,
+                        ModifiersState::empty(),
+                    ),
+                ]
+                .as_slice()
+            )
+        );
+        assert!(
+            partial.override_for("GameAbort").is_none(),
+            "the corrupt lexicographically earlier registration aborts later compilation"
+        );
+        let keypad = parse_runtime_key_config(b"[Keys]\nGameAbort=Keypad Enter\n")
+            .expect("compile a canonical SDL keypad name");
+        assert_eq!(
+            keypad.override_for("GameAbort").unwrap()[0].physical,
+            RuntimePhysicalKey::Keyboard(VirtualKeyCode::NumpadEnter)
+        );
+        let lowercase_keypad = parse_runtime_key_config(b"[Keys]\nGameAbort=keypad 1\n")
+            .expect("SDL scancode names are case-insensitive");
+        assert_eq!(
+            lowercase_keypad.override_for("GameAbort").unwrap()[0].physical,
+            RuntimePhysicalKey::Keyboard(VirtualKeyCode::Numpad1)
+        );
+
+        let caps_raw = input::encode_virtual_key_code(VirtualKeyCode::Capital)
+            .expect("the active platform represents CapsLock");
+        let raw_caps = format!("[Keys]\nToggleChat=\\x{caps_raw:x}\n");
+        let raw_caps = parse_runtime_key_config(raw_caps.as_bytes())
+            .expect("compile an active-platform raw key code");
+        assert_eq!(
+            raw_caps.override_for("ToggleChat").unwrap()[0].physical,
+            RuntimePhysicalKey::Keyboard(VirtualKeyCode::Capital)
+        );
+
+        let noncanonical = parse_runtime_key_config(b"[Keys]\nKbd01Key01=F2\n")
+            .expect("noncanonical registration names only warn");
+        assert!(noncanonical.override_for("Kbd01Key01").is_none());
     }
 
     #[test]
@@ -138906,24 +139961,13 @@ ScenInfoArea=70,5,25,90
         assert_eq!(
             parsed.net_observer_next_player,
             vec![
+                RuntimeKeyChord::keyboard(VirtualKeyCode::N, ModifiersState::ALT),
+                RuntimeKeyChord::keyboard(VirtualKeyCode::Right, ModifiersState::empty()),
+                RuntimeKeyChord::keyboard(VirtualKeyCode::F5, ModifiersState::empty()),
+                RuntimeKeyChord::keyboard(VirtualKeyCode::F6, ModifiersState::empty()),
+                RuntimeKeyChord::keyboard(VirtualKeyCode::F7, ModifiersState::empty()),
                 RuntimeKeyChord {
-                    key: VirtualKeyCode::N,
-                    modifiers: ModifiersState::ALT,
-                },
-                RuntimeKeyChord {
-                    key: VirtualKeyCode::Right,
-                    modifiers: ModifiersState::empty(),
-                },
-                RuntimeKeyChord {
-                    key: VirtualKeyCode::F5,
-                    modifiers: ModifiersState::empty(),
-                },
-                RuntimeKeyChord {
-                    key: VirtualKeyCode::F6,
-                    modifiers: ModifiersState::empty(),
-                },
-                RuntimeKeyChord {
-                    key: VirtualKeyCode::F7,
+                    physical: RuntimePhysicalKey::Disabled,
                     modifiers: ModifiersState::empty(),
                 },
             ]
@@ -139029,6 +140073,233 @@ ScenInfoArea=70,5,25,90
             .handle_key(VirtualKeyCode::N, ElementState::Pressed)
             .expect("owned viewport ignores a FreeView-only binding");
         assert_eq!(owned.film_view_player, None);
+    }
+
+    #[test]
+    fn l006_named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
+        let config = parse_runtime_key_config(
+            b"[Keys]\nChatOpen=G,Joy2A\nScoreboardToggle=H\nGameAbort=B\nFullscreenMenuDown=J\nKbd1Key1=Shift+T\nKbd1Key2=\\x0042000a\n",
+        )
+        .expect("parse modeled named remaps");
+        let mut app = new_running_sandbox_app();
+        app.runtime_key_config_cache = OnceLock::new();
+        app.runtime_key_config_cache
+            .set(Ok(config))
+            .expect("install per-game key registry");
+
+        assert!(app.handle_running_chat_open_key(VirtualKeyCode::G, ElementState::Pressed));
+        assert!(app.running_chat_active());
+        app.close_running_chat()
+            .expect("close custom keyboard chat through the production lifecycle");
+        assert!(!app.handle_running_chat_open_key(
+            VirtualKeyCode::Return,
+            ElementState::Pressed,
+        ));
+        app.handle_gamepad_direction(
+            GamepadSlot::new(1),
+            ControlButton::Left,
+            ElementState::Pressed,
+        )
+        .expect("custom Joy spelling reaches the named chat callback");
+        assert!(app.running_chat_active());
+        app.close_running_chat()
+            .expect("close custom gamepad chat through the production lifecycle");
+
+        assert!(
+            app.handle_scoreboard_key(VirtualKeyCode::H, ElementState::Pressed)
+                .expect("custom scoreboard callback")
+        );
+        assert!(
+            !app.handle_scoreboard_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("replaced scoreboard default")
+        );
+
+        let shifted = app.runtime_control_candidates_for_keyboard(
+            VirtualKeyCode::T,
+            ElementState::Pressed,
+        );
+        assert!(shifted.is_empty(), "the custom chord requires Shift");
+        app.keyboard_modifiers = ModifiersState::SHIFT;
+        assert_eq!(
+            app.runtime_control_candidates_for_keyboard(
+                VirtualKeyCode::T,
+                ElementState::Pressed,
+            ),
+            vec![KeyboardBindings::control_candidate_for_set(
+                0,
+                ControlBindingId::CursorLeft,
+                ElementState::Pressed,
+            )
+            .expect("first keyboard callback")]
+        );
+        app.keyboard_modifiers = ModifiersState::empty();
+        assert_eq!(
+            app.runtime_control_candidates_for_gamepad_button(
+                0,
+                0,
+                ElementState::Pressed,
+            ),
+            vec![KeyboardBindings::control_candidate_for_set(
+                0,
+                ControlBindingId::CursorToggle,
+                ElementState::Pressed,
+            )
+            .expect("second keyboard callback")]
+        );
+
+        app.ingame_menu.replace(
+            OWNER_NONE,
+            IngameMenuState::main_menu(&MainMenuConditions {
+                has_player: false,
+                player_count: 2,
+                ..MainMenuConditions::default()
+            }),
+        );
+        let before = app
+            .ingame_menu
+            .get(OWNER_NONE)
+            .expect("ownerless menu")
+            .selection();
+        assert!(
+            app.handle_runtime_fullscreen_menu_key(
+                VirtualKeyCode::J,
+                ElementState::Pressed,
+            )
+            .expect("custom ownerless menu callback")
+        );
+        assert_ne!(
+            app.ingame_menu
+                .get(OWNER_NONE)
+                .expect("ownerless menu remains")
+                .selection(),
+            before
+        );
+        app.ingame_menu.clear();
+
+        app.handle_key(VirtualKeyCode::B, ElementState::Pressed)
+            .expect("custom abort callback");
+        assert_eq!(
+            app.ingame_menu
+                .get(app.local_owner)
+                .expect("abort confirmation menu")
+                .page(),
+            ingame_menu::MenuPage::AbortConfirm
+        );
+
+        let mut context_priority = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        context_priority.runtime_key_config_cache = OnceLock::new();
+        context_priority
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nScoreboardToggle=Escape,Return,R\n",
+            )
+            .expect("parse custom scoreboard chord")))
+            .expect("install custom scoreboard chord");
+        context_priority
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new(
+                    "Remain open",
+                )],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("open higher-priority context menu");
+        context_priority
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("context Escape precedes custom ScoreboardToggle");
+        assert!(context_priority.context_menu.is_none());
+        assert!(context_priority.scoreboard_dialog.is_none());
+        context_priority
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new(
+                    "Remain open",
+                )],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("reopen context for Return priority");
+        context_priority
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("context Return precedes custom ScoreboardToggle");
+        assert!(context_priority.scoreboard_dialog.is_none());
+        context_priority.close_context_menu_silently();
+        context_priority
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")
+                    .with_hotkey('R')],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("reopen context for hotkey priority");
+        context_priority
+            .handle_key(VirtualKeyCode::R, ElementState::Pressed)
+            .expect("context hotkey precedes custom ScoreboardToggle");
+        assert!(context_priority.scoreboard_dialog.is_none());
+
+        let mut gamepad_priority = new_running_sandbox_app();
+        gamepad_priority.runtime_key_config_cache = OnceLock::new();
+        gamepad_priority
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(b"[Keys]\nChatOpen=Joy1A\n")
+                .expect("parse colliding gamepad chat chord")))
+            .expect("install colliding gamepad chat chord");
+        gamepad_priority.local_controls = LocalControlRegistry::default();
+        gamepad_priority.local_controls.initialize(LocalControlInit {
+            owner: gamepad_priority.local_owner,
+            preferred_set: 4,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        gamepad_priority
+            .handle_gamepad_direction(
+                GamepadSlot::new(0),
+                ControlButton::Left,
+                ElementState::Pressed,
+            )
+            .expect("assigned gamepad player callback precedes custom chat");
+        assert!(!gamepad_priority.running_chat_active());
+        assert_ne!(
+            gamepad_priority
+                .engine
+                .player(gamepad_priority.local_owner)
+                .expect("local gamepad player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+        );
+
+        let mut chat_priority = new_running_sandbox_app();
+        chat_priority.runtime_key_config_cache = OnceLock::new();
+        chat_priority
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(
+                b"[Keys]\nChatOpen2Allies=Up\n",
+            )
+            .expect("parse chat-history collision")))
+            .expect("install chat-history collision");
+        chat_priority.start_running_chat(RunningChatMode::All);
+        chat_priority
+            .handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+            .expect("chat history precedes the remapped global callback");
+        assert_eq!(chat_priority.running_chat_text(), Some(""));
+
+        let mut game_over_chat = new_game_over_keyboard_app();
+        game_over_chat.runtime_key_config_cache = OnceLock::new();
+        game_over_chat
+            .runtime_key_config_cache
+            .set(Ok(parse_runtime_key_config(b"[Keys]\nChatOpen=G\n")
+                .expect("parse game-over chat remap")))
+            .expect("install game-over chat remap");
+        game_over_chat
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("game-over OnEnter opens chat independently of ChatOpen");
+        assert!(game_over_chat.running_chat_active());
+        assert_eq!(game_over_chat.running_chat_text(), Some(""));
     }
 
     #[test]
@@ -172114,7 +173385,7 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn l051_runtime_key_config_loads_observer_binding_and_refuses_other_overrides() {
+    fn l006_runtime_key_config_loads_known_remaps_from_directory_and_packed_groups() {
         let _lock = env_lock().lock();
         let install = tempdir().expect("runtime help install fixture");
         let user_data = tempdir().expect("runtime help user fixture");
@@ -172146,21 +173417,30 @@ func ControlDig() { dig_count = 1; return(1); }
         assert_eq!(
             loaded.net_observer_next_player,
             vec![
-                RuntimeKeyChord {
-                    key: VirtualKeyCode::Right,
-                    modifiers: ModifiersState::empty(),
-                },
-                RuntimeKeyChord {
-                    key: VirtualKeyCode::F5,
-                    modifiers: ModifiersState::empty(),
-                },
+                RuntimeKeyChord::keyboard(VirtualKeyCode::Right, ModifiersState::empty()),
+                RuntimeKeyChord::keyboard(VirtualKeyCode::F5, ModifiersState::empty()),
             ]
         );
-        fs::write(extra.join("kEyCoNfIg.TxT"), "[Keys]\nToggleShowHelp=F2\n")
+        fs::write(
+            extra.join("kEyCoNfIg.TxT"),
+            "[Keys]\nToggleShowHelp=Shift+F2\nUnknownAction=F9\n",
+        )
             .expect("directory KeyConfig fixture");
-        let error = guard_runtime_global_key_config(Some(&paths))
-            .expect_err("directory KeyConfig must not display stale defaults");
-        assert!(error.to_string().contains("KeyConfig.txt"));
+        let loaded = load_runtime_global_key_config(Some(&paths))
+            .expect("known directory remaps load while unknown names only warn");
+        assert_eq!(
+            loaded.override_for("ToggleShowHelp"),
+            Some(
+                [RuntimeKeyChord::keyboard(
+                    VirtualKeyCode::F2,
+                    ModifiersState::SHIFT,
+                )]
+                .as_slice()
+            )
+        );
+        assert!(loaded.override_for("UnknownAction").is_none());
+        guard_runtime_global_key_config(Some(&paths))
+            .expect("a present directory KeyConfig is not a fatal guard");
 
         fs::remove_dir_all(&extra).expect("replace directory Extra.c4g");
         fs::write(
@@ -172177,24 +173457,41 @@ func ControlDig() { dig_count = 1; return(1); }
         assert_eq!(
             loaded.net_observer_next_player,
             vec![
-                RuntimeKeyChord {
-                    key: VirtualKeyCode::Right,
-                    modifiers: ModifiersState::empty(),
-                },
-                RuntimeKeyChord {
-                    key: VirtualKeyCode::F5,
-                    modifiers: ModifiersState::empty(),
-                },
+                RuntimeKeyChord::keyboard(VirtualKeyCode::Right, ModifiersState::empty()),
+                RuntimeKeyChord::keyboard(VirtualKeyCode::F5, ModifiersState::empty()),
             ]
         );
         fs::write(
             &extra,
-            packed_test_file_group(&[("KEYCONFIG.TXT", false, b"[Keys]\nToggleShowHelp=F2\n")]),
+            packed_test_file_group(&[(
+                "KEYCONFIG.TXT",
+                false,
+                b"[Keys]\nToggleShowHelp=F2\nUnknownAction=F9\n",
+            )]),
         )
         .expect("packed Extra.c4g fixture");
-        let error = guard_runtime_global_key_config(Some(&paths))
-            .expect_err("packed KeyConfig must not display stale defaults");
-        assert!(error.to_string().contains("KeyConfig.txt"));
+        let loaded = load_runtime_global_key_config(Some(&paths))
+            .expect("known packed remaps load while unknown names only warn");
+        assert_eq!(
+            loaded.override_for("ToggleShowHelp"),
+            Some(
+                [RuntimeKeyChord::keyboard(
+                    VirtualKeyCode::F2,
+                    ModifiersState::empty(),
+                )]
+                .as_slice()
+            )
+        );
+        guard_runtime_global_key_config(Some(&paths))
+            .expect("a present packed KeyConfig is not a fatal guard");
+
+        fs::write(&extra, b"not a C4Group archive")
+            .expect("replace packed Extra.c4g with an unreadable group");
+        let ignored = load_runtime_global_key_config(Some(&paths))
+            .expect("native ignores an unreadable optional Extra.c4g");
+        assert_eq!(ignored, RuntimeKeyConfig::default());
+        guard_runtime_global_key_config(Some(&paths))
+            .expect("an unreadable optional Extra.c4g does not abort startup");
     }
 
     #[test]
@@ -172223,14 +173520,12 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(app.runtime_help_visible);
 
         app.configure_running_state("Second game".to_string(), DEFAULT_GROUND_HEIGHT);
-        let error = app
-            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
-            .expect_err("next game must observe the KeyConfig override");
-        assert!(matches!(
-            error,
-            EngineError::ClassicMenuParityBoundary { .. }
-        ));
+        app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("the remapped default key becomes inert next game");
         assert!(!app.runtime_help_visible);
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("the next game applies the newly discovered remap");
+        assert!(app.runtime_help_visible);
     }
 
     #[test]
@@ -172654,6 +173949,91 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("player control owns F1 while player menu is active");
         assert!(!menu.runtime_help_visible);
         assert!(menu.ingame_menu.is_some());
+    }
+
+    #[test]
+    fn l006_secondary_auto_stop_key_config_f1_f3_binding_uses_matching_owner() {
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = add_secondary_local_player_for_mouse_option_test(&mut app);
+        app.engine
+            .player_mut(primary)
+            .expect("primary local player")
+            .control
+            .control_style = false;
+        app.engine
+            .player_mut(secondary)
+            .expect("secondary local player")
+            .control
+            .control_style = true;
+        app.snapshot = app.engine.snapshot();
+        assert_eq!(app.local_controls.owner_for_set(1), Some(secondary));
+        let left_mask = 1 << lc_engine::COM_LEFT;
+
+        for (key, source) in [
+            (
+                VirtualKeyCode::F1,
+                b"[Keys]\nKbd2Key7=F1\n".as_slice(),
+            ),
+            (
+                VirtualKeyCode::F3,
+                b"[Keys]\nKbd2Key7=F3\n".as_slice(),
+            ),
+        ] {
+            app.runtime_key_config_cache = OnceLock::new();
+            app.runtime_key_config_cache
+                .set(Ok(parse_runtime_key_config(source).expect("parse secondary player remap")))
+                .expect("install secondary player remap");
+
+            app.handle_key(key, ElementState::Pressed)
+                .expect("secondary player control owns global-key down");
+            assert_eq!(
+                app.engine
+                    .player(primary)
+                    .expect("primary local player")
+                    .control
+                    .pressed_coms
+                    & left_mask,
+                0,
+            );
+            assert_ne!(
+                app.engine
+                    .player(secondary)
+                    .expect("secondary local player")
+                    .control
+                    .pressed_coms
+                    & left_mask,
+                0,
+            );
+            assert!(app.pressed_engine_keys.contains(&key));
+            assert!(!app.runtime_help_visible);
+            assert!(app.runtime_flash_message.is_none());
+
+            app.handle_key(key, ElementState::Released)
+                .expect("secondary auto-stop style owns global-key up");
+            assert_eq!(
+                app.engine
+                    .player(secondary)
+                    .expect("secondary local player")
+                    .control
+                    .pressed_coms
+                    & left_mask,
+                0,
+                "{key:?} release must use the matching secondary owner's auto-stop style",
+            );
+            assert_eq!(
+                app.engine
+                    .player(primary)
+                    .expect("primary local player")
+                    .control
+                    .pressed_coms
+                    & left_mask,
+                0,
+            );
+            assert!(!app.pressed_engine_keys.contains(&key));
+            assert!(!app.runtime_help_visible);
+            assert!(app.runtime_flash_message.is_none());
+        }
     }
 
     #[test]

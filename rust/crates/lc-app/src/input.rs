@@ -331,6 +331,24 @@ impl KeyboardBindings {
             })
     }
 
+    /// Builds the callback candidate for one named `KbdNKeyM` registration.
+    /// Runtime `KeyConfig.txt` overlays use this after replacing the physical
+    /// code list without mutating the persisted `[Controls]` binding.
+    pub(crate) fn control_candidate_for_set(
+        control_set: usize,
+        id: ControlBindingId,
+        state: ElementState,
+    ) -> Option<(usize, Option<ControlEvent>)> {
+        (control_set < KEYBOARD_SET_COUNT).then(|| {
+            let binding = id.spec().binding;
+            let event = match state {
+                ElementState::Pressed => Some(binding.press_event()),
+                ElementState::Released => binding.release_event(),
+            };
+            (control_set, event)
+        })
+    }
+
     /// Filters the exact callback stream down to candidates that emit an
     /// engine event. Routing code that models C++ consumption must use
     /// `control_candidates_for_key` instead.
@@ -937,7 +955,7 @@ fn function_key_index(key: VirtualKeyCode) -> Option<i32> {
 }
 
 #[cfg(target_os = "windows")]
-fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
+pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
         value @ 0x70..=0x87 => function_key(value - 0x70),
         value @ 65..=90 => letter_from_offset(value - 65),
@@ -946,6 +964,8 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         8 => Some(VirtualKeyCode::Back),
         9 => Some(VirtualKeyCode::Tab),
         13 => Some(VirtualKeyCode::Return),
+        19 => Some(VirtualKeyCode::Pause),
+        20 => Some(VirtualKeyCode::Capital),
         27 => Some(VirtualKeyCode::Escape),
         32 => Some(VirtualKeyCode::Space),
         33 => Some(VirtualKeyCode::PageUp),
@@ -956,13 +976,18 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         38 => Some(VirtualKeyCode::Up),
         39 => Some(VirtualKeyCode::Right),
         40 => Some(VirtualKeyCode::Down),
+        44 => Some(VirtualKeyCode::Snapshot),
         45 => Some(VirtualKeyCode::Insert),
         46 => Some(VirtualKeyCode::Delete),
+        93 => Some(VirtualKeyCode::Apps),
         106 => Some(VirtualKeyCode::NumpadMultiply),
         107 => Some(VirtualKeyCode::NumpadAdd),
+        108 => Some(VirtualKeyCode::NumpadComma),
         109 => Some(VirtualKeyCode::NumpadSubtract),
         110 => Some(VirtualKeyCode::NumpadDecimal),
         111 => Some(VirtualKeyCode::NumpadDivide),
+        144 => Some(VirtualKeyCode::Numlock),
+        145 => Some(VirtualKeyCode::Scroll),
         186 => Some(VirtualKeyCode::Semicolon),
         188 => Some(VirtualKeyCode::Comma),
         189 => Some(VirtualKeyCode::Minus),
@@ -979,7 +1004,7 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
 }
 
 #[cfg(target_os = "linux")]
-fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
+pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
         value @ 0xffbe..=0xffd5 => function_key(value - 0xffbe),
         value @ 97..=122 => letter_from_offset(value - 97),
@@ -1005,6 +1030,8 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         0xff08 => Some(VirtualKeyCode::Back),
         0xff09 => Some(VirtualKeyCode::Tab),
         0xff0d => Some(VirtualKeyCode::Return),
+        0xff13 => Some(VirtualKeyCode::Pause),
+        0xff14 => Some(VirtualKeyCode::Scroll),
         0xff1b => Some(VirtualKeyCode::Escape),
         0xff50 => Some(VirtualKeyCode::Home),
         0xff51 => Some(VirtualKeyCode::Left),
@@ -1014,6 +1041,9 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         0xff55 => Some(VirtualKeyCode::PageUp),
         0xff56 => Some(VirtualKeyCode::PageDown),
         0xff57 => Some(VirtualKeyCode::End),
+        0xff61 => Some(VirtualKeyCode::Snapshot),
+        0xff67 => Some(VirtualKeyCode::Apps),
+        0xff7f => Some(VirtualKeyCode::Numlock),
         0xff95 => Some(VirtualKeyCode::Numpad7),
         0xff96 => Some(VirtualKeyCode::Numpad4),
         0xff97 => Some(VirtualKeyCode::Numpad8),
@@ -1030,15 +1060,18 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         0xff8d => Some(VirtualKeyCode::NumpadEnter),
         0xffaa => Some(VirtualKeyCode::NumpadMultiply),
         0xffab => Some(VirtualKeyCode::NumpadAdd),
+        0xffac => Some(VirtualKeyCode::NumpadComma),
         0xffad => Some(VirtualKeyCode::NumpadSubtract),
         0xffae => Some(VirtualKeyCode::NumpadDecimal),
         0xffaf => Some(VirtualKeyCode::NumpadDivide),
+        0xffbd => Some(VirtualKeyCode::NumpadEquals),
+        0xffe5 => Some(VirtualKeyCode::Capital),
         _ => None,
     }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
+pub(crate) fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
         value @ 58..=69 => function_key(value - 58),
         value @ 104..=115 => function_key(value - 104 + 12),
@@ -1062,6 +1095,10 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         54 => Some(VirtualKeyCode::Comma),
         55 => Some(VirtualKeyCode::Period),
         56 => Some(VirtualKeyCode::Slash),
+        57 => Some(VirtualKeyCode::Capital),
+        70 => Some(VirtualKeyCode::Snapshot),
+        71 => Some(VirtualKeyCode::Scroll),
+        72 => Some(VirtualKeyCode::Pause),
         73 => Some(VirtualKeyCode::Insert),
         74 => Some(VirtualKeyCode::Home),
         75 => Some(VirtualKeyCode::PageUp),
@@ -1072,6 +1109,7 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         80 => Some(VirtualKeyCode::Left),
         81 => Some(VirtualKeyCode::Down),
         82 => Some(VirtualKeyCode::Up),
+        83 => Some(VirtualKeyCode::Numlock),
         84 => Some(VirtualKeyCode::NumpadDivide),
         85 => Some(VirtualKeyCode::NumpadMultiply),
         86 => Some(VirtualKeyCode::NumpadSubtract),
@@ -1080,12 +1118,15 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         value @ 89..=97 => numpad_key(value - 88),
         98 => Some(VirtualKeyCode::Numpad0),
         99 => Some(VirtualKeyCode::NumpadDecimal),
+        101 => Some(VirtualKeyCode::Apps),
+        103 => Some(VirtualKeyCode::NumpadEquals),
+        133 => Some(VirtualKeyCode::NumpadComma),
         _ => None,
     }
 }
 
 #[cfg(target_os = "windows")]
-fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
+pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
     if let Some(index) = function_key_index(key) {
         return Some(0x70 + index);
     }
@@ -1102,6 +1143,8 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::Back => 8,
         VirtualKeyCode::Tab => 9,
         VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => 13,
+        VirtualKeyCode::Pause => 19,
+        VirtualKeyCode::Capital => 20,
         VirtualKeyCode::Escape => 27,
         VirtualKeyCode::Space => 32,
         VirtualKeyCode::PageUp => 33,
@@ -1112,13 +1155,18 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::Up => 38,
         VirtualKeyCode::Right => 39,
         VirtualKeyCode::Down => 40,
+        VirtualKeyCode::Snapshot => 44,
         VirtualKeyCode::Insert => 45,
         VirtualKeyCode::Delete => 46,
+        VirtualKeyCode::Apps => 93,
         VirtualKeyCode::NumpadMultiply => 106,
         VirtualKeyCode::NumpadAdd => 107,
+        VirtualKeyCode::NumpadComma => 108,
         VirtualKeyCode::NumpadSubtract => 109,
         VirtualKeyCode::NumpadDecimal => 110,
         VirtualKeyCode::NumpadDivide => 111,
+        VirtualKeyCode::Numlock => 144,
+        VirtualKeyCode::Scroll => 145,
         VirtualKeyCode::Semicolon => 186,
         VirtualKeyCode::Comma => 188,
         VirtualKeyCode::Minus => 189,
@@ -1135,7 +1183,7 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
 }
 
 #[cfg(target_os = "linux")]
-fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
+pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
     if let Some(index) = function_key_index(key) {
         return Some(0xffbe + index);
     }
@@ -1165,6 +1213,8 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::Back => 0xff08,
         VirtualKeyCode::Tab => 0xff09,
         VirtualKeyCode::Return => 0xff0d,
+        VirtualKeyCode::Pause => 0xff13,
+        VirtualKeyCode::Scroll => 0xff14,
         VirtualKeyCode::Escape => 0xff1b,
         VirtualKeyCode::Home => 0xff50,
         VirtualKeyCode::Left => 0xff51,
@@ -1174,20 +1224,26 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::PageUp => 0xff55,
         VirtualKeyCode::PageDown => 0xff56,
         VirtualKeyCode::End => 0xff57,
+        VirtualKeyCode::Snapshot => 0xff61,
+        VirtualKeyCode::Apps => 0xff67,
+        VirtualKeyCode::Numlock => 0xff7f,
         VirtualKeyCode::Insert => 0xff63,
         VirtualKeyCode::Delete => 0xffff,
         VirtualKeyCode::NumpadEnter => 0xff8d,
         VirtualKeyCode::NumpadMultiply => 0xffaa,
         VirtualKeyCode::NumpadAdd => 0xffab,
+        VirtualKeyCode::NumpadComma => 0xffac,
         VirtualKeyCode::NumpadSubtract => 0xffad,
         VirtualKeyCode::NumpadDecimal => 0xffae,
         VirtualKeyCode::NumpadDivide => 0xffaf,
+        VirtualKeyCode::NumpadEquals => 0xffbd,
+        VirtualKeyCode::Capital => 0xffe5,
         _ => return None,
     })
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
+pub(crate) fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
     if let Some(index) = function_key_index(key) {
         return Some(if index < 12 {
             58 + index
@@ -1221,6 +1277,10 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::Comma => 54,
         VirtualKeyCode::Period => 55,
         VirtualKeyCode::Slash => 56,
+        VirtualKeyCode::Capital => 57,
+        VirtualKeyCode::Snapshot => 70,
+        VirtualKeyCode::Scroll => 71,
+        VirtualKeyCode::Pause => 72,
         VirtualKeyCode::Insert => 73,
         VirtualKeyCode::Home => 74,
         VirtualKeyCode::PageUp => 75,
@@ -1231,6 +1291,7 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::Left => 80,
         VirtualKeyCode::Down => 81,
         VirtualKeyCode::Up => 82,
+        VirtualKeyCode::Numlock => 83,
         VirtualKeyCode::NumpadDivide => 84,
         VirtualKeyCode::NumpadMultiply => 85,
         VirtualKeyCode::NumpadSubtract => 86,
@@ -1238,6 +1299,9 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::NumpadEnter => 88,
         VirtualKeyCode::NumpadDecimal => 99,
         VirtualKeyCode::OEM102 => 100,
+        VirtualKeyCode::Apps => 101,
+        VirtualKeyCode::NumpadEquals => 103,
+        VirtualKeyCode::NumpadComma => 133,
         _ => return None,
     })
 }
@@ -2016,6 +2080,7 @@ mod tests {
             VirtualKeyCode::NumpadMultiply,
             VirtualKeyCode::NumpadSubtract,
             VirtualKeyCode::NumpadDivide,
+            VirtualKeyCode::NumpadComma,
         ] {
             let raw = encode_virtual_key_code(key)
                 .unwrap_or_else(|| panic!("{key:?} must have a config representation"));
@@ -2024,6 +2089,12 @@ mod tests {
 
         #[cfg(not(target_os = "windows"))]
         {
+            let raw = encode_virtual_key_code(VirtualKeyCode::NumpadEquals)
+                .expect("numpad Equals must have a config representation");
+            assert_eq!(
+                decode_platform_key_code(raw),
+                Some(VirtualKeyCode::NumpadEquals)
+            );
             let raw = encode_virtual_key_code(VirtualKeyCode::NumpadEnter)
                 .expect("numpad Enter must have a config representation");
             assert_eq!(
