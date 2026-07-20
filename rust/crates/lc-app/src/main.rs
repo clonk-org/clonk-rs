@@ -126,7 +126,7 @@ use lc_frontend::game_option_buttons::{
 use lc_frontend::input_dialog::{
     InputDialogAction, InputDialogClipboardShortcut, InputDialogContextCommand,
     InputDialogContextLabels, InputDialogController, InputDialogEditKey, InputDialogIcon,
-    InputDialogKeyModifiers, InputDialogSound,
+    InputDialogKeyModifiers, InputDialogPlacement, InputDialogSound,
 };
 use lc_frontend::loader_screen::{
     LoaderRenderConfig, LoaderResources, LoaderScreen, LoaderSelection, LoaderState, LoaderUpdate,
@@ -12748,6 +12748,13 @@ enum RunningChatMode {
 struct RunningChatState {
     history_index: i32,
     active: bool,
+    kind: RunningChatKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RunningChatKind {
+    Ordinary,
+    MessageBoardInput(lc_engine::ActiveMessageBoardInput),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33187,6 +33194,7 @@ impl GameApp {
         self.running_chat = Some(RunningChatState {
             history_index: -1,
             active: true,
+            kind: RunningChatKind::Ordinary,
         });
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::RunningChat,
@@ -33197,6 +33205,76 @@ impl GameApp {
         self.game_option_input_pointer_position = self.running_pointer_position;
         self.game_option_input_last_click = None;
         self.mark_menu_dirty();
+    }
+
+    fn start_message_board_input(&mut self, input: lc_engine::ActiveMessageBoardInput) {
+        let prompt = c4_presentation_text(&input.prompt);
+        let tooltip = self.runtime_resource_text(
+            "IDS_DLGTIP_CHAT",
+            "Enter chat messages here and send them with enter.",
+        );
+        let compact = !input.prompt.contains('|')
+            && self.assets.clonk_fonts.as_deref().is_some_and(|fonts| {
+                let screen_width = self.graphics.surface().width() as i32;
+                fonts.text.measure(&prompt, true).0 < screen_width / 5
+            });
+        let controller = if compact {
+            InputDialogController::new_chat(prompt, "").with_chat_tooltip(tooltip)
+        } else {
+            InputDialogController::new(prompt, "", InputDialogIcon::None)
+                .with_placement(InputDialogPlacement::BottomThird)
+        };
+        self.suspend_ingame_pointer_for_gui();
+        self.message_dialog_active_index = None;
+        self.running_chat = Some(RunningChatState {
+            history_index: -1,
+            active: true,
+            kind: RunningChatKind::MessageBoardInput(input),
+        });
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            purpose: PendingInputDialogPurpose::RunningChat,
+            controller,
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = self.running_pointer_position;
+        self.game_option_input_last_click = None;
+        self.mark_menu_dirty();
+    }
+
+    fn reconcile_message_board_input_dialog(&mut self) -> Result<(), EngineError> {
+        let mut active = self.engine.active_message_board_input().cloned();
+        let visible_query = self.running_chat.as_ref().and_then(|chat| match &chat.kind {
+            RunningChatKind::Ordinary => None,
+            RunningChatKind::MessageBoardInput(input) => Some(input.clone()),
+        });
+        if let Some(visible_query) = visible_query {
+            if active.as_ref() == Some(&visible_query) {
+                return Ok(());
+            }
+            // The target/player may disappear or AbortMessageBoard may replace
+            // the active projection. Never let the stale edit consume a newer
+            // query when it next submits.
+            self.finalize_running_chat_input()?;
+            active = self.engine.active_message_board_input().cloned();
+        }
+        if self.running_chat.is_some()
+            || self.game_option_input_dialog.is_some()
+            || self.game_over_dialog.is_some()
+            || self.top_message_dialog_is_exclusive_vote()
+            || self.external_irc_dialog_visible
+            || self.context_menu.is_some()
+            || self
+                .runtime_client_list
+                .as_ref()
+                .is_some_and(|dialog| dialog.is_info_only())
+        {
+            return Ok(());
+        }
+        if let Some(active) = active {
+            self.start_message_board_input(active);
+        }
+        Ok(())
     }
 
     fn running_chat_controller(&self) -> Option<&InputDialogController> {
@@ -33231,7 +33309,17 @@ impl GameApp {
     }
 
     fn close_running_chat(&mut self) -> Result<(), EngineError> {
-        self.finalize_running_chat_input()
+        let input = self.running_chat.as_ref().and_then(|chat| match &chat.kind {
+            RunningChatKind::Ordinary => None,
+            RunningChatKind::MessageBoardInput(input) => Some(input.clone()),
+        });
+        let answer_result = match input {
+            Some(input) => self.submit_message_board_answer(&input, ""),
+            None => Ok(()),
+        };
+        let finalize_result = self.finalize_running_chat_input();
+        answer_result?;
+        finalize_result
     }
 
     fn finalize_running_chat_input(&mut self) -> Result<(), EngineError> {
@@ -33399,10 +33487,70 @@ impl GameApp {
         }
     }
 
-    fn submit_running_chat_text(&mut self, text: String) -> Result<(), EngineError> {
-        self.finalize_running_chat_input()?;
-        self.process_running_chat_text(&text);
+    fn submit_message_board_answer(
+        &mut self,
+        expected: &lc_engine::ActiveMessageBoardInput,
+        text: &str,
+    ) -> Result<(), EngineError> {
+        if self.engine.active_message_board_input() != Some(expected) {
+            return Ok(());
+        }
+        let answer = LegacyCString::from_bytes(lc_script::c4_string_bytes(text)).unwrap_or_else(
+            || {
+                tracing::warn!("message-board input contained an embedded NUL; cancelling query");
+                LegacyCString::default()
+            },
+        );
+        let by_client = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .or_else(|| {
+                self.engine
+                    .player(expected.player)
+                    .map(|player| player.at_client().get())
+            })
+            .unwrap_or_else(|| self.offline_local_client_id());
+        let Some(control) = self
+            .engine
+            .prepare_message_board_answer_control(answer, by_client)
+        else {
+            return Ok(());
+        };
+        if let Some(network) = self.network.as_ref() {
+            let tick = self.local_control_submission_tick();
+            if let Err(error) = network.submit_message_board_answer(tick, control) {
+                tracing::error!(%error, "failed to submit message-board answer");
+            }
+        } else {
+            self.record_control_batch(std::slice::from_ref(
+                &lc_engine::ControlPacket::MessageBoardAnswer(control.clone()),
+            ));
+            let _ = self.engine.execute_message_board_answer_control(&control)?;
+        }
         Ok(())
+    }
+
+    fn submit_running_chat_text(&mut self, text: String) -> Result<(), EngineError> {
+        let kind = self
+            .running_chat
+            .as_ref()
+            .map(|chat| chat.kind.clone())
+            .unwrap_or(RunningChatKind::Ordinary);
+        match kind {
+            RunningChatKind::Ordinary => {
+                self.finalize_running_chat_input()?;
+                self.process_running_chat_text(&text);
+                Ok(())
+            }
+            RunningChatKind::MessageBoardInput(input) => {
+                self.store_message_input_history(&text);
+                let answer_result = self.submit_message_board_answer(&input, &text);
+                let finalize_result = self.finalize_running_chat_input();
+                answer_result?;
+                finalize_result
+            }
+        }
     }
 
     fn submit_running_chat(&mut self) -> Result<(), EngineError> {
@@ -57575,6 +57723,7 @@ impl GameApp {
                 if self.game_over_dialog.is_some() {
                     return Ok(());
                 }
+                self.reconcile_message_board_input_dialog()?;
                 if self.network.is_some() && !self.network_control_running {
                     return Ok(());
                 }
@@ -57750,6 +57899,7 @@ impl GameApp {
                     .engine
                     .tick()
                     .map_err(map_runtime_flash_producer_engine_error)?;
+                self.reconcile_message_board_input_dialog()?;
                 let retired_viewport_owner = local_viewport_owners_before_tick
                     .iter()
                     .copied()
@@ -59545,6 +59695,12 @@ impl GameApp {
                     if self.game_option_input_dialog.as_ref().is_some_and(|pending| {
                         pending.purpose == PendingInputDialogPurpose::RunningChat
                     }) {
+                        if self.running_chat.as_ref().is_some_and(|chat| {
+                            matches!(&chat.kind, RunningChatKind::MessageBoardInput(_))
+                        }) {
+                            self.submit_running_chat_text(text)?;
+                            break;
+                        }
                         self.process_running_chat_text(&text);
                     } else {
                         tracing::error!(
@@ -59654,7 +59810,7 @@ impl GameApp {
                     self.game_option_input_last_click = None;
                     match pending.purpose {
                         PendingInputDialogPurpose::RunningChat => {
-                            self.finalize_running_chat_input()?;
+                            self.close_running_chat()?;
                         }
                         PendingInputDialogPurpose::NetworkJoinPassword => {
                             self.pending_network_join = None;
@@ -134751,6 +134907,167 @@ ScenInfoArea=70,5,25,90
             "DisableDebug removes /speed before the following packet executes"
         );
         assert_eq!(app.executing_ready_tick, None);
+    }
+
+    #[test]
+    fn message_board_query_opens_on_tick35_and_routes_ui_answer_at_ready_tick() {
+        let mut app = new_synthetic_running_sandbox_app();
+        let player = app.local_owner;
+        app.engine
+            .player_mut(player)
+            .expect("local player remains")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        app.engine
+            .register_definition(
+                Definition::from_script(
+                    "MBUI",
+                    "Message-board UI target",
+                    r#"#strict 2
+local callback_answer, callback_count;
+public func Open(int player) { return CallMessageBoard(this(), true, "Exact prompt", player); }
+protected func InputCallback(string answer, int player)
+{
+    callback_answer = answer;
+    callback_count = callback_count + 1;
+    return 1;
+}
+"#,
+                )
+                .expect("message-board target compiles"),
+            )
+            .expect("message-board target registers");
+        let target = app
+            .engine
+            .spawn_object(SpawnConfig::new("MBUI"))
+            .expect("message-board target spawns");
+        let target_index = app
+            .engine
+            .find_object_index(target)
+            .expect("message-board target is live");
+        assert_eq!(
+            app.engine
+                .call_object_function(target_index, "Open", vec![Value::Int(player)])
+                .expect("query opens"),
+            Value::Bool(true)
+        );
+
+        let updates_to_tick35 = 35 - app.engine.frame() % 35;
+        for update in 1..updates_to_tick35 {
+            app.update().unwrap_or_else(|error| {
+                panic!("pre-activation update {update} succeeds: {error}")
+            });
+            assert!(app.engine.active_message_board_input().is_none());
+            assert!(app.running_chat_controller().is_none());
+        }
+        app.update().expect("Tick35 update activates query");
+        assert_eq!(app.engine.frame() % 35, 0);
+        assert_eq!(
+            app.engine
+                .active_message_board_input()
+                .expect("engine query activates")
+                .prompt,
+            "Exact prompt"
+        );
+        let controller = app
+            .running_chat_controller()
+            .expect("the same Tick35 update opens the input dialog");
+        assert_eq!(controller.message(), "Exact prompt");
+        assert_eq!(controller.text(), "");
+
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(manager);
+        for character in "mixed".chars() {
+            app.handle_text_input(character)
+                .expect("type message-board answer");
+        }
+        let submission_tick = app.local_control_submission_tick();
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("submit message-board answer");
+        assert!(app.running_chat_controller().is_none());
+        assert!(app.engine.active_message_board_input().is_none());
+        let target_before_ready = app
+            .engine
+            .object_snapshot(target)
+            .expect("target remains live before the ready tick");
+        assert_ne!(
+            target_before_ready.local_vars.get("callback_count"),
+            Some(&Value::Int(1)),
+            "submission closes the local UI without running the callback"
+        );
+        let mut submitted = commands.take_submitted_message_board_answers();
+        assert_eq!(submitted.len(), 1);
+        let (queued_tick, answer) = submitted
+            .pop()
+            .expect("network worker receives the UI answer");
+        assert_eq!(queued_tick, submission_tick);
+        assert_eq!(answer.answer.as_bytes(), b"MIXED");
+        assert_eq!(answer.by_client, 0);
+
+        app.apply_ready_controls(
+            queued_tick,
+            vec![NetworkControl::MessageBoardAnswer(answer)],
+        )
+        .expect("message-board answer executes at its ready tick");
+        let target_after_ready = app
+            .engine
+            .object_snapshot(target)
+            .expect("target remains live after the ready tick");
+        assert_eq!(
+            target_after_ready.local_vars.get("callback_answer"),
+            Some(&Value::String("MIXED".to_string()))
+        );
+        assert_eq!(
+            target_after_ready.local_vars.get("callback_count"),
+            Some(&Value::Int(1))
+        );
+
+        app.network = None;
+        assert_eq!(
+            app.engine
+                .call_object_function(target_index, "Open", vec![Value::Int(player)])
+                .expect("second query opens"),
+            Value::Bool(true)
+        );
+        let updates_to_tick35 = 35 - app.engine.frame() % 35;
+        for _ in 0..updates_to_tick35 {
+            app.update().expect("second query reaches Tick35");
+        }
+        assert!(app.running_chat_controller().is_some());
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(manager);
+        let cancel_tick = app.local_control_submission_tick();
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("F2 cancels the script query");
+        let mut submitted = commands.take_submitted_message_board_answers();
+        assert_eq!(submitted.len(), 1);
+        let (queued_tick, answer) = submitted.pop().expect("F2 queues an empty answer");
+        assert_eq!(queued_tick, cancel_tick);
+        assert!(answer.answer.is_empty());
+        app.apply_ready_controls(
+            queued_tick,
+            vec![NetworkControl::MessageBoardAnswer(answer)],
+        )
+        .expect("empty answer removes the query at its ready tick");
+        assert!(app.running_chat_controller().is_none());
+        assert!(app.engine.active_message_board_input().is_none());
+        assert!(
+            app.engine
+                .player(player)
+                .expect("local player remains after cancellation")
+                .message_board_queries()
+                .is_empty()
+        );
+        let target_after_cancel = app
+            .engine
+            .object_snapshot(target)
+            .expect("target remains live after cancellation");
+        assert_eq!(
+            target_after_cancel.local_vars.get("callback_count"),
+            Some(&Value::Int(1)),
+            "an empty answer removes the query without invoking InputCallback"
+        );
     }
 
     #[test]
