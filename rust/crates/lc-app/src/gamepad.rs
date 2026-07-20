@@ -17,6 +17,14 @@ impl GamepadSlot {
         Self(index)
     }
 
+    pub(crate) const fn from_index(index: usize) -> Option<Self> {
+        if index < GAMEPAD_SLOT_COUNT as usize {
+            Some(Self(index as u8))
+        } else {
+            None
+        }
+    }
+
     fn from_gamepad_id(id: GamepadId) -> Option<Self> {
         u8::try_from(usize::from(id))
             .ok()
@@ -49,6 +57,10 @@ impl LegacyGamepadButton {
 pub(crate) struct GamepadManager {
     gilrs: Option<Gilrs>,
     states: HashMap<GamepadSlot, GamepadState>,
+    /// Logical equivalent of the Options `C4GamePadOpener`. Gilrs owns its
+    /// platform handles as one context and cannot physically close one pad,
+    /// so this claim controls which device is live for the Options consumer.
+    options_open_slot: Option<GamepadSlot>,
     next_cluster: u64,
 }
 
@@ -64,6 +76,7 @@ impl GamepadManager {
         Self {
             gilrs,
             states: HashMap::new(),
+            options_open_slot: None,
             next_cluster: 0,
         }
     }
@@ -72,8 +85,29 @@ impl GamepadManager {
         Self {
             gilrs: None,
             states: HashMap::new(),
+            options_open_slot: None,
             next_cluster: 0,
         }
+    }
+
+    /// Close the old Options claim before opening the replacement, matching
+    /// `C4GamePadOpener::SetGamePad`. Re-selecting the same slot is a no-op.
+    pub(crate) fn set_options_open_slot(&mut self, slot: Option<GamepadSlot>) -> bool {
+        if self.options_open_slot == slot {
+            return false;
+        }
+        let _ = self.options_open_slot.take();
+        self.options_open_slot = slot;
+        true
+    }
+
+    pub(crate) const fn options_open_slot(&self) -> Option<GamepadSlot> {
+        self.options_open_slot
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_options_slot_live(&self, slot: GamepadSlot) -> bool {
+        self.options_open_slot == Some(slot)
     }
 
     pub(crate) fn poll(&mut self) -> Vec<SourcedGamepadEvent> {
@@ -645,6 +679,7 @@ mod tests {
         let mut manager = GamepadManager {
             gilrs: None,
             states: HashMap::new(),
+            options_open_slot: None,
             next_cluster: 0,
         };
         let mut output = Vec::new();
@@ -725,6 +760,7 @@ mod tests {
         let mut manager = GamepadManager {
             gilrs: None,
             states: HashMap::new(),
+            options_open_slot: None,
             next_cluster: 0,
         };
         for button in [

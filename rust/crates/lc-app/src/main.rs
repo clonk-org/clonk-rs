@@ -32982,6 +32982,7 @@ impl GameApp {
         enum ClusterOwner {
             Suppressed,
             GamepadCapture,
+            OptionsDevice,
             Message,
             Definition,
             ContextPending,
@@ -32998,6 +32999,7 @@ impl GameApp {
         while let Some(first) = events.next() {
             let gamepad = first.gamepad;
             let cluster = first.cluster;
+            let source_slot = first.event.slot();
             let mut cluster_events = vec![first.event];
             while events
                 .peek()
@@ -33007,7 +33009,12 @@ impl GameApp {
             }
 
             let game_over_open = self.mode == AppMode::Running && self.game_over_dialog.is_some();
-            let eligible_gamepad_gui = gamepad_gui_control && gamepad == 0;
+            let screen_gamepad_open = gamepad_gui_control && gamepad == 0;
+            let options_input_scope =
+                self.mode == AppMode::Menu && self.startup_view == StartupView::Options;
+            let options_gamepad_open =
+                options_input_scope && self.gamepads.options_open_slot() == Some(source_slot);
+            let eligible_gamepad_gui = screen_gamepad_open;
             let gamepad_capture_open = self.message_dialogs.last().is_some_and(|pending| {
                 matches!(
                     pending.continuation,
@@ -33030,6 +33037,18 @@ impl GameApp {
                 ClusterOwner::Suppressed
             } else if gamepad_capture_open {
                 ClusterOwner::GamepadCapture
+            } else if options_input_scope && !screen_gamepad_open {
+                if options_gamepad_open {
+                    // The selected device is live, but ControlConfigArea's
+                    // opener does not grant GUI bindings. Those remain gated
+                    // to configured gamepad 0 by C4GUI controls.
+                    ClusterOwner::OptionsDevice
+                } else {
+                    // Keep every alias from an unopened source out of the
+                    // Options consumer. Capture above deliberately sees all
+                    // sources so it can consume and reject a wrong pad.
+                    ClusterOwner::Suppressed
+                }
             } else if self.context_menu.is_some() {
                 ClusterOwner::ContextPending
             } else if !self.message_dialogs.is_empty() {
@@ -33084,6 +33103,20 @@ impl GameApp {
                             // before the raw button must neither cancel nor
                             // activate the modal, and a wrong-pad raw button is
                             // consumed while leaving capture open.
+                            if let GamepadEvent::Button {
+                                slot,
+                                button,
+                                state,
+                            } = event
+                            {
+                                self.handle_gamepad_button(slot, button, state)?;
+                            }
+                        }
+                        ClusterOwner::OptionsDevice => {
+                            // Preserve the selected device's raw-key path
+                            // without turning selection into permission to
+                            // operate C4GUI. In startup mode this currently
+                            // has no gameplay receiver, just like C++.
                             if let GamepadEvent::Button {
                                 slot,
                                 button,
@@ -47536,12 +47569,26 @@ impl GameApp {
         }
     }
 
+    fn sync_options_gamepad_device(&mut self) {
+        use lc_frontend::startup_options_controls::ControlDevice;
+        use lc_frontend::startup_options_dlg::OptionsSheet;
+
+        let selected = self.startup_options_dialog.as_ref().and_then(|dialog| {
+            (self.mode == AppMode::Menu
+                && self.startup_view == StartupView::Options
+                && dialog.active_sheet() == OptionsSheet::Gamepad)
+                .then(|| dialog.controls().selected_set(ControlDevice::Gamepad))
+        });
+        self.gamepads
+            .set_options_open_slot(selected.and_then(GamepadSlot::from_index));
+    }
+
     fn process_options_dialog_actions(
         &mut self,
         actions: Vec<lc_frontend::startup_options_dlg::OptionsDlgAction>,
     ) -> Result<(), EngineError> {
         use lc_frontend::startup_options_dlg::{
-            OptionsDlgAction, SoundCheckboxId, SoundSheetAction, SoundVolumeId,
+            OptionsDlgAction, OptionsSheet, SoundCheckboxId, SoundSheetAction, SoundVolumeId,
         };
         use lc_frontend::startup_options_graphics::GraphicsSheetAction;
         use lc_frontend::startup_options_network::{NetworkCheckboxId, NetworkValidationError};
@@ -47572,10 +47619,9 @@ impl GameApp {
                         }
                     }
                 }
-                OptionsDlgAction::SheetChanged(
-                    lc_frontend::startup_options_dlg::OptionsSheet::Sound,
-                ) => {
-                    if self.audio.is_none() {
+                OptionsDlgAction::SheetChanged(sheet) => {
+                    self.sync_options_gamepad_device();
+                    if sheet == OptionsSheet::Sound && self.audio.is_none() {
                         return Err(classic_parity_engine_error(report_classic_parity_boundary(
                             ClassicParityBoundary::RuntimeAudioSystem {
                                 action: "the startup Options Sound sheet",
@@ -47584,7 +47630,6 @@ impl GameApp {
                     }
                     self.play_ui_sound("Command");
                 }
-                OptionsDlgAction::SheetChanged(_) => self.play_ui_sound("Command"),
                 OptionsDlgAction::ShowLogTimestampsChanged(enabled) => {
                     self.show_log_timestamps = enabled;
                     self.play_ui_sound("ArrowHit");
@@ -47680,6 +47725,23 @@ impl GameApp {
                 OptionsDlgAction::ResetControlBindings(device) => {
                     self.reset_options_control_bindings(device);
                     self.play_ui_sound("Command");
+                }
+                OptionsDlgAction::GamepadDeviceSelected(set) => {
+                    let valid_selection = self.mode == AppMode::Menu
+                        && self.startup_view == StartupView::Options
+                        && self.startup_options_dialog.as_ref().is_some_and(|dialog| {
+                            dialog.active_sheet() == OptionsSheet::Gamepad
+                                && dialog.controls().selected_set(
+                                    lc_frontend::startup_options_controls::ControlDevice::Gamepad,
+                                ) == set
+                                && set < dialog.controls().visible_sets(
+                                    lc_frontend::startup_options_controls::ControlDevice::Gamepad,
+                                )
+                        });
+                    if valid_selection {
+                        self.gamepads
+                            .set_options_open_slot(GamepadSlot::from_index(set));
+                    }
                 }
                 OptionsDlgAction::GamepadGuiControlChanged(enabled) => {
                     self.gamepad_gui_control = enabled;
@@ -48064,6 +48126,7 @@ impl GameApp {
                             if let Some(dialog) = self.startup_options_dialog.as_mut() {
                                 dialog.restore_sheet(return_sheet);
                             }
+                            self.sync_options_gamepad_device();
                         }
                         Err(error) => {
                             tracing::warn!(%error, "failed to save advanced configuration");
@@ -51444,6 +51507,7 @@ impl GameApp {
         self.menu_frame_cache = None;
         if view != StartupView::Options {
             self.startup_options_advanced_dialog = None;
+            self.gamepads.set_options_open_slot(None);
         }
         if view != StartupView::ScenarioBrowser {
             self.cancel_scenario_selector_discovery();
@@ -51761,6 +51825,9 @@ impl GameApp {
     fn open_options_menu(&mut self) {
         self.close_context_menu_silently();
         self.startup_options_advanced_dialog = None;
+        // Recreating the dialog destroys its ControlConfigArea before the
+        // replacement starts on the Program sheet.
+        self.gamepads.set_options_open_slot(None);
         let mut dialog = lc_frontend::startup_options_dlg::OptionsDlgState::with_all(
             load_options_program_state(self.app_paths.as_ref()),
             load_options_sound_state(self.audio.as_ref()),
@@ -108290,6 +108357,112 @@ ScenInfoArea=70,5,25,90
                 expected
             );
         }
+    }
+
+    #[test]
+    fn l097_options_gamepad_device_claim_switches_and_releases() {
+        use lc_frontend::startup_options_controls::ControlDevice;
+        use lc_frontend::startup_options_dlg::{OptionsDlgAction, OptionsSheet};
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_options_menu();
+        assert_eq!(app.gamepads.options_open_slot(), None);
+        let controls = load_options_control_state(
+            &app.bindings,
+            &app.gamepad_bindings,
+            3,
+            app.gamepad_gui_control,
+        );
+        *app.startup_options_dialog
+            .as_mut()
+            .expect("options dialog")
+            .controls_mut() = controls;
+
+        app.startup_options_dialog
+            .as_mut()
+            .unwrap()
+            .restore_sheet(OptionsSheet::Gamepad);
+        app.process_options_dialog_actions(vec![OptionsDlgAction::SheetChanged(
+            OptionsSheet::Gamepad,
+        )])
+        .expect("enter Gamepad sheet");
+        assert!(app.gamepads.is_options_slot_live(GamepadSlot::new(0)));
+
+        for set in [2, 1] {
+            assert!(app
+                .startup_options_dialog
+                .as_mut()
+                .unwrap()
+                .controls_mut()
+                .select_set(ControlDevice::Gamepad, set));
+            app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(set)])
+                .expect("switch selected gamepad");
+            assert_eq!(
+                app.gamepads.options_open_slot(),
+                GamepadSlot::from_index(set)
+            );
+            for other in 0..3 {
+                assert_eq!(
+                    app.gamepads
+                        .is_options_slot_live(GamepadSlot::new(other as u8)),
+                    other == set
+                );
+            }
+        }
+
+        app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(1)])
+            .expect("repeat selected gamepad");
+        assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
+        app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(3)])
+            .expect("ignore out-of-range gamepad action");
+        assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
+
+        app.startup_options_dialog
+            .as_mut()
+            .unwrap()
+            .restore_sheet(OptionsSheet::Network);
+        app.process_options_dialog_actions(vec![OptionsDlgAction::SheetChanged(
+            OptionsSheet::Network,
+        )])
+        .expect("leave Gamepad sheet");
+        assert_eq!(app.gamepads.options_open_slot(), None);
+
+        app.startup_options_dialog
+            .as_mut()
+            .unwrap()
+            .restore_sheet(OptionsSheet::Gamepad);
+        app.process_options_dialog_actions(vec![OptionsDlgAction::SheetChanged(
+            OptionsSheet::Gamepad,
+        )])
+        .expect("re-enter Gamepad sheet");
+        assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
+
+        let high = |gamepad, slot| SourcedGamepadEvent {
+            gamepad,
+            cluster: gamepad as u64,
+            event: GamepadEvent::GuiButton {
+                slot,
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            },
+        };
+        app.process_sourced_gamepad_event_batch([high(2, GamepadSlot::new(2))], false)
+            .expect("suppress unopened Options gamepad");
+        assert_eq!(app.startup_view, StartupView::Options);
+        assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
+        app.process_sourced_gamepad_event_batch([high(1, GamepadSlot::new(1))], false)
+            .expect("keep selected device separate from GUI eligibility");
+        assert_eq!(app.startup_view, StartupView::Options);
+        assert_eq!(app.gamepads.options_open_slot(), Some(GamepadSlot::new(1)));
+
+        app.gamepad_gui_control = true;
+        app.process_sourced_gamepad_event_batch([high(0, GamepadSlot::new(0))], true)
+            .expect("route configured GUI gamepad");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert_eq!(app.gamepads.options_open_slot(), None);
+        app.process_options_dialog_actions(vec![OptionsDlgAction::GamepadDeviceSelected(1)])
+            .expect("ignore stale selection after Options closes");
+        assert_eq!(app.gamepads.options_open_slot(), None);
     }
 
     #[test]

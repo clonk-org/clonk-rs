@@ -1211,6 +1211,9 @@ pub enum OptionsDlgAction {
     OpenGraphicsScaleText,
     BeginControlCapture(ControlCaptureTarget),
     ResetControlBindings(ControlDevice),
+    /// A different gamepad control set became active. The app owns the
+    /// corresponding device-open lifecycle.
+    GamepadDeviceSelected(usize),
     GamepadGuiControlChanged(bool),
     OpenNetworkText(NetworkTextField),
     NetworkPortEnabledChanged {
@@ -2595,8 +2598,11 @@ impl OptionsDlgState {
         };
         match hit {
             ControlSheetHit::Set(set) => {
-                self.controls.select_set(device, set);
-                Vec::new()
+                let changed = self.controls.select_set(device, set);
+                (changed && device == ControlDevice::Gamepad)
+                    .then_some(OptionsDlgAction::GamepadDeviceSelected(set))
+                    .into_iter()
+                    .collect()
             }
             ControlSheetHit::Key(control) => self
                 .controls
@@ -5181,6 +5187,52 @@ mod tests {
         let port_edit = rect_center(layout.network.port_edit(NetworkPortId::Tcp));
         assert!(state.handle_pointer_down(port_edit).is_empty());
         assert!(state.handle_pointer_up(port_edit).is_empty());
+    }
+
+    #[test]
+    fn gamepad_set_selection_emits_only_changed_device_actions() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let labels = || std::array::from_fn(|_| std::array::from_fn(|_| "Undefined".to_string()));
+        let controls = ControlSheetState::new(labels(), labels(), 3, false);
+        let mut state = OptionsDlgState::with_all(
+            ProgramSheetState::default(),
+            SoundSheetState::default(),
+            GraphicsSheetState::default(),
+            controls,
+            NetworkSheetState::default(),
+        );
+        state.resize(1280, 720, &gui, &book);
+        let layout = options_dlg_layout(1280, 720, &gui, &book);
+
+        for expected in [
+            OptionsSheet::Graphics,
+            OptionsSheet::Sound,
+            OptionsSheet::Keyboard,
+        ] {
+            assert_eq!(
+                state.handle_ctrl_tab(false),
+                vec![OptionsDlgAction::SheetChanged(expected)]
+            );
+        }
+        let keyboard_two = rect_center(layout.controls.set_buttons[1]);
+        assert!(state.handle_pointer_down(keyboard_two).is_empty());
+        assert!(state.handle_pointer_up(keyboard_two).is_empty());
+
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Gamepad)]
+        );
+        for (set, expected) in [
+            (2, vec![OptionsDlgAction::GamepadDeviceSelected(2)]),
+            (1, vec![OptionsDlgAction::GamepadDeviceSelected(1)]),
+            (1, Vec::new()),
+        ] {
+            let point = rect_center(layout.controls.set_buttons[set]);
+            assert!(state.handle_pointer_down(point).is_empty());
+            assert_eq!(state.handle_pointer_up(point), expected);
+        }
+        assert_eq!(state.controls().selected_set(ControlDevice::Gamepad), 1);
     }
 
     #[test]
