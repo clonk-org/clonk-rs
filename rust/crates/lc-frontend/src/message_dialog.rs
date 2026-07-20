@@ -4,7 +4,9 @@
 //! is an ordinary classic dialog, so this renderer deliberately leaves the
 //! underlying screen untouched and draws no dimming layer.
 
-use crate::classic_gui::{draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect};
+use crate::classic_gui::{
+    draw_3d_frame, draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect,
+};
 use crate::clonk_fonts::NativeClonkFont;
 use crate::context_menu::draw_classic_tooltip;
 use crate::hud::HudFont;
@@ -30,6 +32,10 @@ const BUTTON_WIDTH: i32 = 120;
 const BUTTON_HEIGHT: i32 = 32;
 const BUTTON_GAP: i32 = 10;
 const CLIENT_VERTICAL_ROOM: i32 = 80;
+const PROGRESS_VERTICAL_ROOM: i32 = 150;
+const PROGRESS_HEIGHT: i32 = 30;
+const PROGRESS_BUTTON_AREA_HEIGHT: i32 = 40;
+const PROGRESS_BUTTON_WIDTH: i32 = 140;
 const CLOSE_ICON_PHASE: u16 = 34;
 const TITLE_LEFT_INDENT: i32 = 5;
 const TITLE_RIGHT_INDENT: i32 = 20;
@@ -216,6 +222,7 @@ pub struct MessageDialogLayout {
     pub message_text: String,
     pub message_alignment: TextAlign,
     pub checkbox: Option<MessageDialogCheckboxLayout>,
+    pub progress: Option<IntRect>,
     pub buttons: Vec<MessageDialogButtonLayout>,
 }
 
@@ -236,6 +243,7 @@ pub struct MessageDialogResources<'a> {
     pub icons_extended: &'a ImageData,
     pub button_highlight: &'a ImageData,
     pub checkbox: &'a ImageData,
+    pub progress: &'a ImageData,
 }
 
 impl MessageDialogResources<'_> {
@@ -245,6 +253,7 @@ impl MessageDialogResources<'_> {
         validate_icon_sheet("GUIIcons2.png", self.icons_extended, 64)?;
         validate_nonempty_image("GUIButtonHighlight.png", self.button_highlight)?;
         validate_checkbox_sheet("GUICheckbox.png", self.checkbox)?;
+        validate_progress_image("GUIProgress.png", self.progress)?;
         anyhow::ensure!(
             self.tooltip_font.line_height > 0,
             "classic TooltipFont must have a positive line height"
@@ -286,6 +295,7 @@ struct TitleDrag {
 pub struct MessageDialogState {
     caption: String,
     close_tooltip: String,
+    progress_tooltip: String,
     caption_scroll: Cell<CaptionScrollState>,
     message: String,
     buttons: MessageDialogButtons,
@@ -295,6 +305,7 @@ pub struct MessageDialogState {
     default_no: bool,
     force_centered_message: bool,
     checkbox: Option<MessageDialogCheckbox>,
+    progress: Option<u8>,
     checkbox_changes: Vec<bool>,
     placement: MessageDialogPlacement,
     dialog_offset: (i32, i32),
@@ -322,6 +333,7 @@ impl MessageDialogState {
         Self {
             caption,
             close_tooltip: "Close".into(),
+            progress_tooltip: "Progress bar".into(),
             caption_scroll: Cell::new(CaptionScrollState::default()),
             message: message.into(),
             buttons,
@@ -331,6 +343,7 @@ impl MessageDialogState {
             default_no,
             force_centered_message: false,
             checkbox: None,
+            progress: None,
             checkbox_changes: Vec::new(),
             placement: MessageDialogPlacement::Centered,
             dialog_offset: (0, 0),
@@ -386,6 +399,23 @@ impl MessageDialogState {
         self
     }
 
+    /// Selects the native `ProgressDialog` content layout. The value is a
+    /// percentage, so network resource progress is clamped to 0..=100.
+    pub fn with_progress(mut self, progress: u8) -> Self {
+        self.progress = Some(progress.min(100));
+        self
+    }
+
+    pub fn set_progress(&mut self, progress: u8) {
+        if self.progress.is_some() {
+            self.progress = Some(progress.min(100));
+        }
+    }
+
+    pub const fn progress(&self) -> Option<u8> {
+        self.progress
+    }
+
     /// Overrides one stock button label with the active language resource.
     /// C++ constructs OK/Cancel/Yes/No from `IDS_DLG_*` and Retry from
     /// `IDS_BTN_RETRY`, so this lives on the dialog instance rather than in
@@ -406,6 +436,10 @@ impl MessageDialogState {
 
     pub fn set_close_tooltip(&mut self, tooltip: impl Into<String>) {
         self.close_tooltip = tooltip.into();
+    }
+
+    pub fn set_progress_tooltip(&mut self, tooltip: impl Into<String>) {
+        self.progress_tooltip = tooltip.into();
     }
 
     pub fn button_label(&self, button: MessageDialogButton) -> &str {
@@ -519,19 +553,32 @@ impl MessageDialogState {
             font.line_height.max(MIN_CAPTION_HEIGHT)
         };
         let (unbroken_width, unbroken_height) = font.measure(&self.message, true);
-        let centered = self.force_centered_message
+        let is_progress = self.progress.is_some();
+        let centered = is_progress
+            || self.force_centered_message
             || self.size != MessageDialogSize::Regular
             || (unbroken_width <= width - 140 && unbroken_height <= font.line_height);
-        let message_width = if centered { width - 140 } else { width - 80 };
+        let message_width = if is_progress {
+            width - 3 * DIALOG_INDENT - ICON_SIZE
+        } else if centered {
+            width - 140
+        } else {
+            width - 80
+        };
         let message_text = break_message(font, &self.message, message_width);
         let (_, message_height) = font.measure(&message_text, true);
         let checkbox_size = self.checkbox.as_ref().map(|checkbox| {
             let (label_width, label_height) = font.measure(&checkbox.raw_label, true);
             (label_width + label_height + 4, label_height)
         });
-        let client_height =
-            message_height + checkbox_size.map_or(CLIENT_VERTICAL_ROOM, |(_, height)| height + 100);
-        let height = title_height + client_height;
+        let (client_height, height) = if is_progress {
+            let height = message_height.max(ICON_SIZE) + PROGRESS_VERTICAL_ROOM;
+            (height - title_height, height)
+        } else {
+            let client_height = message_height
+                + checkbox_size.map_or(CLIENT_VERTICAL_ROOM, |(_, height)| height + 100);
+            (client_height, title_height + client_height)
+        };
         let (base_x, base_y) = match self.placement {
             MessageDialogPlacement::Centered => {
                 ((screen_width - width) / 2, (screen_height - height) / 2)
@@ -560,9 +607,17 @@ impl MessageDialogState {
             h: ICON_SIZE,
         };
         let message = IntRect {
-            x: x + 70,
+            x: if is_progress {
+                x + 3 * DIALOG_INDENT + ICON_SIZE
+            } else {
+                x + 70
+            },
             y: client_y + 10,
-            w: message_width,
+            w: if is_progress {
+                width - 4 * DIALOG_INDENT - ICON_SIZE
+            } else {
+                message_width
+            },
             h: message_height,
         };
         let checkbox = checkbox_size.map(|(checkbox_width, checkbox_height)| {
@@ -581,16 +636,35 @@ impl MessageDialogState {
                 label_x: bounds.x + checkbox_height + 4,
             }
         });
+        let progress = is_progress.then_some(IntRect {
+            x: x + DIALOG_INDENT,
+            y: client_y + client_height
+                - PROGRESS_BUTTON_AREA_HEIGHT
+                - PROGRESS_HEIGHT
+                - 3 * DIALOG_INDENT,
+            w: width - 2 * DIALOG_INDENT,
+            h: PROGRESS_HEIGHT,
+        });
         let ordered = self.buttons.ordered();
         let count = i32::try_from(ordered.len()).unwrap_or(i32::MAX);
+        let button_width = if is_progress {
+            PROGRESS_BUTTON_WIDTH
+        } else {
+            BUTTON_WIDTH
+        };
         let group_width = if count == 0 {
             0
         } else {
-            count * BUTTON_WIDTH + (count - 1) * BUTTON_GAP
+            count * button_width + (count - 1) * BUTTON_GAP
         };
-        let button_y = client_y
-            + message_height
-            + checkbox_size.map_or(34, |(_, checkbox_height)| checkbox_height + 54);
+        let button_y = if is_progress {
+            client_y + client_height - DIALOG_INDENT - PROGRESS_BUTTON_AREA_HEIGHT
+                + (PROGRESS_BUTTON_AREA_HEIGHT - BUTTON_HEIGHT) / 2
+        } else {
+            client_y
+                + message_height
+                + checkbox_size.map_or(34, |(_, checkbox_height)| checkbox_height + 54)
+        };
         let first_button_x = x + (width - group_width) / 2;
         let buttons = ordered
             .into_iter()
@@ -599,9 +673,10 @@ impl MessageDialogState {
                 button,
                 rect: IntRect {
                     x: first_button_x
-                        + i32::try_from(index).unwrap_or(i32::MAX) * (BUTTON_WIDTH + BUTTON_GAP),
+                        + i32::try_from(index).unwrap_or(i32::MAX)
+                            * (button_width + BUTTON_GAP),
                     y: button_y,
-                    w: BUTTON_WIDTH,
+                    w: button_width,
                     h: BUTTON_HEIGHT,
                 },
             })
@@ -624,6 +699,7 @@ impl MessageDialogState {
                 TextAlign::Left
             },
             checkbox,
+            progress,
             buttons,
         }
     }
@@ -856,10 +932,17 @@ impl MessageDialogState {
         {
             return None;
         }
-        let text = match hit_target(layout, pointer) {
-            Some(DialogTarget::Close) => &self.close_tooltip,
-            None if caption_contains(layout, pointer) => &self.caption,
-            Some(DialogTarget::Checkbox | DialogTarget::Button(_)) | None => return None,
+        let text = if layout
+            .progress
+            .is_some_and(|progress| rect_contains(progress, pointer))
+        {
+            &self.progress_tooltip
+        } else {
+            match hit_target(layout, pointer) {
+                Some(DialogTarget::Close) => &self.close_tooltip,
+                None if caption_contains(layout, pointer) => &self.caption,
+                Some(DialogTarget::Checkbox | DialogTarget::Button(_)) | None => return None,
+            }
         };
         (!text.is_empty()).then(|| MessageDialogTooltip {
             pointer,
@@ -931,6 +1014,9 @@ impl MessageDialogState {
         now: Instant,
     ) -> Result<()> {
         resources.validate()?;
+        if self.progress.is_some() {
+            validate_progress_image("GUIProgress.png", resources.progress)?;
+        }
         let layout = self.layout(
             surface.width() as i32,
             surface.height() as i32,
@@ -974,6 +1060,16 @@ impl MessageDialogState {
             true,
             gamma,
         );
+        if let (Some(progress_rect), Some(progress)) = (layout.progress, self.progress) {
+            draw_progress_bar(
+                surface,
+                progress_rect,
+                progress,
+                resources.progress,
+                &resources.fonts.text,
+                gamma,
+            );
+        }
         if let (Some(checkbox_layout), Some(checkbox)) =
             (layout.checkbox.as_ref(), self.checkbox.as_ref())
         {
@@ -1310,6 +1406,47 @@ fn draw_checkbox(
     Ok(())
 }
 
+fn draw_progress_bar(
+    surface: &mut Surface,
+    rect: IntRect,
+    progress: u8,
+    image: &ImageData,
+    font: &ClonkFont,
+    gamma: Option<&GammaRamp>,
+) {
+    draw_3d_frame(surface, rect, gamma);
+    let fill_width = (rect.w - 4).max(0) * i32::from(progress) / 100;
+    if fill_width > 0 && rect.h > 2 {
+        draw_facet_stretch(
+            surface,
+            image,
+            (
+                1.0,
+                0.0,
+                image.width().saturating_sub(2) as f32,
+                image.height() as f32,
+            ),
+            (
+                (rect.x + 2) as f32,
+                (rect.y + 2) as f32,
+                fill_width as f32,
+                (rect.h - 2) as f32,
+            ),
+            gamma,
+        );
+    }
+    font.draw_with_gamma(
+        surface,
+        rect.x + rect.w / 2,
+        rect.y + (rect.h - font.line_height) / 2 - 1,
+        &format!("{progress}%"),
+        [255, 255, 255, 255],
+        TextAlign::Center,
+        true,
+        gamma,
+    );
+}
+
 fn validate_icon_sheet(name: &str, image: &ImageData, cell: u32) -> Result<()> {
     anyhow::ensure!(
         image.width() >= cell && image.height() >= cell,
@@ -1332,6 +1469,16 @@ fn validate_checkbox_sheet(name: &str, image: &ImageData) -> Result<()> {
     anyhow::ensure!(
         image.height() > 0 && image.width() >= image.height().saturating_mul(2),
         "{name} must contain the enabled unchecked/checked square phases, got {}x{}",
+        image.width(),
+        image.height()
+    );
+    Ok(())
+}
+
+fn validate_progress_image(name: &str, image: &ImageData) -> Result<()> {
+    anyhow::ensure!(
+        image.width() >= 3 && image.height() > 0,
+        "{name} must contain the classic progress facet, got {}x{}",
         image.width(),
         image.height()
     );
@@ -2291,6 +2438,7 @@ mod tests {
         let icons = load_graphics_png("GUIIcons.png");
         let icons_extended = load_graphics_png("GUIIcons2.png");
         let checkbox = load_graphics_png("GUICheckbox.png");
+        let progress = load_graphics_png("GUIProgress.png");
         let mut surface = Surface::new(800, 600, PixelFormat::Rgba8888);
         surface.fill(Color::opaque(17, 29, 43));
         let before = surface.get_pixel(0, 0).expect("corner");
@@ -2302,6 +2450,7 @@ mod tests {
             icons_extended: &icons_extended,
             button_highlight: &highlight,
             checkbox: &checkbox,
+            progress: &progress,
         };
         let mut dialog = ok_dialog("message");
         dialog
@@ -2578,6 +2727,7 @@ mod tests {
         let highlight = blacken_transparent_pixels(&load_graphics_png("GUIButtonHighlight.png"));
         let icons_extended = load_graphics_png("GUIIcons2.png");
         let checkbox = load_graphics_png("GUICheckbox.png");
+        let progress = load_graphics_png("GUIProgress.png");
         let malformed_icons = ImageData::new(39, 40, vec![0; 39 * 40 * 4]);
         let resources = MessageDialogResources {
             skin: ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight)),
@@ -2587,6 +2737,7 @@ mod tests {
             icons_extended: &icons_extended,
             button_highlight: &highlight,
             checkbox: &checkbox,
+            progress: &progress,
         };
         let mut surface = Surface::new(800, 600, PixelFormat::Rgba8888);
         let error = ok_dialog("message")
@@ -2604,11 +2755,29 @@ mod tests {
             icons_extended: &icons_extended,
             button_highlight: &highlight,
             checkbox: &malformed_checkbox,
+            progress: &progress,
         };
         let error = ok_dialog("message")
             .render(&mut surface, resources, true, true, None)
             .expect_err("malformed checkbox sheet must fail");
         assert!(error.to_string().contains("GUICheckbox.png"));
+
+        let malformed_progress = ImageData::new(2, 1, vec![0; 2 * 4]);
+        let resources = MessageDialogResources {
+            skin: ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight)),
+            fonts: &fonts,
+            tooltip_font: &fonts.text,
+            icons: &icons,
+            icons_extended: &icons_extended,
+            button_highlight: &highlight,
+            checkbox: &checkbox,
+            progress: &malformed_progress,
+        };
+        let error = ok_dialog("message")
+            .with_progress(50)
+            .render(&mut surface, resources, true, true, None)
+            .expect_err("malformed progress strip must fail");
+        assert!(error.to_string().contains("GUIProgress.png"));
 
         let resources = MessageDialogResources {
             skin: ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight)),
@@ -2618,6 +2787,7 @@ mod tests {
             icons_extended: &icons_extended,
             button_highlight: &highlight,
             checkbox: &checkbox,
+            progress: &progress,
         };
         let dialog = MessageDialogState::regular_ok(
             "message",

@@ -72,7 +72,8 @@ use ingame_menu::{
 };
 use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
 use lc_app::{
-    ClientStartBarrier, ConfiguredClientPlayerSelection, SelectedClientPlayer,
+    ClientStartBarrier, ClientStartResourceRole, ConfiguredClientPlayerSelection,
+    PendingClientStartResource, SelectedClientPlayer,
     compose_client_network_scenario, load_configured_mission_access,
     load_snapshotted_client_players,
     publish_initial_configured_client_players, resolve_client_game_resources,
@@ -3903,6 +3904,70 @@ enum AdmissionResourceState {
     Unavailable(AdmissionResourceUnavailable),
 }
 
+const BLOCKING_RESOURCE_STALL_TIMEOUT: Duration = Duration::from_millis(100_000);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlockingResourceScope {
+    ClientStart,
+    PlayerJoin,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingAdmissionResource {
+    core: lc_engine::NetworkResourceCore,
+    info_id: i32,
+    player_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct BlockingResourceWait {
+    scope: BlockingResourceScope,
+    resource_id: i32,
+    player_info_id: Option<i32>,
+    display_name: String,
+    last_percent: i16,
+    deadline: Instant,
+}
+
+impl BlockingResourceWait {
+    fn new_at(
+        scope: BlockingResourceScope,
+        resource_id: i32,
+        player_info_id: Option<i32>,
+        display_name: String,
+        present_percent: u8,
+        now: Instant,
+    ) -> Self {
+        let mut wait = Self {
+            scope,
+            resource_id,
+            player_info_id,
+            display_name,
+            last_percent: -1,
+            deadline: now + BLOCKING_RESOURCE_STALL_TIMEOUT,
+        };
+        let _ = wait.observe_at(present_percent, now);
+        wait
+    }
+
+    /// Returns true only after an unchanged percentage has outlived the
+    /// native stall deadline. Any numeric change resets the full timeout.
+    fn observe_at(&mut self, present_percent: u8, now: Instant) -> bool {
+        let present_percent = present_percent.min(100);
+        if self.last_percent != i16::from(present_percent) {
+            self.last_percent = i16::from(present_percent);
+            self.deadline = now + BLOCKING_RESOURCE_STALL_TIMEOUT;
+            false
+        } else {
+            now > self.deadline
+        }
+    }
+
+    fn present_percent(&self) -> u8 {
+        u8::try_from(self.last_percent).unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Default)]
 struct AdmissionResourceStore {
     resources: BTreeMap<i32, AdmissionResourceState>,
@@ -4022,23 +4087,53 @@ fn preflight_admission_resources(
     resources: &mut AdmissionResourceStore,
     clients: &ControlClientRegistry,
     controls: &[NetworkControl],
+    aborted_player_joins: &HashSet<(i32, i32)>,
 ) -> bool {
-    let mut ready = true;
+    pending_admission_resource(resources, clients, controls, aborted_player_joins).is_none()
+}
+
+fn pending_admission_resource(
+    resources: &mut AdmissionResourceStore,
+    clients: &ControlClientRegistry,
+    controls: &[NetworkControl],
+    aborted_player_joins: &HashSet<(i32, i32)>,
+) -> Option<PendingAdmissionResource> {
+    let mut pending = None;
     for control in controls {
-        let control_ready = match control {
+        let waiting = match control {
             NetworkControl::JoinPlayer(lc_engine::JoinPlayerControlData {
                 at_client,
+                info_id,
                 source: lc_engine::JoinPlayerSource::Resource(core),
                 ..
-            }) if clients.contains(*at_client) => !matches!(
+            }) if clients.contains(*at_client) => (matches!(
                 resources.ensure_by_core(core),
                 AdmissionResourceState::Loading { .. }
-            ),
-            _ => true,
+            ) && !aborted_player_joins.contains(&(core.id, *info_id)))
+            .then(|| {
+                let player_name = controls
+                    .iter()
+                    .filter_map(|candidate| match candidate {
+                        NetworkControl::PlayerInfo(info) => Some(&info.players),
+                        _ => None,
+                    })
+                    .flatten()
+                    .find(|player| player.id == *info_id)
+                    .map(|player| legacy_presentation_text(player.name.as_bytes()))
+                    .filter(|name| !name.is_empty());
+                PendingAdmissionResource {
+                    core: core.clone(),
+                    info_id: *info_id,
+                    player_name,
+                }
+            }),
+            _ => None,
         };
-        ready &= control_ready;
+        if pending.is_none() {
+            pending = waiting;
+        }
     }
-    ready
+    pending
 }
 
 #[derive(Clone)]
@@ -4615,6 +4710,7 @@ impl FrontendAssets {
             icons_extended: self.startup_dialog_images.get("GUIIcons2.png")?,
             button_highlight,
             checkbox: self.startup_dialog_images.get("GUICheckbox.png")?,
+            progress: self.startup_dialog_images.get("GUIProgress.png")?,
         })
     }
 
@@ -8881,6 +8977,10 @@ enum MessageDialogContinuation {
     },
     StartupIrcDisconnectConfirm,
     NetworkClientStartWait,
+    BlockingResourceWait {
+        scope: BlockingResourceScope,
+        resource_id: i32,
+    },
     NetworkRuntimeJoin {
         reference: lc_network::NetworkGameReference,
     },
@@ -11123,6 +11223,8 @@ struct GameApp {
     generated_team_name_template: LegacyCString,
     network_team_assignment: Option<NetworkTeamAssignmentState>,
     admission_resources: AdmissionResourceStore,
+    blocking_resource_wait: Option<BlockingResourceWait>,
+    aborted_player_resource_joins: HashSet<(i32, i32)>,
     /// Mutable host-owned JoinData used for lobby Set changes, GO
     /// activation, and later client admission. PreparedHostBootstrap remains
     /// the immutable resource proof from before the socket opened.
@@ -21411,6 +21513,8 @@ impl GameApp {
             generated_team_name_template,
             network_team_assignment,
             admission_resources: AdmissionResourceStore::default(),
+            blocking_resource_wait: None,
+            aborted_player_resource_joins: HashSet::new(),
             host_join_snapshot,
             pending_network_join_data: None,
             initial_lobby_status_ack_pending: false,
@@ -28390,8 +28494,14 @@ impl GameApp {
             let network_ticks = &self.network_ticks;
             let admission_resources = &mut self.admission_resources;
             let control_clients = &self.control_clients;
+            let aborted_player_joins = &self.aborted_player_resource_joins;
             network_ticks.exact_is_ready_if(expected_tick, |controls| {
-                preflight_admission_resources(admission_resources, control_clients, controls)
+                preflight_admission_resources(
+                    admission_resources,
+                    control_clients,
+                    controls,
+                    aborted_player_joins,
+                )
             })
         } else {
             false
@@ -28461,8 +28571,14 @@ impl GameApp {
             let network_ticks = &self.network_ticks;
             let admission_resources = &mut self.admission_resources;
             let control_clients = &self.control_clients;
+            let aborted_player_joins = &self.aborted_player_resource_joins;
             network_ticks.contiguous_ready_behind_if(expected_tick, |controls| {
-                preflight_admission_resources(admission_resources, control_clients, controls)
+                preflight_admission_resources(
+                    admission_resources,
+                    control_clients,
+                    controls,
+                    aborted_player_joins,
+                )
             })
         };
         // NetworkControlClock advances as soon as a cadence-frame control is
@@ -30949,6 +31065,260 @@ impl GameApp {
         Ok(())
     }
 
+    fn client_start_resource_display_name(
+        &self,
+        pending: &PendingClientStartResource,
+    ) -> String {
+        match pending.role {
+            ClientStartResourceRole::Scenario => {
+                self.runtime_resource_text("IDS_NET_RES_SCENARIO", "Scenario")
+            }
+            ClientStartResourceRole::Dynamic => {
+                self.runtime_resource_text("IDS_NET_RES_DYNAMIC", "Dynamic")
+            }
+            ClientStartResourceRole::GameResource { .. } => {
+                let filename = pending.core.filename.to_string_lossy().into_owned();
+                let basename = filename
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .filter(|basename| !basename.is_empty())
+                    .unwrap_or(filename.as_str());
+                format!(
+                    "{}: {basename}",
+                    self.runtime_resource_text("IDS_DLG_DEFINITION", "Object Definition")
+                )
+            }
+        }
+    }
+
+    fn wait_for_client_start_resource(
+        &mut self,
+        pending: PendingClientStartResource,
+    ) -> Result<(), String> {
+        let display_name = self.client_start_resource_display_name(&pending);
+        if matches!(
+            self.admission_resources.status(pending.core.id),
+            Some(AdmissionResourceState::Unavailable(_))
+        ) {
+            return self
+                .finish_startup_network_failure(
+                    StartupNetworkPurpose::Join,
+                    format!("Unable to retrieve {display_name}."),
+                )
+                .map_err(|error| error.to_string());
+        }
+        self.begin_blocking_resource_wait_at(
+            BlockingResourceScope::ClientStart,
+            pending.core.id,
+            None,
+            display_name,
+            Instant::now(),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn blocking_resource_wait_message(&self, display_name: &str) -> String {
+        let template = self.runtime_resource_text("IDS_NET_WAITFORRES", "Waiting for %s...");
+        format_resource_string(template, &[display_name])
+    }
+
+    fn begin_blocking_resource_wait_at(
+        &mut self,
+        scope: BlockingResourceScope,
+        resource_id: i32,
+        player_info_id: Option<i32>,
+        display_name: String,
+        now: Instant,
+    ) -> Result<(), EngineError> {
+        let present_percent = self
+            .admission_resources
+            .present_percent
+            .get(&resource_id)
+            .copied()
+            .unwrap_or_default()
+            .min(100);
+        let same_wait = self.blocking_resource_wait.as_ref().is_some_and(|wait| {
+            wait.scope == scope && wait.resource_id == resource_id
+        });
+        if !same_wait {
+            if let Some(previous) = self.blocking_resource_wait.take() {
+                self.dismiss_blocking_resource_wait_dialog(previous.scope, previous.resource_id);
+            }
+            let wait = BlockingResourceWait::new_at(
+                scope,
+                resource_id,
+                player_info_id,
+                display_name.clone(),
+                present_percent,
+                now,
+            );
+            let dialog = lc_frontend::progress_dialog::ProgressDialogState::new(
+                self.blocking_resource_wait_message(&display_name),
+                self.runtime_resource_text("IDS_NET_CAPTION", "Network"),
+                present_percent,
+                lc_frontend::message_dialog::MessageDialogIcon::Standard(3),
+            )
+            .into_message_dialog();
+            self.push_message_dialog(
+                dialog,
+                MessageDialogContinuation::BlockingResourceWait { scope, resource_id },
+            )?;
+            self.blocking_resource_wait = Some(wait);
+        } else {
+            if let Some(wait) = self.blocking_resource_wait.as_mut() {
+                wait.display_name = display_name;
+            }
+            self.update_blocking_resource_wait_dialog(scope, resource_id, present_percent);
+        }
+        Ok(())
+    }
+
+    fn update_blocking_resource_wait_dialog(
+        &mut self,
+        scope: BlockingResourceScope,
+        resource_id: i32,
+        present_percent: u8,
+    ) {
+        if let Some(dialog) = self.message_dialogs.iter_mut().rfind(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::BlockingResourceWait {
+                    scope: candidate_scope,
+                    resource_id: candidate_id,
+                } if candidate_scope == scope && candidate_id == resource_id
+            )
+        }) {
+            dialog.state.set_progress(present_percent);
+            self.mark_menu_dirty();
+        }
+    }
+
+    fn dismiss_blocking_resource_wait_dialog(
+        &mut self,
+        scope: BlockingResourceScope,
+        resource_id: i32,
+    ) {
+        let Some(index) = self.message_dialogs.iter().rposition(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::BlockingResourceWait {
+                    scope: candidate_scope,
+                    resource_id: candidate_id,
+                } if candidate_scope == scope && candidate_id == resource_id
+            )
+        }) else {
+            return;
+        };
+        self.remove_message_dialog_at(index);
+        self.mark_menu_dirty();
+    }
+
+    fn finish_blocking_resource_wait(&mut self, resource_id: i32) {
+        let Some(wait) = self
+            .blocking_resource_wait
+            .take_if(|wait| wait.resource_id == resource_id)
+        else {
+            return;
+        };
+        self.dismiss_blocking_resource_wait_dialog(wait.scope, wait.resource_id);
+    }
+
+    fn clear_blocking_resource_wait(&mut self) {
+        self.aborted_player_resource_joins.clear();
+        let Some(wait) = self.blocking_resource_wait.take() else {
+            return;
+        };
+        self.dismiss_blocking_resource_wait_dialog(wait.scope, wait.resource_id);
+    }
+
+    fn cancel_blocking_resource_wait(
+        &mut self,
+        scope: BlockingResourceScope,
+        resource_id: i32,
+    ) -> Result<(), EngineError> {
+        let Some(wait) = self.blocking_resource_wait.take_if(|wait| {
+            wait.scope == scope && wait.resource_id == resource_id
+        }) else {
+            return Ok(());
+        };
+        match wait.scope {
+            BlockingResourceScope::ClientStart => self.finish_startup_network_failure(
+                StartupNetworkPurpose::Join,
+                format!("Waiting for {} was aborted.", wait.display_name),
+            ),
+            BlockingResourceScope::PlayerJoin => {
+                // RetrieveRes cancellation fails this one caller, not the
+                // backend transfer. Bypass this synchronized JoinPlayer once;
+                // later callers for the same loading resource still wait.
+                if let Some(info_id) = wait.player_info_id {
+                    self.aborted_player_resource_joins
+                        .insert((wait.resource_id, info_id));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn poll_blocking_resource_wait_at(&mut self, now: Instant) -> Result<(), EngineError> {
+        let Some((scope, resource_id, previous_percent)) = self
+            .blocking_resource_wait
+            .as_ref()
+            .map(|wait| (wait.scope, wait.resource_id, wait.present_percent()))
+        else {
+            return Ok(());
+        };
+        let present_percent = self
+            .admission_resources
+            .present_percent
+            .get(&resource_id)
+            .copied()
+            .unwrap_or(previous_percent)
+            .min(100);
+        let timed_out = self
+            .blocking_resource_wait
+            .as_mut()
+            .is_some_and(|wait| wait.observe_at(present_percent, now));
+        self.update_blocking_resource_wait_dialog(scope, resource_id, present_percent);
+        if !timed_out {
+            return Ok(());
+        }
+
+        let Some(wait) = self.blocking_resource_wait.take() else {
+            return Ok(());
+        };
+        self.dismiss_blocking_resource_wait_dialog(wait.scope, wait.resource_id);
+        let template = self.runtime_resource_text(
+            "IDS_NET_ERR_RESTIMEOUT",
+            "Waiting for %s: Timeout!",
+        );
+        let message = format_resource_string(template, &[&wait.display_name]);
+        tracing::error!(
+            resource_id = wait.resource_id,
+            resource = %wait.display_name,
+            "blocking network resource retrieval timed out"
+        );
+        match wait.scope {
+            BlockingResourceScope::ClientStart => {
+                self.finish_startup_network_failure(StartupNetworkPurpose::Join, message)
+            }
+            BlockingResourceScope::PlayerJoin => {
+                if let Some(info_id) = wait.player_info_id {
+                    self.aborted_player_resource_joins
+                        .insert((wait.resource_id, info_id));
+                }
+                let caption = self.runtime_resource_text("IDS_DLG_LOG", "Error Log");
+                self.push_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                        message,
+                        caption,
+                        lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                    ),
+                    MessageDialogContinuation::None,
+                )
+            }
+        }
+    }
+
     fn prepare_client_network_scenario_if_ready(&mut self) {
         if let Err(error) = self.try_prepare_client_network_scenario() {
             tracing::error!(%error, "failed to prepare client network scenario");
@@ -31008,7 +31378,10 @@ impl GameApp {
                     .map(Path::to_path_buf)
             }) {
                 Ok(resources) => resources,
-                Err(_) => return Ok(()),
+                Err(pending) => {
+                    self.wait_for_client_start_resource(pending)?;
+                    return Ok(());
+                }
             };
             let filename = format!("Combined{}.c4s", join_data.client_id);
             let packed = compose_client_network_scenario(&resources, &filename, &maker)
@@ -31040,7 +31413,10 @@ impl GameApp {
                 .map(Path::to_path_buf)
         }) {
             Ok(resources) => resources,
-            Err(_) => return Ok(()),
+            Err(pending) => {
+                self.wait_for_client_start_resource(pending)?;
+                return Ok(());
+            }
         };
         let combined_path = self
             .client_combined_scenario_path
@@ -32929,6 +33305,9 @@ impl GameApp {
                                     self.pending_client_start_status = Some(requested);
                                 }
                                 self.prepare_client_network_scenario_if_ready();
+                                if self.network.is_none() {
+                                    break;
+                                }
                             }
                         }
                         tracing::debug!(
@@ -33265,13 +33644,33 @@ impl GameApp {
                             path = %path.display(),
                             "network resource received"
                         );
+                        self.finish_blocking_resource_wait(resource_id);
                         self.prepare_client_network_scenario_if_ready();
+                        if self.network.is_none() {
+                            break;
+                        }
                         self.sync_classic_lobby_resource_ready();
                     }
                     NetworkEvent::ResourceLoadFailed { resource_id } => {
+                        let failed_client_start = self
+                            .blocking_resource_wait
+                            .as_ref()
+                            .filter(|wait| {
+                                wait.resource_id == resource_id
+                                    && wait.scope == BlockingResourceScope::ClientStart
+                            })
+                            .map(|wait| wait.display_name.clone());
                         self.admission_resources.mark_failed(resource_id);
+                        self.finish_blocking_resource_wait(resource_id);
                         self.remove_classic_lobby_resource(resource_id);
                         tracing::warn!(resource_id, "network resource load failed");
+                        if let Some(display_name) = failed_client_start {
+                            self.finish_startup_network_failure(
+                                StartupNetworkPurpose::Join,
+                                format!("Unable to retrieve {display_name}."),
+                            )?;
+                            break;
+                        }
                         self.sync_classic_lobby_resource_ready();
                     }
                     NetworkEvent::ResourceDeriveUnsupported { core } => {
@@ -43739,6 +44138,7 @@ impl GameApp {
         self.network_league_name.clear();
         self.network_stream_address = LegacyCString::default();
         self.control_player_infos = ControlPlayerInfoRegistry::default();
+        self.clear_blocking_resource_wait();
         self.admission_resources.clear();
         seed_engine_player_info_parameters(
             &mut self.engine,
@@ -53219,6 +53619,7 @@ impl GameApp {
             self.network_ticks.clear();
             self.network_sync.clear();
             self.sync_checks.clear();
+            self.clear_blocking_resource_wait();
             self.admission_resources.clear();
             self.host_local_alternate_colors_by_resource.clear();
             self.host_local_player_info_ids.clear();
@@ -53921,6 +54322,7 @@ impl GameApp {
         self.network_control_running = true;
         self.runtime_network_status_barrier = None;
         self.league_votes.clear();
+        self.clear_blocking_resource_wait();
         self.admission_resources.clear();
         self.host_local_alternate_colors_by_resource.clear();
         self.host_local_player_info_ids.clear();
@@ -54616,9 +55018,20 @@ impl GameApp {
                     Ok(())
                 }
                 NetworkControl::JoinPlayer(join) => {
-                    self.apply_join_player_control(join)
-                        .map_err(map_runtime_flash_producer_engine_error)?;
-                    Ok(())
+                    let aborted_key = match &join.source {
+                        lc_engine::JoinPlayerSource::Resource(core) => {
+                            Some((core.id, join.info_id))
+                        }
+                        lc_engine::JoinPlayerSource::Embedded(_) => None,
+                    };
+                    if aborted_key.is_some_and(|key| {
+                        self.aborted_player_resource_joins.remove(&key)
+                    }) {
+                        Ok(())
+                    } else {
+                        self.apply_join_player_control(join)
+                            .map_err(map_runtime_flash_producer_engine_error)
+                    }
                 }
                 NetworkControl::RemovePlayer(control) => {
                     self.execute_remove_player_control(control)
@@ -55535,6 +55948,7 @@ impl GameApp {
         self.poll_startup_network_connection()?;
         self.poll_live_masterserver_signup()?;
         self.process_network_events()?;
+        self.poll_blocking_resource_wait_at(Instant::now())?;
         // C4Network2::Execute probes the runtime status target before
         // Control.Prepare on every attempted frame, including halted frames.
         self.check_runtime_network_status_reached();
@@ -55627,12 +56041,54 @@ impl GameApp {
                         // before control/simulation (src/C4GameControl.cpp:262-265;
                         // src/C4Game.cpp:786-797). The decoded packet order is
                         // authoritative, including interleaved SyncCheck packets.
+                        let pending_player_resource = self
+                            .network_ticks
+                            .ready
+                            .get(&tick)
+                            .and_then(|controls| {
+                                pending_admission_resource(
+                                    &mut self.admission_resources,
+                                    &self.control_clients,
+                                    controls,
+                                    &self.aborted_player_resource_joins,
+                                )
+                        });
+                        if let Some(pending) = pending_player_resource {
+                            let player_name = pending
+                                .player_name
+                                .or_else(|| {
+                                    self.control_player_infos
+                                        .get(pending.info_id)
+                                        .map(|player| {
+                                            legacy_presentation_text(player.name.as_bytes())
+                                        })
+                                        .filter(|name| !name.is_empty())
+                                })
+                                .unwrap_or_else(|| {
+                                    pending.core.filename.to_string_lossy().into_owned()
+                                });
+                            let template = self.runtime_resource_text(
+                                "IDS_NET_RES_PLRFILE",
+                                "player file for %s",
+                            );
+                            let display_name =
+                                format_resource_string(template, &[&player_name]);
+                            self.begin_blocking_resource_wait_at(
+                                BlockingResourceScope::PlayerJoin,
+                                pending.core.id,
+                                Some(pending.info_id),
+                                display_name,
+                                Instant::now(),
+                            )?;
+                            return Ok(());
+                        }
                         let Some(controls) =
                             self.network_ticks.take_exact_if_ready(tick, |controls| {
                                 preflight_admission_resources(
                                     &mut self.admission_resources,
                                     &self.control_clients,
                                     controls,
+                                    &self.aborted_player_resource_joins,
                                 )
                             })
                         else {
@@ -57840,6 +58296,7 @@ impl GameApp {
         if matches!(
             continuation,
             MessageDialogContinuation::StartupIrcDisconnectConfirm
+                | MessageDialogContinuation::BlockingResourceWait { .. }
         ) {
             state.set_button_label(
                 MessageDialogButton::Cancel,
@@ -57847,6 +58304,9 @@ impl GameApp {
             );
         }
         state.set_close_tooltip(self.runtime_resource_text("IDS_MNU_CLOSE", "Close"));
+        state.set_progress_tooltip(
+            self.runtime_resource_text("IDS_DLGTIP_PROGRESS", "Progress bar"),
+        );
         self.guard_classic_global_gui_bootstrap()?;
         Self::guard_gui_overlay_result(
             "C4GUI::MessageDialog",
@@ -58022,6 +58482,9 @@ impl GameApp {
             }
             MessageDialogContinuation::NetworkClientStartWait => {
                 self.return_to_menu();
+            }
+            MessageDialogContinuation::BlockingResourceWait { scope, resource_id } => {
+                self.cancel_blocking_resource_wait(scope, resource_id)?;
             }
             MessageDialogContinuation::NetworkRuntimeJoin { reference }
                 if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
@@ -63138,6 +63601,7 @@ impl GameApp {
         self.network_client_activity.clear();
         self.control_player_infos = ControlPlayerInfoRegistry::default();
         self.network_team_assignment = None;
+        self.clear_blocking_resource_wait();
         self.admission_resources.clear();
         self.host_local_alternate_colors_by_resource.clear();
         self.host_local_player_info_ids.clear();
@@ -65750,6 +66214,7 @@ impl GameApp {
         if self.network.is_none() {
             self.control_clients = initial_control_clients(None, None);
             self.control_player_infos = ControlPlayerInfoRegistry::default();
+            self.clear_blocking_resource_wait();
             self.admission_resources.clear();
             self.host_local_alternate_colors_by_resource.clear();
             self.host_local_player_info_ids.clear();
@@ -71539,6 +72004,263 @@ mod tests {
 
     fn tempdir() -> std::io::Result<tempfile::TempDir> {
         tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
+
+    #[test]
+    fn blocking_resource_stall_timeout_resets_only_when_percent_changes() {
+        let started = Instant::now();
+        let mut stuck = BlockingResourceWait::new_at(
+            BlockingResourceScope::ClientStart,
+            7,
+            None,
+            "Scenario".to_string(),
+            25,
+            started,
+        );
+        assert!(!stuck.observe_at(25, started + BLOCKING_RESOURCE_STALL_TIMEOUT));
+        assert!(stuck.observe_at(
+            25,
+            started + BLOCKING_RESOURCE_STALL_TIMEOUT + Duration::from_millis(1)
+        ));
+
+        let mut advancing = BlockingResourceWait::new_at(
+            BlockingResourceScope::ClientStart,
+            7,
+            None,
+            "Scenario".to_string(),
+            25,
+            started,
+        );
+        let changed_at = started + BLOCKING_RESOURCE_STALL_TIMEOUT - Duration::from_millis(1);
+        assert!(!advancing.observe_at(26, changed_at));
+        assert!(!advancing.observe_at(
+            26,
+            changed_at + BLOCKING_RESOURCE_STALL_TIMEOUT
+        ));
+        assert!(advancing.observe_at(
+            26,
+            changed_at + BLOCKING_RESOURCE_STALL_TIMEOUT + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn client_resource_timeout_closes_progress_and_shows_fatal_error_log() {
+        let mut app = new_menu_app(800, 600);
+        let core = lc_engine::NetworkResourceCore {
+            id: 7,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        app.admission_resources.register_lobby_resource(&core);
+        let started = Instant::now();
+        app.begin_blocking_resource_wait_at(
+            BlockingResourceScope::ClientStart,
+            core.id,
+            None,
+            "Scenario".to_string(),
+            started,
+        )
+        .expect("open progress dialog");
+
+        app.poll_blocking_resource_wait_at(started + BLOCKING_RESOURCE_STALL_TIMEOUT)
+            .expect("the exact deadline does not time out");
+        assert!(app.blocking_resource_wait.is_some());
+        app.poll_blocking_resource_wait_at(
+            started + BLOCKING_RESOURCE_STALL_TIMEOUT + Duration::from_millis(1),
+        )
+        .expect("timeout returns to the startup network screen");
+
+        assert!(app.blocking_resource_wait.is_none());
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.message_dialogs[0].state.caption(), "Error Log");
+        assert_eq!(
+            app.message_dialogs[0].state.message(),
+            "Waiting for Scenario: Timeout!"
+        );
+        assert_eq!(
+            app.message_dialogs[0].state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
+    }
+
+    #[test]
+    fn player_resource_abort_releases_only_the_waiting_join() {
+        let mut app = new_synthetic_running_sandbox_app();
+        let (manager, _event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.engine.set_network_game(true);
+        app.control_clients.register(0, true, false);
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 9,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(b"Player.c4p".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        app.admission_resources.register_lobby_resource(&core);
+        app.begin_blocking_resource_wait_at(
+            BlockingResourceScope::PlayerJoin,
+            core.id,
+            Some(99),
+            "player file for Ada".to_string(),
+            Instant::now(),
+        )
+        .expect("open player progress dialog");
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("Abort routes to the waiting JoinPlayer caller");
+
+        assert!(app.blocking_resource_wait.is_none());
+        assert_eq!(
+            app.admission_resources.status(core.id),
+            Some(&AdmissionResourceState::Loading { removed: false })
+        );
+        assert!(app
+            .aborted_player_resource_joins
+            .contains(&(core.id, 99)));
+        let join = |info_id| {
+            vec![NetworkControl::JoinPlayer(
+                lc_engine::JoinPlayerControlData {
+                    at_client: 0,
+                    info_id,
+                    source: lc_engine::JoinPlayerSource::Resource(core.clone()),
+                    ..Default::default()
+                },
+            )]
+        };
+        let mut clients = ControlClientRegistry::default();
+        clients.register(0, true, false);
+        assert!(pending_admission_resource(
+            &mut app.admission_resources,
+            &clients,
+            &join(99),
+            &app.aborted_player_resource_joins,
+        )
+        .is_none());
+        assert_eq!(
+            pending_admission_resource(
+                &mut app.admission_resources,
+                &clients,
+                &join(100),
+                &app.aborted_player_resource_joins,
+            )
+            .map(|pending| pending.info_id),
+            Some(100),
+            "a later caller still waits on the active backend transfer"
+        );
+        assert!(app.message_dialogs.is_empty());
+
+        let player_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lc-engine/tests/fixtures/embedded_player.c4p"
+        ));
+        app.admission_resources
+            .mark_complete(core.id, player_path);
+        app.apply_ready_controls(
+            0,
+            vec![
+                NetworkControl::PlayerInfo(lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        name: lc_engine::LegacyCString::from_bytes(b"Ada".to_vec()).unwrap(),
+                        id: 99,
+                        ..Default::default()
+                    }],
+                    by_client: 1,
+                    ..Default::default()
+                }),
+                join(99).pop().expect("resource join"),
+            ],
+        )
+        .expect("consume the canceled join after transfer completion");
+        assert!(!app
+            .control_player_infos
+            .get(99)
+            .expect("player info was still applied")
+            .is_joined());
+        assert!(!app
+            .engine
+            .snapshot()
+            .players
+            .iter()
+            .any(|player| player.player_info_id == 99));
+        assert!(!app
+            .aborted_player_resource_joins
+            .contains(&(core.id, 99)));
+    }
+
+    #[test]
+    fn failed_client_start_resource_aborts_instead_of_stalling_silently() {
+        let mut app = new_menu_app(800, 600);
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        let core = lc_engine::NetworkResourceCore {
+            id: 11,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        app.admission_resources.register_lobby_resource(&core);
+        app.begin_blocking_resource_wait_at(
+            BlockingResourceScope::ClientStart,
+            core.id,
+            None,
+            "Scenario".to_string(),
+            Instant::now(),
+        )
+        .expect("open scenario progress dialog");
+        event_tx
+            .send(NetworkEvent::ResourceLoadFailed {
+                resource_id: core.id,
+            })
+            .expect("fail scenario transfer");
+
+        app.process_network_events()
+            .expect("resource failure returns to startup");
+
+        assert!(app.network.is_none());
+        assert!(app.blocking_resource_wait.is_none());
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.message_dialogs[0].state.caption(), "Error Log");
+        assert_eq!(
+            app.message_dialogs[0].state.message(),
+            "Unable to retrieve Scenario."
+        );
+    }
+
+    #[test]
+    fn already_failed_client_start_resource_never_opens_a_stale_progress_wait() {
+        let mut app = new_menu_app(800, 600);
+        let (manager, _event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Definitions as u8,
+            id: 12,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(
+                b"Network\\Objects.c4d".to_vec(),
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        app.admission_resources.register_lobby_resource(&core);
+        app.admission_resources.mark_failed(core.id);
+
+        app.wait_for_client_start_resource(PendingClientStartResource {
+            role: ClientStartResourceRole::GameResource { index: 0 },
+            core,
+        })
+        .expect("an already failed resource returns to startup");
+
+        assert!(app.network.is_none());
+        assert!(app.blocking_resource_wait.is_none());
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.message_dialogs[0].state.caption(), "Error Log");
+        assert_eq!(
+            app.message_dialogs[0].state.message(),
+            "Unable to retrieve Object Definition: Objects.c4d."
+        );
     }
 
     fn write_test_definition_graphics(path: &Path) {
@@ -124599,7 +125321,8 @@ ScenInfoArea=70,5,25,90
         assert!(preflight_admission_resources(
             &mut resources,
             &ControlClientRegistry::default(),
-            &controls
+            &controls,
+            &HashSet::new(),
         ));
         assert_eq!(resources.status(resource_id), None);
     }
@@ -128326,6 +129049,22 @@ ScenInfoArea=70,5,25,90
             .send(NetworkEvent::StatusRequested(go))
             .expect("queue GO request");
         app.process_network_events().expect("apply start request");
+        assert_eq!(
+            app.blocking_resource_wait
+                .as_ref()
+                .map(|wait| (wait.scope, wait.resource_id)),
+            Some((BlockingResourceScope::ClientStart, 70))
+        );
+        assert_eq!(
+            app.message_dialogs
+                .iter()
+                .find(|dialog| matches!(
+                    dialog.continuation,
+                    MessageDialogContinuation::BlockingResourceWait { .. }
+                ))
+                .and_then(|dialog| dialog.state.progress()),
+            Some(0)
+        );
 
         let combined_path = directory.path().join("Combined7.c4s");
         assert!(!combined_path.exists());
@@ -128339,6 +129078,12 @@ ScenInfoArea=70,5,25,90
             .expect("complete scenario");
         app.process_network_events().expect("wait for dynamic");
         assert!(!combined_path.exists());
+        assert_eq!(
+            app.blocking_resource_wait
+                .as_ref()
+                .map(|wait| wait.resource_id),
+            Some(71)
+        );
         assert_eq!(commands.take_player_info_updates().len(), 1);
         let (removed_tx, removed_rx) = mpsc::channel();
         let removal_observer = thread::spawn(move || {
@@ -128365,6 +129110,12 @@ ScenInfoArea=70,5,25,90
             71
         );
         let mut commands = removal_observer.join().expect("removal observer exits");
+        assert_eq!(
+            app.blocking_resource_wait
+                .as_ref()
+                .map(|wait| wait.resource_id),
+            Some(72)
+        );
 
         let combined = Group::open(&combined_path).expect("open combined scenario");
         assert_eq!(combined.read_file("Dynamic.txt").unwrap(), b"merged");
@@ -128407,6 +129158,11 @@ ScenInfoArea=70,5,25,90
             .expect("complete authoritative material resource");
         app.process_network_events()
             .expect("begin client InitGame after all resources complete");
+        assert!(app.blocking_resource_wait.is_none());
+        assert!(!app.message_dialogs.iter().any(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::BlockingResourceWait { .. }
+        )));
         assert!(matches!(app.mode, AppMode::Loading));
         app.poll_loading().expect("finish client InitGame phase");
         assert!(matches!(app.mode, AppMode::Loading));
@@ -134712,6 +135468,54 @@ protected func InputCallback(string answer, int player)
             app.admission_resources.status(resource_id),
             Some(&AdmissionResourceState::Loading { removed: false })
         );
+        let wait = app
+            .blocking_resource_wait
+            .as_ref()
+            .expect("resource-backed JoinPlayer opens the progress wait");
+        assert_eq!(wait.scope, BlockingResourceScope::PlayerJoin);
+        assert_eq!(wait.resource_id, resource_id);
+        assert_eq!(wait.display_name, "player file for Delayed resource");
+        let progress = app
+            .message_dialogs
+            .iter()
+            .find(|dialog| {
+                matches!(
+                    dialog.continuation,
+                    MessageDialogContinuation::BlockingResourceWait {
+                        scope: BlockingResourceScope::PlayerJoin,
+                        resource_id: 62,
+                    }
+                )
+            })
+            .expect("player resource progress dialog");
+        assert_eq!(progress.state.progress(), Some(0));
+        assert_eq!(progress.state.message(), "Waiting for player file for Delayed resource...");
+
+        event_tx
+            .send(NetworkEvent::ResourceProgress {
+                resource_id,
+                present_percent: 47,
+            })
+            .expect("advance delayed player resource");
+        app.update().expect("updated progress still stalls the control tick");
+        assert_eq!(app.engine.frame(), initial_frame);
+        assert_eq!(
+            app.blocking_resource_wait
+                .as_ref()
+                .expect("wait remains active")
+                .present_percent(),
+            47
+        );
+        assert_eq!(
+            app.message_dialogs
+                .iter()
+                .find(|dialog| matches!(
+                    dialog.continuation,
+                    MessageDialogContinuation::BlockingResourceWait { .. }
+                ))
+                .and_then(|dialog| dialog.state.progress()),
+            Some(47)
+        );
 
         event_tx
             .send(NetworkEvent::ResourceComplete {
@@ -134734,6 +135538,11 @@ protected func InputCallback(string answer, int player)
             .players
             .iter()
             .any(|player| player.player_info_id == info_id));
+        assert!(app.blocking_resource_wait.is_none());
+        assert!(!app.message_dialogs.iter().any(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::BlockingResourceWait { .. }
+        )));
     }
 
     #[test]
