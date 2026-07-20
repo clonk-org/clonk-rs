@@ -85,7 +85,7 @@ fn reference_server_answers_cpp_http_get_with_current_reference() {
     let advertiser = NetworkGameAdvertiser::start(
         NetworkGameAdvertiserConfig {
             discovery_port: 0,
-            reference_port: 0,
+            reference_port: Some(0),
         },
         advertised_game(),
     )
@@ -133,6 +133,29 @@ fn reference_server_answers_cpp_http_get_with_current_reference() {
     let mut response = Vec::new();
     incomplete.read_to_end(&mut response).unwrap();
     assert!(response.is_empty());
+}
+
+#[test]
+fn disabled_reference_server_keeps_discovery_only_advertiser_clean() {
+    let discovery_reservation = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let discovery_port = discovery_reservation.local_addr().unwrap().port();
+    drop(discovery_reservation);
+
+    let advertiser = NetworkGameAdvertiser::start(
+        NetworkGameAdvertiserConfig {
+            discovery_port,
+            reference_port: None,
+        },
+        advertised_game(),
+    )
+    .unwrap();
+
+    assert_eq!(advertiser.reference_addr().port(), 0);
+    let tcp = std::net::TcpListener::bind((Ipv6Addr::UNSPECIFIED, discovery_port))
+        .expect("discovery-only advertising must not create a TCP listener");
+    advertiser.update(&advertised_game());
+    drop(tcp);
+    drop(advertiser);
 }
 
 fn http_request(reference_port: u16, request: &[u8]) -> Vec<u8> {

@@ -6458,20 +6458,11 @@ fn client_settings_for_paths(
         if let Ok(selection) = snapshot_configured_client_player_selection(paths) {
             settings.group_maker = selection.group_maker().clone();
         }
-        let config = Config::load(paths.config_file()).ok();
-        let network_port = |key: &str, default: u16| {
-            config
-                .as_ref()
-                .and_then(|config| config.get_in(Some("Network"), key))
-                .and_then(|value| value.trim().parse::<u16>().ok())
-                .unwrap_or(default)
-        };
-        let tcp_port = network_port("PortTCP", 11_112);
-        let udp_port = network_port("PortUDP", 11_113);
-        settings.mesh_tcp_bind_address = (tcp_port != 0)
-            .then_some(SocketAddr::from(([0_u16; 8], tcp_port)));
-        settings.mesh_udp_bind_address = (udp_port != 0)
-            .then_some(SocketAddr::from(([0_u16; 8], udp_port)));
+        let ports = load_network_ports(Some(paths));
+        settings.mesh_tcp_bind_address =
+            (ports.tcp != 0).then_some(SocketAddr::from(([0_u16; 8], ports.tcp)));
+        settings.mesh_udp_bind_address =
+            (ports.udp != 0).then_some(SocketAddr::from(([0_u16; 8], ports.udp)));
         settings.resource_directory = paths.cache_dir().join("Network");
         settings.local_system_path = Some(paths.system_group_path().to_path_buf());
         settings.local_resource_roots = vec![
@@ -21036,11 +21027,7 @@ fn load_options_network_state(
             .as_ref()
             .and_then(|config| config.get_in(Some(section), key))
     };
-    let integer = |key: &str, fallback: i32| {
-        value("Network", key)
-            .and_then(|raw| raw.trim().parse::<i32>().ok())
-            .unwrap_or(fallback)
-    };
+    let ports = load_network_ports(paths);
     let boolean = |section: &str, key: &str, fallback: bool| {
         value(section, key)
             .map(parse_config_bool)
@@ -21048,10 +21035,10 @@ fn load_options_network_state(
     };
     NetworkSheetState::new(
         [
-            integer("PortTCP", 11_112),
-            integer("PortUDP", 11_113),
-            integer("PortRefServer", 11_111),
-            integer("PortDiscovery", 11_114),
+            i32::from(ports.tcp),
+            i32::from(ports.udp),
+            i32::from(ports.reference),
+            i32::from(ports.discovery),
         ],
         boolean("Network", "UseAlternateServer", false),
         value("Network", "AlternateServerAddress")
@@ -21147,29 +21134,73 @@ fn native_config_text(config: &[u8], section: &str, key: &str) -> Option<String>
         .map(|value| native_bytes_as_legacy_text(value.as_bytes()))
 }
 
+const DEFAULT_NETWORK_TCP_PORT: u16 = 11_112;
+const DEFAULT_NETWORK_UDP_PORT: u16 = 11_113;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NetworkPorts {
+    tcp: u16,
+    udp: u16,
+    discovery: u16,
+    reference: u16,
+}
+
+fn sanitized_network_ports(config: &[u8]) -> NetworkPorts {
+    let configured_port = |key: &str, default: u16| {
+        native_config_text(config, "Network", key).map_or(default, |value| {
+            value
+                .trim()
+                .parse::<i64>()
+                .ok()
+                .and_then(|value| u16::try_from(value).ok())
+                .unwrap_or(0)
+        })
+    };
+    let mut ports = NetworkPorts {
+        tcp: configured_port("PortTCP", DEFAULT_NETWORK_TCP_PORT),
+        udp: configured_port("PortUDP", DEFAULT_NETWORK_UDP_PORT),
+        discovery: configured_port("PortDiscovery", lc_network::DEFAULT_DISCOVERY_PORT),
+        reference: configured_port("PortRefServer", lc_network::DEFAULT_REFERENCE_PORT),
+    };
+
+    if ports.tcp > 0 && ports.tcp == ports.reference {
+        tracing::warn!(
+            "Network TCP port and reference server port both set to same value - increasing reference server port!"
+        );
+        ports.reference = ports
+            .reference
+            .checked_add(1)
+            .unwrap_or(lc_network::DEFAULT_REFERENCE_PORT);
+    }
+    if ports.udp > 0 && ports.udp == ports.discovery {
+        tracing::warn!(
+            "Network UDP port and LAN game discovery port both set to same value - increasing discovery port!"
+        );
+        ports.discovery = ports
+            .discovery
+            .checked_add(1)
+            .unwrap_or(lc_network::DEFAULT_DISCOVERY_PORT);
+    }
+
+    ports
+}
+
+fn load_network_ports(paths: Option<&AppPaths>) -> NetworkPorts {
+    sanitized_network_ports(&load_native_config_bytes(paths))
+}
+
 fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, u16) {
     let config = load_native_config_bytes(paths);
     let masterserver_signup = native_config_text(&config, "Network", "MasterServerSignUp")
         .as_deref()
         .map(parse_config_bool)
         .unwrap_or(true);
-    let port = native_config_text(&config, "Network", "PortTCP")
-        .and_then(|value| value.trim().parse::<u16>().ok())
-        .filter(|port| *port != 0)
-        .unwrap_or(11112);
-    (masterserver_signup, port)
+    let ports = sanitized_network_ports(&config);
+    (masterserver_signup, ports.tcp)
 }
 
 fn load_network_reference_port(paths: Option<&AppPaths>) -> u16 {
-    paths
-        .and_then(|paths| Config::load(paths.config_file()).ok())
-        .and_then(|config| {
-            config
-                .get_in(Some("Network"), "PortRefServer")
-                .and_then(|value| value.trim().parse::<u16>().ok())
-        })
-        .filter(|port| *port != 0)
-        .unwrap_or(lc_network::DEFAULT_REFERENCE_PORT)
+    load_network_ports(paths).reference
 }
 
 fn load_prepared_league_host_config(
@@ -21235,6 +21266,7 @@ fn build_network_host_preparation(
         .clone()
         .ok_or_else(|| anyhow!("scenario `{}` has no filesystem path", scenario.title))?;
     let config_bytes = load_native_config_bytes(app.app_paths.as_ref());
+    let network_ports = sanitized_network_ports(&config_bytes);
     let raw_value = |section: &str, key: &str| native_config_text(&config_bytes, section, key);
     let value =
         |section: &str, key: &str| raw_value(section, key).map(|value| value.trim().to_owned());
@@ -21412,18 +21444,14 @@ fn build_network_host_preparation(
                 .map(|runtime_join| !runtime_join)
                 .unwrap_or_else(|| boolean("Network", "NoRuntimeJoin", true)),
             enable_upnp: boolean("Network", "EnableUPnP", true),
-            network_tcp_port: app.classic_command_line.tcp_port.unwrap_or_else(|| {
-                integer("Network", "PortTCP", 11_112)
-                    .try_into()
-                    .ok()
-                    .unwrap_or(11_112)
-            }),
-            network_udp_port: app.classic_command_line.udp_port.unwrap_or_else(|| {
-                integer("Network", "PortUDP", 11_113)
-                    .try_into()
-                    .ok()
-                    .unwrap_or(11_113)
-            }),
+            network_tcp_port: app
+                .classic_command_line
+                .tcp_port
+                .unwrap_or(network_ports.tcp),
+            network_udp_port: app
+                .classic_command_line
+                .udp_port
+                .unwrap_or(network_ports.udp),
         },
         league,
     })
@@ -21431,6 +21459,7 @@ fn build_network_host_preparation(
 
 fn load_network_search_settings(paths: Option<&AppPaths>) -> lc_network::NetworkGameSearchConfig {
     let config = load_native_config_bytes(paths);
+    let network_ports = sanitized_network_ports(&config);
     let value = |key| native_config_text(&config, "Network", key);
     let internet_enabled = value("MasterServerSignUp")
         .as_deref()
@@ -21455,15 +21484,11 @@ fn load_network_search_settings(paths: Option<&AppPaths>) -> lc_network::Network
         })
         .unwrap_or(lc_network::DEFAULT_MASTER_SERVER_URL)
         .to_string();
-    let discovery_port = value("PortDiscovery")
-        .and_then(|value| value.trim().parse::<u16>().ok())
-        .filter(|port| *port != 0)
-        .unwrap_or(lc_network::DEFAULT_DISCOVERY_PORT);
     lc_network::NetworkGameSearchConfig {
         internet_enabled,
         use_alternate_server: use_alternate,
         master_server_url,
-        discovery_port,
+        discovery_port: network_ports.discovery,
     }
 }
 
@@ -21567,19 +21592,13 @@ fn load_network_advertiser_settings(
     if paths.is_none() {
         return lc_network::NetworkGameAdvertiserConfig {
             discovery_port: 0,
-            reference_port: 0,
+            reference_port: Some(0),
         };
     }
-    let config = load_native_config_bytes(paths);
-    let port = |key: &str, default| {
-        native_config_text(&config, "Network", key)
-            .and_then(|value| value.trim().parse::<u16>().ok())
-            .filter(|port| *port != 0)
-            .unwrap_or(default)
-    };
+    let ports = load_network_ports(paths);
     lc_network::NetworkGameAdvertiserConfig {
-        discovery_port: port("PortDiscovery", lc_network::DEFAULT_DISCOVERY_PORT),
-        reference_port: port("PortRefServer", lc_network::DEFAULT_REFERENCE_PORT),
+        discovery_port: ports.discovery,
+        reference_port: (ports.reference != 0).then_some(ports.reference),
     }
 }
 
@@ -126104,6 +126123,109 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn l023_network_port_sanitation_preserves_zero_and_disables_invalid_values() {
+        assert_eq!(
+            sanitized_network_ports(b""),
+            NetworkPorts {
+                tcp: DEFAULT_NETWORK_TCP_PORT,
+                udp: DEFAULT_NETWORK_UDP_PORT,
+                discovery: lc_network::DEFAULT_DISCOVERY_PORT,
+                reference: lc_network::DEFAULT_REFERENCE_PORT,
+            }
+        );
+        assert_eq!(
+            sanitized_network_ports(
+                b"[Network]\nPortTCP=0\nPortUDP=0\nPortDiscovery=0\nPortRefServer=0\n"
+            ),
+            NetworkPorts {
+                tcp: 0,
+                udp: 0,
+                discovery: 0,
+                reference: 0,
+            }
+        );
+        assert_eq!(
+            sanitized_network_ports(
+                b"[Network]\nPortTCP=70000\nPortUDP=-1\nPortDiscovery=not-a-port\nPortRefServer=65536\n"
+            ),
+            NetworkPorts {
+                tcp: 0,
+                udp: 0,
+                discovery: 0,
+                reference: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn l023_network_port_collisions_increment_secondary_ports_and_wrap_at_u16_max() {
+        assert_eq!(
+            sanitized_network_ports(
+                b"[Network]\nPortTCP=23000\nPortRefServer=23000\nPortUDP=24000\nPortDiscovery=24000\n"
+            ),
+            NetworkPorts {
+                tcp: 23_000,
+                udp: 24_000,
+                discovery: 24_001,
+                reference: 23_001,
+            }
+        );
+        assert_eq!(
+            sanitized_network_ports(
+                b"[Network]\nPortTCP=65535\nPortRefServer=65535\nPortUDP=65535\nPortDiscovery=65535\n"
+            ),
+            NetworkPorts {
+                tcp: u16::MAX,
+                udp: u16::MAX,
+                discovery: lc_network::DEFAULT_DISCOVERY_PORT,
+                reference: lc_network::DEFAULT_REFERENCE_PORT,
+            }
+        );
+    }
+
+    #[test]
+    fn l023_zero_ports_flow_to_disabled_app_network_services() {
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create config directory");
+        fs::write(
+            paths.config_file(),
+            b"[Network]\nPortTCP=0\nPortUDP=0\nPortDiscovery=0\nPortRefServer=0\n",
+        )
+        .expect("persist disabled ports");
+
+        assert_eq!(load_network_startup_settings(Some(&paths)).1, 0);
+        assert_eq!(load_network_reference_port(Some(&paths)), 0);
+        assert_eq!(
+            load_network_search_settings(Some(&paths)).discovery_port,
+            0
+        );
+        assert_eq!(
+            load_network_advertiser_settings(Some(&paths)),
+            lc_network::NetworkGameAdvertiserConfig {
+                discovery_port: 0,
+                reference_port: None,
+            }
+        );
+        let settings = client_settings_for_paths(
+            SocketAddr::from(([127, 0, 0, 1], DEFAULT_NETWORK_TCP_PORT)),
+            "Client".to_string(),
+            Some(&paths),
+        );
+        assert_eq!(settings.mesh_tcp_bind_address, None);
+        assert_eq!(settings.mesh_udp_bind_address, None);
+    }
+
+    #[test]
     fn game_init_preserves_raw_cpp_participant_config() {
         // C4Config and C4Game retain legacy bytes; startup participant
         // validation changes only the in-memory Participants list and must not
@@ -129397,7 +129519,7 @@ ScenInfoArea=70,5,25,90
         let occupied = std::net::TcpListener::bind("[::]:0").expect("occupy a reference port");
         let config = lc_network::NetworkGameAdvertiserConfig {
             discovery_port: 0,
-            reference_port: occupied.local_addr().expect("occupied address").port(),
+            reference_port: Some(occupied.local_addr().expect("occupied address").port()),
         };
         let mut app = new_state_only_menu_app(320, 200);
 
@@ -129443,7 +129565,7 @@ ScenInfoArea=70,5,25,90
         app.start_network_game_advertiser_with_reference(
             lc_network::NetworkGameAdvertiserConfig {
                 discovery_port: 0,
-                reference_port: 0,
+                reference_port: Some(0),
             },
             retained,
         );

@@ -25,7 +25,9 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetworkGameAdvertiserConfig {
     pub discovery_port: u16,
-    pub reference_port: u16,
+    /// `None` mirrors a disabled `Config.Network.PortRefServer`. `Some(0)`
+    /// remains useful for tests and embedders that need an ephemeral listener.
+    pub reference_port: Option<u16>,
 }
 
 pub fn discovery_reply_for_packet(payload: &[u8], reference_port: u16) -> Option<[u8; 4]> {
@@ -323,8 +325,15 @@ impl NetworkGameAdvertiser {
         config: NetworkGameAdvertiserConfig,
         reference: Vec<u8>,
     ) -> io::Result<Self> {
-        let reference_listener = create_reference_listener(config.reference_port)?;
-        let reference_addr = reference_listener.local_addr()?;
+        let reference_listener = config
+            .reference_port
+            .map(create_reference_listener)
+            .transpose()?;
+        let reference_addr = reference_listener
+            .as_ref()
+            .map(std::net::TcpListener::local_addr)
+            .transpose()?
+            .unwrap_or_else(|| SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)));
         let actual_reference_port = reference_addr.port();
         let discovery = if config.discovery_port == 0 {
             None
@@ -345,9 +354,12 @@ impl NetworkGameAdvertiser {
                     Err(_) => return,
                 };
                 runtime.block_on(async move {
-                    let listener = match TcpListener::from_std(reference_listener) {
-                        Ok(listener) => listener,
-                        Err(_) => return,
+                    let listener = match reference_listener {
+                        Some(listener) => match TcpListener::from_std(listener) {
+                            Ok(listener) => Some(listener),
+                            Err(_) => return,
+                        },
+                        None => None,
                     };
                     let discovery = discovery.and_then(|(socket, interfaces)| {
                         UdpSocket::from_std(socket)
@@ -413,7 +425,7 @@ impl Drop for NetworkGameAdvertiser {
 }
 
 async fn run_advertiser(
-    listener: TcpListener,
+    listener: Option<TcpListener>,
     discovery: Option<(UdpSocket, Vec<u32>)>,
     discovery_port: u16,
     reference_port: u16,
@@ -429,13 +441,19 @@ async fn run_advertiser(
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        if let Ok(Ok((stream, _))) =
-            tokio::time::timeout(Duration::from_millis(20), listener.accept()).await
-        {
-            let reference = Arc::clone(&reference);
-            tokio::spawn(async move {
-                serve_reference(stream, reference).await;
-            });
+        if let Some(listener) = listener.as_ref() {
+            if let Ok(Ok((stream, _))) =
+                tokio::time::timeout(Duration::from_millis(20), listener.accept()).await
+            {
+                let reference = Arc::clone(&reference);
+                tokio::spawn(async move {
+                    serve_reference(stream, reference).await;
+                });
+            }
+        } else {
+            // The TCP accept timeout normally paces discovery polling. Retain
+            // that cadence when the reference server is configured off.
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
         if let Some(discovery) = discovery.as_ref() {
             loop {

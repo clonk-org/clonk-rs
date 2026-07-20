@@ -481,7 +481,7 @@ fn exact_advertiser_serves_the_complete_parameter_payload() {
     let advertiser = NetworkGameAdvertiser::start_exact(
         NetworkGameAdvertiserConfig {
             discovery_port: 0,
-            reference_port: 0,
+            reference_port: Some(0),
         },
         payload,
     )
