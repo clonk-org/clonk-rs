@@ -40428,7 +40428,7 @@ impl GameApp {
         self.netdlg_edit_consumed_keys.clear();
         self.sync_startup_network_game_rows();
         self.reset_startup_masterserver_entry();
-        self.status_text = "Querying game infos…".to_string();
+        self.status_text.clear();
         self.mark_menu_dirty();
 
         self.startup_network_refresh_waiting_for_clear = true;
@@ -44334,7 +44334,6 @@ impl GameApp {
                 } else if let Some(id) = selected_discovery_query {
                     self.focus_startup_discovery_reference_query(id);
                 }
-                self.status_text = "Querying game infos…".to_string();
             }
             lc_network::StartupGameSearchEvent::ReferencesUpdated(references) => {
                 let selected_reference = self.selected_startup_game_reference();
@@ -44342,7 +44341,6 @@ impl GameApp {
                 let selected_discovery_query =
                     self.selected_startup_discovery_reference_query_id();
                 self.startup_game_references = references;
-                let count = self.startup_game_references.len();
                 self.sync_startup_network_game_rows();
                 if let Some(reference) = selected_reference.as_ref() {
                     self.focus_startup_game_reference(reference);
@@ -44351,7 +44349,6 @@ impl GameApp {
                 } else if let Some(id) = selected_discovery_query {
                     self.focus_startup_discovery_reference_query(id);
                 }
-                self.status_text = format!("Found {count} network game(s)");
             }
             lc_network::StartupGameSearchEvent::GameDiscoveryQueryStarted { address } => {
                 self.begin_startup_discovery_reference_query(address);
@@ -44398,8 +44395,7 @@ impl GameApp {
                 if source == Some(lc_network::ReferenceQuerySource::GameDiscovery) {
                     self.show_startup_discovery_error(&message)?;
                 } else if source == Some(lc_network::ReferenceQuerySource::Masterserver) {
-                    self.set_startup_masterserver_error(message.clone());
-                    self.status_text = message;
+                    self.set_startup_masterserver_error(message);
                 } else {
                     self.status_text = message;
                 }
@@ -49842,6 +49838,7 @@ impl GameApp {
 
     fn open_network_game_dialog(&mut self) {
         self.close_context_menu_silently();
+        self.status_text.clear();
         self.startup_network_refresh_waiting_for_clear = false;
         self.startup_network_ignore_redirect = false;
         self.startup_game_references.clear();
@@ -49904,9 +49901,6 @@ impl GameApp {
         self.replace_startup_dialog(StartupView::NetworkGame, StartupDialog::NetworkGame);
         self.sync_startup_irc_snapshot();
         self.startup_network_last_refresh = Some(Instant::now());
-        if self.startup_game_search.is_some() {
-            self.status_text = "Querying game infos…".to_string();
-        }
     }
 
     /// C4StartupNetDlg::OnShown refreshes the Internet icon and query-row
@@ -57050,11 +57044,7 @@ impl GameApp {
     }
 
     fn reject_generic_startup_status(&self) -> Result<()> {
-        let native_netdlg_query = self.startup_view == StartupView::NetworkGame
-            && self.startup_network_dialog.is_some()
-            && self.startup_game_search.is_some()
-            && self.status_text == "Querying game infos…";
-        if self.status_text.is_empty() || native_netdlg_query {
+        if self.status_text.is_empty() {
             return Ok(());
         }
         Err(anyhow::Error::new(report_classic_parity_boundary(
@@ -106605,7 +106595,10 @@ ScenInfoArea=70,5,25,90
             assert!(app.startup_direct_reference_queries.is_empty());
             assert!(app.startup_network_dialog.as_ref().unwrap().games().is_empty());
             assert!(app.netdlg_last_click.is_none());
-            assert_eq!(app.status_text, "Querying game infos…");
+            assert!(
+                app.status_text.is_empty(),
+                "query presentation belongs to the native masterserver row"
+            );
             assert!(!app.take_exit_request());
 
             let deadline = Instant::now() + Duration::from_secs(14);
@@ -106639,7 +106632,10 @@ ScenInfoArea=70,5,25,90
                 [title]
             );
             assert_eq!(app.startup_network_dialog.as_ref().unwrap().games().len(), 1);
-            assert_eq!(app.status_text, "Found 1 network game(s)");
+            assert!(
+                app.status_text.is_empty(),
+                "result presentation belongs to the native query/game rows"
+            );
             assert_eq!(app.startup_view, StartupView::NetworkGame);
             assert!(!app.take_exit_request());
         }
@@ -106725,7 +106721,6 @@ ScenInfoArea=70,5,25,90
     fn l027_refresh_generation_ignores_results_queued_before_worker_clear() {
         let mut app = new_classic_menu_app(800, 600);
         app.startup_network_refresh_waiting_for_clear = true;
-        app.status_text = "Querying game infos…".to_string();
         let stale = lc_network::NetworkGameReference {
             title: "Stale queued result".to_string(),
             ..Default::default()
@@ -106741,6 +106736,7 @@ ScenInfoArea=70,5,25,90
         app.apply_startup_game_search_event(lc_network::StartupGameSearchEvent::Cleared)
             .expect("new generation clear is acknowledged");
         assert!(!app.startup_network_refresh_waiting_for_clear);
+        assert!(app.status_text.is_empty());
 
         let fresh = lc_network::NetworkGameReference {
             title: "Fresh result".to_string(),
@@ -106751,14 +106747,71 @@ ScenInfoArea=70,5,25,90
         )
         .expect("new generation result is applied");
         assert_eq!(app.startup_game_references, [fresh]);
-        assert_eq!(app.status_text, "Found 1 network game(s)");
+        assert!(app.status_text.is_empty());
+    }
+
+    #[test]
+    fn l146_network_search_results_render_only_in_native_rows() {
+        let mut app = new_real_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut app);
+        app.apply_startup_game_search_event(
+            lc_network::StartupGameSearchEvent::MasterserverReply(
+                lc_network::MasterserverReplyInfo {
+                    game_count: 3,
+                    player_count: 5,
+                    ..Default::default()
+                },
+            ),
+        )
+        .expect("project native masterserver count row");
+        let references = (0..3)
+            .map(|index| lc_network::NetworkGameReference {
+                title: format!("Discovered game {index}"),
+                host_name: format!("Host {index}"),
+                version: lc_network::CURRENT_GAME_VERSION,
+                build: lc_network::CURRENT_GAME_BUILD,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        app.apply_startup_game_search_event(
+            lc_network::StartupGameSearchEvent::ReferencesUpdated(references),
+        )
+        .expect("project discovered games into native rows");
+
+        assert!(app.status_text.is_empty());
+        let dialog = app.startup_network_dialog.as_ref().expect("network dialog");
+        assert_eq!(dialog.games().len(), 3);
+        assert_eq!(dialog.masterserver_entry().details, "3 game(s) found.");
+
+        let mut frame = vec![0x4d; 800 * 600 * 4];
+        app.render(&mut frame)
+            .expect("native query and game rows render without a generic status boundary");
+        assert!(frame.iter().any(|byte| *byte != 0x4d));
+
+        app.status_text = "Querying game infos…".to_string();
+        app.apply_startup_game_search_event(
+            lc_network::StartupGameSearchEvent::ReferencesUpdated(Vec::new()),
+        )
+        .expect("native row updates do not erase an unrelated diagnostic");
+        assert_eq!(app.status_text, "Querying game infos…");
+        frame.fill(0x6e);
+        let error = app
+            .render(&mut frame)
+            .expect_err("the removed query sentinel cannot bypass generic status rejection");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::StartupStatusOverlay {
+                view: StartupView::NetworkGame,
+                status,
+            }) if status == "Querying game infos…"
+        ));
+        assert!(frame.iter().all(|byte| *byte == 0x6e));
     }
 
     #[test]
     fn l027_discovery_failure_opens_abort_modal_without_leaving_network_dialog() {
         let mut app = new_classic_menu_app(800, 600);
-        app.startup_view = StartupView::NetworkGame;
-        app.status_text = "Querying game infos…".to_string();
+        attach_l040_network_dialog(&mut app);
         let detail = "unable to send LAN discovery probe: no multicast interface";
 
         app.apply_startup_game_search_event(lc_network::StartupGameSearchEvent::SearchError {
@@ -106783,7 +106836,7 @@ ScenInfoArea=70,5,25,90
             modal.icon(),
             lc_frontend::message_dialog::MessageDialogIcon::ERROR
         );
-        assert_eq!(app.status_text, "Querying game infos…");
+        assert!(app.status_text.is_empty());
         assert_eq!(app.startup_view, StartupView::NetworkGame);
         assert!(!app.take_exit_request());
 
@@ -106796,9 +106849,19 @@ ScenInfoArea=70,5,25,90
             source: Some(lc_network::ReferenceQuerySource::Masterserver),
             message: "masterserver unavailable".to_string(),
         })
-        .expect("masterserver failure remains status-only");
+        .expect("masterserver failure remains in its native query row");
         assert!(app.message_dialogs.is_empty());
-        assert_eq!(app.status_text, "masterserver unavailable");
+        assert!(app.status_text.is_empty());
+        let masterserver = app
+            .startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .masterserver_entry();
+        assert_eq!(masterserver.details, "masterserver unavailable");
+        assert_eq!(
+            masterserver.row_icon,
+            lc_frontend::startup_netdlg::NetDlgRowIcon::Error
+        );
         assert!(!app.take_exit_request());
     }
 
