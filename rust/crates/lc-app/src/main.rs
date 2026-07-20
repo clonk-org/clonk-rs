@@ -18499,6 +18499,12 @@ fn load_native_config_bytes(paths: Option<&AppPaths>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+fn configured_fair_crew_strength(config: &[u8]) -> i32 {
+    native_config_text(config, "General", "DefCrewStrength")
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .unwrap_or(1000)
+}
+
 /// Carries a native C++ byte string through a Rust `String` without treating
 /// valid UTF-8-shaped byte sequences as Unicode. Encoding this projection via
 /// `encode_legacy_script_text` recovers every original byte.
@@ -19011,9 +19017,7 @@ fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> GameOptionValue
             .map(|value| lc_resources::decode_legacy_script_text(value.as_bytes()))
             .unwrap_or_else(|| default.to_string())
     };
-    let fair_crew_strength = native_config_text(&config, "General", "DefCrewStrength")
-        .and_then(|value| value.trim().parse::<i32>().ok())
-        .unwrap_or(1000);
+    let fair_crew_strength = configured_fair_crew_strength(&config);
     GameOptionValues {
         master_server_signup: bool_value("Network", "MasterServerSignUp", true),
         league_server_signup: bool_value("Network", "LeagueServerSignUp", false),
@@ -50438,6 +50442,46 @@ impl GameApp {
                     })
                 }) {
                     tracing::error!(%error, "failed to submit lobby maximum-player update");
+                }
+            }
+            if host && self.network.is_some() {
+                if parameter == b"comment" || parameter.starts_with(b"comment ") {
+                    let value = parameter.strip_prefix(b"comment ").unwrap_or_default();
+                    let value = &value[..value
+                        .len()
+                        .min(lc_frontend::game_option_buttons::COMMENT_MAX_TEXT)];
+                    self.finish_game_option_input(vec![GameOptionAction::CommentChanged(
+                        lc_script::c4_string_from_bytes(value),
+                    )])?;
+                    return Ok(true);
+                }
+                if parameter == b"password" || parameter.starts_with(b"password ") {
+                    let value = parameter.strip_prefix(b"password ").unwrap_or_default();
+                    self.finish_game_option_input(vec![GameOptionAction::PasswordChanged {
+                        password: lc_script::c4_string_from_bytes(value),
+                        remember_for_next_round: None,
+                    }])?;
+                    return Ok(true);
+                }
+            }
+            if host && !self.network_is_league {
+                if let Some(value) = parameter.strip_prefix(b"faircrew ") {
+                    let value = if value == b"on" {
+                        Some(configured_fair_crew_strength(&load_native_config_bytes(
+                            self.app_paths.as_ref(),
+                        )))
+                    } else if value == b"off" {
+                        Some(-1)
+                    } else if value.first().is_some_and(u8::is_ascii_digit) {
+                        Some(legacy_sscanf_decimal_prefix(value).unwrap_or(0))
+                    } else {
+                        None
+                    };
+                    if let Some(value) = value {
+                        self.process_lobby_game_option_action(
+                            GameOptionAction::SendLobbyFairCrewControl { value },
+                        )?;
+                    }
                 }
             }
             return Ok(true);
@@ -90555,6 +90599,166 @@ public func Grant(password) { return GainMissionAccess(password); }
             lobby.logs().last().map(|line| line.text.as_str()),
             Some("MaxPlayer = 4")
         );
+    }
+
+    #[test]
+    fn l103_set_comment_updates_state_reference_and_invalidation() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Exact Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        app.network = Some(manager);
+        let (_snapshot, reference) = default_exact_host_reference();
+        app.advertised_game_reference = Some(reference);
+
+        let oversized = "x".repeat(lc_frontend::game_option_buttons::COMMENT_MAX_TEXT + 1);
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(format!(
+            "/set comment {oversized}"
+        )))
+        .expect("set the live lobby comment");
+
+        let expected = "x".repeat(lc_frontend::game_option_buttons::COMMENT_MAX_TEXT);
+        assert_eq!(app.scenario_game_options.values().comment, expected);
+        assert_eq!(
+            app.advertised_game_reference
+                .as_ref()
+                .expect("updated advertised reference")
+                .metadata()
+                .comment
+                .as_bytes(),
+            expected.as_bytes()
+        );
+        assert_eq!(commands.take_league_update_effects().1, 1);
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("classic lobby")
+                .controller
+                .logs()
+                .last()
+                .map(|line| line.text.as_str()),
+            Some(lc_frontend::game_option_buttons::COMMENT_CHANGED_LOG)
+        );
+    }
+
+    #[test]
+    fn l103_set_password_sets_and_bare_command_clears_live_password() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        let (_snapshot, reference) = default_exact_host_reference();
+        app.advertised_game_reference = Some(reference);
+        let observer = thread::spawn(move || {
+            let mut passwords = Vec::new();
+            for _ in 0..2 {
+                let (password, completion) = commands.receive_host_password();
+                passwords.push(password.as_bytes().to_vec());
+                completion.send(Ok(())).expect("accept password update");
+            }
+            passwords
+        });
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/set password secret".to_string(),
+        ))
+        .expect("set live lobby password");
+        assert_eq!(app.scenario_game_options.values().password, "secret");
+        assert!(app
+            .advertised_game_reference
+            .as_ref()
+            .expect("password-protected reference")
+            .summary()
+            .password_needed);
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/set password".to_string(),
+        ))
+        .expect("clear live lobby password");
+        assert!(app.scenario_game_options.values().password.is_empty());
+        assert!(!app
+            .advertised_game_reference
+            .as_ref()
+            .expect("unprotected reference")
+            .summary()
+            .password_needed);
+        assert_eq!(
+            observer.join().expect("password observer"),
+            [b"secret".to_vec(), Vec::new()]
+        );
+    }
+
+    #[test]
+    fn l103_set_faircrew_submits_native_values_and_obeys_lobby_gates() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated fair-crew configuration");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "General", "DefCrewStrength", "75")
+            .expect("seed configured fair-crew strength");
+        let mut app = new_menu_app(640, 480);
+        app.app_paths = Some(paths);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::LobbyHost,
+            GameOptionValues {
+                fair_crew_strength: 999,
+                ..GameOptionValues::default()
+            },
+        );
+
+        for command in [
+            "/set faircrew on",
+            "/set faircrew off",
+            "/set faircrew 42tail",
+        ] {
+            app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(command.to_string()))
+                .expect("submit fair-crew command");
+        }
+        assert_eq!(
+            commands.take_submitted_control_sets(),
+            [
+                lc_network::LegacyControlSet {
+                    value_type: 5,
+                    data: 75,
+                    by_client: 0,
+                },
+                lc_network::LegacyControlSet {
+                    value_type: 5,
+                    data: -1,
+                    by_client: 0,
+                },
+                lc_network::LegacyControlSet {
+                    value_type: 5,
+                    data: 42,
+                    by_client: 0,
+                },
+            ]
+        );
+
+        app.network_is_league = true;
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/set faircrew on".to_string(),
+        ))
+        .expect("league gate is a silent no-op");
+        assert!(commands.take_submitted_control_sets().is_empty());
+
+        app.network_is_league = false;
+        app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/set faircrew on".to_string(),
+        ))
+        .expect("non-host gate is a silent no-op");
+        assert!(commands.take_submitted_control_sets().is_empty());
+
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/set faircrew -1".to_string(),
+        ))
+        .expect("malformed value is a silent no-op");
+        assert!(commands.take_submitted_control_sets().is_empty());
     }
 
     #[test]
