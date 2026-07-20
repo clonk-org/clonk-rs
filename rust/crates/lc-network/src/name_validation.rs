@@ -1,10 +1,12 @@
 use lc_engine::LegacyCString;
 
-pub(crate) fn validate_name_no_empty(value: LegacyCString) -> LegacyCString {
+/// Applies C++'s byte-exact `VAL_NameNoEmpty` transformation.
+pub fn validate_name_no_empty(value: LegacyCString) -> LegacyCString {
     validate_name(value, false)
 }
 
-pub(crate) fn validate_name_allow_empty(value: LegacyCString) -> LegacyCString {
+/// Applies C++'s byte-exact `VAL_NameAllowEmpty` transformation.
+pub fn validate_name_allow_empty(value: LegacyCString) -> LegacyCString {
     validate_name(value, true)
 }
 
@@ -21,11 +23,11 @@ fn validate_name(value: LegacyCString, allow_empty: bool) -> LegacyCString {
 
     let first = bytes
         .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
+        .position(|byte| !is_cpp_space(*byte))
         .unwrap_or(bytes.len());
     let end = bytes
         .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())
+        .rposition(|byte| !is_cpp_space(*byte))
         .map_or(first, |index| index + 1);
     bytes = bytes[first..end].to_vec();
     if bytes.is_empty() && !allow_empty {
@@ -33,6 +35,10 @@ fn validate_name(value: LegacyCString, allow_empty: bool) -> LegacyCString {
     }
     bytes.truncate(30);
     LegacyCString::from_bytes(bytes).expect("validated bytes came from a NUL-free LegacyCString")
+}
+
+fn is_cpp_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r')
 }
 
 /// Reachable `CMarkup::StripMarkup` behavior after validation removed every
@@ -90,6 +96,11 @@ mod tests {
         assert!(validate_name_allow_empty(LegacyCString::default()).is_empty());
         let dirty = LegacyCString::from_bytes(b" {<i>Alice</i>{ ".to_vec()).unwrap();
         assert_eq!(validate_name_no_empty(dirty).as_bytes(), b"Alice");
+        let vertical_tab = LegacyCString::from_bytes(b"\x0bAlice\x0b".to_vec()).unwrap();
+        assert_eq!(
+            validate_name_no_empty(vertical_tab).as_bytes(),
+            b"Alice"
+        );
     }
 
     #[test]

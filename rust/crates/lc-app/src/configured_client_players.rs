@@ -112,6 +112,25 @@ pub fn load_configured_mission_access(
 /// file to be UTF-8. The returned bytes have the same escaped-string and
 /// fixed-buffer decoding used by classic `C4Config`.
 pub fn configured_native_value(config: &[u8], section: &str, key: &str) -> Option<LegacyCString> {
+    configured_native_value_with_limit(config, section, key, CFG_MAX_STRING)
+}
+
+/// Reads one exact-case legacy config value into a dynamic `StdStrBuf` rather
+/// than C4Config's common `CFG_MaxString` fixed buffer.
+pub fn configured_native_dynamic_value(
+    config: &[u8],
+    section: &str,
+    key: &str,
+) -> Option<LegacyCString> {
+    configured_native_value_with_limit(config, section, key, usize::MAX)
+}
+
+fn configured_native_value_with_limit(
+    config: &[u8],
+    section: &str,
+    key: &str,
+    max_length: usize,
+) -> Option<LegacyCString> {
     let mut in_section = false;
     let mut selected_section = false;
     for raw_line in native_config_lines(config) {
@@ -135,7 +154,7 @@ pub fn configured_native_value(config: &[u8], section: &str, key: &str) -> Optio
         if trim_ascii(&line[..equals]) == key.as_bytes() {
             return LegacyCString::from_bytes(decode_general_config_string(
                 &line[equals + 1..],
-                CFG_MAX_STRING,
+                max_length,
             ));
         }
     }
@@ -1677,6 +1696,16 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
                 .expect("numeric value")
                 .as_bytes(),
             b"12345"
+        );
+
+        let mut dynamic = b"[Network]\nLocalName=\"".to_vec();
+        dynamic.extend(std::iter::repeat_n(b'{', super::CFG_MAX_STRING + 1));
+        dynamic.extend_from_slice(b"Alice\"\n");
+        assert!(
+            super::configured_native_dynamic_value(&dynamic, "Network", "LocalName")
+                .expect("dynamic native name")
+                .as_bytes()
+                .ends_with(b"Alice")
         );
     }
 

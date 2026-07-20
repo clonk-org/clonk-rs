@@ -18440,6 +18440,7 @@ fn load_sound_command_cooldown(paths: Option<&AppPaths>) -> Duration {
 fn build_network_host_preparation(
     app: &GameApp,
     scenario: &FrontendScenario,
+    staged_identity: Option<(&str, &str)>,
 ) -> Result<NetworkHostPreparation> {
     let scenario_path = scenario
         .path
@@ -18506,10 +18507,24 @@ fn build_network_host_preparation(
         .unwrap_or_else(|| {
             std::env::temp_dir().join(format!("legacyclonk-rust-network-{}", std::process::id()))
         });
-    let host_name = value("Network", "LocalName")
-        .filter(|value| !value.is_empty() && value != "Unknown")
-        .unwrap_or_else(|| app.player_name.clone());
-    let host_nick = value("Network", "Nick").unwrap_or_default();
+    let (host_name, host_nick) = if let Some((name, nick)) = staged_identity {
+        (name.to_owned(), nick.to_owned())
+    } else if let Some(paths) = app.app_paths.as_ref() {
+        let (name, nick, _) = load_classic_lobby_identity(paths)?;
+        (name, nick)
+    } else {
+        let name = sanitize_classic_lobby_name(
+            &sanitize_classic_lobby_name(&app.player_name, "host network name", false)?,
+            "host network name",
+            false,
+        )?;
+        let nick = sanitize_classic_lobby_name(
+            &sanitize_classic_lobby_name(&name, "host network nick", false)?,
+            "host network nick",
+            false,
+        )?;
+        (name, nick)
+    };
     let max_load_file_size = value("Network", "MaxLoadFileSize")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(100 * 1024 * 1024);
@@ -18702,23 +18717,88 @@ fn load_network_advertiser_settings(
     }
 }
 
-fn ensure_classic_lobby_name_is_canonical(value: &str, field: &str) -> Result<()> {
-    // C4ClientCore::SetLocal passes both values through VAL_NameNoEmpty:
-    // remove '{', strip markup, trim, substitute Unknown, then truncate to
-    // C4MaxName (30 bytes). The bounded lobby accepts only values for which
-    // that transformation is a no-op rather than guessing at CMarkup parsing.
-    anyhow::ensure!(!value.is_empty(), "{field} is empty");
+fn sanitize_classic_lobby_name(value: &str, field: &str, allow_empty: bool) -> Result<String> {
     let native = lc_resources::encode_legacy_script_text(value)
         .ok_or_else(|| anyhow!("{field} is not representable as Windows-1252"))?;
-    anyhow::ensure!(native.len() <= 30, "{field} exceeds C4MaxName (30 bytes)");
-    anyhow::ensure!(
-        !value.contains(['\0', '{', '<', '>']) && value.trim() == value,
-        "{field} requires unimplemented C4 VAL_NameNoEmpty canonicalization"
-    );
-    Ok(())
+    let native = LegacyCString::from_bytes(native)
+        .ok_or_else(|| anyhow!("{field} contains an interior NUL"))?;
+    let sanitized = if allow_empty {
+        lc_network::validate_name_allow_empty(native)
+    } else {
+        lc_network::validate_name_no_empty(native)
+    };
+    Ok(native_bytes_as_legacy_text(sanitized.as_bytes()))
+}
+
+#[cfg(unix)]
+fn system_hostname_bytes() -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    gethostname::gethostname().as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn system_hostname_bytes() -> Vec<u8> {
+    // Match C4Config's Winsock narrow-byte call instead of transcoding the
+    // physical DNS hostname through Rust's UTF-16 `OsString` representation.
+    #[link(name = "ws2_32")]
+    unsafe extern "system" {
+        fn WSAStartup(version: u16, data: *mut std::ffi::c_void) -> i32;
+        fn WSACleanup() -> i32;
+        fn gethostname(name: *mut std::ffi::c_char, length: i32) -> i32;
+    }
+
+    let mut winsock_data = std::mem::MaybeUninit::<[u64; 64]>::uninit();
+    if unsafe { WSAStartup(0x0202, winsock_data.as_mut_ptr().cast()) } != 0 {
+        return Vec::new();
+    }
+    let mut hostname = [0_u8; 26];
+    let result = unsafe { gethostname(hostname.as_mut_ptr().cast(), 25) };
+    unsafe {
+        WSACleanup();
+    }
+    if result != 0 {
+        return Vec::new();
+    }
+    let length = hostname
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(hostname.len());
+    hostname[..length].to_vec()
+}
+
+fn classic_hostname_fallback(hostname: &[u8]) -> String {
+    // C4Config passes a 25-byte destination span to gethostname. Keep the
+    // largest defined NUL-terminated payload instead of depending on the
+    // platform-specific overlength behavior of that C call.
+    let hostname = hostname
+        .iter()
+        .copied()
+        .take_while(|byte| *byte != 0)
+        .take(24)
+        .collect::<Vec<_>>();
+    if hostname.is_empty() {
+        "Unknown".to_string()
+    } else {
+        native_bytes_as_legacy_text(&hostname)
+    }
 }
 
 fn load_classic_lobby_identity(paths: &AppPaths) -> Result<(String, String, i32)> {
+    load_classic_lobby_identity_with_hostname_provider(paths, system_hostname_bytes)
+}
+
+fn load_classic_lobby_identity_with_hostname(
+    paths: &AppPaths,
+    hostname: &[u8],
+) -> Result<(String, String, i32)> {
+    load_classic_lobby_identity_with_hostname_provider(paths, || hostname.to_vec())
+}
+
+fn load_classic_lobby_identity_with_hostname_provider(
+    paths: &AppPaths,
+    hostname: impl FnOnce() -> Vec<u8>,
+) -> Result<(String, String, i32)> {
     let config = match fs::read(paths.config_file()) {
         Ok(config) => config,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -18728,33 +18808,32 @@ fn load_classic_lobby_identity(paths: &AppPaths) -> Result<(String, String, i32)
         lc_app::configured_native_value(&config, section, key)
             .map(|value| native_bytes_as_legacy_text(value.as_bytes()))
     };
-    let configured_local_name = value("Network", "LocalName")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "Unknown".to_string());
+    let network_name = |key| {
+        lc_app::configured_native_dynamic_value(&config, "Network", key)
+            .map(|value| native_bytes_as_legacy_text(value.as_bytes()))
+    };
+    let configured_local_name = sanitize_classic_lobby_name(
+        &network_name("LocalName").unwrap_or_else(|| "Unknown".to_string()),
+        "Network.LocalName",
+        false,
+    )?;
     let local_name = if configured_local_name == "Unknown" {
-        let hostname = gethostname::gethostname()
-            .into_string()
-            .map_err(|_| anyhow!("system hostname is not valid UTF-8"))?;
-        if hostname.is_empty() {
-            "Unknown".to_string()
-        } else {
-            anyhow::ensure!(
-                lc_resources::encode_legacy_script_text(&hostname)
-                    .is_some_and(|native| native.len() <= 25),
-                "system hostname exceeds C4Config's 25-byte LocalName buffer"
-            );
-            hostname
-        }
+        classic_hostname_fallback(&hostname())
     } else {
         configured_local_name
     };
-    ensure_classic_lobby_name_is_canonical(&local_name, "Network.LocalName")?;
-    let configured_nick = value("Network", "Nick").unwrap_or_default();
+    let local_name =
+        sanitize_classic_lobby_name(&local_name, "Network.LocalName", false)?;
+    let configured_nick = sanitize_classic_lobby_name(
+        &network_name("Nick").unwrap_or_default(),
+        "Network.Nick",
+        true,
+    )?;
     let nick = if configured_nick.is_empty() {
-        local_name.clone()
+        let nick = sanitize_classic_lobby_name(&local_name, "Network.Nick", false)?;
+        sanitize_classic_lobby_name(&nick, "Network.Nick", false)?
     } else {
-        ensure_classic_lobby_name_is_canonical(&configured_nick, "Network.Nick")?;
-        configured_nick
+        sanitize_classic_lobby_name(&configured_nick, "Network.Nick", false)?
     };
     let countdown = match value("Lobby", "CountdownTime") {
         Some(value) => value
@@ -41424,7 +41503,20 @@ impl GameApp {
             self.status_text = "A network connection is already in progress".to_string();
             return;
         }
-        let preparation = match build_network_host_preparation(self, &scenario) {
+        let staged_identity = self
+            .staged_network_host_scenario
+            .as_ref()
+            .filter(|staged| {
+                staged.frontend.identifier == scenario.identifier
+                    && staged.frontend.path == scenario.path
+            })
+            .map(|staged| {
+                (
+                    staged.lobby.local_name.as_str(),
+                    staged.lobby.nick.as_str(),
+                )
+            });
+        let preparation = match build_network_host_preparation(self, &scenario, staged_identity) {
             Ok(preparation) => preparation,
             Err(error) => {
                 self.status_text = format!("Unable to prepare network game: {error}");
@@ -87331,7 +87423,11 @@ public func Grant(password) { return GainMissionAccess(password); }
             GameOptionValues::default(),
         );
         let staged = prepare_tutorial_host_lobby(&app, repository);
-        let prepared = build_network_host_preparation(&app, &staged.frontend)
+        let prepared = build_network_host_preparation(
+            &app,
+            &staged.frontend,
+            Some((&staged.lobby.local_name, &staged.lobby.nick)),
+        )
             .expect("build participant host preparation")
             .prepare()
             .expect("prepare participant host");
@@ -87554,26 +87650,34 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn classic_lobby_identity_preserves_valid_utf8_shaped_native_bytes() {
+    fn l093_classic_lobby_identity_sanitizes_native_bytes() {
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated native identity user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-        let config_with_name = |name: &[u8]| {
+        let config_with_identity = |name: &[u8], nick: &[u8]| {
             let mut config = b"[Network]\nLocalName=\"".to_vec();
             config.extend_from_slice(name);
-            config.extend_from_slice(b"\"\nNick=\"N\xc3\xa4ck\"\n\n[Lobby]\nCountdownTime=7\n");
+            config.extend_from_slice(b"\"\nNick=\"");
+            config.extend_from_slice(nick);
+            config.extend_from_slice(b"\"\n\n[Lobby]\nCountdownTime=7\n");
             config
         };
         let maximum_name = b"\xc3\xa4".repeat(15);
-        fs::write(paths.config_file(), config_with_name(&maximum_name))
-            .expect("write 30-byte native identity");
+        fs::write(
+            paths.config_file(),
+            config_with_identity(&maximum_name, b"N\xc3\xa4ck"),
+        )
+        .expect("write 30-byte native identity");
 
-        let (local_name, nick, countdown) =
-            load_classic_lobby_identity(&paths).expect("load native lobby identity");
+        let (local_name, nick, countdown) = load_classic_lobby_identity_with_hostname_provider(
+            &paths,
+            || panic!("explicit LocalName must not query the system hostname"),
+        )
+        .expect("load native lobby identity");
 
         assert_eq!(
             lc_resources::encode_legacy_script_text(&local_name),
-            Some(maximum_name),
+            Some(maximum_name.clone()),
             "valid UTF-8-shaped bytes must not collapse during CP1252 encoding"
         );
         assert_eq!(
@@ -87583,15 +87687,119 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(countdown, 7);
 
         let overlong_name = b"\xc3\xa4".repeat(16);
-        fs::write(paths.config_file(), config_with_name(&overlong_name))
-            .expect("write 32-byte native identity");
-        let error = load_classic_lobby_identity(&paths)
-            .expect_err("C4MaxName validation counts native bytes");
-        assert!(error.to_string().contains("exceeds C4MaxName"));
+        fs::write(
+            paths.config_file(),
+            config_with_identity(&overlong_name, b"Nick"),
+        )
+        .expect("write 32-byte native identity");
+        let (local_name, _, _) = load_classic_lobby_identity(&paths)
+            .expect("C4MaxName validation truncates native bytes");
+        assert_eq!(
+            lc_resources::encode_legacy_script_text(&local_name),
+            Some(maximum_name),
+            "C4MaxName truncation counts native bytes"
+        );
+
+        let mut removable_prefix = vec![b'{'; 1_025];
+        removable_prefix.extend_from_slice(b"Alice");
+        fs::write(
+            paths.config_file(),
+            config_with_identity(&removable_prefix, b"Nick"),
+        )
+        .expect("write dynamic name beyond CFG_MaxString");
+        let (local_name, _, _) = load_classic_lobby_identity(&paths)
+            .expect("dynamic name is sanitized before its final name cap");
+        assert_eq!(local_name, "Alice");
+
+        let dirty_name = b"  {<i>Guessed</i><c G> Host</c>}}<future>  ";
+        let dirty_nick = b"  <i>Guessed Nick</i>}}  ";
+        fs::write(
+            paths.config_file(),
+            config_with_identity(dirty_name, dirty_nick),
+        )
+        .expect("write noncanonical native identity");
+        let (local_name, nick, _) = load_classic_lobby_identity(&paths)
+            .expect("C++ name validation silently sanitizes identity");
+        assert_eq!(local_name, "Guessed Host<future>");
+        assert_eq!(nick, "Guessed Nick");
+
+        fs::write(
+            paths.config_file(),
+            config_with_identity(b"Exact Host", b" {<i></i>}} "),
+        )
+        .expect("write Nick that sanitizes empty");
+        let (local_name, nick, _) =
+            load_classic_lobby_identity(&paths).expect("empty Nick falls back to LocalName");
+        assert_eq!(
+            (local_name.as_str(), nick.as_str()),
+            ("Exact Host", "Exact Host")
+        );
+
+        fs::write(
+            paths.config_file(),
+            config_with_identity(b"Exact Host", b"<i<i>>"),
+        )
+        .expect("write Nick requiring its final client validation pass");
+        let (_, nick, _) = load_classic_lobby_identity(&paths)
+            .expect("configured Nick receives AllowEmpty then NoEmpty validation");
+        assert_eq!(nick, "Unknown");
+
+        fs::write(
+            paths.config_file(),
+            config_with_identity(b"<i<i<i<i>>>>", b""),
+        )
+        .expect("write nested LocalName with empty Nick");
+        let (local_name, nick, _) = load_classic_lobby_identity(&paths)
+            .expect("client validation uses the native finite pass count");
+        assert_eq!(local_name, "<i<i>>");
+        assert_eq!(nick, "Unknown");
+
+        fs::write(
+            paths.config_file(),
+            b"[Network]\nNick=\"\"\n\n[Lobby]\nCountdownTime=7\n",
+        )
+        .expect("write identity with missing LocalName");
+        let (local_name, nick, _) =
+            load_classic_lobby_identity_with_hostname(&paths, b"H\xc3\xa4st")
+                .expect("raw hostname bytes are preserved");
+        assert_eq!(
+            lc_resources::encode_legacy_script_text(&local_name),
+            Some(b"H\xc3\xa4st".to_vec())
+        );
+        assert_eq!(nick, local_name);
+
+        fs::write(
+            paths.config_file(),
+            config_with_identity(b"<i>Unknown</i>", b""),
+        )
+        .expect("write LocalName that sanitizes to the hostname sentinel");
+        let (local_name, nick, _) = load_classic_lobby_identity_with_hostname(
+            &paths,
+            b"Tylers-MacBook-Pro-M4-Max.local",
+        )
+        .expect("bounded hostname fallback is hostable");
+        assert_eq!(local_name, "Tylers-MacBook-Pro-M4-Ma");
+        assert_eq!(nick, local_name);
+
+        assert_eq!(
+            sanitize_classic_lobby_name("", "test name", false).unwrap(),
+            "empty",
+            "an initially empty VAL_NameNoEmpty input uses the generic guard literal"
+        );
+        assert_eq!(
+            sanitize_classic_lobby_name("<i></i>", "test name", false).unwrap(),
+            "Unknown",
+            "a nonempty input cleaned to empty uses the name-validator fallback"
+        );
+        assert_eq!(
+            sanitize_classic_lobby_name("", "test nick", true).unwrap(),
+            ""
+        );
+        assert!(sanitize_classic_lobby_name("☃", "test name", false).is_err());
     }
 
     #[test]
-    fn staged_host_prebind_accepts_raw_participants_and_scale_but_rejects_invalid_identity_path() {
+    fn l093_staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated host model user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -87636,27 +87844,46 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         persist_config_value(&paths, "General", "Participants", "")
             .expect("clear participant gate probe");
-        persist_config_value(&paths, "Network", "LocalName", "Guessed{Host")
-            .expect("configure noncanonical C++ local name");
-        assert_eq!(
-            Config::load(paths.config_file())
-                .expect("reload noncanonical local name")
-                .get_in(Some("Network"), "LocalName"),
-            Some("Guessed{Host")
-        );
-        assert!(
-            load_classic_lobby_identity(&paths).is_err(),
-            "identity projection itself must reject canonicalization"
-        );
-        let error = app
+        persist_config_value(
+            &paths,
+            "Network",
+            "LocalName",
+            "<i<i<i<i>>>>",
+        )
+        .expect("configure noncanonical C++ local name");
+        persist_config_value(&paths, "Network", "Nick", "")
+            .expect("configure noncanonical C++ nick");
+        let staged = app
             .prepare_network_host_scenario(make_frontend(), definition_load())
-            .err()
-            .expect("noncanonical C4ClientCore name must be rejected before bind");
-        assert!(matches!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model { detail }))
-                if detail.contains("VAL_NameNoEmpty")
-        ));
+            .expect("noncanonical C4ClientCore identity is sanitized before bind");
+        assert_eq!(staged.lobby.local_name, "<i<i>>");
+        assert_eq!(staged.lobby.nick, "Unknown");
+        assert!(app.network.is_none());
+        assert!(app.startup_network_connection.is_none());
+
+        persist_config_value(&paths, "Network", "LocalName", "Changed Host")
+            .expect("change LocalName after staging");
+        persist_config_value(&paths, "Network", "Nick", "Changed Nick")
+            .expect("change Nick after staging");
+        let preparation = build_network_host_preparation(
+            &app,
+            &staged.frontend,
+            Some((&staged.lobby.local_name, &staged.lobby.nick)),
+        )
+        .expect("host preparation reuses the staged sanitized identity");
+        assert_eq!(preparation.host_name, staged.lobby.local_name);
+        assert_eq!(preparation.host_nick, staged.lobby.nick);
+        let prepared = preparation
+            .prepare()
+            .expect("final client identity remains unchanged through host bootstrap");
+        assert_eq!(
+            prepared.host_config().local_core.name.as_bytes(),
+            b"<i<i>>"
+        );
+        assert_eq!(
+            prepared.host_config().local_core.nick.as_bytes(),
+            b"Unknown"
+        );
 
         persist_config_value(&paths, "Network", "LocalName", "Exact Host")
             .expect("restore canonical C++ local name");
@@ -88545,7 +88772,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             })
             .cloned()
             .expect("Tutorial01 is in the startup catalog");
-        let prepared = build_network_host_preparation(&app, &scenario)
+        let prepared = build_network_host_preparation(&app, &scenario, None)
             .expect("build prepared host inputs")
             .prepare()
             .expect("prepare retained host scenario");
@@ -88606,7 +88833,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             })
             .cloned()
             .expect("Tutorial01 is in the startup catalog");
-        let prepared = build_network_host_preparation(&app, &scenario)
+        let prepared = build_network_host_preparation(&app, &scenario, None)
             .expect("build prepared host inputs")
             .prepare()
             .expect("prepare retained host scenario");
@@ -107049,7 +107276,7 @@ ScenInfoArea=70,5,25,90
         scenario.path = Some(scenario_path);
 
         let preparation =
-            build_network_host_preparation(&app, &scenario).expect("prepare host inputs");
+            build_network_host_preparation(&app, &scenario, None).expect("prepare host inputs");
 
         assert_eq!(
             lc_resources::encode_legacy_script_text(&preparation.group_maker),

@@ -125,6 +125,7 @@ pub use initial_network_parameters::{
     serialize_initial_network_parameters, InitialNetworkParametersError,
     InitialNetworkScenarioDefaults,
 };
+pub use name_validation::{validate_name_allow_empty, validate_name_no_empty};
 pub use irc::{
     resolve_irc_server, IrcChannel, IrcClientError, IrcClientEvent, IrcClientHandle,
     IrcClientSnapshot, IrcClientState, IrcCommand, IrcConnectConfig, IrcConnectionState,

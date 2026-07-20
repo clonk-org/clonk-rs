@@ -596,15 +596,14 @@ League=Embedded Cup\n\
     assert_eq!(parameters.teams.teams[0].id, 1);
     fs::remove_file(fixture.scenario_path.join("Teams.txt")).unwrap();
 
-    // CMarkup::StripMarkup consumes `}}` pairs even without an opening tag;
-    // accepted names must remain byte-stable through C++ validation
-    // (pristine 9ffa0a5d src/C4InputValidation.cpp:97-118;
-    // src/StdMarkup.cpp:131-164).
+    // The app hands preparation final C4ClientCore identity bytes. Enforce the
+    // resulting fixed buffer, but do not demand another validation pass:
+    // malformed nested markup can legitimately survive C++'s finite passes.
     assert!(matches!(
         prepare_with_names(
             &fixture,
             &[],
-            "Bad}}Name",
+            "1234567890123456789012345678901",
             "Host Nick",
             "netpuncher.openclonk.org:11115",
         ),
@@ -612,6 +611,18 @@ League=Embedded Cup\n\
             field: "host network name"
         })
     ));
+    let literal_unknown_tag = prepare_with_names(
+        &fixture,
+        &[],
+        "Literal<future>",
+        "Host Nick",
+        "netpuncher.openclonk.org:11115",
+    )
+    .expect("unknown opening markup remains a canonical literal");
+    assert_eq!(
+        literal_unknown_tag.host_config().local_core.name.as_bytes(),
+        b"Literal<future>"
+    );
 
     fs::write(
         fixture.scenario_path.join("Scenario.txt"),

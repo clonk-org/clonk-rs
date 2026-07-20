@@ -129,9 +129,9 @@ pub struct PreparedHostBootstrapSpec<'a> {
     /// `Config.General.Name`, used as the C4Group maker. This is intentionally
     /// independent of the two network client names.
     pub group_maker: &'a str,
-    /// Already-selected `Config.Network.LocalName` input.
+    /// Final `C4ClientCore::Name` bytes after config and client validation.
     pub host_name: &'a str,
-    /// Already-selected `Config.Network.Nick`; empty falls back to `host_name`.
+    /// Final nonempty `C4ClientCore::Nick` bytes after fallback and validation.
     pub host_nick: &'a str,
     /// Process-local `Game.Network` password selected before the host starts.
     pub network_password: &'a str,
@@ -1105,11 +1105,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         .collect::<Result<Vec<_>, _>>()?;
     let group_maker = legacy_string(spec.group_maker);
     let host_name = legacy_string(spec.host_name);
-    let host_nick = if spec.host_nick.is_empty() {
-        host_name.clone()
-    } else {
-        legacy_string(spec.host_nick)
-    };
+    let host_nick = legacy_string(spec.host_nick);
     let local_core = ClientCoreControlData {
         client_id: 0,
         activated: true,
@@ -1842,8 +1838,8 @@ fn validate_inputs(spec: &PreparedHostBootstrapSpec<'_>) -> Result<(), PrepareHo
         }
     }
     validate_c4_text("C4Group maker", spec.group_maker, true)?;
-    validate_network_name("host network name", spec.host_name, false)?;
-    validate_network_name("host network nick", spec.host_nick, true)?;
+    validate_final_client_name("host network name", spec.host_name)?;
+    validate_final_client_name("host network nick", spec.host_nick)?;
     validate_c4_text("network password", spec.network_password, true)?;
     validate_c4_text("network comment", spec.network_comment, true)?;
     validate_ascii_text("netpuncher address", spec.netpuncher_address, true)?;
@@ -2082,14 +2078,17 @@ fn validate_c4_text(
     validate_native_text(field, &value, allow_empty)
 }
 
-fn validate_network_name(
+fn validate_final_client_name(
     field: &'static str,
     value: &str,
-    allow_empty: bool,
 ) -> Result<(), PrepareHostBootstrapError> {
     let value = lc_resources::encode_legacy_script_text(value)
         .ok_or(PrepareHostBootstrapError::UnsupportedText { field })?;
-    validate_network_name_bytes(field, &value, allow_empty)
+    validate_native_text(field, &value, false)?;
+    if value.len() > 30 {
+        return Err(PrepareHostBootstrapError::UnsupportedText { field });
+    }
+    Ok(())
 }
 
 fn validate_c4_network_name(
