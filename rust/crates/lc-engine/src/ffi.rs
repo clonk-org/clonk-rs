@@ -1286,6 +1286,8 @@ unsafe fn make_snapshot(
             // The bridge ABI does not expose the live C4Shape field yet.
             contact_density: crate::CONTACT_DENSITY_SOLID,
             own_vertices: None,
+            vertex_contacts: Vec::new(),
+            solid_mask_override: None,
             container,
             // The bridge ABI does not expose C4Object::pLayer yet.
             layer: None,
@@ -1654,6 +1656,7 @@ unsafe fn make_snapshot(
         definition_closed_containers: Default::default(),
         definition_lines: HashMap::new(),
         transfer_zones: Vec::new(),
+        pathfinder_debug: Default::default(),
         menu_requests: Vec::new(),
         audio: Vec::new(),
     })

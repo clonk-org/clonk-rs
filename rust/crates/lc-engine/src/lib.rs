@@ -128,7 +128,10 @@ pub use network_game_data::{
     UnsupportedInitialNetworkGameState, INITIAL_NETWORK_DEFAULT_SYNC_RATE,
     LANDSCAPE_DEFAULT_GRAVITY_RAW,
 };
-pub use pathfinder::{PathFinder, PathWaypoint};
+pub use pathfinder::{
+    PathFinder, PathWaypoint, PathfinderDebugRay, PathfinderDebugRayStatus,
+    PathfinderDebugSnapshot, PathfinderDebugZone,
+};
 pub use player::{
     ActiveMessageBoardInput, MessageBoardQuery, Player, PlayerAtClient, PlayerConfig,
     PlayerControlState, PlayerState, PlayerStatus, PlayerViewport, PLAYER_VIEW_MODE_CURSOR,
@@ -6286,6 +6289,9 @@ pub struct Object {
     /// previous movement frame's value (C4Movement.cpp:166-182,470).
     #[doc(hidden)]
     pub frame_t_contact: u32,
+    /// C4Shape::VtxContactCNAT aligned with the live Shape vertices. This is
+    /// presentation-only state retained from the most recent ContactCheck.
+    frame_vertex_contacts: Vec<u32>,
     /// This frame's UprightAttach bits (C4Object.cpp:4698-4705): the
     /// per-frame `Action.t_attach |= Def->UprightAttach` OR that feeds the
     /// movement config. Transient — recomputed at every ExecAction, never
@@ -6417,6 +6423,7 @@ impl Object {
         shape_template: ObjectShapeTemplate,
         own_shape_vertices: Option<Vec<ObjectVertex>>,
     ) -> Self {
+        let frame_vertex_contacts = vec![0; state.vertices.len()];
         let fixed_position = FixedVec2::from_ints(state.position.x, state.position.y);
         let fixed_velocity = FixedVec2::from_ints(state.velocity.x, state.velocity.y);
         let fixed_rotation = itofix(state.rotation);
@@ -6449,6 +6456,7 @@ impl Object {
             retired_info_physical: None,
             frame_t_attach: 0,
             frame_t_contact: 0,
+            frame_vertex_contacts,
             solid_mask_bake: None,
             solid_mask_empty_put: false,
             solid_mask_instance_sequence: None,
@@ -6621,6 +6629,21 @@ impl Object {
         );
         self.state.shape_vertices.replace_active(&vertices);
         self.state.vertices = vertices;
+        self.frame_vertex_contacts = vec![0; self.state.vertices.len()];
+    }
+
+    fn latch_shape_contact(&mut self, contact: &ShapeContact) {
+        self.frame_t_contact = contact.contact_cnat;
+        self.frame_vertex_contacts
+            .resize(self.state.vertices.len(), 0);
+        for index in 0..self.state.vertices.len() {
+            // Native CheckContact skips CNAT_NoCollision vertices without
+            // touching their retained VtxContactCNAT slot.
+            if self.state.vertices[index].cnat & CNAT_NO_COLLISION == 0 {
+                self.frame_vertex_contacts[index] =
+                    contact.vertex_contacts.get(index).copied().unwrap_or(0);
+            }
+        }
     }
 
     fn set_owned_shape_vertices(&mut self, vertices: Vec<ObjectVertex>) {
@@ -6633,11 +6656,15 @@ impl Object {
     fn set_live_shape_vertices(&mut self, vertices: Vec<ObjectVertex>) {
         self.state.shape_vertices.replace_active(&vertices);
         self.state.vertices = vertices;
+        self.frame_vertex_contacts
+            .resize(self.state.vertices.len(), 0);
     }
 
     fn set_shape_vertex_buffer(&mut self, vertices: ShapeVertexBuffer) {
         self.state.vertices = vertices.active_vec();
         self.state.shape_vertices = vertices;
+        self.frame_vertex_contacts
+            .resize(self.state.vertices.len(), 0);
     }
 
     fn set_construction(&mut self, construction: i32) {
@@ -6905,7 +6932,7 @@ impl Object {
             // ContactCheck writes t_contact on every probe, including a
             // free probe (zero). Commands on the next frame observe this
             // latch rather than re-probing the resting position.
-            self.frame_t_contact = contact.contact_cnat;
+            self.latch_shape_contact(&contact);
             if contact.is_contact() {
                 if coach_debug_id() == Some(movement.object_id.as_u64()) {
                     let details: Vec<String> = self
@@ -6971,7 +6998,7 @@ impl Object {
                 excluded_solid_mask,
                 movement.contact_density,
             );
-            self.frame_t_contact = contact.contact_cnat;
+            self.latch_shape_contact(&contact);
             if contact.is_contact() {
                 if coach_debug_id() == Some(movement.object_id.as_u64()) {
                     crate::rng::rng_trace_line(&format!(
@@ -7124,7 +7151,7 @@ impl Object {
                 solid_mask_removed.then_some(movement.object_id),
                 movement.contact_density,
             );
-            self.frame_t_contact = contact.contact_cnat;
+            self.latch_shape_contact(&contact);
             if contact.is_contact() {
                 if coach_debug_id() == Some(movement.object_id.as_u64()) {
                     crate::rng::rng_trace_line(&format!(
@@ -7435,6 +7462,7 @@ impl Object {
             let previous_shape_rect = self.shape_rect;
             let previous_fire_top = self.shape_fire_top;
             let previous_shape_override = self.state.shape_override;
+            let previous_vertex_contacts = self.frame_vertex_contacts.clone();
             let previous_position = self.state.position;
             // `C4Shape lshape = Shape` — the contact undo restores the
             // attach record too (C4Movement.cpp:395-417).
@@ -7469,7 +7497,7 @@ impl Object {
                 solid_mask_removed.then_some(movement.object_id),
                 movement.contact_density,
             );
-            self.frame_t_contact = contact.contact_cnat;
+            self.latch_shape_contact(&contact);
             if contact.is_contact() {
                 any_contact = true;
                 contact_cnat |= contact.contact_cnat;
@@ -7480,6 +7508,7 @@ impl Object {
                 self.shape_rect = previous_shape_rect;
                 self.shape_fire_top = previous_fire_top;
                 self.state.shape_override = previous_shape_override;
+                self.frame_vertex_contacts = previous_vertex_contacts;
                 self.state.position = previous_position;
                 self.state.shape_attach = previous_attach;
                 // The rotation walk only restores Shape/r/fix_r on contact;
@@ -7606,6 +7635,8 @@ impl Object {
             current_fire_top,
             contact_density: self.state.contact_density,
             own_vertices: self.own_shape_vertices.clone(),
+            vertex_contacts: self.frame_vertex_contacts.clone(),
+            solid_mask_override: self.state.solid_mask_override,
             container: self.state.container,
             layer: self.state.layer,
             visibility: self.state.visibility,
@@ -8919,6 +8950,14 @@ pub struct ObjectSnapshot {
     pub contact_density: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own_vertices: Option<Vec<ObjectVertex>>,
+    /// `C4Shape::VtxContactCNAT` values aligned with `vertices`. These are
+    /// presentation diagnostics, not collision input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vertex_contacts: Vec<u32>,
+    /// Per-object `C4Object::SolidMask` override. `None` selects DefCore;
+    /// a zero-area rectangle explicitly disables the definition mask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solid_mask_override: Option<DefinitionTargetRect>,
     #[serde(default)]
     pub container: Option<ObjectId>,
     /// C4Object::pLayer (Objects.txt `Layer=` / SetObjectLayer).
@@ -9758,6 +9797,9 @@ pub struct SimulationSnapshot {
     pub definition_lines: HashMap<DefinitionId, DefinitionLineMetadata>,
     #[serde(default)]
     pub transfer_zones: Vec<TransferZoneState>,
+    /// Presentation-only graph retained by the most recent pathfinder run.
+    #[serde(default, skip_serializing_if = "PathfinderDebugSnapshot::is_empty")]
+    pub pathfinder_debug: PathfinderDebugSnapshot,
     #[serde(default)]
     pub menu_requests: Vec<MenuRequest>,
     #[serde(default)]
@@ -16974,6 +17016,9 @@ pub struct Engine {
     /// before an obstructed search; script GetPath reuses the last pair.
     pathfinder_level: i32,
     pathfinder_transfer_zones_enabled: bool,
+    /// Process-local presentation state retained by native's global
+    /// `Game.PathFinder`; excluded from saves and sync checks.
+    pathfinder_debug: Rc<RefCell<PathfinderDebugSnapshot>>,
     audio_registry: AudioRegistry,
     #[doc(hidden)] pub pending_audio: Vec<AudioCommand>,
     #[doc(hidden)] pub pending_menu_requests: Vec<MenuRequest>,
@@ -17521,6 +17566,9 @@ struct ContactVertexInfo {
 struct ShapeContact {
     contact_cnat: u32,
     vertices: Vec<ContactVertexInfo>,
+    /// Per-shape-vertex C4Shape::VtxContactCNAT values. Entries for
+    /// CNAT_NoCollision vertices remain zero and are ignored by the latch.
+    vertex_contacts: Vec<u32>,
 }
 
 impl ShapeContact {
@@ -17984,8 +18032,11 @@ fn shape_contact_check(
     excluded_solid_mask: Option<ObjectId>,
     contact_density: i32,
 ) -> ShapeContact {
-    let mut contact = ShapeContact::default();
-    for vertex in vertices {
+    let mut contact = ShapeContact {
+        vertex_contacts: vec![0; vertices.len()],
+        ..ShapeContact::default()
+    };
+    for (index, vertex) in vertices.iter().enumerate() {
         if vertex.cnat & CNAT_NO_COLLISION != 0 {
             continue;
         }
@@ -18048,6 +18099,7 @@ fn shape_contact_check(
             contact_cnat: vertex_contact,
             friction: vertex.friction,
         });
+        contact.vertex_contacts[index] = vertex_contact;
     }
     contact
 }
@@ -19061,6 +19113,7 @@ impl Engine {
             transfer_zones: TransferZoneTable::default(),
             pathfinder_level: 1,
             pathfinder_transfer_zones_enabled: true,
+            pathfinder_debug: Rc::new(RefCell::new(PathfinderDebugSnapshot::default())),
             audio_registry: AudioRegistry::new(),
             pending_audio: Vec::new(),
             pending_menu_requests: Vec::new(),
@@ -22639,7 +22692,9 @@ impl Engine {
         let mut finder = PathFinder::new(landscape, &zones);
         finder.set_level(level);
         finder.enable_transfer_zones(transfer_zones_enabled);
-        finder.find(from, to)
+        let path = finder.find(from, to);
+        *self.pathfinder_debug.borrow_mut() = finder.debug_snapshot().clone();
+        path
     }
 
     pub fn physics(&self) -> PhysicsSettings {
@@ -24569,6 +24624,7 @@ impl Engine {
             self.pathfinder_level,
             self.pathfinder_transfer_zones_enabled,
         )
+        .with_pathfinder_debug_sink(Rc::clone(&self.pathfinder_debug))
         .with_command_settings(
             self.frame,
             self.base_buy_enabled,
@@ -27815,6 +27871,24 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .and_then(|definition| definition.shape_rect())
+    }
+
+    pub fn definition_entrance_rect(&self, definition_id: &str) -> Option<DefinitionRect> {
+        self.definitions
+            .get(definition_id)
+            .and_then(Definition::entrance_rect)
+    }
+
+    pub fn definition_collection_rect(&self, definition_id: &str) -> Option<DefinitionRect> {
+        self.definitions
+            .get(definition_id)
+            .and_then(Definition::collection_rect)
+    }
+
+    pub fn definition_solid_mask(&self, definition_id: &str) -> Option<DefinitionTargetRect> {
+        self.definitions
+            .get(definition_id)
+            .and_then(Definition::solid_mask)
     }
 
     /// C4Shape::FireTop copied from DefCore and scaled with the live shape
@@ -32750,6 +32824,28 @@ impl Engine {
             })
             .collect();
         let message_snapshots = self.messages.snapshot();
+        let transfer_zones = self.transfer_zones.states();
+        let mut pathfinder_debug = self.pathfinder_debug.borrow().clone();
+        let used_transfer_zones = pathfinder_debug
+            .zones
+            .iter()
+            .filter(|zone| zone.used)
+            .map(|zone| zone.owner)
+            .collect::<HashSet<_>>();
+        // C4PathFinder retains the last ray graph, but Draw walks the live
+        // global transfer-zone list. Preserve last-search `Used` markers by
+        // owner while reflecting subsequent Set/ClearTransferZone calls.
+        pathfinder_debug.zones = transfer_zones
+            .iter()
+            .map(|zone| PathfinderDebugZone {
+                owner: zone.owner,
+                x: zone.x,
+                y: zone.y,
+                width: zone.width,
+                height: zone.height,
+                used: used_transfer_zones.contains(&zone.owner),
+            })
+            .collect();
         SimulationSnapshot {
             frame: self.frame,
             game_time: self.game_time,
@@ -32791,7 +32887,8 @@ impl Engine {
             definition_categories,
             definition_closed_containers,
             definition_lines,
-            transfer_zones: self.transfer_zones.states(),
+            transfer_zones,
+            pathfinder_debug,
             menu_requests: Vec::new(),
             audio: Vec::new(),
         }
@@ -36750,6 +36847,7 @@ impl Engine {
         let original_shape_rect = self.objects[idx].shape_rect;
         let original_fire_top = self.objects[idx].shape_fire_top;
         let original_shape_override = self.objects[idx].state.shape_override;
+        let original_vertex_contacts = self.objects[idx].frame_vertex_contacts.clone();
         let object_id = self.objects[idx].id;
         let position = self.objects[idx].state.position;
         // C++ temporarily writes r=0 and UpdateShape() before ContactCheck,
@@ -36776,7 +36874,7 @@ impl Engine {
             .unwrap_or_default();
         // ContactCheck always overwrites t_contact, including with zero,
         // before it dispatches Contact* callbacks (C4Movement.cpp:166-182).
-        self.objects[idx].frame_t_contact = contact.contact_cnat;
+        self.objects[idx].latch_shape_contact(&contact);
         if contact.is_contact() {
             self.dispatch_contact_callbacks(idx, contact.contact_cnat)?;
             if let Some(index) = self.find_object_index(object_id) {
@@ -36788,6 +36886,7 @@ impl Engine {
                 self.objects[index].shape_rect = original_shape_rect;
                 self.objects[index].shape_fire_top = original_fire_top;
                 self.objects[index].state.shape_override = original_shape_override;
+                self.objects[index].frame_vertex_contacts = original_vertex_contacts;
                 self.objects[index].state.rotation = rotation;
             }
         } else if let Some(index) = self.find_object_index(object_id) {
@@ -40455,7 +40554,7 @@ impl Engine {
             )
         };
         if let Some(object) = self.objects.get_mut(idx) {
-            object.frame_t_contact = contact.contact_cnat;
+            object.latch_shape_contact(&contact);
         }
 
         self.dispatch_contact_callbacks(idx, contact.contact_cnat)?;
@@ -49988,6 +50087,9 @@ impl Engine {
             } => {
                 self.pathfinder_level = level.clamp(1, 10);
                 self.pathfinder_transfer_zones_enabled = transfer_zones_enabled;
+            }
+            CommandEvent::SetPathFinderDebug { snapshot } => {
+                *self.pathfinder_debug.borrow_mut() = snapshot;
             }
             CommandEvent::ApplyObjectUpdate { object_id, update } => {
                 self.apply_object_update(object_id, update)?;
@@ -65082,7 +65184,7 @@ mod pathfinder_host_state_regression {
                     SetCommand(this(), "MoveTo", 0, 90, 50, 0, 1);
                     ExecuteCommand();
                     ExecuteCommand();
-                    return GetPath(10, 50, 90, 50);
+                    return GetPath(11, 49, 89, 51);
                 }
             "#,
         )
@@ -65119,6 +65221,9 @@ mod pathfinder_host_state_regression {
             Value::Nil,
             "same-call GetPath observes ExecuteCommand's disabled-zone write"
         );
+        let graph = engine.snapshot().pathfinder_debug;
+        assert_eq!(graph.rays[0].start, Vector2::new(11, 49));
+        assert_eq!(graph.rays[0].target, Vector2::new(89, 51));
         assert_eq!(script_get_path(&mut engine, from, to), Value::Nil);
     }
 

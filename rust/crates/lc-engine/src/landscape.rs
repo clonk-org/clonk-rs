@@ -2798,6 +2798,51 @@ impl Landscape {
         self.pixels.as_ref()
     }
 
+    /// One entry from C4Landscape's live Surface8 palette plus the material
+    /// whose Mat2Pal color currently overrides that slot. Material mappings
+    /// are intentionally the sticky raster-state copy, not the current
+    /// texture map, matching C4Landscape::HandleTexMapUpdate.
+    pub fn surface8_palette_entry(&self, index: u8) -> ([u8; 3], u8, Option<&str>) {
+        let index = usize::from(index);
+        let source_transparency = if index == 0 {
+            255
+        } else if index == 191 && self.mode != LANDSCAPE_MODE_EXACT {
+            127
+        } else {
+            0
+        };
+        let slot = index & 0x7f;
+        let Some(raster) = self.raster_state.as_ref() else {
+            let material = (slot < C4M_MAX_TEX_INDEX)
+                .then(|| {
+                    self.pixels
+                        .as_ref()
+                        .and_then(|grid| grid.material_names().get(slot))
+                        .and_then(Option::as_deref)
+                })
+                .flatten();
+            return (
+                default_surface_palette()[index],
+                source_transparency,
+                material,
+            );
+        };
+        let color = raster
+            .surface_palette
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| default_surface_palette()[index]);
+        let painted_materials = if raster.surface_palette_materials.is_empty() {
+            &raster.texmap.material_names
+        } else {
+            &raster.surface_palette_materials
+        };
+        let material = (slot < C4M_MAX_TEX_INDEX)
+            .then(|| painted_materials.get(slot).and_then(Option::as_deref))
+            .flatten();
+        (color, source_transparency, material)
+    }
+
     pub(crate) fn set_raster_state(&mut self, state: LandscapeRasterState) {
         self.raster_state = Some(state);
     }
@@ -7312,6 +7357,14 @@ mod tests {
             "a new Surface8 drops stale eager-target palette slots"
         );
         assert_eq!(palette[2], [40, 50, 60]);
+
+        let mut landscape = Landscape::flat(4, 4);
+        landscape.set_raster_state(raster);
+        assert_eq!(
+            landscape.surface8_palette_entry(2),
+            (source[2], 0, Some("Rock")),
+            "the renderer sees the live Mat2Pal material mapping separately from its source palette"
+        );
     }
 
     #[test]

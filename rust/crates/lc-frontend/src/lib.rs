@@ -539,6 +539,30 @@ pub struct DefinitionSprite {
     pub top_face: Option<DefinitionTargetRect>,
 }
 
+/// Definition geometry read by `C4Object`'s developer overlays. Keeping this
+/// beside, rather than inside, bitmap sprites preserves the distinction
+/// between live DefCore geometry and `SetGraphics` image selection.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DefinitionDebugGeometry {
+    pub name: Option<String>,
+    pub entrance: Option<DefinitionRect>,
+    pub collection: Option<DefinitionRect>,
+    pub solid_mask: Option<DefinitionTargetRect>,
+}
+
+/// Process-local `C4GraphicsSystem::Show*` flags. L140 owns the rendering
+/// consumers; keyboard mutation remains the separate L031 boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DebugDrawFlags {
+    pub show_vertices: bool,
+    pub show_entrance: bool,
+    pub show_action: bool,
+    pub show_command: bool,
+    pub show_pathfinder: bool,
+    pub show_solid_mask: bool,
+    pub show_net_status: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HudGraphics {
     pub player: Option<ImageData>,
@@ -2834,6 +2858,9 @@ pub struct GraphicsSystem {
     show_command_keys: bool,
     /// Debug FRAME/STATUS lines; `None` hides them (default HUD).
     debug_hud_text: Option<(String, String)>,
+    debug_draw_flags: DebugDrawFlags,
+    definition_debug_geometry: HashMap<DefinitionId, DefinitionDebugGeometry>,
+    network_status_text: Option<String>,
     viewport_x: f32,
     viewport_y: f32,
     viewport_zoom: f32,
@@ -2935,6 +2962,9 @@ impl GraphicsSystem {
             show_commands: true,
             show_command_keys: true,
             debug_hud_text: None,
+            debug_draw_flags: DebugDrawFlags::default(),
+            definition_debug_geometry: HashMap::new(),
+            network_status_text: None,
             viewport_x: 0.0,
             viewport_y: 0.0,
             viewport_zoom: 1.0,
@@ -2986,6 +3016,30 @@ impl GraphicsSystem {
         self.rotateable_definitions = definitions;
     }
 
+    pub fn set_definition_debug_geometry(
+        &mut self,
+        geometry: HashMap<DefinitionId, DefinitionDebugGeometry>,
+    ) {
+        self.definition_debug_geometry = geometry;
+    }
+
+    pub fn set_debug_draw_flags(&mut self, flags: DebugDrawFlags) {
+        self.debug_draw_flags = flags;
+    }
+
+    pub fn debug_draw_flags(&self) -> DebugDrawFlags {
+        self.debug_draw_flags
+    }
+
+    /// Pipe-delimited CStdFont markup produced by the network runtime.
+    pub fn set_network_status_text(&mut self, text: Option<String>) {
+        self.network_status_text = text;
+    }
+
+    pub fn network_status_text(&self) -> Option<&str> {
+        self.network_status_text.as_deref()
+    }
+
     pub fn set_world_width(&mut self, world_width: i32) {
         self.world_width = world_width.max(self.surface_width as i32);
     }
@@ -3027,6 +3081,15 @@ impl GraphicsSystem {
     /// before any physical viewport has been projected.
     pub fn inherit_pending_observer_scroll(&mut self, previous: &Self) {
         self.pending_primary_observer_scroll = previous.pending_primary_observer_scroll;
+    }
+
+    /// Preserve process-presentation debug state across an output-only
+    /// rebuild such as a window resize. A game reset constructs a fresh
+    /// [`GraphicsSystem`] and therefore still clears these native toggles.
+    pub fn inherit_debug_draw_state(&mut self, previous: &Self) {
+        self.debug_draw_flags = previous.debug_draw_flags;
+        self.definition_debug_geometry = previous.definition_debug_geometry.clone();
+        self.network_status_text = previous.network_status_text.clone();
     }
 
     pub fn set_sky(&mut self, sky: Option<SkyRenderState>) {
@@ -4688,6 +4751,9 @@ impl GraphicsSystem {
             ObjectRenderPass::ForegroundNonParallax,
             gamma,
         );
+        if self.debug_draw_flags.show_pathfinder {
+            self.draw_pathfinder_debug(&snapshot.pathfinder_debug, gamma);
+        }
         // NeedEnergy bolts are emitted inside each object's base pass so
         // background/foreground category layering matches C4Object::Draw.
         if self.viewport_overlays_visible {
@@ -4897,6 +4963,11 @@ impl GraphicsSystem {
             let Some(object) = snapshot.object(*id) else {
                 continue;
             };
+            // C4Object::Draw returns from the ShowSolidMask branch before
+            // DrawSelectMark is reached.
+            if self.debug_draw_flags.show_solid_mask && self.object_has_debug_solid_mask(object) {
+                continue;
+            }
             let screen_x = (object.position.x as f32 - origin_x) * zoom;
             let screen_y = (object.position.y as f32 - origin_y) * zoom;
             if screen_x < -margin
@@ -6017,6 +6088,9 @@ impl GraphicsSystem {
         lighting: f32,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) -> bool {
+        if self.debug_draw_flags.show_solid_mask && self.draw_ground_surface8(landscape, gamma) {
+            return true;
+        }
         if self.draw_ground_textured(landscape, gamma) {
             return true;
         }
@@ -6080,6 +6154,80 @@ impl GraphicsSystem {
             }
         }
         false
+    }
+
+    /// `C4Landscape::Draw`'s ShowSolidMask branch blits the live Surface8
+    /// byte plane through its live Mat2Pal palette instead of the
+    /// material-textured Surface32. Blit8Fast bypasses landscape modulation
+    /// and ClrModMap; object masks are already baked into this plane.
+    fn draw_ground_surface8(
+        &mut self,
+        landscape: Option<&Landscape>,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let Some(landscape) = landscape else {
+            return false;
+        };
+        let Some(grid) = landscape.pixel_grid() else {
+            return false;
+        };
+        let width = grid.width() as i32;
+        let height = grid.height() as i32;
+        let bytes = grid.bytes();
+        let mut palette = [Color::opaque(0, 0, 0); 256];
+        for (index, color) in palette.iter_mut().enumerate() {
+            let (source, source_transparency, material) =
+                landscape.surface8_palette_entry(index as u8);
+            let source_color = if landscape.mode() == lc_engine::landscape::LANDSCAPE_MODE_EXACT {
+                Color::new(
+                    source[0],
+                    source[1],
+                    source[2],
+                    255_u8.saturating_sub(source_transparency),
+                )
+            } else {
+                // Generated Surface8 copies the active loader-resolved DDraw
+                // palette; Exact mode instead owns the BMP palette retained
+                // by LandscapeRasterState.
+                self.game_palette.color(index as u8)
+            };
+            *color = material
+                .and_then(|name| self.material_render_info.get(&name.to_ascii_lowercase()))
+                .map_or(source_color, |material| {
+                    Color::new(
+                        material.color[0],
+                        material.color[1],
+                        material.color[2],
+                        255_u8.saturating_sub(material.alpha[if index >= 128 { 3 } else { 0 }]),
+                    )
+                });
+        }
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        for screen_y in 0..self.surface_height {
+            let world_y = (self.viewport_y + (screen_y as f32 + 0.5) / zoom).floor() as i32;
+            if world_y < 0 || world_y >= height {
+                continue;
+            }
+            for screen_x in 0..self.surface_width {
+                let world_x = (self.viewport_x + (screen_x as f32 + 0.5) / zoom).floor() as i32;
+                if world_x < 0 || world_x >= width {
+                    continue;
+                }
+                let byte = bytes[(world_y * width + world_x) as usize];
+                if byte == 0 {
+                    continue;
+                }
+                draw_pxs_pixel(
+                    &mut self.surface,
+                    screen_x as i32,
+                    screen_y as i32,
+                    palette[usize::from(byte)],
+                    gamma,
+                    None,
+                );
+            }
+        }
+        true
     }
 
     fn draw_liquids(
@@ -6281,17 +6429,6 @@ impl GraphicsSystem {
             if !Self::object_is_visible(objects, players, object, for_player, false) {
                 continue;
             }
-            let line = definition_lines
-                .get(&object.definition_id)
-                .map(|metadata| metadata.line)
-                .unwrap_or(0);
-            // `if (Contained && !eDrawMode) return;` (src/C4Object.cpp:2363):
-            // carried objects never draw into the landscape. Def->Line is
-            // tested before this, so contained line objects are the exception
-            // (src/C4Object.cpp:2249-2254).
-            if line == 0 && object.container.is_some() {
-                continue;
-            }
             match pass {
                 ObjectRenderPass::Background => {
                     if object.category & CATEGORY_BACKGROUND_FLAG != 0 {
@@ -6326,6 +6463,21 @@ impl GraphicsSystem {
                 .get(&object.definition_id)
                 .map(|metadata| metadata.line)
                 .unwrap_or(0);
+            if line == 0 && self.debug_draw_flags.show_command {
+                self.paint_command_debug(object, objects, gamma);
+            }
+            // Native ShowCommand runs before this containment return, so
+            // carried objects retain their command overlay while their
+            // ordinary face/debug-tail work remains suppressed.
+            if line == 0 && object.container.is_some() {
+                continue;
+            }
+            if line == 0
+                && self.debug_draw_flags.show_solid_mask
+                && self.object_has_debug_solid_mask(object)
+            {
+                continue;
+            }
             // `C4D_IgnoreFoW` disables the modulation map only around the
             // object's base `Draw` body. Line definitions return before that
             // switch and `DrawTopFace` runs later with the map restored.
@@ -6335,7 +6487,7 @@ impl GraphicsSystem {
             if suppress_fog {
                 self.fog_suppression_depth += 1;
             }
-            self.paint_object(
+            let reaches_post_face_draw = self.paint_object(
                 object,
                 objects,
                 players,
@@ -6345,24 +6497,484 @@ impl GraphicsSystem {
                 line,
                 gamma,
             );
-            if line == 0 {
+            if line == 0 && reaches_post_face_draw {
                 self.paint_need_energy_bolt(object, frame, gamma);
+                self.paint_object_debug_tail(object, gamma);
             }
             if suppress_fog {
                 self.fog_suppression_depth -= 1;
             }
         }
         for object in &selected {
+            if !definition_lines
+                .get(&object.definition_id)
+                .is_some_and(|metadata| metadata.line != 0)
+                && object.container.is_some()
+            {
+                continue;
+            }
             // The crew-name block is the first drawing work in
             // C4Object::DrawTopFace, before the construction/TopFace facet.
             // Keeping it in this outer list pass prevents graphics-overlay
             // recursion from producing duplicate labels.
             self.paint_crew_name_label(object, for_player, owner_colors, gamma);
+            // Native DrawTopFace emits the crew label before the solid-mask
+            // early return suppresses the actual TopFace.
+            if self.debug_draw_flags.show_solid_mask && self.object_has_debug_solid_mask(object) {
+                continue;
+            }
             if !definition_lines
                 .get(&object.definition_id)
                 .is_some_and(|metadata| metadata.line != 0)
             {
                 self.paint_object_top_face(object, SpriteBlitState::for_object(object), gamma);
+            }
+        }
+    }
+
+    fn object_has_debug_solid_mask(&self, object: &ObjectSnapshot) -> bool {
+        match object.solid_mask_override {
+            Some(mask) => mask.width > 0 && mask.height > 0,
+            None => self
+                .definition_debug_geometry
+                .get(&object.definition_id)
+                .and_then(|geometry| geometry.solid_mask)
+                .is_some_and(|mask| mask.width > 0 && mask.height > 0),
+        }
+    }
+
+    fn draw_pathfinder_debug(
+        &mut self,
+        graph: &lc_engine::PathfinderDebugSnapshot,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let viewport_x = self.viewport_x;
+        let viewport_y = self.viewport_y;
+        let screen = |point: Vector2| {
+            (
+                (point.x as f32 - viewport_x) * zoom,
+                (point.y as f32 - viewport_y) * zoom,
+            )
+        };
+        for zone in &graph.zones {
+            if zone.width <= 0 || zone.height <= 0 {
+                continue;
+            }
+            let top_left = screen(Vector2::new(zone.x, zone.y));
+            self.draw_debug_frame(
+                top_left.0,
+                top_left.1,
+                top_left.0 + (zone.width - 1) as f32 * zoom,
+                top_left.1 + (zone.height - 1) as f32 * zoom,
+                self.game_palette.color(if zone.used { 11 } else { 10 }),
+                gamma,
+            );
+        }
+        for ray in &graph.rays {
+            let color_index = if ray.uses_transfer_zone {
+                14
+            } else {
+                match ray.status {
+                    lc_engine::PathfinderDebugRayStatus::Launch
+                    | lc_engine::PathfinderDebugRayStatus::Crawl => 10,
+                    lc_engine::PathfinderDebugRayStatus::Still => 7,
+                    lc_engine::PathfinderDebugRayStatus::Failure => 13,
+                    lc_engine::PathfinderDebugRayStatus::Deleted => 2,
+                }
+            };
+            let start = screen(ray.start);
+            let end = screen(ray.end);
+            if ray.status == lc_engine::PathfinderDebugRayStatus::Crawl {
+                let (dx, dy) = match ray.crawl_attach {
+                    1 => (0.0, -7.0),
+                    2 => (7.0, 0.0),
+                    3 => (0.0, 7.0),
+                    4 => (-7.0, 0.0),
+                    _ => (0.0, 0.0),
+                };
+                self.draw_debug_line(
+                    end,
+                    (end.0 + dx * zoom, end.1 + dy * zoom),
+                    self.game_palette.color(10),
+                    gamma,
+                );
+            }
+            let color = self.game_palette.color(color_index);
+            self.draw_debug_line(start, end, color, gamma);
+            let crawler_color = if ray.status == lc_engine::PathfinderDebugRayStatus::Crawl {
+                self.game_palette
+                    .color(if ray.direction < 0 { 11 } else { 14 })
+            } else {
+                color
+            };
+            self.draw_debug_frame(
+                end.0 - zoom,
+                end.1 - zoom,
+                end.0 + zoom,
+                end.1 + zoom,
+                crawler_color,
+                gamma,
+            );
+            let target = screen(ray.target);
+            self.draw_debug_frame(
+                target.0 - 2.0 * zoom,
+                target.1 - 2.0 * zoom,
+                target.0 + 2.0 * zoom,
+                target.1 + 2.0 * zoom,
+                self.game_palette.color(13),
+                gamma,
+            );
+        }
+    }
+
+    fn draw_debug_line(
+        &mut self,
+        start: (f32, f32),
+        end: (f32, f32),
+        color: Color,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        let fog = self.fog_draw_context();
+        draw_pxs_line(&mut self.surface, start, end, color, gamma, fog.as_ref());
+    }
+
+    fn draw_debug_frame(
+        &mut self,
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+        color: Color,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        self.draw_debug_line((left, top), (right, top), color, gamma);
+        self.draw_debug_line((right, top), (right, bottom), color, gamma);
+        self.draw_debug_line((right, bottom), (left, bottom), color, gamma);
+        self.draw_debug_line((left, bottom), (left, top), color, gamma);
+    }
+
+    fn object_debug_screen_position(&self, object: &ObjectSnapshot, x: i32, y: i32) -> (f32, f32) {
+        let (target_x, target_y) = self.object_target_position(object);
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        ((x as f32 - target_x) * zoom, (y as f32 - target_y) * zoom)
+    }
+
+    fn object_debug_name(&self, objects: &[ObjectSnapshot], id: ObjectId) -> String {
+        objects
+            .iter()
+            .find(|candidate| candidate.id == id)
+            .map(|candidate| {
+                candidate
+                    .custom_name
+                    .clone()
+                    .or_else(|| {
+                        self.definition_debug_geometry
+                            .get(&candidate.definition_id)
+                            .and_then(|geometry| geometry.name.clone())
+                    })
+                    .unwrap_or_else(|| candidate.definition_id.clone())
+            })
+            .unwrap_or_else(|| id.as_u64().to_string())
+    }
+
+    fn paint_command_debug(
+        &mut self,
+        object: &ObjectSnapshot,
+        objects: &[ObjectSnapshot],
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        let Some(sprite) = self
+            .object_sprites
+            .get(&sprite_map_key(&object.definition_id, None))
+        else {
+            return;
+        };
+        let shape = self.live_object_shape(sprite, object);
+        if !self.object_reaches_post_face_draw(object, sprite, shape) {
+            return;
+        }
+        let views = object.command_stack.command_views();
+        if views.is_empty() {
+            return;
+        }
+        let mut cursor = object.position;
+        let mut move_tos = 0usize;
+        let mut lines = Vec::new();
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        for command in views {
+            let is_move = command.name == "MoveTo";
+            let is_transfer = command.name == "Transfer";
+            if is_move || is_transfer {
+                if let (Some(x), Some(y)) = (command.tx, command.ty) {
+                    let start = self.object_debug_screen_position(object, cursor.x, cursor.y);
+                    let end = self.object_debug_screen_position(object, x, y);
+                    let color = self.game_palette.color(if is_transfer { 11 } else { 10 });
+                    self.draw_debug_line(start, end, color, gamma);
+                    self.draw_debug_frame(
+                        end.0 - zoom,
+                        end.1 - zoom,
+                        end.0 + zoom,
+                        end.1 + zoom,
+                        color,
+                        gamma,
+                    );
+                    cursor = Vector2::new(x, y);
+                }
+                if is_move {
+                    move_tos += 1;
+                    continue;
+                }
+            }
+            if move_tos != 0 {
+                lines.push(format!("{move_tos}x MoveTo"));
+                move_tos = 0;
+            }
+            let target = command
+                .target
+                .map(|id| self.object_debug_name(objects, id))
+                .unwrap_or_default();
+            let data_definition_id = match &command.data {
+                lc_engine::command::CommandData::Integer(raw) if *raw != 0 => {
+                    Some(lc_script::c4_id_from_raw(*raw as u32 as usize))
+                }
+                _ => None,
+            };
+            let data_id = match &command.data {
+                lc_engine::command::CommandData::Integer(_) => data_definition_id
+                    .as_deref()
+                    .map(lc_script::c4_id_text)
+                    .unwrap_or_default(),
+                lc_engine::command::CommandData::Text(text) => c4_presentation_text(text),
+                _ => String::new(),
+            };
+            let text = match command.name.as_str() {
+                "None" => String::new(),
+                "Put" => {
+                    let item = command
+                        .target2
+                        .map(|id| self.object_debug_name(objects, id))
+                        .filter(|name| !name.is_empty())
+                        .or_else(|| (!data_id.is_empty()).then(|| data_id.clone()))
+                        .unwrap_or_else(|| "Content".to_string());
+                    format!("Put {item} to {target}")
+                }
+                "Buy" | "Sell" => {
+                    let base = if target.is_empty() {
+                        "closest base"
+                    } else {
+                        target.as_str()
+                    };
+                    format!("{} {data_id} at {base}", command.name)
+                }
+                "Acquire" => format!("Acquire {target}"),
+                "Call" => {
+                    let call = match &command.data {
+                        lc_engine::command::CommandData::Text(text) => c4_presentation_text(text),
+                        _ => String::new(),
+                    };
+                    let target = if target.is_empty() {
+                        "(null)"
+                    } else {
+                        target.as_str()
+                    };
+                    format!("Call {call} in {target}")
+                }
+                "Construct" => {
+                    let definition_id = data_definition_id
+                        .as_deref()
+                        .or(command.tx_definition.as_deref());
+                    let definition = definition_id
+                        .and_then(|definition_id| {
+                            self.definition_debug_geometry
+                                .get(definition_id)
+                                .and_then(|geometry| geometry.name.clone())
+                        })
+                        .unwrap_or_default();
+                    format!("Construct {definition}")
+                }
+                _ if target.is_empty() => command.name,
+                _ => format!("{} {target}", command.name),
+            };
+            if !text.is_empty() {
+                lines.push(if command.finished {
+                    format!("<i>{text}</i>")
+                } else {
+                    text
+                });
+            }
+        }
+        if move_tos != 0 {
+            lines.push(format!("{move_tos}x MoveTo"));
+        }
+        if lines.is_empty() {
+            return;
+        }
+        let text = format!("|{}", lines.join("|"));
+        let font = hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref());
+        let (_, height) = font.text_extent_markup(&text);
+        let anchor = self.object_debug_screen_position(
+            object,
+            object.position.x,
+            object.position.y + shape.y,
+        );
+        let x = anchor.0.round() as i32;
+        let y = anchor.1.round() as i32 - 10 - height;
+        let fog = self.fog_draw_context();
+        if let Some(fog) = fog.as_ref() {
+            draw_fogged_markup_text(
+                &mut self.surface,
+                &font,
+                x,
+                y,
+                &text,
+                Color::opaque(255, 255, 255),
+                gamma,
+                fog,
+            );
+        } else {
+            font.draw_markup_with_gamma(
+                &mut self.surface,
+                x,
+                y,
+                &text,
+                Color::opaque(255, 255, 255),
+                lc_graphics::clonk_font::TextAlign::Center,
+                gamma,
+            );
+        }
+    }
+
+    fn paint_object_debug_tail(
+        &mut self,
+        object: &ObjectSnapshot,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        if self.debug_draw_flags.show_vertices && object.vertices.len() > 1 {
+            for (index, vertex) in object.vertices.iter().enumerate() {
+                let center = self.object_debug_screen_position(
+                    object,
+                    object.position.x + vertex.x,
+                    object.position.y + vertex.y,
+                );
+                if center.0 < zoom
+                    || center.1 < zoom
+                    || center.0 > self.surface_width as f32 - 2.0 * zoom
+                    || center.1 > self.surface_height as f32 - 2.0 * zoom
+                {
+                    continue;
+                }
+                let color_index = if vertex.cnat & lc_engine::CNAT_NO_COLLISION != 0 {
+                    14
+                } else if object.mobile {
+                    10
+                } else {
+                    13
+                };
+                let color = self.game_palette.color(color_index);
+                self.draw_debug_line(
+                    (center.0 - zoom, center.1),
+                    (center.0 + zoom, center.1),
+                    color,
+                    gamma,
+                );
+                self.draw_debug_line(
+                    (center.0, center.1 - zoom),
+                    (center.0, center.1 + zoom),
+                    color,
+                    gamma,
+                );
+                if object.vertex_contacts.get(index).copied().unwrap_or(0) != 0 {
+                    self.draw_debug_frame(
+                        center.0 - 2.0 * zoom,
+                        center.1 - 2.0 * zoom,
+                        center.0 + 2.0 * zoom,
+                        center.1 + 2.0 * zoom,
+                        self.game_palette.color(6),
+                        gamma,
+                    );
+                }
+            }
+        }
+
+        if self.debug_draw_flags.show_entrance {
+            let geometry = self
+                .definition_debug_geometry
+                .get(&object.definition_id)
+                .cloned()
+                .unwrap_or_default();
+            for (enabled, rect, color_index) in [
+                (
+                    object.ocf & lc_engine::ocf::ENTRANCE != 0,
+                    geometry.entrance,
+                    14,
+                ),
+                (
+                    object.ocf & lc_engine::ocf::COLLECTION != 0,
+                    geometry.collection,
+                    10,
+                ),
+            ] {
+                let Some(rect) = enabled.then_some(rect).flatten() else {
+                    continue;
+                };
+                if rect.width <= 0 || rect.height <= 0 {
+                    continue;
+                }
+                let top_left = self.object_debug_screen_position(
+                    object,
+                    object.position.x + rect.x,
+                    object.position.y + rect.y,
+                );
+                self.draw_debug_frame(
+                    top_left.0,
+                    top_left.1,
+                    top_left.0 + (rect.width - 1) as f32 * zoom,
+                    top_left.1 + (rect.height - 1) as f32 * zoom,
+                    self.game_palette.color(color_index),
+                    gamma,
+                );
+            }
+        }
+
+        // A physical ActMap slot is exactly native `Action.Act > ActIdle`;
+        // unresolved names remain on the built-in idle sentinel.
+        let active_action = object.action.act_map_index.is_some();
+        if self.debug_draw_flags.show_action && active_action {
+            let text = format!("{} ({})", object.action.name, object.action.phase);
+            let font = hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref());
+            let (_, height) = font.text_extent_markup(&text);
+            let shape_y = self
+                .object_sprites
+                .get(&sprite_map_key(&object.definition_id, None))
+                .map(|sprite| self.live_object_shape(sprite, object).y)
+                .unwrap_or(0);
+            let anchor = self.object_debug_screen_position(
+                object,
+                object.position.x,
+                object.position.y + shape_y,
+            );
+            let color = if object.in_liquid {
+                c4_color_to_surface(0xfa00_00ff)
+            } else {
+                Color::opaque(255, 255, 255)
+            };
+            let x = anchor.0.round() as i32;
+            let y = anchor.1.round() as i32 - height;
+            let fog = self.fog_draw_context();
+            if let Some(fog) = fog.as_ref() {
+                draw_fogged_markup_text(&mut self.surface, &font, x, y, &text, color, gamma, fog);
+            } else {
+                font.draw_markup_with_gamma(
+                    &mut self.surface,
+                    x,
+                    y,
+                    &text,
+                    color,
+                    lc_graphics::clonk_font::TextAlign::Center,
+                    gamma,
+                );
             }
         }
     }
@@ -6769,14 +7381,14 @@ impl GraphicsSystem {
         _owner_colors: &HashMap<i32, Color>,
         line: i32,
         gamma: Option<&lc_graphics::GammaRamp>,
-    ) {
+    ) -> bool {
         // C4Object::Draw dispatches every nonzero Def->Line before bounds,
         // containment, TargetPos/parallax, transforms, particles, and faces
         // (src/C4Object.cpp:2249-2254). Even presently unsupported types must
         // return here so a sprite never stands in for the line.
         if line != 0 {
             self.paint_typed_line(object, line, gamma);
-            return;
+            return false;
         }
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let content_width = self.surface_width as f32;
@@ -6823,7 +7435,7 @@ impl GraphicsSystem {
             let target_position = self.object_target_position(object);
             let shape = self.live_object_shape(geometry_sprite, object);
             if !self.object_reaches_post_face_draw(object, geometry_sprite, shape) {
-                return;
+                return false;
             }
             // C4Object draws the fire facet before PrepareDrawing and before
             // its base/action face (src/C4Object.cpp:2388-2418), so the
@@ -6862,7 +7474,7 @@ impl GraphicsSystem {
                 base_transform,
                 gamma,
             );
-            return;
+            return true;
         }
 
         if screen_x < -10.0
@@ -6870,7 +7482,7 @@ impl GraphicsSystem {
             || screen_x > content_width + 10.0
             || screen_y > content_height + 10.0
         {
-            return;
+            return false;
         }
 
         // No sprite available: debug fallbacks only (C++ objects always
@@ -6905,7 +7517,7 @@ impl GraphicsSystem {
                     fill_polygon(&mut self.surface, &points, color)
                 }
             {
-                return;
+                return true;
             }
         }
 
@@ -6935,6 +7547,7 @@ impl GraphicsSystem {
             base_transform,
             gamma,
         );
+        true
     }
 
     fn paint_typed_line(
@@ -8631,6 +9244,49 @@ impl GraphicsSystem {
                 );
             }
         }
+    }
+
+    /// `C4Network2::DrawStatus` is a per-viewport, pipe-delimited FontRegular
+    /// overlay at (+20,+50), after the player's viewport overlay.
+    pub fn draw_network_status(&mut self, gamma: Option<&lc_graphics::GammaRamp>) -> bool {
+        if !self.debug_draw_flags.show_net_status {
+            return false;
+        }
+        let Some(text) = self.network_status_text.clone() else {
+            return false;
+        };
+        let viewports = self.active_viewports.clone();
+        if viewports.is_empty() {
+            return false;
+        }
+        let font = hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref());
+        for viewport in viewports {
+            let previous_clip = self.surface.clip();
+            let clip = previous_clip
+                .and_then(|clip| clip.intersection(viewport.rect))
+                .unwrap_or_else(|| {
+                    if previous_clip.is_some() {
+                        SurfaceRect::new(0, 0, 0, 0)
+                    } else {
+                        viewport.rect
+                    }
+                });
+            self.surface.set_clip(clip);
+            font.draw_markup_with_gamma(
+                &mut self.surface,
+                viewport.rect.x + 20,
+                viewport.rect.y + 50,
+                &text,
+                Color::opaque(255, 255, 255),
+                lc_graphics::clonk_font::TextAlign::Left,
+                gamma,
+            );
+            match previous_clip {
+                Some(clip) => self.surface.set_clip(clip),
+                None => self.surface.clear_clip(),
+            }
+        }
+        true
     }
 
     /// Draw the final per-viewport Help/PlayerMenu/Chat controls after
@@ -13103,6 +13759,8 @@ mod tests {
                 current_fire_top: None,
                 contact_density: 50,
                 own_vertices: None,
+                vertex_contacts: Vec::new(),
+                solid_mask_override: None,
                 container: None,
                 layer: None,
                 visibility: 0,
@@ -13169,9 +13827,265 @@ mod tests {
             definition_closed_containers: Default::default(),
             definition_lines: Default::default(),
             transfer_zones: Vec::new(),
+            pathfinder_debug: Default::default(),
             menu_requests: Vec::new(),
             audio: Vec::new(),
         }
+    }
+
+    #[test]
+    fn l140_debug_vertex_marks_are_flag_gated() {
+        let mut snapshot = make_snapshot();
+        let object = &mut snapshot.objects[0];
+        object.position = Vector2::new(16, 16);
+        object.vertices = vec![
+            ObjectVertex::new(0, 0).with_cnat(lc_engine::CNAT_NO_COLLISION),
+            ObjectVertex::new(4, 0),
+        ];
+        object.vertex_contacts = vec![0, lc_engine::CNAT_BOTTOM];
+        let sprite = DefinitionSprite {
+            image: ImageData::new(2, 2, vec![0; 16]),
+            actions: HashMap::new(),
+            color_mask: None,
+            graphics_scale: 1.0,
+            shape: Some(DefinitionRect::new(-1, -1, 2, 2)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+        };
+        let mut graphics = GraphicsSystem::new(
+            32,
+            32,
+            32,
+            "L140 vertex overlay",
+            test_font(),
+            Arc::new(HashMap::from([(
+                sprite_map_key("TestObject", None),
+                sprite,
+            )])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let draw = |graphics: &mut GraphicsSystem| {
+            graphics.draw_objects(
+                &snapshot.objects,
+                &snapshot.render_order,
+                &snapshot.definition_lines,
+                &snapshot.players,
+                OWNER_NONE,
+                1.0,
+                &HashMap::new(),
+                ObjectRenderPass::Normal,
+                None,
+            );
+        };
+
+        graphics.surface_mut().fill(Color::transparent());
+        draw(&mut graphics);
+        assert_eq!(
+            graphics.surface().get_pixel(16, 16),
+            Some(Color::transparent()),
+            "the developer overlay is inert by default"
+        );
+
+        graphics.set_debug_draw_flags(DebugDrawFlags {
+            show_vertices: true,
+            ..DebugDrawFlags::default()
+        });
+        draw(&mut graphics);
+        assert_eq!(
+            graphics.surface().get_pixel(16, 16),
+            Some(graphics.game_palette.color(14)),
+            "CNAT_NoCollision uses CBlue for the three-pixel vertex cross"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(18, 14),
+            Some(graphics.game_palette.color(6)),
+            "a contacted vertex receives the surrounding CWhite frame"
+        );
+
+        drop(draw);
+        snapshot.objects[0].position = Vector2::new(-20, 16);
+        snapshot.objects[0].vertices[0].x = 36;
+        snapshot.objects[0].vertices[1].x = 40;
+        graphics.surface_mut().fill(Color::transparent());
+        graphics.draw_objects(
+            &snapshot.objects,
+            &snapshot.render_order,
+            &snapshot.definition_lines,
+            &snapshot.players,
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(16, 16),
+            Some(Color::transparent()),
+            "the native output-boundary return suppresses the debug tail even when a displaced vertex would land onscreen"
+        );
+    }
+
+    #[test]
+    fn l140_network_status_text_is_flag_gated_per_viewport() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(80, 60);
+        let render = |show_net_status| {
+            let mut graphics = GraphicsSystem::new(
+                180,
+                110,
+                120,
+                "L140 network status",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.set_debug_draw_flags(DebugDrawFlags {
+                show_net_status,
+                ..DebugDrawFlags::default()
+            });
+            graphics.set_network_status_text(Some(
+                "Local: Active host Alice (ID 0)|Game Status: go (tick 7) reached ack|Protocols: UDP: UDP (11112 i0 o0 bc0)|Control: Central, Tick 7, Behind 0, Rate 2, PreSend 1, ACT: 20|Clients:"
+                    .to_string(),
+            ));
+            graphics.render_frame(
+                &snapshot,
+                &[ViewportInput::from_focus(&snapshot.objects[0])],
+            );
+            graphics.draw_network_status(None);
+            (
+                graphics.surface().pixels().to_vec(),
+                graphics.surface().width() as usize,
+                graphics.active_viewport_projections()[0].rect,
+            )
+        };
+
+        let (hidden, width, rect) = render(false);
+        let (visible, visible_width, visible_rect) = render(true);
+        assert_eq!(width, visible_width);
+        assert_eq!(rect, visible_rect);
+        let changed = hidden
+            .chunks_exact(4)
+            .zip(visible.chunks_exact(4))
+            .enumerate()
+            .filter(|(_, (hidden, visible))| hidden != visible)
+            .map(|(index, _)| ((index % width) as i32, (index / width) as i32))
+            .collect::<Vec<_>>();
+        assert!(
+            changed.len() > 20,
+            "enabling ShowNetstatus must rasterize detailed status text"
+        );
+        assert!(changed.iter().all(|(x, y)| {
+            *x >= rect.x
+                && *x < rect.x + rect.width as i32
+                && *y >= rect.y
+                && *y < rect.y + rect.height as i32
+        }));
+    }
+
+    #[test]
+    fn l140_solid_mask_mode_uses_surface8_and_suppresses_the_object_sprite() {
+        let mut snapshot = make_snapshot();
+        let object = &mut snapshot.objects[0];
+        object.position = Vector2::new(12, 12);
+        object.solid_mask_override = Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0));
+        let sprite = DefinitionSprite {
+            image: ImageData::new(3, 3, [220, 30, 20, 255].repeat(9)),
+            actions: HashMap::new(),
+            color_mask: None,
+            graphics_scale: 1.0,
+            shape: Some(DefinitionRect::new(-1, -1, 3, 3)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+        };
+        let mut graphics = GraphicsSystem::new(
+            24,
+            24,
+            24,
+            "L140 solid masks",
+            test_font(),
+            Arc::new(HashMap::from([(
+                sprite_map_key("TestObject", None),
+                sprite,
+            )])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let draw_object = |graphics: &mut GraphicsSystem| {
+            graphics.draw_objects(
+                &snapshot.objects,
+                &snapshot.render_order,
+                &snapshot.definition_lines,
+                &snapshot.players,
+                OWNER_NONE,
+                1.0,
+                &HashMap::new(),
+                ObjectRenderPass::Normal,
+                None,
+            );
+        };
+        graphics.surface_mut().fill(Color::transparent());
+        draw_object(&mut graphics);
+        assert_eq!(
+            graphics.surface().get_pixel(12, 12),
+            Some(Color::opaque(220, 30, 20))
+        );
+        graphics.surface_mut().fill(Color::transparent());
+        graphics.set_debug_draw_flags(DebugDrawFlags {
+            show_solid_mask: true,
+            ..DebugDrawFlags::default()
+        });
+        draw_object(&mut graphics);
+        assert_eq!(
+            graphics.surface().get_pixel(12, 12),
+            Some(Color::transparent()),
+            "the mask is already represented by Surface8, so Draw and DrawTopFace return"
+        );
+
+        let mut bytes = vec![0; 24 * 24];
+        bytes[4 * 24 + 3] = 14;
+        bytes[4 * 24 + 4] = 142;
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "earth".to_string(),
+            MaterialRenderInfo::new(
+                [17, 33, 65, 0, 0, 0, 0, 0, 0],
+                [64, 0, 0, 192, 0, 0],
+                None,
+                0,
+                50,
+            ),
+        )])));
+        let mut material_names = vec![None; 128];
+        material_names[14] = Some("Earth".to_string());
+        let mut landscape =
+            Landscape::with_default_material(24, vec![24; 24], None).expect("test landscape");
+        landscape.set_world_height(24);
+        landscape.set_pixel_grid(PixelGrid::new(
+            24,
+            24,
+            bytes,
+            vec![0; 128],
+            material_names,
+            vec![None; 128],
+        ));
+        assert!(graphics.draw_ground_surface8(Some(&landscape), None));
+        assert_eq!(
+            graphics.surface().get_pixel(3, 4),
+            Some(Color::new(12, 24, 48, 191)),
+            "the low Surface8 slot uses Mat2Pal Color and Alpha[0]"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(4, 4),
+            Some(Color::new(4, 8, 16, 63)),
+            "the +128 IFT slot uses the same Mat2Pal RGB and Alpha[3]"
+        );
     }
 
     #[test]

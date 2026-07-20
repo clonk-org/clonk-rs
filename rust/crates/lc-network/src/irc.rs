@@ -2029,13 +2029,13 @@ mod tests {
             let mut reader = BufReader::new(stream.try_clone().expect("clone server stream"));
             assert_eq!(read_wire_line(&mut reader), "NICK Me");
             assert_eq!(read_wire_line(&mut reader), "USER clonk x x :Clonk Player");
-            registered_tx.send(()).expect("registration signal");
 
             stream
                 .write_all(b":server 376 Me :End of MOTD\r\nPING :probe\r\n")
                 .expect("send welcome and ping");
             assert_eq!(read_wire_line(&mut reader), "JOIN #loopback");
             assert_eq!(read_wire_line(&mut reader), "PONG :probe");
+            registered_tx.send(()).expect("registration signal");
             assert_eq!(
                 read_wire_line(&mut reader),
                 "PRIVMSG #loopback :from client"

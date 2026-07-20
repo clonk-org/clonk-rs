@@ -772,6 +772,8 @@ mod tests {
             current_fire_top: None,
             contact_density: 50,
             own_vertices: None,
+            vertex_contacts: Vec::new(),
+            solid_mask_override: None,
             container: None,
             layer: None,
             visibility: 0,
@@ -851,6 +853,7 @@ mod tests {
             definition_closed_containers: Default::default(),
             definition_lines: Default::default(),
             transfer_zones: Vec::new(),
+            pathfinder_debug: Default::default(),
             menu_requests: Vec::new(),
             audio: Vec::new(),
         };

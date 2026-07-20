@@ -142,6 +142,7 @@ use lc_frontend::startup_plrsel::{
 };
 use lc_frontend::{
     ActiveViewportProjection, ColorByOwnerMask, CrewNameOverlay, CrewOverlay, CursorAtlas,
+    DefinitionDebugGeometry,
     DefinitionSprite, GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics,
     ImageData, InputDispatcher, InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction,
     MainMenuItem, MaterialRenderInfo, MessageBoardMode, MessageBoardOverlay, PlayerOverlay,
@@ -12071,6 +12072,9 @@ struct GameApp {
     /// Control mode applied after the status acknowledgement. The F4 option
     /// keeps displaying this while a newer status is still pending.
     runtime_network_committed_control_mode: Option<i32>,
+    /// Last acknowledged C4Network2Status. Native retains both status flags
+    /// until the next status request resets them.
+    runtime_network_committed_status: Option<lc_network::NetworkStatus>,
     runtime_network_join_allowed: Option<bool>,
     network_control_clock: Option<NetworkControlClock>,
     network_max_players: usize,
@@ -12086,6 +12090,10 @@ struct GameApp {
     frames_per_second: i32,
     frames_since_second: i32,
     control_clients: ControlClientRegistry,
+    /// `C4GameControlClient::iNextControl` for the activated-client copy.
+    /// Native resets every entry to the current ControlTick whenever
+    /// `CopyClientList` runs and never advances it afterwards.
+    network_client_next_control_ticks: HashMap<i32, i32>,
     network_client_activity: NetworkClientActivity,
     control_player_infos: ControlPlayerInfoRegistry,
     /// Native restart handoff captured at full game initialization and kept
@@ -22359,6 +22367,16 @@ impl GameApp {
         let control_clients = initial_control_clients(network.as_ref(), network_mode.as_ref());
         let network_control_running = network.is_none();
         let network_control_clock = initial_network_control_clock(network_mode.as_ref());
+        let network_client_next_control_ticks = network_control_clock.map_or_else(
+            HashMap::new,
+            |clock| {
+                control_clients
+                    .activated_client_ids()
+                    .into_iter()
+                    .map(|client_id| (client_id, clock.current_tick()))
+                    .collect()
+            },
+        );
         let host_join_snapshot = initial_host_join_snapshot(network_mode.as_ref());
         let network_max_players = initial_network_max_players(network_mode.as_ref());
         let network_is_league = initial_network_is_league(network_mode.as_ref());
@@ -22729,6 +22747,7 @@ impl GameApp {
             host_reference_paused: false,
             runtime_network_control_mode: None,
             runtime_network_committed_control_mode: None,
+            runtime_network_committed_status: None,
             runtime_network_join_allowed: None,
             network_control_clock,
             network_max_players,
@@ -22738,6 +22757,7 @@ impl GameApp {
             frames_per_second: 0,
             frames_since_second: 0,
             control_clients,
+            network_client_next_control_ticks,
             network_client_activity: NetworkClientActivity::default(),
             control_player_infos,
             restart_restore_infos: RestartRestoreInfos::default(),
@@ -24460,6 +24480,7 @@ impl GameApp {
         );
         graphics.inherit_liquid_animation_cycle(&self.graphics);
         graphics.inherit_pending_observer_scroll(&self.graphics);
+        graphics.inherit_debug_draw_state(&self.graphics);
         graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
         graphics.set_game_palette(game_palette);
         graphics.set_liquid_animation(liquid_animation);
@@ -24771,6 +24792,7 @@ impl GameApp {
     fn rebuild_definition_sprites(&mut self) {
         let mut sprites = self.assets.base_sprite_map().clone();
         let mut rotateable_definitions = HashSet::new();
+        let mut debug_geometry = HashMap::new();
         for definition_id in self.engine.definition_ids() {
             if self.engine.definition_rotateable(definition_id) != 0 {
                 rotateable_definitions.insert(definition_id.to_string());
@@ -24788,6 +24810,18 @@ impl GameApp {
             let line = self.engine.definition_line(definition_id);
             let stretch_growth = self.engine.definition_stretch_growth(definition_id);
             let top_face = self.engine.definition_top_face(definition_id);
+            debug_geometry.insert(
+                definition_id.to_string(),
+                DefinitionDebugGeometry {
+                    name: self
+                        .engine
+                        .definition_name(definition_id)
+                        .map(str::to_string),
+                    entrance: self.engine.definition_entrance_rect(definition_id),
+                    collection: self.engine.definition_collection_rect(definition_id),
+                    solid_mask: self.engine.definition_solid_mask(definition_id),
+                },
+            );
             if let Some(image) = self.engine.definition_sprite_image(definition_id, None) {
                 let width = image.width();
                 let height = image.height();
@@ -24874,6 +24908,7 @@ impl GameApp {
         }
         self.graphics
             .set_rotateable_definitions(rotateable_definitions);
+        self.graphics.set_definition_debug_geometry(debug_geometry);
         if sprites != self.object_sprites {
             self.object_sprites = sprites;
             self.update_sprite_cache();
@@ -28828,6 +28863,255 @@ impl GameApp {
         (icon, (!local).then_some(state.wait_ms))
     }
 
+    /// Compose the detailed `C4Network2::DrawStatus` text from live runtime
+    /// diagnostics. Collection is skipped while its renderer flag is off so
+    /// the normal frame path never blocks on worker inspection.
+    fn update_network_status_overlay(&mut self) {
+        if !self.graphics.debug_draw_flags().show_net_status {
+            self.graphics.set_network_status_text(None);
+            return;
+        }
+        let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        else {
+            self.graphics.set_network_status_text(None);
+            return;
+        };
+
+        let clients = self.control_clients.snapshot();
+        let local = clients
+            .iter()
+            .find(|client| client.client_id == local_client_id);
+        let activity = |client: &lc_engine::ClientCoreControlData| {
+            if client.observer {
+                "Observing"
+            } else if client.activated {
+                "Active"
+            } else {
+                "Inactive"
+            }
+        };
+        let local_name = local
+            .map(|client| legacy_presentation_text(client.name.as_bytes()))
+            .unwrap_or_else(|| "???".to_string());
+        let local_activity = local.map(activity).unwrap_or("Inactive");
+        let local_role = if local_client_id == 0 {
+            "host"
+        } else {
+            "client"
+        };
+
+        let barrier = self.runtime_network_status_barrier;
+        let displayed_status = barrier
+            .map(|barrier| barrier.status)
+            .or(self.runtime_network_committed_status);
+        let status_state = displayed_status.map(|status| status.state).unwrap_or_else(|| {
+            if self.network_control_running {
+                lc_network::NETWORK_STATE_GO
+            } else {
+                lc_network::NETWORK_STATE_PAUSE
+            }
+        });
+        let status_name = match status_state {
+            lc_network::NETWORK_STATE_NONE => "none",
+            lc_network::NETWORK_STATE_INIT => "init",
+            lc_network::NETWORK_STATE_LOBBY => "lobby",
+            lc_network::NETWORK_STATE_PAUSE => "pause",
+            lc_network::NETWORK_STATE_GO => "go",
+            _ => "???",
+        };
+        let status_tick = displayed_status.map_or_else(
+            || i32::try_from(self.expected_network_control_tick()).unwrap_or(i32::MAX),
+            |status| status.target_tick,
+        );
+        let reached = barrier.map_or_else(
+            || self.runtime_network_committed_status.is_some(),
+            |barrier| barrier.local_reached,
+        );
+        let ack = barrier.is_none() && self.runtime_network_committed_status.is_some();
+
+        let pacing = self.network_control_pacing();
+        let frame = self.engine.frame();
+        let (control_tick, control_rate, presend, average_control_time) = self
+            .network_control_clock
+            .map_or((status_tick, self.engine.control_rate(), 0, 0), |clock| {
+                (
+                    clock.display_control_tick_for_frame(frame),
+                    clock.control_rate(),
+                    clock.control_presend(),
+                    clock.avg_control_send_time(),
+                )
+            });
+        let control_mode = match displayed_status
+            .map(|status| status.control_mode)
+            .or(self.runtime_network_committed_control_mode)
+            .unwrap_or(2)
+        {
+            0 => "Decentral",
+            1 => "Central",
+            _ => "Async",
+        };
+
+        let (addresses, connections, client_states) = self.network.as_ref().map_or_else(
+            || (Vec::new(), Vec::new(), Vec::new()),
+            |network| {
+                let addresses = network.local_addresses();
+                let connections = network.runtime_connections().unwrap_or_default();
+                let states = u32::try_from(control_tick)
+                    .ok()
+                    .and_then(|tick| network.runtime_client_states(tick).ok())
+                    .unwrap_or_default();
+                (addresses, connections, states)
+            },
+        );
+        let protocol_name = |protocol: lc_network::NetworkProtocol| match protocol {
+            lc_network::NetworkProtocol::Tcp => "TCP".to_string(),
+            lc_network::NetworkProtocol::Udp => "UDP".to_string(),
+            lc_network::NetworkProtocol::Unknown(value) => format!("Protocol {value}"),
+            _ => "Unknown".to_string(),
+        };
+
+        let mut lines = vec![
+            format!("Local: {local_activity} {local_role} {local_name} (ID {local_client_id})"),
+            format!(
+                "Game Status: {status_name} (tick {status_tick}){}{}",
+                if reached { " reached" } else { "" },
+                if ack { " ack" } else { "" },
+            ),
+        ];
+        let tcp = addresses
+            .iter()
+            .find(|address| address.protocol == lc_network::NetworkProtocol::Tcp);
+        let udp = addresses
+            .iter()
+            .find(|address| address.protocol == lc_network::NetworkProtocol::Udp);
+        let message_io = udp.or(tcp);
+        let data_io = tcp.or(udp);
+        if let (Some(message_io), Some(data_io)) = (message_io, data_io) {
+            // L066 supplies the C++ rate accumulator; the current session
+            // transport does not yet publish its snapshot to the app, so an
+            // unsampled bucket has the same zero values as native startup.
+            let rates = |_protocol| (0_u64, 0_u64, 0_u64);
+            let (msg_in, msg_out, msg_broadcast) = rates(message_io.protocol);
+            let message_label = if message_io.protocol == data_io.protocol {
+                "Msg/Data"
+            } else {
+                "Msg"
+            };
+            let mut protocols = format!(
+                "Protocols: {message_label}: {} ({} i{msg_in} o{msg_out} bc{msg_broadcast})",
+                protocol_name(message_io.protocol),
+                message_io.endpoint.port(),
+            );
+            if message_io.protocol != data_io.protocol {
+                let (data_in, data_out, _data_broadcast) = rates(data_io.protocol);
+                protocols.push_str(&format!(
+                    ", Data: {} ({} i{data_in} o{data_out} bcv)",
+                    protocol_name(data_io.protocol),
+                    data_io.endpoint.port(),
+                ));
+            }
+            lines.push(protocols);
+        } else {
+            lines.push("Protocols: none".to_string());
+        }
+        lines.push(format!(
+            "Control: {control_mode}, Tick {control_tick}, Behind {}, Rate {control_rate}, PreSend {presend}, ACT: {average_control_time}",
+            pacing.behind,
+        ));
+        let stream = self.league_record_stream_status();
+        if stream.is_streaming() {
+            lines.push(format!(
+                "Streaming: {} waiting, {} in, {} out, {} sent",
+                stream.waiting_raw_bytes(),
+                stream.input_position(),
+                stream.pending_compressed_bytes(),
+                stream.sent_position(),
+            ));
+        }
+        lines.push("Clients:".to_string());
+        for client in clients
+            .iter()
+            .filter(|client| client.client_id != local_client_id)
+        {
+            let state = client_states
+                .iter()
+                .find(|state| i32::try_from(state.client_id).ok() == Some(client.client_id));
+            let suffix = state.map_or("", |state| match state.status {
+                lc_network::RemoteBarrierState::Joining => " (joining)",
+                lc_network::RemoteBarrierState::Chasing => " (chasing)",
+                lc_network::RemoteBarrierState::NotReady => " (!rdy)",
+                lc_network::RemoteBarrierState::Removing => " (removed)",
+                lc_network::RemoteBarrierState::Ready => " (ready to start)",
+            });
+            let wait = state.map_or(0, |state| state.wait_ms);
+            let control_suffix = state
+                .filter(|state| client.activated && !state.control_ready)
+                .map_or("", |_| " (!ctrl)");
+            let name = legacy_presentation_text(client.name.as_bytes());
+            let client_next_control = self
+                .network_client_next_control_ticks
+                .get(&client.client_id)
+                .copied()
+                .unwrap_or(0);
+            let client_behind = control_tick.wrapping_sub(client_next_control);
+            lines.push(format!(
+                "- {} {} {} (ID {}) (wait {wait} ms, behind {client_behind}){suffix}{control_suffix}",
+                activity(client),
+                if client.client_id == 0 {
+                    "host"
+                } else {
+                    "client"
+                },
+                name,
+                client.client_id,
+            ));
+            let mut routes = connections
+                .iter()
+                .filter(|connection| {
+                    i32::try_from(connection.client_id).ok() == Some(client.client_id)
+                })
+                .collect::<Vec<_>>();
+            if routes.is_empty() {
+                lines.push("   Not connected".to_string());
+            } else {
+                routes.sort_by_key(|connection| match connection.usage.as_str() {
+                    "Data/Msg" | "Msg" => 0,
+                    "Data" => 1,
+                    _ => 2,
+                });
+                let routes = routes
+                    .into_iter()
+                    .map(|connection| {
+                        let usage = if connection.usage == "Data/Msg" {
+                            "Msg/Data"
+                        } else {
+                            connection.usage.as_str()
+                        };
+                        let peer = connection
+                            .peer_address
+                            .map(|address| address.to_string())
+                            .unwrap_or_else(|| "???".to_string());
+                        format!(
+                            "{usage}: {} ({peer} p{} l{})",
+                            protocol_name(connection.protocol),
+                            connection.ping_ms,
+                            connection.packet_loss,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!("   Connections: {routes}"));
+            }
+        }
+        if clients.is_empty() {
+            lines.push(" - none -".to_string());
+        }
+        self.graphics.set_network_status_text(Some(lines.join("|")));
+    }
+
     fn runtime_client_list_snapshot(
         &mut self,
     ) -> (
@@ -31198,6 +31482,18 @@ impl GameApp {
             })
     }
 
+    /// `C4GameControlNetwork::CopyClientList` clears the private control
+    /// roster and re-adds every activated client at one shared ControlTick.
+    fn refresh_network_client_next_control_ticks(&mut self) {
+        let control_tick = self.displayed_network_control_tick();
+        self.network_client_next_control_ticks = self
+            .control_clients
+            .activated_client_ids()
+            .into_iter()
+            .map(|client_id| (client_id, control_tick))
+            .collect();
+    }
+
     fn arm_runtime_network_status_barrier(
         &mut self,
         status: lc_network::NetworkStatus,
@@ -31232,6 +31528,7 @@ impl GameApp {
                 network.reset_client_performance();
             }
             self.network_control_running = true;
+            self.refresh_network_client_next_control_ticks();
         }
         true
     }
@@ -34681,6 +34978,7 @@ impl GameApp {
             return Ok(());
         };
         self.runtime_network_control_mode = Some(status.control_mode);
+        self.runtime_network_committed_status = Some(status);
         if status.state == lc_network::NETWORK_STATE_GO {
             self.runtime_network_committed_control_mode = Some(status.control_mode);
         }
@@ -34736,6 +35034,7 @@ impl GameApp {
                 network.reset_client_performance();
             }
             self.network_control_running = true;
+            self.refresh_network_client_next_control_ticks();
             self.publish_running_host_reference();
         } else if status.state == lc_network::NETWORK_STATE_PAUSE {
             self.host_reference_paused = true;
@@ -36996,6 +37295,7 @@ impl GameApp {
                         ));
                         self.control_clients
                             .replace_snapshot(join_data.parameters.clients.clients.iter().cloned());
+                        self.refresh_network_client_next_control_ticks();
                         self.network_client_activity.replace_clients(
                             join_data
                                 .parameters
@@ -48658,6 +48958,7 @@ impl GameApp {
         self.host_reference_paused = false;
         self.runtime_network_control_mode = None;
         self.runtime_network_committed_control_mode = None;
+        self.runtime_network_committed_status = None;
         self.runtime_network_join_allowed = None;
         self.network = None;
         self.network_mode = None;
@@ -59339,6 +59640,7 @@ impl GameApp {
         self.host_reference_paused = false;
         self.runtime_network_control_mode = None;
         self.runtime_network_committed_control_mode = None;
+        self.runtime_network_committed_status = None;
         self.runtime_network_join_allowed = None;
         if self.startup_view == StartupView::NetworkLobby {
             self.control_messages.clear_clients();
@@ -60052,6 +60354,7 @@ impl GameApp {
         self.host_reference_paused = false;
         self.runtime_network_control_mode = None;
         self.runtime_network_committed_control_mode = None;
+        self.runtime_network_committed_status = None;
         self.runtime_network_join_allowed = None;
         self.host_join_snapshot = None;
         self.network_lobby = None;
@@ -61081,6 +61384,11 @@ impl GameApp {
         // marker before propagating errors or returning after session state
         // changes so later local input cannot inherit a stale target tick.
         self.executing_ready_tick = None;
+        if !queued_runtime_record_request && self.network.is_some() {
+            // C4GameControlNetwork::ExecQueuedSyncCtrl refreshes its private
+            // activated-client copy after every synchronized batch.
+            self.refresh_network_client_next_control_ticks();
+        }
         result
     }
 
@@ -67848,6 +68156,7 @@ impl GameApp {
         self.sync_scoreboard_presentation();
         let scoreboard_font_images = self.preflight_visible_scoreboard()?;
         let message_board = self.advance_message_board_overlay();
+        self.update_network_status_overlay();
         let viewports = collect_viewport_inputs_from_physical_state(
             &self.snapshot,
             &self.physical_viewports,
@@ -68758,6 +69067,13 @@ impl GameApp {
             );
         }
         if ordered_native {
+            self.next_pending_native_overlay();
+        }
+
+        // Native C4Viewport draws network status after its complete viewport
+        // overlay (menus, messages, controls and mouse), but before the
+        // process-global GUI layers below.
+        if self.graphics.draw_network_status(Some(&frame_gamma)) && ordered_native {
             self.next_pending_native_overlay();
         }
 
@@ -88917,6 +89233,8 @@ func Award()
             current_fire_top: None,
             contact_density: 50,
             own_vertices: None,
+            vertex_contacts: Vec::new(),
+            solid_mask_override: None,
             container: None,
             layer: None,
             visibility: 0,
@@ -89010,6 +89328,7 @@ func Award()
             definition_closed_containers: Default::default(),
             definition_lines: HashMap::new(),
             transfer_zones: Vec::new(),
+            pathfinder_debug: Default::default(),
             menu_requests: Vec::new(),
             audio: Vec::new(),
         }
@@ -92870,6 +93189,8 @@ func Award()
                 current_fire_top: None,
                 contact_density: 50,
                 own_vertices: None,
+                vertex_contacts: Vec::new(),
+                solid_mask_override: None,
                 container: None,
                 layer: None,
                 visibility: 0,
@@ -92941,6 +93262,8 @@ func Award()
                 current_fire_top: None,
                 contact_density: 50,
                 own_vertices: None,
+                vertex_contacts: Vec::new(),
+                solid_mask_override: None,
                 container: None,
                 layer: None,
                 visibility: 0,
@@ -93032,6 +93355,7 @@ func Award()
             definition_closed_containers: Default::default(),
             definition_lines: HashMap::new(),
             transfer_zones: Vec::new(),
+            pathfinder_debug: Default::default(),
             menu_requests: Vec::new(),
             audio: Vec::new(),
         };
@@ -167734,6 +168058,73 @@ func ControlDig() { dig_count = 1; return(1); }
                 Some(&state(lc_network::RemoteBarrierState::Ready, false, 99)),
             ),
             (RuntimeClientStatusIcon::NetWait, None)
+        );
+    }
+
+    #[test]
+    fn l140_network_status_collector_uses_native_client_next_control_baselines() {
+        let mut app = new_running_sandbox_app();
+        let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        let mut inactive = message_client(9, b"Inactive");
+        inactive.activated = false;
+        app.control_clients.replace_snapshot([
+            message_client(0, b"Host"),
+            message_client(7, b"Remote"),
+            inactive,
+        ]);
+        app.refresh_network_client_next_control_ticks();
+        app.network_control_clock = Some(NetworkControlClock::new(44, 4));
+        app.network
+            .as_ref()
+            .expect("network stub")
+            .set_test_runtime_client_states([
+                network::RuntimeNetworkClientState {
+                    client_id: 7,
+                    status: lc_network::RemoteBarrierState::Ready,
+                    control_ready: false,
+                    wait_ms: -12,
+                },
+                network::RuntimeNetworkClientState {
+                    client_id: 9,
+                    status: lc_network::RemoteBarrierState::NotReady,
+                    control_ready: true,
+                    wait_ms: 5,
+                },
+            ]);
+        app.graphics
+            .set_debug_draw_flags(lc_frontend::DebugDrawFlags {
+                show_net_status: true,
+                ..lc_frontend::DebugDrawFlags::default()
+            });
+
+        app.update_network_status_overlay();
+
+        let text = app
+            .graphics
+            .network_status_text()
+            .expect("enabled network status text");
+        assert!(
+            text.contains(
+                "|- Active client Remote (ID 7) (wait -12 ms, behind 4) (ready to start) (!ctrl)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "|- Inactive client Inactive (ID 9) (wait 5 ms, behind 44) (!rdy)"
+            ),
+            "{text}"
+        );
+
+        app.refresh_network_client_next_control_ticks();
+        app.update_network_status_overlay();
+        assert!(
+            app.graphics
+                .network_status_text()
+                .expect("refreshed network status text")
+                .contains(
+                    "|- Active client Remote (ID 7) (wait -12 ms, behind 0) (ready to start) (!ctrl)"
+                )
         );
     }
 

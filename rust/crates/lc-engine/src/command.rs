@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::math::{self, FixedVec2};
-use crate::pathfinder::PathFinder;
+use crate::pathfinder::{PathFinder, PathfinderDebugSnapshot};
 use crate::transfer::{TransferZone, TransferZoneTable};
 use crate::{
     ActionProcedure, ActionUpdate, CATEGORY_SORT_LIMIT, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE,
@@ -634,6 +634,7 @@ mod tests {
             ty: None,
             target2: None,
             data: CommandData::None,
+            finished: false,
         }
     }
 
@@ -15741,6 +15742,11 @@ pub enum CommandEvent {
         level: i32,
         transfer_zones_enabled: bool,
     },
+    /// Presentation copy of the rays retained by native's game-global
+    /// pathfinder after the most recent obstructed MoveTo search.
+    SetPathFinderDebug {
+        snapshot: PathfinderDebugSnapshot,
+    },
     ApplyObjectUpdate {
         object_id: ObjectId,
         update: ObjectUpdate,
@@ -16252,6 +16258,9 @@ pub struct CommandView {
     pub ty: Option<i32>,
     pub target2: Option<ObjectId>,
     pub data: CommandData,
+    /// Whether C4Command::Finished is set while the entry remains linked.
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    pub finished: bool,
 }
 
 /// The failed command fields frozen before its script feedback can mutate
@@ -16265,7 +16274,12 @@ pub struct CommandFailureFeedback {
 }
 
 impl CommandView {
-    fn from_entry(name: String, request: Option<&CommandRequest>, state: &CommandState) -> Self {
+    fn from_entry(
+        name: String,
+        request: Option<&CommandRequest>,
+        state: &CommandState,
+        finished: bool,
+    ) -> Self {
         let mut view = Self {
             name,
             target: request.and_then(|request| request.target),
@@ -16276,6 +16290,7 @@ impl CommandView {
             data: request
                 .map(|request| request.data.clone())
                 .unwrap_or(CommandData::None),
+            finished,
         };
         state.apply_live_overrides(&mut view);
         view
@@ -16336,6 +16351,7 @@ impl CommandStackSnapshot {
                         .to_string(),
                     command.request.as_ref(),
                     &command.state,
+                    command.finished.is_some(),
                 )
             })
             .collect()
@@ -16579,6 +16595,7 @@ impl CommandStack {
                         .to_string(),
                     entry.request.as_ref(),
                     &entry.state,
+                    entry.finished.is_some(),
                 )
             })
             .collect()
@@ -17268,6 +17285,7 @@ impl CommandStack {
                         .to_string(),
                     entry.request.as_ref(),
                     &entry.state,
+                    entry.finished.is_some(),
                 )
             })
         })
@@ -17819,6 +17837,7 @@ impl CommandStack {
                         .to_string(),
                     entry.request.as_ref(),
                     &entry.state,
+                    entry.finished.is_some(),
                 ),
                 reason: None,
             }
@@ -18004,6 +18023,7 @@ impl CommandStack {
                         .to_string(),
                     entry.request.as_ref(),
                     &entry.state,
+                    entry.finished.is_some(),
                 ),
                 reason: None,
             }
@@ -18087,6 +18107,7 @@ impl CommandStack {
                     .to_string(),
                 entry.request.as_ref(),
                 &entry.state,
+                entry.finished.is_some(),
             ),
             reason: None,
         })
@@ -18365,6 +18386,9 @@ struct MoveToState {
     /// The event is consumed in the same Execute and is not save state.
     #[serde(skip)]
     pathfinder_settings_update: Option<(i32, bool)>,
+    /// Runtime-only viewport handoff for `C4PathFinder::Draw`.
+    #[serde(skip)]
+    pathfinder_debug_update: Option<PathfinderDebugSnapshot>,
 }
 
 impl MoveToState {
@@ -18384,6 +18408,7 @@ impl MoveToState {
             last_direction: CommandDirection::Stop,
             stop_continuation: None,
             pathfinder_settings_update: None,
+            pathfinder_debug_update: None,
         }
     }
 
@@ -18486,7 +18511,9 @@ impl MoveToState {
                     let mut finder = PathFinder::new(landscape, &transfer_zones);
                     finder.set_level(level);
                     finder.enable_transfer_zones(transfer_zones_enabled);
-                    match finder.find(ctx.position, target) {
+                    let path = finder.find(ctx.position, target);
+                    self.pathfinder_debug_update = Some(finder.debug_snapshot().clone());
+                    match path {
                         Some(path) if path.waypoints.len() > 2 => {
                             let waypoint_count = path.waypoints.len();
                             let mut operations = Vec::with_capacity(waypoint_count - 2);
@@ -23992,6 +24019,11 @@ impl ActiveCommand {
             CommandState::Follow(state) => state.step(ctx),
             CommandState::MoveTo(state) => {
                 let mut result = state.step_with_waypoint(ctx, next_is_move_to);
+                if let Some(snapshot) = state.pathfinder_debug_update.take() {
+                    result
+                        .events
+                        .insert(0, CommandEvent::SetPathFinderDebug { snapshot });
+                }
                 if let Some((level, transfer_zones_enabled)) =
                     state.pathfinder_settings_update.take()
                 {

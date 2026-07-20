@@ -235,6 +235,12 @@ impl LeagueRecordStream {
         self.position
     }
 
+    /// Uncompressed bytes accepted by the persistent zlib stream. This is
+    /// C4Record's `GetStreamingPos()` diagnostic.
+    pub fn input_position(&self) -> u64 {
+        self.compressor.total_in()
+    }
+
     pub fn pending_compressed_len(&self) -> usize {
         self.compressed_pending.len()
     }

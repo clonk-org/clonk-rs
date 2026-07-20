@@ -2269,7 +2269,6 @@ where
             .expect("client puncher initialization lock poisoned");
         std::mem::take(&mut observations.observations)
     };
-    let initial_puncher_addresses_changed = !initial_puncher_observations.is_empty();
     for observed_address in initial_puncher_observations {
         let update = mesh_peers
             .entry(join_data.client_id)
@@ -2411,7 +2410,6 @@ where
         pending_secondary,
         tcp_reconnect,
         pending_tcp,
-        initial_puncher_addresses_changed,
     ));
     Ok(ClientHandle {
         command_tx,
@@ -9237,7 +9235,6 @@ async fn run_client_loop_with_addresses<S>(
         None,
         None,
         None,
-        false,
     )
     .await;
 }
@@ -9264,7 +9261,6 @@ async fn run_client_loop_with_routes(
     mut pending_secondary: Option<PendingClientRoute>,
     mut tcp_reconnect: Option<ClientTcpReconnect>,
     mut pending_tcp: Option<PendingTcpClientRoute>,
-    initial_puncher_addresses_changed: bool,
 ) {
     let mut backlog = ControlBacklog::new(CLIENT_BACKLOG_LIMIT);
     let mut client_performance = ClientPerformanceStats::new(CLIENT_BACKLOG_LIMIT);
@@ -9285,14 +9281,15 @@ async fn run_client_loop_with_routes(
         .map(crate::ReliableUdpSessionHub::handle);
     let mut mesh_udp_accept_enabled = mesh_udp_hub.is_some();
 
-    if initial_puncher_addresses_changed {
-        if let Some(local_addresses) = client_addresses.get(&local_core.client_id) {
-            let _ = event_tx
-                .send(ClientEvent::LocalAddressesChanged {
-                    local_addresses: local_addresses.clone(),
-                })
-                .await;
-        }
+    if let Some(local_addresses) = client_addresses
+        .get(&local_core.client_id)
+        .filter(|addresses| !addresses.is_empty())
+    {
+        let _ = event_tx
+            .send(ClientEvent::LocalAddressesChanged {
+                local_addresses: local_addresses.clone(),
+            })
+            .await;
     }
 
     for (core, path) in std::mem::take(&mut resource_state.initial_complete_resources) {

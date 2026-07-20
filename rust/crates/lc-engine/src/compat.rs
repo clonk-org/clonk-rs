@@ -38,7 +38,8 @@ use crate::{
     FloatVector2, GraphicsOverlayMode,
     Landscape, MenuRequest, MenuRequestKind, OWNER_NONE, ObjectBaseGraphics,
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
-    ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PauseGameRequest,
+    ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder,
+    PathfinderDebugSnapshot, PauseGameRequest,
     PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState, PlayerStatus, QueuedCommand,
     RgbColor, ScoreboardState, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig,
     TeamConfiguration, TeamInfo, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
@@ -1831,6 +1832,8 @@ pub struct HostWorldContext {
     /// MoveTo search. FnGetPath reuses them instead of resetting defaults.
     pathfinder_level: i32,
     pathfinder_transfer_zones_enabled: bool,
+    /// Shared process-presentation sink for the global Game.PathFinder graph.
+    pathfinder_debug: Rc<RefCell<PathfinderDebugSnapshot>>,
     players: Rc<HashMap<i32, PlayerState>>,
     /// Process-local display names for configured keyboard/gamepad controls,
     /// keyed by the player's effective control-set number.
@@ -2016,6 +2019,7 @@ impl Default for HostWorldContext {
             transfer_zones: Rc::new(Vec::new()),
             pathfinder_level: 1,
             pathfinder_transfer_zones_enabled: true,
+            pathfinder_debug: Rc::new(RefCell::new(PathfinderDebugSnapshot::default())),
             players: Rc::new(HashMap::new()),
             control_key_names: Rc::new(HashMap::new()),
             player_info_ids: Rc::new(HashSet::new()),
@@ -2280,6 +2284,7 @@ impl HostWorldContext {
             transfer_zones: Rc::new(transfer_zones),
             pathfinder_level: 1,
             pathfinder_transfer_zones_enabled: true,
+            pathfinder_debug: Rc::new(RefCell::new(PathfinderDebugSnapshot::default())),
             local_players: Rc::new(player_ids.iter().copied().collect()),
             active_message_board_input: None,
             player_order: Rc::new(player_ids),
@@ -3369,6 +3374,14 @@ impl HostWorldContext {
         transfer_zones_enabled: bool,
     ) -> Self {
         self.set_pathfinder_settings(level, transfer_zones_enabled);
+        self
+    }
+
+    pub(crate) fn with_pathfinder_debug_sink(
+        mut self,
+        sink: Rc<RefCell<PathfinderDebugSnapshot>>,
+    ) -> Self {
+        self.pathfinder_debug = sink;
         self
     }
 
@@ -27032,7 +27045,9 @@ fn get_path(args: &[Value]) -> Result<Value, RuntimeError> {
         let (level, transfer_zones_enabled) = context.world.pathfinder_settings();
         finder.set_level(level);
         finder.enable_transfer_zones(transfer_zones_enabled);
-        let path = match finder.find(Vector2::new(from_x, from_y), Vector2::new(to_x, to_y)) {
+        let path = finder.find(Vector2::new(from_x, from_y), Vector2::new(to_x, to_y));
+        *context.world.pathfinder_debug.borrow_mut() = finder.debug_snapshot().clone();
+        let path = match path {
             Some(path) => path,
             None => return Ok(Value::Nil),
         };
@@ -44408,6 +44423,13 @@ impl EffectHostContext {
                         level,
                         transfer_zones_enabled,
                     });
+                }
+                CommandEvent::SetPathFinderDebug { snapshot } => {
+                    // FnExecuteCommand mutates the global pathfinder before a
+                    // later GetPath in the same script call. The shared sink
+                    // is already Engine's process-presentation state, so do
+                    // not defer and later overwrite the newer GetPath graph.
+                    *self.world.pathfinder_debug.borrow_mut() = snapshot;
                 }
                 CommandEvent::AttemptGrab {
                     actor_id,
@@ -68146,6 +68168,7 @@ func Probe(state) {
             ty: Some(90),
             target2: None,
             data: CommandData::Integer(0),
+            finished: false,
         }]);
         let world = HostWorldContext::from_objects(vec![world_object]);
         let query = |element: i32| {

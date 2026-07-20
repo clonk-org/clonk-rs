@@ -1,5 +1,6 @@
 use crate::math::integer_distance;
 use crate::{Landscape, ObjectId, TransferZoneState, Vector2};
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 
 const MAX_DEPTH: i32 = 35;
@@ -29,11 +30,63 @@ pub struct PathWaypoint {
     pub transfer_target: Option<ObjectId>,
 }
 
+/// Presentation-only copy of the most recent `C4PathFinder` search graph.
+/// Native keeps these rays on the game-global pathfinder so the viewport can
+/// draw them after object rendering (C4PathFinder.cpp:253-289,589-593).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PathfinderDebugRayStatus {
+    Launch,
+    Crawl,
+    Still,
+    Failure,
+    Deleted,
+}
+
+impl Default for PathfinderDebugRayStatus {
+    fn default() -> Self {
+        Self::Launch
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PathfinderDebugRay {
+    pub status: PathfinderDebugRayStatus,
+    pub start: Vector2,
+    pub end: Vector2,
+    pub target: Vector2,
+    pub crawl_attach: i32,
+    pub direction: i32,
+    pub uses_transfer_zone: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathfinderDebugZone {
+    pub owner: ObjectId,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub used: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PathfinderDebugSnapshot {
+    pub rays: Vec<PathfinderDebugRay>,
+    pub zones: Vec<PathfinderDebugZone>,
+}
+
+impl PathfinderDebugSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.rays.is_empty() && self.zones.is_empty()
+    }
+}
+
 pub struct PathFinder<'a> {
     landscape: &'a Landscape,
     zones: Vec<Zone>,
     transfer_zones_enabled: bool,
     level: i32,
+    last_debug: PathfinderDebugSnapshot,
 }
 
 impl<'a> PathFinder<'a> {
@@ -54,6 +107,7 @@ impl<'a> PathFinder<'a> {
             zones,
             transfer_zones_enabled: true,
             level: 1,
+            last_debug: PathfinderDebugSnapshot::default(),
         }
     }
 
@@ -65,6 +119,10 @@ impl<'a> PathFinder<'a> {
         self.transfer_zones_enabled = enabled;
     }
 
+    pub fn debug_snapshot(&self) -> &PathfinderDebugSnapshot {
+        &self.last_debug
+    }
+
     pub fn find(&mut self, from: Vector2, to: Vector2) -> Option<Path> {
         let mut state = PathFinderState::new(
             self.landscape,
@@ -74,20 +132,26 @@ impl<'a> PathFinder<'a> {
             from,
         );
         if !state.point_free(from.x, from.y) || !state.point_free(to.x, to.y) {
+            self.last_debug = state.debug_snapshot();
             return None;
         }
         if !state.add_ray(from.x, from.y, to.x, to.y, 0, DIRECTION_LEFT, None, None) {
+            self.last_debug = state.debug_snapshot();
             return None;
         }
         if !state.add_ray(from.x, from.y, to.x, to.y, 0, DIRECTION_RIGHT, None, None) {
+            self.last_debug = state.debug_snapshot();
             return None;
         }
         state.run();
-        if state.success {
+        let debug = state.debug_snapshot();
+        let result = if state.success {
             Some(state.into_path(to))
         } else {
             None
-        }
+        };
+        self.last_debug = debug;
+        result
     }
 }
 
@@ -345,6 +409,49 @@ impl<'a> PathFinderState<'a> {
             if !self.execute_iteration() {
                 break;
             }
+        }
+    }
+
+    fn debug_snapshot(&self) -> PathfinderDebugSnapshot {
+        let status = |status| match status {
+            RayStatus::Launch => PathfinderDebugRayStatus::Launch,
+            RayStatus::Crawl => PathfinderDebugRayStatus::Crawl,
+            RayStatus::Still => PathfinderDebugRayStatus::Still,
+            RayStatus::Failure => PathfinderDebugRayStatus::Failure,
+            RayStatus::Deleted => PathfinderDebugRayStatus::Deleted,
+        };
+        PathfinderDebugSnapshot {
+            rays: self
+                .rays
+                .iter()
+                // Native rays are linked by inserting each allocation at
+                // FirstRay, and Draw walks that list from newest to oldest.
+                .rev()
+                .map(|ray| {
+                    let ray = ray.borrow();
+                    PathfinderDebugRay {
+                        status: status(ray.status),
+                        start: Vector2::new(ray.x, ray.y),
+                        end: Vector2::new(ray.x2, ray.y2),
+                        target: Vector2::new(ray.target_x, ray.target_y),
+                        crawl_attach: ray.crawl_attach,
+                        direction: ray.direction,
+                        uses_transfer_zone: ray.use_zone.is_some(),
+                    }
+                })
+                .collect(),
+            zones: self
+                .zones
+                .iter()
+                .map(|zone| PathfinderDebugZone {
+                    owner: zone.owner,
+                    x: zone.x,
+                    y: zone.y,
+                    width: zone.width,
+                    height: zone.height,
+                    used: zone.used,
+                })
+                .collect(),
         }
     }
 
@@ -1145,6 +1252,36 @@ mod tests {
         let last = path.waypoints.last().expect("has target");
         assert_eq!((last.x, last.y), (20, 5));
         assert_eq!(path.length, integer_distance(2, 5, 20, 5));
+    }
+
+    #[test]
+    fn l140_retains_the_latest_search_graph_for_viewport_debug_drawing() {
+        let landscape = Landscape::flat(32, 40);
+        let mut finder = PathFinder::new(&landscape, &[]);
+        finder
+            .find(Vector2::new(2, 5), Vector2::new(20, 5))
+            .expect("direct path exists");
+
+        let graph = finder.debug_snapshot();
+        assert_eq!(graph.rays.len(), 2);
+        assert_eq!(graph.rays[0].start, Vector2::new(2, 5));
+        assert_eq!(graph.rays[0].target, Vector2::new(20, 5));
+        assert_eq!(graph.rays[0].direction, DIRECTION_RIGHT);
+        assert!(
+            graph
+                .rays
+                .iter()
+                .any(|ray| ray.status == PathfinderDebugRayStatus::Still),
+            "the successful direction is retained with its final status"
+        );
+        assert!(
+            graph
+                .rays
+                .iter()
+                .any(|ray| ray.status == PathfinderDebugRayStatus::Launch),
+            "native stops the opposite initial direction once success is found"
+        );
+        assert!(graph.zones.is_empty());
     }
 
     #[test]

@@ -543,9 +543,15 @@ struct LeagueRecordRuntimeHandle {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct LeagueRecordStreamStatus {
     is_streaming: bool,
+    /// Bytes still waiting in C4Record's uncompressed StreamingBuf.
+    waiting_raw_bytes: usize,
+    /// Uncompressed position consumed by the persistent zlib stream.
+    input_position: u64,
     /// C++'s `getPendingStreamData`: compressed bytes retained for upload,
     /// including an in-flight prefix until its successful acknowledgement.
     pending_compressed_bytes: usize,
+    /// Successfully acknowledged compressed-byte position.
+    sent_position: u32,
 }
 
 impl LeagueRecordStreamStatus {
@@ -555,6 +561,18 @@ impl LeagueRecordStreamStatus {
 
     pub(crate) fn pending_compressed_bytes(self) -> usize {
         self.pending_compressed_bytes
+    }
+
+    pub(crate) fn waiting_raw_bytes(self) -> usize {
+        self.waiting_raw_bytes
+    }
+
+    pub(crate) fn input_position(self) -> u64 {
+        self.input_position
+    }
+
+    pub(crate) fn sent_position(self) -> u32 {
+        self.sent_position
     }
 }
 
@@ -768,7 +786,10 @@ fn publish_league_record_stream_status(
     *status.lock() = stream.map_or_else(LeagueRecordStreamStatus::default, |stream| {
         LeagueRecordStreamStatus {
             is_streaming: stream.is_streaming(),
+            waiting_raw_bytes: stream.pending_raw_len(),
+            input_position: stream.input_position(),
             pending_compressed_bytes: stream.pending_compressed_len(),
+            sent_position: stream.position(),
         }
     });
 }
@@ -7515,7 +7536,10 @@ mod tests {
             runtime.status(),
             LeagueRecordStreamStatus {
                 is_streaming: true,
+                waiting_raw_bytes: 0,
+                input_position: 0,
                 pending_compressed_bytes: 0,
+                sent_position: 0,
             }
         );
 
@@ -7535,7 +7559,10 @@ mod tests {
         finish_result.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
         let finishing_status = runtime.status();
         assert!(finishing_status.is_streaming());
+        assert_eq!(finishing_status.waiting_raw_bytes(), 0);
+        assert_eq!(finishing_status.input_position(), source.len() as u64);
         assert!(finishing_status.pending_compressed_bytes() > 0);
+        assert_eq!(finishing_status.sent_position(), 0);
         request_ready
             .recv_timeout(Duration::from_secs(5))
             .unwrap();

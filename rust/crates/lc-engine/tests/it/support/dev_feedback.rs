@@ -1141,13 +1141,57 @@ fn write_readme(directory: &Path, scenario: &str) -> Result<(), DevFeedbackError
 }
 
 fn snapshot_hash(snapshot: &SimulationSnapshot) -> String {
-    let value = serde_json::to_value(snapshot).expect("snapshot serializes");
+    // Debug-draw sidecars are frame-local presentation data. Keep them in
+    // serialized snapshots and artifacts, but exclude them from deterministic
+    // engine replay checkpoints so enabling diagnostics cannot change a run's
+    // identity.
+    let mut deterministic = snapshot.clone();
+    deterministic.pathfinder_debug = Default::default();
+    for object in &mut deterministic.objects {
+        object.vertex_contacts.clear();
+        object.solid_mask_override = None;
+    }
+    let value = serde_json::to_value(&deterministic).expect("snapshot serializes");
     let canonical = canonicalize_json(value);
     let bytes = serde_json::to_vec(&canonical).expect("canonical snapshot serializes");
     let hash = bytes.into_iter().fold(FNV_OFFSET, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
     });
     format!("{hash:016x}")
+}
+
+#[test]
+fn snapshot_hash_ignores_serialized_debug_draw_sidecars() {
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(
+            lc_engine::Definition::from_script("DBUG", "Debug", "")
+                .expect("debug definition compiles"),
+        )
+        .expect("debug definition registers");
+    engine
+        .spawn_object(lc_engine::SpawnConfig::new("DBUG"))
+        .expect("debug object spawns");
+    let baseline = engine.snapshot();
+    let mut with_debug = baseline.clone();
+    with_debug.objects[0].vertex_contacts = vec![17];
+    with_debug.objects[0].solid_mask_override =
+        Some(lc_engine::DefinitionTargetRect::new(1, 2, 3, 4, 5, 6));
+    with_debug
+        .pathfinder_debug
+        .rays
+        .push(lc_engine::PathfinderDebugRay::default());
+
+    let encoded = serde_json::to_string(&with_debug).expect("snapshot serializes");
+    let restored: SimulationSnapshot =
+        serde_json::from_str(&encoded).expect("snapshot round-trips");
+    assert_eq!(restored.objects[0].vertex_contacts, vec![17]);
+    assert_eq!(
+        restored.objects[0].solid_mask_override,
+        with_debug.objects[0].solid_mask_override
+    );
+    assert_eq!(restored.pathfinder_debug, with_debug.pathfinder_debug);
+    assert_eq!(snapshot_hash(&baseline), snapshot_hash(&restored));
 }
 
 fn canonicalize_json(value: Value) -> Value {
