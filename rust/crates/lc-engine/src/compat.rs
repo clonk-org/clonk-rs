@@ -33482,14 +33482,23 @@ fn player_object_command_host(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(command) = CommandId::from_name(&command_name) else {
         return Ok(Value::Bool(false));
     };
-    if command == CommandId::Call {
-        // The value-only host ABI cannot inspect cthr->Caller's strictness.
-        // Raise the STRICT3 result unconditionally; crucially this precedes
-        // every C4Player/Object command side effect.
-        return Err(RuntimeError::new(
-            "PlayerObjectCommand: Command \"Call\" not supported",
-        ));
-    }
+    let data = if command == CommandId::Call {
+        const MESSAGE: &str = "PlayerObjectCommand: Command \"Call\" not supported";
+        // StrictError reads cthr->Caller->Func->Owner->Strict. Direct native,
+        // non-strict, and strict-1/2 callers warn and continue; strict-3 and
+        // above abort before C4Player::ObjectCommand performs any mutation.
+        if matches!(
+            lc_script::caller_strictness(),
+            lc_script::HostCallerStrictness::Strict(level) if level >= 3
+        ) {
+            return Err(RuntimeError::new(MESSAGE));
+        }
+        tracing::warn!(target: "lc-script", "{MESSAGE}");
+        // FnPlayerObjectCommand deliberately skips data.getIntOrID() for Call.
+        0
+    } else {
+        data
+    };
 
     // FnPlayerObjectCommand ignores ObjectCommand's false result and reports
     // true for an existing, but eliminated, player.

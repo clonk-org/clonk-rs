@@ -24305,6 +24305,66 @@ func ReadMenu() { return GetMenu(); }
         );
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct PlayerObjectCommandDiagnostic {
+        level: tracing::Level,
+        target: String,
+        message: String,
+    }
+
+    #[derive(Clone)]
+    struct PlayerObjectCommandDiagnosticLayer {
+        records: std::sync::Arc<std::sync::Mutex<Vec<PlayerObjectCommandDiagnostic>>>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for PlayerObjectCommandDiagnosticLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = PlayerObjectCommandMessageVisitor::default();
+            event.record(&mut visitor);
+            self.records
+                .lock()
+                .expect("diagnostic records lock")
+                .push(PlayerObjectCommandDiagnostic {
+                    level: *event.metadata().level(),
+                    target: event.metadata().target().to_string(),
+                    message: visitor.message.unwrap_or_default(),
+                });
+        }
+    }
+
+    #[derive(Default)]
+    struct PlayerObjectCommandMessageVisitor {
+        message: Option<String>,
+    }
+
+    impl tracing::field::Visit for PlayerObjectCommandMessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                let mut text = format!("{value:?}");
+                if let Some(stripped) = text
+                    .strip_prefix('"')
+                    .and_then(|inner| inner.strip_suffix('"'))
+                {
+                    text = stripped.to_string();
+                }
+                self.message = Some(text);
+            }
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "message" {
+                self.message = Some(value.to_string());
+            }
+        }
+    }
+
     fn player_object_command_fixture() -> (Engine, ObjectId, ObjectId, ObjectId) {
         let caller_script = r#"#strict 3
         func Seed(target) { return SetCommand(target, "Wait"); }
@@ -24377,6 +24437,156 @@ func ReadMenu() { return GetMenu(); }
     ) -> Result<Value, EngineError> {
         let caller_index = engine.find_object_index(caller).expect("caller exists");
         engine.call_object_function(caller_index, function, args)
+    }
+
+    #[test]
+    fn player_object_command_call_warns_below_strict3_and_errors_at_strict3() {
+        // StrictError reads cthr->Caller->Func->Owner->Strict. Below STRICT3
+        // it diagnoses Call but still performs C4P_Command_Set with Data=0;
+        // STRICT3 throws before C4Player::ObjectCommand (C4Script.cpp:62-75,
+        // 961-985).
+        let (mut engine, strict3_caller, crew, container) = player_object_command_fixture();
+        let mut legacy_callers = Vec::new();
+        for (definition, strict_directive) in
+            [("NSCL", ""), ("S1CL", "#strict"), ("S2CL", "#strict 2")]
+        {
+            let script = format!(
+                r#"{strict_directive}
+                func Issue(target, target2) {{
+                    return PlayerObjectCommand(1, "Call", target, 17, 19, target2, 4711);
+                }}
+                "#
+            );
+            engine
+                .register_definition(
+                    Definition::from_script(definition, definition, &script)
+                        .expect("legacy caller compiles"),
+                )
+                .expect("legacy caller registers");
+            let caller = engine
+                .spawn_object(SpawnConfig::new(definition))
+                .expect("legacy caller spawns");
+            legacy_callers.push((strict_directive, caller));
+        }
+        engine
+            .tick_without_snapshot()
+            .expect("legacy callers initialize");
+
+        for (strict_directive, caller) in legacy_callers {
+            assert_eq!(
+                call_player_object_command_fixture(
+                    &mut engine,
+                    strict3_caller,
+                    "Seed",
+                    vec![Value::Object(crew.as_u64())],
+                )
+                .expect("old Wait command seeds"),
+                Value::Bool(true)
+            );
+
+            let records = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::layer::SubscriberExt::with(
+                tracing_subscriber::Registry::default(),
+                PlayerObjectCommandDiagnosticLayer {
+                    records: std::sync::Arc::clone(&records),
+                },
+            );
+            let result = tracing::subscriber::with_default(subscriber, || {
+                call_player_object_command_fixture(
+                    &mut engine,
+                    caller,
+                    "Issue",
+                    vec![
+                        Value::Object(container.as_u64()),
+                        Value::Object(strict3_caller.as_u64()),
+                    ],
+                )
+            });
+
+            assert_eq!(
+                result.expect("legacy Call continues after its diagnostic"),
+                Value::Bool(true),
+                "caller {strict_directive:?}"
+            );
+            assert_eq!(
+                records.lock().expect("diagnostic records lock").as_slice(),
+                &[PlayerObjectCommandDiagnostic {
+                    level: tracing::Level::WARN,
+                    target: "lc-script".to_string(),
+                    message: "PlayerObjectCommand: Command \"Call\" not supported".to_string(),
+                }],
+                "caller {strict_directive:?}"
+            );
+
+            let views = engine
+                .object_snapshot(crew)
+                .expect("crew exists")
+                .command_stack
+                .command_views();
+            assert_eq!(views.len(), 1, "Call replaces the seeded Wait command");
+            assert_eq!(views[0].name, "Call");
+            assert_eq!(views[0].target, Some(container));
+            assert_eq!(views[0].tx, Some(17));
+            assert_eq!(views[0].ty, Some(19));
+            assert_eq!(views[0].target2, Some(strict3_caller));
+            assert_eq!(
+                views[0].data,
+                CommandData::Integer(0),
+                "Call ignores the supplied 4711 data value"
+            );
+        }
+
+        call_player_object_command_fixture(
+            &mut engine,
+            strict3_caller,
+            "Seed",
+            vec![Value::Object(crew.as_u64())],
+        )
+        .expect("strict-3 baseline Wait command seeds");
+        let before = engine
+            .object_snapshot(crew)
+            .expect("crew exists")
+            .command_stack;
+        let records = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::layer::SubscriberExt::with(
+            tracing_subscriber::Registry::default(),
+            PlayerObjectCommandDiagnosticLayer {
+                records: std::sync::Arc::clone(&records),
+            },
+        );
+        let error = tracing::subscriber::with_default(subscriber, || {
+            call_player_object_command_fixture(
+                &mut engine,
+                strict3_caller,
+                "BadCall",
+                Vec::new(),
+            )
+        })
+        .expect_err("strict-3 Call errors");
+        match error {
+            EngineError::Script { source, .. } => assert!(
+                source
+                    .to_string()
+                    .contains("PlayerObjectCommand: Command \"Call\" not supported"),
+                "unexpected strict error: {source}"
+            ),
+            other => panic!("expected script error, got {other:?}"),
+        }
+        assert!(
+            records
+                .lock()
+                .expect("diagnostic records lock")
+                .is_empty(),
+            "strict-3 throws instead of warning"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew exists")
+                .command_stack,
+            before,
+            "strict-3 rejection precedes every command mutation"
+        );
     }
 
     #[test]
