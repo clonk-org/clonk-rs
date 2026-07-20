@@ -91750,6 +91750,49 @@ public func Grant(password) { return GainMissionAccess(password); }
         .expect("pre-bind exact host scenario")
     }
 
+    fn install_minimal_prepared_host_fixture(content: &Path) -> FrontendScenario {
+        let scenario_path = content.join("Fixture.c4s");
+        let definition_path = content.join("Defs.c4d/Good.c4d");
+        fs::create_dir_all(&scenario_path).expect("minimal prepared-host scenario group");
+        fs::create_dir_all(&definition_path).expect("minimal prepared-host definition");
+        fs::create_dir_all(content.join("Material.c4g"))
+            .expect("minimal prepared-host material group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Fixture\nIcon=2\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=GOOD=1\n",
+        )
+        .expect("minimal prepared-host scenario core");
+        fs::write(
+            definition_path.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("minimal prepared-host definition core");
+        fs::write(definition_path.join("Script.c"), "// fixture\n")
+            .expect("minimal prepared-host definition script");
+        write_test_definition_graphics(&definition_path);
+
+        let mut frontend = FrontendScenario::fallback();
+        frontend.identifier = "Fixture.c4s".to_string();
+        frontend.title = "selector title must not own the lobby".to_string();
+        frontend.path = Some(scenario_path);
+        frontend
+    }
+
+    fn minimal_prepared_host_definition_load() -> ScenarioDefinitionLoad {
+        ScenarioDefinitionLoad::Seed {
+            modules: vec!["Defs.c4d".to_string()],
+            definition_root: None,
+        }
+    }
+
+    fn prepare_minimal_host_lobby(
+        app: &GameApp,
+        frontend: FrontendScenario,
+    ) -> StagedNetworkHostScenario {
+        app.prepare_network_host_scenario(frontend, minimal_prepared_host_definition_load())
+            .expect("pre-bind minimal host scenario")
+    }
+
     fn install_test_classic_host_lobby(app: &mut GameApp) {
         app.startup_view = StartupView::NetworkLobby;
         app.classic_host_lobby = Some(ClassicHostLobbyState {
@@ -92358,19 +92401,16 @@ public func Grant(password) { return GainMissionAccess(password); }
     fn staged_host_installs_activated_participant_before_building_lobby_roster() {
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated participant lobby user data");
-        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let content = tempdir().expect("minimal participant lobby content");
+        let scenario = install_minimal_prepared_host_fixture(content.path());
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
         configure_test_startup_participant(&paths, user_data.path());
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .expect("repository root");
         let mut app = new_menu_app_with_paths(800, 600, &paths);
         app.scenario_game_options = GameOptionButtons::new(
             GameOptionContext::NetworkHostSelector,
             GameOptionValues::default(),
         );
-        let staged = prepare_tutorial_host_lobby(&app, repository);
+        let staged = prepare_minimal_host_lobby(&app, scenario);
         let prepared = build_network_host_preparation(
             &app,
             &staged.frontend,
@@ -92751,20 +92791,19 @@ public func Grant(password) { return GainMissionAccess(password); }
     fn l093_staged_host_prebind_sanitizes_identity_and_keeps_other_gates() {
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated host model user data");
-        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .expect("repository root");
-        let nested_player = repository.join("content/Fantasy.c4f/Drachenfels.c4s/ScriptPlr-1.c4p");
+        let content = tempdir().expect("minimal host model content");
+        let scenario = install_minimal_prepared_host_fixture(content.path());
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+        configure_test_startup_participant(&paths, user_data.path());
+        let undiscovered_player_root = user_data.path().join("undiscovered-players");
+        fs::create_dir(&undiscovered_player_root).expect("undiscovered participant root");
         persist_config_value(
             &paths,
             "General",
-            "Participants",
-            nested_player.to_string_lossy(),
+            "PlayerPath",
+            undiscovered_player_root.to_string_lossy(),
         )
-        .expect("configure valid participant outside non-recursive discovery roots");
+        .expect("keep the valid participant outside the discovery root");
         persist_config_value(&paths, "General", "LanguageEx", "DE")
             .expect("configure non-US startup language");
         let mut app = new_menu_app_with_paths(640, 480, &paths);
@@ -92774,15 +92813,8 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .any(|player| player.activated),
             "regression requires a raw participant omitted by discovery"
         );
-        let make_frontend = || {
-            let mut scenario = FrontendScenario::fallback();
-            scenario.path = Some(repository.join("content/Tutorial.c4f/Tutorial01.c4s"));
-            scenario
-        };
-        let definition_load = || ScenarioDefinitionLoad::Seed {
-            modules: vec!["Objects.c4d".to_string()],
-            definition_root: None,
-        };
+        let make_frontend = || scenario.clone();
+        let definition_load = minimal_prepared_host_definition_load;
 
         let staged = app
             .prepare_network_host_scenario(make_frontend(), definition_load())
@@ -93715,18 +93747,11 @@ public func Grant(password) { return GainMissionAccess(password); }
     #[test]
     fn classic_host_zero_countdown_enters_go_without_a_countdown_packet() {
         let _lock = env_lock().lock();
-        let mut app = new_discovered_menu_app(640, 480);
-        let scenario = app
-            .scenario_catalog
-            .values()
-            .find(|scenario| {
-                scenario
-                    .path
-                    .as_ref()
-                    .is_some_and(|path| path.ends_with("Tutorial.c4f/Tutorial01.c4s"))
-            })
-            .cloned()
-            .expect("Tutorial01 is in the startup catalog");
+        let user_data = tempdir().expect("isolated zero-countdown user data");
+        let content = tempdir().expect("minimal zero-countdown content");
+        let scenario = install_minimal_prepared_host_fixture(content.path());
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
         let prepared = build_network_host_preparation(&app, &scenario, None)
             .expect("build prepared host inputs")
             .prepare()
@@ -93776,18 +93801,11 @@ public func Grant(password) { return GainMissionAccess(password); }
     #[test]
     fn l085_atomic_go_worker_failure_is_reported_before_lobby_teardown() {
         let _lock = env_lock().lock();
-        let mut app = new_discovered_menu_app(640, 480);
-        let scenario = app
-            .scenario_catalog
-            .values()
-            .find(|scenario| {
-                scenario
-                    .path
-                    .as_ref()
-                    .is_some_and(|path| path.ends_with("Tutorial.c4f/Tutorial01.c4s"))
-            })
-            .cloned()
-            .expect("Tutorial01 is in the startup catalog");
+        let user_data = tempdir().expect("isolated atomic Go user data");
+        let content = tempdir().expect("minimal atomic Go content");
+        let scenario = install_minimal_prepared_host_fixture(content.path());
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
         let prepared = build_network_host_preparation(&app, &scenario, None)
             .expect("build prepared host inputs")
             .prepare()
@@ -115009,18 +115027,28 @@ ScenInfoArea=70,5,25,90
         // empty Initial PlayerInfo; AllowJoin follows that direct local
         // execution (src/C4Game.cpp:421-438,3847-3876;
         // src/C4Network2Players.cpp:38-49,78-123,160-239).
-        let mut app = new_discovered_menu_app(1280, 720);
-        let scenario = app
-            .scenario_catalog
-            .values()
-            .find(|scenario| {
-                scenario
-                    .path
-                    .as_ref()
-                    .is_some_and(|path| path.ends_with("Tutorial.c4f/Tutorial01.c4s"))
-            })
-            .cloned()
-            .expect("Tutorial01 is in the startup catalog");
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated selected-host user data");
+        let content = tempdir().expect("minimal selected-host content");
+        let scenario = install_minimal_prepared_host_fixture(content.path());
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+        persist_config_value(&paths, "Network", "PortUDP", "0")
+            .expect("disable selected-host UDP listener");
+        persist_config_value(&paths, "Network", "EnableUPnP", "0")
+            .expect("disable selected-host UPnP probe");
+        let reference_port = std::net::TcpListener::bind("[::1]:0")
+            .expect("reserve selected-host reference port")
+            .local_addr()
+            .expect("selected-host reference address")
+            .port();
+        persist_config_value(
+            &paths,
+            "Network",
+            "PortRefServer",
+            reference_port.to_string(),
+        )
+        .expect("configure selected-host reference listener");
+        let mut app = new_menu_app_with_paths(1280, 720, &paths);
 
         app.activate_prepared_network_host(scenario.clone(), SocketAddr::from(([127, 0, 0, 1], 0)));
         assert!(app.network.is_none(), "preparation must precede bind");
