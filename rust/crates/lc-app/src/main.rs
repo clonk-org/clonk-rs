@@ -12427,6 +12427,9 @@ struct SearchEditState {
     focused: bool,
     horizontal_scroll: i32,
     dragging: bool,
+    /// C++ retains `iSelectionStart` independently from the visible caret,
+    /// even when the selection is collapsed; an active drag reuses it.
+    drag_anchor: usize,
     blink_ticks: u32,
 }
 
@@ -12452,6 +12455,7 @@ impl SearchEditState {
         self.caret = self.text.len();
         self.anchor = self.caret;
         self.horizontal_scroll = 0;
+        self.drag_anchor = 0;
         self.blink_ticks = 0;
     }
 
@@ -12462,6 +12466,7 @@ impl SearchEditState {
         self.focused = true;
         self.anchor = 0;
         self.caret = self.text.len();
+        self.drag_anchor = 0;
         self.blink_ticks = 0;
     }
 
@@ -12469,6 +12474,7 @@ impl SearchEditState {
         self.focused = false;
         self.anchor = self.caret;
         self.dragging = false;
+        self.drag_anchor = 0;
         self.blink_ticks = 0;
     }
 
@@ -12491,6 +12497,7 @@ impl SearchEditState {
     fn select_all(&mut self) {
         self.anchor = 0;
         self.caret = self.text.len();
+        self.drag_anchor = 0;
         self.blink_ticks = 0;
     }
 
@@ -12502,6 +12509,7 @@ impl SearchEditState {
         self.text.replace_range(range, "");
         self.caret = start;
         self.anchor = start;
+        self.drag_anchor = start;
         self.blink_ticks = 0;
         true
     }
@@ -12528,6 +12536,26 @@ impl SearchEditState {
         self.anchor = self.caret;
         self.blink_ticks = 0;
         true
+    }
+
+    /// `C4GUI::Edit::InsertText`: unlike keyboard input and ordinary Paste,
+    /// the middle-button PRIMARY path inserts bytes without mapping `|` or
+    /// treating line breaks as submit callbacks.
+    fn insert_raw_text(&mut self, text: &str) -> bool {
+        let old_text = self.text.clone();
+        self.delete_selection();
+        let available = SEARCH_EDIT_MAX_BYTES.saturating_sub(self.text.len());
+        let mut end = text.len().min(available);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end > 0 {
+            self.text.insert_str(self.caret, &text[..end]);
+            self.caret += end;
+            self.blink_ticks = 0;
+        }
+        self.anchor = self.caret;
+        self.text != old_text
     }
 
     fn previous_boundary(&self, at: usize) -> usize {
@@ -12593,6 +12621,7 @@ impl SearchEditState {
     fn move_cursor(&mut self, operation: SearchCursorOperation, ctrl: bool, shift: bool) {
         if self.selection_range().is_some() && !shift {
             self.anchor = self.caret;
+            self.drag_anchor = 0;
         }
         let old_caret = self.caret;
         let target = match operation {
@@ -12614,8 +12643,9 @@ impl SearchEditState {
             SearchCursorOperation::End => self.text.len(),
         };
         if shift {
-            if self.selection_range().is_none() {
+            if target != old_caret && self.selection_range().is_none() {
                 self.anchor = old_caret;
+                self.drag_anchor = old_caret;
             }
             self.caret = target;
         } else {
@@ -12698,6 +12728,7 @@ impl SearchEditState {
         self.anchor = position;
         self.caret = position;
         self.dragging = true;
+        self.drag_anchor = position;
         self.blink_ticks = 0;
     }
 
@@ -12705,12 +12736,14 @@ impl SearchEditState {
         if !self.dragging {
             return;
         }
+        self.anchor = self.drag_anchor.min(self.text.len());
         self.caret = position.min(self.text.len());
         self.blink_ticks = 0;
     }
 
     fn end_pointer_selection(&mut self, position: usize) {
         if self.dragging {
+            self.anchor = self.drag_anchor.min(self.text.len());
             self.caret = position.min(self.text.len());
             self.dragging = false;
             self.blink_ticks = 0;
@@ -12779,6 +12812,7 @@ impl SearchEditState {
         self.anchor = start;
         self.caret = end;
         self.dragging = false;
+        self.drag_anchor = start;
         self.blink_ticks = 0;
     }
 }
@@ -25138,7 +25172,7 @@ impl GameApp {
             return None;
         }
         let control_x =
-            point.x as i32 - (edit.x + 2) + self.menu_state.search_edit.horizontal_scroll;
+            point.x as i32 - (edit.x + 4) + self.menu_state.search_edit.horizontal_scroll;
         let text = self.menu_state.search_edit.text();
         let mut last_width = 0;
         for (start, character) in text.char_indices() {
@@ -25160,6 +25194,44 @@ impl GameApp {
         self.menu_state
             .search_edit
             .begin_pointer_selection(position);
+        true
+    }
+
+    /// C4GUI middle-down repositions the caret on every platform, inserts
+    /// the raw PRIMARY selection only where the platform supplies one, and
+    /// neither focuses the edit nor starts a selection drag.
+    fn handle_scensel_search_middle_down(
+        &mut self,
+        point: GuiPoint,
+        primary_selection: Option<&str>,
+    ) -> bool {
+        let Some(position) = self.scensel_search_char_pos(point, true) else {
+            return false;
+        };
+        let (previous, current, inserted) = {
+            let edit = &mut self.menu_state.search_edit;
+            let previous = edit.caret;
+            edit.anchor = position;
+            edit.caret = position;
+            edit.drag_anchor = position;
+            let inserted = primary_selection
+                .is_some_and(|text| edit.insert_raw_text(text));
+            (previous, edit.caret, inserted)
+        };
+        if inserted || previous != current {
+            let Some(fonts) = self.assets.clonk_fonts.clone() else {
+                return true;
+            };
+            let layout = lc_frontend::startup_scensel::scen_sel_layout(
+                self.graphics.surface().width() as i32,
+                self.graphics.surface().height() as i32,
+                &fonts,
+            );
+            let edit = &mut self.menu_state.search_edit;
+            let cursor_x = fonts.text.measure(&edit.text[..edit.caret], false).0;
+            let cursor_half = fonts.text.measure("\u{a6}", false).0 / 2;
+            edit.scroll_cursor_in_view(cursor_x, layout.search_edit.w - 8, cursor_half);
+        }
         true
     }
 
@@ -41730,6 +41802,17 @@ impl GameApp {
                     })
                     .unwrap_or_default();
                 self.process_network_dialog_actions(outcome.actions)?;
+            }
+            return Ok(());
+        }
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
+            if button_state == ElementState::Pressed {
+                if let Some(point) = self.menu_state.pointer_position() {
+                    if self.scensel_search_char_pos(point, true).is_some() {
+                        let primary = primary_clipboard_text();
+                        self.handle_scensel_search_middle_down(point, primary.as_deref());
+                    }
+                }
             }
             return Ok(());
         }
@@ -72511,7 +72594,7 @@ fn draw_scensel_dynamic(
     let search_cursor_half = fonts.text.measure("¦", false).0 / 2;
     scenario_menu.search_edit.scroll_cursor_in_view(
         search_cursor_x,
-        layout.search_edit.w - 4,
+        layout.search_edit.w - 8,
         search_cursor_half,
     );
     let search_selection = scenario_menu
@@ -103882,6 +103965,33 @@ public func Grant(password) { return GainMissionAccess(password); }
         edit.end_pointer_selection(edit.text().len());
         assert_eq!(edit.selected_text(), Some("alpha beta"));
 
+        edit.set_text("abcdef");
+        edit.begin_pointer_selection(5);
+        edit.drag_pointer_selection(2);
+        assert_eq!(edit.selected_text(), Some("cde"));
+        assert!(edit.backspace(false, false));
+        assert_eq!(edit.text(), "abf");
+        edit.drag_pointer_selection(edit.text().len());
+        assert_eq!(
+            edit.selected_text(),
+            Some("f"),
+            "selection deletion updates the still-active physical drag anchor"
+        );
+        edit.end_pointer_selection(edit.text().len());
+
+        edit.set_text("abcdef");
+        edit.begin_pointer_selection(5);
+        assert!(edit.backspace(false, false));
+        assert_eq!(edit.text(), "abcdf");
+        assert_eq!(edit.caret(), 4);
+        edit.drag_pointer_selection(2);
+        assert_eq!(
+            edit.selected_text(),
+            Some("cdf"),
+            "collapsed cursor deletion preserves C++'s hidden drag anchor"
+        );
+        edit.end_pointer_selection(2);
+
         edit.set_text("W".repeat(100));
         edit.scroll_cursor_in_view(500, 100, 3);
         assert!(edit.horizontal_scroll > 0);
@@ -103893,6 +104003,170 @@ public func Grant(password) { return GainMissionAccess(password); }
             edit.tick_blink();
         }
         assert!(!edit.cursor_visible());
+    }
+
+    #[test]
+    fn scensel_middle_down_inserts_raw_primary_without_focus_or_submit() {
+        let mut app = new_menu_app(800, 600);
+        app.open_scenario_browser();
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, &fonts);
+
+        app.menu_state.set_search_text("alpha beta");
+        app.menu_state.search_edit.anchor = 0;
+        app.menu_state.search_edit.caret = 5;
+        assert!(!app.menu_state.search_focused());
+        let insertion = "raw|primary\ntext";
+        let clicked_position = "alpha ".len();
+        let point = GuiPoint::new(
+            (layout.search_edit.x
+                + 4
+                + fonts.text.measure("alpha ", false).0) as f32,
+            (layout.search_edit.y + layout.search_edit.h / 2) as f32,
+        );
+        assert_eq!(
+            app.scensel_search_char_pos(point, true),
+            Some(clicked_position)
+        );
+        assert!(app.handle_scensel_search_middle_down(point, Some(insertion)));
+        assert_eq!(app.menu_state.search_text(), "alpha raw|primary\ntextbeta");
+        assert_eq!(
+            app.menu_state.search_edit.caret(),
+            clicked_position + insertion.len()
+        );
+        assert!(app.menu_state.search_edit.selection_range().is_none());
+        assert!(!app.menu_state.search_focused(), "middle-down does not focus");
+        assert_eq!(
+            app.menu_state.applied_search_text, "",
+            "raw PRIMARY insertion does not submit the search"
+        );
+
+        let unchanged = app.menu_state.search_text().to_string();
+        app.menu_state.search_edit.horizontal_scroll = 0;
+        let start = GuiPoint::new(
+            (layout.search_edit.x + 4) as f32,
+            (layout.search_edit.y + layout.search_edit.h / 2) as f32,
+        );
+        app.menu_state.search_edit.blink_ticks = 7;
+        app.menu_state.search_edit.dragging = true;
+        assert!(app.handle_scensel_search_middle_down(start, None));
+        assert_eq!(app.menu_state.search_text(), unchanged);
+        assert_eq!(app.menu_state.search_edit.caret(), 0);
+        assert_eq!(app.menu_state.search_edit.blink_ticks, 7);
+        assert!(
+            app.menu_state.search_edit.dragging,
+            "middle-down does not cancel an active left-button drag"
+        );
+        assert!(!app.handle_scensel_search_middle_down(
+            GuiPoint::new(-10.0, -10.0),
+            Some("ignored")
+        ));
+        assert_eq!(app.menu_state.search_text(), unchanged);
+
+        app.menu_state.set_search_text("tail");
+        app.menu_state.search_edit.begin_pointer_selection(2);
+        assert!(app.handle_scensel_search_middle_down(start, Some("raw")));
+        assert!(app.menu_state.search_edit.dragging);
+        let end = app.menu_state.search_text().len();
+        app.menu_state.search_edit.drag_pointer_selection(end);
+        assert_eq!(
+            app.menu_state.search_edit.selected_text(),
+            Some("rawtail"),
+            "an active left drag retains the pre-insertion click as its anchor"
+        );
+        app.menu_state.search_edit.end_pointer_selection(0);
+        assert!(app.menu_state.search_edit.selection_range().is_none());
+        assert_eq!(app.menu_state.search_edit.caret(), 0);
+
+        app.menu_state.set_search_text("tail");
+        app.menu_state.search_edit.begin_pointer_selection(0);
+        let tail_end = GuiPoint::new(
+            (layout.search_edit.x + 4 + fonts.text.measure("tail", false).0) as f32,
+            (layout.search_edit.y + layout.search_edit.h / 2) as f32,
+        );
+        assert_eq!(app.scensel_search_char_pos(tail_end, true), Some(4));
+        assert!(app.handle_scensel_search_middle_down(tail_end, Some("raw")));
+        app.menu_state
+            .search_edit
+            .move_cursor(SearchCursorOperation::End, false, true);
+        app.menu_state.search_edit.drag_pointer_selection(0);
+        assert_eq!(
+            app.menu_state.search_edit.selected_text(),
+            Some("tail"),
+            "a no-op Shift+End preserves the hidden pre-insertion drag anchor"
+        );
+        app.menu_state.search_edit.end_pointer_selection(0);
+
+        app.menu_state.set_search_text("x".repeat(252));
+        app.menu_state.search_edit.anchor = 10;
+        app.menu_state.search_edit.caret = 20;
+        app.menu_state.search_edit.blink_ticks = 9;
+        app.menu_state.search_edit.dragging = false;
+        assert!(app.handle_scensel_search_middle_down(start, Some("raw")));
+        assert_eq!(app.menu_state.search_text().len(), SEARCH_EDIT_MAX_BYTES);
+        assert!(app.menu_state.search_text().starts_with("ra"));
+        assert_eq!(app.menu_state.search_edit.caret(), 2);
+        assert_eq!(app.menu_state.search_edit.blink_ticks, 0);
+        assert!(app.menu_state.search_edit.selection_range().is_none());
+
+        let insertion_position = 100;
+        let narrow_text = "i".repeat(insertion_position + 3);
+        app.menu_state.set_search_text(narrow_text);
+        let client_width = layout.search_edit.w - 8;
+        let prefix_width = fonts
+            .text
+            .measure(&"i".repeat(insertion_position), false)
+            .0;
+        assert!(prefix_width > client_width);
+        let pointer_offset = client_width - 2;
+        let old_scroll = prefix_width - pointer_offset;
+        app.menu_state.search_edit.horizontal_scroll = old_scroll;
+        let same_index_point = GuiPoint::new(
+            (layout.search_edit.x + 4 + pointer_offset) as f32,
+            (layout.search_edit.y + layout.search_edit.h / 2) as f32,
+        );
+        assert_eq!(
+            app.scensel_search_char_pos(same_index_point, true),
+            Some(insertion_position)
+        );
+        assert!(app.handle_scensel_search_middle_down(same_index_point, Some("WWW")));
+        assert_eq!(
+            app.menu_state.search_edit.caret(),
+            insertion_position + 3,
+            "the insertion can end at the old caret byte index"
+        );
+        assert!(
+            app.menu_state.search_edit.horizontal_scroll > old_scroll,
+            "a successful same-index insertion still recomputes cursor scrolling"
+        );
+
+        app.menu_state.set_search_text("");
+        assert!(app.handle_scensel_search_middle_down(
+            start,
+            Some(&"W".repeat(SEARCH_EDIT_MAX_BYTES))
+        ));
+        assert!(
+            app.menu_state.search_edit.horizontal_scroll > 0,
+            "raw insertion scrolls the advanced caret into view"
+        );
+
+        app.menu_state
+            .set_search_text("W".repeat(SEARCH_EDIT_MAX_BYTES));
+        app.menu_state.set_search_focused(true);
+        app.menu_state.search_edit.blink_ticks = 7;
+        app.menu_state.search_edit.dragging = true;
+        app.menu_state.set_pointer_position(Some(start));
+        app.startup_dialog_fade = None;
+        app.handle_other_mouse_button(ElementState::Pressed)
+            .expect("route scenario middle-down");
+        assert_eq!(app.menu_state.search_text().len(), SEARCH_EDIT_MAX_BYTES);
+        assert_eq!(app.menu_state.search_edit.caret(), 0);
+        assert!(app.menu_state.search_edit.selection_range().is_none());
+        assert_eq!(
+            app.menu_state.search_edit.blink_ticks, 7,
+            "a full buffer cannot insert PRIMARY and does not restart blink"
+        );
+        assert!(app.menu_state.search_edit.dragging);
     }
 
     #[test]
@@ -104081,7 +104355,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
         let layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, &fonts);
         app.menu_state.set_search_text("alpha beta");
-        let beta_x = layout.search_edit.x + 2 + fonts.text.measure("alpha be", false).0;
+        let beta_x = layout.search_edit.x + 4 + fonts.text.measure("alpha be", false).0;
         let edit_y = layout.search_edit.y + layout.search_edit.h / 2;
         for _ in 0..2 {
             app.handle_cursor_moved(PhysicalPosition::new(f64::from(beta_x), f64::from(edit_y)))
@@ -104094,7 +104368,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(app.menu_state.search_edit.selected_text(), Some("beta"));
 
         app.handle_cursor_moved(PhysicalPosition::new(
-            f64::from(layout.search_edit.x + 2),
+            f64::from(layout.search_edit.x + 4),
             f64::from(edit_y),
         ))
         .expect("point at search start");

@@ -1343,9 +1343,26 @@ pub fn draw_search_edit_contents(
         0x7f000000,
         gamma,
     );
-    let text_y = edit.y + (edit.h - gui_fonts.text.line_height) / 2;
-    let client_left = edit.x + 2;
-    let client_right = edit.x + edit.w - 3;
+    let client = IntRect {
+        x: edit.x + 4,
+        y: edit.y + 2,
+        w: (edit.w - 8).max(0),
+        h: (edit.h - 4).max(0),
+    };
+    let clip = IntRect {
+        x: client.x - 2,
+        y: client.y,
+        w: client.w + 4,
+        h: client.h + 1,
+    };
+    let (text_y0, selection_height) = if client.h <= gui_fonts.text.line_height {
+        (client.y, client.h)
+    } else {
+        (
+            client.y + (client.h - gui_fonts.text.line_height) / 2 + 1,
+            gui_fonts.text.line_height - 2,
+        )
+    };
     if let Some((selection_start, selection_end)) = selection {
         let selection_start = selection_start.min(text.len());
         let selection_end = selection_end.min(text.len());
@@ -1353,21 +1370,21 @@ pub fn draw_search_edit_contents(
             && text.is_char_boundary(selection_start)
             && text.is_char_boundary(selection_end)
         {
-            let x1 = client_left
+            let x1 = client.x
                 + gui_fonts.text.measure(&text[..selection_start], false).0
                 - horizontal_scroll;
-            let x2 = client_left
+            let x2 = client.x
                 + gui_fonts.text.measure(&text[..selection_end], false).0
                 - horizontal_scroll;
-            let x1 = x1.clamp(client_left, client_right);
-            let x2 = x2.clamp(client_left, client_right + 1);
-            if x2 > x1 {
+            let clipped_x1 = x1.max(clip.x);
+            let clipped_x2 = (x2 - 1).min(clip.x + clip.w - 1);
+            if clipped_x1 <= clipped_x2 {
                 draw_box_dw(
                     surface,
-                    x1,
-                    text_y + 1,
-                    x2 - 1,
-                    text_y + gui_fonts.text.line_height - 2,
+                    clipped_x1,
+                    text_y0,
+                    clipped_x2,
+                    text_y0 + selection_height - 1,
                     0x7f7f7f00,
                     gamma,
                 );
@@ -1377,37 +1394,106 @@ pub fn draw_search_edit_contents(
     draw_text_clipped(
         surface,
         &gui_fonts.text,
-        client_left - horizontal_scroll,
-        text_y,
+        client.x - horizontal_scroll,
+        text_y0 - 1,
         text,
         [255, 255, 255, 255],
         TextAlign::Left,
         false,
         gamma,
         (
-            edit.x + 2,
-            edit.y + 2,
-            edit.x + edit.w - 3,
-            edit.y + edit.h - 3,
+            clip.x,
+            clip.y,
+            clip.x + clip.w - 1,
+            clip.y + clip.h - 1,
         ),
     );
     if cursor_visible {
         let caret = caret.min(text.len());
         let caret = if text.is_char_boundary(caret) { caret } else { 0 };
-        let cursor_x = client_left + gui_fonts.text.measure(&text[..caret], false).0
+        let cursor_x = client.x + gui_fonts.text.measure(&text[..caret], false).0
+            - gui_fonts.text.measure("\u{a6}", false).0 / 2
             - horizontal_scroll;
-        if (client_left - 2..=client_right + 1).contains(&cursor_x) {
-            draw_line_dw(
-                surface,
-                cursor_x,
-                edit.y + 3,
-                cursor_x,
-                edit.y + edit.h - 4,
-                0x00ffffff,
-                gamma,
-            );
+        draw_scaled_search_caret(
+            surface,
+            &gui_fonts.text,
+            cursor_x,
+            text_y0 - gui_fonts.text.line_height / 3,
+            clip,
+            gamma,
+        );
+    }
+}
+
+/// `Edit::DrawElement` renders the reserved broken-bar glyph through
+/// `TextOut(..., 1.5f)`. Keep the glyph in a padded atlas tile so the shared
+/// facet blitter reproduces the native linear filtering at that scale.
+fn draw_scaled_search_caret(
+    surface: &mut Surface,
+    font: &ClonkFont,
+    x: i32,
+    y: i32,
+    clip: IntRect,
+    gamma: Option<&GammaRamp>,
+) {
+    const SCALE: f32 = 1.5;
+    let Some(glyph) = font.glyph('\u{a6}') else {
+        return;
+    };
+    let Ok(width) = u32::try_from(glyph.width) else {
+        return;
+    };
+    let Ok(height) = u32::try_from(font.cell_height) else {
+        return;
+    };
+    if width == 0 || height == 0 || glyph.pixels.len() != width as usize * height as usize {
+        return;
+    }
+
+    let atlas_width = width.max(height).next_power_of_two();
+    let mut pixels = vec![255_u8; atlas_width as usize * height as usize * 4];
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel[3] = 0;
+    }
+    for row in 0..height as usize {
+        for column in 0..width as usize {
+            let pixel = glyph.pixels[row * width as usize + column];
+            let destination = (row * atlas_width as usize + column) * 4;
+            let (red, green, blue) = if pixel.a == 0 {
+                (255, 255, 255)
+            } else {
+                (pixel.r, pixel.g, pixel.b)
+            };
+            pixels[destination..destination + 4]
+                .copy_from_slice(&[red, green, blue, pixel.a]);
         }
     }
+    let image = ImageData::new(atlas_width, height, pixels);
+    let destination = (
+        x as f32,
+        y as f32,
+        width as f32 * SCALE,
+        height as f32 * SCALE,
+    );
+    let left = destination.0.max(clip.x as f32);
+    let top = destination.1.max(clip.y as f32);
+    let right = (destination.0 + destination.2).min((clip.x + clip.w) as f32);
+    let bottom = (destination.1 + destination.3).min((clip.y + clip.h) as f32);
+    if left >= right || top >= bottom {
+        return;
+    }
+    draw_facet_stretch(
+        surface,
+        &image,
+        (
+            (left - destination.0) / SCALE,
+            (top - destination.1) / SCALE,
+            (right - left) / SCALE,
+            (bottom - top) / SCALE,
+        ),
+        (left, top, right - left, bottom - top),
+        gamma,
+    );
 }
 
 /// The Open/Start button with its selection-specific text — "Open"
@@ -2460,12 +2546,43 @@ mod tests {
                 cursor_visible,
                 None,
             );
-            surface.snapshot()
+            surface
         };
         let plain = render(None, text.len(), 0, false);
-        assert_ne!(render(Some((0, 5)), text.len(), 0, false), plain);
-        assert_ne!(render(None, 0, 0, true), plain);
-        assert_ne!(render(None, text.len(), 20, false), plain);
+        assert_ne!(
+            render(Some((0, 5)), text.len(), 0, false).snapshot(),
+            plain.snapshot()
+        );
+        let caret = render(None, 0, 0, true);
+        assert_ne!(caret.snapshot(), plain.snapshot());
+        let edit = layout.search_edit;
+        let mut changed = 0_u32;
+        let mut bounds = (u32::MAX, u32::MAX, 0_u32, 0_u32);
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for y in edit.y as u32..(edit.y + edit.h) as u32 {
+            for x in edit.x as u32..(edit.x + edit.w) as u32 {
+                let on = caret.get_pixel(x, y).expect("caret-on pixel");
+                let off = plain.get_pixel(x, y).expect("caret-off pixel");
+                if on != off {
+                    changed += 1;
+                    bounds.0 = bounds.0.min(x);
+                    bounds.1 = bounds.1.min(y);
+                    bounds.2 = bounds.2.max(x);
+                    bounds.3 = bounds.3.max(y);
+                    for byte in [on.r, on.g, on.b, on.a, off.r, off.g, off.b, off.a] {
+                        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            (changed, bounds, hash),
+            (104, (165, 468, 170, 485), 0x4ec9_97b4_06dd_f222)
+        );
+        assert_ne!(
+            render(None, text.len(), 20, false).snapshot(),
+            plain.snapshot()
+        );
     }
 
     #[test]
