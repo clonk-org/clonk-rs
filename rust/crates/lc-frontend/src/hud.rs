@@ -18,9 +18,11 @@
 
 use crate::{
     draw_image_bilinear, draw_image_bilinear_additive, draw_image_bilinear_owner,
-    draw_image_strip, fill_rect, ClonkFontSet, HudGraphics, ImageData, InventoryOverlay,
+    draw_image_strip, ClonkFontSet, HudGraphics, ImageData, InventoryOverlay,
     MessageBoardMode, MessageBoardOverlay,
 };
+#[cfg(test)]
+use crate::fill_rect;
 use lc_graphics::{
     clonk_font::TextAlign, Color, GammaRamp, Rect as SurfaceRect, Surface, TextFont,
 };
@@ -323,6 +325,7 @@ fn draw_fallback_text_with_gamma(
     );
 }
 
+#[cfg(test)]
 fn fill_hud_rect(
     surface: &mut Surface,
     rect: &lc_gui::Rect,
@@ -727,28 +730,23 @@ pub(crate) fn draw_upper_board_with_initialized_text_width(
 
     if mode != UpperBoardMode::Mini {
         let board_height = upper_board_output_height(mode, hud);
-        match hud.upper_board.as_ref() {
-            Some(board) => blit_tile_scaled(
-                surface,
-                board,
-                0,
-                0,
-                width,
-                board_height,
-                if mode == UpperBoardMode::Small {
-                    0.5
-                } else {
-                    1.0
-                },
-                gamma,
-            ),
-            None => fill_hud_rect(
-                surface,
-                &lc_gui::Rect::new(0.0, 0.0, width as f32, board_height as f32),
-                Color::opaque(66, 44, 24),
-                gamma,
-            ),
-        }
+        let Some(board) = hud.upper_board.as_ref() else {
+            return;
+        };
+        blit_tile_scaled(
+            surface,
+            board,
+            0,
+            0,
+            width,
+            board_height,
+            if mode == UpperBoardMode::Small {
+                0.5
+            } else {
+                1.0
+            },
+            gamma,
+        );
 
         // Logo (src/C4UpperBoard.cpp:54-71).
         if let Some(logo) = hud.logo.as_ref() {
@@ -2486,15 +2484,10 @@ pub(crate) fn draw_message_board_with_gamma(
     let width = surface.width() as i32;
     let height = board.output_height(line_height);
     let y = surface.height() as i32 - height;
-    match hud.background.as_ref() {
-        Some(background) => blit_tile(surface, background, 0, y, width, height, 0, -y, gamma),
-        None => fill_hud_rect(
-            surface,
-            &lc_gui::Rect::new(0.0, y as f32, width as f32, height as f32),
-            Color::opaque(0, 0, 0),
-            gamma,
-        ),
-    }
+    let Some(background) = hud.background.as_ref() else {
+        return;
+    };
+    blit_tile(surface, background, 0, y, width, height, 0, -y, gamma);
 
     if board.mode == MessageBoardMode::Hidden && !board.type_in {
         return;

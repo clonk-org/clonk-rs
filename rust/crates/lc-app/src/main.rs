@@ -4402,6 +4402,10 @@ struct FrontendAssets {
     base_sprites: HashMap<String, DefinitionSprite>,
     cursor_atlas: Arc<CursorAtlas>,
     hud_graphics: Arc<HudGraphics>,
+    /// True for repository/install-backed assets, whose C4GraphicsResource
+    /// initialization must reject missing mandatory HUD images. Asset-less
+    /// state-only fixtures intentionally exercise non-presentation behavior.
+    classic_hud_resources_required: bool,
     game_palette: Arc<GamePalette>,
     /// Graphics.c4g/Liquid.png, present only when both legacy graphics
     /// switches required for the landscape shader are enabled.
@@ -4411,6 +4415,7 @@ struct FrontendAssets {
 
 impl FrontendAssets {
     fn load(paths: Option<&AppPaths>) -> Self {
+        let classic_hud_resources_required = paths.is_some();
         let liquid_animation_enabled = load_graphics_color_animation(paths);
         let font = Self::load_font(paths);
         let classic_fonts = Self::load_classic_fonts(paths);
@@ -4629,6 +4634,7 @@ impl FrontendAssets {
             base_sprites: sprites,
             cursor_atlas: Arc::new(cursor_atlas),
             hud_graphics: Arc::new(hud_graphics),
+            classic_hud_resources_required,
             game_palette: Arc::new(game_palette),
             liquid_animation,
             liquid_animation_enabled,
@@ -5565,6 +5571,28 @@ impl FrontendAssets {
             Ok(())
         } else {
             Err(ClassicParityBoundary::GameOverResources { missing })
+        }
+    }
+
+    fn require_classic_hud_resources_with_hud(
+        &self,
+        hud: &HudGraphics,
+    ) -> std::result::Result<(), ClassicParityBoundary> {
+        if !self.classic_hud_resources_required {
+            return Ok(());
+        }
+
+        let mut missing = Vec::new();
+        if hud.background.is_none() {
+            missing.push("Background.png");
+        }
+        if hud.upper_board.is_none() {
+            missing.push("UpperBoard.png");
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(ClassicParityBoundary::HudResources { missing })
         }
     }
 
@@ -13343,6 +13371,9 @@ enum ClassicParityBoundary {
     IngameMenuResources {
         missing: Vec<&'static str>,
     },
+    HudResources {
+        missing: Vec<&'static str>,
+    },
     GameOverResources {
         missing: Vec<&'static str>,
     },
@@ -13458,6 +13489,11 @@ impl fmt::Display for ClassicParityBoundary {
             Self::IngameMenuResources { missing } => write!(
                 f,
                 "classic in-game menu resources are unavailable (missing {})",
+                missing.join(", ")
+            ),
+            Self::HudResources { missing } => write!(
+                f,
+                "classic HUD resources are unavailable (missing {}); refusing generic Rust fallback",
                 missing.join(", ")
             ),
             Self::GameOverResources { missing } => write!(
@@ -66869,6 +66905,9 @@ impl GameApp {
         self.apply_show_commands_enable_request();
         self.sync_film_view_presentation();
         self.reject_classic_global_gui_bootstrap()?;
+        self.assets
+            .require_classic_hud_resources_with_hud(self.current_hud_graphics_ref())
+            .map_err(report_classic_parity_boundary)?;
         self.preflight_visible_gui_overlay_resources()?;
         if self.game_over_dialog.is_some() {
             self.assets
@@ -158971,6 +159010,91 @@ func ControlDig() { dig_count = 1; return(1); }
             error.to_string().contains("running-mode only"),
             "boundary must identify the invalid lifecycle state: {error:#}"
         );
+    }
+
+    #[test]
+    fn upper_board_and_message_board_fail_closed_when_resources_missing() {
+        let mut app = new_classic_lightweight_running_sandbox_app();
+        let assert_refusal = |app: &mut GameApp, missing: Vec<&'static str>| {
+            app.graphics.surface_mut().fill(Color::opaque(91, 47, 13));
+            let surface_before = app.graphics.surface().pixels().to_vec();
+            let mut frame = vec![0x5a; surface_before.len()];
+            let frame_before = frame.clone();
+
+            let error = app
+                .render(&mut frame)
+                .expect_err("missing classic HUD resource must fail closed");
+            let expected = ClassicParityBoundary::HudResources { missing };
+            assert_eq!(
+                error.downcast_ref::<ClassicParityBoundary>(),
+                Some(&expected)
+            );
+            assert!(
+                error.to_string().contains("refusing generic Rust fallback"),
+                "boundary must explain why the fallback is unreachable: {error:#}"
+            );
+            assert_eq!(frame, frame_before, "preflight must precede output writes");
+            assert_eq!(
+                app.graphics.surface().pixels(),
+                surface_before.as_slice(),
+                "preflight must precede logical-surface writes"
+            );
+        };
+
+        let upper_board = Arc::make_mut(
+            &mut Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .hud_graphics,
+        )
+        .upper_board
+        .take()
+        .expect("classic fixture upper board");
+        assert_refusal(&mut app, vec!["UpperBoard.png"]);
+        Arc::make_mut(
+            &mut Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .hud_graphics,
+        )
+        .upper_board = Some(upper_board);
+
+        let background = Arc::make_mut(
+            &mut Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .hud_graphics,
+        )
+        .background
+        .take()
+        .expect("classic fixture message-board background");
+        assert_refusal(&mut app, vec!["Background.png"]);
+        Arc::make_mut(
+            &mut Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .hud_graphics,
+        )
+        .background = Some(background);
+
+        let (background, upper_board) = {
+            let hud = Arc::make_mut(
+                &mut Arc::get_mut(&mut app.assets)
+                    .expect("frontend assets are app-owned")
+                    .hud_graphics,
+            );
+            (
+                hud.background.take().expect("restored background"),
+                hud.upper_board.take().expect("restored upper board"),
+            )
+        };
+        assert_refusal(
+            &mut app,
+            vec!["Background.png", "UpperBoard.png"],
+        );
+        let hud = Arc::make_mut(
+            &mut Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .hud_graphics,
+        );
+        hud.background = Some(background);
+        hud.upper_board = Some(upper_board);
     }
 
     #[test]
