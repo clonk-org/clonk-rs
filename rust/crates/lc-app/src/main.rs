@@ -12,6 +12,7 @@ mod advanced_config;
 mod clonk_fonts;
 mod control_message;
 mod control_options;
+mod desktop_notification;
 mod draw_commands;
 mod game_message;
 mod game_over;
@@ -56,6 +57,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use control_message::{mentions_nick, ControlMessageState};
 use control_options::{binding_display_name, format_key_label};
+use desktop_notification::{DesktopNotification, DesktopNotifier};
 use game_over::{
     EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction, GameOverActivationKey,
     GameOverClassicResources, GameOverEntry, GameOverFocus, GameOverOutcome, GameOverSound,
@@ -7217,6 +7219,13 @@ fn main() -> Result<()> {
                     },
                 ))
             })?;
+    let desktop_notifier = match DesktopNotifier::initialize() {
+        Ok(notifier) => notifier,
+        Err(error) => {
+            tracing::warn!(%error, "failed to initialize desktop notification system");
+            None
+        }
+    };
     let event_loop = EventLoop::new();
     let mut window_builder = WindowBuilder::new().with_title("Clonk Rust");
     if matches!(display_options.mode, DisplayMode::Window) && !display_options.maximized {
@@ -7265,6 +7274,7 @@ fn main() -> Result<()> {
         runtime,
     )
     .context("failed to initialise app state")?;
+    app.window_active = window.has_focus();
     app.set_display_mode(display_options.mode);
     app.configure_native_startup_fonts(display_options.scale, display_options.point_filtering);
     app.apply_classic_command_line(&classic)?;
@@ -7378,6 +7388,11 @@ fn main() -> Result<()> {
                 if app.take_user_attention_request() {
                     window.request_user_attention(Some(UserAttentionType::Informational));
                 }
+                deliver_desktop_notifications(&mut app, |notification| {
+                    desktop_notifier
+                        .as_ref()
+                        .map_or(Ok(()), |notifier| notifier.show(notification))
+                });
 
                 if !simulation_pass.skip_redraw
                     && (did_update
@@ -7506,6 +7521,21 @@ fn main() -> Result<()> {
             }
         }
     });
+}
+
+fn deliver_desktop_notifications<F>(app: &mut GameApp, mut show: F)
+where
+    F: FnMut(&DesktopNotification) -> Result<()>,
+{
+    while let Some(notification) = app.take_desktop_notification() {
+        if let Err(error) = show(&notification) {
+            tracing::warn!(
+                %error,
+                title = %notification.title,
+                "failed to show desktop notification"
+            );
+        }
+    }
 }
 
 fn apply_options_display_requests(
@@ -12770,6 +12800,8 @@ struct GameApp {
     /// excludes the host from the broadcast, so suppress exactly those echoes.
     pending_local_lobby_countdown_echoes: VecDeque<lc_network::LobbyCountdownPacket>,
     lobby_ready_check_cooldown: LobbyReadyCheckCooldown,
+    ready_check_toasts_enabled: bool,
+    pending_desktop_notifications: VecDeque<DesktopNotification>,
     control_messages: ControlMessageState,
     league_votes: LeagueVoteState,
     startup_network_connection: Option<StartupNetworkConnection>,
@@ -21337,6 +21369,14 @@ fn load_lobby_ready_check_cooldown(paths: Option<&AppPaths>) -> LobbyReadyCheckC
     LobbyReadyCheckCooldown::from_config_seconds(seconds)
 }
 
+fn ready_check_toasts_enabled_from_config(config: &[u8]) -> bool {
+    lc_app::configured_native_boolean(config, "Toasts", "ReadyCheck").unwrap_or(true)
+}
+
+fn load_ready_check_toasts_enabled(paths: Option<&AppPaths>) -> bool {
+    ready_check_toasts_enabled_from_config(&load_native_config_bytes(paths))
+}
+
 fn load_sound_command_cooldown(paths: Option<&AppPaths>) -> Duration {
     let config = load_native_config_bytes(paths);
     let seconds = native_config_text(&config, "Cooldowns", "SoundCommand")
@@ -23900,6 +23940,8 @@ impl GameApp {
             host_lobby_countdown: None,
             pending_local_lobby_countdown_echoes: VecDeque::new(),
             lobby_ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
+            ready_check_toasts_enabled: load_ready_check_toasts_enabled(paths),
+            pending_desktop_notifications: VecDeque::new(),
             control_messages,
             league_votes: LeagueVoteState::default(),
             startup_network_connection: None,
@@ -59837,6 +59879,7 @@ impl GameApp {
         self.white_lobby_chat = load_white_lobby_chat(paths);
         self.show_log_timestamps = load_show_log_timestamps(paths);
         self.show_folder_maps = load_show_folder_maps(paths);
+        self.ready_check_toasts_enabled = load_ready_check_toasts_enabled(paths);
         let record = load_recording_flag(paths);
         self.startup_view_flags.record = record;
         self.recording_enabled = record && self.recordings_dir.is_some();
@@ -60834,6 +60877,14 @@ impl GameApp {
             .without_focus(),
             MessageDialogContinuation::LobbyReadyCheck { remaining_seconds },
         )?;
+        if self.ready_check_toasts_enabled && !self.window_active {
+            self.pending_desktop_notifications
+                .push_back(DesktopNotification::new(
+                    "Are you ready?",
+                    lobby_ready_check_message(remaining_seconds).replace('|', "\n"),
+                    Duration::from_secs(u64::from(remaining_seconds)),
+                ));
+        }
         Ok(())
     }
 
@@ -64825,6 +64876,10 @@ impl GameApp {
 
     fn take_user_attention_request(&mut self) -> bool {
         self.control_messages.take_user_attention_request()
+    }
+
+    fn take_desktop_notification(&mut self) -> Option<DesktopNotification> {
+        self.pending_desktop_notifications.pop_front()
     }
 
     fn prune_host_local_alternate_colors(&mut self) {
@@ -145644,6 +145699,83 @@ ScenInfoArea=70,5,25,90
         let cooldown = lobby_ready_check_cooldown_from_config(Some(&config));
 
         assert_eq!(cooldown.duration, Duration::from_secs(17));
+    }
+
+    #[test]
+    fn l030_ready_check_toast_config_uses_cpp_boolean_grammar_and_default() {
+        assert!(ready_check_toasts_enabled_from_config(b""));
+        assert!(ready_check_toasts_enabled_from_config(
+            b"[Toasts]\nReadyCheck=true\n"
+        ));
+        assert!(!ready_check_toasts_enabled_from_config(
+            b"[Toasts]\nReadyCheck=false\n"
+        ));
+        assert!(
+            ready_check_toasts_enabled_from_config(b"[Toasts]\nReadyCheck=invalid\n"),
+            "malformed values retain C++'s enabled default"
+        );
+    }
+
+    #[test]
+    fn l030_unfocused_ready_check_queues_one_enabled_desktop_notification() {
+        fn client_app(window_active: bool, toasts_enabled: bool) -> GameApp {
+            let mut app = new_menu_app(320, 200);
+            app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+                "Client",
+            )));
+            app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+            app.window_active = window_active;
+            app.ready_check_toasts_enabled = toasts_enabled;
+            app
+        }
+
+        let packet = lc_network::ReadyCheckPacket {
+            client_id: 0,
+            data: lc_network::ReadyCheckData::Request,
+        };
+        let mut app = client_app(false, true);
+        app.handle_lobby_ready_check_request(packet)
+            .expect("open ready-check prompt");
+
+        assert_eq!(
+            app.take_desktop_notification(),
+            Some(DesktopNotification::new(
+                "Are you ready?",
+                "The host wants to know whether you're ready.\n15 seconds remaining.",
+                Duration::from_secs(15),
+            ))
+        );
+        app.handle_lobby_ready_check_request(packet)
+            .expect("ignore duplicate prompt");
+        assert!(app.take_desktop_notification().is_none());
+
+        for (window_active, toasts_enabled) in [(true, true), (false, false)] {
+            let mut app = client_app(window_active, toasts_enabled);
+            app.handle_lobby_ready_check_request(packet)
+                .expect("open ready-check prompt without a desktop alert");
+            assert!(app.take_desktop_notification().is_none());
+        }
+    }
+
+    #[test]
+    fn l030_desktop_notification_delivery_failure_is_nonfatal() {
+        let mut app = new_state_only_menu_app(320, 200);
+        app.pending_desktop_notifications
+            .push_back(DesktopNotification::new(
+                "Ready check",
+                "Synthetic failure",
+                Duration::from_secs(15),
+            ));
+        let mut attempts = 0;
+
+        deliver_desktop_notifications(&mut app, |_| {
+            attempts += 1;
+            Err(anyhow!("synthetic notification backend failure"))
+        });
+
+        assert_eq!(attempts, 1);
+        assert!(app.take_desktop_notification().is_none());
     }
 
     #[test]
