@@ -10,6 +10,7 @@ pub mod clonk_fonts;
 pub mod classic_gui;
 pub mod context_menu;
 pub mod definition_sel;
+pub mod download_dialog;
 pub mod flash_message;
 pub mod game_option_buttons;
 pub mod game_lobby;
