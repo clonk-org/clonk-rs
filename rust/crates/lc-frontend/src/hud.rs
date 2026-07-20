@@ -518,6 +518,8 @@ pub fn draw_upper_board(
         scenario_title,
         game_time_seconds,
         None,
+        None,
+        None,
     );
 }
 
@@ -527,6 +529,8 @@ pub(crate) fn draw_upper_board_with_gamma(
     hud: &HudGraphics,
     scenario_title: &str,
     game_time_seconds: u64,
+    clock_text: Option<&str>,
+    frames_per_second: Option<i32>,
     gamma: Option<&GammaRamp>,
 ) {
     let width = surface.width() as i32;
@@ -571,15 +575,41 @@ pub(crate) fn draw_upper_board_with_gamma(
     let text_y = UPPER_BOARD_HEIGHT / 2 - font.line_height() / 2;
     let time_text = format_game_time(game_time_seconds);
     let time_width = font.text_width(&time_text);
+    let mut right_offset = 1;
     font.draw_with_gamma(
         surface,
-        width - time_width - 10,
+        width - right_offset * time_width - 10,
         text_y,
         &time_text,
         MESSAGE_COLOR,
         TextAlign::Left,
         gamma,
     );
+    right_offset += 1;
+    if let Some(clock_text) = clock_text {
+        font.draw_with_gamma(
+            surface,
+            width - right_offset * time_width - 30,
+            text_y,
+            clock_text,
+            MESSAGE_COLOR,
+            TextAlign::Left,
+            gamma,
+        );
+        right_offset += 1;
+    }
+    if let Some(frames_per_second) = frames_per_second {
+        let fps_text = format!("{frames_per_second} FPS");
+        font.draw_with_gamma(
+            surface,
+            width - right_offset * time_width - 30,
+            text_y,
+            &fps_text,
+            MESSAGE_COLOR,
+            TextAlign::Left,
+            gamma,
+        );
+    }
     font.draw_with_gamma(
         surface,
         10,
@@ -3201,6 +3231,62 @@ mod tests {
         assert_eq!(format_game_time(0), "00:00:00");
         assert_eq!(format_game_time(18), "00:00:18");
         assert_eq!(format_game_time(3600 + 2 * 60 + 3), "01:02:03");
+    }
+
+    #[test]
+    fn upper_board_draws_clock_and_fps_rows_when_enabled() {
+        // iRightOff advances once for each enabled right-hand section:
+        // playing time at 1*TextWidth-10, then Clock/FPS at successive
+        // TextWidth slots with the 30px inset (src/C4UpperBoard.cpp:74-88).
+        let mut target = surface(400, 60);
+        let hud = HudGraphics {
+            upper_board: Some(solid_image(8, 50, [120, 80, 40, 255])),
+            ..HudGraphics::default()
+        };
+        let marker = FixedWidthMarkerFont;
+        let font = HudFont::Fallback(&marker);
+        draw_upper_board_with_gamma(
+            &mut target,
+            &font,
+            &hud,
+            "",
+            0,
+            Some("[12:34:56]"),
+            Some(42),
+            None,
+        );
+
+        let text_y = (UPPER_BOARD_HEIGHT / 2 - font.line_height() / 2) as u32;
+        assert_eq!(
+            target.get_pixel(306, text_y),
+            Some(MESSAGE_COLOR),
+            "clock starts at width - 2*TextWidth - 30"
+        );
+        assert_eq!(
+            target.get_pixel(274, text_y),
+            Some(MESSAGE_COLOR),
+            "FPS starts at width - 3*TextWidth - 30 when Clock is present"
+        );
+
+        let mut disabled = surface(400, 60);
+        draw_upper_board_with_gamma(
+            &mut disabled,
+            &font,
+            &hud,
+            "",
+            0,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            disabled.get_pixel(306, text_y),
+            Some(Color::opaque(120, 80, 40))
+        );
+        assert_eq!(
+            disabled.get_pixel(274, text_y),
+            Some(Color::opaque(120, 80, 40))
+        );
     }
 
     #[test]

@@ -140,10 +140,10 @@ use lc_frontend::startup_plrsel::{
     PlrSelControl, PlrSelCrewContextCommand, PlrSelPlayerContextCommand,
 };
 use lc_frontend::{
-    ActiveViewportProjection, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
-    GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher,
-    InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction, MainMenuItem,
-    MaterialRenderInfo, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
+    ActiveViewportProjection, ColorByOwnerMask, CrewNameOverlay, CrewOverlay, CursorAtlas,
+    DefinitionSprite, GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics,
+    ImageData, InputDispatcher, InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction,
+    MainMenuItem, MaterialRenderInfo, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
     StartupMainMenu, StartupMenu, StartupMenuAction, StartupTooltip, ViewportEdgeScroll,
     ViewportInput, ViewportPointer, default_owner_color, viewport_edge_scroll,
     viewport_edge_scroll_at,
@@ -6429,6 +6429,7 @@ fn main() -> Result<()> {
         runtime,
     )
     .context("failed to initialise app state")?;
+    app.set_display_mode(display_options.mode);
     app.configure_native_startup_fonts(display_options.scale, display_options.point_filtering);
     app.auto_start_sandbox = cli.sandbox;
 
@@ -6688,6 +6689,7 @@ fn apply_options_display_requests(
                     DisplayMode::Fullscreen | DisplayMode::Window => {}
                 }
                 display_options.record_mode(mode);
+                app.set_display_mode(mode);
             }
             OptionsDisplayRequest::SetScale { percent, persist } => {
                 let percent = percent.clamp(100, 300);
@@ -6824,6 +6826,7 @@ fn handle_window_event(
                 }
                 app.reject_classic_global_gui_bootstrap()?;
                 toggle_fullscreen(window, display_options);
+                app.set_display_mode(display_options.mode);
                 return Ok(());
             }
             app.handle_key(keycode, state)
@@ -23128,6 +23131,90 @@ impl GameApp {
         }
     }
 
+    /// Prepare the object-name half of `C4Object::DrawTopFace`. Geometry,
+    /// viewport clipping and the final player-color draw stay in the frontend,
+    /// while the app resolves C4ObjectInfo/definition names and the
+    /// process-local invisible-player flag.
+    fn crew_name_overlays(&self, viewports: &[ViewportInput<'_>]) -> Vec<CrewNameOverlay> {
+        if (!self.display_flags.player_names && !self.display_flags.clonk_names)
+            || self.engine.film_replay()
+        {
+            return Vec::new();
+        }
+
+        let mut viewers = Vec::new();
+        for viewport in viewports {
+            if !viewers.contains(&viewport.owner) {
+                viewers.push(viewport.owner);
+            }
+        }
+
+        self.snapshot
+            .objects
+            .iter()
+            .filter(|object| {
+                object.status == lc_engine::ObjectStatus::Normal
+                    && object.ocf & lc_engine::ocf::CREW_MEMBER != 0
+                    && object.container.is_none()
+            })
+            .filter_map(|object| {
+                let owner = self.engine.player(object.owner)?;
+                let invisible = self
+                    .control_player_infos
+                    .get(owner.player_info_id())
+                    .is_some_and(|info| {
+                        info.flags & lc_engine::PLAYER_INFO_FLAG_INVISIBLE != 0
+                    });
+                if invisible {
+                    return None;
+                }
+
+                let player_name = c4_presentation_text(owner.name());
+                let clonk_name = object
+                    .custom_name
+                    .as_deref()
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| {
+                        self.engine
+                            .crew_object_info(object.id)
+                            .map(|info| info.name.as_str())
+                    })
+                    .or_else(|| self.engine.definition_name(&object.definition_id))
+                    .unwrap_or(object.definition_id.as_str());
+                let clonk_name = c4_presentation_text(clonk_name);
+                let text = match (
+                    self.display_flags.player_names,
+                    self.display_flags.clonk_names,
+                ) {
+                    (true, true) => format!("{clonk_name} ({player_name})"),
+                    (true, false) => player_name,
+                    (false, true) => clonk_name,
+                    (false, false) => unreachable!("empty display-name flags returned above"),
+                };
+
+                let visible_to = viewers
+                    .iter()
+                    .copied()
+                    .filter(|viewer| {
+                        if *viewer == object.owner {
+                            return false;
+                        }
+                        let Some(viewer_player) = self.engine.player(*viewer) else {
+                            return *viewer == OWNER_NONE;
+                        };
+                        !viewer_player.is_hostile_towards(object.owner)
+                            && !owner.is_hostile_towards(*viewer)
+                    })
+                    .collect::<Vec<_>>();
+                (!visible_to.is_empty()).then_some(CrewNameOverlay {
+                    object_id: object.id,
+                    text,
+                    visible_to,
+                })
+            })
+            .collect()
+    }
+
     /// Fills the presentation half of the crew overlays: the selected info
     /// portrait (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-320), the crew
     /// name and rank (src/C4ObjectInfo.cpp:330-370) and the def rank symbols
@@ -29171,6 +29258,13 @@ impl GameApp {
         self.main_menu_conditions_for(self.local_owner)
     }
 
+    /// Keep the in-game menu gates synchronized with the live window mode.
+    /// The process-wide display settings remain owned by the window loop;
+    /// `DisplayFlags` is their presentation projection for running menus.
+    fn set_display_mode(&mut self, mode: DisplayMode) {
+        self.display_flags.is_fullscreen = matches!(mode, DisplayMode::Fullscreen);
+    }
+
     fn main_menu_conditions_for(&self, player: i32) -> MainMenuConditions {
         let players = &self.snapshot.players;
         MainMenuConditions {
@@ -29181,7 +29275,7 @@ impl GameApp {
             network_enabled: self.network.is_some(),
             network_host: matches!(self.network_mode, Some(NetworkMode::Host(_))),
             network_has_clients: self.network.is_some(),
-            is_fullscreen: true,
+            is_fullscreen: self.display_flags.is_fullscreen,
             team_switch_allowed: self.engine.team_configuration().allow_team_switch,
         }
     }
@@ -50047,7 +50141,9 @@ impl GameApp {
 
     fn synchronize_advanced_options_runtime(&mut self) {
         let paths = self.app_paths.as_ref();
+        let is_fullscreen = self.display_flags.is_fullscreen;
         self.display_flags = load_display_flags(paths);
+        self.display_flags.is_fullscreen = is_fullscreen;
         self.white_lobby_chat = load_white_lobby_chat(paths);
         self.show_log_timestamps = load_show_log_timestamps(paths);
         self.show_folder_maps = load_show_folder_maps(paths);
@@ -62551,6 +62647,7 @@ impl GameApp {
                 }
             }
         }
+        let crew_name_labels = self.crew_name_overlays(&viewports);
         let overlay = GraphicsOverlay {
             frame_text: &self.frame_text,
             status_text: &self.status_text,
@@ -62559,6 +62656,15 @@ impl GameApp {
             players,
             game_time_seconds: self.game_time_seconds(),
             message_board_line: self.message_board_line(),
+            crew_name_labels,
+            clock_text: self
+                .display_flags
+                .clock
+                .then(|| lc_core::chrono_util::current_timestamp(false)),
+            frames_per_second: self
+                .display_flags
+                .fps
+                .then_some(self.frames_per_second),
             // Config.Graphics.ShowPortraits/ShowCommands/ShowCommandKeys
             // from the Display menu (src/C4Config.cpp:448-450).
             show_portraits: self.display_flags.portraits,
@@ -76985,6 +77091,9 @@ mod tests {
             players: Vec::new(),
             game_time_seconds: 0,
             message_board_line: None,
+            crew_name_labels: Vec::new(),
+            clock_text: None,
+            frames_per_second: None,
             show_portraits: false,
             show_commands: true,
             show_command_keys: false,
@@ -108809,6 +108918,89 @@ ScenInfoArea=70,5,25,90
         assert_eq!(player.status(), PlayerStatus::Active);
         assert_eq!(player.team(), Some(2));
         assert!(app.ingame_menu.get(owner).is_none());
+    }
+
+    #[test]
+    fn main_menu_hides_abort_and_display_fullscreen_only_entries_in_windowed_mode() {
+        let mut app = new_state_only_running_sandbox_app();
+        app.set_display_mode(DisplayMode::Window);
+
+        let main = IngameMenuState::main_menu(&app.main_menu_conditions())
+            .expect("windowed main menu remains nonempty");
+        assert!(!main.items().iter().any(|item| item.action == MenuAction::Abort));
+        let display = IngameMenuState::display_menu(&app.display_flags, 0);
+        assert_eq!(
+            display
+                .items()
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Player names", "Clonk names", "Portraits", "Commands", "Keys"]
+        );
+
+        app.set_display_mode(DisplayMode::Fullscreen);
+        let main = IngameMenuState::main_menu(&app.main_menu_conditions())
+            .expect("fullscreen main menu remains nonempty");
+        assert!(main.items().iter().any(|item| item.action == MenuAction::Abort));
+        assert_eq!(
+            IngameMenuState::display_menu(&app.display_flags, 0)
+                .items()
+                .len(),
+            9
+        );
+    }
+
+    #[test]
+    fn crew_name_label_respects_display_flags() {
+        let mut app = new_state_only_running_sandbox_app();
+        let viewer = app.local_owner;
+        let focus = app
+            .engine
+            .crew_cursor(viewer)
+            .expect("sandbox viewer has a crew cursor");
+        let focus_state = app
+            .engine
+            .object_snapshot(focus)
+            .expect("sandbox cursor remains live");
+        let remote = viewer + 1;
+        app.engine
+            .register_player(PlayerConfig::new(remote, "Remote Player"))
+            .expect("register allied remote player");
+        app.engine
+            .spawn_object(
+                SpawnConfig::new(focus_state.definition_id)
+                    .with_position(focus_state.position)
+                    .with_owner(remote)
+                    .with_crew_member(true)
+                    .with_custom_name("Remote Clonk"),
+            )
+            .expect("spawn remote crew member");
+        app.snapshot = app.engine.snapshot();
+
+        let labels = |app: &GameApp| {
+            let focus = app.snapshot.object(focus).expect("viewer focus in snapshot");
+            app.crew_name_overlays(&[ViewportInput::new(
+                viewer,
+                focus.position,
+                1.0,
+                focus,
+            )])
+        };
+
+        assert_eq!(
+            labels(&app)
+                .iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Remote Clonk (Remote Player)"]
+        );
+        app.display_flags.player_names = false;
+        assert_eq!(labels(&app)[0].text, "Remote Clonk");
+        app.display_flags.player_names = true;
+        app.display_flags.clonk_names = false;
+        assert_eq!(labels(&app)[0].text, "Remote Player");
+        app.display_flags.player_names = false;
+        assert!(labels(&app).is_empty());
     }
 
     #[test]

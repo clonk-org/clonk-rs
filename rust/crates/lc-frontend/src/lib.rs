@@ -91,6 +91,32 @@ fn c4_presentation_text(text: &str) -> String {
     lc_resources::decode_legacy_script_text(&lc_script::c4_string_bytes(text))
 }
 
+/// `SWordWrap(text, ' ', '|', max_line)` (src/C4Strings.cpp:311-331).
+/// Native counts encoded bytes; presentation strings are already decoded at
+/// this boundary, so preserve the same separator/last-space algorithm over
+/// displayed scalar values.
+fn c4_word_wrap(text: &str, max_line: usize) -> String {
+    let mut characters = text.chars().collect::<Vec<_>>();
+    let mut last_space = None;
+    let mut line_run = 0usize;
+    for index in 0..characters.len() {
+        if characters[index] == ' ' {
+            last_space = Some(index);
+        }
+        if characters[index] == '|' {
+            line_run = 0;
+        }
+        if line_run >= max_line {
+            if let Some(space) = last_space {
+                characters[space] = '|';
+                line_run = index.saturating_sub(space);
+            }
+        }
+        line_run = line_run.saturating_add(1);
+    }
+    characters.into_iter().collect()
+}
+
 /// `C4ViewportScrollBorder` (src/C4Constants.h:95).
 const VIEWPORT_SCROLL_BORDER: i32 = 40;
 /// `Config.General.ScrollSmooth` (src/C4Config.cpp:386). The C++ viewport
@@ -1346,6 +1372,103 @@ fn draw_fogged_cursor_text_line(
     }
 }
 
+/// Markup-aware `TextOut` under ClrModMap. Rasterizing first preserves the
+/// font's tag stack across pipe-separated lines; the second pass applies the
+/// world-space fog sample to each covered pixel before final gamma blending.
+fn draw_fogged_markup_text(
+    surface: &mut Surface,
+    font: &hud::HudFont<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: Color,
+    gamma: Option<&lc_graphics::GammaRamp>,
+    fog: &FogDrawContext,
+) {
+    let (width, measured_height) = font.text_extent_markup(text);
+    let raster_height = measured_height.saturating_add(
+        font.graphics_line_height()
+            .saturating_sub(font.line_height()),
+    );
+    let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(raster_height)) else {
+        return;
+    };
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let origin_x = x - width as i32 / 2;
+    let mut source_surface = Surface::new(width, height, PixelFormat::Rgba8888);
+    font.draw_markup_with_gamma(
+        &mut source_surface,
+        width as i32 / 2,
+        0,
+        text,
+        color,
+        lc_graphics::clonk_font::TextAlign::Center,
+        None,
+    );
+    let base_blit = SpriteBlitState::normal();
+    let sampler = FogSpriteSampler::new(
+        fog,
+        (
+            origin_x as f32,
+            y as f32,
+            width as f32,
+            height as f32,
+        ),
+        (0.0, 0.0, width as f32, height as f32),
+        (width, height),
+        false,
+        |x, y| (x, y),
+    );
+    for row in 0..height {
+        for column in 0..width {
+            let Some(mut source_color) = source_surface.get_pixel(column, row) else {
+                continue;
+            };
+            if source_color.a == 0 {
+                continue;
+            }
+            // Text was source-over blended onto transparent black. Recover
+            // straight-alpha RGB before submitting the final fogged fragment.
+            let alpha = u32::from(source_color.a);
+            let unpremultiply = |channel: u8| {
+                ((u32::from(channel) * 255 + alpha / 2) / alpha).min(255) as u8
+            };
+            source_color.r = unpremultiply(source_color.r);
+            source_color.g = unpremultiply(source_color.g);
+            source_color.b = unpremultiply(source_color.b);
+
+            let target_x = origin_x.saturating_add(column as i32);
+            let target_y = y.saturating_add(row as i32);
+            let pixel_blit = fog_sprite_blit_at(
+                sampler.as_ref(),
+                Some(fog),
+                base_blit,
+                (column as f32 + 0.5) / width as f32,
+                (row as f32 + 0.5) / height as f32,
+                target_x,
+                target_y,
+            );
+            let source = prepare_sprite_fragment(source_color, None, None, pixel_blit);
+            if source.alpha() == 0 {
+                continue;
+            }
+            let (Ok(target_x), Ok(target_y)) =
+                (u32::try_from(target_x), u32::try_from(target_y))
+            else {
+                continue;
+            };
+            let Some(destination) = surface.get_pixel(target_x, target_y) else {
+                continue;
+            };
+            let output = composite_sprite_fragment(source, destination, pixel_blit, gamma);
+            let _ = surface.set_pixel(target_x, target_y, output);
+        }
+    }
+}
+
 fn object_is_closed_to_fog(snapshot: &SimulationSnapshot, object: &ObjectSnapshot) -> bool {
     object
         .container
@@ -2210,12 +2333,21 @@ pub struct GraphicsOverlay<'a> {
     /// to its independent `C4GraphicsSystem` pass.
     pub viewport_overlays_visible: bool,
     pub players: Vec<PlayerOverlay>,
+    /// Precomposed `C4Object::DrawTopFace` crew labels. The app owns the
+    /// player-info/invisibility and hostility policy; the renderer owns the
+    /// object-space gates, placement and color (src/C4Object.cpp:2582-2612).
+    pub crew_name_labels: Vec<CrewNameOverlay>,
     /// `Game.Time` seconds for the upper board clock
     /// (C4Game::Sec1Timer, src/C4Game.cpp:1737-1741).
     pub game_time_seconds: u64,
     /// The current message board log line (C4MessageBoard LogBuffer tail,
     /// src/C4MessageBoard.cpp:271-303).
     pub message_board_line: Option<String>,
+    /// Local wall-clock text (`[%H:%M:%S]`) shown by `C4UpperBoard::Draw`.
+    /// `None` is `Config.Graphics.ShowClock == false`.
+    pub clock_text: Option<String>,
+    /// Sampled `C4Game::FPS`; `None` is `Config.General.FPS == false`.
+    pub frames_per_second: Option<i32>,
     /// `Config.Graphics.ShowPortraits` (src/C4Config.cpp:448) — shifts the
     /// viewport bars down ten pixels when portraits are enabled.
     pub show_portraits: bool,
@@ -2225,6 +2357,16 @@ pub struct GraphicsOverlay<'a> {
     /// `Config.Graphics.ShowCommandKeys` (src/C4Config.cpp:450) — key names
     /// on the command key caps (src/C4ObjectCom.cpp:942).
     pub show_command_keys: bool,
+}
+
+/// One world-space crew-name label after the app has applied the two display
+/// toggles and player-level visibility rules. `visible_to` contains viewport
+/// player numbers; include [`OWNER_NONE`] for the fullscreen observer view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrewNameOverlay {
+    pub object_id: ObjectId,
+    pub text: String,
+    pub visible_to: Vec<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2607,11 +2749,14 @@ pub struct GraphicsSystem {
     scenario_label_text: String,
     /// Per-player HUD state fed by [`Self::update_overlay`].
     hud_players: Vec<PlayerOverlay>,
+    crew_name_labels: Vec<CrewNameOverlay>,
     /// The two native film-replay gates in `C4Viewport::Draw` and
     /// `C4Viewport::DrawOverlay` (src/C4Viewport.cpp:838-881,1088).
     viewport_overlays_visible: bool,
     game_time_seconds: u64,
     message_board_line: Option<String>,
+    clock_text: Option<String>,
+    frames_per_second: Option<i32>,
     /// `Config.Graphics.ShowPortraits` / `ShowCommands` / `ShowCommandKeys`
     /// (src/C4Config.cpp:448-450, default true).
     show_portraits: bool,
@@ -2708,9 +2853,12 @@ impl GraphicsSystem {
             clonk_fonts: None,
             scenario_label_text: scenario_label.to_string(),
             hud_players: Vec::new(),
+            crew_name_labels: Vec::new(),
             viewport_overlays_visible: true,
             game_time_seconds: 0,
             message_board_line: None,
+            clock_text: None,
+            frames_per_second: None,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -3761,9 +3909,12 @@ impl GraphicsSystem {
     /// (src/C4UpperBoard.cpp:37-44).
     pub fn update_overlay(&mut self, overlay: &GraphicsOverlay<'_>) {
         self.hud_players = overlay.players.clone();
+        self.crew_name_labels = overlay.crew_name_labels.clone();
         self.viewport_overlays_visible = overlay.viewport_overlays_visible;
         self.game_time_seconds = overlay.game_time_seconds;
         self.message_board_line = overlay.message_board_line.clone();
+        self.clock_text = overlay.clock_text.clone();
+        self.frames_per_second = overlay.frames_per_second;
         self.show_portraits = overlay.show_portraits;
         self.show_commands = overlay.show_commands;
         self.show_command_keys = overlay.show_command_keys;
@@ -5969,15 +6120,127 @@ impl GraphicsSystem {
             }
         }
         for object in &selected {
-            if definition_lines
+            // The crew-name block is the first drawing work in
+            // C4Object::DrawTopFace, before the construction/TopFace facet.
+            // Keeping it in this outer list pass prevents graphics-overlay
+            // recursion from producing duplicate labels.
+            self.paint_crew_name_label(object, for_player, owner_colors, gamma);
+            if !definition_lines
                 .get(&object.definition_id)
                 .is_some_and(|metadata| metadata.line != 0)
             {
-                continue;
+                self.paint_object_top_face(object, SpriteBlitState::for_object(object), gamma);
             }
-            self.paint_object_top_face(
-                object,
-                SpriteBlitState::for_object(object),
+        }
+    }
+
+    /// `C4Object::DrawTopFace`'s crew label
+    /// (src/C4Object.cpp:2582-2612). Player existence, invisibility,
+    /// hostility and the two display-toggle text variants have already been
+    /// projected into [`CrewNameOverlay`]; world/object gates stay here.
+    fn paint_crew_name_label(
+        &mut self,
+        object: &ObjectSnapshot,
+        for_player: i32,
+        owner_colors: &HashMap<i32, Color>,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        if !self.viewport_overlays_visible
+            || object.ocf & lc_engine::ocf::CREW_MEMBER == 0
+            || object.container.is_some()
+        {
+            return;
+        }
+        let Some(label) = self
+            .crew_name_labels
+            .iter()
+            .find(|label| {
+                label.object_id == object.id && label.visible_to.contains(&for_player)
+            })
+            .cloned()
+        else {
+            return;
+        };
+        if label.text.is_empty() {
+            return;
+        }
+
+        // The range gate reads the live object shape; the vertical anchor
+        // retains the definition shape even after SetShape/Con changes.
+        let Some(definition_sprite) = self
+            .object_sprites
+            .get(&sprite_map_key(&object.definition_id, None))
+            .cloned()
+        else {
+            return;
+        };
+        let shape = self.live_object_shape(&definition_sprite, object);
+        let definition_shape = Self::sprite_def_shape(&definition_sprite);
+        let (target_x, target_y) = self.object_target_position(object);
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let view_width = ((self.surface_width as f32 / zoom).ceil() as i32).max(1);
+        let view_height = ((self.surface_height as f32 / zoom).ceil() as i32).max(1);
+        let shape_x = object.position.x + shape.x - target_x as i32;
+        let shape_y = object.position.y + shape.y - target_y as i32;
+        let inside = |value: i32, minimum: i32, maximum: i32| {
+            value >= minimum && value <= maximum
+        };
+        if !inside(shape_x, 1 - shape.width, view_width)
+            || !inside(shape_y, 1 - shape.height, view_height)
+        {
+            return;
+        }
+
+        let font = hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref());
+        let max_line = (view_width / font.text_width("m").max(1)).max(20);
+        let text = c4_word_wrap(&label.text, max_line as usize);
+        let (text_width, text_height) = font.text_extent_markup(&text);
+        let output_width = self.surface_width as i32;
+        let output_height = self.surface_height as i32;
+        let unclamped_x = ((object.position.x as f32 - target_x) * zoom).round() as i32;
+        let half_width = text_width / 2;
+        let text_x = if half_width <= output_width - half_width {
+            unclamped_x.clamp(half_width, output_width - half_width)
+        } else {
+            output_width / 2
+        };
+        let unclamped_y = ((object.position.y - definition_shape.height / 2 - 20) as f32
+            - target_y)
+            * zoom;
+        let unclamped_y = unclamped_y.round() as i32 - text_height;
+        let text_y = if text_height <= output_height {
+            unclamped_y.clamp(0, output_height - text_height)
+        } else {
+            0
+        };
+
+        let owner_color = owner_colors
+            .get(&object.owner)
+            .copied()
+            .unwrap_or_else(|| default_owner_color(object.owner));
+        // C4 colors store transparency in the high byte. `| 0x7f000000`
+        // therefore becomes source alpha 255-127 = 128.
+        let color = Color::new(owner_color.r, owner_color.g, owner_color.b, 128);
+        let fog = self.fog_draw_context();
+        if let Some(fog) = fog.as_ref() {
+            draw_fogged_markup_text(
+                &mut self.surface,
+                &font,
+                text_x,
+                text_y,
+                &text,
+                color,
+                gamma,
+                fog,
+            );
+        } else {
+            font.draw_markup_with_gamma(
+                &mut self.surface,
+                text_x,
+                text_y,
+                &text,
+                color,
+                lc_graphics::clonk_font::TextAlign::Center,
                 gamma,
             );
         }
@@ -8135,6 +8398,8 @@ impl GraphicsSystem {
                 &self.hud_graphics,
                 &self.scenario_label_text,
                 self.game_time_seconds,
+                self.clock_text.as_deref(),
+                self.frames_per_second,
                 gamma,
             );
         }
@@ -16652,8 +16917,11 @@ mod tests {
             debug_hud: false,
             viewport_overlays_visible: true,
             players: Vec::new(),
+            crew_name_labels: Vec::new(),
             game_time_seconds: 61,
             message_board_line: Some("Player join: Test".to_string()),
+            clock_text: None,
+            frames_per_second: None,
             show_portraits: false,
             show_commands: true,
             show_command_keys: true,
@@ -16723,8 +16991,11 @@ mod tests {
                 commands: Vec::new(),
                 flash_command: 0,
             }],
+            crew_name_labels: Vec::new(),
             game_time_seconds: 0,
             message_board_line: None,
+            clock_text: None,
+            frames_per_second: None,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -20156,8 +20427,11 @@ mod tests {
             debug_hud: false,
             viewport_overlays_visible: true,
             players,
+            crew_name_labels: Vec::new(),
             game_time_seconds: 0,
             message_board_line: None,
+            clock_text: None,
+            frames_per_second: None,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -20211,6 +20485,141 @@ mod tests {
     }
 
     #[test]
+    fn crew_name_label_respects_display_flags() {
+        // The app projects ShowCrewNames/ShowCrewCNames into zero or one
+        // precomposed label. The world renderer consumes that projection only
+        // for an allowed viewport (src/C4Object.cpp:2582-2612).
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].owner = 1;
+        snapshot.objects[0].ocf |= lc_engine::ocf::CREW_MEMBER;
+        snapshot.players = vec![
+            PlayerState {
+                id: 0,
+                ..PlayerState::default()
+            },
+            PlayerState {
+                id: 1,
+                color: Some(RgbColor::new(220, 40, 20)),
+                ..PlayerState::default()
+            },
+        ];
+        let object_id = snapshot.objects[0].id;
+        let sprites = solid_sprite(
+            "TestObject",
+            12,
+            20,
+            Color::opaque(20, 80, 160),
+            Some(DefinitionRect::new(-6, -10, 12, 20)),
+            false,
+        );
+        let render_at = |
+            text: Option<&str>,
+            visible_to: Vec<i32>,
+            overlays_visible: bool,
+            width: u32,
+            height: u32,
+            zoom: f32,
+        | {
+            let mut graphics = GraphicsSystem::new(
+                width,
+                height,
+                height as i32,
+                "Crew label",
+                test_font(),
+                Arc::clone(&sprites),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.update_overlay(&GraphicsOverlay {
+                frame_text: "",
+                status_text: "",
+                debug_hud: false,
+                viewport_overlays_visible: overlays_visible,
+                players: Vec::new(),
+                crew_name_labels: text
+                    .map(|text| {
+                        vec![CrewNameOverlay {
+                            object_id,
+                            text: text.to_string(),
+                            visible_to,
+                        }]
+                    })
+                    .unwrap_or_default(),
+                game_time_seconds: 0,
+                message_board_line: None,
+                clock_text: None,
+                frames_per_second: None,
+                show_portraits: true,
+                show_commands: true,
+                show_command_keys: true,
+            });
+            graphics.render_frame(
+                &snapshot,
+                &[ViewportInput::new(
+                    0,
+                    snapshot.objects[0].position,
+                    zoom,
+                    &snapshot.objects[0],
+                )],
+            );
+            graphics.surface().pixels().to_vec()
+        };
+        let render = |text: Option<&str>, visible_to: Vec<i32>, overlays_visible: bool| {
+            render_at(text, visible_to, overlays_visible, 200, 120, 1.0)
+        };
+
+        let hidden = render(None, Vec::new(), true);
+        let player_name = render(Some("Owner"), vec![0], true);
+        let clonk_name = render(Some("Clonk"), vec![0], true);
+        let both_names = render(Some("Clonk (Owner)"), vec![0], true);
+        assert_ne!(player_name, hidden, "ShowCrewNames draws the player name");
+        assert_ne!(clonk_name, hidden, "ShowCrewCNames draws the clonk name");
+        assert_ne!(both_names, player_name, "both flags use the composed label");
+        assert_ne!(both_names, clonk_name, "both flags retain both names");
+        assert_eq!(
+            render(Some("<c ff0000>Clonk</c>"), vec![0], true),
+            clonk_name,
+            "fallback rendering consumes markup instead of drawing its tags literally"
+        );
+        assert_eq!(
+            render(Some("Clonk (Owner)"), vec![1], true),
+            hidden,
+            "the owning/non-visible viewport receives no label"
+        );
+        assert_eq!(
+            render(Some("Clonk (Owner)"), vec![0], false),
+            hidden,
+            "film replay suppresses world crew labels"
+        );
+
+        let zoomed_hidden = render_at(None, Vec::new(), true, 800, 240, 2.0);
+        let zoomed_wrapped = render_at(
+            Some("Alpha Bravo Charlie Delta Echo Foxtrot Golf"),
+            vec![0],
+            true,
+            800,
+            240,
+            2.0,
+        );
+        let changed_rows = zoomed_wrapped
+            .chunks_exact(4)
+            .zip(zoomed_hidden.chunks_exact(4))
+            .enumerate()
+            .filter_map(|(pixel, (actual, baseline))| {
+                (actual != baseline).then_some((pixel / 800) as i32)
+            })
+            .collect::<Vec<_>>();
+        let changed_span = changed_rows
+            .last()
+            .zip(changed_rows.first())
+            .map_or(0, |(last, first)| last - first + 1);
+        assert!(
+            changed_span > 14,
+            "2x zoom wraps against the 400-unit logical viewport, not 800 physical pixels"
+        );
+    }
+
+    #[test]
     fn l066_film_replay_hides_player_hud_and_world_cursor_marks() {
         let (snapshot, mut graphics) = cursor_label_fixture(Some("Joe"));
         let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
@@ -20247,8 +20656,11 @@ mod tests {
             debug_hud: false,
             viewport_overlays_visible: false,
             players,
+            crew_name_labels: Vec::new(),
             game_time_seconds: 0,
             message_board_line: None,
+            clock_text: None,
+            frames_per_second: None,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -20379,8 +20791,11 @@ mod tests {
             debug_hud: false,
             viewport_overlays_visible: true,
             players,
+            crew_name_labels: Vec::new(),
             game_time_seconds: 0,
             message_board_line: None,
+            clock_text: None,
+            frames_per_second: None,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -20461,8 +20876,11 @@ mod tests {
             debug_hud: false,
             viewport_overlays_visible: true,
             players,
+            crew_name_labels: Vec::new(),
             game_time_seconds: 0,
             message_board_line: None,
+            clock_text: None,
+            frames_per_second: None,
             show_portraits: false,
             show_commands: true,
             show_command_keys: true,
