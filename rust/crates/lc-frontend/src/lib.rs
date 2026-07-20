@@ -15,6 +15,7 @@ pub mod flash_message;
 pub mod game_option_buttons;
 pub mod game_lobby;
 pub mod hud;
+pub mod info_dialog;
 pub mod input_dialog;
 pub mod league_signup;
 pub mod loader_screen;

@@ -25917,11 +25917,26 @@ impl GameApp {
         if self.league_signup_dialog.is_some() {
             return Ok(());
         }
-        if self
+        let runtime_client_info_only = self
             .runtime_client_list
             .as_ref()
-            .is_some_and(|dialog| dialog.is_info_only())
-        {
+            .is_some_and(|dialog| dialog.is_info_only());
+        if runtime_client_info_only {
+            let native_delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            if let (Some((preferred, line_height)), Some(point)) = (
+                self.runtime_client_list_input_geometry(),
+                self.running_pointer_position,
+            ) {
+                if let Some(dialog) = self.runtime_client_list.as_mut() {
+                    let _ = dialog.handle_wheel(point, native_delta, preferred, line_height);
+                }
+                self.mark_menu_dirty();
+            }
             return Ok(());
         }
         if self.external_irc_dialog_visible {
@@ -28823,6 +28838,14 @@ impl GameApp {
     }
 
     fn refresh_runtime_client_list(&mut self) -> bool {
+        self.refresh_runtime_client_list_inner(false)
+    }
+
+    fn refresh_runtime_client_list_on_sec1(&mut self) -> bool {
+        self.refresh_runtime_client_list_inner(true)
+    }
+
+    fn refresh_runtime_client_list_inner(&mut self, sec1_timer: bool) -> bool {
         if self.runtime_client_list.is_none() {
             return false;
         }
@@ -28832,7 +28855,11 @@ impl GameApp {
             .is_some_and(|dialog| dialog.info_client_id().is_some());
         let (options, rows, status) = self.runtime_client_list_snapshot();
         let close_info_only = self.runtime_client_list.as_mut().is_some_and(|dialog| {
-            dialog.replace_snapshot(options, rows, status);
+            if sec1_timer {
+                dialog.replace_snapshot_on_sec1(options, rows, status);
+            } else {
+                dialog.replace_snapshot(options, rows, status);
+            }
             dialog.is_info_only() && dialog.info_client_id().is_none()
         });
         if info_was_open
@@ -29089,19 +29116,37 @@ impl GameApp {
             .as_ref()
             .is_some_and(|dialog| dialog.is_info_only());
         if info_only {
-            if state == ElementState::Pressed {
-                self.runtime_client_list_consumed_keys.insert(key);
+            if state != ElementState::Pressed {
+                return Ok(true);
             }
-            let action = (key == VirtualKeyCode::Escape)
-                .then(|| {
+            self.runtime_client_list_consumed_keys.insert(key);
+            let action = map_key_code(key)
+                .filter(|key| {
+                    matches!(
+                        key,
+                        KeyCode::Escape
+                            | KeyCode::Up
+                            | KeyCode::Down
+                            | KeyCode::Home
+                            | KeyCode::End
+                            | KeyCode::PageUp
+                            | KeyCode::PageDown
+                    )
+                })
+                .zip(self.runtime_client_list_input_geometry())
+                .and_then(|(gui_key, (preferred, line_height))| {
                     self.runtime_client_list
                         .as_mut()
-                        .and_then(|dialog| dialog.handle_escape(state == ElementState::Pressed))
-                })
-                .flatten();
+                        .and_then(|dialog| {
+                            dialog
+                                .handle_key(gui_key, false, preferred, line_height)
+                                .1
+                        })
+                });
             if let Some(action) = action {
                 self.handle_runtime_client_list_action(action)?;
             }
+            self.mark_menu_dirty();
             return Ok(true);
         }
         if self.runtime_client_list.is_none() || state == ElementState::Released {
@@ -61799,7 +61844,7 @@ impl GameApp {
         self.engine.sec1_timer();
         let after = self.engine.game_time();
         self.frames_per_second = std::mem::take(&mut self.frames_since_second);
-        let client_list_changed = self.refresh_runtime_client_list();
+        let client_list_changed = self.refresh_runtime_client_list_on_sec1();
         if after != before {
             self.snapshot.game_time = after;
         }
@@ -167723,6 +167768,88 @@ func ControlDig() { dig_count = 1; return(1); }
                 data: 0,
             }
         ));
+    }
+
+    #[test]
+    fn l144_standalone_client_info_routes_wheel_and_keyboard_to_overflow() {
+        use lc_frontend::runtime_client_list::{
+            RuntimeClientListDialog, RuntimeClientRow, RuntimeClientStatusIcon,
+        };
+
+        let mut app = new_classic_running_sandbox_app();
+        app.resize(640, 480).expect("resize client-info fixture");
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+        let row = RuntimeClientRow {
+            client_id: 7,
+            name: "Remote".to_string(),
+            nick: "Nick".to_string(),
+            host: false,
+            local: false,
+            activated: true,
+            observer: false,
+            muted: false,
+            has_players: false,
+            player_names: Vec::new(),
+            addresses: (0..20)
+                .map(|index| format!("198.51.100.{index}:1111"))
+                .collect(),
+            status: RuntimeClientStatusIcon::Ready,
+            wait_ms: None,
+            connections: Vec::new(),
+            can_moderate: false,
+        };
+        app.runtime_client_list = Some(RuntimeClientListDialog::new_info(
+            "Client information",
+            row,
+        ));
+        let (preferred, line_height) = app
+            .runtime_client_list_input_geometry()
+            .expect("standalone info geometry");
+        let info = app
+            .runtime_client_list
+            .as_ref()
+            .and_then(|dialog| dialog.info_layout(preferred, line_height))
+            .expect("standalone info layout");
+        app.running_pointer_position = Some(GuiPoint::new(
+            (info.text.x + 2) as f32,
+            (info.text.y + info.text.h / 2) as f32,
+        ));
+        let initial = app
+            .runtime_client_list
+            .as_ref()
+            .and_then(|dialog| dialog.info_scroll_metrics(preferred, &fonts.text))
+            .expect("initial scroll metrics");
+        assert!(initial.max_scroll > 0);
+
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("standalone info consumes wheel");
+        let wheeled = app
+            .runtime_client_list
+            .as_ref()
+            .and_then(|dialog| dialog.info_scroll_metrics(preferred, &fonts.text))
+            .expect("wheel scroll metrics");
+        assert!(wheeled.scroll_y > initial.scroll_y);
+
+        app.handle_key(VirtualKeyCode::End, ElementState::Pressed)
+            .expect("standalone info consumes End");
+        let ended = app
+            .runtime_client_list
+            .as_ref()
+            .and_then(|dialog| dialog.info_scroll_metrics(preferred, &fonts.text))
+            .expect("End scroll metrics");
+        assert_eq!(ended.scroll_y, ended.max_scroll);
+        app.handle_key(VirtualKeyCode::End, ElementState::Released)
+            .expect("standalone info consumes End release");
+        app.handle_key(VirtualKeyCode::Home, ElementState::Pressed)
+            .expect("standalone info consumes Home");
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .and_then(|dialog| dialog.info_scroll_metrics(preferred, &fonts.text))
+                .expect("Home scroll metrics")
+                .scroll_y,
+            0
+        );
     }
 
     #[test]

@@ -14,6 +14,9 @@ use crate::classic_gui::{
 };
 use crate::context_menu::{draw_classic_tooltip, ClassicTooltipTracker};
 use crate::game_lobby::{LobbyOptionKind, LobbyOptionRow};
+use crate::info_dialog::{
+    InfoScrollTarget, ScrollingInfoDialog, ScrollingInfoGeometry, ScrollingInfoMetrics,
+};
 use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode, StartupTooltip};
 
 const ICON_CELL: u32 = 40;
@@ -169,6 +172,9 @@ enum HitTarget {
     Dialog,
     Close,
     InfoClose,
+    InfoScrollUp,
+    InfoScrollDown,
+    InfoScrollTrack,
     OptionRow(usize),
     OptionValue(usize),
     OptionScrollUp,
@@ -223,6 +229,7 @@ pub struct RuntimeClientListLayout {
     pub option_rows: Vec<RuntimeClientOptionLayout>,
     pub row_height: i32,
     pub icon_size: i32,
+    font_line_height: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -230,7 +237,9 @@ pub struct RuntimeClientInfoLayout {
     pub bounds: IntRect,
     pub caption: IntRect,
     pub close_button: IntRect,
+    pub text_window: IntRect,
     pub text: IntRect,
+    pub scrollbar: IntRect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,7 +275,7 @@ pub struct RuntimeClientListTooltip {
 #[derive(Clone, Debug)]
 pub struct RuntimeClientListDialog {
     caption: String,
-    info_caption: String,
+    info_dialog: ScrollingInfoDialog,
     caption_scroll: Cell<CaptionScrollState>,
     info_caption_scroll: Cell<CaptionScrollState>,
     options: Vec<LobbyOptionRow>,
@@ -304,7 +313,7 @@ impl RuntimeClientListDialog {
             .unwrap_or_default();
         Self {
             caption: caption.into(),
-            info_caption: "Client information".to_string(),
+            info_dialog: ScrollingInfoDialog::new("Client information", 10, true),
             caption_scroll: Cell::new(CaptionScrollState::default()),
             info_caption_scroll: Cell::new(CaptionScrollState::default()),
             options,
@@ -333,9 +342,10 @@ impl RuntimeClientListDialog {
     /// constructing the surrounding F4 client-list dialog.
     pub fn new_info(caption: impl Into<String>, row: RuntimeClientRow) -> Self {
         let client_id = row.client_id;
+        let lines = client_info_lines(&row);
         Self {
             caption: String::new(),
-            info_caption: caption.into(),
+            info_dialog: ScrollingInfoDialog::new(caption, 10, true),
             caption_scroll: Cell::new(CaptionScrollState::default()),
             info_caption_scroll: Cell::new(CaptionScrollState::default()),
             options: Vec::new(),
@@ -358,10 +368,16 @@ impl RuntimeClientListDialog {
             option_scroll_row: Cell::new(0),
             scroll_row: Cell::new(0),
         }
+        .with_initial_info_lines(lines)
+    }
+
+    fn with_initial_info_lines(mut self, lines: Vec<String>) -> Self {
+        self.info_dialog.reset_lines(lines);
+        self
     }
 
     pub fn with_info_caption(mut self, caption: impl Into<String>) -> Self {
-        self.info_caption = caption.into();
+        self.info_dialog.set_caption(caption);
         self
     }
 
@@ -425,6 +441,10 @@ impl RuntimeClientListDialog {
         self.info_client_id
     }
 
+    pub fn info_lines(&self) -> &[String] {
+        self.info_dialog.lines()
+    }
+
     pub const fn is_info_only(&self) -> bool {
         self.info_only
     }
@@ -439,6 +459,25 @@ impl RuntimeClientListDialog {
         rows: Vec<RuntimeClientRow>,
         status: RuntimeClientListStatus,
     ) {
+        self.replace_snapshot_inner(options, rows, status, false);
+    }
+
+    pub fn replace_snapshot_on_sec1(
+        &mut self,
+        options: Vec<LobbyOptionRow>,
+        rows: Vec<RuntimeClientRow>,
+        status: RuntimeClientListStatus,
+    ) {
+        self.replace_snapshot_inner(options, rows, status, true);
+    }
+
+    fn replace_snapshot_inner(
+        &mut self,
+        options: Vec<LobbyOptionRow>,
+        rows: Vec<RuntimeClientRow>,
+        status: RuntimeClientListStatus,
+        sec1_timer: bool,
+    ) {
         self.options = options;
         self.rows = rows;
         self.status = status;
@@ -447,6 +486,18 @@ impl RuntimeClientListDialog {
             .is_some_and(|id| !self.rows.iter().any(|row| row.client_id == id))
         {
             self.close_info();
+        }
+        if let Some(lines) = self.info_client_id.and_then(|id| {
+            self.rows
+                .iter()
+                .find(|row| row.client_id == id)
+                .map(client_info_lines)
+        }) {
+            if sec1_timer {
+                let _ = self.info_dialog.on_sec1_timer(|| lines);
+            } else {
+                self.info_dialog.replace_lines_preserving_scroll(lines);
+            }
         }
         if self
             .selected_entry
@@ -588,6 +639,7 @@ impl RuntimeClientListDialog {
             option_rows,
             row_height: (font_line_height + 4).max(18),
             icon_size: font_line_height.max(16),
+            font_line_height: font_line_height.max(1),
         };
         self.clamped_scroll_row(&layout);
         layout
@@ -600,6 +652,28 @@ impl RuntimeClientListDialog {
     ) -> Option<RuntimeClientInfoLayout> {
         let parent = self.layout(preferred, font_line_height);
         self.info_layout_from_parent(&parent)
+    }
+
+    pub fn info_scroll_metrics(
+        &self,
+        preferred: IntRect,
+        font: &ClonkFont,
+    ) -> Option<ScrollingInfoMetrics> {
+        let layout = self.info_layout(preferred, font.line_height)?;
+        let geometry = info_scrolling_geometry(&layout, font.line_height);
+        Some(self.info_dialog.metrics(&geometry))
+    }
+
+    pub fn visible_info_lines(&self, preferred: IntRect, font: &ClonkFont) -> Vec<String> {
+        let Some(layout) = self.info_layout(preferred, font.line_height) else {
+            return Vec::new();
+        };
+        let geometry = info_scrolling_geometry(&layout, font.line_height);
+        self.info_dialog
+            .visible_lines(&geometry)
+            .into_iter()
+            .map(|line| line.text)
+            .collect()
     }
 
     /// Returns the title/close tooltip currently owned by this dialog. The
@@ -621,7 +695,7 @@ impl RuntimeClientListDialog {
             if contains(info.close_button, point) {
                 Some(StartupTooltip::resource("IDS_MNU_CLOSE"))
             } else if contains(info.caption, point) {
-                Some(StartupTooltip::text(self.info_caption.clone()))
+                Some(StartupTooltip::text(self.info_dialog.caption().to_string()))
             } else {
                 None
             }
@@ -647,8 +721,12 @@ impl RuntimeClientListDialog {
         self.pointer = Some(point);
         self.tooltip.note_pointer_wheel();
         let layout = self.layout(preferred, font_line_height);
-        if self.info_client_id.is_some() {
-            return false;
+        if let Some(info) = self.info_layout_from_parent(&layout) {
+            if contains(info.text_window, point) && delta != 0 {
+                let geometry = info_scrolling_geometry(&info, font_line_height);
+                self.info_dialog.handle_wheel(delta, &geometry);
+            }
+            return true;
         }
         if contains(layout.options, point) {
             if delta != 0 {
@@ -712,6 +790,13 @@ impl RuntimeClientListDialog {
             return true;
         }
         let layout = self.layout(preferred, font_line_height);
+        if self.pointer_capture == Some(HitTarget::InfoScrollTrack) {
+            if let Some(info) = self.info_layout_from_parent(&layout) {
+                let geometry = info_scrolling_geometry(&info, font_line_height);
+                self.info_dialog.set_scroll_from_pointer(point, &geometry);
+            }
+            return true;
+        }
         if self.pointer_capture == Some(HitTarget::OptionScrollTrack) {
             self.set_option_scroll_from_pointer(point, &layout);
             return true;
@@ -741,6 +826,33 @@ impl RuntimeClientListDialog {
         self.title_drag = None;
         self.pointer_capture = self.hit_target(point, &layout);
         match self.pointer_capture {
+            Some(HitTarget::InfoScrollUp) => {
+                if let Some(info) = self.info_layout_from_parent(&layout) {
+                    let geometry = info_scrolling_geometry(&info, font_line_height);
+                    self.info_dialog
+                        .activate_scroll_target(InfoScrollTarget::Up, point, &geometry);
+                }
+            }
+            Some(HitTarget::InfoScrollDown) => {
+                if let Some(info) = self.info_layout_from_parent(&layout) {
+                    let geometry = info_scrolling_geometry(&info, font_line_height);
+                    self.info_dialog.activate_scroll_target(
+                        InfoScrollTarget::Down,
+                        point,
+                        &geometry,
+                    );
+                }
+            }
+            Some(HitTarget::InfoScrollTrack) => {
+                if let Some(info) = self.info_layout_from_parent(&layout) {
+                    let geometry = info_scrolling_geometry(&info, font_line_height);
+                    self.info_dialog.activate_scroll_target(
+                        InfoScrollTarget::Track,
+                        point,
+                        &geometry,
+                    );
+                }
+            }
             Some(HitTarget::OptionRow(_) | HitTarget::OptionValue(_)) => {
                 self.focus = Some(RuntimeClientListFocus::OptionsList);
             }
@@ -826,6 +938,9 @@ impl RuntimeClientListDialog {
             }
             HitTarget::ClientInfo(client_id) => {
                 self.reset_info_presentation();
+                if let Some(row) = self.rows.iter().find(|row| row.client_id == client_id) {
+                    self.info_dialog.reset_lines(client_info_lines(row));
+                }
                 self.info_client_id = Some(client_id);
                 RuntimeClientListAction::OpenInfo(client_id)
             }
@@ -839,6 +954,9 @@ impl RuntimeClientListDialog {
                 }
             }
             HitTarget::Dialog
+            | HitTarget::InfoScrollUp
+            | HitTarget::InfoScrollDown
+            | HitTarget::InfoScrollTrack
             | HitTarget::OptionRow(_)
             | HitTarget::OptionScrollUp
             | HitTarget::OptionScrollDown
@@ -874,8 +992,13 @@ impl RuntimeClientListDialog {
         parent: &RuntimeClientListLayout,
     ) -> Option<RuntimeClientInfoLayout> {
         self.info_client_id?;
-        let width = (parent.bounds.w * 3 / 4).max(160).min(parent.bounds.w);
-        let height = (parent.row_height * 8 + 16).max(90).min(parent.bounds.h);
+        let width = 620.min(parent.bounds.w).max(1);
+        let font_line_height = parent.font_line_height;
+        let height = self
+            .info_dialog
+            .preferred_dialog_height(font_line_height)
+            .max(90)
+            .min(parent.bounds.h);
         // The information dialog is a separate modal C4GUI::Dialog. Center it
         // in the preferred rectangle independently of a dragged F4 dialog.
         let parent_x = parent.bounds.x.saturating_sub(self.dialog_offset.0);
@@ -893,6 +1016,16 @@ impl RuntimeClientListDialog {
             w: bounds.w,
             h: (parent.row_height + 4).max(24),
         };
+        let text_window = IntRect {
+            x: bounds.x + 4,
+            y: caption.y + caption.h + 3,
+            w: (bounds.w - 8).max(1),
+            h: self
+                .info_dialog
+                .preferred_text_window_height(font_line_height)
+                .min((bounds.h - caption.h - 7).max(1)),
+        };
+        let scrolling = self.info_dialog.geometry(text_window, font_line_height);
         Some(RuntimeClientInfoLayout {
             bounds,
             caption,
@@ -902,12 +1035,9 @@ impl RuntimeClientListDialog {
                 w: 16,
                 h: 16,
             },
-            text: IntRect {
-                x: bounds.x + 4,
-                y: caption.y + caption.h + 3,
-                w: (bounds.w - 8).max(1),
-                h: (bounds.h - caption.h - 7).max(1),
-            },
+            text_window,
+            text: scrolling.viewport,
+            scrollbar: scrolling.scrollbar,
         })
     }
 
@@ -951,6 +1081,7 @@ impl RuntimeClientListDialog {
     fn reset_info_presentation(&mut self) {
         self.info_dialog_offset = (0, 0);
         self.info_caption_scroll.set(CaptionScrollState::default());
+        self.info_dialog.reset_scroll();
         if self
             .title_drag
             .is_some_and(|drag| drag.title == DialogTitle::Info)
@@ -963,6 +1094,7 @@ impl RuntimeClientListDialog {
         self.info_client_id = None;
         self.pointer_capture = None;
         self.reset_info_presentation();
+        self.info_dialog.reset_lines(Vec::new());
     }
 
     pub fn handle_key(
@@ -975,10 +1107,15 @@ impl RuntimeClientListDialog {
         self.tooltip.note_non_pointer_input();
         if self.info_client_id.is_some() {
             self.keyboard_press = None;
-            return match key {
-                KeyCode::Escape => (true, self.handle_escape(true)),
-                _ => (true, None),
-            };
+            if key == KeyCode::Escape {
+                return (true, self.handle_escape(true));
+            }
+            let layout = self.layout(preferred, font_line_height);
+            if let Some(info) = self.info_layout_from_parent(&layout) {
+                let geometry = info_scrolling_geometry(&info, font_line_height);
+                let _ = self.info_dialog.handle_key(key, &geometry);
+            }
+            return (true, None);
         }
         if !matches!(key, KeyCode::Enter | KeyCode::Space) {
             self.keyboard_press = None;
@@ -1284,8 +1421,8 @@ impl RuntimeClientListDialog {
         title: DialogTitle,
     ) -> i32 {
         let (text, state) = match title {
-            DialogTitle::Main => (&self.caption, &self.caption_scroll),
-            DialogTitle::Info => (&self.info_caption, &self.info_caption_scroll),
+            DialogTitle::Main => (self.caption.as_str(), &self.caption_scroll),
+            DialogTitle::Info => (self.info_dialog.caption(), &self.info_caption_scroll),
         };
         caption_scroll_offset_at(state, now, font, text, caption.w)
     }
@@ -1400,12 +1537,10 @@ impl RuntimeClientListDialog {
         self.measure_option_caption_width(&resources.fonts.text);
         let layout = self.layout(preferred, resources.fonts.text.line_height);
         if self.info_only {
-            if let (Some(client_id), Some(info)) =
+            if let (Some(_), Some(info)) =
                 (self.info_client_id, self.info_layout_from_parent(&layout))
             {
-                self.draw_client_info(
-                    surface, client_id, &layout, &info, resources, active, gamma, now,
-                );
+                self.draw_client_info(surface, &layout, &info, resources, active, gamma, now);
             }
             return Ok(());
         }
@@ -1555,12 +1690,9 @@ impl RuntimeClientListDialog {
             layout.status,
         );
 
-        if let (Some(client_id), Some(info)) =
-            (self.info_client_id, self.info_layout_from_parent(&layout))
+        if let (Some(_), Some(info)) = (self.info_client_id, self.info_layout_from_parent(&layout))
         {
-            self.draw_client_info(
-                surface, client_id, &layout, &info, resources, active, gamma, now,
-            );
+            self.draw_client_info(surface, &layout, &info, resources, active, gamma, now);
         } else if active {
             if let Some(tooltip) = self.tooltip_state_at(now, preferred, &resources.fonts.text) {
                 draw_classic_tooltip(
@@ -1804,7 +1936,6 @@ impl RuntimeClientListDialog {
     fn draw_client_info(
         &self,
         surface: &mut Surface,
-        client_id: i32,
         parent: &RuntimeClientListLayout,
         layout: &RuntimeClientInfoLayout,
         resources: RuntimeClientListResources<'_>,
@@ -1812,9 +1943,6 @@ impl RuntimeClientListDialog {
         gamma: Option<&GammaRamp>,
         now: Instant,
     ) {
-        let Some(row) = self.rows.iter().find(|row| row.client_id == client_id) else {
-            return;
-        };
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
         let caption_scroll = self.caption_scroll_offset_at(
             now,
@@ -1825,7 +1953,7 @@ impl RuntimeClientListDialog {
         resources.skin.draw_caption_scrolled(
             surface,
             layout.caption,
-            &self.info_caption,
+            self.info_dialog.caption(),
             &resources.fonts.text,
             [255, 255, 255, 255],
             TextAlign::Left,
@@ -1843,46 +1971,40 @@ impl RuntimeClientListDialog {
             active,
             gamma,
         );
-        let role = if row.host { "host" } else { "client" };
-        let location = if row.local { "local" } else { "remote" };
-        let activity = if row.activated { "active" } else { "inactive" };
-        let mut lines = vec![
-            format!("{activity}, {location}, {role}"),
-            format!("{} ({})", row.label(), row.client_id),
-        ];
-        if !row.player_names.is_empty() {
-            lines.push(format!("Players: {}", row.player_names.join(", ")));
-        }
-        if row.addresses.is_empty() {
-            lines.push("No addresses available".to_string());
-        } else {
-            lines.push("Addresses:".to_string());
-            lines.extend(row.addresses.iter().map(|address| format!("  {address}")));
-        }
-        if row.connections.is_empty() {
-            lines.push("No connection details available".to_string());
-        } else {
-            lines.extend(row.connections.iter().map(|connection| {
-                format!(
-                    "{} {} {} ({} ms)",
-                    connection.usage,
-                    connection.protocol,
-                    connection.peer_address,
-                    connection.ping_ms
-                )
-            }));
-        }
-        let text = lines.join("|");
-        draw_clipped_text(
+        draw_engine_box(
             surface,
-            &resources.fonts.text,
-            layout.bounds.x + 6,
-            layout.caption.y + layout.caption.h + 5,
-            &text,
-            [255, 255, 255, 255],
-            TextAlign::Left,
+            layout.text_window.x,
+            layout.text_window.y,
+            layout.text_window.x + layout.text_window.w - 1,
+            layout.text_window.y + layout.text_window.h - 1,
+            0x7f00_0000,
             gamma,
-            layout.text,
+        );
+        draw_3d_frame(surface, layout.text_window, gamma);
+        let geometry = info_scrolling_geometry(layout, resources.fonts.text.line_height);
+        for line in self.info_dialog.visible_lines(&geometry) {
+            draw_clipped_text(
+                surface,
+                &resources.fonts.text,
+                geometry.viewport.x,
+                line.y,
+                &line.text,
+                [255, 255, 255, 255],
+                TextAlign::Left,
+                gamma,
+                geometry.viewport,
+            );
+        }
+        let metrics = self.info_dialog.metrics(&geometry);
+        draw_scrollbar(
+            surface,
+            geometry.scrollbar,
+            resources.scroll,
+            self.info_dialog.scrollbar_pin(&geometry),
+            usize::try_from(metrics.max_scroll).unwrap_or(usize::MAX),
+            self.pointer_capture == Some(HitTarget::InfoScrollUp),
+            self.pointer_capture == Some(HitTarget::InfoScrollDown),
+            gamma,
         );
     }
 
@@ -1983,6 +2105,15 @@ impl RuntimeClientListDialog {
         if let Some(info) = self.info_layout_from_parent(layout) {
             return if contains(info.close_button, point) {
                 Some(HitTarget::InfoClose)
+            } else if let Some(target) = self.info_dialog.scroll_target_at(
+                point,
+                &info_scrolling_geometry(&info, layout.font_line_height),
+            ) {
+                Some(match target {
+                    InfoScrollTarget::Up => HitTarget::InfoScrollUp,
+                    InfoScrollTarget::Down => HitTarget::InfoScrollDown,
+                    InfoScrollTarget::Track => HitTarget::InfoScrollTrack,
+                })
             } else if contains(info.bounds, point) {
                 Some(HitTarget::Dialog)
             } else {
@@ -2101,6 +2232,48 @@ impl RuntimeClientListDialog {
             y += layout.row_height;
         }
         contains(layout.bounds, point).then_some(HitTarget::Dialog)
+    }
+}
+
+fn client_info_lines(row: &RuntimeClientRow) -> Vec<String> {
+    let role = if row.host { "host" } else { "client" };
+    let location = if row.local { "local" } else { "remote" };
+    let activity = if row.activated { "active" } else { "inactive" };
+    let mut lines = vec![
+        format!("{activity}, {location}, {role}"),
+        format!("{} ({})", row.label(), row.client_id),
+    ];
+    if !row.player_names.is_empty() {
+        lines.push(format!("Players: {}", row.player_names.join(", ")));
+    }
+    if row.addresses.is_empty() {
+        lines.push("No addresses available".to_string());
+    } else {
+        lines.push("Addresses:".to_string());
+        lines.extend(row.addresses.iter().map(|address| format!("  {address}")));
+    }
+    if row.connections.is_empty() {
+        lines.push("No connection details available".to_string());
+    } else {
+        lines.extend(row.connections.iter().map(|connection| {
+            format!(
+                "{} {} {} ({} ms)",
+                connection.usage, connection.protocol, connection.peer_address, connection.ping_ms
+            )
+        }));
+    }
+    lines
+}
+
+fn info_scrolling_geometry(
+    layout: &RuntimeClientInfoLayout,
+    line_height: i32,
+) -> ScrollingInfoGeometry {
+    ScrollingInfoGeometry {
+        frame: layout.text_window,
+        viewport: layout.text,
+        scrollbar: layout.scrollbar,
+        line_height: line_height.max(1),
     }
 }
 
@@ -2563,7 +2736,7 @@ mod tests {
             vec![row()],
             RuntimeClientListStatus::default(),
         )
-        .with_info_caption("W".repeat(138));
+        .with_info_caption("W".repeat(158));
         let layout = dialog.layout(preferred, font.line_height);
         assert_eq!(
             font.measure(&dialog.caption, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT
@@ -2604,7 +2777,9 @@ mod tests {
             .info_layout(preferred, font.line_height)
             .expect("info layout");
         assert_eq!(
-            font.measure(&dialog.info_caption, true).0 + TITLE_LEFT_INDENT + TITLE_RIGHT_INDENT
+            font.measure(dialog.info_dialog.caption(), true).0
+                + TITLE_LEFT_INDENT
+                + TITLE_RIGHT_INDENT
                 - info.caption.w,
             3
         );
@@ -2726,6 +2901,114 @@ mod tests {
             Some(RuntimeClientListAction::CloseInfo)
         );
         assert_eq!(dialog.info_client_id(), None);
+    }
+
+    #[test]
+    fn l144_client_info_overflow_is_reachable_and_sec1_refresh_preserves_scroll() {
+        let preferred = IntRect {
+            x: 0,
+            y: 0,
+            w: 320,
+            h: 200,
+        };
+        let font = tooltip_font();
+        let mut overflow = row();
+        overflow.addresses = (0..12)
+            .map(|index| format!("10.0.0.{index}:111{index}"))
+            .collect();
+        overflow.connections = (0..6)
+            .map(|index| RuntimeConnectionRow {
+                connection_id: index,
+                usage: format!("route-{index}"),
+                protocol: "UDP".to_string(),
+                peer_address: format!("192.0.2.{index}:222{index}"),
+                packet_loss: index,
+                ping_ms: 10 + index as i32,
+                can_disconnect: false,
+            })
+            .collect();
+        let all_lines = client_info_lines(&overflow);
+        let mut dialog = RuntimeClientListDialog::new(
+            "Network",
+            options(true),
+            vec![overflow.clone()],
+            RuntimeClientListStatus::default(),
+        );
+        let list = dialog.layout(preferred, font.line_height);
+        let row_point = GuiPoint::new(
+            (list.list.x + 25) as f32,
+            (list.list.y + list.row_height / 2) as f32,
+        );
+        assert!(dialog.handle_pointer_down(row_point, preferred, font.line_height));
+        assert_eq!(
+            dialog.handle_pointer_up(row_point, preferred, font.line_height),
+            Some(RuntimeClientListAction::OpenInfo(7))
+        );
+        let roomy = IntRect {
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 480,
+        };
+        assert_eq!(
+            dialog
+                .info_scroll_metrics(roomy, &font)
+                .expect("unclamped scroll metrics")
+                .viewport_height,
+            10 * font.line_height,
+            "the configurable line count fixes the unclamped viewport height"
+        );
+        let info = dialog
+            .info_layout(preferred, font.line_height)
+            .expect("standalone info layout");
+        let point = GuiPoint::new(
+            (info.text.x + 2) as f32,
+            (info.text.y + info.text.h / 2) as f32,
+        );
+        let mut reached = std::collections::BTreeSet::new();
+
+        loop {
+            reached.extend(dialog.visible_info_lines(preferred, &font));
+            let metrics = dialog
+                .info_scroll_metrics(preferred, &font)
+                .expect("scroll metrics");
+            if metrics.scroll_y == metrics.max_scroll {
+                assert!(metrics.max_scroll > 0, "fixture must overflow the viewport");
+                break;
+            }
+            assert!(dialog.handle_wheel(point, -16, preferred, font.line_height));
+        }
+        assert!(
+            all_lines.iter().all(|line| reached.contains(line)),
+            "every generated address and connection line must become visible"
+        );
+
+        let retained_scroll = dialog
+            .info_scroll_metrics(preferred, &font)
+            .expect("retained scroll metrics")
+            .scroll_y;
+        overflow
+            .connections
+            .last_mut()
+            .expect("tail connection")
+            .peer_address = "refreshed-tail.example:9999".to_string();
+        dialog.replace_snapshot_on_sec1(
+            options(true),
+            vec![overflow],
+            RuntimeClientListStatus::default(),
+        );
+        assert_eq!(
+            dialog
+                .info_scroll_metrics(preferred, &font)
+                .expect("refreshed scroll metrics")
+                .scroll_y,
+            retained_scroll,
+            "the one-second refresh retains the absolute pixel offset"
+        );
+        assert!(dialog
+            .visible_info_lines(preferred, &font)
+            .iter()
+            .any(|line| line.contains("refreshed-tail.example:9999")));
     }
 
     #[test]
