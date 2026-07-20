@@ -23,7 +23,8 @@ pub use client_start_barrier::ClientStartBarrier;
 pub use configured_client_players::{
     configured_native_value, load_configured_client_players, load_configured_mission_access,
     load_snapshotted_client_players, snapshot_configured_client_player_selection,
-    ConfiguredClientPlayerSelection, ConfiguredClientPlayers, ConfiguredClientPlayersError,
+    update_configured_native_values, ConfiguredClientPlayerSelection, ConfiguredClientPlayers,
+    ConfiguredClientPlayersError, NativeConfigValue,
 };
 
 use std::collections::HashMap;

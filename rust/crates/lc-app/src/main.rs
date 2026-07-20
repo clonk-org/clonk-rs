@@ -8684,10 +8684,13 @@ enum MenuTitleDrag {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum MessageDialogContinuation {
     None,
     StartupNetworkConnectProgress,
+    StartupIrcConnectWarning {
+        login: lc_frontend::startup_netdlg::NetDlgChatLogin,
+    },
     NetworkClientStartWait,
     NetworkRuntimeJoin {
         reference: lc_network::NetworkGameReference,
@@ -8721,7 +8724,7 @@ enum MessageDialogContinuation {
     OptionsAdvancedWarning,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct PendingMessageDialog {
     state: lc_frontend::message_dialog::MessageDialogState,
     continuation: MessageDialogContinuation,
@@ -17510,6 +17513,84 @@ fn parse_config_bool(raw: &str) -> bool {
     )
 }
 
+const DEFAULT_IRC_SERVER: &str = "irc.euirc.net";
+const DEFAULT_IRC_CHANNELS: &str = "#clonken,#legacyclonk";
+
+/// Typed projection of C4ConfigIRC plus the startup disclaimer preference.
+/// The password deliberately is not configuration-backed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IrcSettings {
+    server: String,
+    nick: String,
+    real_name: String,
+    channel: String,
+    hide_dangerous_warning: bool,
+}
+
+impl Default for IrcSettings {
+    fn default() -> Self {
+        Self {
+            server: DEFAULT_IRC_SERVER.to_string(),
+            nick: String::new(),
+            real_name: String::new(),
+            channel: DEFAULT_IRC_CHANNELS.to_string(),
+            hide_dangerous_warning: false,
+        }
+    }
+}
+
+impl IrcSettings {
+    fn from_config(config: &[u8]) -> Self {
+        let text = |section, key| {
+            native_config_text(config, section, key).map(|value| {
+                lc_resources::decode_legacy_script_text(&lc_script::c4_string_bytes(&value))
+            })
+        };
+        let mut settings = Self::default();
+        settings.server = text("IRC", "Server2")
+            .as_deref()
+            .unwrap_or(DEFAULT_IRC_SERVER)
+            .to_string();
+        settings.nick = text("IRC", "Nick")
+            .as_deref()
+            .unwrap_or_default()
+            .to_string();
+        if settings.nick.is_empty() {
+            settings.nick = text("Network", "Nick")
+                .as_deref()
+                .unwrap_or_default()
+                .to_string();
+        }
+        settings.real_name = text("IRC", "RealName")
+            .as_deref()
+            .unwrap_or_default()
+            .to_string();
+        settings.channel = text("IRC", "Channel")
+            .as_deref()
+            .unwrap_or(DEFAULT_IRC_CHANNELS)
+            .to_string();
+        settings.hide_dangerous_warning = text("Startup", "HideMsgIRCDangerous")
+            .as_deref()
+            .and_then(parse_classic_loader_bool)
+            .unwrap_or(false);
+        settings
+    }
+
+    fn login(&self) -> lc_frontend::startup_netdlg::NetDlgChatLogin {
+        lc_frontend::startup_netdlg::NetDlgChatLogin {
+            server: self.server.clone(),
+            nick: self.nick.clone(),
+            password: String::new(),
+            real_name: self.real_name.clone(),
+            channel: self.channel.clone(),
+        }
+    }
+}
+
+fn load_irc_settings(paths: Option<&AppPaths>) -> IrcSettings {
+    IrcSettings::from_config(&load_native_config_bytes(paths))
+}
+
 fn load_startup_alphabetical_sorting(paths: Option<&AppPaths>) -> bool {
     paths
         .and_then(|paths| Config::load(paths.config_file()).ok())
@@ -18578,6 +18659,67 @@ fn persist_config_value(
         fs::create_dir_all(parent)?;
     }
     config.save(path)
+}
+
+fn persist_irc_login_settings(
+    paths: &AppPaths,
+    login: &lc_frontend::startup_netdlg::NetDlgChatLogin,
+) -> io::Result<()> {
+    let native_value = |field: &str, value: &str| {
+        lc_resources::encode_legacy_script_text(value).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("IRC {field} is not representable in the classic Windows-1252 config"),
+            )
+        })
+    };
+    let nick = native_value("nickname", &login.nick)?;
+    let real_name = native_value("real name", &login.real_name)?;
+    let channel = native_value("channel", &login.channel)?;
+    persist_native_config_values(
+        paths,
+        "IRC",
+        &[
+            ("Nick", lc_app::NativeConfigValue::CppEscapedString(&nick)),
+            (
+                "RealName",
+                lc_app::NativeConfigValue::CppEscapedString(&real_name),
+            ),
+            (
+                "Channel",
+                lc_app::NativeConfigValue::CppEscapedString(&channel),
+            ),
+        ],
+    )
+}
+
+fn persist_irc_warning_preference(paths: &AppPaths, checked: bool) -> io::Result<()> {
+    persist_native_config_values(
+        paths,
+        "Startup",
+        &[(
+            "HideMsgIRCDangerous",
+            lc_app::NativeConfigValue::RawAscii(if checked { "1" } else { "0" }),
+        )],
+    )
+}
+
+fn persist_native_config_values(
+    paths: &AppPaths,
+    section: &str,
+    updates: &[(&str, lc_app::NativeConfigValue<'_>)],
+) -> io::Result<()> {
+    let path = paths.config_file();
+    let config = match fs::read(&path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    let updated = lc_app::update_configured_native_values(&config, section, updates)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, updated)
 }
 
 fn apply_startup_options_config(
@@ -40330,6 +40472,55 @@ impl GameApp {
         self.sync_startup_irc_projection(snapshot);
     }
 
+    fn request_startup_irc_connection(
+        &mut self,
+        login: lc_frontend::startup_netdlg::NetDlgChatLogin,
+    ) -> Result<(), EngineError> {
+        // C4ChatControl::OnConnectBtn stores these three editable values
+        // before the disclaimer. Server2 stays config-owned and the password
+        // remains transient even when the user cancels the warning.
+        if let Some(paths) = self.app_paths.as_ref() {
+            if let Err(error) = persist_irc_login_settings(paths, &login) {
+                tracing::warn!(%error, "failed to persist IRC login settings");
+                self.status_text = format!("Unable to save IRC login settings: {error}");
+            }
+        }
+
+        if load_irc_settings(self.app_paths.as_ref()).hide_dangerous_warning {
+            self.connect_startup_irc(login);
+            return Ok(());
+        }
+
+        let message = format_resource_string(
+            self.runtime_resource_text(
+                "IDS_MSG_YOUAREABOUTTOCONNECTTOAPU",
+                "You are about to connect to a public chat server (%s). RedWolf Design cannot assume liability for the contents of any public chat. Additional rules can be found as part of the server messages in the server channel. Proceed?",
+            ),
+            &[&login.server],
+        );
+        let caption = self.runtime_resource_text(
+            "IDS_MSG_CHATDISCLAIMER",
+            "Chat - Disclaimer",
+        );
+        let checkbox = self.runtime_resource_text(
+            "IDS_MSG_DONTSHOW",
+            "&Don't display this message in the future.",
+        );
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                message,
+                caption,
+                lc_frontend::message_dialog::MessageDialogButtons::OK_CANCEL,
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            )
+            .with_checkbox(checkbox, false),
+            MessageDialogContinuation::StartupIrcConnectWarning { login },
+        )?;
+        Ok(())
+    }
+
     fn connect_startup_irc(&mut self, login: lc_frontend::startup_netdlg::NetDlgChatLogin) {
         if let Some(mut client) = self.startup_irc_client.take() {
             if let Err(error) = client.close() {
@@ -40518,7 +40709,9 @@ impl GameApp {
                     lc_frontend::startup_netdlg::NetDlgSound::Command => "Command",
                     lc_frontend::startup_netdlg::NetDlgSound::Error => "Error",
                 }),
-                NetDlgAction::ChatConnect(login) => self.connect_startup_irc(login),
+                NetDlgAction::ChatConnect(login) => {
+                    self.request_startup_irc_connection(login)?;
+                }
                 NetDlgAction::ChatCommand(command) => self.dispatch_startup_irc_command(command),
                 NetDlgAction::ChatDisconnect => self.disconnect_startup_irc(),
                 NetDlgAction::ChatSelectSheet { .. } => {
@@ -49678,6 +49871,7 @@ impl GameApp {
             },
             metrics,
         );
+        dialog.set_chat_login(load_irc_settings(self.app_paths.as_ref()).login());
         let search_config = load_network_search_settings(self.app_paths.as_ref());
         dialog.set_masterserver_entry(Self::startup_masterserver_query_entry(
             self.app_paths.as_ref(),
@@ -54631,28 +54825,42 @@ impl GameApp {
     }
 
     fn persist_message_dialog_checkbox_changes(&mut self, index: usize) {
-        let changes = self
-            .message_dialogs
-            .get_mut(index)
-            .filter(|dialog| {
-                matches!(
-                    &dialog.continuation,
-                    MessageDialogContinuation::NetworkScenarioPlayerCountWarning { .. }
-                )
-            })
-            .map(|dialog| dialog.state.take_checkbox_changes())
-            .unwrap_or_default();
+        let Some((key, description, native_irc_preference, changes)) = self.message_dialogs.get_mut(index).and_then(
+            |dialog| {
+                let (key, description, native_irc_preference) = match &dialog.continuation {
+                    MessageDialogContinuation::NetworkScenarioPlayerCountWarning { .. } => (
+                        "HideMsgStartDedicated",
+                        "scenario-start warning preference",
+                        false,
+                    ),
+                    MessageDialogContinuation::StartupIrcConnectWarning { .. } => (
+                        "HideMsgIRCDangerous",
+                        "IRC disclaimer preference",
+                        true,
+                    ),
+                    _ => return None,
+                };
+                Some((
+                    key,
+                    description,
+                    native_irc_preference,
+                    dialog.state.take_checkbox_changes(),
+                ))
+            },
+        ) else {
+            return;
+        };
         let Some(paths) = self.app_paths.as_ref() else {
             return;
         };
         for checked in changes {
-            if let Err(error) = persist_config_value(
-                paths,
-                "Startup",
-                "HideMsgStartDedicated",
-                i32::from(checked).to_string(),
-            ) {
-                tracing::warn!(%error, "failed to persist scenario-start warning preference");
+            let persisted = if native_irc_preference {
+                persist_irc_warning_preference(paths, checked)
+            } else {
+                persist_config_value(paths, "Startup", key, i32::from(checked).to_string())
+            };
+            if let Err(error) = persisted {
+                tracing::warn!(%error, preference = description, "failed to persist warning preference");
             }
         }
     }
@@ -54726,6 +54934,16 @@ impl GameApp {
                     self.startup_network_connection = None;
                     self.pending_network_join = None;
                     self.status_text.clear();
+                }
+            }
+            MessageDialogContinuation::StartupIrcConnectWarning { login } => {
+                if let (Some(paths), Some(checked)) = (self.app_paths.as_ref(), checkbox_checked) {
+                    if let Err(error) = persist_irc_warning_preference(paths, checked) {
+                        tracing::warn!(%error, "failed to persist IRC disclaimer preference");
+                    }
+                }
+                if result == lc_frontend::message_dialog::MessageDialogResult::Ok {
+                    self.connect_startup_irc(login);
                 }
             }
             MessageDialogContinuation::NetworkClientStartWait => {
@@ -95188,6 +95406,264 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("press Chat");
         app.handle_mouse_button(ElementState::Released)
             .expect("open the retained Chat page");
+    }
+
+    fn spawn_loopback_irc_server() -> (String, thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind loopback IRC listener");
+        let address = listener
+            .local_addr()
+            .expect("read loopback IRC listener address")
+            .to_string();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept loopback IRC client");
+            let mut buffer = [0_u8; 512];
+            while stream.read(&mut buffer).is_ok_and(|read| read != 0) {}
+        });
+        (address, server)
+    }
+
+    #[test]
+    fn irc_settings_use_cpp_defaults_and_network_nick_fallback() {
+        let defaults = IrcSettings::from_config(b"");
+        assert_eq!(defaults.server, "irc.euirc.net");
+        assert_eq!(defaults.nick, "");
+        assert_eq!(defaults.real_name, "");
+        assert_eq!(defaults.channel, "#clonken,#legacyclonk");
+        assert!(!defaults.hide_dangerous_warning);
+        assert_eq!(defaults.login().password, "");
+
+        let configured = IrcSettings::from_config(
+            b"[Network]\nNick=FallbackClonker\n[IRC]\nServer2=irc.example.test\nNick=\nRealName=J\xfcrgen\nChannel=#test\n[Startup]\nHideMsgIRCDangerous=true\n",
+        );
+        assert_eq!(configured.server, "irc.example.test");
+        assert_eq!(configured.nick, "FallbackClonker");
+        assert_eq!(configured.real_name, "Jürgen");
+        assert_eq!(configured.channel, "#test");
+        assert!(configured.hide_dangerous_warning);
+
+        let configured = IrcSettings::from_config(
+            b"[Network]\nNick=FallbackClonker\n[IRC]\nNick=IrcClonker\n",
+        );
+        assert_eq!(configured.nick, "IrcClonker");
+
+        let invalid = IrcSettings::from_config(b"[Startup]\nHideMsgIRCDangerous=yes\n");
+        assert!(!invalid.hide_dangerous_warning);
+    }
+
+    #[test]
+    fn irc_persistence_preserves_legacy_native_config_bytes() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("native IRC config user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        fs::write(
+            paths.config_file(),
+            b"[General]\r\nName=\"M\x81ker\"\r\n[IRC]\r\nServer2=\"irc.native.test\"\r\nNick=\"Old\"\r\n[Vendor]\r\nOpaque=\"\xfe\"\r\n",
+        )
+        .expect("write non-UTF-8 legacy config");
+        persist_irc_login_settings(
+            &paths,
+            &lc_frontend::startup_netdlg::NetDlgChatLogin {
+                server: "must-not-replace-server.test".into(),
+                nick: "NativeNick".into(),
+                password: "never-persist-this".into(),
+                real_name: "Grü1".into(),
+                channel: "#native".into(),
+            },
+        )
+        .expect("persist IRC fields in native config");
+        persist_irc_warning_preference(&paths, true)
+            .expect("persist IRC warning preference in native config");
+
+        let updated = fs::read(paths.config_file()).expect("read updated native config");
+        assert!(updated.starts_with(b"[General]\r\nName=\"M\x81ker\"\r\n"));
+        assert!(updated
+            .windows(b"[Vendor]\r\nOpaque=\"\xfe\"\r\n".len())
+            .any(|window| window == b"[Vendor]\r\nOpaque=\"\xfe\"\r\n"));
+        let native = |section, key| {
+            lc_app::configured_native_value(&updated, section, key)
+                .unwrap_or_else(|| panic!("missing {section}.{key}"))
+        };
+        assert_eq!(native("IRC", "Server2").as_bytes(), b"irc.native.test");
+        assert_eq!(native("IRC", "Nick").as_bytes(), b"NativeNick");
+        assert_eq!(native("IRC", "RealName").as_bytes(), b"Gr\xfc1");
+        assert_eq!(native("IRC", "Channel").as_bytes(), b"#native");
+        assert!(lc_app::configured_native_value(&updated, "IRC", "Password").is_none());
+        assert_eq!(
+            native("Startup", "HideMsgIRCDangerous").as_bytes(),
+            b"1"
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn startup_network_dialog_seeds_irc_login_from_config() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("IRC seed user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        fs::write(
+            paths.config_file(),
+            "[General]\nLanguageEx=US\n[Network]\nNick=NetworkFallback\nMasterServerSignUp=0\n[IRC]\nServer2=irc.seeded.test\nNick=\nRealName=Seeded Name\nChannel=#seeded\n",
+        )
+        .expect("seed IRC config");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        install_classic_test_assets(&mut app);
+
+        app.open_network_game_dialog();
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .chat_login(),
+            lc_frontend::startup_netdlg::NetDlgChatLogin {
+                server: "irc.seeded.test".into(),
+                nick: "NetworkFallback".into(),
+                password: String::new(),
+                real_name: "Seeded Name".into(),
+                channel: "#seeded".into(),
+            }
+        );
+        drop(app);
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn startup_irc_warning_persists_login_and_checkbox_on_cancel_then_connects_on_ok() {
+        use lc_frontend::message_dialog::{
+            MessageDialogButton, MessageDialogButtons, MessageDialogIcon, MessageDialogResult,
+        };
+
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("IRC warning user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "Startup", "HideMsgIRCDangerous", "0")
+            .expect("enable IRC warning");
+        persist_config_value(&paths, "IRC", "Server2", "irc.configured.test")
+            .expect("seed configured IRC server");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        install_classic_test_assets(&mut app);
+        let cancelled = lc_frontend::startup_netdlg::NetDlgChatLogin {
+            server: "irc.cancelled.test".into(),
+            nick: "SavedNick".into(),
+            password: "transient-secret".into(),
+            real_name: "Saved Name".into(),
+            channel: "#saved".into(),
+        };
+
+        app.request_startup_irc_connection(cancelled.clone())
+            .expect("open IRC warning");
+        let warning = app.message_dialogs.last_mut().expect("IRC warning dialog");
+        assert_eq!(warning.state.caption(), "Chat - Disclaimer");
+        assert!(warning.state.message().contains("irc.cancelled.test"));
+        assert_eq!(warning.state.buttons(), MessageDialogButtons::OK_CANCEL);
+        assert_eq!(warning.state.icon(), MessageDialogIcon::NOTIFY);
+        assert_eq!(warning.state.focused_button(), Some(MessageDialogButton::Ok));
+        assert!(matches!(
+            &warning.continuation,
+            MessageDialogContinuation::StartupIrcConnectWarning { login }
+                if login == &cancelled
+        ));
+        assert_eq!(warning.state.handle_hotkey('d'), None);
+        app.persist_top_message_dialog_checkbox_changes();
+        app.finish_message_dialog(MessageDialogResult::Cancel)
+            .expect("cancel IRC warning");
+        assert!(app.startup_irc_client.is_none());
+
+        let persisted = Config::load(paths.config_file()).expect("reload persisted IRC config");
+        assert_eq!(persisted.get_in(Some("IRC"), "Nick"), Some("SavedNick"));
+        assert_eq!(
+            persisted.get_in(Some("IRC"), "RealName"),
+            Some("Saved Name")
+        );
+        assert_eq!(persisted.get_in(Some("IRC"), "Channel"), Some("#saved"));
+        assert_eq!(persisted.get_in(Some("IRC"), "Password"), None);
+        assert_eq!(
+            persisted.get_in(Some("IRC"), "Server2"),
+            Some("irc.configured.test"),
+            "Connect persists form fields without replacing configured Server2"
+        );
+        assert_eq!(
+            persisted.get_in(Some("Startup"), "HideMsgIRCDangerous"),
+            Some("1"),
+            "the don't-show choice persists even when the connection is cancelled"
+        );
+
+        persist_config_value(&paths, "Startup", "HideMsgIRCDangerous", "0")
+            .expect("show warning again");
+        let (address, server) = spawn_loopback_irc_server();
+        let accepted = lc_frontend::startup_netdlg::NetDlgChatLogin {
+            server: address,
+            nick: "AcceptedNick".into(),
+            password: "another-secret".into(),
+            real_name: "Accepted Name".into(),
+            channel: "#accepted".into(),
+        };
+        app.request_startup_irc_connection(accepted)
+            .expect("reopen IRC warning");
+        assert!(app.startup_irc_client.is_none());
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("accept IRC warning");
+        let client = app.startup_irc_client.as_ref().expect("IRC client started");
+        assert!(matches!(
+            client.recv_event_timeout(Duration::from_secs(2)),
+            Ok(lc_network::IrcClientEvent::Connected)
+        ));
+        drop(app);
+        server.join().expect("join loopback IRC server");
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn hidden_startup_irc_warning_connects_immediately() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("hidden IRC warning user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let (address, server) = spawn_loopback_irc_server();
+        persist_config_value(&paths, "Startup", "HideMsgIRCDangerous", "1")
+            .expect("hide IRC warning");
+        persist_config_value(&paths, "Network", "MasterServerSignUp", "0")
+            .expect("disable test masterserver query");
+        persist_config_value(&paths, "IRC", "Server2", &address)
+            .expect("seed loopback IRC server");
+        persist_config_value(&paths, "IRC", "Nick", "HiddenNick")
+            .expect("seed IRC nick");
+        persist_config_value(&paths, "IRC", "RealName", "Hidden Name")
+            .expect("seed IRC real name");
+        persist_config_value(&paths, "IRC", "Channel", "#hidden")
+            .expect("seed IRC channel");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        install_classic_test_assets(&mut app);
+        app.open_network_game_dialog();
+        let mut login = app
+            .startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .chat_login();
+        assert_eq!(login.server, address);
+        assert_eq!(login.nick, "HiddenNick");
+        assert_eq!(login.real_name, "Hidden Name");
+        assert_eq!(login.channel, "#hidden");
+        login.password = "not-persisted".into();
+        let dialog_count = app.message_dialogs.len();
+
+        app.request_startup_irc_connection(login)
+            .expect("connect without warning");
+        assert_eq!(app.message_dialogs.len(), dialog_count);
+        let client = app.startup_irc_client.as_ref().expect("IRC client started");
+        assert!(matches!(
+            client.recv_event_timeout(Duration::from_secs(2)),
+            Ok(lc_network::IrcClientEvent::Connected)
+        ));
+        let persisted = Config::load(paths.config_file()).expect("reload hidden-warning config");
+        assert_eq!(persisted.get_in(Some("IRC"), "Nick"), Some("HiddenNick"));
+        assert_eq!(persisted.get_in(Some("IRC"), "Password"), None);
+        drop(app);
+        server.join().expect("join loopback IRC server");
+        reset_cached_app_paths();
     }
 
     fn enter_unported_startup_subscreen(app: &mut GameApp, subscreen: ClassicStartupSubscreen) {
