@@ -30414,6 +30414,7 @@ impl GameApp {
                 audio.options.music_enabled
             })
             .expect("audio availability preflighted above");
+        self.persist_running_audio_option("Music", enabled);
         self.set_runtime_music_playback(enabled);
         self.runtime_flash_message = flash_message;
         Ok(())
@@ -30421,18 +30422,35 @@ impl GameApp {
 
     /// `Application.SoundSystem->ToggleOnOff()` (C4MainMenu.cpp:842-845).
     fn toggle_sound_option(&mut self) -> Result<(), EngineError> {
-        let audio = self.audio.as_mut().ok_or_else(|| {
-            classic_parity_engine_error(report_classic_parity_boundary(
-                ClassicParityBoundary::RuntimeAudioSystem {
-                    action: "the running SoundToggle action",
-                },
-            ))
-        })?;
-        // C4SoundSystem::ToggleOnOff changes only RXSound. The next sound
-        // update releases mixer channels while retaining logical instances;
-        // starts made while muted are retained channel-less as well.
-        audio.options.sound_enabled = !audio.options.sound_enabled;
+        let enabled = {
+            let audio = self.audio.as_mut().ok_or_else(|| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeAudioSystem {
+                        action: "the running SoundToggle action",
+                    },
+                ))
+            })?;
+            // C4SoundSystem::ToggleOnOff changes only RXSound. The next sound
+            // update releases mixer channels while retaining logical instances;
+            // starts made while muted are retained channel-less as well.
+            audio.options.sound_enabled = !audio.options.sound_enabled;
+            audio.options.sound_enabled
+        };
+        self.persist_running_audio_option("Sound", enabled);
         Ok(())
+    }
+
+    fn persist_running_audio_option(&self, key: &'static str, enabled: bool) {
+        let Some(paths) = self.app_paths.as_ref() else {
+            return;
+        };
+        // C4ConfigSound::CompileFunc serializes RXSound/RXMusic as the
+        // external [Sound] Sound/Music keys. Rust saves eagerly; a write
+        // failure must not roll back the live toggle, just as C++ ignores a
+        // later Config.Save failure during normal application shutdown.
+        if let Err(error) = persist_config_value(paths, "Sound", key, enabled.to_string()) {
+            tracing::warn!(%error, key, "failed to persist running audio option");
+        }
     }
 
     fn set_frontend_music_option(&mut self, enabled: bool) -> Result<(), EngineError> {
@@ -151084,6 +151102,78 @@ func ControlDig() { dig_count = 1; return(1); }
             .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
             .expect("loading excludes the running producer");
         assert!(startup.runtime_flash_message.is_none());
+    }
+
+    #[test]
+    fn ingame_options_sound_and_music_toggles_persist_to_config_file() {
+        // Keep the process-global environment lock around only the tiny
+        // isolated config writes; this state-only running fixture needs no
+        // installed resources or user-data discovery.
+        let mut app = new_state_only_lightweight_running_sandbox_app();
+        let audio = app.audio.as_mut().expect("state-only test audio");
+        audio.options.sound_enabled = true;
+        audio.options.music_enabled = true;
+        app.runtime_music_enabled = true;
+
+        let user_data = tempdir().expect("isolated audio config");
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover isolated app paths");
+        persist_config_value(&paths, "Sound", "Sound", "true")
+            .expect("seed RXSound config");
+        persist_config_value(&paths, "Sound", "Music", "true")
+            .expect("seed RXMusic config");
+        persist_config_value(&paths, "Sound", "VendorExtension", "keep-me")
+            .expect("seed preserved sound extension");
+        app.app_paths = Some(paths.clone());
+
+        app.apply_ingame_menu_action(MenuAction::ActivateOptions)
+            .expect("open in-game Options");
+        app.apply_ingame_menu_action(MenuAction::ToggleSound)
+            .expect("toggle in-game Sound");
+        let after_sound = Config::load(paths.config_file()).expect("reload Sound toggle");
+        assert_eq!(
+            after_sound.get_in(Some("Sound"), "Sound"),
+            Some("false")
+        );
+        assert_eq!(
+            after_sound.get_in(Some("Sound"), "Music"),
+            Some("true"),
+            "the Sound action must not wait for or rewrite the Music action"
+        );
+
+        app.apply_ingame_menu_action(MenuAction::ToggleMusic)
+            .expect("toggle in-game Music");
+        let after_music = Config::load(paths.config_file()).expect("reload Music toggle");
+        assert_eq!(
+            after_music.get_in(Some("Sound"), "Sound"),
+            Some("false")
+        );
+        assert_eq!(
+            after_music.get_in(Some("Sound"), "Music"),
+            Some("false")
+        );
+        assert_eq!(
+            after_music.get_in(Some("Sound"), "VendorExtension"),
+            Some("keep-me"),
+            "eager running toggles preserve unrelated classic config keys"
+        );
+
+        let reloaded = AudioOptions::load(Some(&paths));
+        assert!(!reloaded.sound_enabled, "next launch reloads RXSound off");
+        assert!(!reloaded.music_enabled, "next launch reloads RXMusic off");
+        assert_eq!(
+            app.ingame_menu.as_ref().map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options),
+            "each native toggle reopens Options at the existing page"
+        );
     }
 
     #[test]
