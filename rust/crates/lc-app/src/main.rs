@@ -6220,8 +6220,8 @@ fn main() -> Result<()> {
                     app.can_present_ordered_native_text(presenter.scale());
                 let defer_native_main_text = !ordered_native_text
                     && app.can_defer_native_main_menu_text(presenter.scale());
-                let defer_native_loader_text =
-                    app.can_defer_native_loader_text(presenter.scale());
+                let defer_native_loader_text = !ordered_native_text
+                    && app.can_defer_native_loader_text(presenter.scale());
                 let defer_native_game_messages = !ordered_native_text
                     && app.can_defer_native_game_messages(presenter.scale());
                 let native_game_message_gamma = defer_native_game_messages.then(|| {
@@ -21445,7 +21445,16 @@ impl GameApp {
     }
 
     fn can_present_ordered_native_text(&self, scale: f32) -> bool {
-        matches!(self.mode, AppMode::Menu | AppMode::Running)
+        let ordered_loading_overlay = self.mode == AppMode::Loading
+            && (!self.message_dialogs.is_empty()
+                || self
+                    .network_start_wait
+                    .as_ref()
+                    .is_some_and(|wait| wait.visible))
+            && self
+                .loader_render_config
+                .is_some_and(|config| config.application_scale() == scale);
+        (matches!(self.mode, AppMode::Menu | AppMode::Running) || ordered_loading_overlay)
             && scale > 1.0
             && scale.is_finite()
             && self
@@ -21474,6 +21483,7 @@ impl GameApp {
         plan.batches.push(NativePresentationBatch {
             logical_layer: None,
             clip: None,
+            native_loader_text: false,
             text,
             fonts: None,
         });
@@ -21503,6 +21513,7 @@ impl GameApp {
             plan.batches.push(NativePresentationBatch {
                 logical_layer: has_raster.then(|| surface.pixels().to_vec()),
                 clip,
+                native_loader_text: false,
                 text,
                 fonts: None,
             });
@@ -21513,6 +21524,15 @@ impl GameApp {
         let mut plan = self.pending_native_presentation.take().unwrap_or_default();
         self.finish_native_base_batch(frame, &mut plan);
         self.pending_native_presentation = Some(plan);
+    }
+
+    fn commit_pending_native_loader_base(&mut self, frame: &mut [u8]) {
+        self.commit_pending_native_base(frame);
+        self.pending_native_presentation
+            .as_mut()
+            .and_then(|plan| plan.batches.last_mut())
+            .expect("loader base batch was just committed")
+            .native_loader_text = true;
     }
 
     fn commit_pending_native_overlay(&mut self) {
@@ -21586,6 +21606,33 @@ impl GameApp {
                 } else {
                     composer.composite_layer();
                 }
+            }
+            if batch.native_loader_text {
+                let loader = self.loader_screen.as_ref().ok_or_else(|| {
+                    self.loader_boundary("selected classic loader disappeared before presentation")
+                })?;
+                let gamma = self.loader_gamma.as_ref();
+                composer
+                    .draw_native(|physical, geometry| -> Result<()> {
+                        let (width, height) = geometry.physical_size();
+                        let mut surface = Surface::from_bytes(
+                            width,
+                            height,
+                            PixelFormat::Rgba8888,
+                            physical.to_vec(),
+                        )?;
+                        let (logical_width, logical_height) = geometry.logical_size();
+                        loader.render_native_text(
+                            &mut surface,
+                            default_fonts,
+                            logical_width,
+                            logical_height,
+                            gamma,
+                        )?;
+                        physical.copy_from_slice(surface.pixels());
+                        Ok(())
+                    })
+                    .map_err(|error| self.loader_boundary(error.to_string()))?;
             }
             if batch.text.is_empty() {
                 continue;
@@ -58974,7 +59021,13 @@ impl GameApp {
     fn render_ordered_native_base(&mut self, frame: &mut [u8]) -> Result<bool> {
         self.pending_native_presentation = Some(NativePresentationPlan::default());
         self.begin_native_text_capture(false);
-        self.render_for_presentation(frame, false, false, false)?;
+        if let Err(error) = self.render_for_presentation(frame, false, false, false) {
+            let surface = self.graphics.surface_mut();
+            let _ = surface.take_clonk_text_capture();
+            surface.clear_clip();
+            self.pending_native_presentation = None;
+            return Err(error);
+        }
         if self.graphics.surface().is_clonk_text_capture_active() {
             let has_base = self
                 .pending_native_presentation
@@ -59263,6 +59316,7 @@ impl GameApp {
                                         outgoing_opacity,
                                     )),
                                     clip: None,
+                                    native_loader_text: false,
                                     text: startup_fade_native_text(
                                         &fade.outgoing_native_text,
                                         outgoing_opacity,
@@ -59278,6 +59332,7 @@ impl GameApp {
                                     incoming_opacity,
                                 )),
                                 clip: None,
+                                native_loader_text: false,
                                 text: startup_fade_native_text(
                                     &incoming_text,
                                     incoming_opacity,
@@ -59822,8 +59877,10 @@ impl GameApp {
         let config = self
             .loader_render_config
             .ok_or_else(|| self.loader_boundary("loader render configuration is unavailable"))?;
+        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         if config.application_scale() > 1.0
             && !defer_native_text
+            && !ordered_native
             && self.message_dialogs.is_empty()
             && !self
                 .network_start_wait
@@ -59834,10 +59891,6 @@ impl GameApp {
                 "scale-native loader fonts are unavailable for the configured scale",
             ));
         }
-        let loader = self
-            .loader_screen
-            .as_ref()
-            .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?;
         let (width, height) = {
             let surface = self.graphics.surface();
             (surface.width(), surface.height())
@@ -59852,6 +59905,60 @@ impl GameApp {
                 frame.len()
             )));
         }
+
+        if ordered_native {
+            let render = self
+                .loader_screen
+                .as_ref()
+                .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?
+                .render_chrome(
+                    self.graphics.surface_mut(),
+                    config,
+                    self.loader_gamma.as_ref(),
+                );
+            render.map_err(|error| self.loader_boundary(error.to_string()))?;
+
+            // C4GraphicsSystem draws the startup message-board loader before
+            // C4GUI. Commit that base with the loader's dedicated native-text
+            // draw point, then give every later dialog its own ordered layer.
+            self.commit_pending_native_loader_base(frame);
+            self.begin_native_text_capture(true);
+            if self
+                .network_start_wait
+                .as_ref()
+                .is_some_and(|wait| wait.visible)
+            {
+                {
+                    let resources = self
+                        .assets
+                        .network_start_wait_resources()
+                        .map_err(|error| self.loader_boundary(error.to_string()))?;
+                    self.network_start_wait
+                        .as_ref()
+                        .expect("visibility was checked above")
+                        .controller
+                        .render(
+                            self.graphics.surface_mut(),
+                            &resources,
+                            true,
+                            self.loader_gamma.as_ref(),
+                        )
+                        .map_err(|error| self.loader_boundary(error.to_string()))?;
+                }
+                self.next_pending_native_overlay();
+            }
+            let gamma = self.loader_gamma.clone();
+            self.render_message_dialogs(gamma.as_ref())
+                .map_err(|error| self.loader_boundary(error.to_string()))?;
+            self.render_message_dialog_tooltip(gamma.as_ref())
+                .map_err(|error| self.loader_boundary(error.to_string()))?;
+            return Ok(());
+        }
+
+        let loader = self
+            .loader_screen
+            .as_ref()
+            .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?;
         let mut surface = Surface::from_bytes(width, height, PixelFormat::Rgba8888, frame.to_vec())
             .map_err(|error| self.loader_boundary(error.to_string()))?;
         let render = if defer_native_text {
@@ -60282,6 +60389,7 @@ impl GameApp {
                 .push(NativePresentationBatch {
                     logical_layer: None,
                     clip: None,
+                    native_loader_text: false,
                     text,
                     fonts: None,
                 });
@@ -65255,6 +65363,9 @@ struct NativePresentationBatch {
     /// Set only for a raster layer explicitly isolated to one primary clipper.
     /// Mixed and otherwise unproven layers retain full-frame composition.
     clip: Option<Rect>,
+    /// Draw C4LoaderScreen text with its dedicated native-metric path between
+    /// this batch's base/chrome and every later GUI layer.
+    native_loader_text: bool,
     text: Vec<lc_graphics::clonk_font::CapturedClonkText>,
     /// A fading outgoing dialog retains the font bundle it was captured with.
     fonts: Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>>,
@@ -107361,6 +107472,239 @@ ScenInfoArea=70,5,25,90
         app.render_native_loader_text(&mut frame, 480, 300)
             .expect("render fractional native loader text");
         assert!(frame.chunks_exact(4).any(|pixel| pixel[3] != 0));
+    }
+
+    #[test]
+    fn l149_scale_three_host_start_wait_renders_after_native_loader_text() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("installed paths");
+        let mut app = GameApp::new(
+            640,
+            480,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("app");
+        app.configure_native_startup_fonts(3.0, false);
+        app.loader_screen
+            .as_mut()
+            .expect("loader")
+            .update(LoaderUpdate::SetTitle("L149|host loader".into()));
+        app.loader_screen
+            .as_mut()
+            .expect("loader")
+            .update(LoaderUpdate::ReplaceLog(vec!["L149 process".into()]));
+        app.loader_screen
+            .as_mut()
+            .expect("loader")
+            .update(LoaderUpdate::SetProcess(Some(73)));
+        let resources = app
+            .loader_screen
+            .as_ref()
+            .expect("loader")
+            .resources()
+            .clone();
+        let (_sender, receiver) = mpsc::channel();
+        app.loading_state = Some(ScenarioLoadingState::new(
+            FrontendScenario::fallback(),
+            resources,
+            HashMap::new(),
+            receiver,
+        ));
+        app.mode = AppMode::Loading;
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        let status = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 4,
+        };
+        app.begin_network_start_wait(status);
+        app.show_reached_network_start_wait()
+            .expect("show reached host wait");
+
+        let (_chrome, _rendered, plan) =
+            render_ordered_test_frame(&mut app, 3.0, 1920, 1440);
+        let command_batch = |needle: &str| {
+            plan.batches
+                .iter()
+                .enumerate()
+                .find_map(|(index, batch)| {
+                    batch
+                        .text
+                        .iter()
+                        .any(|command| command.text == needle)
+                        .then_some(index)
+                })
+                .unwrap_or_else(|| panic!("captured loading text `{needle}`"))
+        };
+        let loader_batch = plan
+            .batches
+            .iter()
+            .position(|batch| batch.native_loader_text)
+            .expect("loader keeps its native-metric StringOut/process path");
+        let wait_batch = command_batch("Waiting for start...");
+        assert_eq!(loader_batch, 0, "loader text owns the native base batch");
+        assert!(
+            wait_batch > loader_batch && plan.batches[wait_batch].logical_layer.is_some(),
+            "wait dialog chrome/text must be composited after loader text"
+        );
+    }
+
+    #[test]
+    fn l149_fractional_client_wait_and_upper_dialog_keep_native_layer_order() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("installed paths");
+        let mut app = GameApp::new(
+            640,
+            480,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("app");
+        app.configure_native_startup_fonts(1.5, false);
+        app.loader_screen
+            .as_mut()
+            .expect("loader")
+            .update(LoaderUpdate::SetTitle("L149 client loader".into()));
+        let resources = app
+            .loader_screen
+            .as_ref()
+            .expect("loader")
+            .resources()
+            .clone();
+        let (_sender, receiver) = mpsc::channel();
+        app.loading_state = Some(ScenarioLoadingState::new(
+            FrontendScenario::fallback(),
+            resources,
+            HashMap::new(),
+            receiver,
+        ));
+        app.mode = AppMode::Loading;
+        app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+        app.show_reached_network_start_wait()
+            .expect("show reached client wait");
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "L149 upper message",
+                "L149 upper caption",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("stack a second loading dialog");
+        let (upper_layout, title_point) = {
+            let resources = app
+                .assets
+                .message_dialog_resources()
+                .expect("message-dialog resources");
+            let layout = app
+                .message_dialogs
+                .last()
+                .expect("upper dialog")
+                .state
+                .layout(640, 480, &resources.fonts.text);
+            let caption = layout.caption.expect("upper dialog caption");
+            let point = GuiPoint::new((caption.x + 10) as f32, (caption.y + 10) as f32);
+            (layout, point)
+        };
+        let tooltip_started = Instant::now()
+            .checked_sub(
+                lc_frontend::context_menu::CLASSIC_TOOLTIP_DELAY + Duration::from_millis(1),
+            )
+            .expect("monotonic clock supports tooltip lookback");
+        app.startup_tooltip = ClassicTooltipTracker::new_at(tooltip_started);
+        app.startup_tooltip
+            .note_pointer_move_at(title_point, tooltip_started);
+        app.message_dialogs
+            .last_mut()
+            .expect("upper dialog")
+            .state
+            .handle_pointer_move(title_point, &upper_layout);
+
+        let (_chrome, _rendered, plan) =
+            render_ordered_test_frame(&mut app, 1.5, 960, 720);
+        let command_batch = |needle: &str| {
+            plan.batches
+                .iter()
+                .enumerate()
+                .find_map(|(index, batch)| {
+                    batch
+                        .text
+                        .iter()
+                        .any(|command| command.text == needle)
+                        .then_some(index)
+                })
+                .unwrap_or_else(|| panic!("captured loading text `{needle}`"))
+        };
+        let loader_batch = plan
+            .batches
+            .iter()
+            .position(|batch| batch.native_loader_text)
+            .expect("loader keeps its dedicated native renderer");
+        let client_wait_batch = command_batch("Waiting for start...");
+        let upper_batch = command_batch("L149 upper message");
+        assert_eq!(loader_batch, 0);
+        assert!(client_wait_batch > loader_batch);
+        assert!(upper_batch > client_wait_batch);
+        assert!(plan.batches[client_wait_batch].logical_layer.is_some());
+        assert!(plan.batches[upper_batch].logical_layer.is_some());
+        let upper_caption_batches = plan
+            .batches
+            .iter()
+            .enumerate()
+            .filter_map(|(index, batch)| {
+                batch
+                    .text
+                    .iter()
+                    .any(|command| command.text == "L149 upper caption")
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(upper_caption_batches.len(), 2);
+        let tooltip_batch = *upper_caption_batches.last().unwrap();
+        assert!(tooltip_batch > upper_batch);
+        assert!(plan.batches[tooltip_batch].logical_layer.is_some());
+
+        app.loader_screen = None;
+        let mut failed_frame = vec![0_u8; 640 * 480 * 4];
+        let error = app
+            .render_ordered_native_base(&mut failed_frame)
+            .expect_err("missing loader must still fail closed");
+        assert!(error.to_string().contains("no selected classic loader"));
+        assert!(app.pending_native_presentation.is_none());
+        assert!(!app.graphics.surface().is_clonk_text_capture_active());
     }
 
     #[test]
