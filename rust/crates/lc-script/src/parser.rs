@@ -7,6 +7,10 @@ use crate::lexer::Lexer;
 use crate::token::{Keyword, Symbol, Token, TokenKind};
 use crate::value::Literal;
 
+/// `C4AUL_MAX_Par`: a new-style function declaration has ten syntactic
+/// parameter slots at most (C4Aul.h; C4AulParse.cpp:1624-1640).
+const MAX_FUNCTION_PARAMETERS: usize = 10;
+
 pub struct Parser<'a> {
     lexer: Lexer<'a>,
     peeked: Option<Token>,
@@ -626,10 +630,33 @@ impl<'a> Parser<'a> {
 
     fn parse_parameter_list(&mut self) -> Result<Vec<Parameter>, ParseError> {
         let mut params = Vec::new();
+        // C++ advances `cpar` for every comma-delimited declaration even
+        // when C4ValueMapNames::AddName deduplicates its name. Do not derive
+        // this limit from `params.len()`.
+        let mut syntactic_parameter_count = 0;
         if self.check_symbol(Symbol::RParen)? {
             return Ok(params);
         }
         loop {
+            // C++ checks ')' before the cap on every iteration. Besides the
+            // empty list, this admits its legacy trailing comma after the
+            // tenth parameter.
+            if self.check_symbol(Symbol::RParen)? {
+                break;
+            }
+
+            // The cap check also precedes `...`: nine named parameters plus
+            // ellipsis is legal, but ten named parameters plus ellipsis is
+            // the rejected eleventh iteration.
+            if syntactic_parameter_count >= MAX_FUNCTION_PARAMETERS {
+                let token = self.peek()?.clone();
+                return Err(ParseError::new(
+                    "'func' parameter list: too many parameters (max 10)",
+                    token.line,
+                    token.column,
+                ));
+            }
+
             // `...` ends the parameter list: the function takes anything via
             // Par() and declares no further names (C4AulParse.cpp:1642-1648).
             if self.consume_if_symbol(Symbol::Ellipsis)?.is_some() {
@@ -686,6 +713,7 @@ impl<'a> Parser<'a> {
                     params.push(Parameter::new(name));
                 }
             }
+            syntactic_parameter_count += 1;
 
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {
                 continue;

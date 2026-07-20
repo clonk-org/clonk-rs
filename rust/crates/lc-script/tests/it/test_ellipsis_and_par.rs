@@ -22,6 +22,68 @@ fn ellipsis_parameter_list_compiles() {
 }
 
 #[test]
+fn function_declaration_rejects_eleventh_parameter() {
+    // The limit is a direct parse error at every strictness level
+    // (C4AulParse.cpp:1624-1640), not a call-time truncation rule.
+    for strict_prefix in ["", "#strict 3\n"] {
+        let source = format!(
+            "{strict_prefix}func TooMany(a, b, c, d, e, f, g, h, i, j, k) {{ return 1; }}\n\
+             func Healthy() {{ return 7; }}"
+        );
+        let script = Script::compile(&source).expect("top-level recovery retains the script");
+        assert!(
+            script.parse_diagnostics().iter().any(|error| {
+                error.message() == "'func' parameter list: too many parameters (max 10)"
+            }),
+            "missing parameter-limit diagnostic for {source:?}: {:?}",
+            script.parse_diagnostics()
+        );
+        assert!(
+            !script.functions().contains_key("TooMany"),
+            "the rejected declaration must not be registered"
+        );
+        assert!(
+            script.functions().contains_key("Healthy"),
+            "the next declaration must survive preparse recovery"
+        );
+    }
+}
+
+#[test]
+fn function_parameter_limit_preserves_cpp_boundary_order() {
+    // The native loop checks ')' first, the syntactic count second, and
+    // ellipsis third. Duplicate names still consume syntactic entries even
+    // though their C4ValueMap slot is reused.
+    for source in [
+        "func Ten(a, b, c, d, e, f, g, h, i, j) {}",
+        "func NineVariadic(a, b, c, d, e, f, g, h, i, ...) {}",
+        "func BareVariadic(...) {}",
+        "func TenTrailingComma(a, b, c, d, e, f, g, h, i, j,) {}",
+    ] {
+        let script = Script::compile(source).expect("boundary declaration compiles");
+        assert!(
+            script.parse_diagnostics().is_empty(),
+            "unexpected diagnostic for {source:?}: {:?}",
+            script.parse_diagnostics()
+        );
+    }
+
+    for source in [
+        "func TenThenVariadic(a, b, c, d, e, f, g, h, i, j, ...) {}",
+        "func DuplicateEleven(a, a, a, a, a, a, a, a, a, a, a) {}",
+    ] {
+        let script = Script::compile(source).expect("rejected declaration is diagnosed");
+        assert!(
+            script.parse_diagnostics().iter().any(|error| {
+                error.message() == "'func' parameter list: too many parameters (max 10)"
+            }),
+            "syntactic limit must reject {source:?}: {:?}",
+            script.parse_diagnostics()
+        );
+    }
+}
+
+#[test]
 fn par_reads_current_function_arguments() {
     let source = r#"
         global func PickSecond(...) { return Par(1); }
