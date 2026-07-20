@@ -68377,7 +68377,22 @@ fn draw_scensel_dynamic(
             )
         })
         .collect();
-    let mut list_layer = surface.clone();
+    // The list viewport is the C4GUI::ListBox primary clipper. Draw directly
+    // into the destination so scale-native ClonkFont capture remains attached
+    // to the frame; a cloned scratch surface would retain and then discard the
+    // semantic row-label commands while only its raster pixels were copied.
+    let previous_clip = surface.clip();
+    let viewport_clip = Rect::new(
+        x,
+        top,
+        item_w.max(0) as u32,
+        viewport_height.max(0) as u32,
+    );
+    let list_clip = previous_clip.map_or(viewport_clip, |clip| {
+        clip.intersection(viewport_clip)
+            .unwrap_or(Rect::new(viewport_clip.x, viewport_clip.y, 0, 0))
+    });
+    surface.set_clip(list_clip);
     let mut y = top - scenario_menu.scenario_list_scroll();
     for (index, (identifier, icon, title, enabled)) in rows.iter().enumerate() {
         if y >= bottom {
@@ -68396,7 +68411,7 @@ fn draw_scensel_dynamic(
                     0xaf7f7f7f
                 };
             fill_engine_box(
-                &mut list_layer,
+                surface,
                 x,
                 y,
                 x + item_w - 1,
@@ -68413,7 +68428,7 @@ fn draw_scensel_dynamic(
                     rename.identifier == *identifier && !rename.edit.label_visible()
                 });
             scensel::draw_scen_list_item(
-                &mut list_layer,
+                surface,
                 &assets.scen_icons,
                 &book_fonts.text,
                 Some(gamma),
@@ -68429,7 +68444,7 @@ fn draw_scensel_dynamic(
                 let edit_h = fonts.text.line_height.max(1) as u32;
                 if let Some(rename) = scenario_menu.rename_edit.as_mut() {
                     rename.edit.render(
-                        &mut list_layer,
+                        surface,
                         &fonts.text,
                         lc_frontend::classic_gui::IntRect {
                             x: edit_x,
@@ -68444,12 +68459,10 @@ fn draw_scensel_dynamic(
         }
         y += pitch;
     }
-    for py in top.max(0)..bottom.min(surface.height() as i32) {
-        for px in x.max(0)..(x + item_w).min(surface.width() as i32) {
-            if let Some(color) = list_layer.get_pixel(px as u32, py as u32) {
-                let _ = surface.set_pixel(px as u32, py as u32, color);
-            }
-        }
+    if let Some(clip) = previous_clip {
+        surface.set_clip(clip);
+    } else {
+        surface.clear_clip();
     }
     let list_max_scroll = scenario_menu.scenario_list_max_scroll(viewport_height, pitch);
     if list_max_scroll > 0 {
@@ -101182,6 +101195,88 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         state.leave_folder();
         assert_eq!(state.book_caption(), "Scenarios");
+    }
+
+    #[test]
+    fn scale_native_scensel_rows_retain_clipped_book_text() {
+        let scenarios = [
+            ("tutorial", "Tutorial"),
+            ("missions", "Missions"),
+            ("melees", "Melees"),
+        ]
+        .into_iter()
+        .map(|(identifier, title)| {
+            let mut scenario = FrontendScenario::fallback();
+            scenario.identifier = identifier.to_string();
+            scenario.title = title.to_string();
+            scenario
+        })
+        .collect::<Vec<_>>();
+        let mut app = new_menu_app_with_frontend_scenarios(640, 480, Some(scenarios));
+        install_classic_test_assets(&mut app);
+        app.open_scenario_browser();
+
+        let assets = app.assets.scensel_assets().expect("scenario assets");
+        let button_down = app
+            .assets
+            .dialog_image("GUIButtonDown.png")
+            .expect("scenario button-down plank");
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+        let book = app.assets.book_fonts.clone().expect("book fonts");
+        let expected_titles = app
+            .menu_state
+            .visible_entries()
+            .iter()
+            .map(|entry| entry.title.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(expected_titles.len(), 3);
+
+        // Retina/scale-native presentation captures role-tagged text instead
+        // of rasterizing it into the logical surface. These commands must stay
+        // on the destination frame and retain the ListBox viewport clip.
+        let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        draw_scensel_dynamic(
+            &mut surface,
+            &mut app.menu_state,
+            &app.scenario_entry_enabled,
+            &assets,
+            &button_down,
+            &fonts,
+            &book,
+            None,
+            startup_gamma(),
+            true,
+        )
+        .expect("render scale-native scenario rows");
+        let commands = surface.take_clonk_text_capture();
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(640, 480, &fonts);
+        let item_h = lc_frontend::startup_scensel::scen_list_item_height(&book.text);
+        let list_x = layout.list.x + 3;
+        let list_top = layout.list.y + 3;
+        let list_clip = Rect::new(
+            list_x,
+            list_top,
+            (layout.list.w - 6 - 16) as u32,
+            (layout.list.h - 6) as u32,
+        );
+
+        for (index, title) in expected_titles.iter().enumerate() {
+            let matches = commands
+                .iter()
+                .filter(|command| {
+                    command.role == lc_graphics::clonk_font::ClonkFontRole::BookText
+                        && command.text == *title
+                        && command.clip == Some(list_clip)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1, "one clipped row label for {title}");
+            assert_eq!(matches[0].x, list_x + item_h + 2);
+            assert_eq!(
+                matches[0].y,
+                list_top + index as i32 * (item_h + 1) + 2
+            );
+        }
     }
 
     // List icon defaults (C4StartupScenSelDlg.cpp:705-710,951-952,1036-1037):
