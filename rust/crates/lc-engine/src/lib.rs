@@ -27101,6 +27101,12 @@ impl Engine {
             .map(|definition| definition.name())
     }
 
+    pub fn definition_description(&self, definition_id: &str) -> Option<&str> {
+        self.definitions
+            .get(definition_id)
+            .and_then(Definition::description)
+    }
+
     /// Whether the definition's script defines `function`
     /// (C4AulScript::GetSFunc; used by the presentation-side
     /// C4Object::DrawCommands port, src/C4ScriptHost.cpp:100-120).

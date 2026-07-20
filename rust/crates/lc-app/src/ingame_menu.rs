@@ -95,8 +95,10 @@ pub enum MenuSymbol {
     /// overlaid with Menu.png phase 7 while the menu owner attacks them
     /// (C4Player.cpp:1149-1165).
     Hostility { opponent: i32, hostile: bool },
-    /// A definition picture (`pDef->Draw(fctSymbol)`, C4MainMenu.cpp:367).
-    Definition(String),
+    /// A definition picture (`pDef->Draw(fctSymbol)`, C4MainMenu.cpp:367),
+    /// optionally overlaid with the Captain facet for a fulfilled goal
+    /// (C4MainMenu.cpp:368-372).
+    Definition { id: String, fulfilled: bool },
 }
 
 /// Display submenu toggles ("Display:*" commands, C4MainMenu.cpp:855-884).
@@ -408,11 +410,13 @@ pub struct SaveSlotState {
 }
 
 /// A goal or rule entry for `ActivateGoals`/`ActivateRules`
-/// (C4MainMenu.cpp:332-405): definition id + name (+fulfilled for goals).
+/// (C4MainMenu.cpp:332-405): definition id, name, description and fulfillment
+/// state (the latter is used only for goals).
 #[derive(Clone, Debug)]
 pub struct GoalRuleEntry {
     pub definition_id: String,
     pub name: String,
+    pub description: Option<String>,
     pub fulfilled: bool,
 }
 
@@ -1047,9 +1051,12 @@ impl IngameMenuState {
             .map(|goal| {
                 MenuItem::new(
                     goal.name.clone(),
-                    MenuSymbol::Definition(goal.definition_id.clone()),
+                    MenuSymbol::Definition {
+                        id: goal.definition_id.clone(),
+                        fulfilled: goal.fulfilled,
+                    },
                     MenuAction::GoalInfo(goal.definition_id.clone()),
-                    None,
+                    goal.description.as_deref(),
                 )
             })
             .collect();
@@ -1070,9 +1077,12 @@ impl IngameMenuState {
             .map(|rule| {
                 MenuItem::new(
                     rule.name.clone(),
-                    MenuSymbol::Definition(rule.definition_id.clone()),
+                    MenuSymbol::Definition {
+                        id: rule.definition_id.clone(),
+                        fulfilled: false,
+                    },
                     MenuAction::RuleInfo(rule.definition_id.clone()),
-                    None,
+                    rule.description.as_deref(),
                 )
             })
             .collect();
@@ -1718,11 +1728,56 @@ impl IngameMenuGraphics {
                 .as_ref()
                 .map(|img| (img, Rect::new(0, 0, img.width(), img.height()))),
             MenuSymbol::Hostility { .. } => None,
-            MenuSymbol::Definition(id) => self
+            MenuSymbol::Definition { id, .. } => self
                 .definition_icons
                 .get(id)
                 .map(|img| (img, Rect::new(0, 0, img.width(), img.height()))),
         }
+    }
+
+    fn draw_definition_symbol(
+        &self,
+        surface: &mut Surface,
+        id: &str,
+        fulfilled: bool,
+        dest: Rect,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let side = SYMBOL_SIZE as u32;
+        let mut composed = Surface::new(side, side, lc_graphics::PixelFormat::Rgba8888);
+        if let Some(image) = self.definition_icons.get(id) {
+            let _ = crate::copy_menu_image_aspect(
+                &mut composed,
+                image,
+                Rect::new(0, 0, side, side),
+            );
+        }
+        if fulfilled {
+            if let Some(captain) = self.hud.captain.as_ref() {
+                // ActivateGoals first software-composites the Captain facet at
+                // (17,2) on the 35x35 definition symbol. Preserve BltAlpha's
+                // /256 cache quirk, then scale and gamma-draw that symbol once.
+                let _ = crate::software_blit_menu_image(
+                    &mut composed,
+                    captain,
+                    Rect::new(
+                        SYMBOL_SIZE - captain.width() as i32 - 2,
+                        2,
+                        captain.width(),
+                        captain.height(),
+                    ),
+                    lc_graphics::BlitMode::Normal,
+                );
+            }
+        }
+        let composed = ImageData::new(side, side, composed.pixels().to_vec());
+        draw_image_region(
+            surface,
+            &composed,
+            Rect::new(0, 0, side, side),
+            dest,
+            gamma,
+        );
     }
 
     fn draw_hostility_symbol(
@@ -1904,17 +1959,25 @@ fn draw_menu(
             layout.item_height as u32,
             row_rect.height,
         );
-        if let MenuSymbol::Hostility { opponent, hostile } = &item.symbol {
-            gfx.draw_hostility_symbol(surface, *opponent, *hostile, symbol_rect, gamma);
-        } else if let Some((image, src)) = gfx.symbol_source(&item.symbol) {
-            draw_image_region_aspect(
-                surface,
-                image,
-                src,
-                symbol_rect,
-                matches!(item.symbol, MenuSymbol::PlayerColor),
-                gamma,
-            );
+        match &item.symbol {
+            MenuSymbol::Hostility { opponent, hostile } => {
+                gfx.draw_hostility_symbol(surface, *opponent, *hostile, symbol_rect, gamma);
+            }
+            MenuSymbol::Definition { id, fulfilled } => {
+                gfx.draw_definition_symbol(surface, id, *fulfilled, symbol_rect, gamma);
+            }
+            _ => {
+                if let Some((image, src)) = gfx.symbol_source(&item.symbol) {
+                    draw_image_region_aspect(
+                        surface,
+                        image,
+                        src,
+                        symbol_rect,
+                        matches!(item.symbol, MenuSymbol::PlayerColor),
+                        gamma,
+                    );
+                }
+            }
         }
         // Normal menus are icon-only; their selected caption is installed in
         // the title. Context menus draw the caption alongside the symbol.
@@ -2939,18 +3002,115 @@ mod tests {
     }
 
     #[test]
-    fn goals_menu_uses_definition_symbols() {
+    fn goals_menu_uses_definition_description_as_tooltip() {
         let goals = vec![GoalRuleEntry {
             definition_id: "GOLD".to_string(),
             name: "Gold Rush".to_string(),
+            description: Some("Collect all the gold.".to_string()),
             fulfilled: false,
         }];
         let menu = IngameMenuState::goals_menu(&goals);
         assert_eq!(captions(&menu), vec!["Gold Rush"]);
-        assert!(matches!(&menu.items()[0].symbol, MenuSymbol::Definition(id) if id == "GOLD"));
+        assert_eq!(
+            menu.items()[0].info_caption.as_deref(),
+            Some("Collect all the gold.")
+        );
+        assert!(matches!(
+            &menu.items()[0].symbol,
+            MenuSymbol::Definition {
+                id,
+                fulfilled: false,
+            } if id == "GOLD"
+        ));
         assert_eq!(
             menu.items()[0].action,
             MenuAction::GoalInfo("GOLD".to_string())
+        );
+
+        let rules = vec![GoalRuleEntry {
+            definition_id: "RULE".to_string(),
+            name: "Rule".to_string(),
+            description: Some("Keep to the rule.".to_string()),
+            fulfilled: false,
+        }];
+        let menu = IngameMenuState::rules_menu(&rules);
+        assert_eq!(
+            menu.items()[0].info_caption.as_deref(),
+            Some("Keep to the rule.")
+        );
+    }
+
+    #[test]
+    fn goals_menu_marks_fulfilled_goal() {
+        use lc_graphics::BitmapFont;
+
+        let goals = vec![GoalRuleEntry {
+            definition_id: "GOLD".to_string(),
+            name: "Gold Rush".to_string(),
+            description: None,
+            fulfilled: true,
+        }];
+        let menu = IngameMenuState::goals_menu(&goals);
+        assert!(matches!(
+            &menu.items()[0].symbol,
+            MenuSymbol::Definition {
+                id,
+                fulfilled: true,
+            } if id == "GOLD"
+        ));
+
+        let definition = Color::opaque(200, 30, 20);
+        let captain = Color::opaque(20, 220, 40);
+        let mut captain_pixels = [captain.r, captain.g, captain.b, captain.a].repeat(16 * 16);
+        captain_pixels[..4].copy_from_slice(&[0, 0, 255, 128]);
+        captain_pixels[8..12].copy_from_slice(&[250, 0, 0, 0]);
+        let gfx = IngameMenuGraphics {
+            hud: HudGraphics {
+                captain: Some(ImageData::new(16, 16, captain_pixels)),
+                ..HudGraphics::default()
+            },
+            definition_icons: HashMap::from([(
+                "GOLD".to_string(),
+                ImageData::new(
+                    35,
+                    35,
+                    [definition.r, definition.g, definition.b, definition.a].repeat(35 * 35),
+                ),
+            )]),
+            ..IngameMenuGraphics::default()
+        };
+        let font_backend = BitmapFont::new();
+        let font = HudFont::Fallback(&font_backend);
+        let area = Rect::new(0, 0, 320, 200);
+        let symbol = menu
+            .layout(area, &font, &gfx)
+            .item_rect(0)
+            .expect("goal row");
+        let mut surface = Surface::new(320, 200, lc_graphics::PixelFormat::Rgba8888);
+        menu.render(&mut surface, area, &font, None, &gfx);
+        let scaled_offset = |offset: i32| (offset * symbol.height as i32 + 34) / 35;
+        let marker_x = symbol.x + scaled_offset(35 - 16 - 2);
+        let marker_y = symbol.y + scaled_offset(2);
+
+        assert_eq!(
+            surface.get_pixel(marker_x as u32, marker_y as u32),
+            Some(Color::opaque(99, 14, 137)),
+            "the Captain marker is software-composited at (17, 2) before row scaling",
+        );
+        assert_eq!(
+            surface.get_pixel((marker_x + 1) as u32, marker_y as u32),
+            Some(Color::opaque(199, 29, 19)),
+            "transparent Captain pixels retain software BltAlpha's /256 coverage quirk",
+        );
+        assert_eq!(
+            surface.get_pixel((marker_x + 2) as u32, marker_y as u32),
+            Some(Color::opaque(19, 219, 39)),
+            "opaque Captain pixels retain software BltAlpha's /256 quirk",
+        );
+        assert_eq!(
+            surface.get_pixel(symbol.x as u32, symbol.y as u32),
+            Some(definition),
+            "the fulfilled marker remains an overlay on the definition picture",
         );
     }
 

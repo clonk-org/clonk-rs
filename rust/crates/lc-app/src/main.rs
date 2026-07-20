@@ -5262,6 +5262,9 @@ impl FrontendAssets {
         if self.hud_graphics.crew.is_none() {
             missing.push("Crew.png");
         }
+        if self.hud_graphics.captain.is_none() {
+            missing.push("Captain.png");
+        }
         if missing.is_empty() {
             Ok(())
         } else {
@@ -29850,10 +29853,16 @@ impl GameApp {
                 );
             }
             MenuAction::GoalInfo(id) => {
-                self.submit_game_goal_rule_activation(player, &id)?;
+                self.submit_game_goal_rule_activation(
+                    player,
+                    ClassicIngameMenuChild::GoalInfo(id),
+                )?;
             }
             MenuAction::RuleInfo(id) => {
-                self.submit_game_goal_rule_activation(player, &id)?;
+                self.submit_game_goal_rule_activation(
+                    player,
+                    ClassicIngameMenuChild::RuleInfo(id),
+                )?;
             }
             MenuAction::JoinPlayer(file) => {
                 if self.network_is_league || self.engine.replay() {
@@ -30039,6 +30048,7 @@ impl GameApp {
             entries.push(GoalRuleEntry {
                 definition_id: id.to_string(),
                 name: self.engine.definition_name(id).unwrap_or(id).to_string(),
+                description: self.engine.definition_description(id).map(str::to_string),
                 fulfilled: false,
             });
         }
@@ -30059,6 +30069,10 @@ impl GameApp {
                         .definition_name(&definition_id)
                         .unwrap_or(&definition_id)
                         .to_string(),
+                    description: self
+                        .engine
+                        .definition_description(&definition_id)
+                        .map(str::to_string),
                     fulfilled: request.fulfilled_goals.contains(&definition_id),
                     definition_id,
                 })
@@ -30222,14 +30236,18 @@ impl GameApp {
     fn submit_game_goal_rule_activation(
         &mut self,
         player: i32,
-        definition_id: &str,
+        unresolved: ClassicIngameMenuChild,
     ) -> Result<(), EngineError> {
+        let definition_id = match &unresolved {
+            ClassicIngameMenuChild::GoalInfo(id) | ClassicIngameMenuChild::RuleInfo(id) => id,
+            _ => unreachable!("goal/rule activation requires its corresponding typed boundary"),
+        };
         let Some(object) = self
             .engine
             .first_active_object_for_definition(definition_id)
             .and_then(|object| i32::try_from(object.as_u64()).ok())
         else {
-            return Ok(());
+            return Err(classic_ingame_menu_child_error(unresolved));
         };
         if self.network.is_some() {
             let tick = self.local_control_submission_tick();
@@ -106191,6 +106209,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 IngameMenuState::goals_menu(&[GoalRuleEntry {
                     definition_id: "GOAL".to_string(),
                     name: "Goal".to_string(),
+                    description: None,
                     fulfilled: false,
                 }]),
             ),
@@ -106199,6 +106218,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 IngameMenuState::rules_menu(&[GoalRuleEntry {
                     definition_id: "RULE".to_string(),
                     name: "Rule".to_string(),
+                    description: None,
                     fulfilled: false,
                 }]),
             ),
@@ -107351,6 +107371,7 @@ ScenInfoArea=70,5,25,90
         for name in ["Menu.png", "Options.png", "Control.png", "Player.png"] {
             assets.startup_dialog_images.remove(name);
         }
+        Arc::make_mut(&mut assets.hud_graphics).captain = None;
         app.ingame_menu
             .replace(app.local_owner, Some(IngameMenuState::surrender_menu()));
         app.scoreboard_initial_reconcile_pending = true;
@@ -107366,6 +107387,7 @@ ScenInfoArea=70,5,25,90
                     && missing.contains(&"Options.png")
                     && missing.contains(&"Control.png")
                     && missing.contains(&"Player.png")
+                    && missing.contains(&"Captain.png")
         ));
         assert_eq!(runtime_global_ui_snapshot(&app), before);
     }
@@ -132245,6 +132267,62 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn goal_rule_activation_on_unresolved_definition_returns_typed_boundary() {
+        let mut app = new_running_sandbox_app();
+        let player = app.local_owner;
+
+        for (action, child) in [
+            (
+                MenuAction::GoalInfo("MISS".to_string()),
+                ClassicIngameMenuChild::GoalInfo("MISS".to_string()),
+            ),
+            (
+                MenuAction::RuleInfo("MISS".to_string()),
+                ClassicIngameMenuChild::RuleInfo("MISS".to_string()),
+            ),
+        ] {
+            let error = app
+                .apply_ingame_menu_action_for_player(player, action)
+                .expect_err("an unresolved goal/rule must reach its typed menu boundary");
+            let EngineError::ClassicMenuParityBoundary { detail } = error else {
+                panic!("unexpected unresolved goal/rule error: {error:?}");
+            };
+            assert_eq!(
+                detail,
+                format!(
+                    "classic in-game menu child {child:?} is not implemented; refusing status/no-op substitute"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn rules_menu_uses_engine_definition_description_as_tooltip() {
+        let mut app = new_running_sandbox_app();
+        let player = app.local_owner;
+        let mut rule = Definition::from_script("IRUL", "Integrated Rule", "#strict 3\n")
+            .expect("rule definition compiles");
+        rule.set_category(C4D_RULE);
+        rule.set_description(Some("Keep to the rule".to_string()));
+        app.engine
+            .register_definition(rule)
+            .expect("rule definition registers");
+        app.engine
+            .spawn_object(lc_engine::SpawnConfig::new("IRUL"))
+            .expect("rule object spawns");
+        app.snapshot = app.engine.snapshot();
+
+        app.apply_ingame_menu_action_for_player(player, MenuAction::ActivateRules)
+            .expect("open rules menu");
+        let menu = app.ingame_menu.get(player).expect("rules menu opens");
+        assert_eq!(menu.page(), ingame_menu::MenuPage::Rules);
+        assert_eq!(
+            menu.items()[0].info_caption.as_deref(),
+            Some("Keep to the rule")
+        );
+    }
+
+    #[test]
     fn synchronized_goal_menu_evaluates_before_opening_only_for_local_player() {
         let mut app = new_running_sandbox_app();
         let player = app.local_owner;
@@ -132255,6 +132333,7 @@ ScenInfoArea=70,5,25,90
         )
         .expect("goal definition compiles");
         goal.set_category(C4D_GOAL);
+        goal.set_description(Some("Reach the target".to_string()));
         app.engine
             .register_definition(goal)
             .expect("goal definition registers");
@@ -132280,6 +132359,10 @@ ScenInfoArea=70,5,25,90
         assert_eq!(
             menu.items()[0].action,
             MenuAction::GoalInfo("IGOL".to_string())
+        );
+        assert_eq!(
+            menu.items()[0].info_caption.as_deref(),
+            Some("Reach the target")
         );
 
         app.ingame_menu.replace(player, None);
@@ -152354,6 +152437,7 @@ func ControlDig() { dig_count = 1; return(1); }
             let entry = GoalRuleEntry {
                 definition_id: "CLNK".to_string(),
                 name: "Entry".to_string(),
+                description: None,
                 fulfilled: false,
             };
             vec![
@@ -153924,6 +154008,7 @@ func ControlDig() { dig_count = 1; return(1); }
             let entry = GoalRuleEntry {
                 definition_id: "CLNK".to_string(),
                 name: "Entry".to_string(),
+                description: None,
                 fulfilled: false,
             };
             vec![
