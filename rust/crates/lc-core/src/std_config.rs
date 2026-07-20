@@ -14,23 +14,10 @@ use std::path::Path;
 /// consume every following digit of their radix rather than using C's usual
 /// length limits.
 pub fn decode_cpp_escaped_string(value: &[u8], max_length: usize) -> Option<Vec<u8>> {
-    decode_cpp_escaped_string_impl(value, max_length, true)
+    decode_cpp_escaped_string_impl(value, max_length)
 }
 
-fn decode_cpp_escaped_string_allowing_continuations(
-    value: &[u8],
-    max_length: usize,
-) -> Option<Vec<u8>> {
-    // `Config::from_reader` normalizes an odd trailing backslash plus line end
-    // to an embedded LF before parsing, so preserve that Rust config feature.
-    decode_cpp_escaped_string_impl(value, max_length, false)
-}
-
-fn decode_cpp_escaped_string_impl(
-    value: &[u8],
-    max_length: usize,
-    stop_at_line_end: bool,
-) -> Option<Vec<u8>> {
+fn decode_cpp_escaped_string_impl(value: &[u8], max_length: usize) -> Option<Vec<u8>> {
     let start = value
         .iter()
         .position(|byte| !matches!(byte, b' ' | b'\t'))
@@ -44,7 +31,7 @@ fn decode_cpp_escaped_string_impl(
     let mut index = 1;
     while index < value.len() && output.len() < max_length {
         let byte = value[index];
-        if matches!(byte, 0 | b'"') || (stop_at_line_end && matches!(byte, b'\n' | b'\r')) {
+        if matches!(byte, 0 | b'"' | b'\n' | b'\r') {
             break;
         }
         if byte != b'\\' {
@@ -236,32 +223,19 @@ impl Config {
 
         let mut config = Config::new();
         let mut buffer = String::new();
-        let mut line_accumulator = String::new();
         let mut current_section: Option<String> = None;
 
         loop {
             buffer.clear();
             let bytes_read = reader.read_line(&mut buffer)?;
             if bytes_read == 0 {
-                if !line_accumulator.trim().is_empty() {
-                    if let Some(comment) = standalone_comment(&line_accumulator) {
-                        config.standalone_comments.push(comment);
-                    } else if let Some(item) = parse_line(&line_accumulator) {
-                        handle_item(&mut config, &mut current_section, item);
-                    }
-                }
                 break;
             }
-            line_accumulator.push_str(&buffer);
-            if line_continues(&mut line_accumulator) {
-                continue;
-            }
-            if let Some(comment) = standalone_comment(&line_accumulator) {
+            if let Some(comment) = standalone_comment(&buffer) {
                 config.standalone_comments.push(comment);
-            } else if let Some(item) = parse_line(&line_accumulator) {
+            } else if let Some(item) = parse_line(&buffer) {
                 handle_item(&mut config, &mut current_section, item);
             }
-            line_accumulator.clear();
         }
         Ok(config)
     }
@@ -546,48 +520,6 @@ fn is_cpp_escaped_config_field(section: Option<&str>, key: &str) -> bool {
     }
 }
 
-fn line_continues(line: &mut String) -> bool {
-    let mut end = line.len();
-    while end > 0 && matches!(line.as_bytes()[end - 1], b'\n' | b'\r') {
-        end -= 1;
-    }
-    while end > 0 {
-        let ch = line.as_bytes()[end - 1] as char;
-        if ch.is_whitespace() && ch != '\\' {
-            end -= 1;
-        } else {
-            break;
-        }
-    }
-    if end == 0 {
-        return false;
-    }
-    let mut backslash_count = 0;
-    let mut cursor = end;
-    while cursor > 0 && line.as_bytes()[cursor - 1] == b'\\' {
-        backslash_count += 1;
-        cursor -= 1;
-    }
-    let continuation = backslash_count % 2 == 1;
-    if continuation {
-        while matches!(line.chars().last(), Some('\n') | Some('\r')) {
-            line.pop();
-        }
-        while let Some(last) = line.chars().last() {
-            if last.is_whitespace() && last != '\\' {
-                line.pop();
-            } else {
-                break;
-            }
-        }
-        if matches!(line.as_bytes().last(), Some(b'\\')) {
-            line.pop();
-        }
-        line.push('\n');
-    }
-    continuation
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,18 +565,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_basic_config() {
+    fn l024_parse_basic_config_preserves_markup_and_inline_hash() {
         let data = b"Name = <i>Player</i> # main user\nEnabled=true\n\n";
         let mut cursor = Cursor::new(&data[..]);
         let cfg = Config::from_reader(&mut cursor).unwrap();
-        assert_eq!(cfg.get("Name"), Some("<i>Player</i>"));
+        assert_eq!(cfg.get("Name"), Some("<i>Player</i> # main user"));
         assert_eq!(cfg.get_bool("Enabled"), Some(true));
         let entry = cfg
             .entries
             .values()
             .find(|entry| entry.key == "Name")
             .unwrap();
-        assert_eq!(entry.comment.as_deref(), Some("main user"));
+        assert_eq!(entry.comment, None);
         assert!(cfg.get("Unknown").is_none());
     }
 
@@ -665,43 +597,22 @@ mod tests {
     }
 
     #[test]
-    fn save_reload_preserves_continued_and_escaped_quoted_values() {
-        let data = b"[Vendor]\nMultiline=first\\\nsecond\nTitle=\"Alice \\\"The #1\\\"\" # keep\n";
+    fn save_reload_preserves_escaped_quoted_values() {
+        let data = b"[Vendor]\nTitle=\"Alice \\\"The #1\\\"\"\n";
         let mut cursor = Cursor::new(&data[..]);
         let cfg = Config::from_reader(&mut cursor).unwrap();
-        assert_eq!(
-            cfg.get_in(Some("Vendor"), "Multiline"),
-            Some("first\nsecond")
-        );
         assert_eq!(
             cfg.get_in(Some("Vendor"), "Title"),
             Some("Alice \"The #1\"")
         );
 
         let serialized = cfg.to_string().unwrap();
-        assert!(serialized.contains("Multiline=\"first\\nsecond\""));
-        assert!(serialized.contains("Title=\"Alice \\\"The #1\\\"\" #keep"));
+        assert!(serialized.contains("Title=\"Alice \\\"The #1\\\"\""));
         let mut cursor = Cursor::new(serialized.as_bytes());
         let reloaded = Config::from_reader(&mut cursor).unwrap();
         assert_eq!(
-            reloaded.get_in(Some("Vendor"), "Multiline"),
-            Some("first\nsecond")
-        );
-        assert_eq!(
             reloaded.get_in(Some("Vendor"), "Title"),
             Some("Alice \"The #1\"")
-        );
-    }
-
-    #[test]
-    fn l010_quoted_rust_line_continuation_survives_cpp_escape_decode() {
-        let data = b"[Network]\nComment=\"first\\\nsecond\"\n";
-        let mut cursor = Cursor::new(&data[..]);
-        let cfg = Config::from_reader(&mut cursor).unwrap();
-
-        assert_eq!(
-            cfg.get_in(Some("Network"), "Comment"),
-            Some("first\nsecond")
         );
     }
 
@@ -821,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn updating_an_existing_value_preserves_its_comment() {
+    fn updating_an_existing_value_replaces_its_full_inline_hash_value() {
         let data = b"[General]\nName=Old # keep this note\n";
         let mut reader = Cursor::new(&data[..]);
         let mut config = Config::from_reader(&mut reader).expect("parse config");
@@ -833,9 +744,10 @@ mod tests {
             .find(|entry| entry.section.as_deref() == Some("General") && entry.key == "Name")
             .expect("updated entry");
         assert_eq!(entry.value, "New");
-        assert_eq!(entry.comment.as_deref(), Some("keep this note"));
+        assert_eq!(entry.comment, None);
         let serialized = config.to_string().expect("serialize config");
-        assert!(serialized.contains("Name=\"New\" #keep this note"));
+        assert!(serialized.contains("Name=\"New\"\r\n"));
+        assert!(!serialized.contains("keep this note"));
         let mut reloaded = Cursor::new(serialized.as_bytes());
         let reloaded = Config::from_reader(&mut reloaded).expect("reload config");
         assert_eq!(
@@ -843,7 +755,7 @@ mod tests {
                 .iter()
                 .find(|entry| entry.key == "Name")
                 .and_then(|entry| entry.comment.as_deref()),
-            Some("keep this note")
+            None
         );
     }
 
@@ -865,12 +777,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_multiline_values() {
-        let data = b"[General]\nDescription=First line\\\nsecond line\\\nthird line\n";
-        let mut cursor = Cursor::new(&data[..]);
+    fn l024_trailing_backslash_does_not_consume_following_line() {
+        for line_ending in ["\n", "\r\n"] {
+            let data = format!("[General]{line_ending}Path=C:\\{line_ending}Next=ok{line_ending}");
+            let mut cursor = Cursor::new(data.as_bytes());
+            let cfg = Config::from_reader(&mut cursor).unwrap();
+            assert_eq!(cfg.get_in(Some("General"), "Path"), Some("C:\\"));
+            assert_eq!(cfg.get_in(Some("General"), "Next"), Some("ok"));
+        }
+
+        let mut cursor = Cursor::new(b"[General]\nPath=C:\\".as_slice());
         let cfg = Config::from_reader(&mut cursor).unwrap();
-        let value = cfg.get_in(Some("General"), "Description").unwrap();
-        assert_eq!(value, "First line\nsecond line\nthird line");
+        assert_eq!(cfg.get_in(Some("General"), "Path"), Some("C:\\"));
     }
 
     #[test]

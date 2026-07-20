@@ -127032,7 +127032,7 @@ ScenInfoArea=70,5,25,90
         );
         assert!(matches!(
             controller.value("General", "Name"),
-            Some(AdvancedConfigValue::Text(value)) if value == "Old"
+            Some(AdvancedConfigValue::Text(value)) if value == "Old # keep this note"
         ));
         assert_eq!(
             controller.value("General", "FPS"),
@@ -127341,7 +127341,8 @@ ScenInfoArea=70,5,25,90
             {
                 let serialized = fs::read_to_string(paths.config_file())
                     .expect("serialized advanced config");
-                serialized.contains("#keep this note")
+                serialized.contains("Name=\"New name\"")
+                    && !serialized.contains("keep this note")
                     && serialized.contains("# standalone note")
             }
         );

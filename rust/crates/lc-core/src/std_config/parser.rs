@@ -40,37 +40,25 @@ pub(crate) fn parse_line(line: &str) -> Option<ParsedItem<'_>> {
         });
     }
 
-    let (content, comment) = split_comment(trimmed);
-    let (raw_key, raw_value) = split_key_value(content)?;
+    let (raw_key, raw_value) = split_key_value(trimmed)?;
     let key = raw_key.trim();
     let value = raw_value.trim();
 
-    let mut key_owned = key.to_string();
-    let (value_owned, escaped_bytes) = if let Some(decoded) =
-        super::decode_cpp_escaped_string_allowing_continuations(value.as_bytes(), usize::MAX)
-    {
-        (decoded_config_bytes_to_string(&decoded), Some(decoded))
-    } else {
-        let mut unquoted = value.to_string();
-        unescape_comment_markers(&mut unquoted);
-        (unquoted, None)
-    };
-    unescape_comment_markers(&mut key_owned);
-
-    let comment = comment.and_then(|c| {
-        let trimmed = c.trim();
-        if trimmed.is_empty() {
-            None
+    let (value, escaped_bytes) =
+        if let Some(decoded) = super::decode_cpp_escaped_string(value.as_bytes(), usize::MAX) {
+            (
+                Cow::Owned(decoded_config_bytes_to_string(&decoded)),
+                Some(decoded),
+            )
         } else {
-            Some(trimmed.to_string())
-        }
-    });
+            (Cow::Borrowed(value), None)
+        };
 
     Some(ParsedItem::Entry {
-        key: Cow::Owned(key_owned),
-        value: Cow::Owned(value_owned),
+        key: Cow::Borrowed(key),
+        value,
         escaped_bytes,
-        comment,
+        comment: None,
     })
 }
 
@@ -87,38 +75,6 @@ fn parse_section(line: &str, commented: bool) -> Option<Cow<'_, str>> {
         return None;
     }
     Some(Cow::Owned(name.to_string()))
-}
-
-fn split_comment(line: &str) -> (&str, Option<&str>) {
-    let chars = line.char_indices();
-    let mut in_quotes = false;
-    let mut escaped = false;
-    for (idx, ch) in chars {
-        if in_quotes && escaped {
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' if in_quotes => escaped = true,
-            '"' => in_quotes = !in_quotes,
-            '#' if !in_quotes && comment_marker_is_separated(line, idx) => {
-                return (&line[..idx], Some(&line[idx + 1..]));
-            }
-            // C++ treats `//` only as a whole-line comment. Inside a value it
-            // is ordinary data (notably in unquoted `https://` URLs).
-            '/' if !in_quotes => {}
-            _ => {}
-        }
-    }
-    (line, None)
-}
-
-fn comment_marker_is_separated(line: &str, index: usize) -> bool {
-    index == 0
-        || line[..index]
-            .chars()
-            .next_back()
-            .is_some_and(char::is_whitespace)
 }
 
 fn split_key_value(line: &str) -> Option<(&str, &str)> {
@@ -167,15 +123,6 @@ fn decoded_config_bytes_to_string(mut remaining: &[u8]) -> String {
     decoded
 }
 
-fn unescape_comment_markers(s: &mut String) {
-    if s.contains("\\#") {
-        *s = s.replace("\\#", "#");
-    }
-    if s.contains("\\//") {
-        *s = s.replace("\\//", "//");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,8 +139,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_with_comment() {
-        match parse_line("Name = Player # comment").unwrap() {
+    fn l024_inline_hash_is_value_data() {
+        match parse_line("Name = A # B").unwrap() {
             ParsedItem::Entry {
                 key,
                 value,
@@ -201,9 +148,17 @@ mod tests {
                 ..
             } => {
                 assert_eq!(key, "Name");
-                assert_eq!(value, "Player");
-                assert_eq!(comment.as_deref(), Some("comment"));
+                assert_eq!(value, "A # B");
+                assert_eq!(comment, None);
             }
+            ParsedItem::Section { .. } => panic!("expected entry"),
+        }
+    }
+
+    #[test]
+    fn l024_unquoted_comment_marker_escapes_remain_verbatim() {
+        match parse_line(r"Value=A\#B\//C").unwrap() {
+            ParsedItem::Entry { value, .. } => assert_eq!(value, r"A\#B\//C"),
             ParsedItem::Section { .. } => panic!("expected entry"),
         }
     }

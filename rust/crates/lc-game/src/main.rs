@@ -1587,7 +1587,10 @@ mod headless_tests {
         adapt_config_to_current_version(&config_path, &logger).unwrap();
         apply_headless_display_mode_override(&config_path, &logger).unwrap();
         let cfg = Config::load(&config_path).unwrap();
-        assert_eq!(cfg.get_in(Some("General"), "Version"), Some("362"));
+        assert_eq!(
+            cfg.get_in(Some("General"), "Version"),
+            Some("362 # keep version note")
+        );
         assert_eq!(cfg.get_in(Some("Graphics"), "DisplayMode"), Some("1"));
         let native = std::fs::read_to_string(&config_path).unwrap();
         assert!(native.contains("Version=362 # keep version note\n"));
@@ -2668,7 +2671,10 @@ mod tests {
             config.get_in(Some("Network"), "PuncherAddress"),
             Some(OFFICIAL_PUNCHER_SERVER)
         );
-        assert_eq!(config.get_in(Some("Graphics"), "Shader"), Some("true"));
+        assert_eq!(
+            config.get_in(Some("Graphics"), "Shader"),
+            Some("true # keep shader note")
+        );
         assert_eq!(
             config.get_in(Some("Graphics"), "DisableGamma"),
             Some("false")
