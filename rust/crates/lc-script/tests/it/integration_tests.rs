@@ -247,6 +247,27 @@ fn supports_proplists_and_nested_access() {
 }
 
 #[test]
+fn statement_map_literal_evaluates_key_and_value_side_effects() {
+    let mut engine = Engine::new();
+    load_script(
+        &mut engine,
+        r#"
+        #strict 3
+        static calls;
+        func Mark(amount) { calls += amount; return calls; }
+        global func StatementMap() {
+            calls = 0;
+            { [Mark(1)] = Mark(10), nested = { value = Mark(100) } };
+            return calls;
+        }
+        "#,
+    );
+
+    let result = engine.call("StatementMap", &[]).expect("call succeeds");
+    assert_eq!(result, Value::Int(111));
+}
+
+#[test]
 fn assigns_to_proplist_properties() {
     let mut engine = Engine::new();
     load_script(

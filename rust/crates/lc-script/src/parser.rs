@@ -927,6 +927,15 @@ impl<'a> Parser<'a> {
         if self.consume_if_keyword(Keyword::For)?.is_some() {
             return self.parse_for();
         }
+        // C4Aul cannot decide from the opening brace alone whether this is a
+        // statement block or a STRICT3 map-literal expression. Probe the
+        // outer brace contents exactly like IsMapLiteral: nested delimiter
+        // groups do not participate, a top-level `=` selects a map, and a
+        // top-level semicolon selects a block even if an `=` preceded it.
+        // Empty/uncertain braces remain blocks.
+        if self.check_symbol(Symbol::LBrace)? && self.statement_brace_is_map_literal()? {
+            return self.parse_assignment_or_expr();
+        }
         if self.consume_if_symbol(Symbol::LBrace)?.is_some() {
             let body = self.parse_block_statements()?;
             self.expect_symbol(Symbol::RBrace, "expected '}' to close block")?;
@@ -940,6 +949,86 @@ impl<'a> Parser<'a> {
         }
 
         self.parse_assignment_or_expr()
+    }
+
+    /// C4AulParse.cpp `IsMapLiteral` scans from just after a statement-leading
+    /// `{` through its matching outer `}`. It skips complete nested `()`, `[]`
+    /// and `{}` groups, remembers an outer-level plain `=`, and treats an
+    /// outer-level `;` as conclusive block syntax. C++ performs this scan with
+    /// its `Discard` string policy and then rewinds the source pointer. Restore
+    /// the complete token cursor (rather than replaying already-lexed tokens)
+    /// so quoted strings are committed only by the real parse that follows.
+    /// Lexer warnings deliberately remain, matching C++ lookahead side
+    /// effects (and may be emitted again by the real parse).
+    fn statement_brace_is_map_literal(&mut self) -> Result<bool, ParseError> {
+        assert!(
+            self.speculative_tokens.is_none(),
+            "statement lookahead cannot nest inside speculative parsing"
+        );
+        let lexer_checkpoint = self.lexer.checkpoint();
+        let peeked = self.peeked.clone();
+        let lookahead_buffer = self.lookahead_buffer.clone();
+        let brace_depth = self.brace_depth;
+        let consumed_tokens = self.consumed_tokens;
+
+        let result = (|| {
+            self.expect_symbol(Symbol::LBrace, "expected '{' to probe statement")?;
+            let mut is_map = false;
+
+            loop {
+                match self.consume()?.kind {
+                    TokenKind::Symbol(Symbol::LParen) => {
+                        self.skip_statement_probe_group(Symbol::RParen)?
+                    }
+                    TokenKind::Symbol(Symbol::LBracket) => {
+                        self.skip_statement_probe_group(Symbol::RBracket)?
+                    }
+                    TokenKind::Symbol(Symbol::LBrace) => {
+                        self.skip_statement_probe_group(Symbol::RBrace)?
+                    }
+                    TokenKind::Symbol(Symbol::Equal) => is_map = true,
+                    TokenKind::Symbol(Symbol::Semicolon) => return Ok(false),
+                    TokenKind::Symbol(Symbol::RBrace) | TokenKind::Eof => return Ok(is_map),
+                    _ => {}
+                }
+            }
+        })();
+
+        if result.is_ok() {
+            self.lexer.restore(lexer_checkpoint);
+            self.peeked = peeked;
+            self.lookahead_buffer = lookahead_buffer;
+            self.brace_depth = brace_depth;
+            self.consumed_tokens = consumed_tokens;
+        } else {
+            // An exception bypasses C++ IsMapLiteral's `SPos = SPos0`.
+            // Preserve that forward progress for recovery, but still honor
+            // the lookahead's Discard policy for strings scanned before it.
+            self.lexer.finish_failed_discard_scan(lexer_checkpoint);
+        }
+        result
+    }
+
+    /// `SkipBlock<closingAtt>` from the C++ lookahead: nested groups recurse,
+    /// mismatched closing tokens are ordinary contents, and EOF terminates the
+    /// current skip without manufacturing a parse error.
+    fn skip_statement_probe_group(&mut self, closing: Symbol) -> Result<(), ParseError> {
+        loop {
+            match self.consume()?.kind {
+                TokenKind::Symbol(symbol) if symbol == closing => return Ok(()),
+                TokenKind::Eof => return Ok(()),
+                TokenKind::Symbol(Symbol::LParen) => {
+                    self.skip_statement_probe_group(Symbol::RParen)?
+                }
+                TokenKind::Symbol(Symbol::LBracket) => {
+                    self.skip_statement_probe_group(Symbol::RBracket)?
+                }
+                TokenKind::Symbol(Symbol::LBrace) => {
+                    self.skip_statement_probe_group(Symbol::RBrace)?
+                }
+                _ => {}
+            }
+        }
     }
 
     fn parse_var_decl(&mut self) -> Result<Stmt, ParseError> {
@@ -3204,6 +3293,75 @@ func Ok() { return 1; }
             }] if value == "constant"
         ));
         assert_eq!(script.string_literals, ["ordinary", "key"]);
+    }
+
+    #[test]
+    fn statement_leading_map_literal_is_not_a_block() {
+        let script = parse_script(
+            r#"#strict 3
+            func Test(key) {
+                { [key] = SideEffect(), nested = { value = 1 } };
+                { key = SideEffect(); }
+                { if (key = 1) {} }
+                {}
+            }"#,
+        )
+        .expect("map-expression statements and ordinary blocks disambiguate");
+
+        let body = &script.functions[0].body;
+        assert!(matches!(
+            &body[0],
+            Stmt::Expr(Expr::Proplist(entries)) if entries.len() == 2
+        ));
+        assert!(matches!(
+            &body[1],
+            Stmt::Block(statements)
+                if matches!(statements.as_slice(), [Stmt::Assignment { .. }])
+        ));
+        assert!(matches!(
+            &body[2],
+            Stmt::Block(statements) if matches!(statements.as_slice(), [Stmt::If { .. }])
+        ));
+        assert!(matches!(&body[3], Stmt::Block(statements) if statements.is_empty()));
+
+        let error = parse_script("#strict 2\nfunc Test() { { key = 1 }; }")
+            .expect_err("statement-leading maps remain STRICT3-only");
+        assert_eq!(error.message(), "unexpected '{'");
+    }
+
+    #[test]
+    fn statement_map_probe_discards_lookahead_string_operands() {
+        let mut parser =
+            Parser::new("#strict 3\nfunc Broken() { { var = \"\\q\"; } }");
+        let error = parser
+            .parse_script()
+            .expect_err("the malformed declaration must stop before its string operand");
+
+        assert_eq!(error.message(), "expected variable name");
+        assert!(
+            parser.lexer.take_string_literals().is_empty(),
+            "C++ IsMapLiteral uses Discard; lookahead-only strings are not linked"
+        );
+        let diagnostics = parser.lexer.take_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "unknown escape: q");
+    }
+
+    #[test]
+    fn statement_map_probe_lexer_error_keeps_cpp_cursor_progress() {
+        let mut parser = Parser::new(
+            "#strict 3\nfunc Broken() { { key = \"discarded\" @ }; }",
+        );
+        let error = parser
+            .parse_script()
+            .expect_err("invalid lookahead character must abort the statement probe");
+
+        assert_eq!(error.message(), "unexpected character '@'");
+        assert!(parser.lexer.take_string_literals().is_empty());
+        assert!(matches!(
+            parser.peek().expect("cursor remains after the bad byte").kind,
+            TokenKind::Symbol(Symbol::RBrace)
+        ));
     }
 
     #[test]

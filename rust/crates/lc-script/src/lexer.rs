@@ -7,6 +7,21 @@ use crate::value::{
 // C4AUL_MAX_String (C4Aul.h): decoded string buffer bytes.
 const C4AUL_MAX_STRING: usize = 1024;
 
+/// Rewindable token-source state for parser lookahead that must re-lex its
+/// tokens afterward. The string-operand length covers the one lexer side
+/// channel that C++'s speculative `Discard` scan must not commit; diagnostics
+/// intentionally remain observable.
+pub(crate) struct LexerCheckpoint<'a> {
+    chars: std::str::CharIndices<'a>,
+    peeked: Option<(usize, char, usize, usize)>,
+    line: usize,
+    column: usize,
+    just_saw_cr: bool,
+    strict_level: u8,
+    string_literals_len: usize,
+    split_next_leading_star: bool,
+}
+
 pub struct Lexer<'a> {
     input: &'a str,
     chars: std::str::CharIndices<'a>,
@@ -60,6 +75,38 @@ impl<'a> Lexer<'a> {
 
     pub(crate) fn split_next_leading_star(&mut self) {
         self.split_next_leading_star = true;
+    }
+
+    pub(crate) fn checkpoint(&self) -> LexerCheckpoint<'a> {
+        LexerCheckpoint {
+            chars: self.chars.clone(),
+            peeked: self.peeked,
+            line: self.line,
+            column: self.column,
+            just_saw_cr: self.just_saw_cr,
+            strict_level: self.strict_level,
+            string_literals_len: self.string_literals.len(),
+            split_next_leading_star: self.split_next_leading_star,
+        }
+    }
+
+    pub(crate) fn restore(&mut self, checkpoint: LexerCheckpoint<'a>) {
+        self.chars = checkpoint.chars;
+        self.peeked = checkpoint.peeked;
+        self.line = checkpoint.line;
+        self.column = checkpoint.column;
+        self.just_saw_cr = checkpoint.just_saw_cr;
+        self.strict_level = checkpoint.strict_level;
+        self.string_literals
+            .truncate(checkpoint.string_literals_len);
+        self.split_next_leading_star = checkpoint.split_next_leading_star;
+    }
+
+    /// A C++ `Discard` lookahead that throws does not rewind its source
+    /// cursor, but it still must not retain strings scanned before the error.
+    pub(crate) fn finish_failed_discard_scan(&mut self, checkpoint: LexerCheckpoint<'a>) {
+        self.string_literals
+            .truncate(checkpoint.string_literals_len);
     }
 
     pub(crate) fn take_diagnostics(&mut self) -> Vec<ParseError> {
