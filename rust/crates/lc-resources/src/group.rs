@@ -831,7 +831,14 @@ fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
         if ignored_group_entry_bytes(&name_bytes) {
             continue;
         }
-        let metadata = entry.metadata().map_err(convert_walkdir_error)?;
+        // Unix C4GroupEntry::Set uses stat(2), so symbolic links project the
+        // target's metadata. If stat fails (including a dangling link), C++
+        // retains the directory entry with its zero-initialized metadata.
+        #[cfg(not(windows))]
+        let metadata = fs::metadata(entry.path()).ok();
+        // Windows copies the `_finddata_t` entry metadata instead.
+        #[cfg(windows)]
+        let metadata = Some(entry.metadata().map_err(convert_walkdir_error)?);
         let rel = entry
             .path()
             .strip_prefix(root)
@@ -840,10 +847,12 @@ fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
         entries.push(GroupEntry {
             relative_path: rel,
             name_bytes,
-            is_directory: metadata.is_dir(),
-            size: metadata.len(),
-            time: directory_entry_time(&metadata),
-            executable: directory_entry_is_executable(entry.path()),
+            is_directory: metadata.as_ref().is_some_and(fs::Metadata::is_dir),
+            size: metadata.as_ref().map_or(0, fs::Metadata::len),
+            time: metadata.as_ref().map_or(0, directory_entry_time),
+            executable: metadata
+                .as_ref()
+                .is_some_and(|_| directory_entry_is_executable(entry.path())),
             crc_state: 0,
             stored_crc: 0,
         });

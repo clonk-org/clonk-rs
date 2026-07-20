@@ -258,6 +258,53 @@ fn cpp_system_publication_never_creates_a_loadable_standalone() {
     assert_eq!(publication.standalone_path, None);
 }
 
+#[cfg(unix)]
+#[test]
+fn cpp_dangling_symlink_is_zero_sized_in_unpacked_system_crc() {
+    // DirectoryIterator + C4GroupEntry::Set use stat(2). A dangling symlink
+    // therefore remains visible with zero-initialized metadata, and
+    // CalcCRC32 assigns it CRC zero instead of aborting the whole group
+    // (src/C4Group.cpp:586-603,2181-2193,2447-2484).
+    use std::os::unix::fs::symlink;
+
+    let directory = TestDirectory::new();
+    let system = directory.path().join("System.c4g");
+    fs::create_dir(&system).unwrap();
+    fs::write(system.join("C4.c"), b"global func C4() {}\n").unwrap();
+    let readable_crc = Group::open(&system).unwrap().contents_crc().unwrap();
+
+    let missing = directory.path().join("cleaned-tmp-oracle/System.c4g");
+    symlink(&missing, system.join("stale-oracle")).unwrap();
+
+    let group = Group::open(&system).unwrap();
+    let stale = group
+        .entries()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.relative_path == Path::new("stale-oracle"))
+        .expect("C++ directory scan retains the dangling entry");
+    assert!(!stale.is_directory);
+    assert_eq!(stale.size, 0);
+    assert_eq!(stale.time, 0);
+    assert_eq!(group.contents_crc().unwrap(), readable_crc);
+
+    let publication = build_host_resource_core(
+        &system,
+        directory.path().join("Network"),
+        HostResourceCoreSpec::new(
+            HostResourceType::System,
+            18,
+            LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+            "Host Player",
+        ),
+    )
+    .expect("a cleaned temporary symlink target cannot abort host preparation");
+
+    assert_eq!(publication.core.contents_crc, readable_crc);
+    assert!(!publication.core.loadable);
+    assert_eq!(publication.standalone_path, None);
+}
+
 #[test]
 fn cpp_plain_dynamic_uses_the_whole_file_crc_for_both_checksums() {
     // When C4Group::Open fails, SetByFile uses C4Group_GetFileCRC as the
