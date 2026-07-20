@@ -329,6 +329,33 @@ mod tests {
     }
 
     #[test]
+    fn l007_display_mode_default_override_and_numeric_persistence_match_cpp() {
+        let mut missing_mode = DisplayOptions::default();
+        assert_eq!(missing_mode.mode, DisplayMode::Fullscreen);
+        missing_mode.apply_config(&Config::new());
+        assert!(
+            missing_mode.dirty,
+            "an absent DisplayMode is materialized by the shutdown save"
+        );
+        let mut persisted = Config::new();
+        missing_mode.write_config(&mut persisted);
+        assert_eq!(persisted.get_in(Some("Graphics"), "DisplayMode"), Some("0"));
+
+        for raw in ["1", "Window"] {
+            let mut config = Config::new();
+            config.set_in(Some("Graphics"), "DisplayMode", raw);
+            let mut options = DisplayOptions::default();
+            options.apply_config(&config);
+            assert_eq!(options.mode, DisplayMode::Window, "raw value {raw}");
+            assert!(!options.dirty, "an explicit valid mode stays clean");
+
+            let mut persisted = Config::new();
+            options.write_config(&mut persisted);
+            assert_eq!(persisted.get_in(Some("Graphics"), "DisplayMode"), Some("1"));
+        }
+    }
+
+    #[test]
     fn display_options_preserve_unclamped_cpp_scale_percent() {
         let mut cfg = Config::new();
         cfg.set_in(Some("Graphics"), "Scale", "500");
@@ -472,7 +499,7 @@ impl Default for DisplayOptions {
             scale: 1.0,
             scale_percent: 100,
             point_filtering: false,
-            mode: DisplayMode::Window,
+            mode: DisplayMode::Fullscreen,
             maximized: false,
             position: None,
             dirty: false,
@@ -489,15 +516,17 @@ impl DisplayOptions {
         let config_path = paths.config_file();
         match Config::load(&config_path) {
             Ok(config) => options.apply_config(&config),
-            Err(err) => {
-                if err.kind() != ErrorKind::NotFound {
-                    tracing::warn!(
-                        error = %err,
-                        path = %config_path.display(),
-                        "failed to load display config"
-                    );
-                }
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                // C4Application saves the freshly defaulted configuration
+                // during startup. Keep the missing-file case dirty so the
+                // normal shutdown path persists the native fullscreen mode.
+                options.dirty = true;
             }
+            Err(err) => tracing::warn!(
+                error = %err,
+                path = %config_path.display(),
+                "failed to load display config"
+            ),
         }
         options
     }
@@ -693,10 +722,14 @@ impl DisplayOptions {
                 self.point_filtering = parsed;
             }
         }
-        if let Some(raw) = config.get_in(Some("Graphics"), "DisplayMode") {
-            if let Some(mode) = DisplayMode::from_config(raw) {
-                self.mode = mode;
+        match config.get_in(Some("Graphics"), "DisplayMode") {
+            Some(raw) => {
+                if let Some(mode) = DisplayMode::from_config(raw) {
+                    self.mode = mode;
+                }
             }
+            // The classic startup save materializes an absent enum default.
+            None => self.dirty = true,
         }
         if let Some(raw) = config.get_in(Some("Graphics"), "Maximized") {
             if let Some(parsed) = parse_bool(raw) {

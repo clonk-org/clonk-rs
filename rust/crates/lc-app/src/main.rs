@@ -89516,6 +89516,47 @@ func Award()
     }
 
     #[test]
+    fn l007_fresh_install_shutdown_persists_fullscreen_default() {
+        let install = tempdir().expect("install root");
+        let user_data = tempdir().expect("user data");
+        fs::create_dir_all(install.path().join("planet")).expect("planet directory");
+        fs::write(install.path().join("planet/System.c4g"), b"stub")
+            .expect("system group stub");
+        let config_file = user_data.path().join("custom/fresh.config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("LC_CONFIG_FILE", None),
+        ]);
+        let paths = AppPaths::discover_with_config_file(Some(&config_file))
+            .expect("discover fresh-install paths");
+        paths.ensure_user_dirs().expect("prepare config parent");
+        assert!(!config_file.exists());
+
+        let mut display = DisplayOptions::load(Some(&paths));
+        assert_eq!(display.mode, DisplayMode::Fullscreen);
+        display.persist_if_dirty(&paths);
+
+        let persisted = Config::load(&config_file).expect("load first-quit config");
+        assert_eq!(
+            persisted.get_in(Some("Graphics"), "DisplayMode"),
+            Some("0")
+        );
+
+        fs::write(&config_file, "[General]\nSentinel=keep\n")
+            .expect("write config without DisplayMode");
+        let mut missing_key = DisplayOptions::load(Some(&paths));
+        assert_eq!(missing_key.mode, DisplayMode::Fullscreen);
+        missing_key.persist_if_dirty(&paths);
+        let persisted = Config::load(&config_file).expect("reload missing-key config");
+        assert_eq!(persisted.get_in(Some("General"), "Sentinel"), Some("keep"));
+        assert_eq!(
+            persisted.get_in(Some("Graphics"), "DisplayMode"),
+            Some("0")
+        );
+    }
+
+    #[test]
     fn fully_disabled_test_audio_skips_install_resource_discovery() {
         let audio = AudioContext::try_new(AudioOptions {
             sound_enabled: false,
