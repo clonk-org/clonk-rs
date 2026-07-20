@@ -711,6 +711,61 @@ fn classic_safe_random(range: usize) -> usize {
     classic_safe_random_unlocked(range)
 }
 
+fn classic_names_equal_case_insensitive(first: &[u8], second: &[u8]) -> bool {
+    let capital = |byte| match byte {
+        b'a'..=b'z' => byte - (b'a' - b'A'),
+        0xe4 => 0xc4,
+        0xf6 => 0xd6,
+        0xfc => 0xdc,
+        _ => byte,
+    };
+    first.len() == second.len()
+        && first
+            .iter()
+            .zip(second)
+            .all(|(&first, &second)| capital(first) == capital(second))
+}
+
+fn classic_script_player_name(
+    configured_names: &LegacyCString,
+    active_names: &[&[u8]],
+    next_random: &mut impl FnMut(usize) -> usize,
+) -> LegacyCString {
+    if configured_names.is_empty() {
+        return lc_network::validate_name_no_empty(
+            LegacyCString::from_bytes(b"Computer".to_vec())
+                .expect("the shipped script-player fallback contains no NUL"),
+        );
+    }
+
+    let names = configured_names
+        .as_bytes()
+        .split(|byte| *byte == b'|')
+        .collect::<Vec<_>>();
+    let selected = names
+        .iter()
+        .copied()
+        .find(|candidate| {
+            active_names
+                .iter()
+                .all(|active| !classic_names_equal_case_insensitive(active, candidate))
+        })
+        .unwrap_or_else(|| names[next_random(names.len())]);
+    lc_network::validate_name_no_empty(
+        LegacyCString::from_bytes(selected.to_vec())
+            .expect("configured script-player names contain no interior NUL"),
+    )
+}
+
+fn classic_script_player_color(next_random: &mut impl FnMut(usize) -> usize) -> u32 {
+    let mut channel = || next_random(302).min(256) as u8;
+    let red = channel();
+    let green = channel();
+    let blue = channel();
+    // StdColors.h's RGB helper stores red in the low byte.
+    u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16)
+}
+
 fn select_loader_with_safe_random(
     groups: &[Group],
     graphics: &Group,
@@ -44696,61 +44751,75 @@ impl GameApp {
     }
 
     fn add_classic_lobby_script_player(&mut self) {
+        let request = {
+            let _guard = lock_unpoisoned(&CLASSIC_SAFE_RANDOM_LOCK);
+            self.classic_lobby_script_player_request_with_random(classic_safe_random_unlocked)
+        };
+        self.submit_classic_lobby_script_player_request(request);
+    }
+
+    #[cfg(test)]
+    fn add_classic_lobby_script_player_with_random(
+        &mut self,
+        next_random: impl FnMut(usize) -> usize,
+    ) {
+        let request = self.classic_lobby_script_player_request_with_random(next_random);
+        self.submit_classic_lobby_script_player_request(request);
+    }
+
+    fn classic_lobby_script_player_request_with_random(
+        &self,
+        mut next_random: impl FnMut(usize) -> usize,
+    ) -> Option<lc_engine::PlayerInfoUpdateRequest> {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
-            return;
+            return None;
         }
         let Some(metadata) = self
             .network_team_assignment
             .as_ref()
             .map(|assignment| assignment.teams().clone())
         else {
-            return;
+            return None;
         };
         let (_, packets) = self.control_player_infos.retained_rows_snapshot();
         let active = packets
             .iter()
             .flat_map(|(_, _, players)| players)
-            .filter(|player| {
-                player.is_script_player()
-                    && player.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED == 0
+            .filter(|player| player.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED == 0)
+            .collect::<Vec<_>>();
+        let active_script_players = active
+            .iter()
+            .filter(|player| player.is_script_player())
+            .count();
+        if metadata.max_script_players
+            <= i32::try_from(active_script_players).unwrap_or(i32::MAX)
+        {
+            return None;
+        }
+        let active_names = active
+            .iter()
+            .map(|player| {
+                if !player.league_account.is_empty() {
+                    player.league_account.as_bytes()
+                } else if !player.forced_name.is_empty() {
+                    player.forced_name.as_bytes()
+                } else {
+                    player.name.as_bytes()
+                }
             })
             .collect::<Vec<_>>();
-        if metadata.max_script_players <= i32::try_from(active.len()).unwrap_or(i32::MAX) {
-            return;
-        }
-        let mut chosen_name = None;
-        for candidate in metadata
-            .script_player_names
-            .as_bytes()
-            .split(|byte| *byte == b'|')
-            .filter(|candidate| !candidate.is_empty())
-        {
-            let available = active
-                .iter()
-                .all(|player| !player.name.as_bytes().eq_ignore_ascii_case(candidate));
-            if available {
-                chosen_name = LegacyCString::from_bytes(candidate.to_vec());
-                break;
-            }
-        }
-        let name = chosen_name.unwrap_or_else(|| {
-            LegacyCString::from_bytes(b"Computer".to_vec()).unwrap_or_default()
-        });
-        let colors = [
-            0x00f4_0000,
-            0x0000_c800,
-            0x0020_20ff,
-            0x00f4_f400,
-            0x00f4_00f4,
-            0x0000_f4f4,
-        ];
-        let color = colors[active.len() % colors.len()];
+        let name = classic_script_player_name(
+            &metadata.script_player_names,
+            &active_names,
+            &mut next_random,
+        );
+        let color = classic_script_player_color(&mut next_random);
         let local_client_id = self
             .network
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             .unwrap_or(0);
-        let request = lc_engine::PlayerInfoUpdateRequest {
+        Some(lc_engine::PlayerInfoUpdateRequest {
             client_id: local_client_id,
             flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
             players: vec![lc_engine::ControlPlayerInfoEntry {
@@ -44760,6 +44829,15 @@ impl GameApp {
                 original_color: color,
                 ..lc_engine::ControlPlayerInfoEntry::default()
             }],
+        })
+    }
+
+    fn submit_classic_lobby_script_player_request(
+        &self,
+        request: Option<lc_engine::PlayerInfoUpdateRequest>,
+    ) {
+        let Some(request) = request else {
+            return;
         };
         if let Some(Err(error)) = self
             .network
@@ -92750,6 +92828,165 @@ public func Grant(password) { return GainMissionAccess(password); }
             LobbyRosterRow::Player(player) => player.team.as_ref(),
             _ => None,
         }).all(|team| team.name == "Random team" && !team.selectable));
+    }
+
+    fn l100_script_player_add_fixture(
+        configured_names: &[u8],
+        active_players: &[(&[u8], bool)],
+        max_script_players: i32,
+    ) -> (GameApp, network::TestNetworkCommands) {
+        let mut app = new_state_only_menu_app(320, 200);
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: active_players
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (name, script_player))| {
+                        lc_engine::ControlPlayerInfoEntry {
+                            id: i32::try_from(index + 1).unwrap(),
+                            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+                            player_type: if *script_player {
+                                lc_engine::PLAYER_INFO_TYPE_SCRIPT
+                            } else {
+                                lc_engine::PLAYER_INFO_TYPE_USER
+                            },
+                            ..Default::default()
+                        }
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+        );
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            lc_engine::InitialNetworkTeamMetadata {
+                active: true,
+                custom: true,
+                allow_hostility_change: false,
+                allow_team_switch: false,
+                auto_generate_teams: false,
+                last_team_id: 0,
+                team_distribution: lc_engine::InitialNetworkTeamDistribution::Free,
+                team_colors: false,
+                max_script_players,
+                script_player_names: LegacyCString::from_bytes(configured_names.to_vec()).unwrap(),
+                random_team_count: 0,
+                teams: Vec::new(),
+            },
+        ));
+        let (manager, _events, commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        (app, commands)
+    }
+
+    #[test]
+    fn l100_name_conflicts_use_cpp_raw_byte_case_folding() {
+        let configured = LegacyCString::from_bytes(b"\xe4lpha".to_vec()).unwrap();
+        let active = [b"\xc4LPHA".as_slice()];
+        let mut ranges = Vec::new();
+        let selected = classic_script_player_name(&configured, &active, &mut |range| {
+            ranges.push(range);
+            0
+        });
+
+        assert_eq!(selected.as_bytes(), b"\xe4lpha");
+        assert_eq!(ranges, vec![1]);
+    }
+
+    #[test]
+    fn l100_random_color_wraps_cpp_channel_256_after_clamping() {
+        let draws = [256, 301, 255];
+        let mut draw = 0;
+        let mut ranges = Vec::new();
+        let color = classic_script_player_color(&mut |range| {
+            ranges.push(range);
+            let value = draws[draw];
+            draw += 1;
+            value
+        });
+
+        assert_eq!(color, 0x00ff_0000);
+        assert_eq!(ranges, vec![302, 302, 302]);
+    }
+
+    #[test]
+    fn l100_exhausted_script_player_names_pick_from_configured_list() {
+        let (mut app, mut commands) = l100_script_player_add_fixture(
+            b"Alpha|Beta",
+            &[(b"alpha".as_slice(), false), (b"BETA".as_slice(), true)],
+            2,
+        );
+        let draws = [1, 10, 20, 30];
+        let mut draw = 0;
+        let mut ranges = Vec::new();
+
+        app.add_classic_lobby_script_player_with_random(|range| {
+            ranges.push(range);
+            let value = draws[draw];
+            draw += 1;
+            value
+        });
+
+        let requests = commands.take_player_info_updates();
+        let [request] = requests.as_slice() else {
+            panic!("expected one script-player request, got {requests:?}");
+        };
+        assert_eq!(request.players[0].name.as_bytes(), b"Beta");
+        assert_ne!(request.players[0].name.as_bytes(), b"Computer");
+        assert_eq!(request.players[0].color, 0x001e_140a);
+        assert_eq!(ranges, vec![2, 302, 302, 302]);
+    }
+
+    #[test]
+    fn l100_empty_script_player_names_keep_computer_fallback() {
+        let (mut app, mut commands) = l100_script_player_add_fixture(b"", &[], 1);
+        let draws = [4, 5, 6];
+        let mut draw = 0;
+        let mut ranges = Vec::new();
+
+        app.add_classic_lobby_script_player_with_random(|range| {
+            ranges.push(range);
+            let value = draws[draw];
+            draw += 1;
+            value
+        });
+
+        let requests = commands.take_player_info_updates();
+        let [request] = requests.as_slice() else {
+            panic!("expected one script-player request, got {requests:?}");
+        };
+        assert_eq!(request.players[0].name.as_bytes(), b"Computer");
+        assert_eq!(request.players[0].color, 0x0006_0504);
+        assert_eq!(ranges, vec![302, 302, 302]);
+    }
+
+    #[test]
+    fn l100_each_script_player_add_draws_three_fresh_random_color_channels() {
+        let (mut app, mut commands) = l100_script_player_add_fixture(b"Solo", &[], 2);
+        let draws = [1, 2, 3, 4, 5, 6];
+        let mut draw = 0;
+        let mut ranges = Vec::new();
+        let mut next_random = |range| {
+            ranges.push(range);
+            let value = draws[draw];
+            draw += 1;
+            value
+        };
+
+        app.add_classic_lobby_script_player_with_random(&mut next_random);
+        app.add_classic_lobby_script_player_with_random(&mut next_random);
+        drop(next_random);
+
+        let requests = commands.take_player_info_updates();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].players[0].color, 0x0003_0201);
+        assert_eq!(requests[1].players[0].color, 0x0006_0504);
+        assert_ne!(requests[0].players[0].color, 0x00f4_0000);
+        assert_ne!(requests[1].players[0].color, 0x0000_c800);
+        assert_eq!(ranges, vec![302; 6]);
     }
 
     #[test]
