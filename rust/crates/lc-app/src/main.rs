@@ -20078,19 +20078,14 @@ fn encode_surface_to_png(surface: &Surface) -> Result<Vec<u8>> {
 }
 
 fn screenshot_directories(paths: Option<&AppPaths>) -> (PathBuf, PathBuf) {
-    let root = paths
-        .map(|paths| paths.install_root().to_path_buf())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let folder = paths
-        .and_then(|paths| Config::load(&paths.config_file()).ok())
-        .and_then(|config| {
-            config
-                .get_in(Some("General"), "ScreenshotFolder")
-                .map(str::trim)
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| "Screenshots".to_string());
-    (root.join(folder), root)
+    let Some(paths) = paths else {
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        return (root.join("Screenshots"), root);
+    };
+    (
+        paths.screenshot_dir(),
+        paths.install_root().to_path_buf(),
+    )
 }
 
 fn next_screenshot_path(directory: &Path) -> PathBuf {
@@ -23281,9 +23276,13 @@ impl GameApp {
         let control_player_infos = ControlPlayerInfoRegistry::default();
         // Scenario discovery only walks directories and reads scenario
         // groups; start it only after the process-global resource gate.
-        let scenario_discovery = frontend_scenarios
-            .is_none()
-            .then(|| std::thread::spawn(load_frontend_scenarios));
+        let scenario_discovery = frontend_scenarios.is_none().then(|| {
+            let paths = paths.cloned();
+            std::thread::spawn(move || match paths {
+                Some(paths) => load_frontend_scenarios_from_paths(&paths),
+                None => load_frontend_scenarios(),
+            })
+        });
         let (loader_screen, loader_error) = match paths {
             Some(paths) => match build_startup_loader(paths, assets.as_ref()) {
                 Ok(setup) => (Some(setup.screen), None),
@@ -23681,7 +23680,7 @@ impl GameApp {
             client_material_resource_groups: None,
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
-            recordings_dir: paths.map(|p| p.recordings_dir()),
+            recordings_dir: paths.map(AppPaths::recordings_dir),
             recording_template: None,
             recording: None,
             control_playback: None,
@@ -122716,6 +122715,32 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn l016_screenshot_folder_override_falls_back_to_install_root() {
+        let install = tempdir().expect("screenshot install root");
+        let user_data = tempdir().expect("screenshot user data");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("fixture System group");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("fixture app paths");
+        paths.ensure_user_dirs().expect("fixture user directories");
+        fs::write(
+            paths.config_file(),
+            b"[General]\nName=M\xe4ker\nScreenshotFolder=Configured Screenshots\n",
+        )
+        .expect("configure screenshot folder");
+        let blocked = install.path().join("Configured Screenshots");
+        fs::write(&blocked, b"not a directory").expect("block configured screenshot folder");
+
+        let (path, result) = prepare_numbered_screenshot_path(Some(&paths));
+
+        result.expect("install-root screenshot fallback");
+        assert_eq!(path, install.path().join("Screenshot001.png"));
+    }
+
+    #[test]
     fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
         let install = tempdir().expect("screenshot install root");
         let user_data = tempdir().expect("screenshot user data");
@@ -179925,6 +179950,122 @@ func ControlDig() { dig_count = 1; return(1); }
         );
         assert!(looks_like_cpp_integer("+999999999999999999999999"));
         assert!(looks_like_cpp_integer("-01"));
+    }
+
+    #[test]
+    fn l016_save_demo_folder_controls_recording_directory() {
+        let fixture = tempdir().expect("recording path fixture");
+        let user_data = fixture.path().join("user-data");
+        let absolute_records = fixture.path().join("Absolute Records.c4f");
+        let (_guard, paths) = exact_loader_test_paths(&user_data, None);
+
+        assert_eq!(
+            paths.recordings_dir(),
+            paths.install_root().join("Records.c4f")
+        );
+
+        persist_config_value(
+            &paths,
+            "General",
+            "SaveDemoFolder",
+            "Relative Records.c4f",
+        )
+        .expect("configure relative recording folder");
+        let relative_records = paths.install_root().join("Relative Records.c4f");
+        assert_eq!(
+            paths.recordings_dir(),
+            relative_records
+        );
+
+        let app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: true,
+            },
+        )
+        .expect("initialize app with configured recording folder");
+        assert_eq!(
+            app.recordings_dir.as_deref(),
+            Some(relative_records.as_path())
+        );
+
+        persist_config_value(
+            &paths,
+            "General",
+            "SaveDemoFolder",
+            absolute_records.to_string_lossy().into_owned(),
+        )
+        .expect("configure absolute recording folder");
+        assert_eq!(paths.recordings_dir(), absolute_records);
+    }
+
+    #[test]
+    fn l016_game_app_uses_selected_user_root_for_scenario_discovery() {
+        let fixture = tempdir().expect("selected user-root fixture");
+        let selected_user = fixture.path().join("selected-user");
+        let ambient_user = fixture.path().join("ambient-user");
+        let config_file = fixture.path().join("selected.config");
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        fs::write(
+            &config_file,
+            format!(
+                "[General]\nUserPath=\"{}\"\nLanguageEx=US\n\n[Network]\nLocalName=Exact Host\n",
+                selected_user.display()
+            ),
+        )
+        .expect("write selected config");
+        let _selected_guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_CONTENT_DIR", None),
+            ("LC_USER_DATA_DIR", None),
+            ("LC_CONFIG_FILE", None),
+        ]);
+        let paths = AppPaths::discover_with_config_file(Some(&config_file))
+            .expect("discover selected app paths");
+        paths.ensure_user_dirs().expect("selected user directories");
+        let scenario = paths.scenario_dir().join("L016Configured.c4s");
+        fs::create_dir_all(&scenario).expect("selected user scenario directory");
+        fs::write(
+            scenario.join("Scenario.json"),
+            br#"{"name":"Selected User Scenario"}"#,
+        )
+        .expect("selected user scenario metadata");
+
+        // Make a fresh ambient discovery disagree with the already-selected
+        // paths. The constructor must pass its AppPaths into the worker.
+        let _ambient_guard = EnvGuard::set(&[("LC_USER_DATA_DIR", Some(&ambient_user))]);
+        let app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize app with selected user root");
+
+        assert_eq!(paths.user_data_dir(), selected_user);
+        assert_eq!(paths.config_file(), config_file);
+        assert_eq!(
+            app.scenario_catalog
+                .get("L016Configured.c4s")
+                .map(|scenario| scenario.title.as_str()),
+            Some("Selected User Scenario")
+        );
     }
 
     #[test]

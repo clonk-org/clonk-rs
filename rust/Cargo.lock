@@ -2296,6 +2296,7 @@ dependencies = [
 name = "lc-platform"
 version = "0.1.0"
 dependencies = [
+ "lc-core",
  "tempfile",
  "thiserror 1.0.69",
 ]

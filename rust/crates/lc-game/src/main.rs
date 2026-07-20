@@ -117,6 +117,11 @@ fn run() -> Result<()> {
     logger
         .log_line(&format!("using config file at {}", config_path.display()))
         .context("failed to log config path")?;
+    // `prepare_config` may have copied a legacy config that was not present
+    // during bootstrap discovery. Re-read the selected file before deriving
+    // runtime paths so its General.UserPath applies on this first launch.
+    let paths = rediscover_paths_after_config(&config_path)
+        .context("failed to apply configured application paths")?;
 
     validate_update_tool(&paths, &logger)
         .context("failed to validate updater tool availability")?;
@@ -664,6 +669,15 @@ fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> 
         .context("failed to apply headless display mode override")?;
 
     Ok(config_path)
+}
+
+fn rediscover_paths_after_config(config_path: &Path) -> Result<AppPaths> {
+    let paths = AppPaths::discover_with_config_file(Some(config_path))
+        .context("failed to rediscover paths from the prepared config")?;
+    paths
+        .ensure_user_dirs()
+        .context("failed to prepare configured user directories")?;
+    Ok(paths)
 }
 
 fn adapt_config_to_current_version(config_path: &Path, logger: &LauncherLogger) -> Result<()> {
@@ -2764,6 +2778,52 @@ mod tests {
         let config = Config::load(&config_path).unwrap();
         assert_eq!(config.get_in(Some("General"), "Version"), Some("362"));
         assert_eq!(config.get_in(Some("General"), "Preloading"), Some("false"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn l016_migrated_config_user_path_applies_before_runtime_launch() {
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"system payload").unwrap();
+
+        let home_dir = TempDir::new().unwrap();
+        let legacy_dir = TempDir::new().unwrap();
+        let legacy_path = legacy_dir.path().join("Legacy.cfg");
+        fs::write(
+            &legacy_path,
+            b"[General]\nUserPath=\"$HOME/Relocated Data\"\n",
+        )
+        .unwrap();
+        let configured_user = home_dir.path().join("Relocated Data");
+        let log_dir = TempDir::new().unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", None),
+            ("LC_CONFIG_FILE", None),
+            ("LC_LEGACY_CONFIG_FILE", Some(legacy_path.as_path())),
+            ("LC_CACHE_DIR", None),
+            ("LC_LOGS_DIR", None),
+            ("XDG_DATA_HOME", None),
+            ("HOME", Some(home_dir.path())),
+            ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
+        ]);
+
+        let bootstrap_paths = AppPaths::discover().unwrap();
+        assert_ne!(bootstrap_paths.user_data_dir(), configured_user);
+        bootstrap_paths.ensure_user_dirs().unwrap();
+        let logger = test_logger(&log_dir);
+        let config_path = prepare_config(&bootstrap_paths, &logger).unwrap();
+
+        let runtime_paths = rediscover_paths_after_config(&config_path).unwrap();
+
+        assert_eq!(runtime_paths.config_file(), config_path);
+        assert_eq!(runtime_paths.user_data_dir(), configured_user);
+        assert_eq!(runtime_paths.cache_dir(), configured_user.join("Cache"));
+        assert_eq!(runtime_paths.logs_dir(), configured_user.join("Logs"));
+        assert!(configured_user.join("Config").is_dir());
     }
 
     #[test]

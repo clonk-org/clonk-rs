@@ -1,10 +1,13 @@
 use std::env;
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 const APP_NAME: &str = "LegacyClonk";
+const SAVE_DEMO_FOLDER_NAME: &str = "Records.c4f";
+const SCREENSHOT_FOLDER_NAME: &str = "Screenshots";
 #[cfg(target_os = "macos")]
 const CONFIG_FILE_NAME: &str = "legacyclonk.config";
 #[cfg(target_os = "windows")]
@@ -46,8 +49,18 @@ impl AppPaths {
         explicit_config_file: Option<&Path>,
     ) -> Result<Self, PathsError> {
         let install_root = discover_install_root()?;
-        let user_data_dir = discover_user_data_dir(&install_root);
-        let config_file = discover_config_file(&user_data_dir, explicit_config_file);
+        // Select the config from the platform/explicit bootstrap root first.
+        // General.UserPath changes the user-data root, not the file from which
+        // C4Config was loaded.
+        let environment_user_data_dir = env_path("LC_USER_DATA_DIR");
+        let bootstrap_user_data_dir = environment_user_data_dir
+            .clone()
+            .unwrap_or_else(|| discover_default_user_data_dir(&install_root));
+        let config_file = discover_config_file(&bootstrap_user_data_dir, explicit_config_file);
+        let user_data_dir = environment_user_data_dir.unwrap_or_else(|| {
+            discover_configured_user_data_dir(&config_file, &install_root)
+                .unwrap_or(bootstrap_user_data_dir)
+        });
         let cache_dir = discover_cache_dir(&user_data_dir);
         let logs_dir = discover_logs_dir(&user_data_dir);
         let temp_dir = discover_temp_dir();
@@ -108,7 +121,20 @@ impl AppPaths {
     }
 
     pub fn recordings_dir(&self) -> PathBuf {
-        self.user_data_dir.join("Recordings")
+        let configured = configured_general_value(&self.config_file, "SaveDemoFolder")
+            .unwrap_or_else(|| SAVE_DEMO_FOLDER_NAME.to_string());
+        let path = PathBuf::from(configured);
+        if path.is_absolute() {
+            path
+        } else {
+            self.install_root.join(path)
+        }
+    }
+
+    pub fn screenshot_dir(&self) -> PathBuf {
+        let configured = configured_general_value(&self.config_file, "ScreenshotFolder")
+            .unwrap_or_else(|| SCREENSHOT_FOLDER_NAME.to_string());
+        self.install_root.join(configured.trim())
     }
 
     pub fn playlists_dir(&self) -> PathBuf {
@@ -199,10 +225,7 @@ fn find_root_starting_at(start: PathBuf) -> Option<PathBuf> {
     None
 }
 
-fn discover_user_data_dir(install_root: &Path) -> PathBuf {
-    if let Some(override_dir) = env_path("LC_USER_DATA_DIR") {
-        return override_dir;
-    }
+fn discover_default_user_data_dir(install_root: &Path) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         if let Some(local_app_data) = env_path("LOCALAPPDATA") {
@@ -228,6 +251,68 @@ fn discover_user_data_dir(install_root: &Path) -> PathBuf {
         }
     }
     install_root.join("user-data")
+}
+
+fn discover_configured_user_data_dir(config_file: &Path, install_root: &Path) -> Option<PathBuf> {
+    let configured = configured_general_value(config_file, "UserPath")?;
+    if configured.is_empty() {
+        return None;
+    }
+    let expanded = expand_user_path_environment(&configured);
+    let path = PathBuf::from(expanded);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        // Native startup makes ExePath the working directory before relative
+        // config paths are evaluated.
+        install_root.join(path)
+    })
+}
+
+fn configured_general_value(config_file: &Path, key: &str) -> Option<String> {
+    let bytes = fs::read(config_file).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    let mut projected = lc_core::std_buf::StdStrBuf::new();
+    projected.copy_bytes(&bytes);
+    projected.ensure_unicode();
+    let mut reader = Cursor::new(projected.as_bytes());
+    let config = lc_core::std_config::Config::from_reader(&mut reader).ok()?;
+    config
+        .get_in(Some("General"), key)
+        .or_else(|| config.get_in(None, key))
+        .map(str::to_string)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn expand_user_path_environment(configured: &str) -> String {
+    let Some(home) = env::var("HOME").ok().filter(|home| !home.is_empty()) else {
+        return configured.to_string();
+    };
+    configured.replacen("$HOME", &home, 1)
+}
+
+#[cfg(target_os = "windows")]
+fn expand_user_path_environment(configured: &str) -> String {
+    let mut expanded = configured.to_string();
+    let mut cursor = 0;
+    while let Some(start_offset) = expanded[cursor..].find('%') {
+        let start = cursor + start_offset;
+        let Some(end_offset) = expanded[start + 1..].find('%') else {
+            break;
+        };
+        let end = start + 1 + end_offset;
+        let name = &expanded[start + 1..end];
+        let Some(value) = env::var_os(name) else {
+            cursor = end + 1;
+            continue;
+        };
+        let value = value.to_string_lossy();
+        expanded.replace_range(start..=end, &value);
+        cursor = start + value.len();
+    }
+    expanded
 }
 
 fn discover_cache_dir(user_data_dir: &Path) -> PathBuf {
@@ -365,7 +450,15 @@ mod tests {
 
     #[test]
     fn config_file_is_nested_under_config_dir() {
-        let _guard = EnvGuard::set(&[("LC_CONFIG_FILE", None), ("LC_LANGUAGE_OVERRIDE", None)]);
+        let install_dir = TempDir::new().unwrap();
+        touch_system_group(&install_dir);
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+            ("LC_CONFIG_FILE", None),
+            ("LC_LANGUAGE_OVERRIDE", None),
+        ]);
         let paths = AppPaths::discover().unwrap();
         let config_file = paths.config_file();
         let config_dir = paths.config_dir();
@@ -462,6 +555,74 @@ mod tests {
 
         assert_eq!(paths.config_file(), explicit_file);
         assert!(explicit_file.parent().unwrap().is_dir());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn l016_selected_config_user_path_expands_without_relocating_config() {
+        let install_dir = TempDir::new().unwrap();
+        touch_system_group(&install_dir);
+        let home_dir = TempDir::new().unwrap();
+        let config_dir = TempDir::new().unwrap();
+        let environment_file = config_dir.path().join("environment.config");
+        let explicit_file = config_dir.path().join("explicit.config");
+        fs::write(
+            &environment_file,
+            "[General]\nUserPath=\"$HOME/Legacy Data\"\n",
+        )
+        .unwrap();
+        fs::write(
+            &explicit_file,
+            "[General]\nUserPath=\"$HOME/Wrong Data\"\n",
+        )
+        .unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", None),
+            ("LC_CONFIG_FILE", Some(environment_file.as_path())),
+            ("LC_CACHE_DIR", None),
+            ("LC_LOGS_DIR", None),
+            ("HOME", Some(home_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover_with_config_file(Some(&explicit_file)).unwrap();
+
+        assert_eq!(paths.config_file(), environment_file);
+        assert_eq!(paths.user_data_dir(), home_dir.path().join("Legacy Data"));
+        assert_eq!(paths.cache_dir(), home_dir.path().join("Legacy Data/Cache"));
+        assert_eq!(paths.logs_dir(), home_dir.path().join("Legacy Data/Logs"));
+        paths.ensure_user_dirs().unwrap();
+        assert!(home_dir.path().join("Legacy Data/Config").is_dir());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn l016_rust_user_data_override_precedes_config_user_path() {
+        let install_dir = TempDir::new().unwrap();
+        touch_system_group(&install_dir);
+        let user_dir = TempDir::new().unwrap();
+        let configured_dir = TempDir::new().unwrap();
+        let config_dir = TempDir::new().unwrap();
+        let config_file = config_dir.path().join("explicit.config");
+        fs::write(
+            &config_file,
+            format!(
+                "[General]\nUserPath=\"{}\"\n",
+                configured_dir.path().display()
+            ),
+        )
+        .unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+            ("LC_CONFIG_FILE", None),
+            ("HOME", None),
+        ]);
+
+        let paths = AppPaths::discover_with_config_file(Some(&config_file)).unwrap();
+
+        assert_eq!(paths.config_file(), config_file);
+        assert_eq!(paths.user_data_dir(), user_dir.path());
     }
 
     #[test]
