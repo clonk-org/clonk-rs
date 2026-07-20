@@ -602,6 +602,10 @@ pub struct LobbyResourceRow {
     pub id: i32,
     pub filename: String,
     pub present_percent: u8,
+    /// Exact `C4Network2ResDlg::ListItem::IsSavePossible` projection. The app
+    /// owns locality, transfer state, type and configuration; the frontend
+    /// owns only the conditional `Ico_Save` button.
+    pub save_possible: bool,
 }
 
 impl LobbyResourceRow {
@@ -760,6 +764,9 @@ pub enum LobbyAction {
         anchor: GuiPoint,
         minimum_width: i32,
     },
+    SaveResourceRequested {
+        resource_id: i32,
+    },
     Chat(LobbyChatRequest),
     GameOptions(LobbyGameOptionInput),
     FocusChanged(LobbyControl),
@@ -781,6 +788,7 @@ pub enum LobbyControl {
     Roster,
     RosterTeam,
     RosterAddPlayer,
+    ResourceSave(i32),
     OptionsList,
     Option(LobbyOptionKind),
     Exit,
@@ -834,6 +842,8 @@ pub struct LobbyRosterRowLayout {
     pub icon: IntRect,
     pub add_player: Option<IntRect>,
     pub team: Option<IntRect>,
+    /// Conditional 16x16 `Ico_Save` button on a Resources-sheet row.
+    pub save: Option<IntRect>,
     /// Stacked ComboBox bounds for an Options-sheet row.
     pub option_value: Option<IntRect>,
     pub rank: Option<IntRect>,
@@ -1306,6 +1316,7 @@ enum HitTarget {
     RosterRow(usize),
     RosterBlank,
     RightListInert,
+    ResourceSave(i32),
     AddPlayer(usize),
     Team(usize),
     OptionRow(usize),
@@ -1327,6 +1338,7 @@ impl HitTarget {
             Self::Exit => Some(LobbyControl::Exit),
             Self::Run => Some(LobbyControl::Run),
             Self::AddPlayer(_) => Some(LobbyControl::RosterAddPlayer),
+            Self::ResourceSave(resource_id) => Some(LobbyControl::ResourceSave(resource_id)),
             _ => None,
         }
     }
@@ -1500,6 +1512,7 @@ impl GameLobby {
             HitTarget::RosterRow(_)
                 | HitTarget::RosterBlank
                 | HitTarget::RightListInert
+                | HitTarget::ResourceSave(_)
                 | HitTarget::AddPlayer(_)
                 | HitTarget::Team(_)
                 | HitTarget::OptionRow(_)
@@ -1517,6 +1530,7 @@ impl GameLobby {
                 HitTarget::RosterRow(_)
                     | HitTarget::RosterBlank
                     | HitTarget::RightListInert
+                    | HitTarget::ResourceSave(_)
                     | HitTarget::AddPlayer(_)
                     | HitTarget::Team(_)
                     | HitTarget::OptionRow(_)
@@ -2014,7 +2028,7 @@ impl GameLobby {
             .resource_rows
             .iter()
             .enumerate()
-            .map(|(index, _)| {
+            .map(|(index, row)| {
                 let y = i32::try_from(index)
                     .unwrap_or(i32::MAX)
                     .saturating_mul(row_height);
@@ -2035,6 +2049,12 @@ impl GameLobby {
                     },
                     add_player: None,
                     team: None,
+                    save: row.save_possible.then_some(IntRect {
+                        x: rect.x + rect.w - 18,
+                        y: rect.y + 1,
+                        w: 16,
+                        h: 16,
+                    }),
                     option_value: None,
                     rank: None,
                     collapsed: false,
@@ -2106,6 +2126,7 @@ impl GameLobby {
                     },
                     add_player: None,
                     team: None,
+                    save: None,
                     option_value: Some(IntRect {
                         x: rect.x + 6,
                         y: rect.y + caption_height + 3,
@@ -2282,6 +2303,7 @@ impl GameLobby {
                 icon,
                 add_player,
                 team,
+                save: None,
                 option_value: None,
                 rank,
                 collapsed,
@@ -3678,6 +3700,13 @@ impl GameLobby {
                 }
                 _ => Vec::new(),
             },
+            HitTarget::ResourceSave(resource_id) => self
+                .resource_rows
+                .iter()
+                .find(|row| row.id == resource_id && row.save_possible)
+                .map(|_| LobbyAction::SaveResourceRequested { resource_id })
+                .into_iter()
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -3992,6 +4021,16 @@ impl GameLobby {
                 }
                 if contains(row_layout.rect, point) {
                     return HitTarget::OptionRow(row_layout.index);
+                }
+            }
+        }
+        if self.active_sheet == LobbySheet::Resources && contains(layout.roster_client, point) {
+            for row_layout in &roster.rows {
+                let Some(row) = self.resource_rows.get(row_layout.index) else {
+                    continue;
+                };
+                if row_layout.save.is_some_and(|rect| contains(rect, point)) {
+                    return HitTarget::ResourceSave(row.id);
                 }
             }
         }
@@ -4584,6 +4623,35 @@ impl GameLobby {
                     gamma,
                     layout.roster_client,
                 );
+            }
+            if let Some(save) = row_layout.save {
+                let target = HitTarget::ResourceSave(row.id);
+                if self.hovered == target {
+                    draw_highlight_clipped(
+                        surface,
+                        save,
+                        layout.roster_client,
+                        &resources.button_highlight,
+                        gamma,
+                    );
+                }
+                draw_standard_icon_clipped(
+                    surface,
+                    save,
+                    layout.roster_client,
+                    &resources.icons,
+                    13,
+                    gamma,
+                );
+                if self.pointer_pressed == Some(target) && self.pointer_inside_pressed {
+                    draw_highlight_clipped(
+                        surface,
+                        save,
+                        layout.roster_client,
+                        &resources.button_highlight,
+                        gamma,
+                    );
+                }
             }
         }
     }
@@ -6196,16 +6264,19 @@ mod tests {
                 id: 9,
                 filename: r"Network\Definitions.c4d".into(),
                 present_percent: u8::MAX,
+                save_possible: false,
             },
             LobbyResourceRow {
                 id: -2,
                 filename: "anonymous.c4s".into(),
                 present_percent: 5,
+                save_possible: false,
             },
             LobbyResourceRow {
                 id: 2,
                 filename: "Network/Scenario.c4s".into(),
                 present_percent: 42,
+                save_possible: false,
             },
         ]);
 
@@ -6250,6 +6321,41 @@ mod tests {
         assert!(!lobby.set_resource_progress(77, 10));
         assert!(lobby.remove_resource_row(9));
         assert!(!lobby.remove_resource_row(9));
+    }
+
+    #[test]
+    fn resource_save_button_uses_native_geometry_and_emits_the_exact_row_id() {
+        let fonts = endeavour_font_set();
+        let mut lobby = lobby(LobbyRole::Client, vec![client(1, true)]);
+        lobby.set_resource_rows(vec![
+            LobbyResourceRow {
+                id: 7,
+                filename: "Network/Scenario.c4s".into(),
+                present_percent: 100,
+                save_possible: true,
+            },
+            LobbyResourceRow {
+                id: 9,
+                filename: "Network/System.c4g".into(),
+                present_percent: 100,
+                save_possible: false,
+            },
+        ]);
+        lobby.set_active_sheet(LobbySheet::Resources);
+        let layout = lobby.layout(1280, 720, &fonts);
+        let roster = lobby.roster_layout(&layout, fonts.text.line_height);
+        let save = roster.rows[0].save.expect("eligible row has Save");
+        assert_eq!(save.x, roster.rows[0].rect.x + roster.rows[0].rect.w - 18);
+        assert_eq!(save.y, roster.rows[0].rect.y + 1);
+        assert_eq!((save.w, save.h), (16, 16));
+        assert_eq!(roster.rows[1].save, None);
+
+        let point = GuiPoint::new((save.x + 8) as f32, (save.y + 8) as f32);
+        assert!(lobby.pointer_down(point, &layout, &roster).is_empty());
+        assert_eq!(
+            lobby.pointer_up(point, &layout, &roster, Instant::now()),
+            vec![LobbyAction::SaveResourceRequested { resource_id: 7 }]
+        );
     }
 
     #[test]
@@ -6647,6 +6753,7 @@ mod tests {
                     id,
                     filename: format!("Network/Resource{id}.c4d"),
                     present_percent: 50,
+                    save_possible: false,
                 })
                 .collect(),
         );

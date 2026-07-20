@@ -3877,20 +3877,24 @@ enum AdmissionResourceUnavailable {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AdmissionResourceState {
     Loading { removed: bool },
-    Complete { path: PathBuf, removed: bool },
+    Complete {
+        path: PathBuf,
+        removed: bool,
+        local: bool,
+    },
     Unavailable(AdmissionResourceUnavailable),
 }
 
 #[derive(Debug, Default)]
 struct AdmissionResourceStore {
     resources: BTreeMap<i32, AdmissionResourceState>,
-    resource_types: BTreeMap<i32, u8>,
+    resource_cores: BTreeMap<i32, lc_engine::NetworkResourceCore>,
     present_percent: BTreeMap<i32, u8>,
 }
 
 impl AdmissionResourceStore {
     fn register_lobby_resource(&mut self, core: &lc_engine::NetworkResourceCore) {
-        self.resource_types.insert(core.id, core.resource_type);
+        self.resource_cores.insert(core.id, core.clone());
         self.present_percent.entry(core.id).or_insert(0);
         self.resources
             .entry(core.id)
@@ -3923,10 +3927,10 @@ impl AdmissionResourceStore {
     }
 
     fn lobby_ready_available(&self) -> bool {
-        self.resource_types
+        self.resource_cores
             .iter()
-            .all(|(resource_id, resource_type)| {
-                *resource_type == lc_network::HostResourceType::Player as u8
+            .all(|(resource_id, core)| {
+                core.resource_type == lc_network::HostResourceType::Player as u8
                     || !matches!(
                         self.resources.get(resource_id),
                         Some(AdmissionResourceState::Loading { removed: false })
@@ -3935,9 +3939,9 @@ impl AdmissionResourceStore {
     }
 
     fn ensure_by_core(&mut self, core: &lc_engine::NetworkResourceCore) -> &AdmissionResourceState {
-        self.resource_types
+        self.resource_cores
             .entry(core.id)
-            .or_insert(core.resource_type);
+            .or_insert_with(|| core.clone());
         self.resources.entry(core.id).or_insert_with(|| {
             if core.loadable {
                 AdmissionResourceState::Loading { removed: false }
@@ -3959,12 +3963,17 @@ impl AdmissionResourceStore {
     }
 
     fn mark_complete(&mut self, resource_id: i32, path: PathBuf) {
+        self.mark_complete_with_locality(resource_id, path, true);
+    }
+
+    fn mark_complete_with_locality(&mut self, resource_id: i32, path: PathBuf, local: bool) {
         self.present_percent.insert(resource_id, 100);
         self.resources.insert(
             resource_id,
             AdmissionResourceState::Complete {
                 path,
                 removed: false,
+                local,
             },
         );
     }
@@ -3986,7 +3995,7 @@ impl AdmissionResourceStore {
 
     fn clear(&mut self) {
         self.resources.clear();
-        self.resource_types.clear();
+        self.resource_cores.clear();
         self.present_percent.clear();
     }
 }
@@ -8861,6 +8870,7 @@ enum MessageDialogContinuation {
         address: String,
     },
     ClassicLobbyStart { countdown_seconds: i32 },
+    LobbyResourceOverwrite { resource_id: i32 },
     DeleteStartupPlayer { path: PathBuf },
     DeleteStartupCrew {
         player_path: PathBuf,
@@ -9727,6 +9737,7 @@ fn initial_classic_lobby_resource_rows(
                     id: core.id,
                     filename: legacy_presentation_text(core.filename.as_bytes()),
                     present_percent: 100,
+                    save_possible: false,
                 },
             )
         })
@@ -9745,10 +9756,71 @@ fn joined_classic_lobby_resource_rows(
                     id: core.id,
                     filename: legacy_presentation_text(core.filename.as_bytes()),
                     present_percent: present_percent.get(&core.id).copied().unwrap_or(0),
+                    save_possible: false,
                 },
             )
         })
         .collect()
+}
+
+fn path_has_raw_directory_prefix(path: &Path, directory: &Path) -> bool {
+    let path = path.as_os_str().as_encoded_bytes();
+    let directory = directory.as_os_str().as_encoded_bytes();
+    path.starts_with(directory)
+}
+
+fn lobby_resource_save_possible(
+    local: bool,
+    complete: bool,
+    resource_type: u8,
+    allow_player_save: bool,
+    source: &Path,
+    work_directory: &Path,
+) -> bool {
+    if local || !complete || !path_has_raw_directory_prefix(source, work_directory) {
+        return false;
+    }
+    resource_type == lc_network::HostResourceType::Scenario as u8
+        || resource_type == lc_network::HostResourceType::Definitions as u8
+        || resource_type == lc_network::HostResourceType::Player as u8 && allow_player_save
+}
+
+fn lobby_resource_save_target(
+    exe_path: &Path,
+    player_path: &Path,
+    core: &lc_engine::NetworkResourceCore,
+) -> Option<(PathBuf, String)> {
+    let raw_basename = core
+        .filename
+        .as_bytes()
+        .rsplit(|byte| matches!(byte, b'/' | b'\\'))
+        .next()
+        .filter(|basename| !basename.is_empty())?;
+    let basename = legacy_presentation_text(raw_basename);
+    let mut target = exe_path.to_path_buf();
+    if has_player_group_extension(raw_basename) && !player_path.as_os_str().is_empty() {
+        let relative_player_path = player_path
+            .to_string_lossy()
+            .trim_start_matches(['/', '\\'])
+            .to_string();
+        target.push(relative_player_path);
+    }
+    #[cfg(unix)]
+    target.push(path_from_group_name_bytes(raw_basename));
+    #[cfg(not(unix))]
+    target.push(&basename);
+    Some((target, basename))
+}
+
+fn copy_lobby_resource_item(source: &Path, target: &Path) -> io::Result<()> {
+    if let Ok(metadata) = fs::symlink_metadata(target) {
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            fs::remove_dir_all(target)?;
+        } else {
+            fs::remove_file(target)?;
+        }
+    }
+    lc_core::std_file::copy_file(source, target, false).map(|_| ())
 }
 
 fn initial_network_control_clock(
@@ -13384,6 +13456,7 @@ enum LobbyButton {
     Ready,
     Start,
     Sheet(LobbySheet),
+    ResourceSave(i32),
     ExternalChat,
 }
 
@@ -13392,12 +13465,20 @@ struct NetworkLobbyLayout {
     ready_button: GuiRect,
     start_button: Option<GuiRect>,
     sheet_buttons: Vec<(LobbySheet, GuiRect)>,
+    roster_client: GuiRect,
+    resource_save_buttons: Vec<(i32, GuiRect)>,
     external_chat_button: Option<GuiRect>,
     menu_region_max_x: f32,
 }
 
 impl NetworkLobbyLayout {
-    fn from_classic(layout: &LobbyLayout) -> Self {
+    fn from_classic(
+        layout: &LobbyLayout,
+        active_sheet: LobbySheet,
+        resource_rows: &BTreeMap<i32, LobbyResourceRow>,
+        resource_scroll: i32,
+        text_line_height: i32,
+    ) -> Self {
         let as_gui_rect = |rect: lc_frontend::classic_gui::IntRect| {
             GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32)
         };
@@ -13411,10 +13492,41 @@ impl NetworkLobbyLayout {
             .iter()
             .find(|button| button.control == LobbyControl::ChatDialog)
             .map(|button| as_gui_rect(button.rect));
+        let row_height = text_line_height.max(1).saturating_add(4);
+        let resource_save_buttons = (active_sheet == LobbySheet::Resources)
+            .then(|| {
+                resource_rows
+                    .values()
+                    .enumerate()
+                    .filter(|(_, row)| row.save_possible)
+                    .filter_map(|(index, row)| {
+                        let y = layout.roster_client.y
+                            + i32::try_from(index)
+                                .unwrap_or(i32::MAX)
+                                .saturating_mul(row_height)
+                            - resource_scroll
+                            + 1;
+                        let rect = lc_frontend::classic_gui::IntRect {
+                            x: layout.roster_client.x + layout.roster_client.w - 18,
+                            y,
+                            w: 16,
+                            h: 16,
+                        };
+                        let visible = rect.x < layout.roster_client.x + layout.roster_client.w
+                            && rect.x + rect.w > layout.roster_client.x
+                            && rect.y < layout.roster_client.y + layout.roster_client.h
+                            && rect.y + rect.h > layout.roster_client.y;
+                        visible.then(|| (row.id, as_gui_rect(rect)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             ready_button: as_gui_rect(layout.ready_checkbox),
             start_button: layout.run_button.map(as_gui_rect),
             sheet_buttons,
+            roster_client: as_gui_rect(layout.roster_client),
+            resource_save_buttons,
             external_chat_button,
             // C4GameLobby has no startup scenario-selector pane. Keep all
             // ordinary pointer traffic on the fullscreen dialog itself.
@@ -13463,6 +13575,7 @@ enum LobbyAction {
     ToggleReady,
     StartGame,
     SelectSheet(LobbySheet),
+    SaveResource(i32),
     OpenExternalIrcChat,
     SubmitMessage(String),
     ChatEdited,
@@ -13765,7 +13878,13 @@ impl NetworkLobbyState {
             self.has_teams,
             self.has_external_chat,
         );
-        self.layout = Some(NetworkLobbyLayout::from_classic(&layout));
+        self.layout = Some(NetworkLobbyLayout::from_classic(
+            &layout,
+            self.active_sheet,
+            &self.resource_rows,
+            self.resource_scroll,
+            22,
+        ));
         self.layout.as_ref().expect("layout just initialised")
     }
 
@@ -13798,6 +13917,9 @@ impl NetworkLobbyState {
                 Some(LobbyButton::Ready) => Some(LobbyAction::ToggleReady),
                 Some(LobbyButton::Start) => Some(LobbyAction::StartGame),
                 Some(LobbyButton::Sheet(sheet)) => Some(LobbyAction::SelectSheet(sheet)),
+                Some(LobbyButton::ResourceSave(resource_id)) => {
+                    Some(LobbyAction::SaveResource(resource_id))
+                }
                 Some(LobbyButton::ExternalChat) => Some(LobbyAction::OpenExternalIrcChat),
                 None => None,
             }
@@ -14029,7 +14151,13 @@ impl NetworkLobbyState {
         let mut options = GameOptionButtons::new(role.game_option_context(), option_values);
         let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
         options.set_bounds(layout.game_option_strip);
-        self.layout = Some(NetworkLobbyLayout::from_classic(&layout));
+        self.layout = Some(NetworkLobbyLayout::from_classic(
+            &layout,
+            self.active_sheet,
+            &self.resource_rows,
+            self.resource_scroll,
+            fonts.text.line_height,
+        ));
         Ok((controller, options))
     }
 
@@ -14215,6 +14343,15 @@ impl NetworkLobbyState {
 
     fn hit_test_button(&self, point: GuiPoint) -> Option<LobbyButton> {
         let layout = self.layout.as_ref()?;
+        if point_in_rect(point, &layout.roster_client) {
+            if let Some((resource_id, _)) = layout
+                .resource_save_buttons
+                .iter()
+                .find(|(_, rect)| point_in_rect(point, rect))
+            {
+                return Some(LobbyButton::ResourceSave(*resource_id));
+            }
+        }
         let ready_square = GuiRect::new(
             layout.ready_button.origin.x,
             layout.ready_button.origin.y,
@@ -33053,10 +33190,11 @@ impl GameApp {
                         resource_id,
                         core,
                         path,
+                        local,
                     } => {
                         self.admission_resources.register_lobby_resource(&core);
                         self.admission_resources
-                            .mark_complete(resource_id, path.clone());
+                            .mark_complete_with_locality(resource_id, path.clone(), local);
                         self.register_classic_lobby_resource(&core, 100);
                         tracing::info!(
                             resource_id,
@@ -44709,6 +44847,170 @@ impl GameApp {
         }
     }
 
+    fn lobby_resource_work_directory(&self) -> PathBuf {
+        match self.network_mode.as_ref() {
+            Some(NetworkMode::Client(settings)) => settings.resource_directory.clone(),
+            Some(NetworkMode::Host(settings)) => settings
+                .prepared
+                .as_ref()
+                .and_then(|prepared| prepared.host_config().resource_directory.clone())
+                .or_else(|| {
+                    self.app_paths
+                        .as_ref()
+                        .map(|paths| paths.cache_dir().join("Network"))
+                })
+                .unwrap_or_else(|| PathBuf::from("Network")),
+            None => self
+                .app_paths
+                .as_ref()
+                .map(|paths| paths.cache_dir().join("Network"))
+                .unwrap_or_else(|| PathBuf::from("Network")),
+        }
+    }
+
+    fn lobby_resource_exe_path(&self, work_directory: &Path) -> PathBuf {
+        self.app_paths
+            .as_ref()
+            .map(|paths| paths.install_root().to_path_buf())
+            .or_else(|| work_directory.parent().map(Path::to_path_buf))
+            .unwrap_or_default()
+    }
+
+    fn lobby_resource_player_path(&self) -> PathBuf {
+        let config = load_native_config_bytes(self.app_paths.as_ref());
+        native_config_text(&config, "General", "PlayerPath")
+            .map(|path| PathBuf::from(path.trim()))
+            .unwrap_or_default()
+    }
+
+    fn lobby_allow_player_save(&self) -> bool {
+        let config = load_native_config_bytes(self.app_paths.as_ref());
+        native_config_text(&config, "Lobby", "AllowPlayerSave")
+            .is_some_and(|value| parse_config_bool(value.trim()))
+    }
+
+    fn lobby_resource_save_possible(&self, resource_id: i32) -> bool {
+        let Some(core) = self.admission_resources.resource_cores.get(&resource_id) else {
+            return false;
+        };
+        let Some(AdmissionResourceState::Complete {
+            path,
+            removed: false,
+            local,
+        }) = self.admission_resources.status(resource_id)
+        else {
+            return false;
+        };
+        lobby_resource_save_possible(
+            *local,
+            true,
+            core.resource_type,
+            self.lobby_allow_player_save(),
+            path,
+            &self.lobby_resource_work_directory(),
+        )
+    }
+
+    fn request_lobby_resource_save(
+        &mut self,
+        resource_id: i32,
+        overwrite: bool,
+    ) -> Result<(), EngineError> {
+        let Some(core) = self
+            .admission_resources
+            .resource_cores
+            .get(&resource_id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let Some(source) = self
+            .admission_resources
+            .complete_path(resource_id)
+            .map(Path::to_path_buf)
+        else {
+            return Ok(());
+        };
+        let work_directory = self.lobby_resource_work_directory();
+        let error_caption = self.runtime_resource_text(
+            "IDS_NET_ERR_COPYFILE",
+            "Error copying file",
+        );
+        if !path_has_raw_directory_prefix(&source, &work_directory) {
+            let message = self.runtime_resource_text(
+                "IDS_NET_ERR_COPYFILE_LOCAL",
+                "The file is local already",
+            );
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    message,
+                    error_caption,
+                    lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                ),
+                MessageDialogContinuation::None,
+            )?;
+            return Ok(());
+        }
+        let exe_path = self.lobby_resource_exe_path(&work_directory);
+        let player_path = self.lobby_resource_player_path();
+        let Some((target, basename)) =
+            lobby_resource_save_target(&exe_path, &player_path, &core)
+        else {
+            return Ok(());
+        };
+        if !overwrite && fs::symlink_metadata(&target).is_ok() {
+            let template = self.runtime_resource_text(
+                "IDS_NET_RES_SAVE_OVERWRITE",
+                "File %s exists. Overwrite?",
+            );
+            let caption = self.runtime_resource_text("IDS_NET_RES_SAVE", "Save resource");
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::new(
+                    format_resource_string(template, &[&basename]),
+                    caption,
+                    lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                    lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                    lc_frontend::message_dialog::MessageDialogSize::Regular,
+                    false,
+                ),
+                MessageDialogContinuation::LobbyResourceOverwrite { resource_id },
+            )?;
+            return Ok(());
+        }
+        if let Err(error) = copy_lobby_resource_item(&source, &target) {
+            tracing::warn!(
+                resource_id,
+                source = %source.display(),
+                target = %target.display(),
+                %error,
+                "failed to save lobby resource"
+            );
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    error_caption.clone(),
+                    error_caption,
+                    lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                ),
+                MessageDialogContinuation::None,
+            )?;
+            return Ok(());
+        }
+        let template = self.runtime_resource_text(
+            "IDS_NET_RES_SAVED_DESC",
+            "Resource successfully saved to %s",
+        );
+        let caption = self.runtime_resource_text("IDS_NET_RES_SAVED", "Resource saved");
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                format_resource_string(template, &[&basename]),
+                caption,
+                lc_frontend::message_dialog::MessageDialogIcon::Standard(13),
+            ),
+            MessageDialogContinuation::None,
+        )?;
+        Ok(())
+    }
+
     fn register_classic_lobby_resource(
         &mut self,
         core: &lc_engine::NetworkResourceCore,
@@ -44717,6 +45019,7 @@ impl GameApp {
         if core.id < 0 {
             return;
         }
+        let save_possible = self.lobby_resource_save_possible(core.id);
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
             lobby.resource_rows.insert(
                 core.id,
@@ -44724,6 +45027,7 @@ impl GameApp {
                     id: core.id,
                     filename: legacy_presentation_text(core.filename.as_bytes()),
                     present_percent: present_percent.min(100),
+                    save_possible,
                 },
             );
         }
@@ -44734,6 +45038,7 @@ impl GameApp {
                     id: core.id,
                     filename: legacy_presentation_text(core.filename.as_bytes()),
                     present_percent: present_percent.min(100),
+                    save_possible,
                 },
             );
         }
@@ -44808,7 +45113,7 @@ impl GameApp {
             .resources
             .retain(|resource_id, _| !owned(resource_id));
         self.admission_resources
-            .resource_types
+            .resource_cores
             .retain(|resource_id, _| !owned(resource_id));
         self.admission_resources
             .present_percent
@@ -49912,6 +50217,9 @@ impl GameApp {
                 }
             }
             LobbyAction::StartGame => self.start_network_lobby_countdown()?,
+            LobbyAction::SaveResource(resource_id) => {
+                self.request_lobby_resource_save(resource_id, false)?;
+            }
             LobbyAction::OpenExternalIrcChat => self.show_external_irc_dialog()?,
             LobbyAction::SubmitMessage(text) => {
                 self.store_message_input_history(&text);
@@ -50275,6 +50583,9 @@ impl GameApp {
                     minimum_width,
                 } => {
                     self.open_classic_lobby_option_combo(option, anchor, minimum_width)?;
+                }
+                ClassicLobbyAction::SaveResourceRequested { resource_id } => {
+                    self.request_lobby_resource_save(resource_id, false)?;
                 }
                 ClassicLobbyAction::Chat(request) => {
                     self.process_classic_lobby_chat_request(request)?;
@@ -57588,6 +57899,12 @@ impl GameApp {
                 self.start_network_lobby_countdown_with(countdown_seconds)?;
             }
             MessageDialogContinuation::ClassicLobbyStart { .. } => {}
+            MessageDialogContinuation::LobbyResourceOverwrite { resource_id }
+                if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
+            {
+                self.request_lobby_resource_save(resource_id, true)?;
+            }
+            MessageDialogContinuation::LobbyResourceOverwrite { .. } => {}
             MessageDialogContinuation::NetworkScenarioPlayerCountWarning { scenario } => {
                 if let (Some(paths), Some(checked)) = (self.app_paths.as_ref(), checkbox_checked) {
                     if let Err(error) = persist_config_value(
@@ -91849,6 +92166,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                     id: 7,
                     filename: "Network/Packs/Scenario.c4s".to_string(),
                     present_percent: 10,
+                    save_possible: false,
                 },
             );
 
@@ -91927,6 +92245,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                     ..Default::default()
                 },
                 path: PathBuf::from("Network/Scenario.c4s"),
+                local: false,
             })
             .unwrap();
         app.process_network_events()
@@ -92168,6 +92487,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                         id,
                         filename: format!("Resource{id}.c4g"),
                         present_percent: 50,
+                        save_possible: false,
                     },
                 );
             }
@@ -92243,6 +92563,202 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn lobby_resource_save_gate_matches_native_type_completion_and_locality_matrix() {
+        let root = PathBuf::from("l105-root");
+        let work = root.join("Network");
+        let source = work.join("Downloaded.c4g");
+        for resource_type in 0_u8..=6 {
+            for local in [false, true] {
+                for complete in [false, true] {
+                    for allow_player_save in [false, true] {
+                        let type_allowed = resource_type
+                            == lc_network::HostResourceType::Scenario as u8
+                            || resource_type
+                                == lc_network::HostResourceType::Definitions as u8
+                            || resource_type == lc_network::HostResourceType::Player as u8
+                                && allow_player_save;
+                        assert_eq!(
+                            lobby_resource_save_possible(
+                                local,
+                                complete,
+                                resource_type,
+                                allow_player_save,
+                                &source,
+                                &work,
+                            ),
+                            !local && complete && type_allowed,
+                            "type={resource_type} local={local} complete={complete} allow_player_save={allow_player_save}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            lobby_resource_save_possible(
+                false,
+                true,
+                lc_network::HostResourceType::Scenario as u8,
+                false,
+                &root.join("NetworkSibling/Downloaded.c4s"),
+                &work,
+            ),
+            "SEqual2 accepts any literal raw prefix"
+        );
+        assert!(!lobby_resource_save_possible(
+            false,
+            true,
+            lc_network::HostResourceType::Scenario as u8,
+            false,
+            &root.join("network/Downloaded.c4s"),
+            &work,
+        ));
+
+        let player_named_scenario = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Scenario as u8,
+            filename: LegacyCString::from_bytes(b"Remote/Upper.C4P".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(
+            lobby_resource_save_target(
+                Path::new("install"),
+                Path::new("Players"),
+                &player_named_scenario,
+            ),
+            Some((
+                Path::new("install/Players/Upper.C4P").to_path_buf(),
+                "Upper.C4P".to_string(),
+            )),
+            "the advertised extension, not the resource type, selects PlayerPath"
+        );
+
+        let legacy_named_scenario = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Scenario as u8,
+            filename: LegacyCString::from_bytes(b"Remote/Gr\xfcnd.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        #[cfg(unix)]
+        let legacy_target = Path::new("install").join(path_from_group_name_bytes(b"Gr\xfcnd.c4s"));
+        #[cfg(not(unix))]
+        let legacy_target = Path::new("install").join("Gründ.c4s");
+        assert_eq!(
+            lobby_resource_save_target(
+                Path::new("install"),
+                Path::new("Players"),
+                &legacy_named_scenario,
+            ),
+            Some((legacy_target, "Gründ.c4s".to_string())),
+            "the filesystem target preserves the legacy basename bytes"
+        );
+    }
+
+    #[test]
+    fn generic_client_resource_save_hit_target_emits_the_resource_id() {
+        let mut lobby = NetworkLobbyState::new(7, "Client".to_string(), false);
+        lobby.active_sheet = LobbySheet::Resources;
+        lobby.resource_rows.insert(
+            23,
+            LobbyResourceRow {
+                id: 23,
+                filename: "Network/Downloaded.c4s".to_string(),
+                present_percent: 100,
+                save_possible: true,
+            },
+        );
+        let layout = lobby.update_layout(640.0, 480.0).clone();
+        let rect = layout.resource_save_buttons[0].1;
+        let point = GuiPoint::new(
+            rect.origin.x + rect.size.width / 2.0,
+            rect.origin.y + rect.size.height / 2.0,
+        );
+        lobby.handle_panel_pointer_move(point);
+        lobby.handle_panel_pointer_down(point);
+        assert_eq!(
+            lobby.handle_panel_pointer_up(point),
+            Some(LobbyAction::SaveResource(23))
+        );
+    }
+
+    #[test]
+    fn lobby_resource_save_dialogs_cover_overwrite_decline_accept_success_and_failure() {
+        use lc_frontend::message_dialog::{
+            MessageDialogButtons, MessageDialogIcon, MessageDialogResult,
+        };
+
+        let root = tempdir().expect("resource save root");
+        let work = root.path().join("Network");
+        fs::create_dir(&work).expect("network work directory");
+        let source = work.join("Downloaded.c4s");
+        let target = root.path().join("Downloaded.c4s");
+        fs::write(&source, b"first").expect("downloaded resource");
+
+        let mut app = new_menu_app(640, 480);
+        let mut settings = ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        );
+        settings.resource_directory = work.clone();
+        app.network_mode = Some(NetworkMode::Client(settings));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Scenario as u8,
+            id: 47,
+            loadable: true,
+            filename: LegacyCString::from_bytes(b"Remote/Downloaded.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        app.admission_resources.register_lobby_resource(&core);
+        app.admission_resources
+            .mark_complete_with_locality(core.id, source.clone(), false);
+        app.register_classic_lobby_resource(&core, 100);
+        assert!(app.network_lobby.as_ref().unwrap().resource_rows[&core.id].save_possible);
+
+        app.request_lobby_resource_save(core.id, false)
+            .expect("copy new target");
+        assert_eq!(fs::read(&target).unwrap(), b"first");
+        let success = app.message_dialogs.last().unwrap();
+        assert_eq!(success.state.caption(), "Resource saved");
+        assert_eq!(success.state.icon(), MessageDialogIcon::Standard(13));
+        assert!(success.state.message().ends_with("Downloaded.c4s"));
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("close success");
+
+        fs::write(&source, b"replacement").expect("replace source");
+        fs::write(&target, b"keep").expect("existing target");
+        app.request_lobby_resource_save(core.id, false)
+            .expect("prompt before overwrite");
+        let confirmation = app.message_dialogs.last().unwrap();
+        assert_eq!(confirmation.state.caption(), "Save resource");
+        assert_eq!(confirmation.state.buttons(), MessageDialogButtons::YES_NO);
+        assert_eq!(confirmation.state.icon(), MessageDialogIcon::CONFIRM);
+        assert!(matches!(
+            &confirmation.continuation,
+            MessageDialogContinuation::LobbyResourceOverwrite { resource_id: 47 }
+        ));
+        app.finish_message_dialog(MessageDialogResult::No)
+            .expect("decline overwrite");
+        assert_eq!(fs::read(&target).unwrap(), b"keep");
+        assert!(app.message_dialogs.is_empty());
+
+        app.request_lobby_resource_save(core.id, false)
+            .expect("prompt for accepted overwrite");
+        app.finish_message_dialog(MessageDialogResult::Yes)
+            .expect("accept overwrite");
+        assert_eq!(fs::read(&target).unwrap(), b"replacement");
+        assert_eq!(app.message_dialogs.last().unwrap().state.caption(), "Resource saved");
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("close overwrite success");
+
+        fs::remove_file(&source).expect("force copy failure");
+        fs::remove_file(&target).expect("avoid overwrite prompt");
+        app.request_lobby_resource_save(core.id, false)
+            .expect("present copy failure");
+        let failure = app.message_dialogs.last().unwrap();
+        assert_eq!(failure.state.caption(), "Error copying file");
+        assert_eq!(failure.state.message(), "Error copying file");
+        assert_eq!(failure.state.icon(), MessageDialogIcon::ERROR);
+    }
+
+    #[test]
     fn classic_lobby_client_removal_evicts_its_resource_namespace() {
         let mut app = new_menu_app(640, 480);
         install_test_classic_host_lobby(&mut app);
@@ -92259,6 +92775,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                         id: resource_id,
                         filename: format!("Resource{resource_id}.c4p"),
                         present_percent: 100,
+                        save_possible: false,
                     },
                 );
             app.admission_resources.resources.insert(
@@ -92266,11 +92783,16 @@ public func Grant(password) { return GainMissionAccess(password); }
                 AdmissionResourceState::Complete {
                     path: PathBuf::from(format!("Resource{resource_id}.c4p")),
                     removed: false,
+                    local: true,
                 },
             );
             app.admission_resources
-                .resource_types
-                .insert(resource_id, lc_network::HostResourceType::Player as u8);
+                .resource_cores
+                .insert(resource_id, lc_engine::NetworkResourceCore {
+                    id: resource_id,
+                    resource_type: lc_network::HostResourceType::Player as u8,
+                    ..Default::default()
+                });
             app.admission_resources
                 .present_percent
                 .insert(resource_id, 100);
@@ -123869,6 +124391,7 @@ ScenInfoArea=70,5,25,90
                     resource_id: core.id,
                     core,
                     path: PathBuf::from(path),
+                    local: false,
                 })
                 .expect("queue resource completion");
         }
@@ -127485,6 +128008,7 @@ ScenInfoArea=70,5,25,90
                 resource_id: 70,
                 core: join_data.parameters.scenario.clone(),
                 path: scenario_path,
+                local: false,
             })
             .expect("complete scenario");
         app.process_network_events().expect("wait for dynamic");
@@ -127504,6 +128028,7 @@ ScenInfoArea=70,5,25,90
                 resource_id: 71,
                 core: join_data.dynamic.clone(),
                 path: dynamic_path.clone(),
+                local: false,
             })
             .expect("complete dynamic");
         app.process_network_events().expect("compose resources");
@@ -127524,6 +128049,7 @@ ScenInfoArea=70,5,25,90
                 resource_id: 71,
                 core: join_data.dynamic,
                 path: dynamic_path,
+                local: false,
             })
             .expect("repeat dynamic completion");
         event_tx
@@ -127542,6 +128068,7 @@ ScenInfoArea=70,5,25,90
                 resource_id: 72,
                 core: join_data.parameters.game_resources[0].clone(),
                 path: game_resource_path,
+                local: false,
             })
             .expect("complete ordinary game resource");
         event_tx
@@ -127549,6 +128076,7 @@ ScenInfoArea=70,5,25,90
                 resource_id: 73,
                 core: join_data.parameters.game_resources[1].clone(),
                 path: material_resource_path,
+                local: false,
             })
             .expect("complete authoritative material resource");
         app.process_network_events()
@@ -133786,6 +134314,7 @@ protected func InputCallback(string answer, int player)
                 resource_id,
                 core,
                 path: path.clone(),
+                local: false,
             })
             .unwrap();
 
@@ -133863,6 +134392,7 @@ protected func InputCallback(string answer, int player)
                 resource_id,
                 core,
                 path: path.clone(),
+                local: false,
             })
             .expect("complete delayed player resource");
         app.update().expect("completed resource releases control tick");
@@ -134031,6 +134561,7 @@ protected func InputCallback(string answer, int player)
             AdmissionResourceState::Complete {
                 path: resolved_path,
                 removed: false,
+                local: true,
             },
         );
         let resource = lc_engine::NetworkResourceCore {

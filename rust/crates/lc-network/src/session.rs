@@ -655,6 +655,7 @@ pub enum HostEvent {
         resource_id: i32,
         core: lc_engine::NetworkResourceCore,
         path: PathBuf,
+        local: bool,
     },
     ResourceLoadFailed {
         resource_id: i32,
@@ -3175,6 +3176,7 @@ pub enum ClientEvent {
         resource_id: i32,
         core: lc_engine::NetworkResourceCore,
         path: PathBuf,
+        local: bool,
     },
     ResourceLoadFailed {
         resource_id: i32,
@@ -5524,7 +5526,7 @@ async fn run_host(
                         completion,
                     } => match finish_host_resource_derive(derivation, &mut state) {
                         Ok((core, events)) => {
-                            dispatch_host_resource_events(events, &mut state).await;
+                            dispatch_host_resource_events(events, true, &mut state).await;
                             let _ = completion.send(Ok(core));
                         }
                         Err(error) => {
@@ -5642,7 +5644,9 @@ async fn run_host(
                 if let Some(backend) = state.resource_backend.as_mut() {
                     let mut random = resource_safe_random;
                     match backend.on_timer(now_seconds, &mut random) {
-                        Ok(events) => dispatch_host_resource_events(events, &mut state).await,
+                        Ok(events) => {
+                            dispatch_host_resource_events(events, false, &mut state).await
+                        }
                         Err(error) => report_host_resource_error(error, &state).await,
                     }
                 } else {
@@ -6055,7 +6059,7 @@ async fn handle_client_accepted(
     if let Some(backend) = state.resource_backend.as_mut() {
         let mut random = resource_safe_random;
         match backend.on_peer_connected(core.client_id, now_seconds, &mut random) {
-            Ok(events) => dispatch_host_resource_events(events, state).await,
+            Ok(events) => dispatch_host_resource_events(events, false, state).await,
             Err(error) => report_host_resource_error(error, state).await,
         }
     } else {
@@ -6395,7 +6399,7 @@ async fn handle_client_message(
                             &mut state.published_player_sources,
                             &events,
                         );
-                        dispatch_host_resource_events(events, state).await;
+                        dispatch_host_resource_events(events, false, state).await;
                     }
                     Err(error) => report_host_resource_error(error, state).await,
                 }
@@ -6766,6 +6770,7 @@ async fn dispatch_host_resource_actions(
 
 async fn dispatch_host_resource_events(
     events: Vec<crate::ResourceTransferEvent>,
+    completion_local: bool,
     state: &mut HostState,
 ) {
     for event in events {
@@ -6796,6 +6801,7 @@ async fn dispatch_host_resource_events(
                         resource_id,
                         core,
                         path,
+                        local: completion_local,
                     })
                     .await;
             }
@@ -7414,6 +7420,7 @@ async fn dispatch_packet(
                             resource_id: core.id,
                             core: core.clone(),
                             path: path.clone(),
+                            local: true,
                         })
                         .await;
                 }
@@ -9256,6 +9263,7 @@ async fn run_client_loop_with_routes(
                 resource_id: core.id,
                 core,
                 path,
+                local: true,
             })
             .await;
     }
@@ -10645,6 +10653,7 @@ async fn run_client_loop_with_routes(
                                                 resource_id: core.id,
                                                 core,
                                                 path,
+                                                local: true,
                                             })
                                             .await;
                                     }
@@ -11064,6 +11073,7 @@ async fn dispatch_client_resource_events(
                         resource_id,
                         core,
                         path,
+                        local: false,
                     })
                     .await;
             }
@@ -15410,6 +15420,7 @@ mod tests {
             resource_id,
             core: completed_core,
             path,
+            local,
         } = event
         else {
             panic!("unexpected client bootstrap event: {event:?}");
@@ -15417,6 +15428,7 @@ mod tests {
         assert_eq!(resource_id, core.id);
         assert_eq!(completed_core, core);
         assert_eq!(path, local_dynamic);
+        assert!(local);
 
         shutdown_tx.send(()).unwrap();
         client_loop.await.unwrap();
@@ -15523,6 +15535,7 @@ mod tests {
             resource_id,
             core: completed_core,
             path,
+            local,
         } = event
         else {
             panic!("unexpected buffered resource event: {event:?}");
@@ -15531,6 +15544,7 @@ mod tests {
         assert_eq!(completed_core, core);
         assert_eq!(fs::read(&path).unwrap(), b"early");
         assert!(path.is_file());
+        assert!(!local);
 
         shutdown_tx
             .send(())
@@ -16461,8 +16475,9 @@ mod tests {
                     resource_id,
                     core,
                     path,
+                    local,
                 }) if resource_id == valid_core.id => {
-                    completed = Some((core, path));
+                    completed = Some((core, path, local));
                 }
                 Some(ClientEvent::Disconnected { reason }) => {
                     panic!("client disconnected while loading PlayerInfo resource: {reason:?}");
@@ -16485,9 +16500,10 @@ mod tests {
             assert_eq!(player.flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
             assert_eq!(player.resource, None);
         }
-        let (completed_core, completed_path) = completed.unwrap();
+        let (completed_core, completed_path, local) = completed.unwrap();
         assert_eq!(completed_core, valid_core);
         assert!(completed_path.is_file());
+        assert!(!local);
 
         host.submit_packet(ControlDelivery::Direct, encoded)
             .await
@@ -16593,9 +16609,11 @@ mod tests {
                     resource_id,
                     core: completed,
                     path,
+                    local,
                 }) if resource_id == core.id => {
                     assert_eq!(completed, core);
                     assert_eq!(path, source);
+                    assert!(local);
                     break;
                 }
                 Some(HostEvent::TransportError { error, .. }) => {
@@ -16637,9 +16655,11 @@ mod tests {
                     resource_id,
                     core: completed,
                     path,
+                    local,
                 }) if resource_id == core.id => {
                     assert_eq!(completed, core);
                     assert!(path.is_file());
+                    assert!(!local);
                     break;
                 }
                 Some(ClientEvent::Disconnected { reason }) => {
@@ -16738,9 +16758,11 @@ mod tests {
                     resource_id,
                     core: completed,
                     path,
+                    local,
                 }) if resource_id == core.id => {
                     assert_eq!(completed, core);
                     assert_eq!(path, client_source);
+                    assert!(local);
                     break;
                 }
                 Some(ClientEvent::Direct { data, .. })
@@ -16832,9 +16854,11 @@ mod tests {
                     resource_id,
                     core: completed_core,
                     path,
+                    local,
                 } => {
                     assert_eq!(resource_id, core.id);
                     assert_eq!(completed_core, core);
+                    assert!(!local);
                     break path;
                 }
                 ClientEvent::ResourceProgress {
@@ -16893,7 +16917,8 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let host = start_host(listener, host_config).await.unwrap();
+        let mut host = start_host(listener, host_config).await.unwrap();
+        let mut host_events = host.take_event_receiver();
         let mut client = connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player)
@@ -16943,6 +16968,26 @@ mod tests {
             .unwrap();
         assert_ne!(derived.id, parent.id);
         assert_eq!(derived.derived_id, parent.id);
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host derive completion stalled")
+                .expect("host event stream closed")
+            {
+                HostEvent::ResourceComplete {
+                    resource_id,
+                    core,
+                    path,
+                    local,
+                } if resource_id == derived.id => {
+                    assert_eq!(core, derived);
+                    assert_eq!(path, host_source);
+                    assert!(local);
+                    break;
+                }
+                _ => continue,
+            }
+        }
         let completed_path = loop {
             match timeout(EVENT_WAIT, client.events().recv())
                 .await
@@ -16953,8 +16998,10 @@ mod tests {
                     resource_id,
                     core,
                     path,
+                    local,
                 } if resource_id == derived.id => {
                     assert_eq!(core, derived);
+                    assert!(!local);
                     break path;
                 }
                 ClientEvent::Disconnected { reason } => {

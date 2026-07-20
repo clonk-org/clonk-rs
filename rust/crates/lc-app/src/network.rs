@@ -1978,6 +1978,7 @@ pub enum NetworkEvent {
         resource_id: i32,
         core: lc_engine::NetworkResourceCore,
         path: PathBuf,
+        local: bool,
     },
     ResourceLoadFailed {
         resource_id: i32,
@@ -5412,11 +5413,13 @@ async fn handle_host_event(
             resource_id,
             core,
             path,
+            local,
         } => {
             let _ = event_tx.send(NetworkEvent::ResourceComplete {
                 resource_id,
                 core,
                 path,
+                local,
             });
         }
         HostEvent::ResourceLoadFailed { resource_id } => {
@@ -6441,11 +6444,13 @@ async fn handle_client_event(
             resource_id,
             core,
             path,
+            local,
         } => {
             let _ = event_tx.send(NetworkEvent::ResourceComplete {
                 resource_id,
                 core,
                 path,
+                local,
             });
         }
         ClientEvent::ResourceLoadFailed { resource_id } => {
