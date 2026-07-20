@@ -7588,12 +7588,34 @@ fn startup_window_builder(
             window_builder = window_builder.with_position(PhysicalPosition::new(x, y));
         }
     }
-    if matches!(display_options.mode, DisplayMode::Fullscreen) {
-        // On macOS, winit only retries a failed launch-time fullscreen
-        // transition when fullscreen was requested through WindowBuilder.
+    if matches!(display_options.mode, DisplayMode::Fullscreen)
+        && !defer_startup_fullscreen_until_resumed(display_options.mode)
+    {
         window_builder = window_builder.with_fullscreen(Some(Fullscreen::Borderless(None)));
     }
     window_builder
+}
+
+fn defer_startup_fullscreen_until_resumed(mode: DisplayMode) -> bool {
+    // winit creates macOS windows before applicationDidFinishLaunching. AppKit
+    // silently ignores toggleFullScreen at that point, so request the same
+    // native desktop fullscreen as C++/SDL once the event loop is resumed.
+    cfg!(target_os = "macos") && matches!(mode, DisplayMode::Fullscreen)
+}
+
+fn should_reconcile_deferred_fullscreen(mode: DisplayMode, is_fullscreen: bool) -> bool {
+    defer_startup_fullscreen_until_resumed(mode) && !is_fullscreen
+}
+
+const DEFERRED_FULLSCREEN_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+fn reconcile_deferred_fullscreen(window: &Window, mode: DisplayMode) -> bool {
+    if should_reconcile_deferred_fullscreen(mode, window.fullscreen().is_some()) {
+        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+        true
+    } else {
+        false
+    }
 }
 
 fn main() -> Result<()> {
@@ -7772,6 +7794,7 @@ fn main() -> Result<()> {
     app.launch_classic_command_line_scenario()
         .context("failed to start command-line scenario")?;
 
+    let mut deferred_fullscreen_retry_at = None;
     let mut previous_instant = Instant::now();
     let mut accumulator = Duration::ZERO;
     let mut game_clock_accumulator = Duration::ZERO;
@@ -7783,6 +7806,12 @@ fn main() -> Result<()> {
 
     event_loop.run(move |event, _, control_flow| {
         match event {
+            Event::Resumed => {
+                if reconcile_deferred_fullscreen(&window, display_options.mode) {
+                    deferred_fullscreen_retry_at =
+                        Some(Instant::now() + DEFERRED_FULLSCREEN_RETRY_DELAY);
+                }
+            }
             Event::WindowEvent { window_id, event } if window_id == window.id() => {
                 if let Err(err) = handle_window_event(
                     &window,
@@ -7813,6 +7842,18 @@ fn main() -> Result<()> {
                     tracing::error!(error = ?err, "options display change failed");
                     control_flow.set_exit();
                     return;
+                }
+                // A post-launch native fullscreen transition can still fail
+                // during another macOS Space animation. winit restores its
+                // state to windowed on failure, so retry the configured mode.
+                if deferred_fullscreen_retry_at
+                    .is_some_and(|retry_at| Instant::now() >= retry_at)
+                {
+                    deferred_fullscreen_retry_at = reconcile_deferred_fullscreen(
+                        &window,
+                        display_options.mode,
+                    )
+                    .then(|| Instant::now() + DEFERRED_FULLSCREEN_RETRY_DELAY);
                 }
                 if app.take_exit_request() {
                     control_flow.set_exit();
@@ -98395,7 +98436,7 @@ func Award()
     }
 
     #[test]
-    fn configured_fullscreen_reaches_startup_window_builder() {
+    fn configured_fullscreen_reaches_platform_startup_path() {
         let install = tempdir().expect("install root");
         let user_data = tempdir().expect("user data");
         fs::create_dir_all(install.path().join("planet")).expect("planet directory");
@@ -98413,6 +98454,8 @@ func Award()
             .expect("discover fullscreen config paths");
         let windowed = DisplayOptions::load(Some(&paths));
         assert_eq!(windowed.mode, DisplayMode::Window);
+        assert!(!defer_startup_fullscreen_until_resumed(windowed.mode));
+        assert!(!should_reconcile_deferred_fullscreen(windowed.mode, false));
         assert!(
             startup_window_builder(&windowed, PhysicalSize::new(800, 600))
                 .window_attributes()
@@ -98424,13 +98467,22 @@ func Award()
             .expect("select fullscreen mode");
         let display = DisplayOptions::load(Some(&paths));
         assert_eq!(display.mode, DisplayMode::Fullscreen);
+        assert_eq!(
+            should_reconcile_deferred_fullscreen(display.mode, false),
+            cfg!(target_os = "macos")
+        );
+        assert!(!should_reconcile_deferred_fullscreen(display.mode, true));
 
         let builder = startup_window_builder(&display, PhysicalSize::new(800, 600));
 
-        assert!(matches!(
-            builder.window_attributes().fullscreen.as_ref(),
-            Some(Fullscreen::Borderless(None))
-        ));
+        if defer_startup_fullscreen_until_resumed(display.mode) {
+            assert!(builder.window_attributes().fullscreen.is_none());
+        } else {
+            assert!(matches!(
+                builder.window_attributes().fullscreen.as_ref(),
+                Some(Fullscreen::Borderless(None))
+            ));
+        }
     }
 
     #[test]
