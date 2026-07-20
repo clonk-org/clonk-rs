@@ -769,97 +769,8 @@ fn raw_general_config(config: &[u8]) -> RawGeneralConfig {
 
 fn decode_general_config_string(value: &[u8], max_length: usize) -> Vec<u8> {
     let value = trim_horizontal_start(value);
-    if value.first() != Some(&b'"') {
-        return recover_unquoted_rust_config_value(value, max_length);
-    }
-
-    let mut output = Vec::with_capacity(value.len().min(max_length));
-    let mut index = 1;
-    while index < value.len() && output.len() < max_length {
-        let byte = value[index];
-        if byte == 0 || byte == b'"' {
-            break;
-        }
-        if byte != b'\\' {
-            output.push(byte);
-            index += 1;
-            continue;
-        }
-
-        index += 1;
-        if index >= value.len() {
-            break;
-        }
-        let escaped = value[index];
-        let decoded = match escaped {
-            b'a' => {
-                index += 1;
-                b'\x07'
-            }
-            b'b' => {
-                index += 1;
-                b'\x08'
-            }
-            b'f' => {
-                index += 1;
-                b'\x0c'
-            }
-            b'n' => {
-                index += 1;
-                b'\n'
-            }
-            b'r' => {
-                index += 1;
-                b'\r'
-            }
-            b't' => {
-                index += 1;
-                b'\t'
-            }
-            b'v' => {
-                index += 1;
-                b'\x0b'
-            }
-            b'\'' | b'"' | b'\\' | b'?' => {
-                index += 1;
-                escaped
-            }
-            b'x' => {
-                index += 1;
-                if index >= value.len() || !value[index].is_ascii_hexdigit() {
-                    b'x'
-                } else {
-                    let mut code = 0_i32;
-                    while index < value.len() && value[index].is_ascii_hexdigit() {
-                        code = code
-                            .wrapping_mul(16)
-                            .wrapping_add(cpp_hex_digit(value[index]));
-                        index += 1;
-                    }
-                    code as u8
-                }
-            }
-            b'0'..=b'7' => {
-                let mut code = 0_i32;
-                while index < value.len() && matches!(value[index], b'0'..=b'7') {
-                    code = code
-                        .wrapping_mul(8)
-                        .wrapping_add(i32::from(value[index] - b'0'));
-                    index += 1;
-                }
-                code as u8
-            }
-            _ => {
-                index += 1;
-                escaped
-            }
-        };
-        if decoded == 0 {
-            break;
-        }
-        output.push(decoded);
-    }
-    output
+    lc_core::std_config::decode_cpp_escaped_string(value, max_length)
+        .unwrap_or_else(|| recover_unquoted_rust_config_value(value, max_length))
 }
 
 // Compatibility recovery, not C++ parity: the current Rust Config writer
@@ -873,14 +784,6 @@ fn recover_unquoted_rust_config_value(value: &[u8], max_length: usize) -> Vec<u8
         .take_while(|byte| *byte != 0)
         .take(max_length)
         .collect()
-}
-
-fn cpp_hex_digit(byte: u8) -> i32 {
-    if byte.is_ascii_digit() {
-        i32::from(byte - b'0')
-    } else {
-        i32::from(byte) - i32::from(b'a') + 10
-    }
 }
 
 fn trim_horizontal_start(value: &[u8]) -> &[u8] {
@@ -1867,6 +1770,24 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
                 .as_bytes()
                 .ends_with(b"Alice")
         );
+    }
+
+    #[test]
+    fn l010_std_config_and_native_config_decoders_agree_on_cpp_escapes() {
+        let config = br#"[Network]
+Comment="M\303\274ller\\path\"quoted\""
+"#;
+        let native =
+            super::configured_native_value(config, "Network", "Comment").expect("native comment");
+        let mut reader = std::io::Cursor::new(config);
+        let parsed =
+            lc_core::std_config::Config::from_reader(&mut reader).expect("parse shared config");
+        let decoded = parsed
+            .get_in(Some("Network"), "Comment")
+            .expect("parsed comment");
+
+        assert_eq!(decoded, "Müller\\path\"quoted\"");
+        assert_eq!(decoded.as_bytes(), native.as_bytes());
     }
 
     #[test]

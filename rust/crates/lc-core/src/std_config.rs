@@ -6,6 +6,139 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
+/// Decodes one complete C++ `RCT_Escaped` value into its native bytes.
+///
+/// `StdCompilerINIRead` skips horizontal whitespace, requires an opening
+/// quote, consumes the C/C++ escape set bytewise, and stops at the first
+/// unescaped closing quote or raw line ending. Numeric escapes deliberately
+/// consume every following digit of their radix rather than using C's usual
+/// length limits.
+pub fn decode_cpp_escaped_string(value: &[u8], max_length: usize) -> Option<Vec<u8>> {
+    decode_cpp_escaped_string_impl(value, max_length, true)
+}
+
+fn decode_cpp_escaped_string_allowing_continuations(
+    value: &[u8],
+    max_length: usize,
+) -> Option<Vec<u8>> {
+    // `Config::from_reader` normalizes an odd trailing backslash plus line end
+    // to an embedded LF before parsing, so preserve that Rust config feature.
+    decode_cpp_escaped_string_impl(value, max_length, false)
+}
+
+fn decode_cpp_escaped_string_impl(
+    value: &[u8],
+    max_length: usize,
+    stop_at_line_end: bool,
+) -> Option<Vec<u8>> {
+    let start = value
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))
+        .unwrap_or(value.len());
+    let value = &value[start..];
+    if value.first() != Some(&b'"') {
+        return None;
+    }
+
+    let mut output = Vec::with_capacity(value.len().min(max_length));
+    let mut index = 1;
+    while index < value.len() && output.len() < max_length {
+        let byte = value[index];
+        if matches!(byte, 0 | b'"') || (stop_at_line_end && matches!(byte, b'\n' | b'\r')) {
+            break;
+        }
+        if byte != b'\\' {
+            output.push(byte);
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+        if index >= value.len() {
+            break;
+        }
+        let escaped = value[index];
+        let decoded = match escaped {
+            b'a' => {
+                index += 1;
+                b'\x07'
+            }
+            b'b' => {
+                index += 1;
+                b'\x08'
+            }
+            b'f' => {
+                index += 1;
+                b'\x0c'
+            }
+            b'n' => {
+                index += 1;
+                b'\n'
+            }
+            b'r' => {
+                index += 1;
+                b'\r'
+            }
+            b't' => {
+                index += 1;
+                b'\t'
+            }
+            b'v' => {
+                index += 1;
+                b'\x0b'
+            }
+            b'\'' | b'"' | b'\\' | b'?' => {
+                index += 1;
+                escaped
+            }
+            b'x' => {
+                index += 1;
+                if index >= value.len() || !value[index].is_ascii_hexdigit() {
+                    b'x'
+                } else {
+                    let mut code = 0_i32;
+                    while index < value.len() && value[index].is_ascii_hexdigit() {
+                        code = code
+                            .wrapping_mul(16)
+                            .wrapping_add(cpp_hex_digit(value[index]));
+                        index += 1;
+                    }
+                    code as u8
+                }
+            }
+            b'0'..=b'7' => {
+                let mut code = 0_i32;
+                while index < value.len() && matches!(value[index], b'0'..=b'7') {
+                    code = code
+                        .wrapping_mul(8)
+                        .wrapping_add(i32::from(value[index] - b'0'));
+                    index += 1;
+                }
+                code as u8
+            }
+            _ => {
+                index += 1;
+                escaped
+            }
+        };
+        if decoded == 0 {
+            break;
+        }
+        output.push(decoded);
+    }
+    Some(output)
+}
+
+fn cpp_hex_digit(byte: u8) -> i32 {
+    if byte.is_ascii_digit() {
+        i32::from(byte - b'0')
+    } else {
+        // Preserve StdCompilerINIRead's lowercase subtraction even when
+        // isxdigit accepted an uppercase byte.
+        i32::from(byte) - i32::from(b'a') + 10
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub section: Option<String>,
@@ -406,6 +539,18 @@ mod tests {
         assert_eq!(
             reloaded.get_in(Some("Vendor"), "Title"),
             Some("Alice \"The #1\"")
+        );
+    }
+
+    #[test]
+    fn l010_quoted_rust_line_continuation_survives_cpp_escape_decode() {
+        let data = b"[Network]\nComment=\"first\\\nsecond\"\n";
+        let mut cursor = Cursor::new(&data[..]);
+        let cfg = Config::from_reader(&mut cursor).unwrap();
+
+        assert_eq!(
+            cfg.get_in(Some("Network"), "Comment"),
+            Some("first\nsecond")
         );
     }
 

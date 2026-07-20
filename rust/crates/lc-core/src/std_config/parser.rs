@@ -45,11 +45,16 @@ pub(crate) fn parse_line(line: &str) -> Option<ParsedItem<'_>> {
     let value = raw_value.trim();
 
     let mut key_owned = key.to_string();
-    let mut value_owned = strip_quotes(value)
-        .map(decode_escaped_value)
-        .unwrap_or_else(|| value.to_string());
+    let value_owned = if let Some(decoded) =
+        super::decode_cpp_escaped_string_allowing_continuations(value.as_bytes(), usize::MAX)
+    {
+        decoded_config_bytes_to_string(&decoded)
+    } else {
+        let mut unquoted = value.to_string();
+        unescape_comment_markers(&mut unquoted);
+        unquoted
+    };
     unescape_comment_markers(&mut key_owned);
-    unescape_comment_markers(&mut value_owned);
 
     let comment = comment.and_then(|c| {
         let trimmed = c.trim();
@@ -137,63 +142,25 @@ fn split_key_value(line: &str) -> Option<(&str, &str)> {
     None
 }
 
-fn strip_quotes(value: &str) -> Option<&str> {
-    if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
-        Some(&value[1..value.len() - 1])
-    } else {
-        None
-    }
-}
-
-fn decode_escaped_value(value: &str) -> String {
-    let mut decoded = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    while let Some(character) = chars.next() {
-        if character != '\\' {
-            decoded.push(character);
-            continue;
+fn decoded_config_bytes_to_string(mut remaining: &[u8]) -> String {
+    let mut decoded = String::with_capacity(remaining.len());
+    while !remaining.is_empty() {
+        match std::str::from_utf8(remaining) {
+            Ok(valid) => {
+                decoded.push_str(valid);
+                break;
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                let valid = std::str::from_utf8(&remaining[..valid_up_to])
+                    .expect("Utf8Error valid prefix is UTF-8");
+                decoded.push_str(valid);
+                let invalid = &remaining[valid_up_to..];
+                let invalid_length = error.error_len().unwrap_or(invalid.len());
+                decoded.extend(invalid[..invalid_length].iter().copied().map(char::from));
+                remaining = &invalid[invalid_length..];
+            }
         }
-        let Some(escaped) = chars.next() else {
-            decoded.push('\\');
-            break;
-        };
-        let decoded_character = match escaped {
-            'a' => '\u{7}',
-            'b' => '\u{8}',
-            'f' => '\u{c}',
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            'v' => '\u{b}',
-            '\'' => '\'',
-            '"' => '"',
-            '\\' => '\\',
-            '?' => '?',
-            'x' => {
-                let mut number = 0_u32;
-                let mut found = false;
-                while let Some(digit) = chars.peek().and_then(|digit| digit.to_digit(16)) {
-                    found = true;
-                    number = number.wrapping_mul(16).wrapping_add(digit);
-                    chars.next();
-                }
-                if found {
-                    char::from_u32(number & 0xff).unwrap_or('\u{fffd}')
-                } else {
-                    'x'
-                }
-            }
-            first @ '0'..='7' => {
-                let mut number = first.to_digit(8).expect("matched octal digit");
-                while let Some(digit) = chars.peek().and_then(|digit| digit.to_digit(8)) {
-                    number = number.wrapping_mul(8).wrapping_add(digit);
-                    chars.next();
-                }
-                char::from_u32(number & 0xff).unwrap_or('\u{fffd}')
-            }
-            other => other,
-        };
-        decoded.push(decoded_character);
     }
     decoded
 }
@@ -242,6 +209,25 @@ mod tests {
     fn parse_quoted_value() {
         match parse_line("Path = \"C:/Games\" ").unwrap() {
             ParsedItem::Entry { value, .. } => assert_eq!(value, "C:/Games"),
+            ParsedItem::Section { .. } => panic!("expected entry"),
+        }
+    }
+
+    #[test]
+    fn l010_cpp_escaped_utf8_backslash_and_quote_decode_bytewise() {
+        let line = r#"Comment="M\303\274ller\\path\"quoted\"" trailing data"#;
+        match parse_line(line).unwrap() {
+            ParsedItem::Entry { value, .. } => {
+                assert_eq!(value, "Müller\\path\"quoted\"");
+            }
+            ParsedItem::Section { .. } => panic!("expected entry"),
+        }
+    }
+
+    #[test]
+    fn l010_quoted_latin1_fallback_does_not_reprocess_comment_escapes() {
+        match parse_line("Value=\"\\374\\\\#\"").unwrap() {
+            ParsedItem::Entry { value, .. } => assert_eq!(value, "ü\\#"),
             ParsedItem::Section { .. } => panic!("expected entry"),
         }
     }
