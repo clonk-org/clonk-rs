@@ -128,6 +128,7 @@ use lc_frontend::input_dialog::{
     InputDialogContextLabels, InputDialogController, InputDialogEditKey, InputDialogIcon,
     InputDialogKeyModifiers, InputDialogPlacement, InputDialogSound,
 };
+use lc_frontend::hud::MESSAGE_BOARD_MAX_FADING_LINES;
 use lc_frontend::loader_screen::{
     LoaderRenderConfig, LoaderResources, LoaderScreen, LoaderSelection, LoaderState, LoaderUpdate,
     STARTUP_LOADER_SPECIFICATION,
@@ -143,10 +144,10 @@ use lc_frontend::{
     ActiveViewportProjection, ColorByOwnerMask, CrewNameOverlay, CrewOverlay, CursorAtlas,
     DefinitionSprite, GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics,
     ImageData, InputDispatcher, InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction,
-    MainMenuItem, MaterialRenderInfo, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
-    StartupMainMenu, StartupMenu, StartupMenuAction, StartupTooltip, ViewportEdgeScroll,
-    ViewportInput, ViewportPointer, default_owner_color, viewport_edge_scroll,
-    viewport_edge_scroll_at,
+    MainMenuItem, MaterialRenderInfo, MessageBoardMode, MessageBoardOverlay, PlayerOverlay,
+    ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction,
+    StartupTooltip, ViewportEdgeScroll, ViewportInput, ViewportPointer, default_owner_color,
+    viewport_edge_scroll, viewport_edge_scroll_at,
 };
 use lc_graphics::{
     BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, Surface, TextFont,
@@ -11183,6 +11184,215 @@ struct ScreenshotRequest {
     gamma: lc_graphics::GammaRamp,
 }
 
+#[derive(Clone, Debug)]
+struct ClassicMessageBoardState {
+    mode: MessageBoardMode,
+    line_count: i32,
+    delay: i32,
+    fader: i32,
+    speed: i32,
+    empty: bool,
+    screen_fader: i32,
+    back_scroll: i32,
+    log_history: VecDeque<String>,
+}
+
+impl Default for ClassicMessageBoardState {
+    fn default() -> Self {
+        Self {
+            mode: MessageBoardMode::SingleLine,
+            line_count: 4,
+            delay: -1,
+            fader: 0,
+            speed: 2,
+            empty: true,
+            screen_fader: 0,
+            back_scroll: -1,
+            log_history: VecDeque::new(),
+        }
+    }
+}
+
+impl ClassicMessageBoardState {
+    fn initialize(&mut self, enabled: bool, line_height: i32) {
+        *self = Self::default();
+        self.line_count = i32::from(enabled);
+        self.change_mode(
+            if enabled {
+                MessageBoardMode::SingleLine
+            } else {
+                MessageBoardMode::Hidden
+            },
+            line_height,
+        );
+    }
+
+    /// `C4MessageBoard::ChangeMode`; the returned bool is the exact value
+    /// assigned to the bool-typed `Config.Graphics.MsgBoard` field.
+    fn change_mode(&mut self, mode: MessageBoardMode, line_height: i32) -> bool {
+        let enabled = match mode {
+            MessageBoardMode::SingleLine => {
+                if self.mode == MessageBoardMode::Hidden {
+                    self.back_scroll = -1;
+                    self.empty = true;
+                } else {
+                    self.back_scroll = -1;
+                    self.fader = -1;
+                    self.empty = false;
+                    self.speed = 2;
+                    self.screen_fader = MESSAGE_BOARD_MAX_FADING_LINES * line_height;
+                }
+                true
+            }
+            MessageBoardMode::Continuous => {
+                self.line_count = self.line_count.max(2);
+                self.back_scroll = -1;
+                self.fader = 0;
+                true
+            }
+            MessageBoardMode::Hidden => false,
+        };
+        self.mode = mode;
+        enabled
+    }
+
+    fn set_line_count(&mut self, line_count: i32, line_height: i32) -> bool {
+        match line_count.clamp(0, 20) {
+            0 => self.change_mode(MessageBoardMode::Hidden, line_height),
+            1 => self.change_mode(MessageBoardMode::SingleLine, line_height),
+            count => {
+                self.line_count = count;
+                self.change_mode(MessageBoardMode::Continuous, line_height)
+            }
+        }
+    }
+
+    /// `C4MessageBoard::Execute`, advanced once for each app graphics frame.
+    fn execute(&mut self, line_height: i32, type_in: bool) -> bool {
+        if self.mode == MessageBoardMode::Continuous {
+            return false;
+        }
+        if self.mode == MessageBoardMode::Hidden && !type_in {
+            self.screen_fader = 100;
+            self.back_scroll = -1;
+            return false;
+        }
+
+        if type_in {
+            self.screen_fader = (self.screen_fader - 20).max(-100);
+        }
+        if self.back_scroll < 0 {
+            self.empty = true;
+            return !type_in;
+        }
+        if self.empty {
+            self.fader = line_height;
+            self.delay = -1;
+            self.empty = false;
+        }
+
+        self.speed = (self.back_scroll / 5).max(1);
+        if self.fader > 0 {
+            self.fader = (self.fader - self.speed).max(0);
+        }
+        if self.fader < 0 {
+            self.fader = (self.fader - self.speed).max(-line_height);
+        }
+        if self.fader == 0 {
+            if self.delay == -1 {
+                let index = (-self.back_scroll).min(-1);
+                self.delay = self
+                    .log_line(index)
+                    .map(|line| lc_script::c4_string_byte_len(line) as i32)
+                    .unwrap_or(0);
+            }
+            if self.delay > 0 {
+                self.delay = (self.delay - self.speed).max(0);
+            }
+            if self.delay == 0 {
+                self.fader = (-self.speed).max(-line_height);
+                self.delay = -1;
+            }
+        }
+        self.screen_fader = (self.screen_fader - 20).max(-100);
+        if self.fader == -line_height {
+            self.back_scroll = (self.back_scroll - 1).max(-1);
+            self.fader = 0;
+        }
+        false
+    }
+
+    fn log_line(&self, negative_index: i32) -> Option<&str> {
+        let offset = usize::try_from(negative_index.checked_neg()?).ok()?;
+        self.log_history
+            .len()
+            .checked_sub(offset)
+            .and_then(|index| self.log_history.get(index))
+            .map(String::as_str)
+    }
+
+    fn current_line(&self) -> Option<String> {
+        self.log_line(-self.back_scroll - 1).map(str::to_string)
+    }
+
+    /// `AddLog` followed by the ordinary main-thread `LogNotify` call.
+    fn enqueue(&mut self, line: String) {
+        self.log_history.push_back(line);
+        while self.log_history.len() > 1000
+            || self
+                .log_history
+                .iter()
+                .map(|line| lc_script::c4_string_byte_len(line).saturating_add(1))
+                .sum::<usize>()
+                > 30_000
+        {
+            self.log_history.pop_front();
+        }
+        self.back_scroll = 0;
+    }
+
+    fn scroll(&mut self, older: bool) {
+        self.delay = -1;
+        self.fader = 0;
+        self.empty = false;
+        if older {
+            self.back_scroll = self.back_scroll.saturating_add(1);
+        } else if self.back_scroll > -1 {
+            self.back_scroll -= 1;
+        }
+    }
+
+    fn clear_log(&mut self) {
+        self.log_history.clear();
+    }
+
+    fn overlay(&mut self, line_height: i32, type_in: bool) -> MessageBoardOverlay {
+        if self.mode != MessageBoardMode::Hidden || type_in {
+            self.screen_fader = self
+                .screen_fader
+                .min(MESSAGE_BOARD_MAX_FADING_LINES * line_height);
+        }
+        MessageBoardOverlay {
+            mode: self.mode,
+            line_count: self.line_count,
+            log_lines: self.log_history.iter().cloned().collect(),
+            back_scroll: self.back_scroll,
+            fader: self.fader,
+            screen_fader: self.screen_fader,
+            type_in,
+        }
+    }
+
+    fn advance_frame(&mut self, line_height: i32, type_in: bool) -> MessageBoardOverlay {
+        let increment_screen_fader_after_draw = self.execute(line_height, type_in);
+        let overlay = self.overlay(line_height, type_in);
+        if increment_screen_fader_after_draw {
+            self.screen_fader += 5;
+        }
+        overlay
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OptionsDisplayRequest {
     SetMode(lc_frontend::startup_options_graphics::GraphicsDisplayMode),
@@ -11802,16 +12012,9 @@ struct GameApp {
     /// Last join-address edit click for C4GUI::Edit's double-click word
     /// selection. This is independent from the game-list row gesture.
     netdlg_join_edit_last_click: Option<Instant>,
-    /// The message board's current log line and the frame it expires
-    /// (fade-in + strlen delay + fade-out at Speed 1,
-    /// src/C4MessageBoard.cpp:163-212).
-    board_line: Option<(String, u64)>,
-    /// C4MessageBoard LogBuffer history (1000 lines / 30000 bytes). One-line
-    /// mode still presents the newest notification immediately.
-    board_log_history: VecDeque<String>,
-    /// C4MessageBoard backscroll: -1 is past the live tail, 0 is newest, and
-    /// positive values walk toward older physical log lines.
-    board_back_scroll: i32,
+    /// C4MessageBoard's mode, LogBuffer cursor, and per-graphics-frame
+    /// Fader/ScreenFader state.
+    message_board: ClassicMessageBoardState,
     /// Process-global C4ChatInputDialog projection for ordinary game chat.
     running_chat: Option<RunningChatState>,
     /// A paste may close its chat owner on key-down; retain the physical V
@@ -19365,6 +19568,17 @@ fn load_show_log_timestamps(paths: Option<&AppPaths>) -> bool {
         .unwrap_or(false)
 }
 
+fn load_message_board_enabled(paths: Option<&AppPaths>) -> bool {
+    paths
+        .and_then(|paths| Config::load(paths.config_file()).ok())
+        .and_then(|config| {
+            config
+                .get_in(Some("Graphics"), "MsgBoard")
+                .map(parse_config_bool)
+        })
+        .unwrap_or(true)
+}
+
 fn load_options_sound_state(
     audio: Option<&AudioContext>,
 ) -> lc_frontend::startup_options_dlg::SoundSheetState {
@@ -20868,22 +21082,9 @@ fn cursor_portrait_images(image: lc_engine::DefinitionPictureImage) -> CursorPor
     }
 }
 
-fn player_join_board_line(frame: u64, player_name: &str) -> (String, u64) {
+fn player_join_board_line(player_name: &str) -> String {
     const PREFIX: &str = "Player join: ";
-    let line = format!("{PREFIX}{}", c4_presentation_text(player_name));
-    let raw_len = PREFIX
-        .len()
-        .saturating_add(lc_script::c4_string_byte_len(player_name));
-    (
-        line,
-        frame.saturating_add(raw_len as u64).saturating_add(30),
-    )
-}
-
-fn control_message_board_line(frame: u64, line: String) -> (String, u64) {
-    let raw_len = lc_script::c4_string_byte_len(&line);
-    let expires = frame.saturating_add(raw_len as u64).saturating_add(30);
-    (line, expires)
+    format!("{PREFIX}{}", c4_presentation_text(player_name))
 }
 
 fn lobby_chat_selection(view: &LobbyChatEditView) -> Option<std::ops::Range<usize>> {
@@ -22172,9 +22373,7 @@ impl GameApp {
             plrsel_last_click: None,
             netdlg_last_click: None,
             netdlg_join_edit_last_click: None,
-            board_line: None,
-            board_log_history: VecDeque::new(),
-            board_back_scroll: -1,
+            message_board: ClassicMessageBoardState::default(),
             running_chat: None,
             chat_paste_consumed_keys: HashSet::new(),
             message_input_history: VecDeque::new(),
@@ -33145,9 +33344,8 @@ impl GameApp {
         }
     }
 
-    /// The native `/mute` and `/unmute` commands are process-local policy,
-    /// not controls. Command names are case-sensitive in ProcessCommand and
-    /// client names are matched exactly.
+    /// Native ProcessCommand entries that mutate only this process. Command
+    /// names are case-sensitive; `/msgboard` is available only in-game.
     fn process_control_message_local_command(&mut self, text: &str) -> bool {
         let raw = lc_script::c4_string_bytes(text);
         let Some(command) = raw.strip_prefix(b"/") else {
@@ -33159,6 +33357,14 @@ impl GameApp {
             .map_or((command, &[][..]), |space| {
                 (&command[..space], &command[space + 1..])
             });
+        if name == b"msgboard" {
+            if !matches!(self.mode, AppMode::Running) {
+                return false;
+            }
+            let parameter = native_bytes_as_legacy_text(parameter);
+            self.set_message_board_line_count(legacy_atoi_i32(&parameter).clamp(0, 20));
+            return true;
+        }
         let muted = match name {
             b"mute" => true,
             b"unmute" => false,
@@ -57716,7 +57922,6 @@ impl GameApp {
         // Native runs Network.Execute before Control.Prepare, so this scan
         // must still happen when the ready-control gate returns early.
         self.deactivate_inactive_network_clients();
-        self.expire_message_board_line();
         if !matches!(self.mode, AppMode::Menu) {
             // Whatever happens while loading or in-game (game over, return
             // to menu) must not replay a stale pre-game menu frame; dropping
@@ -63064,6 +63269,7 @@ impl GameApp {
         self.reconcile_initial_scoreboard();
         self.sync_scoreboard_presentation();
         let scoreboard_font_images = self.preflight_visible_scoreboard()?;
+        let message_board = self.advance_message_board_overlay();
         let viewports = collect_viewport_inputs_from_physical_state(
             &self.snapshot,
             &self.physical_viewports,
@@ -63162,7 +63368,7 @@ impl GameApp {
             viewport_overlays_visible,
             players,
             game_time_seconds: self.game_time_seconds(),
-            message_board_line: self.message_board_line(),
+            message_board,
             crew_name_labels,
             clock_text: self
                 .display_flags
@@ -64173,54 +64379,48 @@ impl GameApp {
         self.snapshot.game_time.max(0) as u64
     }
 
-    /// The message board's current log line, dropped once its C++ fade
-    /// window has passed (src/C4MessageBoard.cpp:163-212).
+    /// The C4MessageBoard line selected by its live LogBuffer cursor.
     fn message_board_line(&self) -> Option<String> {
-        if self.board_back_scroll < 0 {
-            return None;
-        }
-        let offset = usize::try_from(self.board_back_scroll).ok()?;
-        self.board_log_history
-            .len()
-            .checked_sub(offset.saturating_add(1))
-            .and_then(|index| self.board_log_history.get(index))
-            .cloned()
+        self.message_board.current_line()
     }
 
-    fn expire_message_board_line(&mut self) {
-        let frame = self.engine.frame();
-        if self
-            .board_line
-            .as_ref()
-            .is_some_and(|(_, expires)| frame >= *expires)
-        {
-            self.board_line = None;
-            self.board_back_scroll = -1;
-        }
+    fn advance_message_board_overlay(&mut self) -> MessageBoardOverlay {
+        let line_height = self.graphics.message_board_line_height();
+        let type_in = self.running_chat_active();
+        self.message_board.advance_frame(line_height, type_in)
     }
 
     fn enqueue_control_message_board_line(&mut self, line: String) {
-        self.board_log_history.push_back(line.clone());
-        while self.board_log_history.len() > 1000
-            || self
-                .board_log_history
-                .iter()
-                .map(|line| line.len().saturating_add(1))
-                .sum::<usize>()
-                > 30_000
-        {
-            self.board_log_history.pop_front();
-        }
-        self.board_back_scroll = 0;
-        self.board_line = Some(control_message_board_line(self.engine.frame(), line));
+        self.message_board.enqueue(line);
     }
 
     fn scroll_message_board(&mut self, older: bool) {
-        if older {
-            self.board_back_scroll = self.board_back_scroll.saturating_add(1);
-        } else if self.board_back_scroll > -1 {
-            self.board_back_scroll -= 1;
+        self.message_board.scroll(older);
+    }
+
+    fn clear_message_board_log(&mut self) {
+        self.message_board.clear_log();
+    }
+
+    fn set_message_board_line_count(&mut self, line_count: i32) {
+        let line_height = self.graphics.message_board_line_height();
+        let enabled = self.message_board.set_line_count(line_count, line_height);
+        if let Some(paths) = self.app_paths.as_ref() {
+            if let Err(error) = persist_config_value(
+                paths,
+                "Graphics",
+                "MsgBoard",
+                i32::from(enabled).to_string(),
+            ) {
+                tracing::warn!(%error, "failed to persist Graphics.MsgBoard");
+            }
         }
+    }
+
+    fn message_board_overlay(&mut self) -> MessageBoardOverlay {
+        let line_height = self.graphics.message_board_line_height();
+        let type_in = self.running_chat_active();
+        self.message_board.overlay(line_height, type_in)
     }
 
     fn draw_classic_game_messages(
@@ -68111,22 +68311,25 @@ impl GameApp {
         // engine and pulsed by the event loop's one-second accumulator.
         // ShowStartup is set on player init (C4Player.cpp:1735).
         self.show_startup_hint = true;
-        // C4PlayerList::JoinNew logs IDS_PRC_JOINPLR "Player join: %s"
-        // (C4PlayerList.cpp:281, LanguageUS.txt:1222); one-line message
-        // board timing = fade-in + strlen delay + fade-out at line height
-        // 15 / Speed 1 (C4MessageBoard.cpp:163-212).
+        // C4MessageBoard::Init reloads the bool-typed MsgBoard setting for
+        // every game. A runtime multi-line count therefore collapses back to
+        // ordinary one-line mode on the next initialization.
         self.running_chat = None;
         self.game_option_input_dialog = None;
-        self.board_log_history.clear();
-        self.board_line = None;
-        self.board_back_scroll = -1;
+        let line_height = self.graphics.message_board_line_height();
+        self.message_board.initialize(
+            load_message_board_enabled(self.app_paths.as_ref()),
+            line_height,
+        );
+        // C4PlayerList::JoinNew logs IDS_PRC_JOINPLR "Player join: %s"
+        // (C4PlayerList.cpp:281, LanguageUS.txt:1222).
         let join_line = self
             .engine
             .snapshot()
             .players
             .iter()
             .find(|state| state.id == self.local_owner)
-            .map(|state| player_join_board_line(self.engine.frame(), &state.name).0);
+            .map(|state| player_join_board_line(&state.name));
         if let Some(line) = join_line {
             let line = self.timestamp_log_line(line);
             self.enqueue_control_message_board_line(line);
@@ -77687,7 +77890,7 @@ mod tests {
             viewport_overlays_visible: true,
             players: Vec::new(),
             game_time_seconds: 0,
-            message_board_line: None,
+            message_board: MessageBoardOverlay::default(),
             crew_name_labels: Vec::new(),
             clock_text: None,
             frames_per_second: None,
@@ -82344,13 +82547,7 @@ mod tests {
         );
 
         let raw_name = lc_script::c4_string_from_bytes(&[0xe9]);
-        let (line, expires) = player_join_board_line(10, &raw_name);
-        assert_eq!(line, "Player join: \u{e9}");
-        assert_eq!(
-            expires,
-            10 + "Player join: ".len() as u64 + 1 + 30,
-            "message timing remains based on the native byte length"
-        );
+        assert_eq!(player_join_board_line(&raw_name), "Player join: \u{e9}");
     }
 
     /// Pump the app until asynchronous boot loading completes and the main menu
@@ -86637,6 +86834,7 @@ func Award()
 
         app.resize(1152, 644)
             .expect("resize to the reported logical surface");
+        hold_message_board_for_frame_comparison(&mut app);
         let messages = std::mem::take(&mut app.snapshot.hud.messages);
         let mut warm = vec![0_u8; 1152 * 644 * 4];
         app.render(&mut warm)
@@ -88156,6 +88354,8 @@ func Award()
         assert_eq!(crew.breath, 50_000);
         assert_eq!(crew.breath_capacity, 250_000);
         assert!(crew.breath != 0 && crew.breath < crew.breath_capacity);
+
+        hold_message_board_for_frame_comparison(&mut app);
 
         // The stock EnergyBars.png is split into six 8px columns and three
         // 12px cap/tile rows (C4GraphicsResource.cpp:231-241). With portraits
@@ -120842,6 +121042,18 @@ ScenInfoArea=70,5,25,90
         Classic,
     }
 
+    fn hold_message_board_for_frame_comparison(app: &mut GameApp) {
+        // Pixel-composition tests compare consecutive presentations. Keep the
+        // seeded join line in C4MessageBoard's stable single-line delay phase;
+        // the L120 regressions exercise the animated transitions explicitly.
+        app.message_board.back_scroll = 0;
+        app.message_board.empty = false;
+        app.message_board.fader = 0;
+        app.message_board.delay = i32::MAX;
+        app.message_board.speed = 1;
+        app.message_board.screen_fader = -100;
+    }
+
     fn new_running_sandbox_app_with_definitions_and_assets(
         definition_load: SandboxDefinitionLoad<'_>,
         fixture_assets: SandboxFixtureAssets,
@@ -120899,6 +121111,7 @@ ScenInfoArea=70,5,25,90
                 .expect("install sandbox cursor view range");
             app.snapshot = app.engine.snapshot();
         }
+        hold_message_board_for_frame_comparison(&mut app);
         app
     }
 
@@ -121694,7 +121907,8 @@ ScenInfoArea=70,5,25,90
             .expect("retain the released sync batch until commit");
         assert!(app.network_sync.scheduled.contains_key(&3));
         assert!(app
-            .board_log_history
+            .message_board
+            .log_history
             .iter()
             .all(|line| !line.contains("overshoot-sync")));
         events
@@ -121705,7 +121919,8 @@ ScenInfoArea=70,5,25,90
 
         assert!(app.network_sync.scheduled.is_empty());
         assert!(app
-            .board_log_history
+            .message_board
+            .log_history
             .iter()
             .any(|line| line.contains("overshoot-sync")));
         assert!(!app.network_control_running);
@@ -121984,9 +122199,133 @@ ScenInfoArea=70,5,25,90
             .expect("message sender exists")
             .set_at_client(lc_engine::PlayerAtClient::new(7));
         app.engine.set_local_players([app.local_owner]);
-        app.board_line = None;
-        app.board_log_history.clear();
-        app.board_back_scroll = -1;
+        let line_height = app.graphics.message_board_line_height();
+        app.message_board.initialize(true, line_height);
+        let _ = app.message_board.advance_frame(line_height, false);
+    }
+
+    #[test]
+    fn l120_message_board_change_mode_and_execute_match_native_faders() {
+        let line_height = 15;
+        let mut board = ClassicMessageBoardState::default();
+        assert!(board.change_mode(MessageBoardMode::SingleLine, line_height));
+        let first_frame = board.advance_frame(line_height, false);
+        assert_eq!(first_frame.screen_fader, 90);
+        assert_eq!(board.screen_fader, 95);
+        assert!(board.empty);
+
+        board.enqueue("first".to_string());
+        board.enqueue("second".to_string());
+        let _ = board.advance_frame(line_height, false);
+        assert_eq!(board.fader, line_height - 1);
+        assert_eq!(board.current_line().as_deref(), Some("second"));
+        assert_eq!(board.screen_fader, 75);
+
+        board.line_count = 7;
+        assert!(board.change_mode(MessageBoardMode::Continuous, line_height));
+        assert_eq!(board.mode, MessageBoardMode::Continuous);
+        assert_eq!(board.line_count, 7);
+        assert_eq!(board.back_scroll, -1);
+        assert_eq!(board.fader, 0);
+        let unchanged = board.clone();
+        let _ = board.advance_frame(line_height, false);
+        assert_eq!(board.mode, unchanged.mode);
+        assert_eq!(board.screen_fader, unchanged.screen_fader);
+
+        assert!(!board.change_mode(MessageBoardMode::Hidden, line_height));
+        let _ = board.advance_frame(line_height, false);
+        assert_eq!(board.screen_fader, 100);
+        assert_eq!(board.back_scroll, -1);
+        assert!(board.change_mode(MessageBoardMode::SingleLine, line_height));
+        assert!(board.empty, "hidden-to-single keeps the native empty transition");
+    }
+
+    #[test]
+    fn l120_msgboard_command_uses_runtime_lines_but_persists_only_a_bool() {
+        let _lock = env_lock().lock();
+        let root = tempdir().expect("message-board config root");
+        let (_guard, paths, _) = loader_origin_fixture_paths(root.path());
+        paths.ensure_user_dirs().expect("message-board user dirs");
+        let mut app = new_state_only_running_sandbox_app();
+        app.app_paths = Some(paths.clone());
+        let line_height = app.graphics.message_board_line_height();
+
+        app.process_running_chat_text("/msgboard 4");
+        assert_eq!(app.message_board.mode, MessageBoardMode::Continuous);
+        assert_eq!(app.message_board.line_count, 4);
+        for line in ["one", "two", "three", "four"] {
+            app.enqueue_control_message_board_line(line.to_string());
+        }
+        let overlay = app.message_board_overlay();
+        assert_eq!(overlay.mode, MessageBoardMode::Continuous);
+        assert!(overlay.log_lines.ends_with(&[
+            "one".to_string(),
+            "two".to_string(),
+            "three".to_string(),
+            "four".to_string(),
+        ]));
+        let config = Config::load(paths.config_file()).expect("persisted message-board config");
+        assert_eq!(config.get_in(Some("Graphics"), "MsgBoard"), Some("1"));
+
+        let mut reloaded = ClassicMessageBoardState::default();
+        reloaded.initialize(load_message_board_enabled(Some(&paths)), line_height);
+        assert_eq!(
+            reloaded.mode,
+            MessageBoardMode::SingleLine,
+            "the bool-typed config cannot retain the runtime line count"
+        );
+        assert_eq!(reloaded.line_count, 1);
+
+        app.process_running_chat_text("/msgboard 0");
+        assert_eq!(app.message_board.mode, MessageBoardMode::Hidden);
+        let config = Config::load(paths.config_file()).expect("hidden message-board config");
+        assert_eq!(config.get_in(Some("Graphics"), "MsgBoard"), Some("0"));
+        let mut hidden_reloaded = ClassicMessageBoardState::default();
+        hidden_reloaded.initialize(load_message_board_enabled(Some(&paths)), line_height);
+        assert_eq!(hidden_reloaded.mode, MessageBoardMode::Hidden);
+        assert_eq!(hidden_reloaded.line_count, 0);
+
+        app.process_running_chat_text("/msgboard 21tail");
+        assert_eq!(app.message_board.mode, MessageBoardMode::Continuous);
+        assert_eq!(app.message_board.line_count, 20);
+        app.process_running_chat_text("/msgboard 1");
+        assert_eq!(app.message_board.mode, MessageBoardMode::SingleLine);
+    }
+
+    #[test]
+    fn l120_msgboard_command_reaches_continuous_multiline_render() {
+        let mut app = new_classic_running_sandbox_app();
+        app.clear_message_board_log();
+        app.process_running_chat_text("/msgboard 3");
+
+        let width = app.graphics.surface().width() as usize;
+        let height = app.graphics.surface().height() as usize;
+        let line_height = app.graphics.message_board_line_height() as usize;
+        let mut without_lines = vec![0_u8; width * height * 4];
+        app.render(&mut without_lines)
+            .expect("render empty continuous message board");
+
+        for line in ["Alpha", "Bravo", "Charlie"] {
+            app.enqueue_control_message_board_line(line.to_string());
+        }
+        let mut with_lines = vec![0_u8; width * height * 4];
+        app.render(&mut with_lines)
+            .expect("render /msgboard continuous lines");
+
+        let output_y = height - 4 * line_height;
+        let band_changed = |top: usize| {
+            (top..top + line_height).any(|y| {
+                (0..width).any(|x| {
+                    let pixel = (y * width + x) * 4;
+                    without_lines[pixel..pixel + 4] != with_lines[pixel..pixel + 4]
+                })
+            })
+        };
+        assert!(band_changed(output_y));
+        assert!(
+            band_changed(output_y + line_height),
+            "/msgboard 3 must render more than one simultaneous message line"
+        );
     }
 
     #[test]
@@ -122091,13 +122430,13 @@ ScenInfoArea=70,5,25,90
         let spoofed =
             app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, 7, -1, b"spoofed", 8));
         assert!(spoofed.rejected);
-        assert!(app.board_line.is_none());
+        assert!(app.message_board.log_history.is_empty());
 
         let normal =
             app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, 7, -1, b"hello", 7));
         assert!(normal.displayed);
         assert_eq!(
-            app.board_line.as_ref().map(|line| line.0.as_str()),
+            app.message_board_line().as_deref(),
             Some("<c 123456><Sender> hello")
         );
 
@@ -122110,11 +122449,12 @@ ScenInfoArea=70,5,25,90
         ));
         assert!(queued.displayed);
         assert_eq!(
-            app.board_line.as_ref().map(|line| line.0.as_str()),
+            app.message_board_line().as_deref(),
             Some("<c 123456><Sender> second")
         );
         assert_eq!(
-            app.board_log_history
+            app.message_board
+                .log_history
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
@@ -122133,12 +122473,8 @@ ScenInfoArea=70,5,25,90
             app.message_board_line().as_deref(),
             Some("<c 123456><Sender> second")
         );
-        app.board_line.as_mut().expect("active line").1 = app.engine.frame();
-        app.expire_message_board_line();
-        assert!(app.board_line.is_none());
 
-        app.board_line = None;
-        app.board_log_history.clear();
+        app.clear_message_board_log();
         let missing_player = app.execute_message_control(message_control(
             MESSAGE_TYPE_NORMAL,
             999,
@@ -122148,18 +122484,18 @@ ScenInfoArea=70,5,25,90
         ));
         assert!(missing_player.displayed);
         assert_eq!(
-            app.board_line.as_ref().map(|line| line.0.as_str()),
+            app.message_board_line().as_deref(),
             Some("<Remote> client message")
         );
 
-        app.board_line = None;
+        app.clear_message_board_log();
         app.engine
             .set_hostility(7, app.local_owner, true)
             .expect("sender hostility sets");
         let hostile_team =
             app.execute_message_control(message_control(MESSAGE_TYPE_TEAM, 7, -1, b"hidden", 7));
         assert!(!hostile_team.displayed);
-        assert!(app.board_line.is_none());
+        assert!(app.message_board.log_history.is_empty());
         app.engine
             .set_hostility(7, app.local_owner, false)
             .expect("sender hostility clears");
@@ -122168,7 +122504,7 @@ ScenInfoArea=70,5,25,90
                 .displayed
         );
 
-        app.board_line = None;
+        app.clear_message_board_log();
         assert!(
             app.execute_message_control(message_control(
                 MESSAGE_TYPE_PRIVATE,
@@ -122179,7 +122515,7 @@ ScenInfoArea=70,5,25,90
             ))
             .displayed
         );
-        app.board_line = None;
+        app.clear_message_board_log();
         assert!(
             !app.execute_message_control(message_control(
                 MESSAGE_TYPE_PRIVATE,
@@ -122190,7 +122526,7 @@ ScenInfoArea=70,5,25,90
             ))
             .displayed
         );
-        assert!(app.board_line.is_none());
+        assert!(app.message_board.log_history.is_empty());
     }
 
     #[test]
@@ -126681,9 +127017,11 @@ ScenInfoArea=70,5,25,90
             set_test_scenario_head_flags(&mut app, replay, film);
             app.snapshot.hud.messages.clear();
 
+            let message_board = app.message_board.clone();
             let mut without_menu = vec![0_u8; 320 * 200 * 4];
             app.render(&mut without_menu).expect("render menu-free frame");
             install_test_cursor_menu(&mut app, cursor, two_item_script_menu(cursor));
+            app.message_board = message_board;
             let mut with_menu = vec![0_u8; 320 * 200 * 4];
             app.render(&mut with_menu).expect("render script-menu frame");
             assert_eq!(
@@ -126704,6 +127042,7 @@ ScenInfoArea=70,5,25,90
             .expect("clear matrix script menu");
         set_test_scenario_head_flags(&mut app, 1, 1);
         app.snapshot.hud.messages.clear();
+        let message_board = app.message_board.clone();
         let mut without_message = vec![0_u8; 320 * 200 * 4];
         app.render(&mut without_message)
             .expect("render clean film frame");
@@ -126722,6 +127061,7 @@ ScenInfoArea=70,5,25,90
             frame_decoration: None,
             portrait: None,
         }];
+        app.message_board = message_board.clone();
         let mut with_message = vec![0_u8; 320 * 200 * 4];
         app.render(&mut with_message)
             .expect("film replay still renders game messages");
@@ -126752,6 +127092,7 @@ ScenInfoArea=70,5,25,90
             text: "Hidden mouse caption".to_string(),
             keep_moves: 1,
         });
+        app.message_board = message_board;
         let mut with_hidden_menus = vec![0_u8; 320 * 200 * 4];
         app.render(&mut with_hidden_menus)
             .expect("hidden film menus skip their render preflights");
@@ -158340,7 +158681,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("league refusal is nonfatal");
         assert!(commands.take_submitted_client_updates().is_empty());
         assert_eq!(
-            app.board_log_history.back().map(String::as_str),
+            app.message_board.log_history.back().map(String::as_str),
             Some("Command not allowed in league games!")
         );
 

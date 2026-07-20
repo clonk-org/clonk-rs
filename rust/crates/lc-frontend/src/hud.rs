@@ -13,11 +13,13 @@
 //!   (src/C4Viewport.cpp:1446-1476) — keyboard/gamepad graphic, optional
 //!   mouse symbol, and player name in the player color.
 //! - Message board: `C4MessageBoard::Draw` (src/C4MessageBoard.cpp:243-306)
-//!   — one log line over the tiled background strip at the screen bottom.
+//!   — hidden, fading single-line, and continuous multi-line layouts over the
+//!   tiled background strip at the screen bottom.
 
 use crate::{
     draw_image_bilinear, draw_image_bilinear_additive, draw_image_bilinear_owner,
     draw_image_strip, fill_rect, ClonkFontSet, HudGraphics, ImageData, InventoryOverlay,
+    MessageBoardMode, MessageBoardOverlay,
 };
 use lc_graphics::{
     clonk_font::TextAlign, Color, GammaRamp, Rect as SurfaceRect, Surface, TextFont,
@@ -43,6 +45,8 @@ const MOUSE_SOURCE: (u32, u32, u32, u32) = (198, 100, 32, 32);
 const GAMEPAD_CELL_WIDTH: u32 = 80;
 /// White HUD text (`CStdDDraw::DEFAULT_MESSAGE_COLOR`, src/StdDDraw2.h:361).
 const MESSAGE_COLOR: Color = Color::opaque(255, 255, 255);
+/// `C4MSGB_MaxMsgFading` (src/C4MessageBoard.h:21).
+pub const MESSAGE_BOARD_MAX_FADING_LINES: i32 = 6;
 /// `0xfaFF0000`, the red caption color passed by C4MouseControl::Draw.
 pub const MOUSE_CAPTION_COLOR: Color = Color::new(255, 0, 0, 0xfa);
 /// FontRegular is the 14px main font (`C4Fonts.cpp:280-288`); the fallback
@@ -345,32 +349,40 @@ fn blit_tile(
     y: i32,
     width: i32,
     height: i32,
+    offset_x: i32,
+    offset_y: i32,
     gamma: Option<&GammaRamp>,
 ) {
     let (tile_w, tile_h) = (image.width() as i32, image.height() as i32);
     if tile_w <= 0 || tile_h <= 0 {
         return;
     }
-    let mut ty = 0;
-    while ty < height {
-        let src_h = tile_h.min(height - ty);
-        let mut tx = 0;
-        while tx < width {
-            let src_w = tile_w.min(width - tx);
+    let mut tile_y = y.saturating_add(offset_y % tile_h);
+    while tile_y < y.saturating_add(height) {
+        let src_y = y.saturating_sub(tile_y).max(0);
+        let src_h = tile_h
+            .min(y.saturating_add(height).saturating_sub(tile_y))
+            .saturating_sub(src_y);
+        let mut tile_x = x.saturating_add(offset_x % tile_w);
+        while tile_x < x.saturating_add(width) {
+            let src_x = x.saturating_sub(tile_x).max(0);
+            let src_w = tile_w
+                .min(x.saturating_add(width).saturating_sub(tile_x))
+                .saturating_sub(src_x);
             draw_hud_image_strip(
                 surface,
-                x + tx,
-                y + ty,
+                tile_x.saturating_add(src_x),
+                tile_y.saturating_add(src_y),
                 image,
-                0,
-                0,
+                src_x as u32,
+                src_y as u32,
                 src_w as u32,
                 src_h as u32,
                 gamma,
             );
-            tx += tile_w;
+            tile_x = tile_x.saturating_add(tile_w);
         }
-        ty += tile_h;
+        tile_y = tile_y.saturating_add(tile_h);
     }
 }
 
@@ -543,7 +555,7 @@ pub(crate) fn draw_upper_board_with_gamma(
         .unwrap_or(UPPER_BOARD_HEIGHT);
 
     match hud.upper_board.as_ref() {
-        Some(board) => blit_tile(surface, board, 0, 0, width, board_height, gamma),
+        Some(board) => blit_tile(surface, board, 0, 0, width, board_height, 0, 0, gamma),
         None => fill_hud_rect(
             surface,
             &lc_gui::Rect::new(0.0, 0.0, width as f32, board_height as f32),
@@ -2253,30 +2265,31 @@ pub(crate) fn draw_player_controls_with_gamma(
     }
 }
 
-/// `C4MessageBoard::Draw` in one-line mode (src/C4MessageBoard.cpp:243-306):
-/// tiled `fctBackground` strip at the screen bottom with the current log
-/// line at its top-left.
+/// `C4MessageBoard::Draw` (src/C4MessageBoard.cpp:243-306): an opaque tiled
+/// `fctBackground` output strip followed by the exact line-selection,
+/// vertical-fader and text-alpha loop.
 pub fn draw_message_board(
     surface: &mut Surface,
     font: &HudFont<'_>,
     hud: &HudGraphics,
-    line: Option<&str>,
+    board: &MessageBoardOverlay,
 ) {
-    draw_message_board_with_gamma(surface, font, hud, line, None);
+    draw_message_board_with_gamma(surface, font, hud, board, None);
 }
 
 pub(crate) fn draw_message_board_with_gamma(
     surface: &mut Surface,
     font: &HudFont<'_>,
     hud: &HudGraphics,
-    line: Option<&str>,
+    board: &MessageBoardOverlay,
     gamma: Option<&GammaRamp>,
 ) {
-    let height = font.line_height();
+    let line_height = font.line_height().max(1);
     let width = surface.width() as i32;
+    let height = board.output_height(line_height);
     let y = surface.height() as i32 - height;
     match hud.background.as_ref() {
-        Some(background) => blit_tile(surface, background, 0, y, width, height, gamma),
+        Some(background) => blit_tile(surface, background, 0, y, width, height, 0, -y, gamma),
         None => fill_hud_rect(
             surface,
             &lc_gui::Rect::new(0.0, y as f32, width as f32, height as f32),
@@ -2284,16 +2297,78 @@ pub(crate) fn draw_message_board_with_gamma(
             gamma,
         ),
     }
-    if let Some(line) = line.filter(|line| !line.is_empty()) {
-        // iMsgY = cgo.Y + (iMsg + iLines-1)*iLineHgt + Fader with the
-        // current message at iMsg = -1, iLines = 2, Fader = 0
-        // (src/C4MessageBoard.cpp:271-303).
+
+    if board.mode == MessageBoardMode::Hidden && !board.type_in {
+        return;
+    }
+
+    let mut message_fader = if board.mode == MessageBoardMode::Continuous {
+        0
+    } else {
+        MESSAGE_BOARD_MAX_FADING_LINES
+    };
+    let maximum_screen_fader = MESSAGE_BOARD_MAX_FADING_LINES.saturating_mul(line_height);
+    let screen_fader = if board.screen_fader >= maximum_screen_fader {
+        message_fader = 0;
+        maximum_screen_fader
+    } else {
+        board.screen_fader
+    };
+    let lines = if board.mode == MessageBoardMode::Continuous {
+        board.line_count.max(2)
+    } else {
+        2
+    };
+    let first_message = -message_fader - lines;
+    for message_index in first_message..0 {
+        let log_index = message_index.saturating_sub(board.back_scroll);
+        if log_index >= 0 {
+            break;
+        }
+        let Some(from_end) = log_index
+            .checked_neg()
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            continue;
+        };
+        let Some(line) = board
+            .log_lines
+            .len()
+            .checked_sub(from_end)
+            .and_then(|index| board.log_lines.get(index))
+            .filter(|line| !line.is_empty())
+        else {
+            continue;
+        };
+
+        // `iMsgY = cgo.Y + (iMsg + (iLines - 1)) * iLineHgt + Fader`.
+        let message_y = y
+            .saturating_add(
+                message_index
+                    .saturating_add(lines.saturating_sub(1))
+                    .saturating_mul(line_height),
+            )
+            .saturating_add(board.fader);
+        let alpha = if message_y < y {
+            // Preserve C++ integer-operation order:
+            // `(distance * 256 / max(iMsgFader, 1) / iLineHgt)`.
+            let distance = y
+                .saturating_sub(message_y)
+                .saturating_add(screen_fader.max(0));
+            let fade = i64::from(distance)
+                .saturating_mul(256)
+                / i64::from(message_fader.max(1))
+                / i64::from(line_height);
+            255_i64.saturating_sub(fade.clamp(0, 255)) as u8
+        } else {
+            255
+        };
         font.draw_markup_with_gamma(
             surface,
             0,
-            y,
+            message_y,
             line,
-            MESSAGE_COLOR,
+            Color::new(MESSAGE_COLOR.r, MESSAGE_COLOR.g, MESSAGE_COLOR.b, alpha),
             TextAlign::Left,
             gamma,
         );
@@ -4126,7 +4201,12 @@ mod tests {
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
         let strip_height = font.line_height();
-        draw_message_board(&mut target, &font, &hud, None);
+        draw_message_board(
+            &mut target,
+            &font,
+            &hud,
+            &MessageBoardOverlay::default(),
+        );
         assert_eq!(
             target.get_pixel(50, 64 - 1),
             Some(Color::opaque(20, 24, 28))
@@ -4134,6 +4214,130 @@ mod tests {
         assert_eq!(
             target.get_pixel(50, (64 - strip_height - 1) as u32),
             Some(Color::opaque(0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn l120_message_board_background_tile_is_screen_anchored() {
+        let mut target = surface(8, 10);
+        let hud = HudGraphics {
+            background: Some(ImageData::new(
+                1,
+                3,
+                vec![
+                    200, 0, 0, 255, 0, 200, 0, 255, 0, 0, 200, 255,
+                ],
+            )),
+            ..HudGraphics::default()
+        };
+        let fallback = FixedWidthMarkerFont;
+        let font = HudFont::Fallback(&fallback);
+
+        draw_message_board(
+            &mut target,
+            &font,
+            &hud,
+            &MessageBoardOverlay::default(),
+        );
+
+        // Output.Y is 4, so the first board row continues screen row 4 of
+        // the three-row tile instead of restarting at source row zero.
+        assert_eq!(target.get_pixel(7, 4), Some(Color::opaque(0, 200, 0)));
+        assert_eq!(target.get_pixel(7, 5), Some(Color::opaque(0, 0, 200)));
+        assert_eq!(target.get_pixel(7, 6), Some(Color::opaque(200, 0, 0)));
+    }
+
+    #[test]
+    fn l120_single_line_fader_offsets_and_alpha_fades_older_text() {
+        let mut target = surface(64, 24);
+        let hud = HudGraphics {
+            background: Some(solid_image(2, 2, [0, 0, 0, 255])),
+            ..HudGraphics::default()
+        };
+        let fallback = FixedWidthMarkerFont;
+        let font = HudFont::Fallback(&fallback);
+        let line_height = font.line_height();
+        let output_y = target.height() as i32 - line_height;
+        let board = MessageBoardOverlay {
+            log_lines: vec!["old".to_string(), "new".to_string()],
+            back_scroll: 0,
+            fader: 3,
+            ..MessageBoardOverlay::default()
+        };
+
+        draw_message_board(&mut target, &font, &hud, &board);
+
+        assert_eq!(
+            target.get_pixel(0, (output_y + 3) as u32),
+            Some(Color::opaque(255, 255, 255)),
+            "Fader vertically offsets the current line"
+        );
+        assert_eq!(
+            target.get_pixel(0, (output_y - 3) as u32),
+            Some(Color::new(255, 255, 255, 234)),
+            "the preceding line keeps native integer alpha fade ordering"
+        );
+    }
+
+    #[test]
+    fn l120_continuous_message_board_draws_multiple_lines_over_opaque_dynamic_strip() {
+        let mut target = surface(96, 96);
+        let background_color = Color::opaque(20, 24, 28);
+        let hud = HudGraphics {
+            background: Some(solid_image(8, 8, [20, 24, 28, 255])),
+            ..HudGraphics::default()
+        };
+        let fallback = bitmap_font();
+        let font = HudFont::Fallback(&fallback);
+        let line_height = font.line_height();
+        let board = MessageBoardOverlay {
+            mode: MessageBoardMode::Continuous,
+            line_count: 3,
+            log_lines: vec![
+                "Alpha".to_string(),
+                "Bravo".to_string(),
+                "Charlie".to_string(),
+            ],
+            back_scroll: 0,
+            ..MessageBoardOverlay::default()
+        };
+        let output_height = board.output_height(line_height);
+        let output_y = target.height() as i32 - output_height;
+
+        draw_message_board(&mut target, &font, &hud, &board);
+
+        assert_eq!(output_height, 4 * line_height);
+        assert_eq!(
+            target.get_pixel(90, 95),
+            Some(background_color),
+            "continuous mode tiles the complete (iLines + 1)-line output"
+        );
+        assert_eq!(
+            target.get_pixel(90, (output_y - 1) as u32),
+            Some(Color::opaque(0, 0, 0)),
+            "the opaque backdrop begins at MessageBoard.Output.Y"
+        );
+
+        let has_opaque_text_in_band = |start_y: i32| {
+            (start_y..start_y + line_height).any(|y| {
+                (0..target.width()).any(|x| {
+                    target
+                        .get_pixel(x, y as u32)
+                        .is_some_and(|pixel| pixel == Color::opaque(255, 255, 255))
+                })
+            })
+        };
+        assert!(has_opaque_text_in_band(output_y));
+        assert!(has_opaque_text_in_band(output_y + line_height));
+        assert!(
+            !(output_y - line_height..output_y).any(|y| {
+                (0..target.width()).any(|x| {
+                    target
+                        .get_pixel(x, y as u32)
+                        .is_some_and(|pixel| pixel == Color::opaque(255, 255, 255))
+                })
+            }),
+            "the loop's extra line above cgo.Y reaches zero alpha exactly"
         );
     }
 

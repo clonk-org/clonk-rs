@@ -2321,6 +2321,67 @@ impl SkyRenderState {
     }
 }
 
+/// `C4MessageBoard::iMode` (src/C4MessageBoard.cpp:65-125).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MessageBoardMode {
+    /// The standard one-line board whose current message slides and fades.
+    #[default]
+    SingleLine,
+    /// The runtime-only continuous board selected by `/msgboard <n>` for
+    /// `n >= 2`.
+    Continuous,
+    /// No board output, except for the native type-in fallthrough.
+    Hidden,
+}
+
+/// Immutable `C4MessageBoard::Draw` input assembled by the application.
+///
+/// `log_lines` are stored oldest-to-newest. `back_scroll == 0` addresses the
+/// newest physical line, matching `C4LogBuffer::GetLine(-1)`; positive values
+/// walk toward older lines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageBoardOverlay {
+    pub mode: MessageBoardMode,
+    pub line_count: i32,
+    pub log_lines: Vec<String>,
+    pub back_scroll: i32,
+    pub fader: i32,
+    pub screen_fader: i32,
+    pub type_in: bool,
+}
+
+impl Default for MessageBoardOverlay {
+    fn default() -> Self {
+        Self {
+            mode: MessageBoardMode::SingleLine,
+            line_count: 4,
+            log_lines: Vec::new(),
+            back_scroll: -1,
+            fader: 0,
+            screen_fader: 0,
+            type_in: false,
+        }
+    }
+}
+
+impl MessageBoardOverlay {
+    /// `MessageBoard.Output.Hgt` after `ChangeMode`: one FontRegular line in
+    /// standard mode, `(iLines + 1)` lines in continuous mode, and zero while
+    /// hidden (src/C4MessageBoard.cpp:65-125).
+    pub fn output_height(&self, line_height: i32) -> i32 {
+        let line_height = line_height.max(0);
+        match self.mode {
+            MessageBoardMode::SingleLine => line_height,
+            MessageBoardMode::Continuous => self
+                .line_count
+                .max(2)
+                .saturating_add(1)
+                .saturating_mul(line_height),
+            MessageBoardMode::Hidden => 0,
+        }
+    }
+}
+
 pub struct GraphicsOverlay<'a> {
     /// Debug FRAME/POS/VEL line — drawn only when `debug_hud` is set.
     pub frame_text: &'a str,
@@ -2340,9 +2401,9 @@ pub struct GraphicsOverlay<'a> {
     /// `Game.Time` seconds for the upper board clock
     /// (C4Game::Sec1Timer, src/C4Game.cpp:1737-1741).
     pub game_time_seconds: u64,
-    /// The current message board log line (C4MessageBoard LogBuffer tail,
-    /// src/C4MessageBoard.cpp:271-303).
-    pub message_board_line: Option<String>,
+    /// Complete `C4MessageBoard::Draw` projection, including continuous-mode
+    /// history and the two native faders (src/C4MessageBoard.cpp:243-306).
+    pub message_board: MessageBoardOverlay,
     /// Local wall-clock text (`[%H:%M:%S]`) shown by `C4UpperBoard::Draw`.
     /// `None` is `Config.Graphics.ShowClock == false`.
     pub clock_text: Option<String>,
@@ -2754,7 +2815,7 @@ pub struct GraphicsSystem {
     /// `C4Viewport::DrawOverlay` (src/C4Viewport.cpp:838-881,1088).
     viewport_overlays_visible: bool,
     game_time_seconds: u64,
-    message_board_line: Option<String>,
+    message_board: MessageBoardOverlay,
     clock_text: Option<String>,
     frames_per_second: Option<i32>,
     /// `Config.Graphics.ShowPortraits` / `ShowCommands` / `ShowCommandKeys`
@@ -2856,7 +2917,7 @@ impl GraphicsSystem {
             crew_name_labels: Vec::new(),
             viewport_overlays_visible: true,
             game_time_seconds: 0,
-            message_board_line: None,
+            message_board: MessageBoardOverlay::default(),
             clock_text: None,
             frames_per_second: None,
             show_portraits: true,
@@ -3912,7 +3973,7 @@ impl GraphicsSystem {
         self.crew_name_labels = overlay.crew_name_labels.clone();
         self.viewport_overlays_visible = overlay.viewport_overlays_visible;
         self.game_time_seconds = overlay.game_time_seconds;
-        self.message_board_line = overlay.message_board_line.clone();
+        self.message_board = overlay.message_board.clone();
         self.clock_text = overlay.clock_text.clone();
         self.frames_per_second = overlay.frames_per_second;
         self.show_portraits = overlay.show_portraits;
@@ -8136,11 +8197,17 @@ impl GraphicsSystem {
         hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref())
     }
 
-    /// The bottom border the message board strip occupies
-    /// (`MessageBoard.Output.Hgt` = one FontRegular line,
-    /// src/C4MessageBoard.cpp:73-76,228 / C4GraphicsSystem.cpp:346).
-    fn message_board_height(&self) -> i32 {
+    /// Current `Game.GraphicsResource.FontRegular.GetLineHeight()` used by
+    /// `C4MessageBoard::Init` and `Execute`.
+    pub fn message_board_line_height(&self) -> i32 {
         self.hud_font().line_height()
+    }
+
+    /// The bottom border occupied by `MessageBoard.Output.Hgt` after the
+    /// current `ChangeMode` (src/C4MessageBoard.cpp:65-125,223-241).
+    fn message_board_height(&self) -> i32 {
+        self.message_board
+            .output_height(self.message_board_line_height())
     }
 
     /// Whether the fullscreen chrome (upper board + message board) is
@@ -8389,7 +8456,7 @@ impl GraphicsSystem {
                 &mut self.surface,
                 &font,
                 &self.hud_graphics,
-                self.message_board_line.as_deref(),
+                &self.message_board,
                 gamma,
             );
             hud::draw_upper_board_with_gamma(
@@ -16919,7 +16986,11 @@ mod tests {
             players: Vec::new(),
             crew_name_labels: Vec::new(),
             game_time_seconds: 61,
-            message_board_line: Some("Player join: Test".to_string()),
+            message_board: MessageBoardOverlay {
+                log_lines: vec!["Player join: Test".to_string()],
+                back_scroll: 0,
+                ..MessageBoardOverlay::default()
+            },
             clock_text: None,
             frames_per_second: None,
             show_portraits: false,
@@ -16993,7 +17064,7 @@ mod tests {
             }],
             crew_name_labels: Vec::new(),
             game_time_seconds: 0,
-            message_board_line: None,
+            message_board: MessageBoardOverlay::default(),
             clock_text: None,
             frames_per_second: None,
             show_portraits: true,
@@ -17054,6 +17125,66 @@ mod tests {
             rect,
             "mouse control narrows dialog placement to its viewport"
         );
+    }
+
+    #[test]
+    fn l120_message_board_mode_recalculates_viewport_bottom_border() {
+        let snapshot = make_snapshot();
+        let focus = &snapshot.objects[0];
+        let board = ImageData::new(4, 55, vec![120; 4 * 55 * 4]);
+        let hud_graphics = Arc::new(HudGraphics {
+            upper_board: Some(board),
+            ..HudGraphics::default()
+        });
+        let mut graphics = GraphicsSystem::new(
+            320,
+            240,
+            150,
+            "Dynamic message board",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            hud_graphics,
+        );
+        let line_height = graphics.hud_font().line_height();
+        let viewports = vec![ViewportInput::from_focus(focus)];
+
+        for (message_board, expected_height) in [
+            (
+                MessageBoardOverlay {
+                    mode: MessageBoardMode::Hidden,
+                    ..MessageBoardOverlay::default()
+                },
+                0,
+            ),
+            (MessageBoardOverlay::default(), line_height),
+            (
+                MessageBoardOverlay {
+                    mode: MessageBoardMode::Continuous,
+                    line_count: 3,
+                    ..MessageBoardOverlay::default()
+                },
+                4 * line_height,
+            ),
+        ] {
+            graphics.message_board = message_board;
+            graphics.render_frame(&snapshot, &viewports);
+            let rect = graphics.active_viewports[0].rect;
+            assert_eq!(graphics.message_board_height(), expected_height);
+            assert_eq!(
+                rect.height as i32,
+                240 - hud::UPPER_BOARD_HEIGHT - expected_height
+            );
+            assert_eq!(
+                graphics.preferred_dialog_rect(None),
+                SurfaceRect::new(
+                    0,
+                    hud::UPPER_BOARD_HEIGHT,
+                    320,
+                    (240 - hud::UPPER_BOARD_HEIGHT - expected_height) as u32,
+                )
+            );
+        }
     }
 
     fn viewport_layout(width: u32, height: u32, count: usize) -> Vec<SurfaceRect> {
@@ -20429,7 +20560,7 @@ mod tests {
             players,
             crew_name_labels: Vec::new(),
             game_time_seconds: 0,
-            message_board_line: None,
+            message_board: MessageBoardOverlay::default(),
             clock_text: None,
             frames_per_second: None,
             show_portraits: true,
@@ -20546,7 +20677,7 @@ mod tests {
                     })
                     .unwrap_or_default(),
                 game_time_seconds: 0,
-                message_board_line: None,
+                message_board: MessageBoardOverlay::default(),
                 clock_text: None,
                 frames_per_second: None,
                 show_portraits: true,
@@ -20658,7 +20789,7 @@ mod tests {
             players,
             crew_name_labels: Vec::new(),
             game_time_seconds: 0,
-            message_board_line: None,
+            message_board: MessageBoardOverlay::default(),
             clock_text: None,
             frames_per_second: None,
             show_portraits: true,
@@ -20793,7 +20924,7 @@ mod tests {
             players,
             crew_name_labels: Vec::new(),
             game_time_seconds: 0,
-            message_board_line: None,
+            message_board: MessageBoardOverlay::default(),
             clock_text: None,
             frames_per_second: None,
             show_portraits: true,
@@ -20878,7 +21009,7 @@ mod tests {
             players,
             crew_name_labels: Vec::new(),
             game_time_seconds: 0,
-            message_board_line: None,
+            message_board: MessageBoardOverlay::default(),
             clock_text: None,
             frames_per_second: None,
             show_portraits: false,
