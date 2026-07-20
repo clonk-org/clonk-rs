@@ -43100,28 +43100,107 @@ impl GameApp {
         self.mark_menu_dirty();
     }
 
-    fn poll_startup_network_connection(&mut self) {
-        let selected_scenario = self
-            .startup_network_connection
-            .as_ref()
-            .and_then(|connection| connection.selected_scenario.clone());
-        let purpose = self
-            .startup_network_connection
-            .as_ref()
-            .map(|connection| connection.purpose);
-        let result = match self
-            .startup_network_connection
-            .as_ref()
-            .map(|connection| connection.receiver.try_recv())
-        {
-            Some(Ok(result)) => result,
-            Some(Err(TryRecvError::Empty)) | None => return,
-            Some(Err(TryRecvError::Disconnected)) => Err(NetworkStartError::Other(
+    fn finish_startup_network_failure(
+        &mut self,
+        purpose: StartupNetworkPurpose,
+        message: String,
+    ) -> Result<(), EngineError> {
+        tracing::error!(?purpose, error = %message, "startup network session failed");
+
+        // Failed C4Game::Init returns through QuitGame and constructs the
+        // remembered startup dialog again in the same process. Clear every
+        // partially installed network-game projection before doing likewise.
+        self.restore_startup_fonts();
+        self.active_global_gui_overrides.clear();
+        self.classic_host_lobby = None;
+        self.network_lobby = None;
+        self.network_start_wait = None;
+        self.staged_network_host_scenario = None;
+        self.loader_screen = None;
+        self.loader_error = None;
+        self.abandon_live_masterserver_signup();
+        self.network_game_advertiser = None;
+        self.advertised_game_reference = None;
+        self.host_reference_paused = false;
+        self.network = None;
+        self.network_mode = None;
+        self.host_join_snapshot = None;
+        self.host_lobby_countdown = None;
+        self.pending_local_lobby_countdown_echoes.clear();
+        self.network_ticks.clear();
+        self.network_sync.clear();
+        self.sync_checks.clear();
+        self.network_control_clock = None;
+        self.host_local_alternate_colors_by_resource.clear();
+        self.host_local_player_info_ids.clear();
+        self.network_is_league = false;
+        self.network_league_name.clear();
+        self.network_stream_address = LegacyCString::default();
+        self.control_player_infos = ControlPlayerInfoRegistry::default();
+        self.admission_resources.clear();
+        seed_engine_player_info_parameters(
+            &mut self.engine,
+            &self.network_league_name,
+            &self.control_player_infos,
+        );
+        self.network_control_running = true;
+        self.runtime_network_status_barrier = None;
+        self.control_clients = initial_control_clients(None, None);
+        self.network_client_activity.clear();
+        self.pending_network_join = None;
+        self.pending_network_join_data = None;
+        self.initial_lobby_status_ack_pending = false;
+        self.client_start_barrier = ClientStartBarrier::default();
+        self.pending_client_start_status = None;
+        self.client_combined_scenario_path = None;
+        self.client_material_resource_groups = None;
+        self.active_scenario = None;
+        self.active_definition_load = None;
+        self.mode = AppMode::Menu;
+        self.status_text.clear();
+
+        match purpose {
+            StartupNetworkPurpose::StagedHost => {
+                self.startup_game_search = None;
+                self.startup_network_last_refresh = None;
+                self.startup_network_dialog = None;
+                self.restore_startup_dialog(StartupDialog::ScenarioBrowser(
+                    ScenarioSelectorMode::NetworkHost,
+                ));
+            }
+            StartupNetworkPurpose::Join => {
+                self.restore_startup_dialog(StartupDialog::NetworkGame);
+            }
+        }
+        // NetDlg discovery startup has its own native row presentation. It
+        // must not displace the fatal diagnostic with a generic overlay.
+        self.status_text.clear();
+        let caption = self.runtime_resource_text("IDS_DLG_LOG", "Error Log");
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                message,
+                caption,
+                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        )
+    }
+
+    fn poll_startup_network_connection(&mut self) -> Result<(), EngineError> {
+        let Some(connection) = self.startup_network_connection.as_ref() else {
+            return Ok(());
+        };
+        let selected_scenario = connection.selected_scenario.clone();
+        let purpose = connection.purpose;
+        let result = match connection.receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return Ok(()),
+            Err(TryRecvError::Disconnected) => Err(NetworkStartError::Other(
                 "network worker disconnected before reporting readiness".to_string(),
             )),
         };
         self.startup_network_connection = None;
-        if purpose == Some(StartupNetworkPurpose::Join) {
+        if purpose == StartupNetworkPurpose::Join {
             // Resolution owns silent dismissal. Finishing the dialog would
             // run its continuation and incorrectly turn success into abort.
             self.dismiss_startup_network_connect_progress();
@@ -43136,11 +43215,10 @@ impl GameApp {
                     }) = &mut mode
                     {
                         if let Err(error) = prepared.apply_league_start_response(&response) {
-                            self.status_text =
-                                format!("Unable to apply league registration: {error}");
-                            self.mode = AppMode::Menu;
-                            self.restore_startup_fonts();
-                            return;
+                            return self.finish_startup_network_failure(
+                                purpose,
+                                format!("Unable to apply league registration: {error}"),
+                            );
                         }
                     }
                     if response.max_players != 0 {
@@ -43149,7 +43227,7 @@ impl GameApp {
                         }
                     }
                 }
-                if purpose == Some(StartupNetworkPurpose::StagedHost) {
+                if purpose == StartupNetworkPurpose::StagedHost {
                     if let NetworkMode::Host(HostSettings {
                         prepared: Some(prepared),
                         ..
@@ -43181,29 +43259,29 @@ impl GameApp {
                             if let Err(error) = self
                                 .finalize_prepared_host_players(&manager, prepared, is_league)
                             {
-                                self.status_text = format!(
-                                    "Unable to finalize initial host players: {error}"
+                                return self.finish_startup_network_failure(
+                                    purpose,
+                                    format!(
+                                        "Unable to finalize initial host players: {error}"
+                                    ),
                                 );
-                                self.mode = AppMode::Menu;
-                                self.restore_startup_fonts();
-                                return;
                             }
                             if let Some(snapshot) =
                                 prepared.host_config().initial_join_snapshot.clone()
                             {
                                 if let Err(error) = manager.publish_join_snapshot(snapshot) {
-                                    self.status_text = format!(
-                                        "Unable to publish initial host players: {error}"
+                                    return self.finish_startup_network_failure(
+                                        purpose,
+                                        format!(
+                                            "Unable to publish initial host players: {error}"
+                                        ),
                                     );
-                                    self.mode = AppMode::Menu;
-                                    self.restore_startup_fonts();
-                                    return;
                                 }
                             }
                         }
                     }
                 }
-                if purpose == Some(StartupNetworkPurpose::Join) {
+                if purpose == StartupNetworkPurpose::Join {
                     self.pending_network_join = None;
                     self.host_local_alternate_colors_by_resource.clear();
                     self.host_local_player_info_ids.clear();
@@ -43211,7 +43289,7 @@ impl GameApp {
                 // InitNetwork constructs a fresh C4Network2Client list; no
                 // activity timestamp survives into the new socket session.
                 self.network_client_activity.clear();
-                if purpose == Some(StartupNetworkPurpose::StagedHost) {
+                if purpose == StartupNetworkPurpose::StagedHost {
                     let control_clients = initial_control_clients(Some(&manager), Some(&mode));
                     let network_control_clock = initial_network_control_clock(Some(&mode));
                     let mut previous_player_infos = None;
@@ -43245,17 +43323,12 @@ impl GameApp {
                                             previous_admission_resources.take().expect(
                                                 "prepared install saved the previous resources",
                                             );
-                                        self.status_text = format!(
-                                            "Unable to install prepared host PlayerInfo/resources: {error}"
+                                        return self.finish_startup_network_failure(
+                                            purpose,
+                                            format!(
+                                                "Unable to install prepared host PlayerInfo/resources: {error}"
+                                            ),
                                         );
-                                        self.staged_network_host_scenario = None;
-                                        self.loader_screen = None;
-                                        self.network_control_running = true;
-                                        self.control_clients = initial_control_clients(None, None);
-                                        self.replace_startup_view(StartupView::NetworkGame);
-                                        self.mode = AppMode::Menu;
-                                        self.restore_startup_fonts();
-                                        return;
                                     }
                                 }
                             }
@@ -43275,16 +43348,10 @@ impl GameApp {
                             {
                                 self.admission_resources = previous_admission_resources;
                             }
-                            self.status_text =
-                                format!("Unable to open prepared host admission: {error}");
-                            self.staged_network_host_scenario = None;
-                            self.loader_screen = None;
-                            self.network_control_running = true;
-                            self.control_clients = initial_control_clients(None, None);
-                            self.replace_startup_view(StartupView::NetworkGame);
-                            self.mode = AppMode::Menu;
-                            self.restore_startup_fonts();
-                            return;
+                            return self.finish_startup_network_failure(
+                                purpose,
+                                format!("Unable to open prepared host admission: {error}"),
+                            );
                         }
                     }
                     self.host_local_alternate_colors_by_resource =
@@ -43351,7 +43418,7 @@ impl GameApp {
                             self.status_text.clear();
                             self.menu_frame_cache = None;
                             self.restore_startup_fonts();
-                            return;
+                            return Ok(());
                         }
                     }
                     match self.build_classic_host_lobby(&mode, &manager) {
@@ -43405,7 +43472,7 @@ impl GameApp {
                             if let Some(audio) = self.audio.as_mut() {
                                 audio.stop_music();
                             }
-                            return;
+                            return Ok(());
                         }
                         Err(error) => {
                             if let Some(previous_player_infos) = previous_player_infos.take() {
@@ -43417,7 +43484,10 @@ impl GameApp {
                                 self.admission_resources = previous_admission_resources;
                             }
                             tracing::error!(%error, "cannot enter exact classic host lobby");
-                            self.status_text = format!("Network lobby unavailable: {error}");
+                            return self.finish_startup_network_failure(
+                                purpose,
+                                format!("Network lobby unavailable: {error}"),
+                            );
                         }
                     }
                 } else {
@@ -43455,68 +43525,29 @@ impl GameApp {
                     self.pending_local_lobby_countdown_echoes.clear();
                     self.mode = AppMode::Menu;
                     self.open_network_lobby();
-                    return;
+                    return Ok(());
                 }
-                self.classic_host_lobby = None;
-                self.abandon_live_masterserver_signup();
-                self.network = None;
-                self.network_mode = None;
-                self.host_join_snapshot = None;
-                self.network_is_league = false;
-                self.network_league_name.clear();
-                self.network_stream_address = LegacyCString::default();
-                seed_engine_player_info_parameters(
-                    &mut self.engine,
-                    &self.network_league_name,
-                    &self.control_player_infos,
-                );
-                self.network_control_running = true;
-                self.runtime_network_status_barrier = None;
-                self.control_clients = initial_control_clients(None, None);
-                self.replace_startup_view(StartupView::NetworkGame);
-                self.mode = AppMode::Menu;
             }
             Err(NetworkStartError::WrongPassword { .. })
-                if purpose == Some(StartupNetworkPurpose::Join)
+                if purpose == StartupNetworkPurpose::Join
                     && self.pending_network_join.is_some() =>
             {
                 self.mode = AppMode::Menu;
                 if let Err(error) = self.open_network_join_password_dialog() {
-                    self.pending_network_join = None;
-                    self.status_text =
-                        format!("Unable to reopen the network password prompt: {error}");
+                    return self.finish_startup_network_failure(
+                        purpose,
+                        format!("Unable to reopen the network password prompt: {error}"),
+                    );
                 }
             }
             Err(error) => {
-                self.pending_network_join = None;
-                self.status_text = format!("Unable to start network session: {error}");
-                self.mode = AppMode::Menu;
+                return self.finish_startup_network_failure(
+                    purpose,
+                    format!("Unable to start network session: {error}"),
+                );
             }
         }
-        if purpose == Some(StartupNetworkPurpose::StagedHost) {
-            self.restore_startup_fonts();
-            self.classic_host_lobby = None;
-            self.staged_network_host_scenario = None;
-            self.loader_screen = None;
-            self.abandon_live_masterserver_signup();
-            self.network = None;
-            self.network_mode = None;
-            self.host_join_snapshot = None;
-            self.host_local_alternate_colors_by_resource.clear();
-            self.host_local_player_info_ids.clear();
-            self.network_is_league = false;
-            self.network_league_name.clear();
-            self.network_stream_address = LegacyCString::default();
-            seed_engine_player_info_parameters(
-                &mut self.engine,
-                &self.network_league_name,
-                &self.control_player_infos,
-            );
-            self.network_control_running = true;
-            self.runtime_network_status_barrier = None;
-            self.control_clients = initial_control_clients(None, None);
-            self.replace_startup_view(StartupView::NetworkGame);
-        }
+        Ok(())
     }
 
     fn start_prepared_network_game_advertiser(
@@ -54333,7 +54364,7 @@ impl GameApp {
         self.poll_startup_game_search()?;
         self.poll_scenario_selector_discovery()?;
         self.poll_startup_irc()?;
-        self.poll_startup_network_connection();
+        self.poll_startup_network_connection()?;
         self.poll_live_masterserver_signup()?;
         self.process_network_events()?;
         // C4Network2::Execute probes the runtime status target before
@@ -86355,7 +86386,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             None,
         )
         .expect("begin exact-host transition");
-        app.poll_startup_network_connection();
+        app.poll_startup_network_connection()
+            .expect("poll exact-host transition");
 
         assert_eq!(app.mode, AppMode::Menu);
         assert_eq!(app.startup_view, StartupView::NetworkLobby);
@@ -87584,6 +87616,23 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
     }
 
+    fn assert_startup_error_log(app: &GameApp, expected_message: &str) {
+        use lc_frontend::message_dialog::{
+            MessageDialogButton, MessageDialogButtons, MessageDialogIcon, MessageDialogSize,
+        };
+
+        assert_eq!(app.message_dialogs.len(), 1);
+        let dialog = &app.message_dialogs[0];
+        assert_eq!(dialog.state.caption(), "Error Log");
+        assert_eq!(dialog.state.message(), expected_message);
+        assert_eq!(dialog.state.buttons(), MessageDialogButtons::OK);
+        assert_eq!(dialog.state.focused_button(), Some(MessageDialogButton::Ok));
+        assert_eq!(dialog.state.icon(), MessageDialogIcon::ERROR);
+        assert_eq!(dialog.state.size(), MessageDialogSize::Regular);
+        assert!(matches!(dialog.continuation, MessageDialogContinuation::None));
+        assert!(app.status_text.is_empty());
+    }
+
     #[test]
     fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteractive() {
         let _lock = env_lock().lock();
@@ -87793,18 +87842,40 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .join_address(),
             join_before
         );
+        let reported_host_error = "host preparation failed: initial host resources could not be published: failed to publish System resource /missing/planet/System.c4g: host C4Group could not be read: No such file or directory (os error 2)";
         sender
             .send(Err(NetworkStartError::Other(
-                "controlled host failure".to_string(),
+                reported_host_error.to_string(),
             )))
             .expect("resolve controlled transition");
-        app.poll_startup_network_connection();
+        app.poll_startup_network_connection()
+            .expect("poll controlled host transition");
         assert!(!app.startup_network_transition_active());
-        assert!(app.status_text.contains("controlled host failure"));
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(
+            app.scenario_selector_mode,
+            ScenarioSelectorMode::NetworkHost
+        );
+        assert_eq!(
+            app.last_startup_dialog,
+            StartupDialog::ScenarioBrowser(ScenarioSelectorMode::NetworkHost)
+        );
+        assert_eq!(app.startup_scenario_back_dialog, None);
+        assert_startup_error_log(
+            &app,
+            &format!("Unable to start network session: {reported_host_error}"),
+        );
         assert!(app.staged_network_host_scenario.is_none());
         assert!(app.loader_screen.is_none());
         assert!(app.network.is_none());
         assert!(app.network_mode.is_none());
+        let mut frame = vec![0x4c; 800 * 600 * 4];
+        app.render(&mut frame)
+            .expect("render restored host selector and Error Log");
+        assert!(frame.iter().any(|byte| *byte != 0x4c));
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss host Error Log");
         let stale = prepare_tutorial_host_lobby(&app, repository);
         app.staged_network_host_scenario = Some(stale);
         app.stage_network_host_scenario(
@@ -87998,7 +88069,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn unstaged_host_connection_never_enters_generic_lobby() {
+    fn unstaged_host_connection_returns_to_host_selector_with_error_log() {
         let mut app = new_real_classic_menu_app(800, 600);
         app.open_network_game_dialog();
         let (manager, _events) = NetworkManager::test_stub();
@@ -88018,28 +88089,25 @@ public func Grant(password) { return GainMissionAccess(password); }
             selected_scenario: None,
             purpose: StartupNetworkPurpose::StagedHost,
         });
-        app.poll_startup_network_connection();
-        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        app.poll_startup_network_connection()
+            .expect("poll unstaged host transition");
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(
+            app.scenario_selector_mode,
+            ScenarioSelectorMode::NetworkHost
+        );
         assert_ne!(app.startup_view, StartupView::NetworkLobby);
         assert!(app.network_lobby.is_none());
         assert!(app.network.is_none(), "headless listener must be dropped");
         assert!(app.network_mode.is_none());
-        assert!(app.status_text.contains("without a staged scenario"));
-
-        let diagnostic = app.status_text.clone();
+        assert_startup_error_log(
+            &app,
+            "Network lobby unavailable: classic game-lobby model is unavailable: host connection completed without a staged scenario; refusing guessed lobby state",
+        );
         let mut frame = vec![0x4c; 800 * 600 * 4];
-        let error = app
-            .render(&mut frame)
-            .expect_err("post-connect lobby refusal must fail before drawing NetDlg status");
-        assert!(matches!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::StartupStatusOverlay {
-                view: StartupView::NetworkGame,
-                status,
-            }) if status == &diagnostic
-        ));
-        assert_eq!(app.status_text, diagnostic);
-        assert!(frame.iter().all(|byte| *byte == 0x4c));
+        app.render(&mut frame)
+            .expect("render restored host selector and Error Log");
+        assert!(frame.iter().any(|byte| *byte != 0x4c));
     }
 
     fn prepare_tutorial_host_lobby(app: &GameApp, repository: &Path) -> StagedNetworkHostScenario {
@@ -88519,7 +88587,8 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .title(),
             expected_title
         );
-        app.poll_startup_network_connection();
+        app.poll_startup_network_connection()
+            .expect("poll prepared host transition");
 
         assert_eq!(app.mode, AppMode::Menu);
         assert!(app.network_client_activity.last_frame.is_empty());
@@ -88714,7 +88783,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             None,
         )
         .expect("begin prepared participant host transition");
-        app.poll_startup_network_connection();
+        app.poll_startup_network_connection()
+            .expect("poll prepared participant host transition");
         admission
             .join()
             .expect("join prepared lobby admission responder");
@@ -94141,7 +94211,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             selected_scenario: None,
             purpose: StartupNetworkPurpose::Join,
         });
-        app.poll_startup_network_connection();
+        app.poll_startup_network_connection()
+            .expect("poll joined network transition");
         assert!(app.network.is_some());
         assert!(matches!(app.network_mode, Some(NetworkMode::Client(_))));
         assert!(app.classic_host_lobby.is_none());
@@ -109838,7 +109909,8 @@ ScenInfoArea=70,5,25,90
         assert!(app.startup_network_connection.is_some());
 
         for _ in 0..3_000 {
-            app.poll_startup_network_connection();
+            app.poll_startup_network_connection()
+                .expect("poll selected network host");
             if app.network.is_some() && app.network_control_clock.is_some() {
                 break;
             }
@@ -111204,8 +111276,12 @@ ScenInfoArea=70,5,25,90
             MessageDialogButton, MessageDialogButtons, MessageDialogIcon, MessageDialogSize,
         };
 
-        let mut app = new_classic_menu_app(800, 600);
+        let mut app = new_real_classic_menu_app(800, 600);
         attach_l040_network_dialog(&mut app);
+        app.startup_network_dialog
+            .as_mut()
+            .expect("initial network dialog")
+            .set_join_address("stale.example:11112");
         let (sender, receiver) = mpsc::channel();
         let target = "UDP:192.0.2.10:11112, TCP:192.0.2.10:11112";
 
@@ -111236,13 +111312,26 @@ ScenInfoArea=70,5,25,90
                 "controlled connection failure".to_string(),
             )))
             .expect("resolve controlled raw connect");
-        app.poll_startup_network_connection();
+        app.poll_startup_network_connection()
+            .expect("poll controlled raw connect");
 
         assert!(app.startup_network_connection.is_none());
-        assert!(app.message_dialogs.is_empty());
         assert_eq!(app.startup_view, StartupView::NetworkGame);
-        assert!(app.startup_network_dialog.is_some());
-        assert!(app.status_text.contains("controlled connection failure"));
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("fresh network dialog")
+                .join_address(),
+            ""
+        );
+        assert_startup_error_log(
+            &app,
+            "Unable to start network session: controlled connection failure",
+        );
+        let mut frame = vec![0x4c; 800 * 600 * 4];
+        app.render(&mut frame)
+            .expect("render fresh NetDlg and Error Log");
+        assert!(frame.iter().any(|byte| *byte != 0x4c));
     }
 
     #[test]
@@ -111278,7 +111367,8 @@ ScenInfoArea=70,5,25,90
 
         app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
             .expect("Escape release remains owned by dismissed progress");
-        app.poll_startup_network_connection();
+        app.poll_startup_network_connection()
+            .expect("poll after aborted raw connect");
         assert!(app.message_dialog_consumed_keys.is_empty());
         assert_eq!(app.startup_view, StartupView::NetworkGame);
         assert!(app.status_text.is_empty());
@@ -113212,7 +113302,8 @@ ScenInfoArea=70,5,25,90
             purpose: StartupNetworkPurpose::Join,
         });
 
-        app.poll_startup_network_connection();
+        app.poll_startup_network_connection()
+            .expect("poll wrong-password result");
 
         assert!(app.startup_network_connection.is_none());
         assert_eq!(
@@ -113252,10 +113343,15 @@ ScenInfoArea=70,5,25,90
             selected_scenario: None,
             purpose: StartupNetworkPurpose::Join,
         });
-        app.poll_startup_network_connection();
+        app.poll_startup_network_connection()
+            .expect("poll terminal join rejection");
         assert!(app.pending_network_join.is_none());
         assert!(app.game_option_input_dialog.is_none());
-        assert!(app.status_text.contains("join denied"));
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert_startup_error_log(
+            &app,
+            "Unable to start network session: join denied",
+        );
     }
 
     #[test]
@@ -113287,7 +113383,8 @@ ScenInfoArea=70,5,25,90
         );
         assert!(app.startup_network_connection.is_some());
         for _ in 0..100 {
-            app.poll_startup_network_connection();
+            app.poll_startup_network_connection()
+                .expect("poll submitted-password join");
             if app.startup_network_connection.is_none() {
                 break;
             }
