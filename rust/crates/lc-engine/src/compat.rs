@@ -10135,8 +10135,10 @@ fn exit_object_at_position_with_full_motion_and_calls(
     });
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
-            let _ = refresh_live_object_ocf(context, target);
+            // Exit's UpdateFace(true) updates the shape/solid mask before
+            // SetOCF derives the final outside-container flags.
             context.update_live_solid_mask(target, false);
+            let _ = refresh_live_object_ocf(context, target);
         }
     });
 
@@ -10241,7 +10243,7 @@ fn enter_object_live_with_calls(
     container: ObjectId,
     f_calls: bool,
 ) -> Result<bool, RuntimeError> {
-    enter_object_live_internal(target, container, f_calls, false)
+    enter_object_live_internal(target, container, f_calls, false, true)
 }
 
 /// ObjectComPut's Enter form supplies a non-null RejectCollect result
@@ -10251,7 +10253,17 @@ fn enter_object_live_with_reject_collect(
     target: ObjectId,
     container: ObjectId,
 ) -> Result<bool, RuntimeError> {
-    enter_object_live_internal(target, container, true, true)
+    enter_object_live_internal(target, container, true, true, true)
+}
+
+/// C4Object::Collect supplies RejectCollect but defers CopyMotion until after
+/// Collection and Hit. All other C4Object::Enter state and callbacks are the
+/// ordinary live path.
+fn enter_object_live_for_collect(
+    target: ObjectId,
+    container: ObjectId,
+) -> Result<bool, RuntimeError> {
+    enter_object_live_internal(target, container, true, true, false)
 }
 
 fn enter_object_live_internal(
@@ -10259,10 +10271,11 @@ fn enter_object_live_internal(
     container: ObjectId,
     f_calls: bool,
     reject_collect: bool,
+    f_copy_motion: bool,
 ) -> Result<bool, RuntimeError> {
-    // C4Object::Enter gates on raw Status truthiness after any old-container
-    // Exit. STATUS_Inactive is nonzero and remains a valid container.
-    if target == container || !object_has_status(target) || !object_has_status(container) {
+    // C4Object::Enter rejects null/self up front, but delays raw Status gates
+    // until after RejectEntrance/RejectCollect and any old-container Exit.
+    if target == container {
         return Ok(false);
     }
     if call_object_own_fail_safe(
@@ -10340,13 +10353,15 @@ fn enter_object_live_internal(
             .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
             .unwrap_or_default();
         let target_ready = context.object_scope(target).is_some_and(|scope| {
-            !scope.destroy && scope.status().is_active() && scope.container().is_none()
+            !scope.destroy
+                && scope.status() != ObjectStatus::Deleted
+                && scope.container().is_none()
         }) || context
             .get_world_object(target)
             .is_some_and(|object| object.is_present() && object.container().is_none());
         let container_motion = context
             .object_scope(container)
-            .filter(|scope| !scope.destroy && scope.status().is_active())
+            .filter(|scope| !scope.destroy && scope.status() != ObjectStatus::Deleted)
             .map(|scope| {
                 (
                     scope.effective_position(),
@@ -10369,21 +10384,26 @@ fn enter_object_live_internal(
         let Some(scope) = context.object_scope_mut(target) else {
             return false;
         };
-        let was_mobile = scope.mobile();
+        // Enter closes an uncontained object's menu before linking it. A
+        // transfer's Exit already did so, but the repeated close is harmless.
+        scope.pending_update.menu = Some(None);
         scope.set_container(Some(container));
         if !(scope.alive() && scope.category() & crate::CATEGORY_LIVING != 0) {
             scope.set_controller(controller);
         }
-        // CopyMotion writes integer position/fix position and x/y dirs; it
-        // intentionally leaves r/rdir untouched.
-        scope.current_position = position;
-        scope.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
-        scope.pending_update.position = Some(position);
-        scope.pending_update.construction_preserves_fixed_position = false;
-        scope.set_fixed_velocity(velocity);
-        // CopyMotion does not mobilize; the generic fixed-dir update does,
-        // so carry the pre-Enter native flag explicitly over that fold.
-        scope.set_mobile(was_mobile);
+        if f_copy_motion {
+            let was_mobile = scope.mobile();
+            // CopyMotion writes integer position/fix position and x/y dirs;
+            // it intentionally leaves r/rdir untouched.
+            scope.current_position = position;
+            scope.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
+            scope.pending_update.position = Some(position);
+            scope.pending_update.construction_preserves_fixed_position = false;
+            scope.set_fixed_velocity(velocity);
+            // CopyMotion does not mobilize; the generic fixed-dir update does,
+            // so carry the pre-Enter native flag explicitly over that fold.
+            scope.set_mobile(was_mobile);
+        }
         let nonliving = !(scope.alive() && scope.category() & crate::CATEGORY_LIVING != 0);
         if let Some(spawn) = context
             .pending_spawns
@@ -10391,12 +10411,21 @@ fn enter_object_live_internal(
             .find(|spawn| spawn.id == Some(target))
         {
             spawn.container = Some(container);
-            spawn.position = position;
-            spawn.fixed_position = None;
-            spawn.fixed_velocity = Some(velocity);
+            if f_copy_motion {
+                spawn.position = position;
+                spawn.fixed_position = None;
+                spawn.fixed_velocity = Some(velocity);
+            }
             if nonliving {
                 spawn.controller = Some(controller);
             }
+        }
+        if f_copy_motion {
+            // Native Enter removes the outside solid mask before CopyMotion,
+            // so SetOCF at the destination cannot sample the object's own
+            // old bake. No callback occurs during CopyMotion; removing here,
+            // immediately before SetOCF, has the same observable ordering.
+            context.update_live_solid_mask(target, false);
         }
         let _ = refresh_live_object_ocf(context, target);
         if let Some(scope) = context.object_scope_mut(target) {
@@ -11358,157 +11387,11 @@ fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    // Enter first asks the ENTERING object, before cycle detection or any
-    // mutation (C4Object.cpp:1575-1581).
-    if call_fail_safe(item, "RejectEntrance", &[object_reference_value(collector)]).as_bool() {
+    // Collect uses the ordinary Enter lifecycle and RejectCollect query, but
+    // passes fCopyMotion=false so Collection2/Entrance/Collection/Hit observe
+    // the item's post-Exit motion. Its own tail copies collector motion later.
+    if !enter_object_live_for_collect(item, collector)? {
         return Ok(Value::Bool(false));
-    }
-
-    let would_cycle = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return true;
-        };
-        let mut cursor = Some(collector);
-        let mut seen = HashSet::new();
-        while let Some(container) = cursor {
-            if container == item || !seen.insert(container) {
-                return true;
-            }
-            cursor = context
-                .get_world_object(container)
-                .and_then(|object| object.container());
-        }
-        false
-    });
-    if would_cycle {
-        return Ok(Value::Bool(false));
-    }
-
-    // Collect supplies Enter's non-null pfRejectCollect pointer, so the
-    // COLLECTOR sees (entering definition id, entering object) next
-    // (C4Object.cpp:1582-1591,5701-5704).
-    let item_definition = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.get_world_object(item))
-            .map(|object| object.definition_id().to_string())
-    });
-    let Some(item_definition) = item_definition else {
-        return Ok(Value::Bool(false));
-    };
-    if call_fail_safe(
-        collector,
-        "RejectCollect",
-        &[Value::C4Id(item_definition), object_reference_value(item)],
-    )
-    .as_bool()
-    {
-        return Ok(Value::Bool(false));
-    }
-
-    // A transfer performs a real Exit first. Its callbacks observe the
-    // already-cleared relation and may re-enter, which aborts the outer Enter
-    // (C4Object.cpp:1592-1594; Exit :1559-1563).
-    let previous = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return None;
-        };
-        if !context.ensure_object_scope(item) {
-            return None;
-        }
-        let previous = context.object_scope(item)?.container();
-        if previous.is_some() {
-            context.set_object_container_tracked(item, None);
-        }
-        Some(previous)
-    });
-    let Some(previous) = previous else {
-        return Ok(Value::Bool(false));
-    };
-    if let Some(previous) = previous {
-        call_fail_safe(previous, "Ejection", &[object_reference_value(item)]);
-        call_fail_safe(item, "Departure", &[object_reference_value(previous)]);
-    }
-
-    let entered = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
-        let item_ready = context
-            .get_world_object(item)
-            .is_some_and(|object| object.is_present() && object.container().is_none());
-        let collector_state = context
-            .get_world_object(collector)
-            .filter(|object| object.is_present());
-        let Some(collector_state) = collector_state else {
-            return false;
-        };
-        if !item_ready || !context.ensure_object_scope(item) {
-            return false;
-        }
-        let collector_controller = collector_state.controller();
-        let Some(scope) = context.object_scope_mut(item) else {
-            return false;
-        };
-        scope.set_container(Some(collector));
-        if !(scope.alive() && scope.category() & crate::CATEGORY_LIVING != 0) {
-            scope.set_controller(collector_controller);
-        }
-        true
-    });
-    if !entered {
-        return Ok(Value::Bool(false));
-    }
-
-    // Enter updates the collector's mass and cached OCF immediately after
-    // inserting into Contents, before Collection2. Contents can cross the
-    // CollectionLimit here and clear OCF_Collection even while the temporary
-    // NoCollectDelay override is active (C4Object.cpp:1619-1624;
-    // SetOCF :595-600).
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
-        let Some(collector_state) = context.get_world_object(collector) else {
-            return;
-        };
-        let collection_full = collector_state
-            .collection_limit
-            .is_some_and(|limit| collector_state.contents().len() >= limit as usize);
-        if context.ensure_object_scope(collector) {
-            if let Some(scope) = context.object_scope_mut(collector) {
-                let mut updated = scope.ocf();
-                if collection_full {
-                    updated &= !ocf::COLLECTION;
-                }
-                scope.cached_ocf = Some(updated);
-            }
-        }
-    });
-
-    // The relation is live before both callbacks. Collection2 may move the
-    // item; Entrance receives its then-current container, and is skipped when
-    // either that container or the original collector died
-    // (C4Object.cpp:1625-1630).
-    call_fail_safe(collector, "Collection2", &[object_reference_value(item)]);
-    let entrance_target = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
-        let current = context.get_world_object(item)?.container()?;
-        let current_live = context
-            .get_world_object(current)
-            .is_some_and(|object| object.is_present());
-        let original_live = context
-            .get_world_object(collector)
-            .is_some_and(|object| object.is_present());
-        (current_live && original_live).then_some(current)
-    });
-    if let Some(container) = entrance_target {
-        call_fail_safe(item, "Entrance", &[object_reference_value(container)]);
     }
 
     // C4Object::Collect cancels an ATTACH procedure before Collection. Use
@@ -11537,20 +11420,21 @@ fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     call_fail_safe(collector, "Collection", &[object_reference_value(item)]);
-    let hit_flags = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.get_world_object(item))
-            .filter(|object| object.is_present())
-            .map(|object| object.ocf())
-            .unwrap_or(0)
-    });
     for (flag, function) in [
         (ocf::HIT_SPEED1, "Hit"),
         (ocf::HIT_SPEED2, "Hit2"),
         (ocf::HIT_SPEED3, "Hit3"),
     ] {
-        if hit_flags & flag != 0 {
+        // Native rereads both Status and OCF before every callback; an
+        // earlier Hit may delete the item or synchronously change later
+        // hit-speed flags.
+        let should_call = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.get_world_object(item))
+                .is_some_and(|object| object.is_present() && object.ocf() & flag != 0)
+        });
+        if should_call {
             call_fail_safe(item, function, &[]);
         }
     }
@@ -11584,8 +11468,11 @@ fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(scope) = context.object_scope_mut(item) else {
             return;
         };
+        let was_mobile = scope.mobile();
         scope.set_position(position);
         scope.set_fixed_velocity(velocity);
+        // Native CopyMotion writes x/y and xdir/ydir without changing Mobile.
+        scope.set_mobile(was_mobile);
     });
 
     // FnCollect restores the old positive NoCollectDelay but deliberately
@@ -11659,140 +11546,16 @@ fn grab_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
 
-    let call_fail_safe = |target, function: &str, pars: &[Value]| {
-        if let Some(Err(error)) = call_world_object_own_function(target, function, pars) {
-            tracing::warn!(
-                %error,
-                object = target.as_u64(),
-                callback = function,
-                "script error in container callback; continuing like C++ fail-safe Call"
-            );
-        }
-    };
-
+    // C4Object::GrabContents snapshots the list, then invokes the ordinary
+    // C4Object::Enter path for every still-live link. Reuse the live Enter
+    // seam so transfers receive their complete Exit/CopyMotion/OCF/face and
+    // callback lifecycle instead of maintaining another partial duplicate.
     for child in contents {
-        let live = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .and_then(|context| context.get_world_object(child))
-                .is_some_and(|object| object.is_present())
-        });
-        if !live {
-            continue;
-        }
-
-        // C4Object::Enter's first gate is the entering object's
-        // ~RejectEntrance(pTarget). GrabContents deliberately does not ask
-        // the target's ~RejectCollect because it passes no pfRejectCollect.
-        let rejected = match call_world_object_own_function(
-            child,
-            "RejectEntrance",
-            &[object_reference_value(to)],
-        ) {
-            Some(Ok(value)) => value.as_bool(),
-            Some(Err(error)) => {
-                tracing::warn!(
-                    %error,
-                    object = child.as_u64(),
-                    "script error in RejectEntrance; continuing like C++ fail-safe Call"
-                );
-                false
-            }
-            None => false,
-        };
-        if rejected {
-            continue;
-        }
-
-        // Reject endless containment before Exit mutates anything
-        // (C4Object.cpp:1566-1568).
-        let would_cycle = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let Some(context) = borrow.as_ref() else {
-                return true;
-            };
-            let mut cursor = Some(to);
-            let mut seen = HashSet::new();
-            while let Some(container) = cursor {
-                if container == child {
-                    return true;
-                }
-                if !seen.insert(container) {
-                    return true;
-                }
-                cursor = context
-                    .get_world_object(container)
-                    .and_then(|object| object.container());
-            }
-            false
-        });
-        if would_cycle {
-            continue;
-        }
-
-        // Enter transfers by exiting first. Stage that synchronously so the
-        // fail-safe Ejection/Departure callbacks observe the live relation.
-        let previous = HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return None;
-            };
-            if !context.ensure_object_scope(child) {
-                return None;
-            }
-            let previous = context.object_scope(child)?.container();
-            if previous.is_some() {
-                context.set_object_container_tracked(child, None);
-            }
-            Some(previous)
-        });
-        let Some(previous) = previous else {
-            continue;
-        };
-        if let Some(previous) = previous {
-            call_fail_safe(previous, "Ejection", &[object_reference_value(child)]);
-            call_fail_safe(child, "Departure", &[object_reference_value(previous)]);
-        }
-
-        let entered = HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return false;
-            };
-            let child_ready = context
-                .get_world_object(child)
-                .is_some_and(|object| object.is_present() && object.container().is_none());
-            let target_ready = context
-                .get_world_object(to)
-                .is_some_and(|object| object.is_present());
-            if !child_ready || !target_ready || !context.ensure_object_scope(child) {
-                return false;
-            }
-            context
-                .object_scope_mut(child)
-                .map(|scope| scope.set_container(Some(to)))
-                .is_some()
-        });
-        if !entered {
-            continue;
-        }
-
-        call_fail_safe(to, "Collection2", &[object_reference_value(child)]);
-        let entrance_target = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let context = borrow.as_ref()?;
-            let child = context.get_world_object(child)?;
-            let current = child.container()?;
-            let current_live = context
-                .get_world_object(current)
-                .is_some_and(|object| object.is_present());
-            let original_target_live = context
-                .get_world_object(to)
-                .is_some_and(|object| object.is_present());
-            (current_live && original_target_live).then_some(current)
-        });
-        if let Some(container) = entrance_target {
-            call_fail_safe(child, "Entrance", &[object_reference_value(container)]);
+        // GrabContents' copied-list loop owns this raw Status check. Enter
+        // itself deliberately performs its status gates only after callbacks
+        // and an old-container Exit.
+        if object_has_status(child) {
+            let _ = enter_object_live(child, to)?;
         }
     }
 
@@ -11805,11 +11568,11 @@ fn grab_contents(args: &[Value]) -> Result<Value, RuntimeError> {
 /// and Exit writes position/rotation/dirs unconditionally — bare Exit()
 /// re-places the object at the caller's position with r = 0 and zeroed
 /// dirs (C4Object.cpp:1549-1553), the y target offset by the SUBJECT's
-/// Shape.y (:385) and rdir scaled `itofix(trdir) / 10` (:388). The
-/// BoundsCheck side arm stays unmodeled. ObjectComCancelAttach changes an
-/// ATTACH action to Idle (including its AbortCall) before Exit checks
-/// containment. Exit dispatches Ejection then Departure synchronously and
-/// returns the live post-callback `!Contained` state (C4Object.cpp:1559-1563).
+/// Shape.y (:385) and rdir scaled `itofix(trdir) / 10` (:388).
+/// ObjectComCancelAttach changes an ATTACH action to Idle (including its
+/// AbortCall) before Exit checks containment. Exit unlinks, runs BoundsCheck,
+/// installs final state, dispatches Ejection then Departure synchronously and
+/// returns the live post-callback `!Contained` state (C4Object.cpp:1532-1563).
 fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 7 {
         return Err(RuntimeError::new(
@@ -11877,75 +11640,30 @@ fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
         let _ = native_set_action_by_name(target, "Idle")?;
     }
 
-    let exited = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return None;
-        };
-        // The SUBJECT's live Shape.y (C4Script.cpp:385): a same-call
-        // SetShape override wins over the def shape. Read it only after the
-        // attach AbortCall, which may change the shape or definition.
-        let shape_y = live_object_shape(context, target)
-            .map(|shape| shape.y)
-            .unwrap_or(0);
-        if !context.ensure_object_scope(target) {
-            return None;
-        }
-        let Some(previous_container) = context
-            .object_scope(target)
-            .and_then(ObjectScopeContext::container)
-        else {
-            return None; // not contained (C4Object.cpp:1539)
-        };
-        context.set_object_container_tracked(target, None);
-        let Some(scope) = context.object_scope_mut(target) else {
-            return None;
-        };
-        scope.set_position(Vector2::new(abs_x, abs_y.saturating_add(shape_y)));
-        // Raw r write — C4Object::Exit assigns without SetRotation's
-        // normalization (C4Object.cpp:1552).
-        scope.current_rotation = rotation;
-        scope.pending_update.rotation = Some(rotation);
-        scope.set_fixed_velocity(FixedVec2::new(itofix(txdir), itofix(tydir)));
-        scope.set_rotation_velocity(itofix(trdir) / 10);
-        context.update_live_solid_mask(target, false);
-        Some(previous_container)
+    // The SUBJECT's live Shape.y (C4Script.cpp:385): a same-call SetShape
+    // override wins over the def shape. Read it only after the attach
+    // AbortCall, which may change the shape or definition.
+    let shape_y = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        Some(
+            live_object_shape(context, target)
+                .map(|shape| shape.y)
+                .unwrap_or(0),
+        )
     });
-    let Some(previous_container) = exited else {
+    let Some(shape_y) = shape_y else {
         return Ok(Value::Bool(false));
     };
-
-    let call_fail_safe = |callback_target, function: &str, pars: &[Value]| {
-        if let Some(Err(error)) = call_world_object_own_function(callback_target, function, pars) {
-            tracing::warn!(
-                %error,
-                object = callback_target.as_u64(),
-                callback = function,
-                "script error in Exit callback; continuing like C++ fail-safe Call"
-            );
-        }
-    };
-    call_fail_safe(
-        previous_container,
-        "Ejection",
-        &[object_reference_value(target)],
-    );
-    call_fail_safe(
+    let exited = exit_object_at_position_with_full_motion_and_calls(
         target,
-        "Departure",
-        &[object_reference_value(previous_container)],
-    );
-
-    // Ejection may re-enter the object. C++ returns !Contained only after
-    // both callbacks (C4Object.cpp:1560-1563).
-    let outside = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| context.object_scope(target))
-            .map(|scope| scope.container().is_none())
-            .unwrap_or(true)
-    });
-    Ok(Value::Bool(outside))
+        Vector2::new(abs_x, abs_y.saturating_add(shape_y)),
+        rotation,
+        FixedVec2::new(itofix(txdir), itofix(tydir)),
+        itofix(trdir) / 10,
+        true,
+    )?;
+    Ok(Value::Bool(exited))
 }
 
 /// FnSetComponent (C4Script.cpp:2659-2663): sets the component count on

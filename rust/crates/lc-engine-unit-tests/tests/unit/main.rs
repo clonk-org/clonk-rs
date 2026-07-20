@@ -38972,6 +38972,131 @@ public func Launch(pItem) {
     }
 
     #[test]
+    fn script_exit_runs_bounds_check_contacts_before_ejection_and_departure(
+    ) -> Result<(), EngineError> {
+        // FnExit freezes caller-relative x/y, then reads the subject's live
+        // Shape.y after CancelAttach and delegates to C4Object::Exit. Exit
+        // unlinks before BoundsCheck; ContactLeft therefore sees the old
+        // position and motion with only xdir zeroed. The clamped position and
+        // requested motion are installed before Ejection and Departure.
+        let container_script = r#"#strict
+protected func Ejection(pItem)
+{
+    return(pItem->RecordEjection());
+}
+"#;
+        let item_script = r#"#strict
+local order;
+local contact_x, contact_y, contact_xdir, contact_ydir, contact_contained, contact_shape_y;
+local ejection_x, ejection_y, ejection_xdir, ejection_ydir, ejection_contained;
+local departure_x, departure_y, departure_xdir, departure_ydir, departure_contained;
+
+protected func ContactLeft()
+{
+    order = order * 10 + 1;
+    contact_x = GetX(); contact_y = GetY();
+    contact_xdir = GetXDir(); contact_ydir = GetYDir();
+    contact_contained = !!Contained();
+    contact_shape_y = GetObjectVal("Offset", nil, nil, 1);
+    return(1);
+}
+
+public func RecordEjection()
+{
+    order = order * 10 + 2;
+    ejection_x = GetX(); ejection_y = GetY();
+    ejection_xdir = GetXDir(); ejection_ydir = GetYDir();
+    ejection_contained = !!Contained();
+    return(1);
+}
+
+protected func Departure(pOldContainer)
+{
+    order = order * 10 + 3;
+    departure_x = GetX(); departure_y = GetY();
+    departure_xdir = GetXDir(); departure_ydir = GetYDir();
+    departure_contained = !!Contained();
+    return(1);
+}
+
+public func Leave()
+{
+    SetShape(-4, -5, 8, 10);
+    return(Exit(nil, -100, 10, 90, 3, -2, 20));
+}
+"#;
+
+        let mut container = Definition::from_script("CONT", "Container", container_script)?;
+        container.set_c4_callback_convention(true);
+        let mut item = Definition::from_script("ITEM", "Item", item_script)?;
+        item.set_c4_callback_convention(true);
+        item.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
+        item.set_border_bound(C4D_BORDER_SIDES | C4D_BORDER_TOP);
+        item.set_contact_function_calls(true);
+
+        let mut engine = Engine::with_seed(5);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.register_definition(container)?;
+        engine.register_definition(item)?;
+        let container = engine.spawn_object(
+            SpawnConfig::new("CONT").with_position(Vector2::new(30, 40)),
+        )?;
+        let item = engine.spawn_object(
+            SpawnConfig::new("ITEM")
+                .with_container(container)
+                .with_rotation(11)
+                .with_in_liquid(true)
+                .with_mobile(false),
+        )?;
+        let item_idx = engine.find_object_index(item).expect("item exists");
+        engine.objects[item_idx].set_fixed_velocity(FixedVec2::new(itofix(8), itofix(9)));
+
+        assert_eq!(
+            engine.call_object_function(item_idx, "Leave", Vec::new())?,
+            Value::Bool(true)
+        );
+
+        let item_idx = engine.find_object_index(item).expect("item remains");
+        let object = &engine.objects[item_idx];
+        assert_eq!(object.state.container, None);
+        assert_eq!(object.state.position, Vector2::new(4, 45));
+        assert_eq!(object.fixed_position, FixedVec2::new(itofix(4), itofix(45)));
+        assert_eq!(object.state.rotation, 90);
+        assert_eq!(object.fixed_velocity, FixedVec2::new(itofix(3), itofix(-2)));
+        assert_eq!(object.rotation_velocity, itofix(20) / 10);
+        assert!(object.state.mobile, "Exit sets Mobile");
+        assert!(!object.state.in_liquid, "Exit clears InLiquid");
+
+        let locals = &object.state.local_vars;
+        for (name, expected) in [
+            ("order", 123),
+            ("contact_x", 30),
+            ("contact_y", 40),
+            ("contact_xdir", 0),
+            ("contact_ydir", 90),
+            ("contact_shape_y", -5),
+            ("ejection_x", 4),
+            ("ejection_y", 45),
+            ("ejection_xdir", 30),
+            ("ejection_ydir", -20),
+            ("departure_x", 4),
+            ("departure_y", 45),
+            ("departure_xdir", 30),
+            ("departure_ydir", -20),
+        ] {
+            assert_eq!(locals.get(name), Some(&Value::Int(expected)), "{name}");
+        }
+        for name in [
+            "contact_contained",
+            "ejection_contained",
+            "departure_contained",
+        ] {
+            assert_eq!(locals.get(name), Some(&Value::Bool(false)), "{name}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn script_exit_runs_ejection_then_departure_and_reports_reentry_like_cpp() {
         // C4Object::Exit clears Contained, calls the old container's
         // Ejection(object), then the object's Departure(container), and only
@@ -39055,7 +39180,7 @@ public func Leave(object target, int x, int y, int r)
 }
 "#;
         let item_script = r#"#strict
-local abort_count, abort_container, abort_x, abort_y, abort_r, abort_phase, abort_saw_idle;
+local abort_count, abort_container, abort_x, abort_y, abort_r, abort_phase, abort_saw_idle, abort_random;
 protected func AttachAbort(int phase)
 {
     abort_count++;
@@ -39065,6 +39190,8 @@ protected func AttachAbort(int phase)
     abort_r = GetR();
     abort_phase = phase;
     abort_saw_idle = ActIdle();
+    SetShape(-4, -6, 8, 12);
+    abort_random = Random(360);
 }
 "#;
 
@@ -39115,6 +39242,9 @@ protected func AttachAbort(int phase)
                     .with_loaded(true),
             )
             .expect("loose attached item spawns");
+        let mut expected_rng = engine.debug_rng_clone();
+        let _discarded_rotation = expected_rng.random(360);
+        let expected_abort_random = expected_rng.random(360);
         let result = engine
             .call_object_function(
                 driver_index,
@@ -39123,7 +39253,7 @@ protected func AttachAbort(int phase)
                     object_reference_value(loose),
                     Value::Int(10),
                     Value::Int(5),
-                    Value::Int(90),
+                    Value::Int(-1),
                 ],
             )
             .expect("uncontained Exit runs");
@@ -39136,6 +39266,17 @@ protected func AttachAbort(int phase)
         assert_eq!(loose.local_vars.get("abort_container"), Some(&Value::Nil));
         assert_eq!(loose.local_vars.get("abort_phase"), Some(&Value::Int(3)));
         assert_eq!(loose.local_vars.get("abort_saw_idle"), Some(&Value::Bool(true)));
+        assert_eq!(
+            loose.local_vars.get("abort_random"),
+            Some(&Value::Int(expected_abort_random)),
+            "tr=-1 consumes Random(360) before CancelAttach's AbortCall even when Exit then fails"
+        );
+        let mut observed_rng = engine.debug_rng_clone();
+        assert_eq!(
+            observed_rng.random(360),
+            expected_rng.random(360),
+            "the failed uncontained Exit and AbortCall consumed exactly two draws"
+        );
 
         let mut attach_action = ActionState::new("Attach");
         attach_action.phase = 7;
@@ -39167,7 +39308,11 @@ protected func AttachAbort(int phase)
             .expect("contained item remains");
         assert_eq!(contained.action.name, "Idle");
         assert_eq!(contained.container, None);
-        assert_eq!(contained.position, Vector2::new(110, 205));
+        assert_eq!(
+            contained.position,
+            Vector2::new(110, 199),
+            "FnExit reads the subject's Shape.y after CancelAttach's AbortCall"
+        );
         assert_eq!(contained.rotation, 90);
         assert_eq!(
             contained.local_vars.get("abort_container"),
@@ -39415,6 +39560,219 @@ protected func RejectEntrance(pContainer) { return(1); }
             Value::Bool(false),
             "pTo == from is rejected before the bulk operation"
         );
+    }
+
+    #[test]
+    fn collect_and_grab_contents_transfers_run_full_exit_bounds_before_enter(
+    ) -> Result<(), EngineError> {
+        // Both Collect and GrabContents reach C4Object::Enter, whose transfer
+        // arm calls the ordinary callback-enabled Exit(x,y). Pin the complete
+        // Exit boundary here so neither script host can regress to a raw
+        // containment unlink that skips BoundsCheck.
+        let source_script = r#"#strict
+protected func Ejection(pItem) { return(pItem->MarkEjection()); }
+"#;
+        let destination_script = r#"#strict
+public func Take(pItem) { return(Collect(pItem)); }
+public func TakeAll(pSource) { return(GrabContents(pSource)); }
+protected func RejectCollect(idItem, pItem) { return(0); }
+protected func Collection2(pItem) { return(pItem->MarkCollection2()); }
+protected func Collection(pItem) { return(pItem->MarkCollection()); }
+"#;
+        let item_script = r#"#strict
+local order;
+local left_x, left_y, left_xdir, left_ydir, left_contained;
+local top_x, top_y, top_xdir, top_ydir, top_contained;
+local ejection_x, ejection_y, ejection_xdir, ejection_ydir, ejection_contained;
+local collection2_x, collection2_y, collection2_xdir, collection2_ydir;
+local entrance_x, entrance_y, entrance_xdir, entrance_ydir;
+
+protected func RejectEntrance(pContainer)
+{
+    order = order * 10 + 1;
+    return(0);
+}
+
+protected func ContactLeft()
+{
+    order = order * 10 + 2;
+    left_x = GetX(); left_y = GetY();
+    left_xdir = GetXDir(); left_ydir = GetYDir();
+    left_contained = !!Contained();
+    return(1);
+}
+
+protected func ContactTop()
+{
+    order = order * 10 + 3;
+    top_x = GetX(); top_y = GetY();
+    top_xdir = GetXDir(); top_ydir = GetYDir();
+    top_contained = !!Contained();
+    return(1);
+}
+
+public func MarkEjection()
+{
+    order = order * 10 + 4;
+    ejection_x = GetX(); ejection_y = GetY();
+    ejection_xdir = GetXDir(); ejection_ydir = GetYDir();
+    ejection_contained = !!Contained();
+    return(1);
+}
+
+protected func Departure(pOldContainer)
+{
+    order = order * 10 + 5;
+    return(1);
+}
+
+public func MarkCollection2()
+{
+    order = order * 10 + 6;
+    collection2_x = GetX(); collection2_y = GetY();
+    collection2_xdir = GetXDir(); collection2_ydir = GetYDir();
+    return(1);
+}
+
+protected func Entrance(pContainer)
+{
+    order = order * 10 + 7;
+    entrance_x = GetX(); entrance_y = GetY();
+    entrance_xdir = GetXDir(); entrance_ydir = GetYDir();
+    return(1);
+}
+
+public func MarkCollection()
+{
+    order = order * 10 + 8;
+    return(1);
+}
+"#;
+
+        let mut source = Definition::from_script("SRCE", "Source", source_script)?;
+        source.set_c4_callback_convention(true);
+        let mut destination =
+            Definition::from_script("DEST", "Destination", destination_script)?;
+        destination.set_c4_callback_convention(true);
+        destination.set_collection_rect(Some(DefinitionRect::new(-10, -10, 20, 20)));
+        let mut item = Definition::from_script("ITEM", "Item", item_script)?;
+        item.set_c4_callback_convention(true);
+        item.set_collectible(true);
+        item.set_shape_rect(Some(DefinitionRect::new(-4, -3, 8, 6)));
+        item.set_border_bound(C4D_BORDER_SIDES | C4D_BORDER_TOP);
+        item.set_contact_function_calls(true);
+
+        let mut engine = Engine::with_seed(6);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.register_definition(source)?;
+        engine.register_definition(destination)?;
+        engine.register_definition(item)?;
+        let source = engine.spawn_object(
+            SpawnConfig::new("SRCE").with_position(Vector2::new(-20, -20)),
+        )?;
+        let destination = engine.spawn_object(
+            SpawnConfig::new("DEST")
+                .with_position(Vector2::new(60, 70))
+                .with_velocity(Vector2::new(3, -2)),
+        )?;
+        let collected = engine.spawn_object(
+            SpawnConfig::new("ITEM").with_container(source),
+        )?;
+        let grabbed = engine.spawn_object(
+            SpawnConfig::new("ITEM").with_container(source),
+        )?;
+        let inactive = engine.spawn_object(
+            SpawnConfig::new("ITEM")
+                .with_container(source)
+                .with_status(ObjectStatus::Inactive),
+        )?;
+        for target in [collected, grabbed, inactive] {
+            let index = engine.find_object_index(target).expect("item exists");
+            engine.objects[index].set_fixed_velocity(FixedVec2::new(itofix(8), itofix(9)));
+        }
+
+        let destination_idx = engine
+            .find_object_index(destination)
+            .expect("destination exists");
+        assert_eq!(
+            engine.call_object_function(
+                destination_idx,
+                "Take",
+                vec![object_reference_value(collected)],
+            )?,
+            Value::Bool(true)
+        );
+        let destination_idx = engine
+            .find_object_index(destination)
+            .expect("destination remains");
+        assert_eq!(
+            engine.call_object_function(
+                destination_idx,
+                "TakeAll",
+                vec![object_reference_value(source)],
+            )?,
+            Value::Bool(true)
+        );
+
+        for (target, expected_order) in [
+            (collected, 12_345_678),
+            (grabbed, 1_234_567),
+            (inactive, 1_234_567),
+        ] {
+            let index = engine.find_object_index(target).expect("item remains");
+            let object = &engine.objects[index];
+            assert_eq!(object.state.container, Some(destination));
+            assert_eq!(object.state.position, Vector2::new(60, 70));
+            assert_eq!(object.fixed_velocity, FixedVec2::new(itofix(3), itofix(-2)));
+            let (entered_x, entered_y, entered_xdir, entered_ydir) = if target == collected {
+                // Collect calls Enter with fCopyMotion=false; its callbacks
+                // see Exit's clamped zero-motion state and its own tail copies
+                // destination motion only after Collection/Hit.
+                (4, 3, 0, 0)
+            } else {
+                // GrabContents uses ordinary Enter, whose CopyMotion precedes
+                // Collection2 and Entrance.
+                (60, 70, 30, -20)
+            };
+            let locals = &object.state.local_vars;
+            for (name, expected) in [
+                ("order", expected_order),
+                ("left_x", -20),
+                ("left_y", -20),
+                ("left_xdir", 0),
+                ("left_ydir", 90),
+                ("top_x", -20),
+                ("top_y", -20),
+                ("top_xdir", 0),
+                ("top_ydir", 0),
+                ("ejection_x", 4),
+                ("ejection_y", 3),
+                ("ejection_xdir", 0),
+                ("ejection_ydir", 0),
+                ("collection2_x", entered_x),
+                ("collection2_y", entered_y),
+                ("collection2_xdir", entered_xdir),
+                ("collection2_ydir", entered_ydir),
+                ("entrance_x", entered_x),
+                ("entrance_y", entered_y),
+                ("entrance_xdir", entered_xdir),
+                ("entrance_ydir", entered_ydir),
+            ] {
+                assert_eq!(locals.get(name), Some(&Value::Int(expected)), "{name}");
+            }
+            for name in ["left_contained", "top_contained", "ejection_contained"] {
+                assert_eq!(locals.get(name), Some(&Value::Bool(false)), "{name}");
+            }
+        }
+        let inactive_idx = engine
+            .find_object_index(inactive)
+            .expect("inactive item remains");
+        assert_eq!(
+            engine.objects[inactive_idx].state.status,
+            ObjectStatus::Inactive,
+            "raw nonzero Status remains eligible for GrabContents -> Enter"
+        );
+        Ok(())
     }
 
     // The GoldRush intro Talker blesses every living object with a pure    // The GoldRush intro Talker blesses every living object with a pure    // The GoldRush intro Talker blesses every living object with a pure
@@ -50965,10 +51323,16 @@ protected func Collection2(pObject)
             engine.call_object_function(
                 driver_index,
                 "Put",
-                vec![object_reference_value(deleted), object_reference_value(parent)],
+                vec![object_reference_value(deleted), object_reference_value(child)],
             )?,
             Value::Bool(false),
-            "a deleted target returns false"
+            "a deleted target returns false after the entering object exits its old container"
+        );
+        let child_index = engine.find_object_index(child).expect("child remains");
+        assert_eq!(
+            engine.objects[child_index].state.container,
+            None,
+            "C4Object::Enter delays its raw Status gate until after Exit(x,y)"
         );
         Ok(())
     }
@@ -72491,7 +72855,8 @@ protected func Hit()
                 .with_controller(2)
                 .with_action(ActionState::new("Attached"))
                 .with_position(Vector2::new(40, 50))
-                .with_velocity(Vector2::new(1, 0)),
+                .with_velocity(Vector2::new(1, 0))
+                .with_mobile(false),
         )?;
         let item_idx = engine.find_object_index(item_id).expect("item exists");
         engine.objects[item_idx].fixed_velocity.x = C4Fixed::from_raw(114_688); // 1.75
@@ -72575,6 +72940,10 @@ protected func Hit()
         );
         assert_eq!(item.state.position, collector_position);
         assert_eq!(item.fixed_velocity, collector_velocity);
+        assert!(
+            !item.state.mobile,
+            "Collect's delayed CopyMotion preserves the item's Mobile flag"
+        );
 
         let second_item = engine.spawn_object(
             SpawnConfig::new("ITEM")
