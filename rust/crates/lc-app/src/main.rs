@@ -27376,13 +27376,20 @@ impl GameApp {
         self.graphics
             .set_material_render_info(Arc::clone(&self.material_render_info));
 
+        // Startup models are constructed before boot relinquishes Loading.
+        // macOS may apply the real fullscreen size during that interval, so
+        // keep their retained geometry in sync in every mode. Otherwise the
+        // first Main frame (including buttons and its two footer labels) uses
+        // the smaller pre-fullscreen coordinates even though GraphicsSystem
+        // already owns the final surface.
+        let width_f = width as f32;
+        let height_f = height as f32;
+        self.menu_state.menu().resize(width_f, height_f);
+        self.menu_state.set_pointer_position(None);
+        self.main_menu_state.resize(width_f, height_f);
+        self.main_menu_state.set_pointer_position(None);
+
         if self.mode == AppMode::Menu {
-            let width_f = width as f32;
-            let height_f = height as f32;
-            self.menu_state.menu().resize(width_f, height_f);
-            self.menu_state.set_pointer_position(None);
-            self.main_menu_state.resize(width_f, height_f);
-            self.main_menu_state.set_pointer_position(None);
             if let Some(dialog) = self.startup_network_dialog.as_mut() {
                 dialog.resize(width as i32, height as i32);
                 dialog.pointer_left();
@@ -82745,14 +82752,23 @@ fn render_startup_frame(
                         // with the selection and are drawn fresh over the
                         // restored copy.
                         restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
-                            lc_frontend::startup_scensel::ScenSelScreen::render_chrome_without_game_options(
+                            lc_frontend::startup_scensel::ScenSelScreen::render_backdrop_without_game_options(
                                 surface,
                                 &dlg_assets,
                                 fonts,
-                                title,
                                 Some(startup_gamma()),
                             );
                         });
+                        // CStdFont glyphs are semantic commands during
+                        // scale-native capture and therefore are not part of
+                        // the pixel-only backdrop cache. C++ redraws both
+                        // labels each frame; do the same on cache hits.
+                        lc_frontend::startup_scensel::ScenSelScreen::draw_chrome_text(
+                            surface,
+                            fonts,
+                            title,
+                            Some(startup_gamma()),
+                        );
                         draw_scensel_dynamic(
                             surface,
                             scenario_menu,
@@ -118617,6 +118633,144 @@ public func Grant(password) { return GainMissionAccess(password); }
         }
     }
 
+    #[test]
+    fn scale_native_scensel_static_text_survives_backdrop_cache_hits() {
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "tutorial".to_string();
+        scenario.title = "Tutorial".to_string();
+        let mut app =
+            new_menu_app_with_frontend_scenarios(640, 480, Some(vec![scenario]));
+        install_classic_test_assets(&mut app);
+        app.open_scenario_browser();
+        app.menu_state.set_search_text("needle");
+        app.menu_state.set_search_focused(true);
+        install_native_test_fonts(&mut app, 2.0);
+
+        // The cold frame populates StartupBackdropCache. The second frame is
+        // the failing path: cached pixels cannot carry semantic CStdFont
+        // commands, so C++'s static title and WoodenLabel must be re-emitted.
+        let (_, _, cold) = render_ordered_test_frame(&mut app, 2.0, 1280, 960);
+        let cached_backdrop = app.menu_backdrop_cache.pixels.clone();
+        let (cached_chrome, cached_rendered, cached) =
+            render_ordered_test_frame(&mut app, 2.0, 1280, 960);
+        assert!(app.menu_backdrop_cache.key.is_some());
+        assert_eq!(
+            app.menu_backdrop_cache.pixels, cached_backdrop,
+            "the second frame must reuse the unchanged raster backdrop"
+        );
+
+        for (name, plan) in [("cold", &cold), ("cache hit", &cached)] {
+            let commands = plan
+                .batches
+                .iter()
+                .flat_map(|batch| batch.text.iter())
+                .collect::<Vec<_>>();
+            for (text, role) in [
+                (
+                    "Start Game",
+                    lc_graphics::clonk_font::ClonkFontRole::GuiTitle,
+                ),
+                (
+                    "Search:",
+                    lc_graphics::clonk_font::ClonkFontRole::GuiText,
+                ),
+                (
+                    "needle",
+                    lc_graphics::clonk_font::ClonkFontRole::GuiText,
+                ),
+            ] {
+                assert_eq!(
+                    commands
+                        .iter()
+                        .filter(|command| command.text == text && command.role == role)
+                        .count(),
+                    1,
+                    "{name} must contain exactly one {text:?} native command"
+                );
+            }
+        }
+
+        let cached_commands = cached
+            .batches
+            .iter()
+            .flat_map(|batch| batch.text.iter())
+            .collect::<Vec<_>>();
+        let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(640, 480, fonts);
+        let title = cached_commands
+            .iter()
+            .find(|command| command.text == "Start Game")
+            .expect("cached frame title command");
+        assert_eq!(
+            (title.x, title.y, title.align, title.clip),
+            (
+                layout.title_anchor.0,
+                layout.title_anchor.1,
+                lc_graphics::clonk_font::TextAlign::Center,
+                None
+            )
+        );
+
+        let label = layout.search_label;
+        let search = cached_commands
+            .iter()
+            .find(|command| command.text == "Search:")
+            .expect("cached frame wooden-label command");
+        let label_clip = Rect::new(
+            label.x,
+            label.y,
+            (label.w + 1) as u32,
+            (label.h + 1) as u32,
+        );
+        assert_eq!(
+            (search.x, search.y, search.align, search.clip),
+            (
+                label.x + label.w / 2,
+                label.y + (label.h - fonts.text.line_height) / 2 - 1,
+                lc_graphics::clonk_font::TextAlign::Center,
+                Some(label_clip)
+            )
+        );
+
+        let edit = layout.search_edit;
+        let (client_x, client_y, client_w, client_h) =
+            (edit.x + 4, edit.y + 2, edit.w - 8, edit.h - 4);
+        let query = cached_commands
+            .iter()
+            .find(|command| command.text == "needle")
+            .expect("cached frame edit command");
+        let query_y = if client_h <= fonts.text.line_height {
+            client_y - 1
+        } else {
+            client_y + (client_h - fonts.text.line_height) / 2
+        };
+        assert_eq!(
+            (query.x, query.y, query.align, query.clip),
+            (
+                client_x,
+                query_y,
+                lc_graphics::clonk_font::TextAlign::Left,
+                Some(Rect::new(
+                    client_x - 2,
+                    client_y,
+                    (client_w + 4) as u32,
+                    (client_h + 1) as u32,
+                ))
+            )
+        );
+
+        let changed_in_search_label = (label.y * 2..(label.y + label.h) * 2).any(|y| {
+            (label.x * 2..(label.x + label.w) * 2).any(|x| {
+                let offset = (y as usize * 1280 + x as usize) * 4;
+                cached_chrome[offset..offset + 4] != cached_rendered[offset..offset + 4]
+            })
+        });
+        assert!(
+            changed_in_search_label,
+            "cache-hit Search: command must contribute visible physical pixels"
+        );
+    }
+
     // List icon defaults (C4StartupScenSelDlg.cpp:705-710,951-952,1036-1037):
     // scenario Icon= clamped to the 52-icon strip else 14; .c4f folder 0;
     // plain directory 44.
@@ -139889,6 +140043,106 @@ ScenInfoArea=70,5,25,90
             (cache.width, cache.height),
             (400, 300),
             "cache must track the resized surface"
+        );
+    }
+
+    #[test]
+    fn boot_loading_resize_reflows_main_menu_to_final_fullscreen_size() {
+        // This is the macOS startup sequence from the reported Scale=300
+        // capture: the initial logical framebuffer is 1152x644, then deferred
+        // fullscreen supplies 1152x723 before boot leaves Loading.
+        let mut app = new_real_classic_menu_app(1152, 644);
+        app.mode = AppMode::Loading;
+        app.resize(1152, 723)
+            .expect("apply deferred fullscreen resize during boot loading");
+        assert_eq!(app.mode, AppMode::Loading);
+        app.mode = AppMode::Menu;
+        app.show_main_menu();
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+
+        install_native_test_fonts(&mut app, 3.0);
+        app.graphics.set_presentation_scale(3.0);
+        let mut logical_frame = vec![0_u8; 1152 * 723 * 4];
+        app.render_ordered_native_base(&mut logical_frame)
+            .expect("capture the production Main presentation after boot");
+        let commands = app
+            .pending_native_presentation
+            .as_ref()
+            .expect("ordered Main presentation plan")
+            .batches
+            .iter()
+            .flat_map(|batch| batch.text.iter())
+            .collect::<Vec<_>>();
+
+        let start = commands
+            .iter()
+            .find(|command| command.text.ends_with("</c>tart Game"))
+            .expect("captured first main-menu button label");
+        assert_eq!(
+            (start.role, start.align, start.x, start.y),
+            (
+                lc_graphics::clonk_font::ClonkFontRole::GuiTitle,
+                lc_graphics::clonk_font::TextAlign::Center,
+                944,
+                203
+            ),
+            "the whole retained button column must use final fullscreen geometry"
+        );
+
+        let participants = commands
+            .iter()
+            .find(|command| command.text == app.main_menu_state.participants_label)
+            .expect("captured Players footer label");
+        assert_eq!(
+            (
+                participants.role,
+                participants.align,
+                participants.x,
+                participants.y
+            ),
+            (
+                lc_graphics::clonk_font::ClonkFontRole::GuiTitle,
+                lc_graphics::clonk_font::TextAlign::Right,
+                1101,
+                640
+            )
+        );
+
+        let trademark = commands
+            .iter()
+            .find(|command| command.text.starts_with("LegacyClonk is a fan project"))
+            .expect("captured trademark footer label");
+        assert_eq!(
+            (
+                trademark.role,
+                trademark.align,
+                trademark.x,
+                trademark.y
+            ),
+            (
+                lc_graphics::clonk_font::ClonkFontRole::GuiMini,
+                lc_graphics::clonk_font::TextAlign::Right,
+                1129,
+                695
+            )
+        );
+
+        // CStdGL installs a 3456x2169 viewport into the 2168-row framebuffer,
+        // producing the one-row top crop seen in the reference capture.
+        let projection = lc_graphics::ClipperProjection::new(
+            3.0,
+            (1152, 723),
+            2168,
+            Rect::new(0, 0, 1152, 723),
+        );
+        assert_eq!(projection.physical_clip(), Rect::new(0, -1, 3456, 2169));
+        assert_eq!(
+            projection.logical_to_physical(participants.x.into(), participants.y.into()),
+            (3303.0, 1919.0)
+        );
+        assert_eq!(
+            projection.logical_to_physical(trademark.x.into(), trademark.y.into()),
+            (3387.0, 2084.0)
         );
     }
 

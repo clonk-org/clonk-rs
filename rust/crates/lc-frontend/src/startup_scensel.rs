@@ -1139,7 +1139,7 @@ impl ScenSelScreen {
             surface,
             assets,
             gui_fonts,
-            "Start Game",
+            Some("Start Game"),
             true,
             Some((fair_crew, record)),
             gamma,
@@ -1161,21 +1161,76 @@ impl ScenSelScreen {
         title: &str,
         gamma: Option<&GammaRamp>,
     ) {
-        Self::render_chrome_impl(surface, assets, gui_fonts, title, false, None, gamma);
+        Self::render_chrome_impl(surface, assets, gui_fonts, Some(title), false, None, gamma);
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Raster-only selection-independent chrome for the application's static
+    /// backdrop cache. CStdFont commands are intentionally excluded because
+    /// scale-native capture stores them outside the logical pixel surface;
+    /// callers must emit them every frame with [`Self::draw_chrome_text`].
+    pub fn render_backdrop_without_game_options(
+        surface: &mut Surface,
+        assets: &ScenSelAssets,
+        gui_fonts: &ClonkFontSet,
+        gamma: Option<&GammaRamp>,
+    ) {
+        Self::render_chrome_impl(surface, assets, gui_fonts, None, false, None, gamma);
+    }
+
+    /// Draws the fullscreen base title and the static CStdFont label owned by
+    /// C4StartupScenSelDlg. They remain outside the raster backdrop cache so
+    /// native-scale capture receives one title and wooden-search-label command
+    /// on every frame.
+    pub fn draw_chrome_text(
+        surface: &mut Surface,
+        gui_fonts: &ClonkFontSet,
+        title: &str,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let layout = scen_sel_layout(surface.width() as i32, surface.height() as i32, gui_fonts);
+        let yellow = [255, 255, 0, 255]; // C4GUI_Caption2FontClr / ButtonFontClr
+
+        // Fullscreen title (IDS_DLG_STARTGAME/IDS_DLG_STARTNETWORKGAME):
+        // GUI TitleFont, C4GUI_FullscreenCaptionFontClr yellow, ACenter
+        // (C4GuiDialogs.cpp:846, C4GuiLabels.cpp:34-37).
+        gui_fonts.title.draw_with_gamma(
+            surface,
+            layout.title_anchor.0,
+            layout.title_anchor.1,
+            title,
+            yellow,
+            TextAlign::Center,
+            true,
+            gamma,
+        );
+
+        // WoodenLabel text (C4GuiLabels.cpp:168-209): GUI TextFont yellow,
+        // centered one pixel above the vertical midpoint and label-clipped.
+        let label = &layout.search_label;
+        draw_text_clipped(
+            surface,
+            &gui_fonts.text,
+            label.x + label.w / 2,
+            label.y + (label.h - gui_fonts.text.line_height) / 2 - 1,
+            "Search:",
+            yellow,
+            TextAlign::Center,
+            true,
+            gamma,
+            (label.x, label.y, label.x + label.w, label.y + label.h),
+        );
+    }
+
     fn render_chrome_impl(
         surface: &mut Surface,
         assets: &ScenSelAssets,
         gui_fonts: &ClonkFontSet,
-        title: &str,
+        static_title: Option<&str>,
         draw_back: bool,
         game_options: Option<(bool, bool)>,
         gamma: Option<&GammaRamp>,
     ) {
         let layout = scen_sel_layout(surface.width() as i32, surface.height() as i32, gui_fonts);
-        let yellow = [255, 255, 0, 255]; // C4GUI_Caption2FontClr / ButtonFontClr
 
         // 1. Background: StartupScenSelBG stretched to screen bounds
         // inflated by 1px (FullscreenDialog::DrawBackground,
@@ -1192,38 +1247,16 @@ impl ScenSelScreen {
             gamma,
         );
 
-        // 2. Fullscreen title "Start Game" (IDS_DLG_STARTGAME, amp stripped):
-        // GUI TitleFont, C4GUI_FullscreenCaptionFontClr yellow, ACenter
-        // (C4GuiDialogs.cpp:846, C4GuiLabels.cpp:34-37).
-        gui_fonts.title.draw_with_gamma(
-            surface,
-            layout.title_anchor.0,
-            layout.title_anchor.1,
-            title,
-            yellow,
-            TextAlign::Center,
-            true,
-            gamma,
-        );
-
-        // 4. WoodenLabel "Search:" (C4GuiLabels.cpp:168-209): zoomed
-        // barCaption wood, then GUI TextFont yellow ACenter at the label
-        // middle, one pixel above the vertical center, clipped to the label
-        // bounds.
+        // 4. WoodenLabel raster (C4GuiLabels.cpp:168-209): zoomed
+        // barCaption wood. Its scale-native text is emitted outside this
+        // cacheable layer by `draw_chrome_text`.
         draw_caption_bar(surface, &layout.search_label, &assets.caption_bar, gamma);
-        let label = &layout.search_label;
-        draw_text_clipped(
-            surface,
-            &gui_fonts.text,
-            label.x + label.w / 2,
-            label.y + (label.h - gui_fonts.text.line_height) / 2 - 1,
-            "Search:",
-            yellow,
-            TextAlign::Center,
-            true,
-            gamma,
-            (label.x, label.y, label.x + label.w, label.y + label.h),
-        );
+        if let Some(title) = static_title {
+            // Preserve the public renderer's C++ text order: title/search
+            // precede the edit, list and recursive bottom controls. The app's
+            // cached path passes `None` and emits the same pair after restore.
+            Self::draw_chrome_text(surface, gui_fonts, title, gamma);
+        }
 
         // 5. Search Edit (C4GuiEdit.cpp:556-569): background box from the
         // bounds top-left to (x + W - 1, clientBottom) in C4GUI_EditBGColor,
