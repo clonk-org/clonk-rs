@@ -361,8 +361,9 @@ impl UpperBoardMode {
     }
 }
 
-/// Display toggles shown by `ActivateDisplay` (C4MainMenu.cpp:582-641),
-/// defaults per C4Config.cpp:381,446-465.
+/// Display toggles and renderer flags, with defaults from
+/// C4Config.cpp:381,446-465. The interactive subset is shown by
+/// `ActivateDisplay` (C4MainMenu.cpp:582-641).
 #[derive(Clone, Copy, Debug)]
 pub struct DisplayFlags {
     pub player_names: bool,
@@ -370,6 +371,9 @@ pub struct DisplayFlags {
     pub portraits: bool,
     pub show_commands: bool,
     pub show_command_keys: bool,
+    pub show_player_hud_always: bool,
+    pub splitscreen_dividers: bool,
+    pub fire_particles: bool,
     pub upper_board: UpperBoardMode,
     pub fps: bool,
     pub clock: bool,
@@ -385,6 +389,9 @@ impl Default for DisplayFlags {
             portraits: true,
             show_commands: true,
             show_command_keys: true,
+            show_player_hud_always: true,
+            splitscreen_dividers: true,
+            fire_particles: true,
             upper_board: UpperBoardMode::Full,
             fps: false,
             clock: false,

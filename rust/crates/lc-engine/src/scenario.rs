@@ -4654,6 +4654,13 @@ impl ScenarioValueStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_value_gain_for_test(value_gain: i32) -> Self {
+        let mut core = LegacyScenarioCore::default();
+        core.game.value_gain = value_gain;
+        Self::from_runtime_core(&core, false)
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_landscape_push_pull_for_test(enabled: bool) -> Self {
         let mut core = LegacyScenarioCore::default();
         core.game.realism.landscape_push_pull = i32::from(enabled);

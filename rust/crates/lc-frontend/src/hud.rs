@@ -878,6 +878,9 @@ pub fn draw_player_fixed_items(
         select_count,
         crew_count,
         owner_color,
+        true,
+        true,
+        true,
         None,
     );
 }
@@ -893,59 +896,68 @@ pub(crate) fn draw_player_fixed_items_with_gamma(
     select_count: i32,
     crew_count: i32,
     owner_color: Color,
+    show_wealth: bool,
+    show_score: bool,
+    show_crew: bool,
     gamma: Option<&GammaRamp>,
 ) {
     let (wdt, hgt) = (SYMBOL_SIZE, SYMBOL_SIZE / 2);
     let right = viewport.x + viewport.width as i32;
     let top = viewport.y + SYMBOL_BORDER;
 
-    // Wealth (src/C4Viewport.cpp:1287-1296).
-    let cgo = SurfaceRect::new(right - wdt - SYMBOL_BORDER, top, wdt as u32, hgt as u32);
-    draw_value(
-        surface,
-        font,
-        hud.wealth.as_ref(),
-        &wealth.to_string(),
-        cgo,
-        gamma,
-    );
+    if show_wealth {
+        // Wealth (src/C4Viewport.cpp:1287-1296).
+        let cgo = SurfaceRect::new(right - wdt - SYMBOL_BORDER, top, wdt as u32, hgt as u32);
+        draw_value(
+            surface,
+            font,
+            hud.wealth.as_ref(),
+            &wealth.to_string(),
+            cgo,
+            gamma,
+        );
+    }
 
-    // Value gain / score (src/C4Viewport.cpp:1299-1309).
-    let cgo = SurfaceRect::new(
-        right - 2 * wdt - 2 * SYMBOL_BORDER,
-        top,
-        wdt as u32,
-        hgt as u32,
-    );
-    draw_value(
-        surface,
-        font,
-        hud.score.as_ref(),
-        &score.to_string(),
-        cgo,
-        gamma,
-    );
+    if show_score {
+        // Value gain / score (src/C4Viewport.cpp:1299-1309).
+        let cgo = SurfaceRect::new(
+            right - 2 * wdt - 2 * SYMBOL_BORDER,
+            top,
+            wdt as u32,
+            hgt as u32,
+        );
+        draw_value(
+            surface,
+            font,
+            hud.score.as_ref(),
+            &score.to_string(),
+            cgo,
+            gamma,
+        );
+    }
 
-    // Crew (src/C4Viewport.cpp:1312-1321): fctCrewClr colored by the
-    // player color, "SelectCount/ActiveCrewCount".
-    let cgo = SurfaceRect::new(
-        right - 3 * wdt - 3 * SYMBOL_BORDER,
-        top,
-        wdt as u32,
-        hgt as u32,
-    );
-    let crew_icon = hud
-        .crew
-        .as_ref()
-        .map(|icon| colorize_by_owner(icon, owner_color));
-    draw_value(
-        surface,
-        font,
-        crew_icon.as_ref(),
-        &format!("{select_count}/{crew_count}"),
-        cgo,
-        gamma,
-    );
+    if show_crew {
+        // Crew (src/C4Viewport.cpp:1312-1321): fctCrewClr colored by the
+        // player color, "SelectCount/ActiveCrewCount".
+        let cgo = SurfaceRect::new(
+            right - 3 * wdt - 3 * SYMBOL_BORDER,
+            top,
+            wdt as u32,
+            hgt as u32,
+        );
+        let crew_icon = hud
+            .crew
+            .as_ref()
+            .map(|icon| colorize_by_owner(icon, owner_color));
+        draw_value(
+            surface,
+            font,
+            crew_icon.as_ref(),
+            &format!("{select_count}/{crew_count}"),
+            cgo,
+            gamma,
+        );
+    }
 }
 
 /// `C4ObjectInfo::Draw` (src/C4ObjectInfo.cpp:302-371) inside the
@@ -4560,6 +4572,69 @@ mod tests {
         // Crew icon: cgo (80,5,...) — pure blue is ClrByOwner, so it takes
         // the red owner color (src/C4Viewport.cpp:1320, C4Surface.cpp:236).
         assert_eq!(target.get_pixel(81, 10), Some(Color::opaque(255, 0, 0)));
+    }
+
+    #[test]
+    fn l049_fixed_items_respect_individual_visibility() {
+        let hud = HudGraphics {
+            wealth: Some(solid_image(60, 30, [220, 180, 0, 255])),
+            score: Some(solid_image(60, 30, [180, 90, 0, 255])),
+            crew: Some(solid_image(60, 30, [0, 0, 255, 255])),
+            ..HudGraphics::default()
+        };
+        let font = bitmap_font();
+        let font = HudFont::Fallback(&font);
+        let viewport = SurfaceRect::new(0, 0, 200, 100);
+        let black = Color::opaque(0, 0, 0);
+
+        let mut wealth_only = surface(200, 100);
+        draw_player_fixed_items_with_gamma(
+            &mut wealth_only,
+            &font,
+            &hud,
+            viewport,
+            7,
+            3,
+            1,
+            1,
+            Color::opaque(255, 0, 0),
+            true,
+            false,
+            false,
+            None,
+        );
+        assert_eq!(
+            wealth_only.get_pixel(161, 10),
+            Some(Color::opaque(220, 180, 0))
+        );
+        assert_eq!(wealth_only.get_pixel(121, 10), Some(black));
+        assert_eq!(wealth_only.get_pixel(81, 10), Some(black));
+
+        let mut score_and_crew = surface(200, 100);
+        draw_player_fixed_items_with_gamma(
+            &mut score_and_crew,
+            &font,
+            &hud,
+            viewport,
+            7,
+            3,
+            1,
+            1,
+            Color::opaque(255, 0, 0),
+            false,
+            true,
+            true,
+            None,
+        );
+        assert_eq!(score_and_crew.get_pixel(161, 10), Some(black));
+        assert_eq!(
+            score_and_crew.get_pixel(121, 10),
+            Some(Color::opaque(180, 90, 0))
+        );
+        assert_eq!(
+            score_and_crew.get_pixel(81, 10),
+            Some(Color::opaque(255, 0, 0))
+        );
     }
 
     #[test]

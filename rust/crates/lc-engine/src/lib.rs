@@ -23519,6 +23519,14 @@ impl Engine {
         )
     }
 
+    /// C++ truthiness of the persistent `C4S.Game.ValueGain` scenario value.
+    pub fn scenario_value_gain_enabled(&self) -> bool {
+        matches!(
+            self.scenario_values.get("ValueGain", Some("Game"), 0),
+            Some(scenario::ScenarioValue::Int(value)) if *value != 0
+        )
+    }
+
     /// Whether the current scenario selects C++'s film-view keyboard scope.
     /// Both normal and cinematic films count; the raw replay flag remains
     /// authoritative even after control playback reaches its end marker.
@@ -57726,6 +57734,26 @@ mod control_message_say_regression {
             engine.is_replay_film(),
             "ViewportCheck keeps using persistent Head.Replay after ChangeToLocal"
         );
+    }
+}
+
+#[cfg(test)]
+mod l049_scenario_value_gain_regression {
+    use super::*;
+
+    #[test]
+    fn l049_scenario_value_gain_uses_cpp_integer_truthiness() {
+        let mut engine = Engine::new();
+        for (value_gain, expected) in [(0, false), (1, true), (-1, true)] {
+            engine.set_scenario_values(
+                scenario::ScenarioValueStore::with_value_gain_for_test(value_gain),
+            );
+            assert_eq!(
+                engine.scenario_value_gain_enabled(),
+                expected,
+                "ValueGain={value_gain}"
+            );
+        }
     }
 }
 

@@ -21128,6 +21128,14 @@ fn load_display_flags(paths: Option<&AppPaths>) -> DisplayFlags {
     flags.portraits = graphics_bool("ShowPortraits", flags.portraits);
     flags.show_commands = graphics_bool("ShowCommands", flags.show_commands);
     flags.show_command_keys = graphics_bool("ShowCommandKeys", flags.show_command_keys);
+    flags.show_player_hud_always =
+        graphics_bool("ShowPlayerHUDAlways", flags.show_player_hud_always);
+    flags.splitscreen_dividers = config
+        .get_in(Some("Graphics"), "SplitscreenDividers")
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .map(|value| value != 0)
+        .unwrap_or(flags.splitscreen_dividers);
+    flags.fire_particles = graphics_bool("FireParticles", flags.fire_particles);
     flags.clock = graphics_bool("ShowClock", flags.clock);
     flags.fps = general_bool("FPS", flags.fps);
     flags.white_chat = general_bool("UseWhiteIngameChat", flags.white_chat);
@@ -75119,6 +75127,11 @@ impl GameApp {
 
     fn render_running(&mut self, frame: &mut [u8], defer_native_game_messages: bool) -> Result<()> {
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        self.graphics.set_renderer_config(
+            self.display_flags.show_player_hud_always,
+            self.display_flags.splitscreen_dividers,
+            self.display_flags.fire_particles,
+        );
         // C4Viewport suppresses only its gameplay overlays for a film replay;
         // game messages and C4GraphicsSystem-owned chrome remain independent.
         let viewport_overlays_visible = !self.engine.film_replay();
@@ -82636,10 +82649,17 @@ fn collect_player_overlays(
             .get(&player.owner)
             .map(|state| state.wealth)
             .unwrap_or(0);
+        let view_wealth = detail_map
+            .get(&player.owner)
+            .is_some_and(|state| state.view_wealth != 0);
         let score = detail_map
             .get(&player.owner)
             .map(|state| state.value_gain)
             .unwrap_or(0);
+        let view_value = engine.scenario_value_gain_enabled()
+            && detail_map
+                .get(&player.owner)
+                .is_some_and(|state| state.view_value != 0);
         let owner_color = detail_map
             .get(&player.owner)
             .and_then(|state| state.color.map(|rgb| Color::opaque(rgb.r, rgb.g, rgb.b)))
@@ -82685,7 +82705,9 @@ fn collect_player_overlays(
             owner: player.owner,
             name,
             wealth,
+            view_wealth,
             score,
+            view_value,
             cursor,
             captain: detail_map
                 .get(&player.owner)
@@ -102134,6 +102156,64 @@ func Award()
                 .find(|crew| crew.object_id == teammate)
                 .map(|crew| (crew.hide_hud_elements, crew.hide_hud_bars)),
             Some((0, 0))
+        );
+    }
+
+    #[test]
+    fn l049_player_overlay_projects_transient_hud_flags() {
+        let mut app = new_lightweight_running_sandbox_app();
+        let owner = app.local_owner;
+        let player = app
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == owner)
+            .expect("sandbox player");
+        player.view_wealth = -1;
+        player.view_value = -1;
+
+        assert!(!app.engine.scenario_value_gain_enabled());
+        let overlays = collect_player_overlays(
+            &app.engine,
+            &app.snapshot,
+            None,
+            &app.bindings,
+            &app.gamepad_bindings,
+        );
+        let overlay = overlays
+            .iter()
+            .find(|player| player.owner == owner)
+            .expect("sandbox overlay");
+        assert!(overlay.view_wealth, "nonzero ViewWealth uses C++ truthiness");
+        assert!(
+            !overlay.view_value,
+            "ViewValue stays hidden when Game.ValueGain is disabled"
+        );
+
+        set_test_scenario_value_gain(&mut app, -1);
+        let player = app
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == owner)
+            .expect("restored sandbox player");
+        player.view_wealth = 0;
+        player.view_value = -1;
+        let overlays = collect_player_overlays(
+            &app.engine,
+            &app.snapshot,
+            None,
+            &app.bindings,
+            &app.gamepad_bindings,
+        );
+        let overlay = overlays
+            .iter()
+            .find(|player| player.owner == owner)
+            .expect("restored sandbox overlay");
+        assert!(!overlay.view_wealth);
+        assert!(
+            overlay.view_value,
+            "nonzero ViewValue is visible when Game.ValueGain is enabled"
         );
     }
 
@@ -138114,6 +138194,40 @@ ScenInfoArea=70,5,25,90
         app.snapshot = app.engine.snapshot();
         assert_eq!(app.engine.replay(), replay != 0);
         assert_eq!(app.engine.film(), film != 0);
+    }
+
+    fn set_test_scenario_value_gain(app: &mut GameApp, value_gain: i32) {
+        let mut state = app.engine.capture_state();
+        let values = state
+            .scenario_values
+            .as_mut()
+            .expect("captured state retains Game.C4S values");
+        let mut encoded = serde_json::to_value(&*values).expect("serialize Game.C4S values");
+        let game = encoded
+            .get_mut("sections")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|sections| {
+                sections.iter_mut().find(|section| {
+                    section.get("name").and_then(serde_json::Value::as_str) == Some("Game")
+                })
+            })
+            .expect("Game.C4S contains Game");
+        let entry = game
+            .get_mut("entries")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|entries| {
+                entries.iter_mut().find(|entry| {
+                    entry.get("name").and_then(serde_json::Value::as_str) == Some("ValueGain")
+                })
+            })
+            .expect("Game contains ValueGain");
+        entry["values"] = serde_json::json!([{ "Int": value_gain }]);
+        *values = serde_json::from_value(encoded).expect("deserialize adjusted Game.C4S values");
+        app.engine
+            .restore_state(&state)
+            .expect("restore adjusted Game.C4S values");
+        app.snapshot = app.engine.snapshot();
+        assert_eq!(app.engine.scenario_value_gain_enabled(), value_gain != 0);
     }
 
     fn install_test_recording_template(app: &mut GameApp, output_path: PathBuf) {
@@ -180175,6 +180289,56 @@ func ControlDig() { dig_count = 1; return(1); }
             load_graphics_smoke_level(Some(&paths)),
             lc_engine::DEFAULT_SMOKE_LEVEL
         );
+    }
+
+    #[test]
+    fn l049_renderer_config_loads_native_defaults_and_graphics_values() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("renderer-config install fixture");
+        let user_data = tempdir().expect("renderer-config user fixture");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("fixture System.c4g directory");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover renderer-config fixture");
+        paths.ensure_user_dirs().expect("create fixture user dirs");
+
+        let defaults = load_display_flags(Some(&paths));
+        assert!(defaults.show_player_hud_always);
+        assert!(defaults.splitscreen_dividers);
+        assert!(defaults.fire_particles);
+
+        fs::write(
+            paths.config_file(),
+            "[Graphics]\nShowPlayerHUDAlways=0\nSplitscreenDividers=0\nFireParticles=0\n",
+        )
+        .expect("write disabled renderer config");
+        let disabled = load_display_flags(Some(&paths));
+        assert!(!disabled.show_player_hud_always);
+        assert!(!disabled.splitscreen_dividers);
+        assert!(!disabled.fire_particles);
+
+        fs::write(
+            paths.config_file(),
+            "[Graphics]\nShowPlayerHUDAlways=1\nSplitscreenDividers=-1\nFireParticles=1\n",
+        )
+        .expect("write enabled renderer config");
+        let enabled = load_display_flags(Some(&paths));
+        assert!(enabled.show_player_hud_always);
+        assert!(
+            enabled.splitscreen_dividers,
+            "any nonzero divider integer follows C++ truthiness"
+        );
+        assert!(enabled.fire_particles);
+
+        fs::write(
+            paths.config_file(),
+            "[Graphics]\nSplitscreenDividers=invalid\n",
+        )
+        .expect("write invalid divider config");
+        assert!(load_display_flags(Some(&paths)).splitscreen_dividers);
     }
 
     #[test]

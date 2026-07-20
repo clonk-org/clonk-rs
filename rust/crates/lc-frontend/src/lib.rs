@@ -2525,6 +2525,12 @@ pub struct PlayerOverlay {
     pub name: String,
     pub wealth: i32,
     pub score: i32,
+    /// Raw `C4Player::ViewWealth`; this requests the wealth item even when
+    /// `Config.Graphics.ShowPlayerHUDAlways` is disabled.
+    pub view_wealth: bool,
+    /// Effective `Game.C4S.Game.ValueGain && C4Player::ViewValue`; this
+    /// requests the score item when the global always-visible HUD is disabled.
+    pub view_value: bool,
     /// Effective HUD cursor (`ViewCursor ?: Cursor`). Commands still come
     /// from the player's real cursor (src/C4Viewport.cpp:891-897,947-961).
     pub cursor: Option<ObjectId>,
@@ -2563,6 +2569,18 @@ pub struct PlayerOverlay {
     pub commands: Vec<CommandIcon>,
     /// C4Player::FlashCom for the owner of the object producing `commands`.
     pub flash_command: i32,
+}
+
+const fn player_fixed_item_visibility(
+    show_player_hud_always: bool,
+    view_wealth: bool,
+    view_value: bool,
+) -> (bool, bool, bool) {
+    (
+        show_player_hud_always || view_wealth,
+        show_player_hud_always || view_value,
+        show_player_hud_always,
+    )
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2911,6 +2929,14 @@ pub struct GraphicsSystem {
     /// `C4UpperBoard::TextWidth`, fixed by `Init` until fullscreen chrome is
     /// reinitialized (src/C4UpperBoard.cpp:102-121).
     upper_board_text_width: Option<i32>,
+    /// `Config.Graphics.ShowPlayerHUDAlways` (src/C4Viewport.cpp:1287-1321).
+    show_player_hud_always: bool,
+    /// `Config.Graphics.SplitscreenDividers` (src/C4GraphicsSystem.cpp:389-394).
+    splitscreen_dividers: bool,
+    /// `Config.Graphics.FireParticles` gates C++'s extended Fire/Fire2 pass.
+    /// The Rust renderer currently has only the simple object fire facet,
+    /// which remains unconditional as C++'s fallback does.
+    fire_particles: bool,
     /// `Config.Graphics.ShowPortraits` / `ShowCommands` / `ShowCommandKeys`
     /// (src/C4Config.cpp:448-450, default true).
     show_portraits: bool,
@@ -3018,6 +3044,9 @@ impl GraphicsSystem {
             frames_per_second: None,
             upper_board_mode: hud::UpperBoardMode::Full,
             upper_board_text_width: None,
+            show_player_hud_always: true,
+            splitscreen_dividers: true,
+            fire_particles: true,
             show_portraits: true,
             show_commands: true,
             show_command_keys: true,
@@ -4222,6 +4251,27 @@ impl GraphicsSystem {
         })
     }
 
+    /// Applies the renderer-owned Graphics configuration that is independent
+    /// of the per-frame simulation overlay.
+    pub fn set_renderer_config(
+        &mut self,
+        show_player_hud_always: bool,
+        splitscreen_dividers: bool,
+        fire_particles: bool,
+    ) {
+        self.show_player_hud_always = show_player_hud_always;
+        self.fire_particles = fire_particles;
+        if self.splitscreen_dividers != splitscreen_dividers {
+            self.splitscreen_dividers = splitscreen_dividers;
+            self.relayout_active_viewports();
+        }
+    }
+
+    /// Whether the optional extended Fire/Fire2 presentation pass is enabled.
+    pub fn fire_particles_enabled(&self) -> bool {
+        self.fire_particles
+    }
+
     /// Stores the HUD state drawn by [`Self::render_frame`] — the Rust
     /// counterpart of the per-frame data reads in `C4Viewport::DrawOverlay`
     /// (src/C4Viewport.cpp:835-882) and `C4UpperBoard::Execute`
@@ -5256,8 +5306,16 @@ impl GraphicsSystem {
             for col in 0..columns {
                 // Graphics.SplitscreenDividers defaults to enabled. C++ takes
                 // four pixels only from non-last cells, leaving no outer inset.
-                let divider_width = if col + 1 < columns { 4 } else { 0 };
-                let divider_height = if row + 1 < rows { 4 } else { 0 };
+                let divider_width = if self.splitscreen_dividers && col + 1 < columns {
+                    4
+                } else {
+                    0
+                };
+                let divider_height = if self.splitscreen_dividers && row + 1 < rows {
+                    4
+                } else {
+                    0
+                };
                 rects.push(SurfaceRect::new(
                     (col as u32 * column_width) as i32,
                     overlay_height + (row as i32 * row_height as i32),
@@ -9370,6 +9428,11 @@ impl GraphicsSystem {
                 );
             }
 
+            let (show_wealth, show_score, show_crew) = player_fixed_item_visibility(
+                self.show_player_hud_always,
+                player.view_wealth,
+                player.view_value,
+            );
             hud::draw_player_fixed_items_with_gamma(
                 &mut self.surface,
                 &font,
@@ -9380,6 +9443,9 @@ impl GraphicsSystem {
                 player.select_count,
                 player.crew_count,
                 player.owner_color,
+                show_wealth,
+                show_score,
+                show_crew,
                 gamma,
             );
 
@@ -18368,6 +18434,8 @@ mod tests {
                 name: "Player".to_string(),
                 wealth: 0,
                 score: 0,
+                view_wealth: false,
+                view_value: false,
                 cursor: None,
                 captain: None,
                 eliminated: false,
@@ -18728,8 +18796,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn l049_fixed_item_visibility_combines_global_and_script_requests() {
+        assert_eq!(
+            player_fixed_item_visibility(false, false, false),
+            (false, false, false)
+        );
+        assert_eq!(
+            player_fixed_item_visibility(false, true, false),
+            (true, false, false)
+        );
+        assert_eq!(
+            player_fixed_item_visibility(false, false, true),
+            (false, true, false)
+        );
+        assert_eq!(
+            player_fixed_item_visibility(true, false, false),
+            (true, true, true)
+        );
+    }
+
     fn viewport_layout(width: u32, height: u32, count: usize) -> Vec<SurfaceRect> {
-        GraphicsSystem::new(
+        viewport_layout_with_dividers(width, height, count, true)
+    }
+
+    fn viewport_layout_with_dividers(
+        width: u32,
+        height: u32,
+        count: usize,
+        splitscreen_dividers: bool,
+    ) -> Vec<SurfaceRect> {
+        let mut graphics = GraphicsSystem::new(
             width,
             height,
             height as i32,
@@ -18738,8 +18835,9 @@ mod tests {
             empty_sprites(),
             empty_cursor_atlas(),
             empty_hud_graphics(),
-        )
-        .layout_viewports(count)
+        );
+        graphics.set_renderer_config(true, splitscreen_dividers, true);
+        graphics.layout_viewports(count)
     }
 
     #[test]
@@ -18786,6 +18884,26 @@ mod tests {
                 SurfaceRect::new(0, 0, 396, 296),
                 SurfaceRect::new(400, 0, 400, 296),
                 SurfaceRect::new(0, 300, 396, 300),
+                SurfaceRect::new(400, 300, 400, 300),
+            ]
+        );
+    }
+
+    #[test]
+    fn l049_disabled_splitscreen_dividers_remove_four_pixel_layout_gaps() {
+        assert_eq!(
+            viewport_layout_with_dividers(800, 600, 2, false),
+            vec![
+                SurfaceRect::new(0, 0, 400, 600),
+                SurfaceRect::new(400, 0, 400, 600),
+            ]
+        );
+        assert_eq!(
+            viewport_layout_with_dividers(800, 600, 4, false),
+            vec![
+                SurfaceRect::new(0, 0, 400, 300),
+                SurfaceRect::new(400, 0, 400, 300),
+                SurfaceRect::new(0, 300, 400, 300),
                 SurfaceRect::new(400, 300, 400, 300),
             ]
         );
@@ -20030,6 +20148,60 @@ mod tests {
             }
         }
         ImageData::new(6, 2, pixels)
+    }
+
+    #[test]
+    fn l049_disabling_extended_fire_particles_keeps_simple_fire_facet() {
+        // Rust does not yet implement C++'s extended Fire/Fire2 particle pass.
+        // FireParticles=false therefore disables no existing extended layer;
+        // the native simple Fire.png object facet remains the required fallback.
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(6, 6);
+        object.crew_member = false;
+        object.on_fire = true;
+        object.fire_phase = 0;
+        let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(2, 2, vec![0; 2 * 2 * 4]),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-1, -1, 2, 2)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+        };
+        let hud = Arc::new(HudGraphics {
+            fire: Some(fire_test_strip()),
+            ..HudGraphics::default()
+        });
+        let mut graphics = GraphicsSystem::new(
+            12,
+            12,
+            12,
+            "simple fire fallback",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            hud,
+        );
+        graphics.set_renderer_config(true, true, false);
+        assert!(!graphics.fire_particles_enabled());
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+
+        graphics.draw_object_fire(
+            &object,
+            &sprite,
+            (0.0, 0.0),
+            SpriteBlitState::normal(),
+            None,
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(5, 5),
+            Some(Color::opaque(200, 0, 0))
+        );
     }
 
     #[test]
@@ -22214,6 +22386,8 @@ mod tests {
             name: "P1".to_string(),
             wealth: 0,
             score: 0,
+            view_wealth: false,
+            view_value: false,
             cursor: Some(object_id),
             captain: None,
             eliminated: false,
