@@ -83,9 +83,11 @@ debug = false
 debug-assertions = true
 overflow-checks = true
 
-# Preserve the dev profile's optimized dependencies for test runtime.
+# The test profile inherits the dev package wildcard, whose debug setting would
+# otherwise win. Keep registry dependencies optimized and debug-free explicitly.
 [profile.test.package."*"]
 opt-level = 3
+debug = false
 
 # The main application test harness is the largest final link in the workspace.
 # Level 2 keeps its gameplay-heavy tests close to fully optimized while

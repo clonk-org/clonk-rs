@@ -321,7 +321,9 @@ generated code or test runtime. Frontend, resources, and script accounted for
 audit found another 8,343,469 bytes across the remaining workspace rlibs,
 expanded to 43,125,856 bytes after downstream-link fanout, plus 25,171,978
 bytes in loose debug-map objects. The follow-up therefore made `debug = false`
-the workspace test-profile default instead of accumulating package exceptions.
+the workspace-member test-profile default instead of accumulating package
+exceptions; the dependency wildcard retains its explicit override because the
+test profile also inherits the dev profile's package wildcard.
 Panic-site text and function symbols remain available, while the development
 profile retains debug information for interactive use. Set
 `CARGO_PROFILE_TEST_DEBUG=line-tables-only` for a line-symbolized test build.
