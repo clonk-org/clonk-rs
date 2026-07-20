@@ -63,10 +63,22 @@ struct GlobalMessageLayout {
     text_y: i32,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct TargetMessageLayout {
+    text: String,
+    color: [u8; 4],
+    alignment: TextAlign,
+    text_x: i32,
+    text_y: i32,
+}
+
 pub(crate) fn is_supported(message: &MessageSnapshot) -> bool {
     matches!(
         message.kind,
-        MessageKind::Global | MessageKind::GlobalPlayer
+        MessageKind::Global
+            | MessageKind::GlobalPlayer
+            | MessageKind::Target
+            | MessageKind::TargetPlayer
     )
 }
 
@@ -162,6 +174,133 @@ pub(crate) fn draw_global_message_native(
     Ok(())
 }
 
+/// Draw a target-attached message whose target anchor has already been
+/// projected into absolute GUI/output coordinates. C++ resolves object
+/// visibility, FoW and `GetViewPos` before entering this layout branch; the
+/// caller owns those predicates and the target's shape/offset adjustment.
+pub(crate) fn draw_target_message(
+    surface: &mut Surface,
+    font: &ClonkFont,
+    viewport: Rect,
+    anchor: (i32, i32),
+    message: &MessageSnapshot,
+    images: &dyn FontImageProvider,
+    gamma: Option<&GammaRamp>,
+) -> Result<(), &'static str> {
+    let layout = layout_target_message(
+        MessageFontMetrics::Logical(font),
+        viewport,
+        message,
+        anchor,
+        images,
+    )?;
+    let previous_clip = surface.clip();
+    set_nested_clip(surface, previous_clip, viewport);
+    font.draw_with_gamma_and_images(
+        surface,
+        layout.text_x,
+        layout.text_y,
+        &layout.text,
+        layout.color,
+        layout.alignment,
+        true,
+        gamma,
+        images,
+    );
+    restore_clip(surface, previous_clip);
+    Ok(())
+}
+
+/// Scale-native counterpart to [`draw_target_message`]. Coordinates stay in
+/// GUI space and pass through the viewport's independently rounded C++
+/// clipper projection exactly once.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_target_message_native(
+    surface: &mut Surface,
+    native_font: &NativeClonkFont,
+    scale: f32,
+    logical_target_size: (u32, u32),
+    viewport: Rect,
+    anchor: (i32, i32),
+    message: &MessageSnapshot,
+    images: &dyn FontImageProvider,
+    gamma: Option<&GammaRamp>,
+) -> Result<(), &'static str> {
+    let layout = layout_target_message(
+        MessageFontMetrics::Native(native_font),
+        viewport,
+        message,
+        anchor,
+        images,
+    )?;
+    let previous_clip = surface.clip();
+    let projection = ClipperProjection::new(scale, logical_target_size, surface.height(), viewport);
+    set_nested_clip(surface, previous_clip, projection.physical_clip());
+    native_font.draw_to_physical_surface_with_clipper_and_images(
+        surface,
+        layout.text_x,
+        layout.text_y,
+        &layout.text,
+        layout.color,
+        layout.alignment,
+        true,
+        projection,
+        gamma,
+        images,
+    );
+    restore_clip(surface, previous_clip);
+    Ok(())
+}
+
+fn layout_target_message(
+    metrics: MessageFontMetrics<'_>,
+    viewport: Rect,
+    message: &MessageSnapshot,
+    anchor: (i32, i32),
+    images: &dyn FontImageProvider,
+) -> Result<TargetMessageLayout, &'static str> {
+    if !matches!(message.kind, MessageKind::Target | MessageKind::TargetPlayer) {
+        return Err("global C4GameMessage requires the global renderer");
+    }
+
+    let text = message_text(message);
+    let draw_text = if message.flags & FLAG_NO_BREAK != 0 {
+        text
+    } else {
+        metrics.break_message(
+            &text,
+            bound_by(extent_i32(viewport.width), 50, 200),
+            images,
+        )
+    };
+    // C4GameMessage asks GetTextExtent again after BreakMessage. In
+    // particular, the footprint is the broken markup-aware text rather than
+    // the requested wrap width.
+    let (text_width, text_height) = metrics.measure(&draw_text, images);
+    let viewport_width = extent_i32(viewport.width);
+    let viewport_height = extent_i32(viewport.height);
+    let relative_x = anchor.0.saturating_sub(viewport.x);
+    let relative_y = anchor.1.saturating_sub(viewport.y);
+    let text_x = viewport.x.saturating_add(bound_by(
+        relative_x,
+        text_width / 2,
+        viewport_width.saturating_sub(text_width / 2),
+    ));
+    let text_y = viewport.y.saturating_add(bound_by(
+        relative_y.saturating_sub(text_height),
+        0,
+        viewport_height.saturating_sub(text_height),
+    ));
+
+    Ok(TargetMessageLayout {
+        text: draw_text,
+        color: message_color(message.color),
+        alignment: text_alignment(message.flags, false),
+        text_x,
+        text_y,
+    })
+}
+
 fn layout_global_message(
     metrics: MessageFontMetrics<'_>,
     viewport: Rect,
@@ -218,12 +357,7 @@ fn layout_global_message(
         (broken, width, height)
     };
 
-    let color = [
-        ((message.color >> 16) & 0xff) as u8,
-        ((message.color >> 8) & 0xff) as u8,
-        (message.color & 0xff) as u8,
-        ((message.color >> 24) & 0xff) as u8,
-    ];
+    let color = message_color(message.color);
     let alignment = text_alignment(message.flags, portrait_requested);
     let mut draw_x = viewport.x.saturating_add(x);
     let mut draw_y = viewport.y.saturating_add(y);
@@ -556,6 +690,15 @@ fn message_text(message: &MessageSnapshot) -> String {
     message.lines.join("|")
 }
 
+fn message_color(color: u32) -> [u8; 4] {
+    [
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+        ((color >> 24) & 0xff) as u8,
+    ]
+}
+
 fn text_alignment(flags: u32, portrait: bool) -> TextAlign {
     if flags & FLAG_ALIGN_LEFT != 0 {
         TextAlign::Left
@@ -592,7 +735,9 @@ fn bound_by(value: i32, left: i32, right: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_engine::{Vector2, FLAG_LEFT, FLAG_TOP};
+    use lc_engine::{ObjectId, Vector2, FLAG_LEFT, FLAG_TOP};
+    use lc_graphics::clonk_font::GlyphCell;
+    use lc_graphics::Color;
 
     #[derive(Default)]
     struct TestFontImages {
@@ -609,6 +754,164 @@ mod tests {
                 },
             )
         }
+    }
+
+    fn target_test_font() -> ClonkFont {
+        let mut font = ClonkFont::new(4);
+        font.set_missing_glyph(GlyphCell {
+            width: 6,
+            pixels: vec![Color::opaque(255, 255, 255); 6 * 5],
+        });
+        font
+    }
+
+    fn target_message(kind: MessageKind, flags: u32, text: &str) -> MessageSnapshot {
+        MessageSnapshot {
+            id: 9,
+            kind,
+            lines: vec![text.to_string()],
+            target: Some(ObjectId::new(1)),
+            player: None,
+            offset: Vector2::new(999, -999),
+            color: 0x7f12_3456,
+            flags,
+            width: Some(1),
+            decoration: Some("IGNORED".to_string()),
+            frame_decoration: None,
+            portrait: Some("IGNORED".to_string()),
+        }
+    }
+
+    #[test]
+    fn target_layout_wraps_measured_markup_and_clamps_absolute_anchor() {
+        let font = target_test_font();
+        let images = TestFontImages::default();
+        let viewport = Rect::new(10, 20, 80, 28);
+        let message = target_message(
+            MessageKind::Target,
+            FLAG_ALIGN_LEFT | FLAG_ALIGN_CENTER | FLAG_ALIGN_RIGHT,
+            "AAAA AAAA AAAA AAAA",
+        );
+        let expected_text = MessageFontMetrics::Logical(&font).break_message(
+            &message_text(&message),
+            80,
+            &images,
+        );
+        assert_ne!(expected_text, message_text(&message));
+        let expected_extent = font.measure_with_images(&expected_text, true, &images);
+
+        let layout = layout_target_message(
+            MessageFontMetrics::Logical(&font),
+            viewport,
+            &message,
+            (12, 22),
+            &images,
+        )
+        .expect("layout target message");
+
+        assert_eq!(layout.text, expected_text);
+        assert_eq!(layout.alignment, TextAlign::Left, "ALeft wins precedence");
+        assert_eq!(layout.color, [0x12, 0x34, 0x56, 0x7f]);
+        assert_eq!(layout.text_x, viewport.x + expected_extent.0 / 2);
+        assert_eq!(layout.text_y, viewport.y);
+    }
+
+    #[test]
+    fn target_no_break_uses_raw_text_and_ignores_global_only_fields() {
+        let font = target_test_font();
+        let images = TestFontImages::default();
+        let viewport = Rect::new(30, 40, 120, 60);
+        let mut message = target_message(
+            MessageKind::TargetPlayer,
+            FLAG_NO_BREAK | FLAG_ALIGN_RIGHT | FLAG_WIDTH_REL | FLAG_X_REL | FLAG_Y_REL,
+            "<c ff0000>AAAA</c>|AAAA",
+        );
+        message.lines = vec!["<c ff0000>AAAA</c>".to_string(), "AAAA".to_string()];
+        let raw = message_text(&message);
+        let extent = font.measure_with_images(&raw, true, &images);
+
+        let layout = layout_target_message(
+            MessageFontMetrics::Logical(&font),
+            viewport,
+            &message,
+            (viewport.x + 119, viewport.y + 100),
+            &images,
+        )
+        .expect("layout unbroken target message");
+
+        assert_eq!(layout.text, raw);
+        assert_eq!(layout.alignment, TextAlign::Right);
+        assert_eq!(
+            layout.text_x,
+            viewport.x + extent_i32(viewport.width) - extent.0 / 2
+        );
+        assert_eq!(
+            layout.text_y,
+            viewport.y + extent_i32(viewport.height) - extent.1
+        );
+        assert!(is_supported(&message));
+    }
+
+    #[test]
+    fn target_logical_draw_restores_the_callers_clip() {
+        let font = target_test_font();
+        let images = TestFontImages::default();
+        let viewport = Rect::new(10, 12, 30, 24);
+        let message = target_message(MessageKind::Target, FLAG_NO_BREAK, "A");
+        let mut surface = Surface::new(64, 64, lc_graphics::PixelFormat::Rgba8888);
+        let caller_clip = Rect::new(5, 7, 45, 40);
+        surface.set_clip(caller_clip);
+
+        draw_target_message(
+            &mut surface,
+            &font,
+            viewport,
+            (25, 30),
+            &message,
+            &images,
+            None,
+        )
+        .expect("draw target message");
+
+        assert_eq!(surface.clip(), Some(caller_clip));
+        assert!(surface
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[3] != 0), "target glyph was drawn");
+    }
+
+    #[test]
+    fn target_native_draw_uses_the_cpp_clipper_and_restores_the_callers_clip() {
+        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../planet/System.c4g/Endeavour.ttf");
+        let bytes = std::fs::read(font_path).expect("read Endeavour.ttf");
+        let fonts = lc_frontend::clonk_fonts::build_native_font_set(&bytes, 3)
+            .expect("build scale-three FontRegular");
+        let images = TestFontImages::default();
+        let viewport = Rect::new(10, 8, 30, 20);
+        let message = target_message(MessageKind::Target, FLAG_NO_BREAK, "A");
+        let mut surface = Surface::new(192, 144, lc_graphics::PixelFormat::Rgba8888);
+        let caller_clip = Rect::new(3, 4, 180, 130);
+        surface.set_clip(caller_clip);
+
+        draw_target_message_native(
+            &mut surface,
+            &fonts.text,
+            fonts.scale(),
+            (64, 48),
+            viewport,
+            (25, 24),
+            &message,
+            &images,
+            None,
+        )
+        .expect("draw scale-native target message");
+
+        assert_eq!(surface.clip(), Some(caller_clip));
+        assert!(surface
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[3] != 0), "native target glyph was drawn");
     }
 
     #[test]

@@ -12982,9 +12982,6 @@ enum ClassicParityBoundary {
     HudGameMessage {
         count: usize,
     },
-    HudMessageVisibilityUnavailable {
-        count: usize,
-    },
     RunningShortcut {
         key: &'static str,
     },
@@ -13155,10 +13152,6 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic C4GameMessage renderer is unavailable for {count} visible message(s)"
             ),
-            Self::HudMessageVisibilityUnavailable { count } => write!(
-                f,
-                "C4GameMessage visibility/FoW state is unavailable for {count} potentially visible target message(s)"
-            ),
             Self::RunningShortcut { key } => write!(
                 f,
                 "running shortcut {key} has no classic renderer/action in the Rust port"
@@ -13189,7 +13182,6 @@ impl std::error::Error for ClassicParityBoundary {}
 enum HudMessageDrawability {
     NotDrawable,
     Drawable,
-    VisibilityUnavailable,
 }
 
 fn c4_object_local_int(object: &ObjectSnapshot, name: &str) -> i32 {
@@ -62913,44 +62905,71 @@ impl GameApp {
         let viewports = self.graphics.active_viewport_projections();
         for viewport in viewports {
             for message in &self.snapshot.hud.messages {
-                let owned = match message.kind {
-                    MessageKind::Global => true,
-                    MessageKind::GlobalPlayer => {
-                        message.player.unwrap_or(OWNER_NONE) == viewport.owner
+                let target_position = match message.kind {
+                    MessageKind::Global => None,
+                    MessageKind::GlobalPlayer
+                        if message.player.unwrap_or(OWNER_NONE) == viewport.owner =>
+                    {
+                        None
                     }
-                    MessageKind::Target | MessageKind::TargetPlayer => false,
+                    MessageKind::GlobalPlayer => continue,
+                    MessageKind::Target | MessageKind::TargetPlayer => {
+                        let Some(position) =
+                            self.target_message_position_for_viewport(message, viewport)
+                        else {
+                            continue;
+                        };
+                        Some(position)
+                    }
                 };
-                if !owned || !game_message::is_supported(message) {
+                if !game_message::is_supported(message) {
                     continue;
                 }
-                let portrait = message
-                    .portrait
-                    .as_deref()
-                    .and_then(|spec| resolve_message_portrait(&self.engine, spec));
-                let decoration_image = message.frame_decoration.as_ref().and_then(|decoration| {
-                    self.engine
-                        .definition_sprite_image(&decoration.source_definition, None)
-                        .map(default_owner_definition_sprite)
-                });
                 let font_images = resolve_message_font_images(
                     &self.engine,
                     message,
                     self.script_text_spec_resources(),
                 );
-                game_message::draw_global_message_native(
-                    &mut surface,
-                    &fonts.text,
-                    fonts.scale(),
-                    geometry.logical_size(),
-                    viewport.rect,
-                    message,
-                    message.frame_decoration.as_ref(),
-                    decoration_image.as_ref(),
-                    portrait.as_ref(),
-                    &font_images,
-                    Some(gamma),
-                )
-                .map_err(|detail| anyhow!("native C4GameMessage render failed: {detail}"))?;
+                if let Some(position) = target_position {
+                    let anchor = viewport.logical_to_output(position);
+                    game_message::draw_target_message_native(
+                        &mut surface,
+                        &fonts.text,
+                        fonts.scale(),
+                        geometry.logical_size(),
+                        viewport.rect,
+                        (anchor.0.round() as i32, anchor.1.round() as i32),
+                        message,
+                        &font_images,
+                        Some(gamma),
+                    )
+                    .map_err(|detail| anyhow!("native C4GameMessage render failed: {detail}"))?;
+                } else {
+                    let portrait = message
+                        .portrait
+                        .as_deref()
+                        .and_then(|spec| resolve_message_portrait(&self.engine, spec));
+                    let decoration_image =
+                        message.frame_decoration.as_ref().and_then(|decoration| {
+                            self.engine
+                                .definition_sprite_image(&decoration.source_definition, None)
+                                .map(default_owner_definition_sprite)
+                        });
+                    game_message::draw_global_message_native(
+                        &mut surface,
+                        &fonts.text,
+                        fonts.scale(),
+                        geometry.logical_size(),
+                        viewport.rect,
+                        message,
+                        message.frame_decoration.as_ref(),
+                        decoration_image.as_ref(),
+                        portrait.as_ref(),
+                        &font_images,
+                        Some(gamma),
+                    )
+                    .map_err(|detail| anyhow!("native C4GameMessage render failed: {detail}"))?;
+                }
             }
         }
         frame.copy_from_slice(surface.pixels());
@@ -63685,16 +63704,12 @@ impl GameApp {
 
         let message_viewports = self.graphics.active_viewport_projections();
         let mut unsupported_message_count = 0;
-        let mut unavailable_visibility_count = 0;
         for message in &self.snapshot.hud.messages {
             match self.hud_message_drawability(message, &message_viewports) {
                 HudMessageDrawability::Drawable => {
                     if !game_message::is_supported(message) {
                         unsupported_message_count += 1;
                     }
-                }
-                HudMessageDrawability::VisibilityUnavailable => {
-                    unavailable_visibility_count += 1;
                 }
                 HudMessageDrawability::NotDrawable => {}
             }
@@ -63703,13 +63718,6 @@ impl GameApp {
             return Err(anyhow::Error::new(report_classic_parity_boundary(
                 ClassicParityBoundary::HudGameMessage {
                     count: unsupported_message_count,
-                },
-            )));
-        }
-        if unavailable_visibility_count != 0 {
-            return Err(anyhow::Error::new(report_classic_parity_boundary(
-                ClassicParityBoundary::HudMessageVisibilityUnavailable {
-                    count: unavailable_visibility_count,
                 },
             )));
         }
@@ -64087,78 +64095,76 @@ impl GameApp {
         Ok(())
     }
 
+    /// Resolve the target branch of `C4GameMessage::Draw` for one exact
+    /// physical viewport. The returned point is the post-parallax,
+    /// post-shape-offset C4Facet coordinate used by both FoW and drawing.
+    fn target_message_position_for_viewport(
+        &self,
+        message: &lc_engine::MessageSnapshot,
+        viewport: ActiveViewportProjection,
+    ) -> Option<Vector2> {
+        if !matches!(message.kind, MessageKind::Target | MessageKind::TargetPlayer) {
+            return None;
+        }
+        if message.kind == MessageKind::TargetPlayer
+            && message.player.unwrap_or(OWNER_NONE) != viewport.owner
+        {
+            return None;
+        }
+        let target_id = message.target?;
+        let target = self.snapshot.object(target_id)?;
+        let shape_height = self
+            .engine
+            .definition_shape_rect(&target.definition_id)
+            .map(|shape| shape.height)
+            .unwrap_or(0);
+        let position =
+            c4_message_target_position(target, message.offset, shape_height, viewport);
+        if !viewport.contains_logical_point(position) {
+            return None;
+        }
+        if message.kind == MessageKind::Target
+            && !self
+                .snapshot
+                .object_visible_for_player(target_id, viewport.owner, false)
+        {
+            return None;
+        }
+        let fog_enabled = self
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.id == viewport.owner)
+            .is_some_and(|player| player.fog_of_war);
+        if fog_enabled
+            && target.category & C4D_IGNORE_FOW == 0
+            && !fow_point_is_visible(&self.snapshot, viewport.owner, position)
+        {
+            return None;
+        }
+        Some(position)
+    }
+
     fn hud_message_drawability(
         &self,
         message: &lc_engine::MessageSnapshot,
         viewports: &[ActiveViewportProjection],
     ) -> HudMessageDrawability {
-        match message.kind {
-            MessageKind::Global => {
-                if !viewports.is_empty() {
-                    HudMessageDrawability::Drawable
-                } else {
-                    HudMessageDrawability::NotDrawable
-                }
-            }
+        let drawable = match message.kind {
+            MessageKind::Global => !viewports.is_empty(),
             MessageKind::GlobalPlayer => {
                 let player = message.player.unwrap_or(OWNER_NONE);
-                if viewports.iter().any(|viewport| viewport.owner == player) {
-                    HudMessageDrawability::Drawable
-                } else {
-                    HudMessageDrawability::NotDrawable
-                }
+                viewports.iter().any(|viewport| viewport.owner == player)
             }
-            MessageKind::Target | MessageKind::TargetPlayer => {
-                let Some(target) = message.target.and_then(|id| self.snapshot.object(id)) else {
-                    return HudMessageDrawability::NotDrawable;
-                };
-                let shape_height = self
-                    .engine
-                    .definition_shape_rect(&target.definition_id)
-                    .map(|shape| shape.height)
-                    .unwrap_or(0);
-                let player = message.player.unwrap_or(OWNER_NONE);
-                let mut visibility_unavailable = false;
-                for viewport in viewports {
-                    if message.kind == MessageKind::TargetPlayer && viewport.owner != player {
-                        continue;
-                    }
-                    let position =
-                        c4_message_target_position(target, message.offset, shape_height, *viewport);
-                    if !viewport.contains_logical_point(position) {
-                        continue;
-                    }
-
-                    // C4GM_Target additionally calls C4Object::IsVisible for
-                    // each viewport. SetVisibility is presentation-only and
-                    // absent from ObjectSnapshot, so an in-bounds target is
-                    // potentially drawable but cannot be classified exactly.
-                    if message.kind == MessageKind::Target {
-                        visibility_unavailable = true;
-                        continue;
-                    }
-
-                    let fog_enabled = self
-                        .snapshot
-                        .players
-                        .iter()
-                        .find(|state| state.id == viewport.owner)
-                        .is_some_and(|state| state.fog_of_war);
-                    if fog_enabled && target.category & C4D_IGNORE_FOW == 0 {
-                        // The snapshot retains the player's FoW switch but no
-                        // visibility bitmap. Fail closed only after bounds say
-                        // this message could reach the viewport.
-                        visibility_unavailable = true;
-                        continue;
-                    }
-                    return HudMessageDrawability::Drawable;
-                }
-                if visibility_unavailable {
-                    HudMessageDrawability::VisibilityUnavailable
-                } else {
-                    HudMessageDrawability::NotDrawable
-                }
-            }
+            MessageKind::Target | MessageKind::TargetPlayer => viewports.iter().any(|viewport| {
+                self.target_message_position_for_viewport(message, *viewport)
+                    .is_some()
+            }),
+        };
+        if drawable {
+            HudMessageDrawability::Drawable
+        } else {
+            HudMessageDrawability::NotDrawable
         }
     }
 
@@ -64247,42 +64253,67 @@ impl GameApp {
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         for viewport in viewports {
             for message in &messages {
-                let owned = match message.kind {
-                    MessageKind::Global => true,
-                    MessageKind::GlobalPlayer => {
-                        message.player.unwrap_or(OWNER_NONE) == viewport.owner
+                let target_position = match message.kind {
+                    MessageKind::Global => None,
+                    MessageKind::GlobalPlayer
+                        if message.player.unwrap_or(OWNER_NONE) == viewport.owner =>
+                    {
+                        None
                     }
-                    MessageKind::Target | MessageKind::TargetPlayer => false,
+                    MessageKind::GlobalPlayer => continue,
+                    MessageKind::Target | MessageKind::TargetPlayer => {
+                        let Some(position) =
+                            self.target_message_position_for_viewport(message, viewport)
+                        else {
+                            continue;
+                        };
+                        Some(position)
+                    }
                 };
-                if !owned || !game_message::is_supported(message) {
+                if !game_message::is_supported(message) {
                     continue;
                 }
-                let portrait = message
-                    .portrait
-                    .as_deref()
-                    .and_then(|spec| resolve_message_portrait(&self.engine, spec));
-                let decoration_image = message.frame_decoration.as_ref().and_then(|decoration| {
-                    self.engine
-                        .definition_sprite_image(&decoration.source_definition, None)
-                        .map(default_owner_definition_sprite)
-                });
                 let font_images = resolve_message_font_images(
                     &self.engine,
                     message,
                     self.script_text_spec_resources(),
                 );
-                game_message::draw_global_message(
-                    self.graphics.surface_mut(),
-                    &fonts.text,
-                    viewport.rect,
-                    message,
-                    message.frame_decoration.as_ref(),
-                    decoration_image.as_ref(),
-                    portrait.as_ref(),
-                    &font_images,
-                    Some(gamma),
-                )
-                .map_err(|detail| anyhow!("classic C4GameMessage render failed: {detail}"))?;
+                if let Some(position) = target_position {
+                    let anchor = viewport.logical_to_output(position);
+                    game_message::draw_target_message(
+                        self.graphics.surface_mut(),
+                        &fonts.text,
+                        viewport.rect,
+                        (anchor.0.round() as i32, anchor.1.round() as i32),
+                        message,
+                        &font_images,
+                        Some(gamma),
+                    )
+                    .map_err(|detail| anyhow!("classic C4GameMessage render failed: {detail}"))?;
+                } else {
+                    let portrait = message
+                        .portrait
+                        .as_deref()
+                        .and_then(|spec| resolve_message_portrait(&self.engine, spec));
+                    let decoration_image =
+                        message.frame_decoration.as_ref().and_then(|decoration| {
+                            self.engine
+                                .definition_sprite_image(&decoration.source_definition, None)
+                                .map(default_owner_definition_sprite)
+                        });
+                    game_message::draw_global_message(
+                        self.graphics.surface_mut(),
+                        &fonts.text,
+                        viewport.rect,
+                        message,
+                        message.frame_decoration.as_ref(),
+                        decoration_image.as_ref(),
+                        portrait.as_ref(),
+                        &font_images,
+                        Some(gamma),
+                    )
+                    .map_err(|detail| anyhow!("classic C4GameMessage render failed: {detail}"))?;
+                }
                 if ordered_native {
                     self.next_pending_native_overlay_with_clip(viewport.rect);
                 }
@@ -86974,6 +87005,84 @@ func Award()
     }
 
     #[test]
+    fn scale_three_target_message_commits_through_native_viewport_projection() {
+        let mut app = new_running_sandbox_app();
+        let target = app
+            .snapshot
+            .objects
+            .first()
+            .map(|object| object.id)
+            .expect("sandbox target");
+        let shape_height = app
+            .snapshot
+            .object(target)
+            .and_then(|object| app.engine.definition_shape_rect(&object.definition_id))
+            .map(|shape| shape.height)
+            .unwrap_or(0);
+        app.snapshot.hud.messages = vec![lc_engine::MessageSnapshot {
+            id: 1,
+            kind: MessageKind::TargetPlayer,
+            lines: vec!["A".to_string()],
+            target: Some(target),
+            player: Some(app.local_owner),
+            offset: Vector2::new(0, shape_height / 2 + 5),
+            color: 0xffff_ffff,
+            flags: FLAG_NO_BREAK,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        }];
+        install_native_test_fonts(&mut app, 3.0);
+        assert!(app.can_defer_native_game_messages(3.0));
+
+        let gamma = app
+            .graphics
+            .active_gamma_ramp(&app.snapshot.environment.gamma);
+        let mut presenter = lc_scaling::FramePresenter::new(3.0, 960, 600);
+        let mut output = vec![0_u8; 960 * 600 * 4];
+        assert!(
+            presenter
+                .present(&mut output, |frame| {
+                    app.render_for_presentation(frame, false, false, true)
+                })
+                .expect("render filtered base with deferred target message")
+        );
+        let filtered_base = output.clone();
+
+        app.render_native_game_messages(&mut output, presenter.presentation_geometry(), &gamma)
+            .expect("commit native target message");
+        let viewport = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.owner == app.local_owner)
+            .expect("local target-message viewport")
+            .rect;
+        let physical_viewport = Rect::new(
+            viewport.x * 3,
+            viewport.y * 3,
+            viewport.width * 3,
+            viewport.height * 3,
+        );
+        let changed = output
+            .chunks_exact(4)
+            .zip(filtered_base.chunks_exact(4))
+            .enumerate()
+            .filter_map(|(index, (native, base))| (native != base).then_some(index))
+            .collect::<Vec<_>>();
+        assert!(!changed.is_empty(), "native target glyphs contribute pixels");
+        assert!(changed.iter().all(|index| {
+            let x = (*index % 960) as i32;
+            let y = (*index / 960) as i32;
+            x >= physical_viewport.x
+                && x < physical_viewport.x + physical_viewport.width as i32
+                && y >= physical_viewport.y
+                && y < physical_viewport.y + physical_viewport.height as i32
+        }));
+    }
+
+    #[test]
     fn scale_three_hud_caption_uses_one_pixel_native_edge() {
         let mut app = new_running_sandbox_app();
         let assets = Arc::make_mut(&mut app.assets);
@@ -87190,7 +87299,7 @@ func Award()
         app.snapshot.hud.messages = vec![lc_engine::MessageSnapshot {
             id: 1,
             kind: MessageKind::TargetPlayer,
-            lines: vec!["Second viewport".to_string()],
+            lines: vec!["A".to_string()],
             target: Some(target_id),
             player: Some(app.local_owner),
             offset: Vector2::ZERO,
@@ -87202,14 +87311,14 @@ func Award()
             portrait: None,
         }];
 
-        let mut frame = vec![0; 320 * 200 * 4];
-        let error = app
-            .render(&mut frame)
-            .expect_err("the second same-owner viewport receives the target message");
-        assert!(matches!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::HudGameMessage { count: 1 })
-        ));
+        let messages = std::mem::take(&mut app.snapshot.hud.messages);
+        let mut baseline = vec![0; 320 * 200 * 4];
+        app.render(&mut baseline)
+            .expect("render same-owner split baseline");
+        app.snapshot.hud.messages = messages;
+        let mut rendered = vec![0; 320 * 200 * 4];
+        app.render(&mut rendered)
+            .expect("the second same-owner viewport receives the target message");
 
         let projections = app.graphics.active_viewport_projections();
         assert_eq!(projections.len(), 2);
@@ -87226,6 +87335,22 @@ func Award()
             c4_message_target_position(target, Vector2::ZERO, shape_height, projections[1]);
         assert!(!projections[0].contains_logical_point(first));
         assert!(projections[1].contains_logical_point(second));
+        let changed = rendered
+            .chunks_exact(4)
+            .zip(baseline.chunks_exact(4))
+            .enumerate()
+            .filter_map(|(index, (actual, before))| (actual != before).then_some(index))
+            .collect::<Vec<_>>();
+        assert!(!changed.is_empty(), "the target message contributes pixels");
+        let viewport = projections[1].rect;
+        assert!(changed.iter().all(|index| {
+            let x = (*index % 320) as i32;
+            let y = (*index / 320) as i32;
+            x >= viewport.x
+                && x < viewport.x + viewport.width as i32
+                && y >= viewport.y
+                && y < viewport.y + viewport.height as i32
+        }));
     }
 
     #[test]
@@ -87386,7 +87511,7 @@ func Award()
     }
 
     #[test]
-    fn target_visibility_and_fog_fail_closed_with_typed_boundary() {
+    fn target_messages_render_only_for_cpp_visibility_and_fog() {
         let mut app = new_running_sandbox_app();
         let target = app
             .snapshot
@@ -87394,13 +87519,21 @@ func Award()
             .first()
             .map(|object| object.id)
             .expect("sandbox target");
+        let shape_height = app
+            .snapshot
+            .object(target)
+            .and_then(|object| app.engine.definition_shape_rect(&object.definition_id))
+            .map(|shape| shape.height)
+            .unwrap_or(0);
         let mut message = lc_engine::MessageSnapshot {
             id: 1,
             kind: MessageKind::Target,
-            lines: vec!["Potentially hidden".to_string()],
+            lines: vec!["A".to_string()],
             target: Some(target),
             player: None,
-            offset: Vector2::ZERO,
+            // Cancel the native half-shape/+5 lift so the FoW probe is the
+            // target's own position and its strict range is unambiguous.
+            offset: Vector2::new(0, shape_height / 2 + 5),
             color: 0xffff_ffff,
             flags: 0,
             width: None,
@@ -87408,38 +87541,164 @@ func Award()
             frame_decoration: None,
             portrait: None,
         };
-        let mut frame = vec![0; 320 * 200 * 4];
-        app.snapshot.hud.messages = vec![message.clone()];
-        let hidden = app
-            .render(&mut frame)
-            .expect_err("C4Object::IsVisible state is not projected");
-        assert!(matches!(
-            hidden.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::HudMessageVisibilityUnavailable { count: 1 })
-        ));
+        let target_position = app
+            .snapshot
+            .object(target)
+            .expect("sandbox target")
+            .position;
+        let player = app
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == app.local_owner)
+            .expect("sandbox player");
+        player.fog_of_war = true;
+        player.force_fog_of_war = true;
+        player.viewports = vec![
+            lc_engine::PlayerViewport::new(target_position).with_focus(Some(target)),
+        ];
+        let target_object = app
+            .snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == target)
+            .expect("sandbox target");
+        target_object.visibility = lc_engine::VIS_ALL;
+        target_object.category &= !C4D_IGNORE_FOW;
+        target_object.plr_view_range = 128;
+        app.snapshot.fow_players.insert(
+            app.local_owner,
+            lc_engine::FogOfWarPlayerFrame {
+                view_objects: vec![target],
+                view_target: None,
+            },
+        );
 
+        let mut baseline = vec![0; 320 * 200 * 4];
+        app.render(&mut baseline).expect("render visible FoW baseline");
+        let viewports = app.graphics.active_viewport_projections();
+        assert_eq!(
+            app.hud_message_drawability(&message, &viewports),
+            HudMessageDrawability::Drawable
+        );
+        let viewport = viewports
+            .iter()
+            .copied()
+            .find(|viewport| viewport.owner == app.local_owner)
+            .expect("local target-message viewport");
+        let anchor = app
+            .target_message_position_for_viewport(&message, viewport)
+            .expect("visible adjusted target anchor");
+        let output_anchor = viewport.logical_to_output(anchor);
+        app.snapshot.hud.messages = vec![message.clone()];
+        let mut visible = vec![0; 320 * 200 * 4];
+        app.render(&mut visible)
+            .expect("visible in-FoW target message renders");
+        let changed = visible
+            .chunks_exact(4)
+            .zip(baseline.chunks_exact(4))
+            .enumerate()
+            .filter_map(|(index, (actual, before))| (actual != before).then_some(index))
+            .collect::<Vec<_>>();
+        assert!(!changed.is_empty(), "the visible target message draws pixels");
+        assert!(changed.iter().all(|index| {
+            let x = (*index % 320) as i32;
+            let y = (*index / 320) as i32;
+            x >= viewport.rect.x
+                && x < viewport.rect.x + viewport.rect.width as i32
+                && y >= viewport.rect.y
+                && y < viewport.rect.y + viewport.rect.height as i32
+                && y <= output_anchor.1.round() as i32
+        }));
+
+        // An active FoW player with no revealing view object silently skips
+        // the message, rather than failing the entire overlay batch.
+        app.snapshot.hud.messages.clear();
+        app.snapshot.fow_players.insert(
+            app.local_owner,
+            lc_engine::FogOfWarPlayerFrame {
+                view_objects: Vec::new(),
+                view_target: None,
+            },
+        );
+        let mut fog_baseline = vec![0; 320 * 200 * 4];
+        app.render(&mut fog_baseline)
+            .expect("render hidden FoW baseline");
+        let viewports = app.graphics.active_viewport_projections();
+        assert_eq!(
+            app.hud_message_drawability(&message, &viewports),
+            HudMessageDrawability::NotDrawable
+        );
+        app.snapshot.hud.messages = vec![message.clone()];
+        let mut fogged = vec![0; 320 * 200 * 4];
+        app.render(&mut fogged)
+            .expect("hidden FoW target message is silently skipped");
+        assert_eq!(fogged, fog_baseline);
+
+        // C4GM_Target additionally honors C4Object::IsVisible. The player-
+        // scoped target variant deliberately does not use that predicate.
+        app.snapshot.hud.messages.clear();
+        app.snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == app.local_owner)
+            .expect("sandbox player")
+            .fog_of_war = false;
+        app.snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == target)
+            .expect("sandbox target")
+            .visibility = lc_engine::VIS_NONE;
+        let mut visibility_baseline = vec![0; 320 * 200 * 4];
+        app.render(&mut visibility_baseline)
+            .expect("render IsVisible baseline");
+        let viewports = app.graphics.active_viewport_projections();
+        assert_eq!(
+            app.hud_message_drawability(&message, &viewports),
+            HudMessageDrawability::NotDrawable
+        );
+        app.snapshot.hud.messages = vec![message.clone()];
+        let mut invisible = vec![0; 320 * 200 * 4];
+        app.render(&mut invisible)
+            .expect("invisible C4GM_Target is silently skipped");
+        assert_eq!(invisible, visibility_baseline);
+
+        message.kind = MessageKind::TargetPlayer;
+        message.player = Some(app.local_owner);
+        assert_eq!(
+            app.hud_message_drawability(
+                &message,
+                &app.graphics.active_viewport_projections()
+            ),
+            HudMessageDrawability::Drawable,
+            "C4GM_TargetPlayer bypasses C4Object::IsVisible"
+        );
+
+        message.kind = MessageKind::Target;
+        message.player = None;
         app.snapshot
             .players
             .iter_mut()
             .find(|player| player.id == app.local_owner)
             .expect("sandbox player")
             .fog_of_war = true;
-        app.snapshot
+        let target_object = app
+            .snapshot
             .objects
             .iter_mut()
             .find(|object| object.id == target)
-            .expect("sandbox target")
-            .category &= !C4D_IGNORE_FOW;
-        message.kind = MessageKind::TargetPlayer;
-        message.player = Some(app.local_owner);
-        app.snapshot.hud.messages = vec![message];
-        let fogged = app
-            .render(&mut frame)
-            .expect_err("FoW bitmap state is not projected");
-        assert!(matches!(
-            fogged.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::HudMessageVisibilityUnavailable { count: 1 })
-        ));
+            .expect("sandbox target");
+        target_object.visibility = lc_engine::VIS_ALL;
+        target_object.category |= C4D_IGNORE_FOW;
+        assert_eq!(
+            app.hud_message_drawability(
+                &message,
+                &app.graphics.active_viewport_projections()
+            ),
+            HudMessageDrawability::Drawable,
+            "C4D_IgnoreFoW bypasses only the FoW predicate"
+        );
     }
 
     #[test]
