@@ -3746,8 +3746,12 @@ impl HostWorldContext {
         self.definition_descriptions.get(id).map(String::as_str)
     }
 
+    fn object_live_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
+        host_object_live_shape_rect(object, &self.definitions)
+    }
+
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
-        host_object_shape_rect(object, &self.definitions)
+        sector_shape_rect(self.object_live_shape_rect(object))
     }
 
     /// The sector map over this context's objects, built on first use.
@@ -3790,6 +3794,22 @@ impl HostWorldContext {
                 sectors.add(record);
             }
         }
+    }
+
+    /// Callback-local `C4GameObjects::UpdatePos` for a live position/shape
+    /// change. Unlike a status transition this retains the object's existing
+    /// sector-list links wherever its covered area did not change.
+    fn preview_object_sector_update(&self, record: SectorObject, master_order: &[ObjectId]) {
+        if self.sector_map().is_none() {
+            return;
+        }
+        let mut cache = self.sectors.borrow_mut();
+        let Some(sectors) = cache.as_mut() else {
+            return;
+        };
+        let sectors = Rc::make_mut(sectors);
+        sectors.set_master_order(master_order.iter().copied());
+        sectors.update(record);
     }
 
     fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
@@ -3860,33 +3880,62 @@ fn host_sector_record(
     object: &HostWorldObject,
     definitions: &HashMap<DefinitionId, DefinitionMetadata>,
 ) -> Option<SectorObject> {
-    if matches!(object.status(), ObjectStatus::Deleted) {
+    if !object.status().is_active() {
         return None;
     }
     Some(SectorObject {
         id: object.id,
         position: object.position(),
-        shape_rect: host_object_shape_rect(object, definitions),
+        shape_rect: sector_shape_rect(host_object_live_shape_rect(object, definitions)),
     })
 }
 
-fn host_object_shape_rect(
+/// Exact world-space `C4Object::Shape` rectangle at callback entry.
+/// Engine-created host snapshots carry `Object::current_shape_rect()` in
+/// `ObjectState::shape_override`; the derivation and vertex fallback keep
+/// synthetic fixture contexts useful without overriding that authoritative
+/// live value.
+fn host_object_live_shape_rect(
     object: &HostWorldObject,
     definitions: &HashMap<DefinitionId, DefinitionMetadata>,
 ) -> DefinitionRect {
-    definitions
-        .get(object.definition_id())
-        .and_then(|metadata| metadata.shape)
+    let metadata = definitions.get(object.definition_id());
+    object
+        .full_state()
+        .and_then(|state| state.shape_override)
+        .or_else(|| {
+            let metadata = metadata?;
+            if metadata.line != 0 {
+                return metadata.shape;
+            }
+            crate::transformed_shape_rect(
+                metadata.shape,
+                object.construction(),
+                metadata.stretch_growth,
+                metadata.rotateable,
+                object.rotation,
+            )
+        })
         .map(|rect| {
             DefinitionRect::new(
-                object.position.x.saturating_add(rect.x),
-                object.position.y.saturating_add(rect.y),
+                object.position().x.saturating_add(rect.x),
+                object.position().y.saturating_add(rect.y),
                 rect.width,
                 rect.height,
             )
         })
         .or_else(|| host_vertex_bounds_rect(object.position(), object.vertices()))
-        .unwrap_or_else(|| DefinitionRect::new(object.position.x, object.position.y, 1, 1))
+        .unwrap_or_else(|| DefinitionRect::new(object.position().x, object.position().y, 1, 1))
+}
+
+/// `C4Object::Left/Top/Width/Height`, used by `C4LArea(Object)` and the
+/// legacy `C4Object::At` query, expand short shapes upward to an 18-pixel
+/// action area. Array Find predicates themselves use the raw shape above.
+fn sector_shape_rect(mut rect: DefinitionRect) -> DefinitionRect {
+    let add_top = (18 - rect.height).max(0);
+    rect.y = rect.y.saturating_sub(add_top);
+    rect.height = rect.height.saturating_add(add_top);
+    rect
 }
 
 fn host_vertex_bounds_rect(position: Vector2, vertices: &[ObjectVertex]) -> Option<DefinitionRect> {
@@ -3913,6 +3962,9 @@ trait WorldAccessor {
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject>;
     fn object_ids(&self) -> Vec<ObjectId>;
     fn master_object_ids(&self) -> Vec<ObjectId>;
+    /// Exact world-space `C4Object::Shape`; no `C4Object::addtop` expansion.
+    fn object_live_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect;
+    /// Sector/legacy-`At` bounds, including `C4Object::addtop`.
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect;
     fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
     fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
@@ -3992,6 +4044,10 @@ impl WorldAccessor for HostWorldContext {
         HostWorldContext::master_object_ids(self).to_vec()
     }
 
+    fn object_live_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
+        self.object_live_shape_rect(object)
+    }
+
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
         self.object_shape_rect(object)
     }
@@ -4031,6 +4087,7 @@ struct FuncFindView {
     pending_objects: HashMap<ObjectId, HostWorldObject>,
     pending_order: Vec<ObjectId>,
     master_order_preview: Option<Vec<ObjectId>>,
+    live_shape_rects: HashMap<ObjectId, DefinitionRect>,
 }
 
 impl WorldAccessor for FuncFindView {
@@ -4059,12 +4116,25 @@ impl WorldAccessor for FuncFindView {
         ids
     }
 
+    fn object_live_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
+        // A preceding Find_Func sibling may have called SetShape while this
+        // borrow-free view was evaluating the same candidate. C++ reads the
+        // live object for the next condition, so refresh this one field when
+        // the host context is available; retain snapshot semantics for every
+        // other Func-find field.
+        HOST_CONTEXT
+            .with(|cell| {
+                let borrow = cell.try_borrow().ok()?;
+                let context = borrow.as_ref()?;
+                let live_object = context.get_world_object(object.id)?;
+                Some(effect_object_live_shape_rect(context, &live_object))
+            })
+            .or_else(|| self.live_shape_rects.get(&object.id).copied())
+            .unwrap_or_else(|| self.world.object_live_shape_rect(object))
+    }
+
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
-        if self.pending_objects.contains_key(&object.id) {
-            host_object_shape_rect(object, self.world.definitions.as_ref())
-        } else {
-            self.world.object_shape_rect(object)
-        }
+        sector_shape_rect(self.object_live_shape_rect(object))
     }
 
     fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
@@ -4149,12 +4219,17 @@ fn snapshot_func_find_view() -> Option<FuncFindView> {
         let borrow = cell.borrow();
         let context = borrow.as_ref()?;
         let mut pending_objects = context.pending_objects.clone();
+        let mut live_shape_rects = pending_objects
+            .iter()
+            .map(|(&id, object)| (id, effect_object_live_shape_rect(context, object)))
+            .collect::<HashMap<_, _>>();
         let scoped_ids = context
             .scopes_in_call_order()
             .map(ObjectScopeContext::id)
             .collect::<Vec<_>>();
         for id in scoped_ids {
             if let Some(object) = context.get_world_object(id) {
+                live_shape_rects.insert(id, effect_object_live_shape_rect(context, &object));
                 pending_objects.insert(id, object);
             }
         }
@@ -4165,6 +4240,7 @@ fn snapshot_func_find_view() -> Option<FuncFindView> {
             // genuinely new objects belong in this appended list.
             pending_order: context.pending_order.clone(),
             master_order_preview: context.master_order_preview.clone(),
+            live_shape_rects,
         })
     })
 }
@@ -4197,12 +4273,12 @@ impl WorldAccessor for EffectHostContext {
         self.world.script_function_known(name)
     }
 
+    fn object_live_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
+        effect_object_live_shape_rect(self, object)
+    }
+
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
-        if self.pending_objects.contains_key(&object.id) {
-            host_object_shape_rect(object, self.world.definitions.as_ref())
-        } else {
-            self.world.object_shape_rect(object)
-        }
+        sector_shape_rect(self.object_live_shape_rect(object))
     }
 
     fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata> {
@@ -9844,6 +9920,25 @@ fn live_object_bounds_shape(
         .map(|scope| scope.vertices().to_vec())
         .unwrap_or_else(|| object.vertices.clone());
     host_vertex_bounds_rect(Vector2::ZERO, &vertices)
+}
+
+/// Exact world-space shape for a callback-live object. This is deliberately
+/// separate from `WorldAccessor::object_shape_rect`, whose sector/legacy-At
+/// contract includes `C4Object::addtop`.
+fn effect_object_live_shape_rect(
+    context: &EffectHostContext,
+    object: &HostWorldObject,
+) -> DefinitionRect {
+    live_object_bounds_shape(context, object.id)
+        .map(|shape| {
+            DefinitionRect::new(
+                object.position().x.saturating_add(shape.x),
+                object.position().y.saturating_add(shape.y),
+                shape.width,
+                shape.height,
+            )
+        })
+        .unwrap_or_else(|| DefinitionRect::new(object.position().x, object.position().y, 1, 1))
 }
 
 fn live_exit_layer_bounds(
@@ -29237,29 +29332,13 @@ impl FindCondition {
                     && position.y < rect.y + rect.height
             }
             FindCondition::AtPoint(x, y) => {
-                let metadata = world.definition_metadata(object.definition_id());
-                compute_object_bounds(object, metadata.as_ref())
-                    .map(|(left, top, right, bottom)| {
-                        *x >= left && *x < right && *y >= top && *y < bottom
-                    })
-                    .unwrap_or(false)
+                rect_contains_point_cpp(world.object_live_shape_rect(object), *x, *y)
             }
             FindCondition::AtRect(rect) => {
-                let metadata = world.definition_metadata(object.definition_id());
-                compute_object_bounds(object, metadata.as_ref())
-                    .map(|(left, top, right, bottom)| {
-                        rect.x < right
-                            && rect.x + rect.width > left
-                            && rect.y < bottom
-                            && rect.y + rect.height > top
-                    })
-                    .unwrap_or(false)
+                rects_overlap_cpp(world.object_live_shape_rect(object), *rect)
             }
             FindCondition::OnLine(x1, y1, x2, y2) => {
-                let metadata = world.definition_metadata(object.definition_id());
-                compute_object_bounds(object, metadata.as_ref())
-                    .map(|bounds| segment_intersects_bounds(*x1, *y1, *x2, *y2, bounds))
-                    .unwrap_or(false)
+                rect_intersects_line_cpp(world.object_live_shape_rect(object), *x1, *y1, *x2, *y2)
             }
             FindCondition::Distance { x, y, r2, .. } => {
                 let position = object.position();
@@ -29491,30 +29570,62 @@ fn rect_add_cpp(a: DefinitionRect, b: DefinitionRect) -> DefinitionRect {
     result
 }
 
-/// Axis-aligned segment/box intersection for C4FO_OnLine (the C++ uses
-/// `Shape.IntersectsLine`; the host shape is its vertices bounding box).
-fn segment_intersects_bounds(
-    x1: i32,
-    y1: i32,
-    x2: i32,
-    y2: i32,
-    bounds: (i32, i32, i32, i32),
-) -> bool {
-    let (left, top, right, bottom) = bounds;
-    let inside = |x: i32, y: i32| x >= left && x < right && y >= top && y < bottom;
-    if inside(x1, y1) || inside(x2, y2) {
+/// Raw `C4Rect::Contains`; unlike the convenience `DefinitionRect` methods,
+/// this preserves C++ behavior for zero/negative dimensions accepted by
+/// `SetShape` and its wrapping `int32_t` edge arithmetic.
+fn rect_contains_point_cpp(rect: DefinitionRect, x: i32, y: i32) -> bool {
+    x >= rect.x
+        && x < rect.x.wrapping_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.wrapping_add(rect.height)
+}
+
+/// Raw `C4Rect::Overlap` (C4Rect.cpp:92-99).
+fn rects_overlap_cpp(a: DefinitionRect, b: DefinitionRect) -> bool {
+    a.x.wrapping_add(a.width) > b.x
+        && a.x < b.x.wrapping_add(b.width)
+        && a.y.wrapping_add(a.height) > b.y
+        && a.y < b.y.wrapping_add(b.height)
+}
+
+/// Literal integer-edge port of `C4Rect::IntersectsLine`
+/// (C4Rect.cpp:131-155). In particular this is not a rasterized line walk:
+/// the native two edge probes and truncating divisions can accept a segment
+/// that never visits an integer point inside the rectangle.
+fn rect_intersects_line_cpp(rect: DefinitionRect, x1: i32, y1: i32, x2: i32, y2: i32) -> bool {
+    if rect_contains_point_cpp(rect, x1, y1) || rect_contains_point_cpp(rect, x2, y2) {
         return true;
     }
-    // sample the segment at integer steps (sufficient for the pixel grid)
-    let steps = (x2 - x1).abs().max((y2 - y1).abs());
-    for step in 0..=steps {
-        let x = x1 + (x2 - x1) * step / steps.max(1);
-        let y = y1 + (y2 - y1) * step / steps.max(1);
-        if inside(x, y) {
-            return true;
-        }
+    let right = rect.x.wrapping_add(rect.width);
+    let bottom = rect.y.wrapping_add(rect.height);
+    if (x1 < rect.x && x2 < rect.x)
+        || (y1 < rect.y && y2 < rect.y)
+        || (x1 >= right && x2 >= right)
+        || (y1 >= bottom && y2 >= bottom)
+    {
+        return false;
     }
-    false
+    if x1 == x2 || y1 == y2 {
+        return true;
+    }
+
+    let intersect_x = if x1 < rect.x { rect.x } else { right };
+    let intersect_y = y1.wrapping_add(
+        y2.wrapping_sub(y1)
+            .wrapping_mul(intersect_x.wrapping_sub(x1))
+            .wrapping_div(x2.wrapping_sub(x1)),
+    );
+    if intersect_y >= rect.y && intersect_y < bottom {
+        return true;
+    }
+
+    let intersect_y = if y1 < rect.y { rect.y } else { bottom };
+    let intersect_x = x1.wrapping_add(
+        x2.wrapping_sub(x1)
+            .wrapping_mul(intersect_y.wrapping_sub(y1))
+            .wrapping_div(y2.wrapping_sub(y1)),
+    );
+    intersect_x >= rect.x && intersect_x < right
 }
 
 impl SortCriterion {
@@ -36333,7 +36444,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn construction_check(
     context: &EffectHostContext,
-    definition_id: &str,
+    _definition_id: &str,
     metadata: &DefinitionMetadata,
     position: Vector2,
 ) -> Result<bool, RuntimeError> {
@@ -36404,15 +36515,15 @@ fn construction_check(
         if other.category() & overlap_mask & CATEGORY_SORT_LIMIT == 0 {
             continue;
         }
-        let other_metadata = if other.definition_id() == definition_id {
-            Some(metadata)
-        } else {
-            context.definition_metadata(other.definition_id())
-        };
-        if let Some(bounds) = compute_object_bounds(&other, other_metadata) {
-            if rectangles_overlap((rect_left, rect_top, rect_right, rect_bottom), bounds) {
-                return Ok(false);
-            }
+        let candidate = effect_object_live_shape_rect(context, &other);
+        let requested = DefinitionRect::new(
+            rect_left,
+            rect_top,
+            rect_right.wrapping_sub(rect_left),
+            rect_bottom.wrapping_sub(rect_top),
+        );
+        if rects_overlap_cpp(requested, candidate) {
+            return Ok(false);
         }
     }
 
@@ -36458,11 +36569,10 @@ fn host_overlap_object(
         if object.category() & category & CATEGORY_SORT_LIMIT == 0 {
             return false;
         }
-        let metadata = context.definition_metadata(object.definition_id());
-        let Some((left, top, right, bottom)) = compute_object_bounds(&object, metadata) else {
-            return false;
-        };
-        x < right && left < x + wdt && y < bottom && top < y + hgt
+        rects_overlap_cpp(
+            DefinitionRect::new(x, y, wdt, hgt),
+            effect_object_live_shape_rect(context, &object),
+        )
     })
 }
 
@@ -36532,60 +36642,6 @@ fn find_construction_site(args: &[Value]) -> Result<Value, RuntimeError> {
         slots.set(var_y, Value::Int(out_y));
         Ok(Value::Bool(found.is_some()))
     })
-}
-
-fn compute_object_bounds(
-    object: &HostWorldObject,
-    metadata: Option<&DefinitionMetadata>,
-) -> Option<(i32, i32, i32, i32)> {
-    if let Some(meta) = metadata {
-        if let Some(shape) = meta.shape {
-            let position = object.position();
-            let left = position.x + shape.x;
-            let top = position.y + shape.y;
-            let right = left + shape.width;
-            let bottom = top + shape.height;
-            return Some((left, top, right, bottom));
-        }
-    }
-
-    let vertices = object.vertices();
-    if vertices.is_empty() {
-        return None;
-    }
-
-    let mut min_x = vertices[0].x;
-    let mut max_x = min_x;
-    let mut min_y = vertices[0].y;
-    let mut max_y = min_y;
-    for vertex in vertices.iter().skip(1) {
-        if vertex.x < min_x {
-            min_x = vertex.x;
-        }
-        if vertex.x > max_x {
-            max_x = vertex.x;
-        }
-        if vertex.y < min_y {
-            min_y = vertex.y;
-        }
-        if vertex.y > max_y {
-            max_y = vertex.y;
-        }
-    }
-
-    let position = object.position();
-    Some((
-        position.x + min_x,
-        position.y + min_y,
-        position.x + max_x,
-        position.y + max_y,
-    ))
-}
-
-fn rectangles_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
-    let (a_left, a_top, a_right, a_bottom) = a;
-    let (b_left, b_top, b_right, b_bottom) = b;
-    a_left < b_right && a_right > b_left && a_top < b_bottom && a_bottom > b_top
 }
 
 fn create_particle(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -39919,15 +39975,17 @@ fn set_shape(args: &[Value]) -> Result<Value, RuntimeError> {
         if !context.ensure_object_scope(target) {
             return Ok(Value::Bool(false));
         }
-        Ok(Value::Bool(
-            context
-                .object_scope_mut(target)
-                .map(|object| {
-                    object.pending_update.shape_override =
-                        Some(Some(DefinitionRect::new(x, y, width, height)));
-                })
-                .is_some(),
-        ))
+        let changed = context
+            .object_scope_mut(target)
+            .map(|object| {
+                object.pending_update.shape_override =
+                    Some(Some(DefinitionRect::new(x, y, width, height)));
+            })
+            .is_some();
+        if changed {
+            context.preview_live_object_sector(target);
+        }
+        Ok(Value::Bool(changed))
     })
 }
 
@@ -46027,6 +46085,25 @@ impl EffectHostContext {
         let mut ids = self.world.master_object_ids().to_vec();
         ids.extend(self.pending_order.iter().copied());
         ids
+    }
+
+    /// Preview `C4Object::UpdatePos` after a same-call shape/position write.
+    /// `SetShape` invokes this synchronously in C++, so later bounded Find
+    /// calls must already enumerate the object's new ObjectShapes sectors.
+    fn preview_live_object_sector(&self, target: ObjectId) {
+        let Some(object) = self.get_world_object(target) else {
+            return;
+        };
+        if !object.status().is_active() {
+            return;
+        }
+        let record = SectorObject {
+            id: target,
+            position: object.position(),
+            shape_rect: sector_shape_rect(effect_object_live_shape_rect(self, &object)),
+        };
+        self.world
+            .preview_object_sector_update(record, &self.master_object_ids());
     }
 
     fn commit_object_status_preview(&mut self, target: ObjectId, ids: Vec<ObjectId>) {
@@ -75701,6 +75778,141 @@ protected func Construction()
             10,
             false,
         )
+    }
+
+    #[test]
+    fn find_shape_conditions_use_live_object_shape() {
+        // C4FindObjectAtPoint/AtRect/OnLine read pObj->Shape directly,
+        // while FnSetShape immediately calls UpdatePos to migrate the
+        // ObjectShapes sector links (C4FindObject.cpp:550-565;
+        // C4Script.cpp:5183-5194). Start in sector 1, force the old cache,
+        // then move a foreign target's shape into sector 2 in the same VM
+        // call. The post-write hits therefore require both the live
+        // predicate geometry and synchronous sector migration.
+        let target_script = r#"
+            #strict 2
+            public func ExpandForFind()
+            {
+                SetShape(60, -5, 20, 10);
+                return true;
+            }
+        "#;
+        let caller_script = r#"
+            #strict 2
+            func ShapeCounts()
+            {
+                return [
+                    ObjectCount2([11, 140, 25]),
+                    ObjectCount2([11, 145, 25]),
+                    ObjectCount2([12, 144, 25, 1, 1]),
+                    ObjectCount2([12, 145, 25, 1, 1]),
+                    ObjectCount2([13, 130, 25, 140, 25]),
+                    ObjectCount2([13, 130, 30, 150, 30]),
+                    ObjectCount2([11, 75, 25]),
+                    ObjectCount2([12, 73, 23, 4, 4]),
+                    ObjectCount2([13, 70, 25, 80, 25])
+                ];
+            }
+            public func Probe(object target)
+            {
+                var before = ShapeCounts();
+                var changed = SetShape(60, -5, 10, 10, target);
+                return [before, changed, ShapeCounts()];
+            }
+            public func VerifyPersistedShape() { return ShapeCounts(); }
+            public func ProbeFuncMutation()
+            {
+                return ObjectCount2([2, [60, "ExpandForFind"], [11, 147, 25]]);
+            }
+        "#;
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine.set_landscape(
+            Landscape::new(200, vec![120; 200]).expect("sectored landscape builds"),
+        );
+        let mut target_definition =
+            crate::Definition::from_script("TARG", "Target", target_script)
+                .expect("target definition compiles");
+        target_definition.set_shape_rect(Some(DefinitionRect::new(-2, -2, 4, 4)));
+        engine
+            .register_definition(target_definition)
+            .expect("target definition registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller definition compiles"),
+            )
+            .expect("caller definition registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG").with_position(Vector2::new(75, 25)))
+            .expect("target spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(10, 100)))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        let before = Value::Array(vec![
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(0),
+        ]);
+        let after = Value::Array(vec![
+            Value::Int(1),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+        ]);
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Probe",
+                    vec![object_reference_value(target)],
+                )
+                .expect("same-call shape probe runs"),
+            Value::Array(vec![before, Value::Bool(true), after.clone()])
+        );
+        assert_eq!(
+            engine.object_current_shape_rect(target),
+            Some(DefinitionRect::new(60, -5, 10, 10))
+        );
+
+        let caller_index = engine.find_object_index(caller).expect("caller remains");
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "VerifyPersistedShape", Vec::new())
+                .expect("persisted shape probe runs"),
+            after,
+            "the next callback's host sectors and predicates retain the live shape"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "ProbeFuncMutation", Vec::new())
+                .expect("Find_Func shape mutation probe runs"),
+            Value::Int(1),
+            "a later sibling criterion observes Find_Func's live SetShape write"
+        );
+
+        // This discriminator is true under C4Rect's two integer edge probes
+        // but false under the former pixel-sampling approximation.
+        assert!(rect_intersects_line_cpp(
+            DefinitionRect::new(0, 0, 1, 1),
+            -5,
+            -5,
+            2,
+            1,
+        ));
     }
 
     #[test]
