@@ -49952,13 +49952,17 @@ impl GameApp {
         let Some(action) = actions.into_iter().next() else {
             return Ok(());
         };
-        self.network_start_wait = None;
         match action {
             lc_frontend::network_start_wait::NetworkStartWaitAction::Restart => {
+                self.network_start_wait = None;
                 self.restart_current_network_scenario();
             }
             lc_frontend::network_start_wait::NetworkStartWaitAction::Cancel => {
+                self.network_start_wait = None;
                 self.return_to_menu();
+            }
+            lc_frontend::network_start_wait::NetworkStartWaitAction::Kick(client_id) => {
+                self.kick_classic_lobby_client(client_id);
             }
         }
         Ok(())
@@ -90927,6 +90931,92 @@ public func Grant(password) { return GainMissionAccess(password); }
             assert!(app.network_start_wait.is_none());
             assert!(app.message_dialogs.is_empty());
         }
+    }
+
+    #[test]
+    fn l104_network_start_wait_kick_click_reuses_direct_and_league_paths() {
+        let setup = |league: bool| {
+            let mut app = new_menu_app(640, 480);
+            let (network, _events, commands) =
+                NetworkManager::test_stub_with_commands_for_client_id(0);
+            app.network = Some(network);
+            app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+            app.network_is_league = league;
+            app.control_clients.replace_snapshot([
+                message_client(0, b"Host"),
+                message_client(7, b"Remote"),
+            ]);
+            if league {
+                app.control_player_infos.replace_snapshot(
+                    1,
+                    [lc_engine::PlayerInfoControlData {
+                        client_id: 7,
+                        players: vec![lc_engine::ControlPlayerInfoEntry {
+                            id: 1,
+                            name: LegacyCString::from_bytes(b"League player".to_vec()).unwrap(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                );
+            }
+            app.mode = AppMode::Loading;
+            app.begin_network_start_wait(lc_network::NetworkStatus {
+                state: lc_network::NETWORK_STATE_GO,
+                control_mode: 1,
+                target_tick: 4,
+            });
+            app.show_reached_network_start_wait()
+                .expect("show host start wait");
+            let layout = app.network_start_wait_layout().expect("visible wait layout");
+            let kick = layout
+                .clients
+                .iter()
+                .find(|row| row.client_id == 7)
+                .and_then(|row| row.kick_button)
+                .expect("remote kick button");
+            let point = GuiPoint::new(
+                (kick.x + kick.w / 2) as f32,
+                (kick.y + kick.h / 2) as f32,
+            );
+            physical_left_click_with_modifiers(
+                &mut app,
+                point,
+                ModifiersState::empty(),
+                ModifiersState::empty(),
+            );
+            assert!(app
+                .network_start_wait
+                .as_ref()
+                .is_some_and(|wait| wait.visible));
+            (app, commands)
+        };
+
+        let (_direct, mut direct_commands) = setup(false);
+        assert_eq!(
+            direct_commands.take_submitted_client_removes(),
+            vec![lc_engine::ClientRemoveControlData {
+                client_id: 7,
+                reason: LegacyCString::from_bytes(
+                    b"kicked from startup waiting dialog".to_vec()
+                )
+                .unwrap(),
+                by_client: 0,
+            }]
+        );
+        assert!(direct_commands.take_submitted_votes().is_empty());
+
+        let (_league, mut league_commands) = setup(true);
+        assert_eq!(
+            league_commands.take_submitted_votes(),
+            vec![lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: 7,
+                by_client: 0,
+            }]
+        );
+        assert!(league_commands.take_submitted_client_removes().is_empty());
     }
 
     #[test]

@@ -40,6 +40,7 @@ const BUTTON_HIGHLIGHT_WIDTH: u32 = 16;
 const BUTTON_HIGHLIGHT_HEIGHT: u32 = 16;
 
 const CLOSE_ICON_PHASE: u16 = 34;
+const KICK_ICON_PHASE: u16 = 16;
 const LIST_BACKGROUND_COLOR: u32 = 0x7f00_0000;
 const WHITE: [u8; 4] = [255, 255, 255, 255];
 
@@ -90,6 +91,7 @@ impl NetworkStartWaitClient {
 pub enum NetworkStartWaitAction {
     Restart,
     Cancel,
+    Kick(i32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +99,7 @@ pub enum NetworkStartWaitControl {
     Close,
     Restart,
     Cancel,
+    Kick(i32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +133,7 @@ pub struct NetworkStartWaitClientLayout {
     pub row: IntRect,
     pub icon: IntRect,
     pub label: IntRect,
+    pub kick_button: Option<IntRect>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -420,10 +424,21 @@ impl NetworkStartWaitState {
                     w: icon_size,
                     h: icon_size,
                 };
+                let kick_size = icon_size.max(16);
+                let kick_button = (client.client_id != 0).then_some(IntRect {
+                    x: row.x + row.w - kick_size - 2,
+                    y: row.y + 1,
+                    w: kick_size,
+                    h: kick_size,
+                });
                 let label = IntRect {
                     x: icon.x + icon.w + ICON_LABEL_SPACING,
                     y: row.y + ROW_VERTICAL_INDENT,
-                    w: (row.w - icon.w - ICON_LABEL_SPACING).max(0),
+                    w: (kick_button.map_or(row.x + row.w, |button| button.x)
+                        - icon.x
+                        - icon.w
+                        - ICON_LABEL_SPACING)
+                        .max(0),
                     h: fonts.text.line_height,
                 };
                 NetworkStartWaitClientLayout {
@@ -431,6 +446,7 @@ impl NetworkStartWaitState {
                     row,
                     icon,
                     label,
+                    kick_button,
                 }
             })
             .collect();
@@ -702,6 +718,18 @@ impl NetworkStartWaitState {
                     layout.client_list_clip,
                     false,
                 );
+                if let Some(kick_button) = row.kick_button {
+                    draw_icon_button(
+                        surface,
+                        resources,
+                        kick_button,
+                        KICK_ICON_PHASE,
+                        NetworkStartWaitControl::Kick(client.client_id),
+                        self,
+                        active,
+                        gamma,
+                    )?;
+                }
             }
         }
         match previous_clip {
@@ -804,27 +832,43 @@ fn draw_close_button(
     active: bool,
     gamma: Option<&GammaRamp>,
 ) -> Result<()> {
-    let target = NetworkStartWaitControl::Close;
+    draw_icon_button(
+        surface,
+        resources,
+        layout.close_button,
+        CLOSE_ICON_PHASE,
+        NetworkStartWaitControl::Close,
+        state,
+        active,
+        gamma,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_icon_button(
+    surface: &mut Surface,
+    resources: &NetworkStartWaitResources<'_>,
+    rect: IntRect,
+    phase: u16,
+    target: NetworkStartWaitControl,
+    state: &NetworkStartWaitState,
+    active: bool,
+    gamma: Option<&GammaRamp>,
+) -> Result<()> {
     let highlighted = active && (state.focus == Some(target) || state.hovered == Some(target));
     if highlighted {
         crate::draw_image_bilinear_additive(
             surface,
-            &gui_rect(layout.close_button),
+            &gui_rect(rect),
             &resources.button_highlight,
             gamma,
         );
     }
-    draw_standard_icon(
-        surface,
-        layout.close_button,
-        &resources.icons,
-        CLOSE_ICON_PHASE,
-        gamma,
-    )?;
+    draw_standard_icon(surface, rect, &resources.icons, phase, gamma)?;
     if active && state.target_pressed(target) {
         crate::draw_image_bilinear_additive(
             surface,
-            &gui_rect(layout.close_button),
+            &gui_rect(rect),
             &resources.button_highlight,
             gamma,
         );
@@ -866,6 +910,7 @@ fn draw_standard_icon(
 fn action_for(control: NetworkStartWaitControl) -> NetworkStartWaitAction {
     match control {
         NetworkStartWaitControl::Restart => NetworkStartWaitAction::Restart,
+        NetworkStartWaitControl::Kick(client_id) => NetworkStartWaitAction::Kick(client_id),
         NetworkStartWaitControl::Close | NetworkStartWaitControl::Cancel => {
             NetworkStartWaitAction::Cancel
         }
@@ -873,6 +918,15 @@ fn action_for(control: NetworkStartWaitControl) -> NetworkStartWaitAction {
 }
 
 fn hit_target(layout: &NetworkStartWaitLayout, point: GuiPoint) -> Option<NetworkStartWaitControl> {
+    if rect_contains(layout.client_list_clip, point) {
+        if let Some(target) = layout.clients.iter().find_map(|row| {
+            row.kick_button
+                .filter(|rect| rect_contains(*rect, point))
+                .map(|_| NetworkStartWaitControl::Kick(row.client_id))
+        }) {
+            return Some(target);
+        }
+    }
     [
         (NetworkStartWaitControl::Close, layout.close_button),
         (NetworkStartWaitControl::Restart, layout.restart_button),
@@ -1002,6 +1056,44 @@ mod tests {
             .all(|rows| rows[0].row.y < rows[1].row.y));
         assert!(state.remove_client(7));
         assert!(!state.remove_client(7));
+    }
+
+    #[test]
+    fn non_host_kick_button_emits_the_client_id_and_obeys_list_clipping() {
+        let fonts = endeavour_font_set();
+        let mut state = NetworkStartWaitState::with_clients([
+            client(0, "Host", NetworkStartWaitClientStatus::Ready),
+            client(7, "Remote", NetworkStartWaitClientStatus::Loading),
+        ]);
+        let layout = state.layout(1280, 720, &fonts);
+        assert!(layout.clients.iter().all(|row| row.client_id != 0));
+        let remote = layout
+            .clients
+            .iter()
+            .find(|row| row.client_id == 7)
+            .expect("remote row");
+        let kick = remote.kick_button.expect("remote kick button");
+        assert_eq!(kick.x + kick.w, remote.row.x + remote.row.w - 2);
+        assert_eq!(kick.y, remote.row.y + 1);
+        assert!(remote.label.x + remote.label.w <= kick.x);
+
+        assert!(state
+            .handle_pointer_down(center(remote.icon), &layout)
+            .is_empty());
+        assert!(state
+            .handle_pointer_up(center(remote.icon), &layout)
+            .is_empty());
+        assert!(state.handle_pointer_down(center(kick), &layout).is_empty());
+        assert_eq!(
+            state.handle_pointer_up(center(kick), &layout),
+            [NetworkStartWaitAction::Kick(7)]
+        );
+
+        let mut clipped = layout.clone();
+        clipped.client_list_clip.y = kick.y + kick.h;
+        clipped.client_list_clip.h = 1;
+        assert!(state.handle_pointer_down(center(kick), &clipped).is_empty());
+        assert!(state.handle_pointer_up(center(kick), &clipped).is_empty());
     }
 
     #[test]
