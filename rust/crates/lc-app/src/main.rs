@@ -31343,7 +31343,7 @@ impl GameApp {
                 audio.options.music_enabled
             })
             .expect("audio availability preflighted above");
-        self.persist_running_audio_option("Music", enabled);
+        self.persist_audio_option("Music", enabled);
         self.set_runtime_music_playback(enabled);
         self.runtime_flash_message = flash_message;
         Ok(())
@@ -31365,20 +31365,21 @@ impl GameApp {
             audio.options.sound_enabled = !audio.options.sound_enabled;
             audio.options.sound_enabled
         };
-        self.persist_running_audio_option("Sound", enabled);
+        self.persist_audio_option("Sound", enabled);
         Ok(())
     }
 
-    fn persist_running_audio_option(&self, key: &'static str, enabled: bool) {
+    fn persist_audio_option(&self, key: &'static str, enabled: bool) {
         let Some(paths) = self.app_paths.as_ref() else {
             return;
         };
-        // C4ConfigSound::CompileFunc serializes RXSound/RXMusic as the
-        // external [Sound] Sound/Music keys. Rust saves eagerly; a write
-        // failure must not roll back the live toggle, just as C++ ignores a
-        // later Config.Save failure during normal application shutdown.
+        // C4ConfigSound::CompileFunc serializes RXSound/RXMusic/FEMusic/
+        // FESamples as the external [Sound] Sound/Music/MenuMusic/MenuSound
+        // keys. Rust saves eagerly; a write failure must not roll back the
+        // live toggle, just as C++ ignores a later Config.Save failure during
+        // normal application shutdown.
         if let Err(error) = persist_config_value(paths, "Sound", key, enabled.to_string()) {
-            tracing::warn!(%error, key, "failed to persist running audio option");
+            tracing::warn!(%error, key, "failed to persist audio option");
         }
     }
 
@@ -31421,6 +31422,7 @@ impl GameApp {
                 ))
             })?;
         self.set_frontend_music_option(enabled)?;
+        self.persist_audio_option("MenuMusic", enabled);
         Ok(enabled)
     }
 
@@ -31449,6 +31451,7 @@ impl GameApp {
                 ))
             })?;
         self.set_frontend_sound_option(enabled)?;
+        self.persist_audio_option("MenuSound", enabled);
         Ok(enabled)
     }
 
@@ -156312,6 +156315,146 @@ func ControlDig() { dig_count = 1; return(1); }
             Some(ingame_menu::MenuPage::Options),
             "each native toggle reopens Options at the existing page"
         );
+    }
+
+    #[test]
+    fn frontend_f3_and_ctrl_f3_persist_menu_audio_keys_in_startup_and_loading() {
+        let mut app = new_menu_app(320, 200);
+        let user_data = tempdir().expect("isolated frontend audio config");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        for (key, value) in [
+            ("MenuMusic", "true"),
+            ("MenuSound", "true"),
+            ("Music", "true"),
+            ("Sound", "true"),
+            ("VendorExtension", "keep-me"),
+        ] {
+            persist_config_value(&paths, "Sound", key, value)
+                .unwrap_or_else(|error| panic!("seed Sound.{key}: {error}"));
+        }
+        app.app_paths = Some(paths.clone());
+        app.audio
+            .as_mut()
+            .expect("state-only test audio")
+            .options
+            .menu_music_enabled = true;
+        app.audio
+            .as_mut()
+            .expect("state-only test audio")
+            .options
+            .menu_sound_enabled = true;
+
+        let press_frontend_f3 = |app: &mut GameApp, modifiers: ModifiersState, label: &str| {
+            app.handle_modifiers_changed(modifiers)
+                .unwrap_or_else(|error| panic!("set modifiers for {label}: {error}"));
+            app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .unwrap_or_else(|error| panic!("press {label}: {error}"));
+            app.handle_key(VirtualKeyCode::F3, ElementState::Released)
+                .unwrap_or_else(|error| panic!("release {label}: {error}"));
+        };
+
+        press_frontend_f3(&mut app, ModifiersState::empty(), "startup F3");
+        let after_startup_music = Config::load(paths.config_file())
+            .expect("reload startup frontend-music toggle");
+        assert_eq!(
+            after_startup_music.get_in(Some("Sound"), "MenuMusic"),
+            Some("false")
+        );
+        assert_eq!(
+            after_startup_music.get_in(Some("Sound"), "MenuSound"),
+            Some("true"),
+            "bare F3 must not rewrite FESamples"
+        );
+
+        press_frontend_f3(&mut app, ModifiersState::CTRL, "startup Ctrl+F3");
+        let after_startup_sound = Config::load(paths.config_file())
+            .expect("reload startup frontend-sound toggle");
+        assert_eq!(
+            after_startup_sound.get_in(Some("Sound"), "MenuSound"),
+            Some("false")
+        );
+        assert_eq!(
+            after_startup_sound.get_in(Some("Sound"), "Music"),
+            Some("true")
+        );
+        assert_eq!(
+            after_startup_sound.get_in(Some("Sound"), "Sound"),
+            Some("true")
+        );
+        assert_eq!(
+            after_startup_sound.get_in(Some("Sound"), "VendorExtension"),
+            Some("keep-me")
+        );
+        let startup_reload = AudioOptions::load(Some(&paths));
+        assert!(!startup_reload.menu_music_enabled);
+        assert!(!startup_reload.menu_sound_enabled);
+
+        app.mode = AppMode::Loading;
+        press_frontend_f3(&mut app, ModifiersState::empty(), "loading F3");
+        press_frontend_f3(&mut app, ModifiersState::CTRL, "loading Ctrl+F3");
+        let after_loading = Config::load(paths.config_file())
+            .expect("reload loading frontend audio toggles");
+        assert_eq!(
+            after_loading.get_in(Some("Sound"), "MenuMusic"),
+            Some("true")
+        );
+        assert_eq!(
+            after_loading.get_in(Some("Sound"), "MenuSound"),
+            Some("true")
+        );
+        assert_eq!(
+            after_loading.get_in(Some("Sound"), "Music"),
+            Some("true")
+        );
+        assert_eq!(
+            after_loading.get_in(Some("Sound"), "Sound"),
+            Some("true")
+        );
+        assert_eq!(
+            after_loading.get_in(Some("Sound"), "VendorExtension"),
+            Some("keep-me")
+        );
+        let loading_reload = AudioOptions::load(Some(&paths));
+        assert!(loading_reload.menu_music_enabled);
+        assert!(loading_reload.menu_sound_enabled);
+    }
+
+    #[test]
+    fn frontend_audio_toggle_write_failure_keeps_live_state() {
+        let mut app = new_menu_app(320, 200);
+        let user_data = tempdir().expect("unwritable frontend audio config");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        app.app_paths = Some(paths.clone());
+        let music_before = app
+            .audio
+            .as_ref()
+            .expect("state-only test audio")
+            .options
+            .menu_music_enabled;
+        let sound_before = app
+            .audio
+            .as_ref()
+            .expect("state-only test audio")
+            .options
+            .menu_sound_enabled;
+
+        fs::remove_file(paths.config_file()).expect("remove writable config");
+        fs::create_dir(paths.config_file()).expect("replace config file with directory");
+
+        app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("frontend music stays live after persistence failure");
+        app.handle_key(VirtualKeyCode::F3, ElementState::Released)
+            .expect("release frontend music key");
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set Ctrl for frontend sound");
+        app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("frontend sound stays live after persistence failure");
+        app.handle_key(VirtualKeyCode::F3, ElementState::Released)
+            .expect("release frontend sound key");
+
+        let audio = app.audio.as_ref().expect("state-only test audio");
+        assert_eq!(audio.options.menu_music_enabled, !music_before);
+        assert_eq!(audio.options.menu_sound_enabled, !sound_before);
     }
 
     #[test]
