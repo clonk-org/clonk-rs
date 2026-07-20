@@ -184,6 +184,7 @@ fn supports_arrays_and_indexing() {
     load_script(
         &mut engine,
         r#"
+        #strict
         global func ThirdElement() {
             var arr = [1, 2, 3, 4];
             return arr[2];
@@ -233,6 +234,7 @@ fn supports_proplists_and_nested_access() {
     load_script(
         &mut engine,
         r#"
+        #strict 3
         global func ProplistQuery() {
             var data = { foo = 42, nested = { value = 7 }, numbers = [5, 9] };
             return data.foo + data.nested.value + data.numbers[1];
@@ -250,6 +252,7 @@ fn assigns_to_proplist_properties() {
     load_script(
         &mut engine,
         r#"
+        #strict 3
         global func Mutate() {
             var data = { foo = 1, nested = { value = 2 } };
             data.foo = data.foo + 41;
@@ -270,6 +273,7 @@ fn property_assignment_reports_type_errors() {
     load_script(
         &mut engine,
         r#"
+        #strict 3
         global func BadAssign() {
             var value = 5;
             value.foo = 1;
@@ -462,6 +466,7 @@ fn array_index_assignment_works() {
     load_script(
         &mut engine,
         r#"
+        #strict
         global func TestArrayIndexAssignment() {
             var arr = [0, 0, 0];
             arr[0] = 10;

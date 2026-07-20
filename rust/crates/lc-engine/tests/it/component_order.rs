@@ -165,7 +165,7 @@ fn get_needed_mat_str_matches_cpp_component_ledger_order_and_builder_context() {
 func Probe(static_site, dynamic_site, leading_site, empty_site, nonarray_site)
 {
   var own_default = GetNeededMatStr();
-  var own_nil = GetNeededMatStr(nil);
+  var own_nil = GetNeededMatStr(0);
   var static_missing = GetNeededMatStr(static_site);
   var dynamic_from_builder = GetNeededMatStr(dynamic_site);
   var dynamic_from_arrow = dynamic_site->GetNeededMatStr();
@@ -212,9 +212,10 @@ protected func GetCustomComponents(builder)
 "#;
     const LEADING_INVALID_SCRIPT: &str = r#"
 #strict 2
+local missing;
 protected func GetCustomComponents(builder)
 {
-  return [nil, WOOD];
+  return [missing, WOOD];
 }
 "#;
 

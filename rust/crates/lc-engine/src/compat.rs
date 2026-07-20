@@ -50776,13 +50776,16 @@ mod tests {
         legacy
             .load_script(
                 "#strict 2\n\
-                 func MapArgument() { return GetX({ id = 1 }); }\n\
+                 func MapArgument(value) { return GetX(value); }\n\
                  func ZeroArgument() { return GetX(0); }",
             )
             .expect("legacy native conversion probe compiles");
 
         let map_error = legacy
-            .call("MapArgument", &[])
+            .call(
+                "MapArgument",
+                &[Value::Proplist(ValueMap::from([("id", Value::Int(1))]))],
+            )
             .expect_err("a map never converts to C4Object");
         assert!(map_error.to_string().contains(
             "call to \"GetX\" parameter 1: got \"map\", but expected \"object\"!"
@@ -53785,6 +53788,7 @@ global func PreInitializePlayer(int player)
         engine
             .load_script(
                 r#"
+                #strict
                 func Probe() {
                     return [
                         ArcCos(0, 100), ArcCos(100, 100),
@@ -55165,7 +55169,7 @@ func Probe(object crew, object plain)
     var info_name = GetName(crew);
     var set = SetName("Alias", crew);
     var alias = GetName(crew);
-    var cleared = SetName(nil, crew);
+    var cleared = SetName(0, crew);
     var restored = GetName(crew);
     var plain_name = GetName(plain);
     var changed = ChangeDef(NEWW, plain);
@@ -57550,7 +57554,7 @@ public func CheckGoals()
             register_host_functions(&mut script);
             script
                 .load_script(&format!(
-                    "#strict {strict}\nfunc Probe() {{ return [Format(\"%v %v\", 0, 5), Format(\"%v\", false), Format(\"%v\", nil), Format(\"%5v\", 7)]; }}"
+                    "#strict {strict}\nfunc Probe() {{ var unset; return [Format(\"%v %v\", 0, 5), Format(\"%v\", false), Format(\"%v\", unset), Format(\"%5v\", 7)]; }}"
                 ))
                 .expect("Format strictness probe compiles");
 
@@ -57801,7 +57805,8 @@ public func Open()
             r#"#strict 2
 public func CastValues()
 {
-    return [CastC4ID(1279546187), CastInt(KSDL), CastBool(0), CastBool(7), CastInt(true), CastInt(nil), CastC4ID(0), CastC4ID(CastInt(GetID()) + 201135119), CastBool(C4Id("4294967296")), CastInt(C4Id("4294967297")), CastC4ID(C4Id("4294967296")), CastInt(CastC4ID(65536))];
+    var unset;
+    return [CastC4ID(1279546187), CastInt(KSDL), CastBool(0), CastBool(7), CastInt(true), CastInt(unset), CastC4ID(0), CastC4ID(CastInt(GetID()) + 201135119), CastBool(C4Id("4294967296")), CastInt(C4Id("4294967297")), CastC4ID(C4Id("4294967296")), CastInt(CastC4ID(65536))];
 }
 public func WideCastValues()
 {
@@ -57980,6 +57985,7 @@ public func RejectConstruction(x, y, builder)
         script
             .load_script(
                 r#"
+                #strict
                 func Grow() {
                     var values = CreateArray(2);
                     values[0] = 10;
@@ -58111,11 +58117,12 @@ public func RejectConstruction(x, y, builder)
                 r#"
                 #strict
                 func Probe() {
+                    var unset;
                     return [
                         GetChar("äb", 0), GetChar("äb", 1),
                         GetChar("abc", -1), GetChar("abc"), GetChar("abc", true),
                         GetChar("abc", 2), GetChar("abc", 3), GetChar("", -1),
-                        GetChar(nil, 0)
+                        GetChar(unset, 0)
                     ];
                 }
                 "#,
@@ -58140,7 +58147,30 @@ public func RejectConstruction(x, y, builder)
 
     #[test]
     fn get_index_of_strict2_and_older_use_cpp_scalar_equality() {
-        for directive in ["", "#strict\n", "#strict 2\n"] {
+        let mut nonstrict = ScriptEngine::new();
+        register_host_functions(&mut nonstrict);
+        nonstrict
+            .load_script("func Probe(needle, values) { return GetIndexOf(needle, values); }")
+            .expect("NONSTRICT scalar probe loads without array syntax");
+        for (needle, values) in [
+            (Value::Nil, vec![Value::Int(0)]),
+            (Value::Bool(false), vec![Value::Int(0)]),
+            (Value::Int(0), vec![Value::Bool(false)]),
+            (Value::Bool(true), vec![Value::Int(1)]),
+            (
+                Value::C4Id("ROCK".into()),
+                vec![Value::Int(i32::from_le_bytes(*b"ROCK"))],
+            ),
+        ] {
+            assert_eq!(
+                nonstrict
+                    .call("Probe", &[needle, Value::Array(values)])
+                    .expect("NONSTRICT scalar equality probe runs"),
+                Value::Int(0)
+            );
+        }
+
+        for directive in ["#strict\n", "#strict 2\n"] {
             let bool_id_index = if directive == "#strict 2\n" { -1 } else { 0 };
             let wide_id_mismatch = if cfg!(target_pointer_width = "64") {
                 -1
@@ -58153,12 +58183,13 @@ public func RejectConstruction(x, y, builder)
                 .load_script(&format!(
                     r#"{directive}
                     func Probe() {{
+                        var unset;
                         var id = C4Id("ROCK");
                         var packed = CastInt(id);
                         var wide_id = C4Id("4294967297");
                         return [
                             GetIndexOf(0, CreateArray(3)),
-                            GetIndexOf(nil, [0]),
+                            GetIndexOf(unset, [0]),
                             GetIndexOf(false, [0]),
                             GetIndexOf(0, [false]),
                             GetIndexOf(true, [1]),
@@ -58367,7 +58398,9 @@ public func RejectConstruction(x, y, builder)
 
         let mut strict2_source = ScriptEngine::new();
         strict2_source
-            .load_script("#strict 2\nfunc Probe() { return GetIndexOf(0, [nil]); }")
+            .load_script(
+                "#strict 2\nfunc Probe() { var unset; return GetIndexOf(0, [unset]); }",
+            )
             .expect("strict2 source loads");
 
         let mut strict3_destination = ScriptEngine::new();
@@ -59001,7 +59034,7 @@ public func RejectConstruction(x, y, builder)
         base.load_script(
             "public func Initialize() { return 1; }\n\
              func Probe(object target) { return LocateFunc(\"Initialize\", target); }\n\
-             func ProbeDefinition() { return LocateFunc(\"Initialize\", nil, BASE); }\n\
+             func ProbeDefinition() { return LocateFunc(\"Initialize\", 0, BASE); }\n\
              func Log() { return true; }\n\
              func ProbeNative(object target) { return LocateFunc(\"Log\", target); }",
         )
@@ -62613,7 +62646,7 @@ func ProbeDrawDefMap() {
             register_host_functions(&mut script);
             script
                 .load_script(
-                    "global func Probe() { return [Hostile(1, 2), Hostile(2, 1), Hostile(1, 2, true), Hostile(2, 1, true), Hostile(1, 1), Hostile(1, 99), SetHostility(2, 1, true, true, true), Hostile(2, 1, true), SetHostility(2, 2, true, true, true), SetHostility(2, 99, true, true, true)]; }",
+                    "#strict\nglobal func Probe() { return [Hostile(1, 2), Hostile(2, 1), Hostile(1, 2, true), Hostile(2, 1, true), Hostile(1, 1), Hostile(1, 99), SetHostility(2, 1, true, true, true), Hostile(2, 1, true), SetHostility(2, 2, true, true, true), SetHostility(2, 99, true, true, true)]; }",
                 )
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
             script
@@ -62853,7 +62886,7 @@ func ProbeDrawDefMap() {
             register_host_functions(&mut script);
             script
                 .load_script(
-                    "global func Probe() { return [GetTaggedPlayerName(5), GetTaggedPlayerName(99)]; }",
+                    "#strict\nglobal func Probe() { return [GetTaggedPlayerName(5), GetTaggedPlayerName(99)]; }",
                 )
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
             script
@@ -62890,7 +62923,7 @@ func ProbeDrawDefMap() {
             register_host_functions(&mut script);
             script
                 .load_script(
-                    "global func Probe() { return [GetPlayerVal(\"ViewX\", 0, 0), GetPlayerVal(\"ViewY\", 0, 0)]; }",
+                    "#strict\nglobal func Probe() { return [GetPlayerVal(\"ViewX\", 0, 0), GetPlayerVal(\"ViewY\", 0, 0)]; }",
                 )
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
             script
@@ -63383,6 +63416,7 @@ func ProbeDrawDefMap() {
             script
                 .load_script(
                     r#"
+                    #strict
                     global func GetPlrCoreJumpAndRunControl(int plr)
                     {
                         return GetPlayerInfoCoreVal("AutoStopControl", "Preferences", plr);
@@ -63965,7 +63999,7 @@ func Probe(object crew, object info_less)
 {
     return [GetCrewExtraData(0, "missing"),
             GetCrewExtraData(0, "number"),
-            GetCrewExtraData(nil, "text"),
+            GetCrewExtraData(0, "text"),
             GetCrewExtraData(crew, "id"),
             GetCrewExtraData(crew, "NUMBER"),
             GetCrewExtraData(info_less, "number")];
@@ -64077,6 +64111,7 @@ func Probe(object crew, object info_less)
         let script = r#"#strict 2
 func Mutate(object crew, object info_less, id_value)
 {
+    var unset;
     return [SetCrewExtraData(crew, "visited", 1),
             GetCrewExtraData(crew, "visited"),
             SetCrewExtraData(0, "visited", 2),
@@ -64085,7 +64120,7 @@ func Mutate(object crew, object info_less, id_value)
             GetCrewExtraData(crew, "flag"),
             SetCrewExtraData(crew, "kind", id_value),
             GetCrewExtraData(crew, "kind"),
-            SetCrewExtraData(crew, "empty", nil),
+            SetCrewExtraData(crew, "empty", unset),
             SetCrewExtraData(crew, "", 3),
             SetCrewExtraData(crew, "bad name!", 3),
             SetCrewExtraData(crew, "visited", "blocked"),
@@ -65255,7 +65290,7 @@ func Sawable(obj) {
   return GetID(obj) != WOOD && GetComponent(WOOD, 0, obj)
          && ComponentAll(obj, WOOD);
 }
-func Missing() { return ComponentAll(nil, WOOD); }
+func Missing() { return ComponentAll(0, WOOD); }
 "#,
             )
             .expect("sawmill predicate compiles");
@@ -67388,7 +67423,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             global func Step(state, frame, random)
             {
                 AsyncRandom(32768);
-                return nil;
+                return 0;
             }
         "#;
 
@@ -67682,14 +67717,15 @@ func Missing() { return ComponentAll(nil, WOOD); }
             .load_script(
                 r#"#strict 2
 func Probe(state) {
+  var unset;
   var renamed = ChangeEffect("Int*", this(), 0, "IntFadeOut", 10);
   var preserved = ChangeEffect("Keep", this(), 0, "KeepOut", -1);
   var empty_rejected = ChangeEffect("KeepOut", this(), 0, "", 1);
-  var nil_rejected = ChangeEffect("KeepOut", this(), 0, nil, 1);
+  var nil_rejected = ChangeEffect("KeepOut", this(), 0, unset, 1);
   var missing_rejected = ChangeEffect("Missing", this(), 0, "StillMissing", 1);
-  var by_number = ChangeEffect(nil, this(), 12, "ByNumber", -7);
+  var by_number = ChangeEffect(unset, this(), 12, "ByNumber", -7);
   var omitted_timer = ChangeEffect("Omitted", this(), 0, "Reset");
-  var clamped = ChangeEffect(nil, this(), 14, "abcdefghijklmnopqrstuvwxyz1234567890", -1);
+  var clamped = ChangeEffect(unset, this(), 14, "abcdefghijklmnopqrstuvwxyz1234567890", -1);
   return [
     renamed,
     GetEffect("IntFadeOut", this(), 0, 3),
@@ -67699,14 +67735,14 @@ func Probe(state) {
     nil_rejected,
     missing_rejected,
     by_number,
-    GetEffect(nil, this(), 12, 1),
-    GetEffect(nil, this(), 12, 3),
-    GetEffect(nil, this(), 12, 6),
+    GetEffect(unset, this(), 12, 1),
+    GetEffect(unset, this(), 12, 3),
+    GetEffect(unset, this(), 12, 6),
     omitted_timer,
-    GetEffect(nil, this(), 13, 3),
-    GetEffect(nil, this(), 13, 6),
+    GetEffect(unset, this(), 13, 3),
+    GetEffect(unset, this(), 13, 6),
     clamped,
-    GetEffect(nil, this(), 14, 1)
+    GetEffect(unset, this(), 14, 1)
   ];
 }
 "#,
@@ -72001,7 +72037,7 @@ func Probe(state) {
             register_host_functions(&mut script);
             script
                 .load_script(
-                    "func Probe(a, b, c) { return [ObjectNumber(), ObjectNumber(nil), ObjectNumber(a), ObjectNumber(b), ObjectNumber(c), Format(\"Object(%d)\", ObjectNumber(a))]; }",
+                    "#strict\nfunc Probe(a, b, c) { var unset; return [ObjectNumber(), ObjectNumber(unset), ObjectNumber(a), ObjectNumber(b), ObjectNumber(c), Format(\"Object(%d)\", ObjectNumber(a))]; }",
                 )
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
             script
@@ -72191,8 +72227,9 @@ func Probe(state) {
         let caller_script = r#"#strict 2
 func Probe(object other)
 {
+    var unset;
     return [GetXDir(other, 100), GetYDir(other),
-            other->GetXDir(nil, 100), other->GetYDir()];
+            other->GetXDir(unset, 100), other->GetYDir()];
 }
 "#;
         let mut engine = crate::Engine::with_seed(0);
@@ -74036,7 +74073,8 @@ public func Probe(object carrier)
         let script = r#"#strict
 func Probe(object pRaw, object pRuntimeCrew)
 {
-    return [CrewMember(), CrewMember(pRaw), CrewMember(nil), pRaw->CrewMember(), CrewMember(pRuntimeCrew)];
+    var unset;
+    return [CrewMember(), CrewMember(pRaw), CrewMember(unset), pRaw->CrewMember(), CrewMember(pRuntimeCrew)];
 }
 
 func ChangeAndProbe()
@@ -75956,7 +75994,7 @@ public func BuyAt(int for_player, int pay_player, object target, bool show_error
 }
 public func BuyHere(int for_player, int pay_player, bool show_errors)
 {
-    return Buy(ITEM, for_player, pay_player, nil, show_errors);
+    return Buy(ITEM, for_player, pay_player, 0, show_errors);
 }
 public func BuyCrew(int for_player, int pay_player, object target)
 {
@@ -77857,7 +77895,7 @@ protected func Construction()
             let mut script = lc_script::Engine::new();
             register_host_functions(&mut script);
             script
-                .load_script("global func Probe(pObj) { return [GetBase(pObj), GetBase()]; }")
+                .load_script("#strict\nglobal func Probe(pObj) { return [GetBase(pObj), GetBase()]; }")
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
             script
                 .call("Probe", &[object_reference_value(hut)])

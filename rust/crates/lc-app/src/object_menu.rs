@@ -4338,6 +4338,7 @@ mod tests {
     #[test]
     fn context_menu_generates_actions() {
         let script = r#"
+        #strict 3
         global func Initialize(state, random) { return nil; }
         global func MenuEntries(state)
         {

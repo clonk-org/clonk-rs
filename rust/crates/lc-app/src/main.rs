@@ -90119,8 +90119,8 @@ fn c4_audio_distance(first: Vector2, second: Vector2) -> i32 {
 
 fn walker_script() -> &'static str {
     r#"
-global func Initialize(state, random) { return nil; }
-global func Step(state, frame, random) { return nil; }
+global func Initialize(state, random) { return 0; }
+global func Step(state, frame, random) { return 0; }
 "#
 }
 

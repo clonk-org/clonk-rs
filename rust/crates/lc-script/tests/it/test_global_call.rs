@@ -161,34 +161,47 @@ fn setglobal_builtin_normalizes_native_any_values_by_caller_strictness() {
 
     let script = r#"
 func Probe() {
-    var zero = SetGlobal(1, TypedZero());
-    var flag = SetGlobal(2, TypedFalse());
-    return [zero, flag, Global(1), Global(2)];
+    SetGlobal(3, SetGlobal(1, TypedZero()));
+    SetGlobal(4, SetGlobal(2, TypedFalse()));
 }
+func Read(index) { return Global(index); }
 "#;
     let mut nonstrict = Engine::new();
     register_falsy_hosts(&mut nonstrict);
     nonstrict
         .load_script(script)
         .expect("nonstrict SetGlobal script parses");
-    assert_eq!(
-        nonstrict.call("Probe", &[]).expect("nonstrict call runs"),
-        Value::Array(vec![Value::Nil; 4])
-    );
+    nonstrict.call("Probe", &[]).expect("nonstrict call runs");
+    let nonstrict_values = (1..=4)
+        .map(|index| {
+            nonstrict
+                .call("Read", &[Value::Int(index)])
+                .expect("nonstrict global read runs")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(nonstrict_values, vec![Value::Nil; 4]);
 
     let mut strict = Engine::new();
     register_falsy_hosts(&mut strict);
     strict
         .load_script(&format!("#strict 3\n{script}"))
         .expect("strict SetGlobal script parses");
+    strict.call("Probe", &[]).expect("strict call runs");
+    let strict_values = (1..=4)
+        .map(|index| {
+            strict
+                .call("Read", &[Value::Int(index)])
+                .expect("strict global read runs")
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        strict.call("Probe", &[]).expect("strict call runs"),
-        Value::Array(vec![
+        strict_values,
+        vec![
             Value::Int(0),
             Value::Bool(false),
             Value::Int(0),
             Value::Bool(false),
-        ])
+        ]
     );
 }
 

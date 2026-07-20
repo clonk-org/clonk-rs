@@ -34,8 +34,14 @@ fn runtime_error(source: &str) -> String {
 #[test]
 fn nil_coerces_to_zero_in_addition() {
     // _getInt(nil) == 0  =>  nil + 5 == 5
-    assert_eq!(eval("func Test() { return nil + 5; }"), Value::Int(5));
-    assert_eq!(eval("func Test() { return 1 + nil; }"), Value::Int(1));
+    assert_eq!(
+        eval("func Test() { var empty; return empty + 5; }"),
+        Value::Int(5)
+    );
+    assert_eq!(
+        eval("func Test() { var empty; return 1 + empty; }"),
+        Value::Int(1)
+    );
 }
 
 #[test]
@@ -94,7 +100,10 @@ fn comparison_result_flows_into_arithmetic() {
 #[test]
 fn nil_coerces_to_zero_in_comparison() {
     // 0 < 5 == true
-    assert_eq!(eval("func Test() { return nil < 5; }"), Value::Bool(true));
+    assert_eq!(
+        eval("func Test() { var empty; return empty < 5; }"),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -102,7 +111,10 @@ fn bool_coerces_in_bitwise_and_multiply() {
     // 7 & 1 == 1
     assert_eq!(eval("func Test() { return 7 & true; }"), Value::Int(1));
     // nil * 3 == 0
-    assert_eq!(eval("func Test() { return nil * 3; }"), Value::Int(0));
+    assert_eq!(
+        eval("func Test() { var empty; return empty * 3; }"),
+        Value::Int(0)
+    );
 }
 
 #[test]
@@ -116,13 +128,19 @@ fn bitwise_or_and_xor_share_left_associative_precedence() {
 #[test]
 fn unary_minus_coerces_like_cpp() {
     // C4AulExec.cpp:468-470 AB_Neg: SetInt(-_getInt())
-    assert_eq!(eval("func Test() { return -nil; }"), Value::Int(0));
+    assert_eq!(
+        eval("func Test() { var empty; return -empty; }"),
+        Value::Int(0)
+    );
     assert_eq!(eval("func Test() { return -true; }"), Value::Int(-1));
 }
 
 #[test]
 fn unary_bitnot_coerces_like_cpp() {
     // C4AulExec.cpp:460-462 AB_BitNot: SetInt(~_getInt()); ~0 == -1, ~1 == -2
-    assert_eq!(eval("func Test() { return ~nil; }"), Value::Int(-1));
+    assert_eq!(
+        eval("func Test() { var empty; return ~empty; }"),
+        Value::Int(-1)
+    );
     assert_eq!(eval("func Test() { return ~true; }"), Value::Int(-2));
 }

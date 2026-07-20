@@ -141,19 +141,24 @@ fn path_free2_native_integer_slots_apply_legacy_falsy_conversion() {
         engine
     }
 
+    // Validate the former [result, x, y] tuple inside one NONSTRICT call;
+    // array syntax itself is unavailable below STRICT 1.
     let nonstrict = r#"
 global func Probe()
 {
     var x = 1, y = 1;
-    var result = PathFree2(x, y, ZeroId(), ZeroId());
-    return [result, x, y];
+    if (!PathFree2(x, y, ZeroId(), ZeroId())) return -1;
+    if (x != 1) return -2;
+    if (y != 1) return -3;
+    return 1;
 }
 "#;
+    let nonstrict = script_engine(nonstrict);
     assert_eq!(
-        script_engine(nonstrict)
+        nonstrict
             .call("Probe", &[])
             .expect("nonstrict native conversion runs"),
-        Value::Array(vec![Value::Bool(true), Value::Int(1), Value::Int(1)])
+        Value::Int(1)
     );
 
     let strict_three = r#"#strict 3

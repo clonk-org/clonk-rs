@@ -83,7 +83,7 @@ protected func Probe(pTarget)
     var set_r = SetR(271, pTarget);
     var after_r = GetR(pTarget);
     return [before_rdir, before_r, set_rdir, after_rdir,
-            set_r, after_r, GetRDir(nil, 10), GetR()];
+            set_r, after_r, GetRDir(0, 10), GetR()];
 }
 "#;
 
@@ -217,7 +217,7 @@ fn construction_reads_spawn_rotation_velocity_before_object_insertion() {
 local construction_rdir;
 protected func Construction()
 {
-    construction_rdir = GetRDir(nil, 100);
+    construction_rdir = GetRDir(0, 100);
 }
 "#;
     let mut definition =
@@ -464,8 +464,9 @@ fn sim_flight_optional_precision_default_follows_caller_strictness() {
             r#"#strict {strict_level}
             func Probe()
             {{
+                var unset;
                 var x = 2, y = 2, xdir = 20, ydir = 10;
-                var result = SimFlight(x, y, xdir, ydir, nil, nil, nil, {precision});
+                var result = SimFlight(x, y, xdir, ydir, unset, unset, unset, {precision});
                 return [result, x, y, xdir, ydir];
             }}
             "#

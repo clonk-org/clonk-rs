@@ -30,7 +30,7 @@ fn empty_string_is_truthy_like_cpp() {
 #[test]
 fn empty_array_is_truthy_like_cpp() {
     assert_eq!(
-        eval("func Test() { if ([]) { return 1; } return 0; }"),
+        eval("#strict\nfunc Test() { if ([]) { return 1; } return 0; }"),
         Value::Int(1)
     );
 }

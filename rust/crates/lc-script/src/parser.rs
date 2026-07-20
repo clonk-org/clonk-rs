@@ -615,7 +615,8 @@ impl<'a> Parser<'a> {
                 | Keyword::Global
                 | Keyword::Func,
             ) => return Ok(true),
-            TokenKind::Identifier(_) | TokenKind::C4Id(_) | TokenKind::Keyword(_) => {}
+            TokenKind::Identifier(_) | TokenKind::C4Id(_) => {}
+            TokenKind::Keyword(keyword) if *keyword != Keyword::Nil => {}
             _ => return Ok(false),
         }
 
@@ -663,6 +664,18 @@ impl<'a> Parser<'a> {
                 break;
             }
 
+            // Strict-3 `nil` is ATT_NIL, not an identifier or a parameter
+            // type. A union that starts with an ordinary type is handled by
+            // the existing type grammar below.
+            let parameter_start = self.peek()?.clone();
+            if matches!(parameter_start.kind, TokenKind::Keyword(Keyword::Nil)) {
+                return Err(ParseError::new(
+                    "expected parameter name",
+                    parameter_start.line,
+                    parameter_start.column,
+                ));
+            }
+
             // Check for optional type annotation
             let type_annotation = self.parse_type_annotation()?;
 
@@ -679,11 +692,10 @@ impl<'a> Parser<'a> {
                     self.consume()?;
                     (name, type_annotation)
                 }
-                // C4Aul keywords are contextual (plain ATT_IDTF words in the
-                // C++ tokenizer), so any keyword is a legal parameter name —
-                // `func SetPrivateTeleporter(bool private)` (Hazard
-                // Teleporter.c4d/Script.c:238).
-                TokenKind::Keyword(keyword) => {
+                // C4Aul declaration words are contextual (plain ATT_IDTF
+                // words in the C++ tokenizer), so names such as `private`
+                // remain legal; strict-3 `nil` is reserved above.
+                TokenKind::Keyword(keyword) if *keyword != Keyword::Nil => {
                     let name = keyword.lexeme().to_string();
                     self.consume()?;
                     (name, type_annotation)
@@ -1229,10 +1241,7 @@ impl<'a> Parser<'a> {
         self.begin_speculative();
         let result = (|| {
             self.consume_if_keyword(Keyword::Var)?;
-            if !matches!(
-                self.peek()?.kind,
-                TokenKind::Identifier(_) | TokenKind::Keyword(_)
-            ) {
+            if !Self::is_identifier_name_token(&self.peek()?.kind) {
                 return Ok(None);
             }
             self.consume()?;
@@ -1241,10 +1250,7 @@ impl<'a> Parser<'a> {
                 return Ok(Some(1));
             }
             if self.consume_if_symbol(Symbol::Comma)?.is_none()
-                || !matches!(
-                    self.peek()?.kind,
-                    TokenKind::Identifier(_) | TokenKind::Keyword(_)
-                )
+                || !Self::is_identifier_name_token(&self.peek()?.kind)
             {
                 return Ok(None);
             }
@@ -2001,14 +2007,14 @@ impl<'a> Parser<'a> {
 
     fn parse_navigation_operation(&mut self) -> Result<Option<NavigationOperation>, ParseError> {
         if let Some(bracket) = self.consume_if_symbol(Symbol::LBracket)? {
+            if self.strict_level == 0 {
+                return Err(ParseError::new(
+                    "unexpected '['".to_string(),
+                    bracket.line,
+                    bracket.column,
+                ));
+            }
             if self.check_symbol(Symbol::RBracket)? {
-                if self.strict_level == 0 {
-                    return Err(ParseError::new(
-                        "unexpected '['".to_string(),
-                        bracket.line,
-                        bracket.column,
-                    ));
-                }
                 self.consume()?;
                 return Ok(Some(NavigationOperation::ArrayAppend));
             }
@@ -2016,7 +2022,14 @@ impl<'a> Parser<'a> {
             self.expect_symbol(Symbol::RBracket, "expected ']' after index expression")?;
             return Ok(Some(NavigationOperation::Index(Box::new(index))));
         }
-        if self.consume_if_symbol(Symbol::Dot)?.is_some() {
+        if let Some(dot) = self.consume_if_symbol(Symbol::Dot)? {
+            if self.strict_level < 3 {
+                return Err(ParseError::new(
+                    "unexpected '.'".to_string(),
+                    dot.line,
+                    dot.column,
+                ));
+            }
             let (name, _) = self.expect_identifier("expected property name after '.'")?;
             return Ok(Some(NavigationOperation::Property(name)));
         }
@@ -2164,8 +2177,26 @@ impl<'a> Parser<'a> {
                 self.expect_symbol(Symbol::RParen, "expected ')' after expression")?;
                 Ok(expr)
             }
-            TokenKind::Symbol(Symbol::LBracket) => self.parse_array_literal(),
-            TokenKind::Symbol(Symbol::LBrace) => self.parse_proplist_literal(),
+            TokenKind::Symbol(Symbol::LBracket) => {
+                if self.strict_level == 0 {
+                    return Err(ParseError::new(
+                        "unexpected '['".to_string(),
+                        token.line,
+                        token.column,
+                    ));
+                }
+                self.parse_array_literal()
+            }
+            TokenKind::Symbol(Symbol::LBrace) => {
+                if self.strict_level < 3 {
+                    return Err(ParseError::new(
+                        "unexpected '{'".to_string(),
+                        token.line,
+                        token.column,
+                    ));
+                }
+                self.parse_proplist_literal()
+            }
             _ => Err(ParseError::new(
                 "unexpected token in expression",
                 token.line,
@@ -2267,6 +2298,11 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn is_identifier_name_token(kind: &TokenKind) -> bool {
+        matches!(kind, TokenKind::Identifier(_))
+            || matches!(kind, TokenKind::Keyword(keyword) if *keyword != Keyword::Nil)
+    }
+
     fn expect_keyword(&mut self, keyword: Keyword, message: &str) -> Result<(), ParseError> {
         let token = self.peek()?.clone();
         match token.kind {
@@ -2301,10 +2337,11 @@ impl<'a> Parser<'a> {
         let token = self.peek()?.clone();
         let name = match &token.kind {
             TokenKind::Identifier(name) => name.clone(),
-            // C4Aul keywords are contextual: the C++ tokenizer emits plain
-            // ATT_IDTF for every word, so names like `var func, objhgt`
-            // (planet/System.c4g/Commits.c:269) are legal.
-            TokenKind::Keyword(keyword) => keyword.lexeme().to_string(),
+            // C4Aul declaration words are contextual: the C++ tokenizer
+            // emits plain ATT_IDTF for them, so names like `var func, objhgt`
+            // (planet/System.c4g/Commits.c:269) are legal. Strict-3 `nil`
+            // remains the reserved ATT_NIL token.
+            TokenKind::Keyword(keyword) if *keyword != Keyword::Nil => keyword.lexeme().to_string(),
             _ => {
                 return Err(ParseError::new(
                     message.to_string(),
@@ -2324,7 +2361,7 @@ impl<'a> Parser<'a> {
         let token = self.peek()?.clone();
         let name = match &token.kind {
             TokenKind::Identifier(name) | TokenKind::C4Id(name) => name.clone(),
-            TokenKind::Keyword(keyword) => keyword.lexeme().to_string(),
+            TokenKind::Keyword(keyword) if *keyword != Keyword::Nil => keyword.lexeme().to_string(),
             _ => {
                 return Err(ParseError::new(
                     message.to_string(),
@@ -2510,6 +2547,10 @@ fn static_const_multi_declarators_parse() {
         Parser::new(source).parse_script()
     }
 
+    fn parse_expression_at_strict(source: &str, strict_level: u8) -> Result<Expr, ParseError> {
+        Parser::with_strict_level(source, Some(strict_level)).parse_direct_exec_expression()
+    }
+
     // C4Aul precedence: unary `!` binds its operand only — `!A && B` is
     // `(!A) && B`. The speculative assignment-operand parse (`!x = y` ->
     // `!(x = y)`, the DYNB pattern) must not swallow binary chains: the
@@ -2582,6 +2623,86 @@ fn static_const_multi_declarators_parse() {
     }
 
     #[test]
+    fn nil_is_contextual_below_strict_three() {
+        for strict_level in 0..3 {
+            let expression = parse_expression_at_strict("nil", strict_level)
+                .expect("nil remains an identifier below strict three");
+            assert!(
+                matches!(expression, Expr::Variable(name) if name == "nil"),
+                "strict level {strict_level} must bind nil as an identifier"
+            );
+
+            let mut parser =
+                Parser::with_strict_level("func Echo(nil) { return nil; }", Some(strict_level));
+            let script = parser
+                .parse_script()
+                .expect("nil is legal as a bound parameter below strict three");
+            assert_eq!(script.functions[0].params[0].name, "nil");
+            assert!(matches!(
+                &script.functions[0].body[0],
+                Stmt::Return(Some(Expr::Variable(name))) if name == "nil"
+            ));
+        }
+
+        assert!(matches!(
+            parse_expression_at_strict("nil", 3).expect("strict-three nil literal parses"),
+            Expr::Literal(Literal::Nil)
+        ));
+        assert!(matches!(
+            parse_expression_at_strict("Nil", 3).expect("reserved nil is case-sensitive"),
+            Expr::Variable(name) if name == "Nil"
+        ));
+
+        for source in ["func nil() {}", "func Echo(nil) { return nil; }"] {
+            let mut parser = Parser::with_strict_level(source, Some(3));
+            assert!(
+                parser.parse_script().is_err(),
+                "strict-three nil must stay reserved in {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn array_syntax_requires_strict_one() {
+        for source in ["[1]", "value[0]", "value[\"key\"]", "value[]"] {
+            let error = parse_expression_at_strict(source, 0)
+                .expect_err("NONSTRICT array syntax must be rejected");
+            assert_eq!(error.message(), "unexpected '['", "source: {source}");
+
+            for strict_level in 1..=3 {
+                parse_expression_at_strict(source, strict_level).unwrap_or_else(|error| {
+                    panic!("strict level {strict_level} must accept {source:?}: {error}")
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn map_and_dot_require_strict_three() {
+        for strict_level in 0..3 {
+            let map_error = parse_expression_at_strict("{key = 1}", strict_level)
+                .expect_err("pre-strict-three map literals must be rejected");
+            assert_eq!(map_error.message(), "unexpected '{'");
+
+            let dot_error = parse_expression_at_strict("value.key", strict_level)
+                .expect_err("pre-strict-three dot access must be rejected");
+            assert_eq!(dot_error.message(), "unexpected '.'");
+
+            parse_expression_at_strict("1 .. 2", strict_level)
+                .expect("concatenation dots are not property access");
+            parse_expression_at_strict("value->Get()", strict_level)
+                .expect("arrow navigation is not dot access");
+        }
+
+        parse_expression_at_strict("{key = 1}", 3).expect("strict-three map literal parses");
+        parse_expression_at_strict("value.key", 3).expect("strict-three dot access parses");
+
+        let reserved_key = parse_expression_at_strict("value.nil", 3)
+            .expect_err("strict-three nil is not an identifier after dot");
+        assert_eq!(reserved_key.message(), "expected property name after '.'");
+    }
+
+    #[test]
     fn invented_word_operators_are_ordinary_identifiers() {
         for expression in [
             "1 lt 2",
@@ -2600,7 +2721,7 @@ fn static_const_multi_declarators_parse() {
         }
 
         parse_script(
-            "func Test() { \
+            "#strict\nfunc Test() { \
                  var lt, le, gt, ge, and, or, not; \
                  lt = 1; le = 2; gt = 3; ge = 4; and = 5; or = 6; not = 7; \
                  return [lt, le, gt, ge, and, or, not]; \
@@ -2660,7 +2781,7 @@ fn static_const_multi_declarators_parse() {
     fn array_statement_after_first_body_position_is_not_a_description() {
         // C4AulParse.cpp:1709-1711 calls Parse_Desc exactly once, before
         // Parse_Function; a later bracket expression remains executable.
-        let script = parse_script("func Test() { var marker; [marker]; return 42; }")
+        let script = parse_script("#strict\nfunc Test() { var marker; [marker]; return 42; }")
             .expect("array statement parses");
 
         assert!(script.functions[0]
@@ -2766,32 +2887,33 @@ fn static_const_multi_declarators_parse() {
 
     #[test]
     fn parse_array_index_assignment() {
-        let result = parse_script("func Test() { var arr = [1, 2]; arr[0] = 3; }");
+        let result = parse_script("#strict\nfunc Test() { var arr = [1, 2]; arr[0] = 3; }");
         assert!(result.is_ok());
     }
 
     #[test]
     fn parse_nested_array_index_assignment() {
-        let result = parse_script("func Test() { var m = [[1]]; m[0][0] = 2; }");
+        let result = parse_script("#strict\nfunc Test() { var m = [[1]]; m[0][0] = 2; }");
         assert!(result.is_ok());
     }
 
     #[test]
     fn parse_proplist_property_assignment() {
-        let result = parse_script("func Test() { var obj = {}; obj.prop = 1; }");
+        let result = parse_script("#strict 3\nfunc Test() { var obj = {}; obj.prop = 1; }");
         assert!(result.is_ok());
     }
 
     #[test]
     fn parse_nested_proplist_assignment() {
-        let result = parse_script("func Test() { var obj = {n={}}; obj.n.prop = 1; }");
+        let result = parse_script("#strict 3\nfunc Test() { var obj = {n={}}; obj.n.prop = 1; }");
         assert!(result.is_ok());
     }
 
     #[test]
     fn parse_map_literal_computed_keys_as_expressions() {
         let script = parse_script(
-            r#"func Test(object_key) {
+            r#"#strict 3
+            func Test(object_key) {
                 return { bare = 1, "quoted" = 2, [42] = 3, [CLNK] = 4, [object_key] = 5 };
             }"#,
         )
@@ -2822,7 +2944,7 @@ fn static_const_multi_declarators_parse() {
 
     #[test]
     fn computed_map_key_requires_closing_bracket() {
-        let error = parse_script("func Test() { return { [42) = 1 }; }")
+        let error = parse_script("#strict 3\nfunc Test() { return { [42) = 1 }; }")
             .expect_err("unterminated computed key must fail");
         assert!(error
             .message()

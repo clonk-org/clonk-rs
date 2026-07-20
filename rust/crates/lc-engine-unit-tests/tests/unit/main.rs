@@ -221,7 +221,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
 
-    const STATEFUL_SCRIPT: &str = r#"
+    const STATEFUL_SCRIPT: &str = r#"#strict 3
     global func Initialize(state, random)
     {
         var vx = state.velocity[0] + (random % 5);
@@ -249,8 +249,8 @@ mod tests {
     "#;
 
     const BASIC_OBJECT_SCRIPT: &str = r#"
-    global func Initialize(state, random) { return nil; }
-    global func Step(state, frame, random) { return nil; }
+    global func Initialize(state, random) { return 0; }
+    global func Step(state, frame, random) { return 0; }
     "#;
 
     #[test]
@@ -5359,7 +5359,7 @@ func Incineration(iCause) { return 1; }
         let script = r#"#strict 2
 global func FxFireStart(pTarget, iNumber, iTemp, iCause, fBlasted, pIncinerating, iUnused) { return 0; }
 func ViaIncinerate() { return Incinerate(); }
-func ViaAddEffect(pIncinerating) { return AddEffect("Fire", this(), 100, 1, nil, nil, 7, true, pIncinerating, nil); }
+func ViaAddEffect(pIncinerating) { var no_value; return AddEffect("Fire", this(), 100, 1, no_value, no_value, 7, true, pIncinerating, no_value); }
 func FireMode() { return 3; }
 func Incineration(iCause) { return 1; }
 "#;
@@ -5968,7 +5968,7 @@ func Incineration(iCause) { return 1; }
             Ok(definition)
         }
         const PLAIN: &str = r#"
-        global func Initialize(state, random) { return nil; }
+        global func Initialize(state, random) { return 0; }
         "#;
 
         let mut engine = Engine::with_seed(50);
@@ -6086,7 +6086,7 @@ func Incineration(iCause) { return 1; }
                 id,
                 id,
                 r#"
-                global func Initialize(state, random) { return nil; }
+                global func Initialize(state, random) { return 0; }
                 "#,
             )?;
             definition.set_crew_member(true);
@@ -8880,16 +8880,16 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
     const PASSIVE_PLAYER_SCRIPT: &str = r#"
 global func Initialize(state, random)
 {
-    return nil;
+    return 0;
 }
 
 global func Step(state, frame, random)
 {
-    return nil;
+    return 0;
 }
 "#;
 
-    const EFFECT_HOST_SCRIPT: &str = r#"
+    const EFFECT_HOST_SCRIPT: &str = r#"#strict 3
     global func Initialize(state, random)
     {
         if (!GetEffect("Glow", this()))
@@ -8928,7 +8928,7 @@ global func Step(state, frame, random)
     {
         AddEffect("Glow", this(), 120, 3);
         AddEffect("Spark", this(), 100);
-        return nil;
+        return 0;
     }
 
     global func Step(state, frame, random)
@@ -8942,34 +8942,37 @@ global func Step(state, frame, random)
             var spark_id = GetEffect("Spark", this());
             if (spark_id)
             {
-                RemoveEffect(nil, this(), spark_id);
+                var no_name;
+                RemoveEffect(no_name, this(), spark_id);
             }
         }
-        return nil;
+        return 0;
     }
     "#;
 
     const GLOBAL_EFFECT_HELPER_SCRIPT: &str = r#"
     global func Initialize(state, random)
     {
-        AddEffect("WorldPulse", nil, 80, 3);
-        return nil;
+        var no_target;
+        AddEffect("WorldPulse", no_target, 80, 3);
+        return 0;
     }
 
     global func Step(state, frame, random)
     {
         if (frame == 1)
         {
-            RemoveEffect("WorldPulse", nil);
+            var no_target;
+            RemoveEffect("WorldPulse", no_target);
         }
-        return nil;
+        return 0;
     }
     "#;
 
     const MENU_COMMAND_SCRIPT: &str = r#"#strict 2
 global func Initialize(state, random)
 {
-    return nil;
+    return 0;
 }
 
 global func MenuCommand(state, kind, selection)
@@ -8983,7 +8986,7 @@ global func MenuCommand(state, kind, selection)
 }
 "#;
 
-    const PROCEDURE_STATE_SCRIPT: &str = r#"#strict 2
+    const PROCEDURE_STATE_SCRIPT: &str = r#"#strict 3
     global func Initialize(state, random)
     {
         if (state.action && state.action.procedure == "flight")
@@ -9251,7 +9254,7 @@ func ReadWind()
         assert_eq!(rng, mirror, "Tick1000 preserves the one-draw ledger");
     }
 
-    const SET_BRIDGE_ACTION_DATA_SCRIPT: &str = r#"
+    const SET_BRIDGE_ACTION_DATA_SCRIPT: &str = r#"#strict 3
     global func Initialize(state, random)
     {
         if (SetBridgeActionData(200, true, false, 7))
@@ -9267,7 +9270,7 @@ func ReadWind()
     }
     "#;
 
-    const SET_BRIDGE_ACTION_DATA_FAILURE_SCRIPT: &str = r#"
+    const SET_BRIDGE_ACTION_DATA_FAILURE_SCRIPT: &str = r#"#strict 3
     global func Initialize(state, random)
     {
         if (SetBridgeActionData(120, false, false, -1))
@@ -9283,7 +9286,7 @@ func ReadWind()
     }
     "#;
 
-    const RANDOM_HELPER_SCRIPT: &str = r#"
+    const RANDOM_HELPER_SCRIPT: &str = r#"#strict 3
     global func Initialize(state, random)
     {
         return nil;
@@ -9298,16 +9301,16 @@ func ReadWind()
     const PROCEDURE_MOVEMENT_SCRIPT: &str = r#"
     global func Initialize(state, random)
     {
-        return nil;
+        return 0;
     }
 
     global func Step(state, frame, random)
     {
-        return nil;
+        return 0;
     }
     "#;
 
-    const PATHFINDING_HELPER_SCRIPT: &str = r#"
+    const PATHFINDING_HELPER_SCRIPT: &str = r#"#strict 3
     global func Initialize(state, random)
     {
         var success = PathFree(0, 0, 10, 0);
@@ -9348,7 +9351,7 @@ func ReadWind()
     }
 
     fn build_definition() -> Definition {
-        let source = r#"
+        let source = r#"#strict 3
         global func Initialize(state, random) {
             return { energy = 100 };
         }
@@ -9834,17 +9837,18 @@ func ReadWind()
                 Definition::from_script(
                     "CALL",
                     "Caller",
-                    r#"
+                    r#"#strict
                     func Probe(player, high, new_magic) {
+                        var no_magic;
                         return [
                             GetPlrMagic(player, high),
-                            GetPlrMagic(player, nil, 0),
-                            GetPlrMagic(player, nil, 1),
-                            GetPlrMagic(player, nil, -1),
+                            GetPlrMagic(player, no_magic, 0),
+                            GetPlrMagic(player, no_magic, 1),
+                            GetPlrMagic(player, no_magic, -1),
                             GetPlrMagic(99, high),
                             SetPlrMagic(player, new_magic),
                             GetPlrMagic(player, new_magic),
-                            GetPlrMagic(player, nil, 2),
+                            GetPlrMagic(player, no_magic, 2),
                             SetPlrMagic(player, high, true),
                             GetPlrMagic(player, high),
                             SetPlrMagic(player, high, true)
@@ -9911,7 +9915,7 @@ func ReadWind()
         let caller = Definition::from_script(
             "CALL",
             "Caller",
-            r#"
+            r#"#strict
 func Probe(known, missing)
 {
   return [Value(known), Value(missing), Value()];
@@ -9954,17 +9958,19 @@ func Probe(known, missing)
             "CALL",
             "Caller",
             r#"#strict 2
-func EmptyGlobal() { return CheckEffect("Probe", nil, 100, 0); }
+func EmptyGlobal() { var no_target; return CheckEffect("Probe", no_target, 100, 0); }
 func Install()
 {
-  AddEffect("World", nil, 200, 0, this());
+  var no_target;
+  AddEffect("World", no_target, 200, 0, this());
   return AddEffect("Shield", this(), 200, 0, this());
 }
 func Probe()
 {
+  var no_target;
   return [
-    CheckEffect("PriorityOne", nil, 1, 0),
-    CheckEffect("GlobalDenied", nil, 100, 0),
+    CheckEffect("PriorityOne", no_target, 1, 0),
+    CheckEffect("GlobalDenied", no_target, 100, 0),
     CheckEffect("Denied", this(), 100, 7, 42),
     CheckEffect("Merge", this(), 100, 9, 6),
     CheckEffect("Clean", this(), 300, 0)
@@ -10241,8 +10247,9 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
             r#"
 func RemoveOnlyThenCheck()
 {
+  var no_name;
   var iOnly = AddEffect("Only", this(), 200, 0, this());
-  RemoveEffect(nil, this(), iOnly, true);
+  RemoveEffect(no_name, this(), iOnly, true);
   return CheckEffect("AfterRemove", this(), 100, 0);
 }
 func InstallWalk()
@@ -10910,11 +10917,11 @@ func Initialize()
         use std::sync::{Arc, Mutex};
 
         let script = r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
-        global func OnIdleStart(state, action) { return nil; }
-        global func OnIdleEnd(state, action) { return nil; }
-        global func OnWalkStart(state, action) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
+        global func OnIdleStart(state, action) { return 0; }
+        global func OnIdleEnd(state, action) { return 0; }
+        global func OnWalkStart(state, action) { return 0; }
         "#;
 
         let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -11134,7 +11141,7 @@ func OnOldAbort() { return 1; }
         let mut definition = Definition::from_script(
             "LOOP",
             "Loop actor",
-            "#strict\npublic func ResetLoop() { return SetAction(\"Loop\"); }\npublic func ResetLoopForced() { return SetAction(\"Loop\", nil, nil, true); }\nprotected func OnLoopStart() { return(1); }\nprotected func OnLoopAbort(int iPhase) { return(1); }\n",
+            "#strict\npublic func ResetLoop() { return SetAction(\"Loop\"); }\npublic func ResetLoopForced() { var no_value; return SetAction(\"Loop\", no_value, no_value, true); }\nprotected func OnLoopStart() { return(1); }\nprotected func OnLoopAbort(int iPhase) { return(1); }\n",
         )?;
         definition.set_c4_callback_convention(true);
         definition.set_debugger_hooks(hooks);
@@ -11434,12 +11441,12 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         use std::sync::{Arc, Mutex};
 
         let script = r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
-        global func OnIdleStart(state, action) { return nil; }
-        global func OnIdleEnd(state, action) { return nil; }
-        global func OnIdleAbort(state, action) { return nil; }
-        global func OnRunStart(state, action) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
+        global func OnIdleStart(state, action) { return 0; }
+        global func OnIdleEnd(state, action) { return 0; }
+        global func OnIdleAbort(state, action) { return 0; }
+        global func OnRunStart(state, action) { return 0; }
         "#;
 
         let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -11518,8 +11525,8 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         use std::sync::{Arc, Mutex};
 
         let script = r#"
-        global func OnIdleStart(a) { return nil; }
-        global func OnIdleAbort(iPhase) { return nil; }
+        global func OnIdleStart(a) { return 0; }
+        global func OnIdleAbort(iPhase) { return 0; }
         "#;
 
         let call_log: Arc<Mutex<Vec<(String, Vec<lc_script::Value>)>>> =
@@ -11589,8 +11596,8 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
     #[test]
     fn non_forced_action_update_respects_no_other_action() {
         let script = r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
         "#;
 
         let mut definition =
@@ -11630,8 +11637,8 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
     #[test]
     fn forced_action_update_overrides_no_other_action() {
         let script = r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
         "#;
 
         let mut definition =
@@ -11669,10 +11676,10 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         use std::sync::{Arc, Mutex};
 
         let script = r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
-        global func OnIdlePhase(state, action) { return nil; }
-        global func OnWalkStart(state, action) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
+        global func OnIdlePhase(state, action) { return 0; }
+        global func OnWalkStart(state, action) { return 0; }
         "#;
 
         let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -11754,8 +11761,8 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
     #[test]
     fn action_step_advances_multiple_phases() {
         let script = r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
         "#;
 
         let mut definition =
@@ -13421,11 +13428,11 @@ func LiftTop()
         // wind to object velocities.
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -13521,7 +13528,7 @@ func LiftTop()
     #[test]
     fn control_command_invokes_object_script() -> Result<(), EngineError> {
         let script = r#"
-global func Initialize(state, random) { return nil; }
+global func Initialize(state, random) { return 0; }
 func ControlDig() { SetAction("Dig"); return true; }
 "#;
         let mut definition =
@@ -13569,7 +13576,7 @@ func ControlDig() { SetAction("Dig"); return true; }
         // (Clonk.c4d/Script.c:195-203 `return(1)` / `return(0)`); C++ never
         // rejects them.
         let script = r#"
-global func Initialize(state, random) { return nil; }
+global func Initialize(state, random) { return 0; }
 func ControlDig() { SetAction("Dig"); return 1; }
 func ControlThrow() { return 0; }
 "#;
@@ -13737,12 +13744,12 @@ public func FxGunControlControlDig(pTarget, iNumber)
         // C4Object.cpp:3221,3230). The clonk's own Control<Com> is NOT
         // consulted. Specials bypass containment (:3364).
         let clonk_script = r#"
-global func Initialize(state, random) { return nil; }
+global func Initialize(state, random) { return 0; }
 func ControlDig() { SetR(3); return 1; }
 func ControlSpecial() { SetR(4); return 1; }
 "#;
         let hut_script = r#"
-global func Initialize(state, random) { return nil; }
+global func Initialize(state, random) { return 0; }
 func ContainedDig(pClonk) { SetR(5); return 1; }
 "#;
         let mut clonk =
@@ -13807,7 +13814,7 @@ func ContainedDig(pClonk) { SetR(5); return 1; }
         // — raw truthiness. Context functions in real content return ints
         // (Waterskin.c4d/Script.c:110 `return(1)`).
         let script = r#"
-global func Initialize(state, random) { return nil; }
+global func Initialize(state, random) { return 0; }
 func EmptyContainer() { SetR(7); return 1; }
 "#;
         let mut definition =
@@ -13892,7 +13899,7 @@ protected func ReadyToMagic(object pByObject, id image)
         // the action stayed "Idle"; now `this` is the object reference so the
         // action becomes "Dig".
         let script = r#"
-global func Initialize(state, random) { return nil; }
+global func Initialize(state, random) { return 0; }
 func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 "#;
         let mut definition =
@@ -14246,7 +14253,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let gem = Definition::from_script(
             "GEM_",
             "Gem",
-            "global func Initialize(state, random) { return nil; }\n",
+            "global func Initialize(state, random) { return 0; }\n",
         )
         .expect("script compiles");
 
@@ -14512,7 +14519,7 @@ func Construction(object creator)
         let gem = Definition::from_script(
             "GEM_",
             "Gem",
-            "global func Initialize(state, random) { return nil; }\n",
+            "global func Initialize(state, random) { return 0; }\n",
         )
         .expect("script compiles");
 
@@ -14594,7 +14601,7 @@ func Construction(object creator)
             Definition::from_script(
                 "GEM_",
                 "Gem",
-                "global func Initialize(state, random) { return nil; }\n",
+                "global func Initialize(state, random) { return 0; }\n",
             )
             .expect("script compiles")
         }
@@ -15430,11 +15437,11 @@ protected func ControlCommand() { own_control_calls++; return 1; }
     fn build_procedure_requires_components_before_progress() -> Result<(), EngineError> {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -15542,11 +15549,11 @@ protected func ControlCommand() { own_control_calls++; return 1; }
     fn build_procedure_noncrew_reports_material_without_acquire() -> Result<(), EngineError> {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -15753,11 +15760,11 @@ protected func BuildAbort()
     fn build_procedure_consumes_components_from_builder() -> Result<(), EngineError> {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -16255,11 +16262,11 @@ protected func RejectEntrance(container)
     fn push_procedure_without_target_resets_to_default() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -16726,11 +16733,11 @@ protected func TurnStart()
     fn push_procedure_moves_target_and_pusher() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -16833,11 +16840,11 @@ protected func TurnStart()
     fn l073_pull_without_target_stops_in_walk_with_silent_wait() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -17209,11 +17216,11 @@ protected func GrabLost()
     fn pull_procedure_moves_target_and_puller() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -18062,11 +18069,11 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
     fn fight_procedure_moves_toward_target() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -18189,11 +18196,11 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
     fn fight_procedure_stands_when_target_not_fighting() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -18273,11 +18280,11 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
     fn fight_procedure_trains_fight_physical_on_tick5() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -18630,7 +18637,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // the function fails the check silently (FindSameNameFunc miss,
         // C4FindObject.cpp:658-659), and the result converts with raw
         // C4Value truthiness (C4Value.h:183-185): any nonzero int matches.
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func ProbeFind() {
             return FindObject2([60, "IsHot", 3]);
         }
@@ -18687,7 +18694,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // mutates each candidate live. The copy-in/copy-out port folds the
         // nested scopes into the outcome and commits them when the outer
         // call returns — including VM-final local variables.
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func TagAll() {
             return ObjectCount2([60, "Tag"]);
         }
@@ -18746,7 +18753,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // next child, and a callback on an earlier object can change a later
         // candidate before its Check begins (C4FindObject.cpp:180-225,
         // 445-450, 576-579, 653-662).
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func FindPromoted(object later) {
             return FindObjects(
                 [20, "PROB"],
@@ -18818,7 +18825,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // AssignRemoval clears the stored object pointer before the next
         // candidate callback (C4Object.cpp:311-313; C4FindObject.cpp:
         // 645-650), rather than replaying the original dead pointer.
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func Survivors(object victim) {
             return FindObjects(
                 [20, "PROB"],
@@ -18828,11 +18835,12 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         "#;
         let probe_script = r#"
         func RemoveThenObserve(victim) {
+            var no_object;
             if (GetOwner() == 1) {
                 RemoveObject(victim);
                 return false;
             }
-            return victim == nil;
+            return victim == no_object;
         }
         "#;
 
@@ -18902,7 +18910,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // C4FindObject::Find returns immediately without evaluating later
         // candidates once a live object passes Check (C4FindObject.cpp:
         // 180-199). FindMany-style collection would run both callbacks.
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func First() { return FindObject2([20, "PROB"], [60, "Match"]); }
         "#;
         let probe_script = r#"
@@ -18957,7 +18965,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // Find rechecks Status after Check and continues past a removed
         // truthy candidate. Count deliberately has no post-Check recheck and
         // still counts that same truthy result (C4FindObject.cpp:164-199).
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func FirstLive() {
             return FindObject2([20, "PROB"], [60, "RemoveFirst"]);
         }
@@ -19035,7 +19043,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // fPassErrors=true (C4FindObject.cpp:661): a runtime error inside
         // the callback rethrows out of Check/Find and aborts the calling
         // script (C4AulExec.cpp:1318-1342).
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func Boom() {
             return FindObject2([60, "Explode"]);
         }
@@ -19078,7 +19086,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // IsImpossible = !pFunc (C4FindObject.cpp:664-667): a name unknown
         // to every script makes the criterion impossible — FindMany returns
         // an empty array without iterating, and no error is raised.
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func Hunt() {
             return ObjectCount2([60, "NoSuchPredicate"]);
         }
@@ -19107,7 +19115,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // C4Value::operator bool (C4Value.h:76,183-185): the Check result is
         // raw-data truthiness — a string is true (nonnull pointer), with no
         // getBool-style type conversion; 0/false/nil are the only falses.
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func CountStrings() { return ObjectCount2([60, "GiveString"]); }
         global func CountZeroes() { return ObjectCount2([60, "GiveZero"]); }
         global func CountFalses() { return ObjectCount2([60, "GiveFalse"]); }
@@ -19157,7 +19165,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // The C++ Find walks the full object list — the caller is a
         // candidate like any other (its live scope serves as the call
         // context when the predicate runs on it).
-        let finder_script = r#"
+        let finder_script = r#"#strict
         local mark;
         func AmI() { return 1; }
         global func HuntSelf() { return ObjectCount2([60, "AmI"]); }
@@ -19192,7 +19200,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // PrepareCache (C4FindObject.cpp:819-832), converts with getInt(),
         // and stable-sorts ascending ("least return values first",
         // C4FindObject.h:61).
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func Ranked() {
             return FindObjects([20, "PROB"], [160, "Rank"]);
         }
@@ -19260,7 +19268,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // Sort_Func cache can mutate an object before the later Distance
         // cache dereferences that same live pointer (C4FindObject.cpp:
         // 819-832, 877-883, 908-911, 934-956).
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func Ranked(object later) {
             return FindObjects(
                 [20, "PROB"],
@@ -19329,7 +19337,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // [Icewing]", C4FindObject.cpp:834-842), with no PrepareCache. So
         // the first match is never evaluated on its own, and the running
         // best re-evaluates on every later comparison.
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func Best() {
             return FindObject2([20, "PROB"], [160, "Rank"]);
         }
@@ -19399,7 +19407,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // The single-result path compares candidate then best for each
         // criterion. During Compare(second, first), the Func value for the
         // second object moves the first before Distance reads either object.
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func Best(object first) {
             return FindObject2(
                 [20, "PROB"],
@@ -19461,7 +19469,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // Find rechecks a would-be winner's Status after Compare. The second
         // object deliberately returns the smaller key but removes itself;
         // it must not replace the first live best (C4FindObject.cpp:188-199).
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func Best() {
             return FindObject2([20, "PROB"], [160, "RankAndVanish"]);
         }
@@ -19526,7 +19534,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // with nullptr instead of erased (CheckObjectStatusAfterSort,
         // replace_if — C4FindObject.cpp:223, 362, 372-375), so a FindObjects
         // result can legitimately contain nil entries.
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func Cull() {
             return FindObjects([20, "PROB"], [160, "Rate"]);
         }
@@ -19593,7 +19601,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // CompareGetValue converts with getInt() (C4FindObject.cpp:955;
         // C4Value.h:159): bools become 0/1, pointer types (strings, arrays)
         // become 0 — unlike Find_Func's raw truthiness.
-        let finder_script = r#"
+        let finder_script = r#"#strict
         global func Ranked() {
             return FindObjects([20, "PROB"], [160, "Rank"]);
         }
@@ -19738,7 +19746,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // FnGlobal returns C4ValueList::operator[](index).GetRef()
         // (C4Script.cpp:3404-3407); the mutable list clamps negative indices
         // to zero and grows on demand (C4ValueList.cpp:50-64).
-        let script = r#"
+        let script = r#"#strict
         global func & Numbered(index) { return Global(index); }
         func Probe() {
             Global(-4) = 7;
@@ -19777,7 +19785,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // FnGlobalN looks up an existing GlobalNamed entry and returns its
         // C4Value reference (C4Script.cpp:4607-4617). Reference-returning
         // script functions preserve that exact cell (C4AulExec.cpp:416-430).
-        let script = r#"
+        let script = r#"#strict
         static spell;
         global func & Dynamic(name) { return GlobalN(name); }
         func Probe() {
@@ -19899,7 +19907,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // then DenumerateVariablePointers recursively resolves their object
         // references after objects load (C4Aul.cpp:506-520;
         // C4Value.cpp:686-713).
-        let writer_script = r#"
+        let writer_script = r#"#strict
         static named_scalar, named_refs;
         func Seed(object target) {
             Global(2) = 17;
@@ -19909,7 +19917,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
             return true;
         }
         "#;
-        let reader_script = r#"
+        let reader_script = r#"#strict
         func Read() {
             return [Global(2), Global(8), GlobalN("named_scalar"), GlobalN("named_refs")];
         }
@@ -20017,7 +20025,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // SetNameList copies only names still registered by the fresh script
         // engine (C4ValueMap.cpp:236-295). DenumeratePointer clears missing
         // object references recursively (C4Value.cpp:686-713).
-        let old_script = r#"
+        let old_script = r#"#strict
         static kept, obsolete;
         func Seed(object target) {
             Global(4) = [target, [target]];
@@ -20025,7 +20033,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
             GlobalN("obsolete") = 9;
         }
         "#;
-        let new_script = r#"
+        let new_script = r#"#strict
         static kept, added;
         func Read() { return [Global(4), GlobalN("kept"), GlobalN("added")]; }
         func SetAdded() { GlobalN("added") = 5; return GlobalN("added"); }
@@ -20101,7 +20109,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // recursively denumerates both numbered Local and LocalNamed values
         // (src/C4Object.cpp:2914-2924; src/C4Value.cpp:684-713). A saved
         // C4V_C4ObjectEnum whose object no longer exists becomes nil.
-        let holder_script = r#"
+        let holder_script = r#"#strict
         local named_refs;
         func Seed(object target) {
             named_refs = [target, [target]];
@@ -20672,7 +20680,7 @@ public func RemoveCaptain(int player)
             Local(2) = 31;
         }
         "#;
-        let new_script = r#"
+        let new_script = r#"#strict
         local added, kept;
         func Read() { return [kept, added, Local(2)]; }
         "#;
@@ -20851,7 +20859,7 @@ public func RemoveCaptain(int player)
         // C4AulScriptEngine section. Treat that omission as empty `Globals`
         // and nil values for every declaration in the fresh GlobalNamed name
         // list (C4Aul.cpp:513-520; C4ValueMap.cpp:236-295).
-        let script = r#"
+        let script = r#"#strict
         static named;
         func Seed() { Global(3) = 11; GlobalN("named") = 12; }
         func Read() { return [Global(3), GlobalN("named")]; }
@@ -21432,7 +21440,7 @@ func Trigger() {
         global func Poke(target) { return target->Secret(21); }
         global func PokeMissing(target) { return target->NoSuch(); }
         global func PokeMissingSafe(target) { return target->~NoSuch(); }
-        global func PokeNil() { return nil->~Anything(); }
+        global func PokeNil() { var no_target; return no_target->~Anything(); }
         global func PokeEngineFn(target) { return target->GetID(); }
         global func PokeNamespaced(target) { return target->OTHR::Secret(22); }
         global func PokeNamespacedMissing(target) { return target->OTHR::NamedOnly(); }
@@ -21908,7 +21916,7 @@ func Trigger() {
                 Definition::from_script(
                     "CALL",
                     "Caller",
-                    r#"
+                    r#"#strict
                     func Probe() {
                         return [
                             GetDefinition(),
@@ -22309,7 +22317,7 @@ func Trigger() {
         func ForceHostile() { return SetHostility(1, 2, true, true, true); }
         func ReadHostile() { return Hostile(1, 2, true); }
         "#;
-        let rule_script = r#"
+        let rule_script = r#"#strict
         local reject, seen_new, seen_old, seen_live;
         func SetReject(value) { reject = value; }
         func RejectHostilityChange(player, opponent, hostile) { return reject; }
@@ -22502,7 +22510,7 @@ func Trigger() {
         let caller_script = r#"
         func Switch(no_calls) { return SetPlayerTeam(1, 1, no_calls); }
         "#;
-        let rule_script = r#"
+        let rule_script = r#"#strict
         local reject, reject_calls, switch_calls, seen;
         func Initialize() {
             reject = 0;
@@ -23618,7 +23626,8 @@ func Trigger() {
             r#"#strict 2
 func Probe(object target)
 {
-    return [GetCategory(target), GetCategory(nil, CLNK), GetDefCoreVal("Category", "DefCore", CLNK)];
+    var no_target;
+    return [GetCategory(target), GetCategory(no_target, CLNK), GetDefCoreVal("Category", "DefCore", CLNK)];
 }
 "#,
         )
@@ -23839,7 +23848,7 @@ func Probe(object target)
             return AddMenuItem("Build", "Choose", DYNA, builder);
         }
         "#;
-        let item_script = r#"
+        let item_script = r#"#strict
         protected func GetCustomComponents(builder) {
             if (builder->~MenuComponentMode()) return [WOOD, WOOD, METL];
             return [GOLD];
@@ -23992,7 +24001,7 @@ func Probe(object target)
         register_item(
             &mut engine,
             "EMPT",
-            "protected func GetCustomComponents(builder) { return []; }",
+                        "#strict\nprotected func GetCustomComponents(builder) { return []; }",
             "WOOD",
             5,
             "Empty custom description.",
@@ -25996,18 +26005,19 @@ local jump_xdir, jump_ydir, jump_by_com;
 
 public func ResetGrabProbe()
 {
+  var no_value;
   order = 0;
-  seen_action = nil;
-  seen_target = nil;
-  finished = nil;
-  finished_front = nil;
-  finished_target = nil;
-  after_execute = nil;
-  after_action = nil;
+  seen_action = no_value;
+  seen_target = no_value;
+  finished = no_value;
+  finished_front = no_value;
+  finished_target = no_value;
+  after_execute = no_value;
+  after_action = no_value;
   remove_on_jump = false;
-  jump_xdir = nil;
-  jump_ydir = nil;
-  jump_by_com = nil;
+  jump_xdir = no_value;
+  jump_ydir = no_value;
+  jump_by_com = no_value;
   return true;
 }
 
@@ -26632,26 +26642,27 @@ local stop_order, stop_abort_action, stop_walk_start_action;
 
 public func ResetGrabCallbacks()
 {
+  var no_value;
   order = 0;
-  grab_target = nil;
-  grab_flag = nil;
-  target_controller_in_grab = nil;
-  grabbed_target = nil;
-  grabbed_flag = nil;
-  grabbed_controller = nil;
+  grab_target = no_value;
+  grab_flag = no_value;
+  target_controller_in_grab = no_value;
+  grabbed_target = no_value;
+  grabbed_flag = no_value;
+  grabbed_controller = no_value;
   deletion_mode = 0;
-  stop_clear_target = nil;
-  finished = nil;
-  push_start_comdir = nil;
-  push_start_action = nil;
-  push_start_target = nil;
-  stop_to_dig = nil;
-  stop_walk_starts = nil;
-  stop_pointer_mode = nil;
-  reject_action = nil;
-  stop_order = nil;
-  stop_abort_action = nil;
-  stop_walk_start_action = nil;
+  stop_clear_target = no_value;
+  finished = no_value;
+  push_start_comdir = no_value;
+  push_start_action = no_value;
+  push_start_target = no_value;
+  stop_to_dig = no_value;
+  stop_walk_starts = no_value;
+  stop_pointer_mode = no_value;
+  reject_action = no_value;
+  stop_order = no_value;
+  stop_abort_action = no_value;
+  stop_walk_start_action = no_value;
   return true;
 }
 
@@ -26724,6 +26735,7 @@ protected func StopWalkStart()
 
 protected func StopAbort()
 {
+  var no_target;
   stop_order = stop_order * 10 + 1;
   stop_abort_action = GetAction();
   if (stop_clear_target)
@@ -26742,7 +26754,7 @@ protected func StopAbort()
     {
       SetObjectStatus(2, stop_clear_target, true);
     }
-    stop_clear_target = nil;
+    stop_clear_target = no_target;
   }
   return true;
 }
@@ -28855,7 +28867,7 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
         // their effects first (the inverse of DoEnergy's Alive gate), the
         // damage clamps at zero, and the Damage script callback fires with
         // (change, causedBy).
-        let script = r#"
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Shell", priority = 100, interval = 0 } ] };
         }
@@ -28924,7 +28936,7 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
         // list order — each Fx<Name>Damage return REPLACES the damage
         // (getInt), and a zeroed damage aborts both the walk and DoEnergy
         // (C4Effect.cpp:312-322).
-        let script = r#"
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [
                 { op = "add", name = "Armor", priority = 200, interval = 0 },
@@ -29062,11 +29074,11 @@ func FxAmplifierDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
     fn do_energy_clamps_to_physical_energy_ceiling() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -29117,11 +29129,11 @@ func FxAmplifierDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
     fn walk_procedure_uses_walk_physical_limit_and_const_accel() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -29781,11 +29793,11 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
     fn scale_procedure_uses_scale_physical_limit_and_trains_at_limit() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -29932,11 +29944,11 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
     fn hangle_procedure_uses_hangle_physical_limit_and_trains_at_limit() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -30253,11 +30265,11 @@ protected func Activity() { SetActionTargets(); return(1); }
     fn swim_procedure_uses_swim_physical_limit_and_trains_on_tick10() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -30474,11 +30486,11 @@ protected func Activity() { SetActionTargets(); return(1); }
     fn dig_procedure_uses_dig_physical_speed() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -30569,11 +30581,11 @@ protected func Activity() { SetActionTargets(); return(1); }
     fn float_procedure_uses_float_physical_limit_and_const_accel() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -31098,11 +31110,11 @@ func Death(by) { death_by = by; return 1; }
     fn push_pull_fixture() -> (Engine, ObjectId, ObjectId) {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -31450,11 +31462,11 @@ func Stuck()
         // (C4Object.cpp:1761) → StopActionDelayCommand.
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
         let (mut engine, _, _) = push_pull_fixture();
@@ -31904,11 +31916,11 @@ public func TrainTemporaryScale()
         // carries a C4ObjectInfo — an object with neither trains NOTHING.
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -32407,11 +32419,11 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
         // rides on the object until the C4ObjectInfo model lands.
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -32471,11 +32483,11 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
     fn fire_effect_executes_once_per_tick() {
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
         let mut definition = Definition::from_script("Torch", "Torch", script).unwrap();
@@ -32508,11 +32520,11 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
         // Random(5), and only at zero breath DoEnergy(-1, EngAsphyxiation).
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -32602,11 +32614,11 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
         // before the ordinary semi-solid check (src/C4Object.cpp:884-899).
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
         let library = MaterialLibrary::parse(
@@ -32696,11 +32708,11 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
         // physical maximum in one gulp.
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -33373,14 +33385,14 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         // temporary set first (C4Object.cpp:2118-2121).
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
             if (frame == 1) {
                 SetPhysical("Walk", 42000, 2);
             }
-            return nil;
+            return 0;
         }
         "#;
 
@@ -33413,11 +33425,11 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         // (C4Game.cpp:1899-1911; C4Object.cpp:1775-1782, 5202-5221).
         let script = r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -34229,8 +34241,8 @@ func Activate(inMat, inLength, inStrength)
         // (C4Weather.cpp:158-168). Initialize therefore observes the default
         // position (50,50), and a no-op Activate leaves the object there.
         let script = r#"
-        func Initialize(state, random) { return nil; }
-        func Step(state, frame, random) { return nil; }
+        func Initialize(state, random) { return 0; }
+        func Step(state, frame, random) { return 0; }
         func Activate(x, y, xdir, xrange, ydir, yrange, gamma)
         {
             MissingWeatherCallback();
@@ -34451,8 +34463,8 @@ func Activate(int x, int y, int xdir, int xrange, int ydir, int yrange, bool gam
         // C4Weather::LaunchVolcano likewise creates FXV1 at the native
         // default (50,50) and supplies coordinates only to Activate.
         let script = r#"
-        func Initialize(state, random) { return nil; }
-        func Step(state, frame, random) { return nil; }
+        func Initialize(state, random) { return 0; }
+        func Step(state, frame, random) { return 0; }
         func Activate(x, y, size, material)
         {
             MissingWeatherCallback();
@@ -34796,8 +34808,8 @@ func Trigger() {
         // truthy C4Value (C4Weather.cpp:196-203). Object creation alone does
         // not make the launch successful.
         let script = r#"
-        func Initialize(state, random) { return nil; }
-        func Step(state, frame, random) { return nil; }
+        func Initialize(state, random) { return 0; }
+        func Step(state, frame, random) { return 0; }
         func Activate() { return false; }
         "#;
 
@@ -36808,10 +36820,10 @@ func ControlUpSingle()
     #[test]
     fn apply_command_uses_engine_order_for_selection() {
         let script = r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
-        global func OnIdleAbort(state, action) { return nil; }
-        global func OnWalkStart(state, action) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
+        global func OnIdleAbort(state, action) { return 0; }
+        global func OnWalkStart(state, action) { return 0; }
         "#;
 
         let call_log: Arc<Mutex<Vec<(String, i32)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -38095,7 +38107,7 @@ public func ReadIDs(int first, int second)
 
     #[test]
     fn tracks_action_state_changes() {
-        let source = r#"
+        let source = r#"#strict 3
         global func Initialize(state, random) {
             return { action = "Walk" };
         }
@@ -38145,7 +38157,7 @@ public func ReadIDs(int first, int second)
 
     #[test]
     fn spawns_additional_objects_from_step() {
-        let source = r#"
+        let source = r#"#strict 3
         global func Initialize(state, random) {
             return { energy = 42 };
         }
@@ -38189,7 +38201,7 @@ public func ReadIDs(int first, int second)
 
     #[test]
     fn produces_deterministic_snapshots() {
-        let source = r#"
+        let source = r#"#strict 3
         global func Step(state, frame, random) {
             var new_y = state.position[1] + (random % 3) - 1;
             return { velocity = [state.velocity[0], new_y - state.position[1]] };
@@ -38235,7 +38247,7 @@ public func ReadIDs(int first, int second)
     fn clamps_objects_to_landscape_surface() {
         let script = r#"
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
         let mut engine = Engine::with_seed(0);
@@ -38260,7 +38272,7 @@ public func ReadIDs(int first, int second)
 
     #[test]
     fn applies_effect_stack_operations() {
-        let source = r#"
+        let source = r#"#strict 3
         global func Initialize(state, random) {
             return {
                 effects = [
@@ -40467,11 +40479,12 @@ local departure_x, departure_y, departure_xdir, departure_ydir, departure_contai
 
 protected func ContactLeft()
 {
+    var no_value;
     order = order * 10 + 1;
     contact_x = GetX(); contact_y = GetY();
     contact_xdir = GetXDir(); contact_ydir = GetYDir();
     contact_contained = !!Contained();
-    contact_shape_y = GetObjectVal("Offset", nil, nil, 1);
+    contact_shape_y = GetObjectVal("Offset", no_value, no_value, 1);
     return(1);
 }
 
@@ -40495,8 +40508,9 @@ protected func Departure(pOldContainer)
 
 public func Leave()
 {
+    var no_container;
     SetShape(-4, -5, 8, 10);
-    return(Exit(nil, -100, 10, 90, 3, -2, 20));
+    return(Exit(no_container, -100, 10, 90, 3, -2, 20));
 }
 "#;
 
@@ -41571,10 +41585,11 @@ protected func Construction(object pCreator) {
     return(1);
 }
 protected func Completion() {
+    var no_object;
     iCompletionCon = GetCon();
     iCompletionY = GetY();
     iCompletionR = GetR();
-    iCompletionRDir = GetRDir(nil, 100);
+    iCompletionRDir = GetRDir(no_object, 100);
     iCompleted = Random(100);
     SetAction("Sparkle");
     return(1);
@@ -43418,6 +43433,7 @@ protected func ContactTop()
 }}
 protected func OldAbort(int old_phase)
 {{
+    var no_value;
     order = order * 10 + 3;
     abort_x = GetX(); abort_y = GetY(); abort_contained = !!Contained();
     return(1);
@@ -43725,10 +43741,11 @@ public func Prime(bool do_swap)
 }}
 protected func OldAbort(int old_phase)
 {{
+    var no_value;
     abort_width = GetObjectVal("Width");
     abort_height = GetObjectVal("Height");
-    abort_x = GetObjectVal("Offset", nil, nil, 0);
-    abort_y = GetObjectVal("Offset", nil, nil, 1);
+    abort_x = GetObjectVal("Offset", no_value, no_value, 0);
+    abort_y = GetObjectVal("Offset", no_value, no_value, 1);
     return(1);
 }}
 "#
@@ -43738,10 +43755,11 @@ protected func OldAbort(int old_phase)
 {SHAPE_LOCALS}
 protected func RejectEntrance(pContainer)
 {{
+    var no_value;
     reject_width = GetObjectVal("Width");
     reject_height = GetObjectVal("Height");
-    reject_x = GetObjectVal("Offset", nil, nil, 0);
-    reject_y = GetObjectVal("Offset", nil, nil, 1);
+    reject_x = GetObjectVal("Offset", no_value, no_value, 0);
+    reject_y = GetObjectVal("Offset", no_value, no_value, 1);
     return(1);
 }}
 "#
@@ -46920,7 +46938,7 @@ func ReadRank() { return GetRank(); }
     #[test]
     fn make_crew_member_requires_an_explicit_object_and_preserves_owner() {
         let script = r#"#strict 2
-func DirectNil() { return MakeCrewMember(nil, 1); }
+func DirectNil() { var no_object; return MakeCrewMember(no_object, 1); }
 func ArrowZero(object target) { return target->MakeCrewMember(0); }
 func Explicit(object target) {
     return [MakeCrewMember(target, 1), GetOwner(target), GetController(target)];
@@ -47027,8 +47045,9 @@ func CrewSelection(bool unselect, bool cursor) {
 }
 
 func Setup() {
+    var no_object;
     var made = MakeCrewMember(this(), 0);
-    var added = SetCrewStatus(1, true, nil);
+    var added = SetCrewStatus(1, true, no_object);
     return [made, added, GetOwner(), GetController(), GetRank(),
             GetCrewCount(0), GetCrewCount(1), GetCrew(1), recruitments,
             GetPlayerVal("Crew", "Player", 0, 0),
@@ -47036,10 +47055,11 @@ func Setup() {
 }
 
 func RemoveFrom(int player) {
+    var no_object;
     removing_player = player;
     SetCursor(player, this(), true, true, true);
     SelectCrew(player, this(), true, true);
-    var removed = SetCrewStatus(player, false, nil);
+    var removed = SetCrewStatus(player, false, no_object);
     return [removed, GetCrewCount(player), GetRank(), unselections,
             callback_rank, callback_crew_count, GetOwner(), GetController(),
             GetCursor(player) == this(),
@@ -47047,7 +47067,8 @@ func RemoveFrom(int player) {
 }
 
 func RemoveAgain(int player) {
-    return [SetCrewStatus(player, false, nil), unselections];
+    var no_object;
+    return [SetCrewStatus(player, false, no_object), unselections];
 }
 
 func TryAdd(int player, object target) {
@@ -47325,7 +47346,8 @@ func Setup() {
     return 1;
 }
 func Deactivate() {
-    var changed = SetObjectStatus(2, nil, false);
+    var no_object;
+    var changed = SetObjectStatus(2, no_object, false);
     var added_inactive = SetCrewStatus(2, true);
     return [changed, added_inactive, GetObjectStatus(),
             GetCrewCount(0), GetCrewCount(1), GetCrewCount(2),
@@ -47333,7 +47355,8 @@ func Deactivate() {
             GetCursor(0) == this(), GetCursor(1) == this()];
 }
 func Reactivate() {
-    var changed = SetObjectStatus(1, nil, false);
+    var no_object;
+    var changed = SetObjectStatus(1, no_object, false);
     return [changed, GetObjectStatus(),
             GetCrewCount(0), GetCrewCount(1), GetCrewCount(2),
             GetCrew(0) == this(), GetCrew(1) == this(),
@@ -48136,7 +48159,8 @@ func ReadCore()
         let script = r#"#strict 2
 func ReadExtra(int entry_nr)
 {
-    return GetObjectInfoCoreVal("ExtraData", "ObjectInfo", nil, entry_nr);
+    var no_section;
+    return GetObjectInfoCoreVal("ExtraData", "ObjectInfo", no_section, entry_nr);
 }
 "#;
         let mut engine = Engine::with_seed(0);
@@ -48205,7 +48229,8 @@ func ReadExtra(int entry_nr)
         let script = r#"#strict 2
 func ReadExtra(int entry_nr)
 {
-    return GetObjectInfoCoreVal("ExtraData", "ObjectInfo", nil, entry_nr);
+    var no_section;
+    return GetObjectInfoCoreVal("ExtraData", "ObjectInfo", no_section, entry_nr);
 }
 "#;
         let mut engine = Engine::with_seed(0);
@@ -50276,7 +50301,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         let definition = Definition::from_script(
             "Dummy",
             "Dummy",
-            "global func Step(state, frame, random) { return nil; }",
+            "global func Step(state, frame, random) { return 0; }",
         )
         .expect("script compiles");
         engine
@@ -50305,7 +50330,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
     #[test]
     fn effect_callbacks_fire_across_lifecycle_events() {
-        let script = r#"
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Pulse", interval = 2 } ] };
         }
@@ -50576,8 +50601,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
     #[test]
     fn shift_contents_rotates_to_next_different_item_like_cpp() {
         let script = r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
         global func Cycle() { return ShiftContents(); }
         global func Pick() { return ShiftContents(0, 0, REVR); }
         "#;
@@ -50831,8 +50856,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
     #[test]
     fn shift_contents_uniform_stack_reports_false_like_cpp() {
         let script = r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
         global func Cycle() { return ShiftContents(); }
         "#;
         let mut engine = Engine::with_seed(5);
@@ -50882,8 +50907,8 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
     #[test]
     fn shift_contents_operates_on_a_foreign_container_like_cpp() {
         let script = r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
         global func Poke() { return ShiftContents(FindObject(CHES)); }
         "#;
         let mut engine = Engine::with_seed(7);
@@ -51410,7 +51435,7 @@ func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
     #[test]
     fn blast_objects_bare_host_damages_flings_and_inherits_caller_controller() {
         let caller_script = r#"#strict
-func Detonate() { return BlastObjects(50, 50, 20, nil, 0); }
+func Detonate() { var no_container; return BlastObjects(50, 50, 20, no_container, 0); }
 "#;
         let mut engine = Engine::with_seed(23);
         engine
@@ -52285,8 +52310,8 @@ func Hit() { return Punch(FindObject(VCTM), 5); }
     #[test]
     fn get_command_returns_command_name_like_cpp() {
         let script = r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
         global func Arm() { SetCommand(this(), "Wait", 0, 0, 0, 0, 50); return 1; }
         global func Ask() { return GetCommand(); }
         "#;
@@ -52326,7 +52351,7 @@ func Hit() { return Punch(FindObject(VCTM), 5); }
     // GetCommand existed and C++ kept running).
     #[test]
     fn effect_callback_script_error_is_fail_safe_like_cpp() {
-        let script = r#"
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Broken", interval = 1 } ] };
         }
@@ -53859,18 +53884,20 @@ func FxNegativeTimer(pThis, iNumber, iTime)
         // no command target (C4Effect::DoCall, C4Effect.cpp:448-452).
         let script = r#"
         global func Initialize(state, random) {
-            AddEffect("WorldPulse", nil, 200, 2);
-            return nil;
-        }
-
-        global func FxWorldPulseTimer(target, number, time) {
-            // pObj is nullptr for global effects (C4Effect.cpp:345).
-            if (target) { return 0; }
-            EffectVar(0, nil, number) = time;
+            var no_target;
+            AddEffect("WorldPulse", no_target, 200, 2);
             return 0;
         }
 
-        global func Step(state, frame, random) { return nil; }
+        global func FxWorldPulseTimer(target, number, time) {
+            var no_target;
+            // pObj is nullptr for global effects (C4Effect.cpp:345).
+            if (target) { return 0; }
+            EffectVar(0, no_target, number) = time;
+            return 0;
+        }
+
+        global func Step(state, frame, random) { return 0; }
         "#;
 
         let definition =
@@ -53949,7 +53976,8 @@ global func FxNoTargetTimer(target, number, time)
 
 func Helper(target)
 {
-    if (GetActMapVal("Length", "Probe") == nil)
+    var no_value;
+    if (GetActMapVal("Length", "Probe") == no_value)
         target->Mark(17);
     else
         target->Mark(98);
@@ -54224,9 +54252,10 @@ func SetCounter(value) { counter = value; return true; }
 func ReadCounter() { return counter; }
 func ArmGlobalEffect()
 {
-    AddEffect("ForeignGlobalA", nil, 100, 1, this());
-    AddEffect("ForeignGlobalB", nil, 101, 1, this());
-    AddEffect("ForeignGlobalC", nil, 102, 1, this());
+    var no_target;
+    AddEffect("ForeignGlobalA", no_target, 100, 1, this());
+    AddEffect("ForeignGlobalB", no_target, 101, 1, this());
+    AddEffect("ForeignGlobalC", no_target, 102, 1, this());
     return true;
 }
 func FxForeignGlobalATimer(target, number, time)
@@ -54295,8 +54324,9 @@ func SetCounter(value) { counter = value; return true; }
 func ReadCounter() { return counter; }
 func ArmGlobalEffectsWithError()
 {
-    AddEffect("ForeignGlobalError", nil, 100, 1, this());
-    AddEffect("ForeignGlobalAfterError", nil, 101, 1, this());
+    var no_target;
+    AddEffect("ForeignGlobalError", no_target, 100, 1, this());
+    AddEffect("ForeignGlobalAfterError", no_target, 101, 1, this());
     return true;
 }
 func FxForeignGlobalErrorTimer(target, number, time)
@@ -54355,7 +54385,7 @@ func FxForeignGlobalAfterErrorTimer(target, number, time)
         assert_eq!(
             engine.install_global_scripts(&[(
                 "System.c4g/SoloEffect.c".to_string(),
-                "global func FxSoloTimer(target, number, time) { EffectVar(0, nil, number) = time; return 0; }\n"
+                "global func FxSoloTimer(target, number, time) { var no_target; EffectVar(0, no_target, number) = time; return 0; }\n"
                     .to_string(),
             )]),
             1
@@ -54451,9 +54481,10 @@ func Read() { return result; }
         // C4Player.cpp:815-824.
         let script = r#"
         global func Initialize(state, random) {
-            var effect = AddEffect("IntSchedule", nil, 200, 1);
-            EffectVar(0, nil, effect) = "SetFoW(true, 0)";
-            return nil;
+            var no_target;
+            var effect = AddEffect("IntSchedule", no_target, 200, 1);
+            EffectVar(0, no_target, effect) = "SetFoW(true, 0)";
+            return 0;
         }
 
         global func FxIntScheduleTimer(target, number, time) {
@@ -54461,7 +54492,7 @@ func Read() { return result; }
             return -1;
         }
 
-        global func Step(state, frame, random) { return nil; }
+        global func Step(state, frame, random) { return 0; }
         "#;
 
         let definition =
@@ -54590,10 +54621,11 @@ func Probe(target) {
         // never fires.
         let script = r#"
         global func Initialize(state, random) {
-            AddEffect("Inert", nil, 100, 0);
-            AddEffect("Doomed", nil, 150, 2);
-            AddEffect("Mute", nil, 200, 3);
-            return nil;
+            var no_target;
+            AddEffect("Inert", no_target, 100, 0);
+            AddEffect("Doomed", no_target, 150, 2);
+            AddEffect("Mute", no_target, 200, 3);
+            return 0;
         }
 
         global func FxDoomedTimer(target, number, time) {
@@ -54605,7 +54637,7 @@ func Probe(target) {
             return 0;
         }
 
-        global func Step(state, frame, random) { return nil; }
+        global func Step(state, frame, random) { return 0; }
         "#;
 
         let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -54894,8 +54926,9 @@ func Probe(target) {
         // effect recovers its priority and stays in the GLOBAL list.
         let script = r#"
         global func Initialize(state, random) {
-            AddEffect("Stubborn", nil, 100, 2);
-            return nil;
+            var no_target;
+            AddEffect("Stubborn", no_target, 100, 2);
+            return 0;
         }
 
         global func FxStubbornTimer(target, number, time) {
@@ -54907,7 +54940,7 @@ func Probe(target) {
             return CastBool(-1);
         }
 
-        global func Step(state, frame, random) { return nil; }
+        global func Step(state, frame, random) { return 0; }
         "#;
 
         let definition =
@@ -54946,15 +54979,16 @@ func Probe(target) {
         // pObj=nullptr, so the GLOBAL list takes the same bracket.
         let script = r#"
         global func Initialize(state, random) {
-            AddEffect("Upper", nil, 200, 0);
-            AddEffect("Mute", nil, 150, 3);
-            return nil;
+            var no_target;
+            AddEffect("Upper", no_target, 200, 0);
+            AddEffect("Mute", no_target, 150, 3);
+            return 0;
         }
 
         global func FxUpperStart(target, number, temp) { return 0; }
         global func FxUpperStop(target, number, reason, temp) { return 0; }
 
-        global func Step(state, frame, random) { return nil; }
+        global func Step(state, frame, random) { return 0; }
         "#;
 
         let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -55018,17 +55052,19 @@ func Probe(target) {
         // (:128-131 + Execute :328-336).
         let script = r#"
         global func Initialize(state, random) {
-            AddEffect("Flash", nil, 200, 5, nil, nil, 42, 77);
-            AddEffect("Vetoed", nil, 200, 5);
-            return nil;
+            var no_value;
+            AddEffect("Flash", no_value, 200, 5, no_value, no_value, 42, 77);
+            AddEffect("Vetoed", no_value, 200, 5);
+            return 0;
         }
 
         global func FxFlashStart(target, number, temp, var1, var2) {
+            var no_target;
             // pForObj is nil for global effects (C4Effect.cpp:129).
             if (target) { return 0; }
             if (temp) { return 0; }
             if (var2 != 77) { return -1; }
-            EffectVar(0, nil, number) = var1 + 1;
+            EffectVar(0, no_target, number) = var1 + 1;
             return 0;
         }
 
@@ -55039,12 +55075,13 @@ func Probe(target) {
         }
 
         global func FxVetoedStop(target, number, reason, temp) {
+            var no_target;
             // must never fire: a Start-denied effect dies without Stop.
-            EffectVar(0, nil, number) = -99;
+            EffectVar(0, no_target, number) = -99;
             return 0;
         }
 
-        global func Step(state, frame, random) { return nil; }
+        global func Step(state, frame, random) { return 0; }
         "#;
 
         let definition =
@@ -55094,7 +55131,7 @@ func Probe(target) {
         // inserted after all effects with |iPriority| < iPrio and before the
         // first with |iPriority| >= iPrio — the list (and therefore the
         // execution order) ascends by priority magnitude, new-before-equal.
-        let script = r#"
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [
                 { op = "add", name = "High", priority = 150 },
@@ -55138,17 +55175,17 @@ func Probe(target) {
         let host_script = r#"
         global func Initialize(state, random) {
             AddEffect("Buff", this(), 100, 2, 0, SPEL);
-            return nil;
+            return 0;
         }
 
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
         let spell_script = r#"
         global func FxBuffTimer(state, effect, timer) {
             DoEnergy(-5);
-            return nil;
+            return 0;
         }
         "#;
 
@@ -55196,25 +55233,27 @@ func Probe(target) {
 local object_no, global_no, id_no;
 
 public func Arm(pTarget) {
-    id_no = AddEffect("DefinitionBound", this(), 100, 5, nil, CMND);
+    var no_target;
+    id_no = AddEffect("DefinitionBound", this(), 100, 5, no_target, CMND);
     object_no = AddEffect("ObjectBound", this(), 100, 5, pTarget);
-    global_no = AddEffect("GlobalBound", nil, 100, 5, pTarget);
+    global_no = AddEffect("GlobalBound", no_target, 100, 5, pTarget);
     return [object_no, global_no, id_no];
 }
 
 public func RemoveAndInspect(pTarget) {
+    var no_value;
     RemoveObject(pTarget);
     return [
         GetEffect("ObjectBound", this()),
         GetEffectCount("ObjectBound", this()),
-        GetEffect(nil, this(), object_no, 1),
-        GetEffect(nil, this(), object_no, 4),
-        GetEffect(nil, this(), object_no, 5) == CMND,
-        GetEffect("GlobalBound", nil),
-        GetEffectCount("GlobalBound", nil),
-        GetEffect(nil, nil, global_no, 1),
+        GetEffect(no_value, this(), object_no, 1),
+        GetEffect(no_value, this(), object_no, 4),
+        GetEffect(no_value, this(), object_no, 5) == CMND,
+        GetEffect("GlobalBound", no_value),
+        GetEffectCount("GlobalBound", no_value),
+        GetEffect(no_value, no_value, global_no, 1),
         GetEffect("DefinitionBound", this()),
-        GetEffectCount(nil, this()),
+        GetEffectCount(no_value, this()),
         GetEffect("DefinitionBound", this(), 0, 5) == CMND
     ];
 }
@@ -55379,7 +55418,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // priority get their Fx<Name>Effect callback with the new effect's
         // name — C4Fx_Effect_Deny (-1, C4Effects.h:36) blocks the creation
         // entirely (no Start, no Stop). Priority-1 effects skip the chain.
-        let script = r#"#strict 2
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Armor", priority = 200, interval = 0 } ] };
         }
@@ -55447,7 +55486,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // answering C4Fx_Effect_Deny returns immediately — checkers later
         // in the chain (higher priority, asked in ascending list order) are
         // never called for the denied effect.
-        let script = r#"#strict 2
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Armor", priority = 100, interval = 0 } ] };
         }
@@ -55525,7 +55564,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // (new-before-equal, C4Effect.cpp:80-94), so an already-present
         // same-name effect sits in the pNext chain and its Fx<Name>Effect
         // callback IS asked about the new addition.
-        let script = r#"
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Guard", priority = 100, interval = 0 } ] };
         }
@@ -55590,7 +55629,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // C4Fx_Start_Deny (-1, C4Effects.h:43): an FxStart returning it
         // marks the effect dead before it ever validates
         // (C4Effect.cpp:128-131) — it disappears without a Stop callback.
-        let script = r#"
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Denied", interval = 2 } ] };
         }
@@ -55662,7 +55701,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // low to high (TempReaddUpperEffects, C4Effect.cpp:494-510). A new
         // effect WITHOUT an Fx*Start skips the whole bracket
         // (`fRemoveUpper && pNext && pFnStart`, C4Effect.cpp:123).
-        let script = r#"
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Upper", priority = 200, interval = 0 } ] };
         }
@@ -55901,7 +55940,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // acceptor's Fx<Name>Add merge seam receives the new effect's
         // name, timer interval and parameters (DoCall PSFS_FxAdd with
         // Par1 = name, Par2 = iTimer, rVal1.., C4Effect.cpp:300-301).
-        let script = r#"#strict 2
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
         }
@@ -56014,7 +56053,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // Fx*Effect check calls carry the pending AddEffect's rVal1-4
         // (C4Effect.cpp:282) — a checker can decide on the parameters, not
         // just the name. Here Shield denies only strength-42 additions.
-        let script = r#"
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
         }
@@ -56107,7 +56146,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // Fire by calling its AddFunc-registered native Start immediately;
         // it must not wait for the first timer and reinterpret persistent
         // Fire vars as constructor arguments.
-        let script = r#"
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [
                 { op = "add", name = "Fire", priority = 100, interval = 1 }
@@ -56215,7 +56254,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // acceptor's Fx*Add runs inside a temp remove/readd bracket of the
         // effects ABOVE the acceptor (C4Effect.cpp:297-304). Plain Annul
         // (-2) must not fire the bracket.
-        let script = r#"#strict 2
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
         }
@@ -56324,7 +56363,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // Fx*Add answers C4Fx_Start_Deny (-1), the ACCEPTOR itself is
         // killed (full Kill — its Stop callback runs) and the check
         // reports C4Fx_Effect_Annul. Neither effect survives.
-        let script = r#"#strict 2
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Shield", priority = 200, interval = 0 } ] };
         }
@@ -56414,7 +56453,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // C4Fx_Stop_Deny (-1, C4Effects.h:42): an Fx*Stop answering it on
         // C4Effect::Kill refuses the removal — the effect's priority is
         // restored and it stays alive (C4Effect.cpp:389-396).
-        let script = r#"
+        let script = r#"#strict 3
         global func Initialize(state, random) {
             return { effects = [ { op = "add", name = "Sticky", priority = 100, interval = 0 } ] };
         }
@@ -56484,7 +56523,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         // Stop denies removal, Kill restores only iPriority on that same
         // node: EffectVar writes and its position among equal-priority
         // peers therefore both survive (C4Effect.cpp:389-402).
-        let script = r#"
+        let script = r#"#strict 3
         func Initialize(state, random) {
             return { effects = [
                 { op = "add", name = "Older", priority = 100, interval = 0 },
@@ -56559,12 +56598,12 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
         func Initialize(state, random)
         {
             AddEffect("Pulse", this(), 100, 1);
-            return nil;
+            return 0;
         }
 
         global func FxPulseStart(object target, int effect)
         {
-            return nil;
+            return 0;
         }
 
         global func FxPulseTimer(object target, int effect, int timer)
@@ -56573,17 +56612,17 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             {
                 RemoveEffect("Pulse", target, 0, true);
             }
-            return nil;
+            return 0;
         }
 
         global func FxPulseStop(object target, int effect, int reason)
         {
-            return nil;
+            return 0;
         }
 
         func Step(state, frame, random)
         {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -56739,7 +56778,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         let definition = Definition::from_script(
             "Dummy",
             "Dummy",
-            "global func Step(state, frame, random) { return nil; }",
+            "global func Step(state, frame, random) { return 0; }",
         )
         .expect("script compiles");
         engine
@@ -56986,7 +57025,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
 
     #[test]
     fn initialize_with_unknown_action_falls_back_to_default() {
-        let source = r#"
+        let source = r#"#strict 3
         global func Initialize(state, random) {
             return { action = "Ghost" };
         }
@@ -57580,8 +57619,8 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
             "Slider",
             "Slider",
             r#"
-            global func Initialize(state, random) { SetXDir(15); return nil; }
-            global func Step(state, frame, random) { return nil; }
+            global func Initialize(state, random) { SetXDir(15); return 0; }
+            global func Step(state, frame, random) { return 0; }
             "#,
         )
         .expect("script compiles");
@@ -60020,8 +60059,8 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
             "Gate",
             r#"
             #strict 2
-            public func Switch() { return SetGraphics("2", nil, SKIN); }
-            public func Reset() { return SetGraphics(nil); }
+            public func Switch() { var no_object; return SetGraphics("2", no_object, SKIN); }
+            public func Reset() { var no_name; return SetGraphics(no_name); }
             "#,
         )
         .expect("gate script compiles");
@@ -60064,19 +60103,20 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
 
     const GRAPHICS_BOUNDS_REFLECTION_SCRIPT: &[u8] = br#"#strict 2
 func ProbeGraphicsBounds() {
+    var no_definition;
     return [
-        GetDefCoreVal("SolidMask", "DefCore", nil, 0),
-        GetDefCoreVal("SolidMask", "DefCore", nil, 1),
-        GetDefCoreVal("SolidMask", "DefCore", nil, 2),
-        GetDefCoreVal("SolidMask", "DefCore", nil, 3),
-        GetDefCoreVal("SolidMask", "DefCore", nil, 4),
-        GetDefCoreVal("SolidMask", "DefCore", nil, 5),
-        GetDefCoreVal("TopFace", "DefCore", nil, 0),
-        GetDefCoreVal("TopFace", "DefCore", nil, 1),
-        GetDefCoreVal("TopFace", "DefCore", nil, 2),
-        GetDefCoreVal("TopFace", "DefCore", nil, 3),
-        GetDefCoreVal("TopFace", "DefCore", nil, 4),
-        GetDefCoreVal("TopFace", "DefCore", nil, 5)
+        GetDefCoreVal("SolidMask", "DefCore", no_definition, 0),
+        GetDefCoreVal("SolidMask", "DefCore", no_definition, 1),
+        GetDefCoreVal("SolidMask", "DefCore", no_definition, 2),
+        GetDefCoreVal("SolidMask", "DefCore", no_definition, 3),
+        GetDefCoreVal("SolidMask", "DefCore", no_definition, 4),
+        GetDefCoreVal("SolidMask", "DefCore", no_definition, 5),
+        GetDefCoreVal("TopFace", "DefCore", no_definition, 0),
+        GetDefCoreVal("TopFace", "DefCore", no_definition, 1),
+        GetDefCoreVal("TopFace", "DefCore", no_definition, 2),
+        GetDefCoreVal("TopFace", "DefCore", no_definition, 3),
+        GetDefCoreVal("TopFace", "DefCore", no_definition, 4),
+        GetDefCoreVal("TopFace", "DefCore", no_definition, 5)
     ];
 }
 "#;
@@ -60242,9 +60282,9 @@ func ProbeGraphicsBounds() {
             "Graphics-clamped gate",
             r#"
             #strict 2
-            public func Switch() { return SetGraphics("small", nil, SKIN); }
-            public func Same() { return SetGraphics("SMALL", nil, SKIN, 0, 0, nil, 123); }
-            public func Reset() { return SetGraphics(nil); }
+            public func Switch() { var no_object; return SetGraphics("small", no_object, SKIN); }
+            public func Same() { var no_value; return SetGraphics("SMALL", no_value, SKIN, 0, 0, no_value, 123); }
+            public func Reset() { var no_name; return SetGraphics(no_name); }
             "#,
         )
         .expect("graphics-clamp script compiles");
@@ -60932,7 +60972,7 @@ func ProbeGraphicsBounds() {
         // Random(i32::MAX) = 30827. ContactRight's SetXDir(40) runs before
         // RedirectForce, so xdir is itofix(4) - FIXED100(50), not the old xdir
         // redirect result.
-        let script = r#"
+        let script = r#"#strict 3
             global func ContactRight()
             {
                 SetXDir(40);
@@ -61927,7 +61967,7 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
         // not HitSpeed3. The callback arguments are (200, 0), so Hit subtracts
         // 210 energy and Hit2 subtracts 220; Step encodes the total callback
         // delta plus RNG as 430 + 36328 = 36758.
-        let script = r#"
+        let script = r#"#strict 3
             global func Hit(x, y)
             {
                 DoEnergy(0 - (10 + x + y), nil, true);
@@ -63658,10 +63698,10 @@ protected func Initialize() {
         use std::sync::{Arc, Mutex};
 
         let script = r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
-        global func OnSlideAbort(state, action) { return nil; }
-        global func OnJumpStart(state, action) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
+        global func OnSlideAbort(state, action) { return 0; }
+        global func OnJumpStart(state, action) { return 0; }
         "#;
         let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let mut hooks = DebuggerHooks::new();
@@ -64442,8 +64482,8 @@ func Arm()
             "Mover",
             "Mover",
             r#"
-            global func Initialize(state, random) { SetXDir(15); return nil; }
-            global func Step(state, frame, random) { return nil; }
+            global func Initialize(state, random) { SetXDir(15); return 0; }
+            global func Step(state, frame, random) { return 0; }
             "#,
         )
         .expect("script compiles");
@@ -64486,8 +64526,8 @@ func Arm()
             "Spinner",
             "Spinner",
             r#"
-            global func Initialize(state, random) { SetRDir(10); return nil; }
-            global func Step(state, frame, random) { return nil; }
+            global func Initialize(state, random) { SetRDir(10); return 0; }
+            global func Step(state, frame, random) { return 0; }
             "#,
         )
         .expect("script compiles");
@@ -64522,8 +64562,8 @@ func Arm()
             "Fixed",
             "Fixed",
             r#"
-            global func Initialize(state, random) { SetRDir(10); return nil; }
-            global func Step(state, frame, random) { return nil; }
+            global func Initialize(state, random) { SetRDir(10); return 0; }
+            global func Step(state, frame, random) { return 0; }
             public func ReadRDir() { return GetRDir(); }
             "#,
         )
@@ -64615,8 +64655,8 @@ func Arm()
             "Limited",
             "Limited",
             r#"
-            global func Initialize(state, random) { SetRDir(10); return nil; }
-            global func Step(state, frame, random) { return nil; }
+            global func Initialize(state, random) { SetRDir(10); return 0; }
+            global func Step(state, frame, random) { return 0; }
             "#,
         )
         .expect("script compiles");
@@ -65540,8 +65580,8 @@ func Arm()
             "Actor",
             "Actor",
             r#"
-            global func Initialize(state, random) { return nil; }
-            global func Step(state, frame, random) { return nil; }
+            global func Initialize(state, random) { return 0; }
+            global func Step(state, frame, random) { return 0; }
             "#,
         )
         .expect("script compiles");
@@ -65581,7 +65621,7 @@ func Arm()
     fn queued_commands_apply_on_next_tick() {
         let script = r#"
         global func Step(state, frame, random) {
-            return nil;
+            return 0;
         }
         "#;
 
@@ -65630,7 +65670,7 @@ func Arm()
 
     #[test]
     fn queued_commands_lower_landscape_columns() {
-        let script = r#"
+        let script = r#"#strict 3
         global func Step(state, frame, random) {
             if (frame == 1) {
                 return {
@@ -65683,7 +65723,7 @@ func Arm()
 
     #[test]
     fn queued_commands_set_and_clear_liquid_columns() {
-        let script = r#"
+        let script = r#"#strict 3
         global func Step(state, frame, random) {
             if (frame == 1) {
                 return {
@@ -65750,7 +65790,7 @@ func Arm()
 
     #[test]
     fn scenario_script_applies_landscape_commands() -> Result<(), EngineError> {
-        const SCRIPT: &str = r#"
+        const SCRIPT: &str = r#"#strict 3
         global func Initialize(state, random)
         {
             return {
@@ -65802,7 +65842,7 @@ func Arm()
 
     #[test]
     fn register_player_invokes_scenario_callbacks() -> Result<(), EngineError> {
-        const SCRIPT: &str = r#"
+        const SCRIPT: &str = r#"#strict 3
         global func Initialize(state, random) { return nil; }
         global func Step(state, frame, random) { return nil; }
 
@@ -66417,9 +66457,9 @@ func Probe() {
         global func Initialize(state, random) {
             CastParticles("Flame", 5, 0, 60, 40, 10, 20, 100, 200);
             PushParticles("Flame", 10, 0);
-            return nil;
+            return 0;
         }
-        global func Step(state, frame, random) { return nil; }
+        global func Step(state, frame, random) { return 0; }
         "#;
         let mut engine = Engine::with_seed(3);
         let core = particles::ParticleDefCore {
@@ -66480,9 +66520,9 @@ func Probe() {
         global func Initialize(state, random) {
             CreateParticle("Leaf", 5, 10, 0, 0, 0, 1);
             CreateParticle("Leaf", 6, 10, 0, 0, 0, 1);
-            return nil;
+            return 0;
         }
-        global func Step(state, frame, random) { return nil; }
+        global func Step(state, frame, random) { return 0; }
         "#;
 
         let mut engine = Engine::with_seed(3);
@@ -66528,7 +66568,7 @@ func Probe() {
 
     #[test]
     fn remove_player_triggers_on_game_over() -> Result<(), EngineError> {
-        const SCRIPT: &str = r#"
+        const SCRIPT: &str = r#"#strict 3
         global func Initialize(state, random) { return nil; }
         global func Step(state, frame, random) { return nil; }
         global func PreInitializePlayer(state, player) { return nil; }
@@ -66729,22 +66769,24 @@ func ReadTeam(int player) { return GetPlayerTeam(player); }
         let script = r#"#strict 2
 func Probe(int player, int eliminated)
 {
+    var no_section;
     return [SurrenderPlayer(99), SurrenderPlayer(eliminated),
             SurrenderPlayer(player),
-            GetPlayerVal("Eliminated", nil, player),
-            GetPlayerVal("Surrendered", nil, player),
-            GetPlayerVal("Status", nil, player),
+            GetPlayerVal("Eliminated", no_section, player),
+            GetPlayerVal("Surrendered", no_section, player),
+            GetPlayerVal("Status", no_section, player),
             EliminatePlayer(player), SurrenderPlayer(player)];
 }
 "#;
         let scenario_script = r#"#strict 2
 global func RemovePlayer(int player, int team)
 {
+    var no_section;
     SetGravity(1);
     if (player == 7 && team == 3
-        && GetPlayerVal("Evaluated", nil, player)
-        && GetPlayerVal("Eliminated", nil, player)
-        && GetPlayerVal("Surrendered", nil, player)
+        && GetPlayerVal("Evaluated", no_section, player)
+        && GetPlayerVal("Eliminated", no_section, player)
+        && GetPlayerVal("Surrendered", no_section, player)
         && GetCrewCount(player) == 1)
         SetGravity(73);
     return true;
@@ -66912,8 +66954,9 @@ protected func OnOwnerChanged(int new_owner, int old_owner)
         const CALLER_SCRIPT: &str = r#"#strict 2
 public func Prepare(object target, object base)
 {
+    var no_graphics;
     target->Arm(base);
-    return SetGraphics(nil, target, SKIN);
+    return SetGraphics(no_graphics, target, SKIN);
 }
 public func Change(object target, int owner) { return SetOwner(owner, target); }
 public func RefreshSame(object target)
@@ -67498,7 +67541,7 @@ func OnOwnerChanged()
         // cooperative AverageValueGain and winner bonus before RoundResults
         // evaluates goals and records Game.Time (C4Player.cpp:930-970;
         // C4RoundResults.cpp:280-313).
-        const SCRIPT: &str = r#"
+        const SCRIPT: &str = r#"#strict 3
         global func Initialize(state, random) { return nil; }
         global func Step(state, frame, random)
         {
@@ -67971,8 +68014,8 @@ func OnOwnerChanged()
             id,
             id,
             r#"
-            global func Initialize(state, random) { return nil; }
-            global func Step(state, frame, random) { return nil; }
+            global func Initialize(state, random) { return 0; }
+            global func Step(state, frame, random) { return 0; }
             "#,
         )
         .expect("script compiles")
@@ -71665,8 +71708,8 @@ func Initialize() { if (armed) CreateObject(MARK); return true; }
     fn def_timer_call_fires_on_the_def_interval_like_cpp() {
         let script = r#"
         local iTicks;
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
         func Tick() { iTicks = iTicks + 1; return 1; }
         "#;
         let mut definition =
@@ -72015,7 +72058,7 @@ private func Sitting()
 
     #[test]
     fn step_script_can_enqueue_commands() {
-        let script = r#"
+        let script = r#"#strict 3
         global func Step(state, frame, random) {
             if (frame == 1) {
                 return {
@@ -72165,6 +72208,7 @@ local iDisabledMod, iDisabledBack, iStringBack, iArrayBack, iNilMod, iExtraBack;
 local iRestoredMod, iRestoredBack;
 
 func ProbeSky() {
+    var no_value;
     iInitialMod = GetSkyAdjust();
     iInitialBack = GetSkyAdjust(1);
     SetSkyAdjust(-2130706433, 1193046);
@@ -72175,7 +72219,7 @@ func ProbeSky() {
     iDisabledBack = GetSkyAdjust(true);
     iStringBack = GetSkyAdjust("");
     iArrayBack = GetSkyAdjust([]);
-    iNilMod = GetSkyAdjust(nil);
+    iNilMod = GetSkyAdjust(no_value);
     iExtraBack = GetSkyAdjust(1, 0);
     return(1);
 }
@@ -73241,13 +73285,14 @@ local flyBaseStartTarget, flyBaseStartAction, flyBaseStartOwner;
 
 public func RecordExecBaseEjection()
 {
+  var no_object;
   callback_order = callback_order * 10 + 1;
   ejection_x = GetX();
   ejection_y = GetY();
   ejection_r = GetR();
-  ejection_xdir = GetXDir(nil, 100);
-  ejection_ydir = GetYDir(nil, 100);
-  ejection_rdir = GetRDir(nil, 100);
+  ejection_xdir = GetXDir(no_object, 100);
+  ejection_ydir = GetYDir(no_object, 100);
+  ejection_rdir = GetRDir(no_object, 100);
   ejection_container = Contained();
   ejection_action = GetAction();
   return(1);
@@ -73255,13 +73300,14 @@ public func RecordExecBaseEjection()
 
 protected func Departure(object old_container)
 {
+  var no_object;
   callback_order = callback_order * 10 + 2;
   departure_x = GetX();
   departure_y = GetY();
   departure_r = GetR();
-  departure_xdir = GetXDir(nil, 100);
-  departure_ydir = GetYDir(nil, 100);
-  departure_rdir = GetRDir(nil, 100);
+  departure_xdir = GetXDir(no_object, 100);
+  departure_ydir = GetYDir(no_object, 100);
+  departure_rdir = GetRDir(no_object, 100);
   departure_container = Contained();
   departure_action = GetAction();
   return(1);
@@ -75147,30 +75193,27 @@ func Probe() {
 
     #[test]
     fn nil_map_assignment_matches_cpp_removal_and_unchanged_slot_rules() {
-        let script_template = r#"#strict 2
-func Probe() {
-    var removed = {};
-    removed["a"] = 1;
-    removed["a"] = nil;
-
-    var fresh = {};
-    fresh["a"] = nil;
-
-    var reduced = { a = 1, b = 2 };
-    reduced.b = nil;
-
-    var already_nil = { a = nil };
-    already_nil.a = nil;
-    var concat_removed = { a = 1 } .. { a = nil };
-    var concat_fresh = {} .. { a = nil };
-    return [GetLength(removed), GetLength(fresh), removed == {}, fresh == {},
-            reduced == { a = 1 }, GetLength(already_nil), concat_removed == {},
+        // Pre-STRICT3 code can receive maps but cannot spell map literals or
+        // dot access. Host-provided maps plus bracket access keep both the
+        // STRICT2 and STRICT3 assignment paths covered with C++-valid syntax.
+        let script_template = r#"#strict {strict}
+func Probe(removed, fresh, reduced, already_nil,
+           concat_removed, concat_fresh, remove_patch, fresh_patch) {
+    var unset;
+    removed["a"] = unset;
+    fresh["a"] = unset;
+    reduced["b"] = unset;
+    already_nil["a"] = unset;
+    concat_removed = concat_removed .. remove_patch;
+    concat_fresh = concat_fresh .. fresh_patch;
+    return [GetLength(removed), GetLength(fresh), GetLength(reduced),
+            GetLength(already_nil), GetLength(concat_removed),
             GetLength(concat_fresh), removed, fresh, reduced, already_nil,
             concat_removed, concat_fresh];
 }
 "#;
         for (id, strict) in [("MN02", 2), ("MN03", 3)] {
-            let script = script_template.replacen("#strict 2", &format!("#strict {strict}"), 1);
+            let script = script_template.replace("{strict}", &strict.to_string());
             let mut engine = Engine::new();
             engine
                 .register_definition(
@@ -75183,22 +75226,36 @@ func Probe() {
                 .expect("map fixture spawns");
             let index = engine.find_object_index(object).expect("map object exists");
             let result = engine
-                .call_object_function(index, "Probe", Vec::new())
+                .call_object_function(
+                    index,
+                    "Probe",
+                    vec![
+                        Value::Proplist(lc_script::ValueMap::from([("a", Value::Int(1))])),
+                        Value::Proplist(lc_script::ValueMap::new()),
+                        Value::Proplist(lc_script::ValueMap::from([
+                            ("a", Value::Int(1)),
+                            ("b", Value::Int(2)),
+                        ])),
+                        Value::Proplist(lc_script::ValueMap::from([("a", Value::Nil)])),
+                        Value::Proplist(lc_script::ValueMap::from([("a", Value::Int(1))])),
+                        Value::Proplist(lc_script::ValueMap::new()),
+                        Value::Proplist(lc_script::ValueMap::from([("a", Value::Nil)])),
+                        Value::Proplist(lc_script::ValueMap::from([("a", Value::Nil)])),
+                    ],
+                )
                 .expect("map removal probe runs");
             let Value::Array(values) = result else {
                 panic!("map removal probe must return an array");
             };
 
             assert_eq!(
-                values[..8],
+                values[..6],
                 [
                     Value::Int(0),
                     Value::Int(1),
-                    Value::Bool(true),
-                    Value::Bool(false),
-                    Value::Bool(true),
                     Value::Int(1),
-                    Value::Bool(true),
+                    Value::Int(1),
+                    Value::Int(0),
                     Value::Int(1)
                 ]
             );
@@ -75207,15 +75264,15 @@ func Probe() {
                 Value::Proplist(lc_script::ValueMap::from([("a", Value::Int(1))]));
             let nil_entry =
                 Value::Proplist(lc_script::ValueMap::from([("a", Value::Nil)]));
-            assert_eq!(values[8], empty);
+            assert_eq!(values[6], empty);
+            assert_eq!(values[7], nil_entry);
+            assert_eq!(values[8], reduced);
             assert_eq!(values[9], nil_entry);
-            assert_eq!(values[10], reduced);
+            assert_eq!(values[10], empty);
             assert_eq!(values[11], nil_entry);
-            assert_eq!(values[12], empty);
-            assert_eq!(values[13], nil_entry);
-            assert_eq!(values[8].c4_value_hash(), empty.c4_value_hash());
-            assert_eq!(values[9].c4_value_hash(), nil_entry.c4_value_hash());
-            assert_eq!(values[10].c4_value_hash(), reduced.c4_value_hash());
+            assert_eq!(values[6].c4_value_hash(), empty.c4_value_hash());
+            assert_eq!(values[7].c4_value_hash(), nil_entry.c4_value_hash());
+            assert_eq!(values[8].c4_value_hash(), reduced.c4_value_hash());
         }
     }
 }

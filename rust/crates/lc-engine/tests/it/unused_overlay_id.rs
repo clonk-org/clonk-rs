@@ -19,7 +19,7 @@ fn get_unused_overlay_id_is_registered_and_matches_search_semantics() {
                     return [
                         GetUnusedOverlayID(0, empty),
                         GetUnusedOverlayID(1, empty),
-                        GetUnusedOverlayID(1, nil),
+                        GetUnusedOverlayID(1, 0),
                         GetUnusedOverlayID(1),
                         GetUnusedOverlayID(-1)
                     ];
@@ -32,7 +32,7 @@ fn get_unused_overlay_id_is_registered_and_matches_search_semantics() {
 
                 func WithoutObjectContext()
                 {
-                    return GetUnusedOverlayID(1, nil);
+                    return GetUnusedOverlayID(1, 0);
                 }
                 "#,
             )

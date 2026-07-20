@@ -35,6 +35,7 @@ fn native_host_arity_pads_missing_and_discards_surplus_after_evaluation() {
     engine
         .load_script(
             r#"
+            #strict
             func Test() {
                 var surplus = Capture(Mark(1), Mark(2), Mark(3));
                 var missing = Capture(Mark(4));
@@ -152,6 +153,7 @@ fn reference_native_arity_preserves_kept_refs_and_pads_missing_values() {
     engine
         .load_script(
             r#"
+            #strict
             func Test() {
                 var value = 4;
                 var surplus = RefCapture(value, Mark(2), Mark(3));
@@ -194,10 +196,12 @@ fn effect_var_private_write_argument_bypasses_public_arity() {
     engine
         .load_script(
             r#"
+            #strict
             func Test() {
-                var before = EffectVar(0, nil, 1, Mark(9));
-                EffectVar(0, nil, 1) = 7;
-                return [before, EffectVar(0, nil, 1)];
+                var target;
+                var before = EffectVar(0, target, 1, Mark(9));
+                EffectVar(0, target, 1) = 7;
+                return [before, EffectVar(0, target, 1)];
             }
             "#,
         )

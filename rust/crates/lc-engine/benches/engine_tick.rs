@@ -2,6 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion
 use lc_engine::{Definition, Engine, Landscape, SpawnConfig, Vector2};
 
 const BOUNCER_SCRIPT: &str = r#"
+#strict 3
 global func Initialize(state, random)
 {
     return { energy = state.energy + (random % 3) };

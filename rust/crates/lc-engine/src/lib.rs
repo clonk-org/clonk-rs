@@ -60911,9 +60911,10 @@ mod custom_command_control_parity {
                 r#"#strict 2
 func RegisterCommands()
 {
+    var unset;
     return [
-        AddMsgBoardCmd(nil, "Capture(1)", C4MSGCMDR_Identifier),
-        AddMsgBoardCmd("nil-script", nil, C4MSGCMDR_Identifier),
+        AddMsgBoardCmd(unset, "Capture(1)", C4MSGCMDR_Identifier),
+        AddMsgBoardCmd("nil-script", unset, C4MSGCMDR_Identifier),
         AddMsgBoardCmd("invalid-low", "Capture(2)", -1),
         AddMsgBoardCmd("invalid-high", "Capture(3)", 3),
         AddMsgBoardCmd("probe", "Capture(%d)", C4MSGCMDR_Escaped),
@@ -63992,7 +63993,7 @@ mod em_move_object_control_parity {
         assert_eq!(
             engine.install_global_scripts(&[(
                 "EMGlobal.c".to_string(),
-                "static GlobalMarks; global func Mark() { if (GlobalMarks == nil) GlobalMarks = 0; GlobalMarks = GlobalMarks + 1; return true; }".to_string(),
+                "static GlobalMarks, Unset; global func Mark() { if (GlobalMarks == Unset) GlobalMarks = 0; GlobalMarks = GlobalMarks + 1; return true; }".to_string(),
             )]),
             1
         );

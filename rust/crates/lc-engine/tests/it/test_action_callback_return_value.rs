@@ -13,7 +13,7 @@ fn action_callback_can_return_int() {
         "Test",
         r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         // This callback returns 1 (like Scaling() in Clonk.c4d)
@@ -65,7 +65,7 @@ fn scaling_callback_returns_int() {
         "Clonk",
         r#"
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         // Actual Scaling function from Clonk.c4d

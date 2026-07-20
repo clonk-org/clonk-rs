@@ -22,7 +22,7 @@ fn var_reads_before_declaration_are_nil() {
              func Probe() {\n\
                  var early = iX;\n\
                  var iX = 7;\n\
-                 if (early == nil && iX == 7) return 1;\n\
+                 if (early == 0 && iX == 7) return 1;\n\
                  return 0;\n\
              }\n",
         )
@@ -82,7 +82,8 @@ fn classic_for_init_var_at_function_top_level_still_works() {
 fn array_for_in_binder_inside_if_keeps_its_final_item_after_the_block() {
     assert_eq!(
         eval(
-            "func Test() {\n\
+            "#strict\n\
+             func Test() {\n\
                  if (true) {\n\
                      for (var item in [4, 8, 12]) {}\n\
                  }\n\

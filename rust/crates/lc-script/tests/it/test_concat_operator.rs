@@ -66,16 +66,15 @@ func Test() { var value = "x"; value ..= true; return value; }"#),
 
 #[test]
 fn concat_rejects_values_without_cpp_string_conversion() {
-    for (expression, value_type) in [
-        (r#""x" .. nil"#, "any"),
-        (r#""x" .. [1]"#, "array"),
-        (r#""x" .. {}"#, "map"),
+    for (source, value_type) in [
+        (r#"func Test() { var empty; return "x" .. empty; }"#, "any"),
+        (r#"#strict
+func Test() { return "x" .. [1]; }"#, "array"),
+        (r#"#strict 3
+func Test() { return "x" .. {}; }"#, "map"),
     ] {
         assert_eq!(
-            runtime_error(
-                &format!("func Test() {{ return {expression}; }}"),
-                &[]
-            ),
+            runtime_error(source, &[]),
             format!(
                 "operator \"..\" right side: can not convert \"{value_type}\" to \"string\"!"
             )
@@ -100,7 +99,8 @@ func Test() { return "x" .. nil; }"#,
     );
     assert_eq!(
         runtime_error(
-            r#"func Test() { var value = "x"; value ..= [1]; return value; }"#,
+            r#"#strict
+func Test() { var value = "x"; value ..= [1]; return value; }"#,
             &[]
         ),
         "operator \"..=\" right side: can not convert \"array\" to \"string\"!"
@@ -117,7 +117,10 @@ func Test() { return "x" .. nil; }"#,
 #[test]
 fn concat_nil_left_side_reports_cpp_conversion_error() {
     assert_eq!(
-        runtime_error(r#"func Test() { return nil .. "a"; }"#, &[]),
+        runtime_error(
+            r#"func Test() { var empty; return empty .. "a"; }"#,
+            &[],
+        ),
         "operator \"..\" left side: can not convert \"any\" to \"string\", \"array\" or \"map\"!"
     );
 }
@@ -154,7 +157,7 @@ fn concat_assign_operator() {
 #[test]
 fn concat_arrays_appends() {
     assert_eq!(
-        eval("func Test() { return [1, 2] .. [3]; }"),
+        eval("#strict\nfunc Test() { return [1, 2] .. [3]; }"),
         Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
     );
 }
@@ -163,7 +166,7 @@ fn concat_arrays_appends() {
 fn concat_maps_merges_with_right_side_winning() {
     assert_eq!(
         eval(
-            "func Test() { var merged = { a = 1, b = 2 } .. { b = 3, c = 4 }; return [merged.a, merged.b, merged.c]; }"
+            "#strict 3\nfunc Test() { var merged = { a = 1, b = 2 } .. { b = 3, c = 4 }; return [merged.a, merged.b, merged.c]; }"
         ),
         Value::Array(vec![Value::Int(1), Value::Int(3), Value::Int(4)])
     );

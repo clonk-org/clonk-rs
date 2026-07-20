@@ -82,22 +82,12 @@ fn map_parameter_carries_map_annotation_and_checks_runtime_type() {
 
 #[test]
 fn map_parameter_type_parses_after_an_int_parameter() {
-    let script = Script::compile(
-        "func F(int first, map second) { return second; }\n\
-         func G(map|nil value) { return value; }",
-    )
-    .expect("map annotations compile in base and union positions");
+    let script = Script::compile("func F(int first, map second) { return second; }")
+        .expect("map annotation compiles after an int annotation");
     let params = &script.functions()["F"].params;
     assert_eq!(params[0].type_annotation, Some(TypeAnnotation::Int));
     assert_eq!(params[1].name, "second");
     assert_eq!(params[1].type_annotation, Some(TypeAnnotation::Map));
-    assert_eq!(
-        script.functions()["G"].params[0].type_annotation,
-        Some(TypeAnnotation::Union(vec![
-            TypeAnnotation::Map,
-            TypeAnnotation::Nil,
-        ]))
-    );
 }
 
 #[test]
@@ -171,7 +161,7 @@ fn pre_strict3_callers_bridge_nil_to_typed_int_and_bool_zeroes() {
         );
         engine.add_script(
             Script::compile(&format!(
-                "{caller_directive}func Test() {{ return Accept(nil, nil); }}"
+                "{caller_directive}func Test() {{ var number, flag; return Accept(number, flag); }}"
             ))
             .expect("caller compiles"),
         );

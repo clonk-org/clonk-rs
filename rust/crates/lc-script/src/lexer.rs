@@ -603,7 +603,7 @@ impl<'a> Lexer<'a> {
             "continue" => TokenKind::Keyword(Keyword::Continue),
             "true" => TokenKind::Keyword(Keyword::True),
             "false" => TokenKind::Keyword(Keyword::False),
-            "nil" => TokenKind::Keyword(Keyword::Nil),
+            "nil" if self.strict_level >= 3 => TokenKind::Keyword(Keyword::Nil),
             "this" => TokenKind::Keyword(Keyword::This),
             // Type keywords are contextual - treated as identifiers here,
             // recognized as keywords only in type annotation contexts by parser

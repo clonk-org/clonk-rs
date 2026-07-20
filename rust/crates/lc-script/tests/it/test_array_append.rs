@@ -24,14 +24,13 @@ fn runtime_error(source: &str, args: &[Value]) -> String {
 
 #[test]
 fn array_append_assignment_is_strict1_plus_only() {
-    for strict_level in 1..=3 {
-        let source =
-            format!("#strict {strict_level}\nfunc Test(a, value) {{ a[] = value; return a; }}");
+    for directive in ["#strict", "#strict 2", "#strict 3"] {
+        let source = format!("{directive}\nfunc Test(a, value) {{ a[] = value; return a; }}");
         assert_eq!(
             call(&source, &[Value::Array(vec![Value::Int(1)]), Value::Int(2)])
                 .expect("strict array append succeeds"),
             Value::Array(vec![Value::Int(1), Value::Int(2)]),
-            "#strict {strict_level}"
+            "{directive}"
         );
     }
 
@@ -63,7 +62,7 @@ fn array_append_assignment_creates_its_slot_before_the_rhs_runs() {
     engine
         .load_script(
             r#"
-            #strict 1
+            #strict
             func Test() {
                 var a = [];
                 a[] = Length(a);
@@ -137,7 +136,7 @@ fn array_append_postincrement_and_read_each_grow_once() {
 #[test]
 fn array_append_remains_a_live_reference_across_later_growth() {
     let source = r#"
-        #strict 1
+        #strict
         func Fill(&first, &second) {
             first = 7;
             second = 8;
@@ -157,7 +156,7 @@ fn array_append_remains_a_live_reference_across_later_growth() {
 
 #[test]
 fn array_append_rejects_non_arrays_with_cpp_errors() {
-    let source = "#strict 1\nfunc Test(value) { value[] = 1; }";
+    let source = "#strict\nfunc Test(value) { value[] = 1; }";
     assert_eq!(
         runtime_error(source, &[Value::Nil]),
         "array append accesss: can't access nil as an array!"
@@ -197,12 +196,12 @@ fn array_append_reads_self_owned_temporary_arrays_as_nil() {
 #[test]
 fn self_owned_temporary_array_append_loses_its_reference() {
     assert_eq!(
-        runtime_error("#strict 1\nfunc Test() { return [1][]++; }", &[]),
+        runtime_error("#strict\nfunc Test() { return [1][]++; }", &[]),
         "operator \"++\": got \"any\", but expected \"int&\"!"
     );
 
     let reference_parameter = r#"
-        #strict 1
+        #strict
         func Set(&slot) { slot = 7; }
         func Test() { Set([1][]); }
     "#;
@@ -215,7 +214,7 @@ fn self_owned_temporary_array_append_loses_its_reference() {
 #[test]
 fn temporary_array_assignment_preserves_cpp_error_order() {
     let source = r#"
-        #strict 1
+        #strict
         static calls;
         func Reset() { calls = 0; }
         func MakeArray() { calls++; return [1]; }
@@ -254,7 +253,7 @@ fn temporary_array_assignment_preserves_cpp_error_order() {
 #[test]
 fn array_append_retains_reference_returning_call_bases() {
     let source = r#"
-        #strict 1
+        #strict
         func &GetArray(&value) { return value; }
         func Test() {
             var source = [1];
@@ -283,7 +282,7 @@ fn array_append_retains_reference_returning_call_bases() {
 #[test]
 fn array_append_retains_found_failsafe_reference_calls() {
     let source = r#"
-        #strict 1
+        #strict
         static source;
         func &GetArray() { return source; }
         func Test(target) {
@@ -302,7 +301,7 @@ fn array_append_retains_found_failsafe_reference_calls() {
 #[test]
 fn reference_declared_function_can_return_a_temporary_append_value() {
     let source = r#"
-        #strict 1
+        #strict
         static calls;
         func &MaybeReference() { return [1][]; }
         func Set(&slot) {}
@@ -345,7 +344,7 @@ fn reference_declared_function_can_return_a_temporary_append_value() {
 #[test]
 fn value_returning_arrow_calls_do_not_use_the_reference_dispatch() {
     let source = r#"
-        #strict 1
+        #strict
         global func Test(target) {
             return [target->MakeArray()[], target->MakeArray()[0]];
         }
@@ -374,7 +373,7 @@ fn value_returning_arrow_calls_do_not_use_the_reference_dispatch() {
 #[test]
 fn ordinary_index_reads_do_not_resize_or_detach_the_array() {
     let source = r#"
-        #strict 1
+        #strict
         func Test() {
             var array = [1];
             var alias = array;
@@ -398,38 +397,41 @@ fn ordinary_index_reads_do_not_resize_or_detach_the_array() {
 #[test]
 fn array_append_rejects_non_array_temporary_values_with_cpp_errors() {
     assert_eq!(
-        runtime_error("#strict 1\nfunc Test() { return nil[]; }", &[]),
+        runtime_error(
+            "#strict\nfunc Test() { var value; return value[]; }",
+            &[],
+        ),
         "array append accesss: can't access nil as an array!"
     );
     assert_eq!(
-        runtime_error("#strict 1\nfunc Test() { return (5)[]; }", &[]),
+        runtime_error("#strict\nfunc Test() { return (5)[]; }", &[]),
         "array append accesss: can't access int as an array!"
     );
     assert_eq!(
         runtime_error(
-            "#strict 1\nfunc MakeNil() { return nil; } func Test() { return MakeNil()[]; }",
+            "#strict\nfunc MakeNil() { var value; return value; } func Test() { return MakeNil()[]; }",
             &[],
         ),
         "array append accesss: can't access nil as an array!"
     );
     assert_eq!(
-        runtime_error("#strict 1\nfunc Test() { return [1][][0]; }", &[]),
+        runtime_error("#strict\nfunc Test() { return [1][][0]; }", &[]),
         "indexed access [index]: array, map or string expected, but got nil"
     );
     assert_eq!(
-        runtime_error("#strict 1\nfunc Test() { return [1][].x; }", &[]),
+        runtime_error("#strict 3\nfunc Test() { return [1][].x; }", &[]),
         "map access with .: map expected, but got nil!"
     );
     assert_eq!(
         runtime_error(
-            "#strict 1\nfunc Test() { return GlobalN(\"missing\")[]; }",
+            "#strict\nfunc Test() { return GlobalN(\"missing\")[]; }",
             &[],
         ),
         "array append accesss: can't access nil as an array!"
     );
     assert_eq!(
         runtime_error(
-            "#strict 1\nfunc Test() { Local(0) = [1]; return Local(-1)[]; }",
+            "#strict\nfunc Test() { Local(0) = [1]; return Local(-1)[]; }",
             &[],
         ),
         "array append accesss: can't access nil as an array!"
@@ -439,11 +441,11 @@ fn array_append_rejects_non_array_temporary_values_with_cpp_errors() {
 #[test]
 fn nested_array_append_target_errors_before_evaluating_rhs() {
     let source = r#"
-        #strict 1
+        #strict 3
         static target, calls;
         func Init() {
             target = [];
-            calls = 0;
+            calls = nil;
         }
         func SideEffect() {
             calls++;

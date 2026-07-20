@@ -93,12 +93,12 @@ func Install()
 
 func AddDenied()
 {
-  return(AddEffect("Denied", this(), 100, 7, this(), nil, 11, 12, 13, 14));
+  return(AddEffect("Denied", this(), 100, 7, this(), 0, 11, 12, 13, 14));
 }
 
 func AddAllowed()
 {
-  var iResult = AddEffect("Allowed", this(), 100, 9, this(), nil, 21, 22, 23, 24);
+  var iResult = AddEffect("Allowed", this(), 100, 9, this(), 0, 21, 22, 23, 24);
   if(iStarts == 1 && iStartOrder == 123) iStartInline = 1;
   return(iResult);
 }

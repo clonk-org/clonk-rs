@@ -13,9 +13,9 @@ fn abs_function_should_work() {
         r#"
         global func Initialize(state, random) {
             Abs(-42);  // Just call it to verify no error
-            return nil;
+            return 0;
         }
-        global func Step(state, frame, random) { return nil; }
+        global func Step(state, frame, random) { return 0; }
         "#,
     )
     .expect("script compiles");
@@ -39,9 +39,9 @@ fn max_function_should_work() {
         r#"
         global func Initialize(state, random) {
             Max(30, 50);  // Just call it to verify no error
-            return nil;
+            return 0;
         }
-        global func Step(state, frame, random) { return nil; }
+        global func Step(state, frame, random) { return 0; }
         "#,
     )
     .expect("script compiles");
@@ -65,9 +65,9 @@ fn min_function_should_work() {
         r#"
         global func Initialize(state, random) {
             Min(30, 50);  // Just call it to verify no error
-            return nil;
+            return 0;
         }
-        global func Step(state, frame, random) { return nil; }
+        global func Step(state, frame, random) { return 0; }
         "#,
     )
     .expect("script compiles");
@@ -90,12 +90,12 @@ fn tree_still_callback_should_use_abs() {
         "TREE",
         "Tree",
         r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
         private func Still() {
             // Simulates: if (Abs(GetWind()) > 49) SetAction("Breeze");
             Abs(GetWind());  // Just call it to verify no error
-            return nil;
+            return 0;
         }
         "#,
     )

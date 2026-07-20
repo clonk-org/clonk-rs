@@ -244,6 +244,7 @@ fn reference_return_mutates_array_and_proplist_elements() {
     engine
         .load_script(
             r#"
+            #strict 3
             local Data;
 
             func & ArraySlot(int index) { return Data[index]; }

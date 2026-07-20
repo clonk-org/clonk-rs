@@ -119,32 +119,27 @@ fn strict3_nil_supported_compound_assignments_error() {
 
 #[test]
 fn below_strict3_nil_numeric_operators_coerce_to_zero() {
-    let expected = Value::Array(vec![
-        Value::Int(1),
-        Value::Bool(true),
-        Value::Int(0),
-        Value::Int(4),
-        Value::Int(0),
-        Value::Int(-1),
-        Value::Int(0),
-        Value::Int(1),
-        Value::Int(2),
-    ]);
+    let cases = [
+        ("var value; return value + 1;", Value::Int(1)),
+        ("var value; return value < 5;", Value::Bool(true)),
+        ("var value; return value << 1;", Value::Int(0)),
+        ("var value; return value | 4;", Value::Int(4)),
+        ("var value; return -value;", Value::Int(0)),
+        ("var value; return ~value;", Value::Int(-1)),
+        ("var value; return value++;", Value::Int(0)),
+        ("var value; value++; return value;", Value::Int(1)),
+        ("var value; value += 2; return value;", Value::Int(2)),
+    ];
 
-    for strict_prefix in ["", "#strict 1\n", "#strict 2\n"] {
-        let source = format!(
-            r#"{strict_prefix}
-            func Test() {{
-                var add, comparison, shift, bit, neg, invert;
-                var increment, compound;
-                var old_increment = increment++;
-                compound += 2;
-                return [add + 1, comparison < 5, shift << 1,
-                        bit | 4, -neg, ~invert, old_increment, increment, compound];
-            }}
-            "#
-        );
-        assert_eq!(call(&source).expect("legacy coercions succeed"), expected);
+    for strict_prefix in ["", "#strict\n", "#strict 2\n"] {
+        for (body, expected) in &cases {
+            let source = format!("{strict_prefix}func Test() {{ {body} }}");
+            assert_eq!(
+                call(&source).expect("legacy coercion succeeds"),
+                expected.clone(),
+                "{strict_prefix}{body}"
+            );
+        }
     }
 }
 

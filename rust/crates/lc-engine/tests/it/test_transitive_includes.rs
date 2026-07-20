@@ -58,7 +58,7 @@ fn check_functions_after_resolve() {
         global func Initialize(state, random) {
             // Call Breeze which should be inherited from TREE via TRE1
             var result = Breeze();
-            return nil;
+            return 0;
         }
         "#,
     )
@@ -87,7 +87,7 @@ fn transitive_includes_resolve_correctly() {
         local MotionThreshold;
 
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         private func Breeze() {
@@ -141,7 +141,7 @@ fn transitive_includes_resolve_correctly() {
             // Call Breeze which should be inherited from TREE via TRE1
             var result = Breeze();
             if (result == 42) {
-                return nil;  // Success
+                return 0;  // Success
             }
             return 1;  // Failure
         }
@@ -171,7 +171,7 @@ fn action_callback_with_transitive_include() {
         #strict
 
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         private func ActionCallback() {

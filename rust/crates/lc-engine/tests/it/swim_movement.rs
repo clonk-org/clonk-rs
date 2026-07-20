@@ -5,9 +5,9 @@ use lc_engine::{
 use std::collections::HashMap;
 
 const SWIM_SCRIPT: &str = r#"
-global func Initialize(state, random) { return nil; }
+global func Initialize(state, random) { return 0; }
 
-global func Step(state, frame, random) { return nil; }
+global func Step(state, frame, random) { return 0; }
 "#;
 
 #[test]

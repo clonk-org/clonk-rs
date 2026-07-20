@@ -154,6 +154,7 @@ fn increment_resolves_side_effectful_var_lvalue_once() {
     engine
         .load_script(
             r#"
+                #strict
                 func Test()
                 {
                     var iCount = 0;
@@ -184,6 +185,7 @@ fn increment_resolves_side_effectful_effectvar_lvalue_once() {
     engine
         .load_script(
             r#"
+                #strict
                 func Test()
                 {
                     var i = 0;
@@ -231,6 +233,7 @@ fn indexed_effectvar_array_assignment_writes_through_the_returned_reference() {
     engine
         .load_script(
             r#"
+                #strict
                 func Test()
                 {
                     EffectVar(7, 0, 1) = [10, 20];

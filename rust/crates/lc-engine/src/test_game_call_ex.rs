@@ -8,7 +8,7 @@ fn test_game_call_ex_parses() {
         func Initialize() {
             // GameCallEx should be recognized as a valid function call
             GameCallEx("OnClonkCreation", this());
-            return nil;
+            return 0;
         }
     "#;
 
@@ -47,7 +47,7 @@ fn test_game_call_ex_minimal() {
     let source = r#"
         func Test() {
             GameCallEx("TestFunction");
-            return nil;
+            return 0;
         }
     "#;
 

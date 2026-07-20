@@ -7452,7 +7452,7 @@ mod tests {
             r#"
                 local pClonk;
                 func Timer() {
-                    var pClonk = nil;
+                    var pClonk;
                     pClonk = 99;
                     return pClonk;
                 }
@@ -7489,6 +7489,7 @@ mod tests {
     fn varn_reads_and_writes_only_named_function_vars() {
         let script = Parser::new(
             r#"
+                #strict
                 local persisted;
                 func Probe(x, only_param) {
                     persisted = 9;
@@ -7549,7 +7550,7 @@ mod tests {
         // The duplicate fourth name reuses slot zero in C4Aul; timer and
         // change consequently read call arguments 4 and 5, not 5 and 6.
         let source =
-            "func Merge(target, number, name, target, timer, change) { return [target, timer, change]; }";
+            "#strict\nfunc Merge(target, number, name, target, timer, change) { return [target, timer, change]; }";
         let result = execute_script(
             source,
             "Merge",
@@ -7608,7 +7609,7 @@ mod tests {
 
     #[test]
     fn vm_handles_array_creation() {
-        let source = "func Test() { var arr = [1, 2, 3]; return arr[1]; }";
+        let source = "#strict\nfunc Test() { var arr = [1, 2, 3]; return arr[1]; }";
         let result = execute_script(source, "Test", &[]).unwrap();
         assert_eq!(result, Value::Int(2));
     }
@@ -7616,6 +7617,7 @@ mod tests {
     #[test]
     fn vm_handles_array_index_assignment() {
         let source = r#"
+            #strict
             func Test() {
                 var arr = [0, 0, 0];
                 arr[1] = 42;
@@ -7629,6 +7631,7 @@ mod tests {
     #[test]
     fn vm_auto_resizes_array_on_assignment() {
         let source = r#"
+            #strict
             func Test() {
                 var arr = [1];
                 arr[5] = 99;
@@ -7642,16 +7645,18 @@ mod tests {
     #[test]
     fn vm_array_indices_coerce_clamp_and_grow_like_cpp() {
         let source = r#"
+            #strict
             func Test() {
+                var nil_index;
                 var a = [7, 8];
-                var reads = [a[-1], a[nil], a[true], a[2]];
+                var reads = [a[-1], a[nil_index], a[true], a[2]];
                 a[-1] = 5;
                 var written = a[0];
                 var e = [];
                 var empty = e[-1];
                 var old = a[-1]++;
                 var coerced = [0, 0];
-                coerced[nil] = 3;
+                coerced[nil_index] = 3;
                 coerced[true] = 4;
                 return [reads, written, empty, e, old, a[0], coerced];
             }
@@ -7707,6 +7712,7 @@ mod tests {
         engine
             .load_script(
                 r#"
+                    #strict
                     local Data;
 
                     func & GetData() { return Data; }
@@ -7738,7 +7744,7 @@ mod tests {
 
     #[test]
     fn vm_array_growth_stops_at_cpp_value_list_max_size() {
-        let source = "func Grow(index) { var a = []; a[index] = 1; return a; }";
+        let source = "#strict\nfunc Grow(index) { var a = []; a[index] = 1; return a; }";
         let grown = execute_script(source, "Grow", &[Value::Int(999_999)])
             .expect("last valid array index grows");
         let Value::Array(elements) = grown else {
@@ -7758,13 +7764,14 @@ mod tests {
     fn vm_string_indices_follow_cpp_offsets_bounds_and_coercion() {
         let source = r#"#strict 2
             func Test() {
+                var nil_index;
                 var nested = [["abc"]];
                 return [
                     "abc"[0],
                     "abc"[-1],
                     "abc"[5],
                     "abc"[-5],
-                    "abc"[nil],
+                    "abc"[nil_index],
                     "abc"[false],
                     "abc"[true],
                     nested[0][0][1][0]
@@ -7916,7 +7923,7 @@ mod tests {
 
     #[test]
     fn vm_string_index_result_has_fresh_cpp_string_identity() {
-        let source = r#"#strict 1
+        let source = r#"#strict
             func Test() {
                 var source = "abc";
                 var indexed = source[0];
@@ -7932,7 +7939,7 @@ mod tests {
 
     #[test]
     fn vm_handles_proplist_creation() {
-        let source = "func Test() { var obj = { x = 10 }; return obj.x; }";
+        let source = "#strict 3\nfunc Test() { var obj = { x = 10 }; return obj.x; }";
         let result = execute_script(source, "Test", &[]).unwrap();
         assert_eq!(result, Value::Int(10));
     }
@@ -7940,6 +7947,7 @@ mod tests {
     #[test]
     fn vm_handles_proplist_property_assignment() {
         let source = r#"
+            #strict 3
             func Test() {
                 var obj = { x = 1 };
                 obj.x = 42;
@@ -8081,17 +8089,24 @@ mod tests {
 
     #[test]
     fn vm_map_entry_removal_clears_the_removed_value_identity() {
-        let source = r#"#strict 1
-            func Test() {
-                var entries = { entry = "same" };
-                var old_value = entries.entry;
-                entries.entry = nil;
-                return [entries.entry == old_value, entries.entry == nil];
+        let source = r#"#strict
+            func Test(entries) {
+                var old_value = entries["entry"];
+                entries["entry"] = 0;
+                return [entries["entry"] == old_value, entries["entry"] == 0];
             }
         "#;
 
         assert_eq!(
-            execute_script(source, "Test", &[]).expect("map property removal runs"),
+            execute_script(
+                source,
+                "Test",
+                &[Value::Proplist(ValueMap::from([(
+                    "entry".to_string(),
+                    Value::String("same".into()),
+                )]))],
+            )
+            .expect("map entry removal runs"),
             Value::Array(vec![Value::Bool(false), Value::Bool(true)])
         );
     }

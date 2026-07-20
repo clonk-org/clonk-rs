@@ -53,6 +53,7 @@ fn reference_aware_host_writes_through_property_and_index_lvalues() {
     engine
         .load_script(
             r#"
+            #strict 3
             func Test() {
                 var data = { score = 4 };
                 var values = [1, 2];
@@ -102,6 +103,7 @@ fn declared_reference_non_lvalue_is_rejected_before_the_native_body() {
     engine
         .load_script(
             r#"
+            #strict
             func Three() { return 3; }
             func Test() {
                 var value = 5;

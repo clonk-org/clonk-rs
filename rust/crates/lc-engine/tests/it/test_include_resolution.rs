@@ -8,8 +8,8 @@ fn simple_definition(id: &str) -> Definition {
         id,
         id,
         r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
         "#,
     )
     .expect("script compiles")
@@ -27,9 +27,9 @@ fn action_callback_should_resolve_through_include() {
         "TRE1",
         "Tree",
         r#"
-        global func Initialize(state, random) { return nil; }
-        global func Step(state, frame, random) { return nil; }
-        private func Still() { return nil; }
+        global func Initialize(state, random) { return 0; }
+        global func Step(state, frame, random) { return 0; }
+        private func Still() { return 0; }
         "#,
     )
     .unwrap();

@@ -248,9 +248,14 @@ fn zero_valued_registered_constants_fold_at_each_use_site() {
         let mut engine = Engine::new();
         engine.register_constant("ZERO_VALUE", Value::Int(0));
         engine.register_constant("FALSE_VALUE", Value::Bool(false));
+        let directive = if strict_level == 1 {
+            "#strict".to_string()
+        } else {
+            format!("#strict {strict_level}")
+        };
         engine
             .load_script(&format!(
-                "#strict {strict_level}\n\
+                "{directive}\n\
                  func Direct() {{ return ZERO_VALUE; }}\n\
                  func Probe() {{ return [ZERO_VALUE, FALSE_VALUE]; }}"
             ))
@@ -282,6 +287,11 @@ fn zero_valued_script_constants_fold_but_runtime_statics_do_not() {
         let mut engine = Engine::new();
         engine.set_global_variables(globals);
         engine.set_global_constants(constants);
+        let directive = if strict_level == 1 {
+            "#strict".to_string()
+        } else {
+            format!("#strict {strict_level}")
+        };
         let old_style_call = if strict_level == 1 {
             "func Called() { return [ZERO_VALUE(), FALSE_VALUE()]; }\n"
         } else {
@@ -289,7 +299,7 @@ fn zero_valued_script_constants_fold_but_runtime_statics_do_not() {
         };
         engine.add_script(
             Script::compile(&format!(
-                "#strict {strict_level}\n\
+                "{directive}\n\
                  static const ZERO_VALUE = 0;\n\
                  static const FALSE_VALUE = false;\n\
                  static slot;\n\

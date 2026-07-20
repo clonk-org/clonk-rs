@@ -3488,6 +3488,7 @@ mod tests {
 
     fn runtime_with_simple_object() -> RuntimeHandle {
         const STEP_SCRIPT: &str = r#"
+#strict 3
 global func Initialize(state, random)
 {
     return {};
@@ -4579,6 +4580,7 @@ global func Step(state, frame, random)
     #[test]
     fn runtime_state_export_and_import_roundtrip() {
         const TEST_SCRIPT: &str = r#"
+#strict 3
 global func Initialize(state, random)
 {
     return {};
@@ -4762,7 +4764,7 @@ global func Step(state, frame, random)
                 Definition::from_script(
                     "Mover",
                     "Mover",
-                    "global func Initialize(state, random) { return nil; }",
+                    "global func Initialize(state, random) { return 0; }",
                 )
                 .unwrap(),
             )

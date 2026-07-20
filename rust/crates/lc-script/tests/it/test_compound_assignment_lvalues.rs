@@ -24,6 +24,7 @@ fn plain_assignment_resolves_array_index_before_rhs() {
     engine.add_script(
         Script::compile(
             r#"
+                #strict
                 func Test() {
                     var values = [0];
                     values[Trace(1)] = Trace(2);
@@ -60,6 +61,7 @@ fn assignment_expression_resolves_array_index_before_rhs() {
     engine.add_script(
         Script::compile(
             r#"
+                #strict
                 func Test() {
                     var values = [0];
                     var assigned = values[Trace(1)] = Trace(2);
@@ -96,6 +98,7 @@ fn compound_assignment_evaluates_array_index_once() {
     engine.add_script(
         Script::compile(
             r#"
+                #strict
                 func Test() {
                     var values = [10, 20];
                     values[SideEffect()] += 5;
@@ -132,6 +135,7 @@ fn compound_assignment_consumes_one_deterministic_random_draw() {
     engine.add_script(
         Script::compile(
             r#"
+                #strict
                 func Test() {
                     var values = [10, 20];
                     values[Random(2)] += 1;
@@ -186,7 +190,7 @@ fn concat_assignment_preserves_nested_array_identity_below_strict_two() {
     engine.add_script(
         Script::compile(
             r#"
-                #strict 1
+                #strict
                 func Test() {
                     var inner = [];
                     var values = [inner];

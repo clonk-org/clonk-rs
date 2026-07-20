@@ -24,14 +24,16 @@ fn eval_error(source: &str) -> String {
 #[test]
 fn falsy_operands_compare_as_empty_below_strict_two() {
     for expression in [
-        "nil S= \"\"",
+        "empty S= \"\"",
         "0 S= \"\"",
         "false S= \"\"",
         "\"\" S= \"\"",
-        "nil eq \"\"",
+        "empty eq \"\"",
     ] {
         assert_eq!(
-            eval(&format!("func Test() {{ return {expression}; }}")),
+            eval(&format!(
+                "func Test() {{ var empty; return {expression}; }}"
+            )),
             Value::Bool(true),
             "{expression}"
         );
@@ -83,7 +85,7 @@ fn string_comparison_stops_at_the_native_nul_terminator() {
 
 #[test]
 fn truthy_non_strings_raise_operator_type_errors_below_strict_two() {
-    for prefix in ["", "#strict 1\n"] {
+    for prefix in ["", "#strict\n"] {
         assert_eq!(
             eval_error(&format!(
                 "{prefix}func Test() {{ return 5 S= \"5\"; }}"
@@ -117,11 +119,11 @@ fn strict_two_treats_adjacent_s_operators_as_identifier_s() {
 #[test]
 fn textual_ne_compares_nil_as_empty_string() {
     assert_eq!(
-        eval("func Test() { return nil ne \"x\"; }"),
+        eval("func Test() { var empty; return empty ne \"x\"; }"),
         Value::Bool(true)
     );
     assert_eq!(
-        eval("func Test() { return nil ne \"\"; }"),
+        eval("func Test() { var empty; return empty ne \"\"; }"),
         Value::Bool(false)
     );
 }

@@ -16064,12 +16064,12 @@ mod tests {
     const TEST_SCRIPT: &str = r#"
 global func Initialize(state, random)
 {
-    return nil;
+    return 0;
 }
 
 global func Step(state, frame, random)
 {
-    return nil;
+    return 0;
 }
 "#;
 
@@ -20166,6 +20166,7 @@ Definitions="Western.c4f\\Misc.c4d"
     #[test]
     fn scenario_script_initialize_spawns_objects() {
         let scenario_script = r#"
+#strict 3
 global func Initialize(state, random)
 {
     return { spawn = [ { definition = "Mover", owner = 42, energy = 77 } ] };
@@ -20295,6 +20296,7 @@ global func Step(state, frame, random)
     #[test]
     fn scenario_script_step_runs_each_tick() {
         let scenario_script = r#"
+#strict 3
 global func Initialize(state, random)
 {
     return nil;
@@ -22254,7 +22256,7 @@ global func Step(state, frame, random)
             "global func Initialize(state, random) {\n\
                  var obj = CreateObject(GOOD, 50, 50, -1);\n\
                  obj->Mark();\n\
-                 return nil;\n\
+                 return 0;\n\
              }\n",
         );
         std::fs::write(
@@ -22293,7 +22295,7 @@ global func Step(state, frame, random)
                  shared = 4;\n\
                  var obj = CreateObject(GOOD, 50, 50, -1);\n\
                  obj->Remember();\n\
-                 return nil;\n\
+                 return 0;\n\
              }\n",
         );
         std::fs::write(
@@ -22341,7 +22343,7 @@ global func Step(state, frame, random)
             "global func Initialize(state, random) {\n\
                  var obj = CreateObject(GOOD, 50, 50, -1);\n\
                  obj->Remember();\n\
-                 return nil;\n\
+                 return 0;\n\
              }\n",
         );
         std::fs::write(
@@ -22396,7 +22398,7 @@ global func Step(state, frame, random)
                  LocalN(\"iWater\", obj) = 90;\n\
                  obj->Check();\n\
                  LocalN(\"iWater\", obj) += 10;\n\
-                 return nil;\n\
+                 return 0;\n\
              }\n",
         );
         std::fs::write(
@@ -22583,7 +22585,7 @@ global func Step(state, frame, random)
             "global func Initialize(state, random) {\n\
                  var obj = CreateObject(GOOD, 50, 50, -1);\n\
                  obj->Boot();\n\
-                 return nil;\n\
+                 return 0;\n\
              }\n",
         );
         std::fs::write(
@@ -22632,7 +22634,7 @@ global func Step(state, frame, random)
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             None,
-            "global func Initialize(state, random) { return nil; }\n",
+            "global func Initialize(state, random) { return 0; }\n",
         );
         std::fs::write(
             dir.path().join("Defs.c4d/Good.c4d/Script.c"),
@@ -22684,7 +22686,7 @@ global func Step(state, frame, random)
             "global func Initialize(state, random) {\n\
                  var obj = CreateObject(GOOD, 50, 50, -1);\n\
                  obj->Boot();\n\
-                 return nil;\n\
+                 return 0;\n\
              }\n",
         );
         std::fs::write(
@@ -23084,7 +23086,7 @@ public func ActualizePhase(pClonk)
             "global func Initialize(state, random) {\n\
                  var obj = CreateObject(GOOD, 50, 50, -1);\n\
                  obj->HLPR::Tag();\n\
-                 return nil;\n\
+                 return 0;\n\
              }\n",
         );
         std::fs::write(
@@ -23134,8 +23136,8 @@ public func ActualizePhase(pClonk)
             dir.path(),
             None,
             "static joined_player;\nstatic init_arg;\n\
-             global func Initialize(first) { init_arg = first; return nil; }\n\
-             global func InitializePlayer(plr) { joined_player = plr; return nil; }\n",
+             global func Initialize(first) { init_arg = first; return 0; }\n\
+             global func InitializePlayer(plr) { joined_player = plr; return 0; }\n",
         );
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         assert_eq!(
@@ -23987,7 +23989,7 @@ public func ActualizePhase(pClonk)
             dir.path(),
             None,
             "static probed;\n\
-             global func Initialize() { probed = PackHelper() + PACK_ORDER; return nil; }\n",
+             global func Initialize() { probed = PackHelper() + PACK_ORDER; return 0; }\n",
         );
         let system = dir.path().join("Defs.c4d/System.c4g");
         std::fs::create_dir_all(&system).expect("system dir");
@@ -25257,7 +25259,7 @@ public func ActualizePhase(pClonk)
         let scenario_dir = write_resilience_fixture(
             dir.path(),
             Some(("BRKN", "func {{{ not a script\n")),
-            "global func Initialize(state, random) { return nil; }\n",
+            "global func Initialize(state, random) { return 0; }\n",
         );
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         assert_eq!(
@@ -25475,7 +25477,7 @@ public func ActualizePhase(pClonk)
             dir.path(),
             Some((
                 "INIT",
-                "static init_def_team_configuration;\n\
+                "#strict\nstatic init_def_team_configuration;\n\
                  func InitializeDef() {\n\
                      init_def_team_configuration = [GetTeamConfig(1), GetTeamConfig(2), GetTeamConfig(3), GetTeamConfig(4), GetTeamConfig(5), GetTeamConfig(6), GetTeamConfig(7)];\n\
                  }\n",
@@ -25529,7 +25531,7 @@ public func ActualizePhase(pClonk)
             dir.path(),
             Some((
                 "PROB",
-                "static restored_named;\n\
+                "#strict\nstatic restored_named;\n\
                  static observed_saved_weather;\n\
                  func InitializeDef() {\n\
                      observed_saved_weather = [restored_named, GetWind(), GetSeason(), GetTemperature()];\n\
@@ -25988,7 +25990,7 @@ public func ActualizePhase(pClonk)
         .expect("write legacy scenario core");
         std::fs::write(
             scenario_dir.join("Script.c"),
-            "global func Initialize(state, random) { return nil; }\n",
+            "global func Initialize(state, random) { return 0; }\n",
         )
         .expect("write legacy scenario script");
 
@@ -27052,7 +27054,7 @@ public func ActualizePhase(pClonk)
         .expect("write scenario core");
         std::fs::write(
             scenario_dir.join("Script.c"),
-            "global func Initialize(state, random) { return nil; }\n",
+            "global func Initialize(state, random) { return 0; }\n",
         )
         .expect("write scenario script");
 

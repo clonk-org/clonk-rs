@@ -12193,7 +12193,7 @@ local own_calls;
 protected func ControlCommand() { own_calls++; return(1); }
 public func IssueExit() {
   CreateMenu(CLNK, this(), this(), 0, "Open");
-  return SetCommand(this(), "Exit", nil, nil, 24, nil, 25);
+  return SetCommand(this(), "Exit", 0, 0, 24, 0, 25);
 }
 "#;
         let vehicle = r#"
@@ -12263,7 +12263,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by) {
         // and may consume a script SetCommand even though fControl is false.
         let clonk = r#"
 #strict
-public func IssueExit() { return SetCommand(this(), "Exit", nil, nil, 24, nil, 25); }
+public func IssueExit() { return SetCommand(this(), "Exit", 0, 0, 24, 0, 25); }
 "#;
         let vehicle = r#"
 #strict
@@ -13226,12 +13226,12 @@ protected func Destruction() {{ return sale_base->RecordDestruction({marker}); }
 local seen_wealth, seen_stock, seen_command;
 public func BuyThenReplace(object base)
 {
-    SetCommand(this(), "Buy", base, 1, 0, nil, ITEM);
+    SetCommand(this(), "Buy", base, 1, 0, 0, ITEM);
     ExecuteCommand();
     seen_wealth = GetWealth(1);
     seen_stock = GetHomebaseMaterial(1, ITEM);
     seen_command = GetCommand(this(), 0);
-    return SetCommand(this(), "Wait", nil, 37);
+    return SetCommand(this(), "Wait", 0, 37);
 }
 "#;
         register_clonk(&mut engine, "CLNK", clonk_script);
@@ -13294,12 +13294,12 @@ public func BuyThenReplace(object base)
 local seen_wealth, seen_stock, seen_command;
 public func SellThenReplace(object base)
 {
-    SetCommand(this(), "Sell", base, 2, 0, nil, ITEM);
+    SetCommand(this(), "Sell", base, 2, 0, 0, ITEM);
     ExecuteCommand();
     seen_wealth = GetWealth(2);
     seen_stock = GetHomebaseMaterial(2, ITEM);
     seen_command = GetCommand(this(), 0);
-    return SetCommand(this(), "Wait", nil, 37);
+    return SetCommand(this(), "Wait", 0, 37);
 }
 "#;
         register_clonk(&mut engine, "CLNK", clonk_script);

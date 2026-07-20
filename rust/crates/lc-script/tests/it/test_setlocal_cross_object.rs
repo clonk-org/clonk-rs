@@ -37,6 +37,7 @@ fn setlocal_with_foreign_target_writes_only_that_objects_slot_and_returns_value(
     engine.add_script(
         Script::compile(
             r#"
+                #strict
                 public func Assign(target) {
                     Local(0) = 17;
                     var result = SetLocal(0, 1, target);
@@ -82,6 +83,7 @@ fn arrow_form_setlocal_writes_the_target_without_world_method_dispatch() {
     engine.add_script(
         Script::compile(
             r#"
+                #strict
                 public func Assign(target) {
                     var result = target->SetLocal(13, 42);
                     return [result, target->Local(13)];
@@ -112,6 +114,7 @@ fn setlocal_without_target_still_writes_the_executing_object() {
     engine.add_script(
         Script::compile(
             r#"
+                #strict
                 public func Assign() {
                     var result = SetLocal(4, 33);
                     return [result, Local(4)];
@@ -145,6 +148,7 @@ fn setlocal_evaluates_an_explicit_self_target_expression_exactly_once() {
     engine.add_script(
         Script::compile(
             r#"
+                #strict
                 public func Assign() {
                     var result = SetLocal(5, 23, SelfTarget());
                     return [result, Local(5)];

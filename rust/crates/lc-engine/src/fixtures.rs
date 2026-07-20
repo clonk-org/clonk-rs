@@ -12,6 +12,7 @@ pub struct SnapshotScenario {
 }
 
 const BASIC_MOVEMENT_SCRIPT: &str = r#"
+#strict 3
 global func Initialize(state, random)
 {
     return { energy = state.energy + 5 };
@@ -52,12 +53,12 @@ global func Step(state, frame, random)
 const PASSIVE_SCRIPT: &str = r#"
 global func Initialize(state, random)
 {
-    return nil;
+    return 0;
 }
 
 global func Step(state, frame, random)
 {
-    return nil;
+    return 0;
 }
 "#;
 

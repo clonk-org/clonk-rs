@@ -10,6 +10,16 @@ fn eval(expression: &str) -> Value {
     engine.call("Test", &[]).expect("script call succeeds")
 }
 
+fn eval_strict1(expression: &str) -> Value {
+    let mut engine = Engine::new();
+    engine
+        .load_script(&format!(
+            "#strict\nfunc Test() {{ var empty; return {expression}; }}"
+        ))
+        .expect("STRICT1 exponentiation script loads");
+    engine.call("Test", &[]).expect("script call succeeds")
+}
+
 fn runtime_error(expression: &str) -> String {
     let mut engine = Engine::new();
     engine
@@ -111,7 +121,9 @@ fn unary_precedence_is_higher_than_exponentiation() {
 #[test]
 fn exponentiation_edge_semantics_match_cpp() {
     assert_eq!(
-        eval("[2 ** -1, nil ** 3, 2 ** nil, true ** true, 2 ** 40, 10 ** 10]"),
+        eval_strict1(
+            "[2 ** -1, empty ** 3, 2 ** empty, true ** true, 2 ** 40, 10 ** 10]",
+        ),
         Value::Array(vec![
             Value::Int(0),
             Value::Int(0),
@@ -134,7 +146,7 @@ fn exponentiation_rejects_non_coercible_operands() {
 #[test]
 fn exponentiation_bool_coercion_and_overflow_match_cpp() {
     assert_eq!(
-        eval("[5 ** -2, true ** 3, (1 << 30) ** 2]"),
+        eval_strict1("[5 ** -2, true ** 3, (1 << 30) ** 2]"),
         Value::Array(vec![Value::Int(0), Value::Int(1), Value::Int(0)])
     );
 }
@@ -162,7 +174,7 @@ func Test() {
 #[test]
 fn shift_counts_are_masked_like_cpp() {
     assert_eq!(
-        eval("[1 << 32, 64 >> 32, 1 << -1, 64 >> -1, -8 >> 33]"),
+        eval_strict1("[1 << 32, 64 >> 32, 1 << -1, 64 >> -1, -8 >> 33]"),
         Value::Array(vec![
             Value::Int(1),
             Value::Int(64),

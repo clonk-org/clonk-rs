@@ -20,7 +20,7 @@ fn local_variables_default_to_nil() {
             // It should be nil, not undefined
             // If accessing it doesn't throw an error, the test passes
             var x = MyLocalVar;
-            return nil;
+            return 0;
         }
         "#,
     )
@@ -47,17 +47,17 @@ fn local_variables_in_action_callback() {
         r#"
         #strict
 
-        local MotionThreshold;
+        local MotionThreshold, Unset;
 
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         // This callback accesses MotionThreshold which hasn't been initialized yet
         // (Construction() would normally set it, but let's test the nil default)
         protected func StillCallback(state, action) {
             // Should be nil, not undefined
-            if (MotionThreshold == nil) {
+            if (MotionThreshold == Unset) {
                 return 1;
             }
             return 0;

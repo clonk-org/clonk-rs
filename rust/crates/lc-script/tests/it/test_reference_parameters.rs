@@ -105,6 +105,7 @@ fn reference_parameter_mutates_array_and_proplist_elements() {
     engine
         .load_script(
             r#"
+            #strict 3
             func SetValue(&x, value) { x = value; }
             func TestArray() {
                 var values = [1, 2];

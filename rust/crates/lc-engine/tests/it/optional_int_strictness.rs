@@ -14,7 +14,7 @@ fn call_modulate_color(strict_level: u8, first_color: &str) -> Value {
 
 fn custom_message_color(strict_level: u8, color: &str) -> u32 {
     let script = format!(
-        "#strict {strict_level}\nfunc Probe() {{ return CustomMessage(\"probe\", nil, nil, nil, nil, {color}); }}"
+        "#strict {strict_level}\nfunc Probe() {{ var unset; return CustomMessage(\"probe\", unset, unset, unset, unset, {color}); }}"
     );
     let mut engine = Engine::new();
     engine

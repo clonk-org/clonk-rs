@@ -18,7 +18,8 @@ fn single_variable_for_in_over_nil_reports_the_cpp_type_error() {
     let error = runtime_error(
         r#"
         func Test() {
-            for (var value in nil);
+            var values;
+            for (var value in values);
             return 1;
         }
         "#,
@@ -46,6 +47,7 @@ fn single_variable_for_in_over_empty_array_continues_after_the_loop() {
     assert_eq!(
         call_test(
             r#"
+            #strict
             func Test() {
                 for (var value in []);
                 return 1;

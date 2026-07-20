@@ -25,14 +25,14 @@ fn construction_called_before_action_start() {
         }
 
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         protected func OnStart() {
             // This should work if Construction() was called
             // Should fail with "cannot apply '+' to operands of type int and nil" if not
             var result = 10 + MyValue;
-            return nil;
+            return 0;
         }
         "#,
     )
@@ -79,14 +79,14 @@ fn construction_initializes_local_vars_for_tree() {
         }
 
         global func Initialize(state, random) {
-            return nil;
+            return 0;
         }
 
         protected func Still() {
             // This is what PLM1's Still action does
             // Should fail if MotionThreshold is nil
             var threshold = 49 + MotionThreshold;
-            return nil;
+            return 0;
         }
         "#,
     )

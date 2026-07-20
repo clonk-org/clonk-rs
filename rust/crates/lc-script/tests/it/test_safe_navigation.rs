@@ -242,7 +242,7 @@ fn guard_covers_the_contiguous_suffix_but_not_a_new_nonnil_intermediate() {
 
 #[test]
 fn safe_navigation_is_strict3_only_and_requires_a_navigation_operator() {
-    for strict_prefix in ["", "#strict 1\n", "#strict 2\n"] {
+    for strict_prefix in ["", "#strict\n", "#strict 2\n"] {
         for suffix in ["?.key", "?[0]", "?->GetX()"] {
             let source = format!("{strict_prefix}func Probe(value) {{ return value{suffix}; }}");
             assert_diagnostic_contains(&source, "unexpected '?'");

@@ -2053,7 +2053,8 @@ mod tests {
         let mut linked_host = Engine::new();
         linked_host
             .load_script(
-                "local Shared;\n\
+                "#strict\n\
+                 local Shared;\n\
                  func Helper() { Shared = Shared + 4; return Shared; }\n\
                  global func Deferred() {\n\
                      Shared = Shared + 2;\n\

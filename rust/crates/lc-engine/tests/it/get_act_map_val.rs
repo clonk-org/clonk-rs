@@ -156,7 +156,7 @@ fn duplicate_actions_keep_cpp_first_name_and_last_next_action_semantics() {
          func FirstStart() { callback_result += 1; }\n\
          func LastAbort() { callback_result += 10; }\n\
          func TryRebind() { return SetAction(\"Dup\"); }\n\
-         func ForceRebind() { callback_result = 0; return [SetAction(\"Dup\", nil, nil, true), callback_result]; }\n\
+         func ForceRebind() { callback_result = 0; return [SetAction(\"Dup\", 0, 0, true), callback_result]; }\n\
          func FirstLength() { return GetActMapVal(\"Length\", \"Dup\"); }\n",
     )
     .expect("Script writes");

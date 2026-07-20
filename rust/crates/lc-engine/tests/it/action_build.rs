@@ -5,7 +5,7 @@ use lc_engine::{
 use std::collections::HashMap;
 
 const BASIC_SCRIPT: &str = r#"
-global func Initialize(state, random) { return nil; }
+global func Initialize(state, random) { return 0; }
 "#;
 
 fn builder_definition() -> Definition {

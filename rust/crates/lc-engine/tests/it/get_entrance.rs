@@ -17,7 +17,7 @@ func Probe()
 {
   var before = GetEntrance();
   SetEntrance(1);
-  var after_set = GetEntrance(nil);
+  var after_set = GetEntrance(0);
   var explicit_self = GetEntrance(this());
   SetEntrance(0);
   return([before, after_set, explicit_self, GetEntrance()]);

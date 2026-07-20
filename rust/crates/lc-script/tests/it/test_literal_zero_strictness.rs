@@ -2,9 +2,14 @@ use lc_script::{Engine, Value};
 
 fn evaluate(strict_level: u8) -> Value {
     let mut engine = Engine::new();
+    let directive = if strict_level == 1 {
+        "#strict".to_string()
+    } else {
+        format!("#strict {strict_level}")
+    };
     engine
         .load_script(&format!(
-            r#"#strict {strict_level}
+            r#"{directive}
 func Probe()
 {{
     var integer = 0;

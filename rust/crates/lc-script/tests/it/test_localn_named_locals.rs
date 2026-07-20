@@ -12,7 +12,7 @@ fn localn_reads_a_named_object_local() {
     // is visible to LocalN in the caller.
     let source = r#"
         local iUsedItems;
-        global func Prime() { iUsedItems = 7; return nil; }
+        global func Prime() { iUsedItems = 7; return 0; }
         global func Probe() { Prime(); return LocalN("iUsedItems"); }
     "#;
     let mut engine = Engine::new();

@@ -19,7 +19,7 @@ fn test_c4id_in_scope_resolution() {
             var obj = this;
             // C4ID used in scope resolution
             obj->CLNK::SomeMethod();
-            return nil;
+            return 0;
         }
     "#;
 
@@ -35,7 +35,7 @@ fn test_c4id_after_arrow_operator() {
             var pAmmo = this;
             // C4ID immediately after ->
             pAmmo->OBRL();
-            return nil;
+            return 0;
         }
     "#;
 
@@ -51,7 +51,7 @@ fn test_complex_c4id_scope_resolution() {
             var pAmmo = this;
             // Complex pattern: method call with C4ID scope resolution
             pAmmo->OBRL::BarrelDoFill(-pAmmo->OBRL::GetAmount());
-            return nil;
+            return 0;
         }
     "#;
 
@@ -64,7 +64,7 @@ fn c4id_shaped_names_are_quarantined_without_panicking_or_dropping_later_code() 
         ("func TEST () { return 1; }", "function name", false),
         ("func Broken() { var ABCD; }", "variable name", true),
         (
-            "func Broken() { for (var COIN in []) {} }",
+            "#strict\nfunc Broken() { for (var COIN in []) {} }",
             "variable name",
             true,
         ),

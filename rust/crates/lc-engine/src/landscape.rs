@@ -9066,7 +9066,7 @@ func FxRecreateTimer(object target, int number, int time)
 #strict 2
 func ArmThreaded(object b)
 {
-    AddEffect("First", this(), 1, 1, this(), nil, b);
+    AddEffect("First", this(), 1, 1, this(), 0, b);
     AddEffect("Second", this(), 1, 1, this());
     return true;
 }
@@ -9179,8 +9179,8 @@ func FxSecondTimer(object target, int number, int time)
 #strict 2
 func ArmForeignState(object other)
 {
-    AddEffect("DisableForeign", this(), 1, 1, this(), nil, other);
-    AddEffect("MoveForeign", this(), 1, 1, this(), nil, other);
+    AddEffect("DisableForeign", this(), 1, 1, this(), 0, other);
+    AddEffect("MoveForeign", this(), 1, 1, this(), 0, other);
     return true;
 }
 
@@ -9269,7 +9269,7 @@ func FxMoveForeignTimer(object target, int number, int time)
 #strict 2
 func ArmOwnership(object b)
 {
-    AddEffect("RecreateForeign", this(), 1, 1, this(), nil, b);
+    AddEffect("RecreateForeign", this(), 1, 1, this(), 0, b);
     AddEffect("DisableOuter", this(), 1, 1, this());
     return true;
 }

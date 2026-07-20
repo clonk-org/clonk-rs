@@ -167,6 +167,7 @@ fn par_is_a_writable_reference_to_the_ten_slot_call_frame() {
     // share those cells, and omitted slots remain writable (C4AulExec.cpp:
     // 1127-1140). Magic.c's ReduceAlchem relies on `Par(1)=this()`.
     let source = r#"
+        #strict
         global func Fill(first)
         {
             Par(0) = 5;

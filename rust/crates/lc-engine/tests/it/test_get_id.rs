@@ -11,9 +11,9 @@ fn get_id_returns_current_object_definition() {
         protected func Initialize() {
             var myId = GetID();
             if (myId != "COWB") {
-                return nil; // This would cause an error
+                return 0; // This would cause an error
             }
-            return nil;
+            return 0;
         }
         "#,
     )
@@ -39,7 +39,7 @@ fn get_id_with_different_definitions() {
         protected func Initialize() {
             // Verify our own ID is COWB
             var myId = GetID();
-            return nil;
+            return 0;
         }
         "#,
     )
@@ -53,7 +53,7 @@ fn get_id_with_different_definitions() {
         protected func Initialize() {
             // Verify our own ID is CLNK
             var myId = GetID();
-            return nil;
+            return 0;
         }
         "#,
     )
@@ -83,7 +83,7 @@ fn get_id_in_clonk_initialize_matches_definition() {
         protected func Initialize() {
             var id = GetID();
             // Just verify GetID() returns something
-            return nil;
+            return 0;
         }
         "#,
     )

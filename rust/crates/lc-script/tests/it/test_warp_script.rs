@@ -39,7 +39,7 @@ private func Warp(clonk)
 #[test]
 fn scope_resolution_call() {
     // Test the ::Connect pattern
-    let source = r#"func Test() { var obj; obj->WARP::Connect(nil); }"#;
+    let source = r#"func Test() { var obj; obj->WARP::Connect(0); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
         eprintln!(
