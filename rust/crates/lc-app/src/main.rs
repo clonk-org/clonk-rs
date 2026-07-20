@@ -6944,6 +6944,19 @@ impl Drop for PendingMusicLoadGuard {
     }
 }
 
+#[cfg(test)]
+struct ControlledMusicLoadRequest {
+    generation: u64,
+    looped: bool,
+    identity: Option<Arc<MusicAssetIdentity>>,
+}
+
+#[cfg(test)]
+struct ControlledMusicLoads {
+    fixture: MusicHandle,
+    requests: VecDeque<ControlledMusicLoadRequest>,
+}
+
 struct AudioContext {
     system: AudioSystem,
     options: AudioOptions,
@@ -6955,6 +6968,8 @@ struct AudioContext {
     music_control: Arc<std::sync::Mutex<MusicControlState>>,
     pending_music: Arc<std::sync::Mutex<Option<MusicHandle>>>,
     music_load_pending: Arc<AtomicU64>,
+    #[cfg(test)]
+    controlled_music_loads: Option<ControlledMusicLoads>,
     loaded_sounds: HashMap<String, SoundHandle>,
     active_channels: HashMap<SoundInstanceKey, ChannelInfo>,
     lobby_elevator_channel: Option<ChannelId>,
@@ -6999,6 +7014,8 @@ impl AudioContext {
             music_control,
             pending_music: Arc::new(std::sync::Mutex::new(None)),
             music_load_pending: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            controlled_music_loads: None,
             loaded_sounds: HashMap::new(),
             active_channels: HashMap::new(),
             lobby_elevator_channel: None,
@@ -7007,6 +7024,52 @@ impl AudioContext {
             music_resolver,
             missing_sounds: HashSet::new(),
         })
+    }
+
+    #[cfg(test)]
+    fn control_music_loads_with(&mut self, fixture: MusicHandle) {
+        assert_eq!(
+            self.music_load_pending.load(AtomicOrdering::Acquire),
+            0,
+            "controlled music loading must be installed before a request starts"
+        );
+        self.controlled_music_loads = Some(ControlledMusicLoads {
+            fixture,
+            requests: VecDeque::new(),
+        });
+    }
+
+    #[cfg(test)]
+    fn complete_next_controlled_music_load(&mut self) -> Result<bool, AudioError> {
+        let (request, fixture) = {
+            let controlled = self
+                .controlled_music_loads
+                .as_mut()
+                .expect("controlled music loading is not installed");
+            let request = controlled
+                .requests
+                .pop_front()
+                .expect("controlled music load queue is empty");
+            (request, controlled.fixture.clone())
+        };
+        let _pending_guard = PendingMusicLoadGuard(
+            Arc::clone(&self.music_load_pending),
+            request.generation,
+        );
+        let mut control = lock_unpoisoned(&self.music_control);
+        let Some(volume) = control.start_volume(request.generation) else {
+            return Ok(false);
+        };
+        // The request retains its production loop flag for assertions. Keep
+        // the silent fixture looping until the test explicitly advances the
+        // lifecycle so host wall-clock progress cannot end it first.
+        self.system.play_music(&fixture, true)?;
+        self.system.music_set_volume(volume);
+        if let Some(identity) = request.identity {
+            control.most_recently_played = Some(identity);
+        }
+        *lock_unpoisoned(&self.pending_music) = Some(fixture);
+        Ok(true)
     }
 
     fn play_music(&mut self, data: &[u8], looped: bool) -> Result<(), AudioError> {
@@ -7030,6 +7093,15 @@ impl AudioContext {
         let slot = Arc::clone(&self.pending_music);
         self.music_load_pending
             .store(generation, AtomicOrdering::Release);
+        #[cfg(test)]
+        if let Some(controlled) = self.controlled_music_loads.as_mut() {
+            controlled.requests.push_back(ControlledMusicLoadRequest {
+                generation,
+                looped,
+                identity,
+            });
+            return Ok(());
+        }
         let load_pending = Arc::clone(&self.music_load_pending);
         std::thread::spawn(move || {
             let _pending_guard = PendingMusicLoadGuard(load_pending, generation);
@@ -101303,6 +101375,9 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn sandbox_music_is_decodable() {
+        // Keep real installed-resource discovery and decoder coverage here;
+        // the menu lifecycle regression uses an explicitly completed fixture
+        // so thread scheduling cannot decide whether that state test passes.
         // Music discovery reads process env; hold the env lock so the
         // EnvGuard-based tests cannot redirect paths mid-load.
         let _lock = env_lock().lock();
@@ -102932,36 +103007,79 @@ public func Grant(password) { return GainMissionAccess(password); }
         )
         .expect("initialise app with audio");
 
+        let fixture = app
+            .audio
+            .as_ref()
+            .expect("test audio")
+            .system
+            .load_music(&silent_pcm_wav(20))
+            .expect("predecode controlled music fixture");
+        app.audio
+            .as_mut()
+            .expect("test audio")
+            .control_music_loads_with(fixture);
+
         // Menu music is started by `ensure_menu_music()` when asynchronous boot
         // loading completes and the menu is shown; pump boot to that point first.
         wait_for_menu(&mut app);
-
-        // Music decodes on a worker thread now (the FluidSynth render must
-        // never block the caller) — poll for playback start.
-        let wait_for_music = |app: &GameApp| {
-            let started = std::time::Instant::now();
-            loop {
-                let playing = app
-                    .audio
-                    .as_ref()
-                    .map(|audio| audio.system.music_is_playing())
-                    .unwrap_or(false);
-                if playing || started.elapsed() > std::time::Duration::from_secs(20) {
-                    break playing;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        };
-        assert!(wait_for_music(&app), "menu music should start on launch");
+        let audio = app.audio.as_ref().expect("test audio");
+        let controlled = audio
+            .controlled_music_loads
+            .as_ref()
+            .expect("controlled music loading");
+        assert_eq!(controlled.requests.len(), 1);
+        let frontend = controlled.requests.front().expect("frontend music request");
+        assert!(!frontend.looped, "frontend music is non-looping");
+        assert!(frontend.identity.is_some(), "frontend music came from the catalog");
+        assert_eq!(audio.music_resolver.playlist.as_deref(), Some("Frontend.*"));
+        assert!(!audio.system.music_is_playing());
+        assert!(
+            app.audio
+                .as_mut()
+                .expect("test audio")
+                .complete_next_controlled_music_load()
+                .expect("complete frontend music load")
+        );
+        assert!(app
+            .audio
+            .as_ref()
+            .expect("test audio")
+            .system
+            .music_is_playing());
 
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start sandbox scenario");
+        let audio = app.audio.as_ref().expect("test audio");
+        let controlled = audio
+            .controlled_music_loads
+            .as_ref()
+            .expect("controlled music loading");
+        assert_eq!(controlled.requests.len(), 1);
+        let sandbox = controlled.requests.front().expect("sandbox music request");
+        assert!(sandbox.looped, "sandbox music is looping");
+        assert!(sandbox.identity.is_none(), "sandbox uses the direct music asset");
+        assert_eq!(audio.music_resolver.playlist, None);
+        assert!(!audio.system.music_is_playing());
         assert!(
-            wait_for_music(&app),
-            "sandbox scenario should have looping music"
+            app.audio
+                .as_mut()
+                .expect("test audio")
+                .complete_next_controlled_music_load()
+                .expect("complete sandbox music load")
         );
 
         app.return_to_menu();
+        assert!(
+            app.audio
+                .as_ref()
+                .expect("test audio")
+                .controlled_music_loads
+                .as_ref()
+                .expect("controlled music loading")
+                .requests
+                .is_empty(),
+            "the fading game song is not replaced before fade completion"
+        );
         assert!(
             app.audio
                 .as_ref()
@@ -102982,10 +103100,36 @@ public func Grant(password) { return GainMissionAccess(password); }
             .halt_music();
         app.update().expect("poll completed teardown fade");
         assert!(!app.resume_frontend_music_after_fade);
+        let audio = app.audio.as_ref().expect("test audio");
+        let controlled = audio
+            .controlled_music_loads
+            .as_ref()
+            .expect("controlled music loading");
+        assert_eq!(controlled.requests.len(), 1);
+        let frontend = controlled
+            .requests
+            .front()
+            .expect("resumed frontend music request");
+        assert!(!frontend.looped, "resumed frontend music is non-looping");
+        assert!(frontend.identity.is_some(), "resumed music came from the catalog");
+        assert_eq!(audio.music_resolver.playlist.as_deref(), Some("Frontend.*"));
+        assert!(!audio.system.music_is_playing());
         assert!(
-            wait_for_music(&app),
-            "menu music should resume after returning to the menu"
+            app.audio
+                .as_mut()
+                .expect("test audio")
+                .complete_next_controlled_music_load()
+                .expect("complete resumed frontend music load")
         );
+        let audio = app.audio.as_ref().expect("test audio");
+        assert!(audio.system.music_is_playing());
+        assert_eq!(audio.music_load_pending.load(AtomicOrdering::Acquire), 0);
+        assert!(audio
+            .controlled_music_loads
+            .as_ref()
+            .expect("controlled music loading")
+            .requests
+            .is_empty());
     }
 
     fn new_menu_app(width: u32, height: u32) -> GameApp {
