@@ -311,6 +311,14 @@ pub enum Stmt {
         target: AssignmentTarget,
         value: Expr,
     },
+    /// A statement whose first token is the bare call `goto(...)`. C++ emits
+    /// AB_RETURN immediately after that call for NONSTRICT origin scripts,
+    /// before compiling any remaining expression suffix. Strict scripts
+    /// execute the complete expression normally.
+    LegacyGoto {
+        call: Expr,
+        expression: Expr,
+    },
     Return(Option<Expr>),
     Break,
     Continue,

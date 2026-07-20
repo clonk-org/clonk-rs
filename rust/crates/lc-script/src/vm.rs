@@ -2952,24 +2952,29 @@ impl<'a> Vm<'a> {
                 self.evaluate_assignment(target, value, env, depth)?;
                 Ok(ControlFlow::Normal)
             }
-            Stmt::Return(expr) => {
-                let value = if returns_reference {
-                    match expr {
-                        Some(expr) => self.evaluate_reference_or_value(expr, env, depth)?,
-                        None => {
-                            return Err(RuntimeError::new(
-                                "reference-returning function must return an lvalue",
-                            ))
-                        }
-                    }
-                } else {
-                    ReturnValue::Value(match expr {
-                        Some(expr) => self.evaluate_tracked(expr, env, depth)?,
-                        None => TrackedValue::runtime(Value::Nil),
-                    })
-                };
-                Ok(ControlFlow::Return(value))
+            Stmt::LegacyGoto { call, expression } => {
+                // C4Aul checks parameters, function/object locals, statics and
+                // constants before entering its direct-function/goto branch.
+                let goto_is_bound = env.lvalue("goto").is_some()
+                    || self.global_variable_cell("goto").is_some()
+                    || self.global_constant_cell("goto").is_some();
+                if env.strict_level.is_none() && !goto_is_bound {
+                    return Ok(ControlFlow::Return(self.evaluate_return_value(
+                        Some(call),
+                        env,
+                        depth,
+                        returns_reference,
+                    )?));
+                }
+                self.evaluate(expression, env, depth)?;
+                Ok(ControlFlow::Normal)
             }
+            Stmt::Return(expr) => Ok(ControlFlow::Return(self.evaluate_return_value(
+                expr.as_ref(),
+                env,
+                depth,
+                returns_reference,
+            )?)),
             Stmt::Break => Ok(ControlFlow::Break),
             Stmt::Continue => Ok(ControlFlow::LoopContinue),
             Stmt::Expr(expr) => {
@@ -3127,6 +3132,26 @@ impl<'a> Vm<'a> {
                 // Used for multi-variable declarations
                 self.execute_statements(statements, env, depth, returns_reference)
             }
+        }
+    }
+
+    fn evaluate_return_value(
+        &self,
+        expression: Option<&Expr>,
+        env: &mut Environment,
+        depth: usize,
+        returns_reference: bool,
+    ) -> Result<ReturnValue, RuntimeError> {
+        if returns_reference {
+            let expression = expression.ok_or_else(|| {
+                RuntimeError::new("reference-returning function must return an lvalue")
+            })?;
+            self.evaluate_reference_or_value(expression, env, depth)
+        } else {
+            Ok(ReturnValue::Value(match expression {
+                Some(expression) => self.evaluate_tracked(expression, env, depth)?,
+                None => TrackedValue::runtime(Value::Nil),
+            }))
         }
     }
 

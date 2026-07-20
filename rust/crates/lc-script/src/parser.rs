@@ -1354,9 +1354,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_assignment_or_expr(&mut self) -> Result<Stmt, ParseError> {
+        let legacy_goto_call = self.probe_leading_goto_call()?;
         let expr = self.parse_expression()?;
         // At statement level, we always expect a trailing semicolon
         self.expect_symbol(Symbol::Semicolon, "expected ';' after expression")?;
+
+        if let Some(call) = legacy_goto_call {
+            return Ok(Stmt::LegacyGoto {
+                call,
+                expression: expr,
+            });
+        }
 
         match expr {
             Expr::Assignment(target, value) => Ok(Stmt::Assignment {
@@ -1365,6 +1373,42 @@ impl<'a> Parser<'a> {
             }),
             _ => Ok(Stmt::Expr(expr)),
         }
+    }
+
+    /// C4AulParse.cpp:2193-2248 recognizes the legacy goto hack from the
+    /// statement's first token, then emits AB_RETURN immediately after the
+    /// direct call. Probe just that call and replay the tokens so the normal
+    /// expression parser still validates any (unreachable) suffix. Starting
+    /// with `(`, another call, an assignment, or any other prefix deliberately
+    /// stays on the ordinary expression path.
+    fn probe_leading_goto_call(&mut self) -> Result<Option<Expr>, ParseError> {
+        if !matches!(
+            &self.peek()?.kind,
+            TokenKind::Identifier(name) if name == "goto"
+        ) {
+            return Ok(None);
+        }
+
+        self.begin_speculative();
+        let result = (|| {
+            self.consume()?; // `goto`
+            if self.consume_if_symbol(Symbol::LParen)?.is_none() {
+                return Ok(None);
+            }
+            let (args, forward_rest) = self.parse_argument_list()?;
+            self.expect_symbol(Symbol::RParen, "expected ')' after arguments")?;
+            Ok(Some(Expr::Call {
+                callee: Box::new(Expr::Variable("goto".to_string())),
+                args,
+                is_optional: false,
+                forward_rest,
+            }))
+        })();
+        self.reset_speculative();
+        // Lexer errors consume their offending bytes and cannot be replayed;
+        // propagate the original result instead of silently reparsing after
+        // the bad byte (for example, turning strict `goto(@)` into `goto()`).
+        result
     }
 
     fn expression_to_assignment_target(

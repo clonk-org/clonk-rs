@@ -33,6 +33,74 @@ fn executes_basic_arithmetic() {
 }
 
 #[test]
+fn nonstrict_standalone_goto_returns_immediately() {
+    fn run(source: &str) -> Value {
+        let mut engine = Engine::new();
+        engine.register_host_function("goto", |args| {
+            Ok(args.first().cloned().unwrap_or(Value::Nil))
+        });
+        load_script(&mut engine, source);
+        engine.call("Probe", &[]).expect("Probe runs")
+    }
+
+    for (directive, expected) in [
+        ("", Value::Int(41)),
+        ("#strict\n", Value::Int(99)),
+        ("#strict 2\n", Value::Int(99)),
+        ("#strict 3\n", Value::Int(99)),
+    ] {
+        assert_eq!(
+            run(&format!(
+                "{directive}func Probe() {{ goto(40 + 1); return 99; }}"
+            )),
+            expected,
+            "only a NONSTRICT bare goto statement returns implicitly"
+        );
+    }
+
+    assert_eq!(
+        run("func Probe() { goto(40 + 1) + 1; return 99; }"),
+        Value::Int(41),
+        "C++ returns the goto result before evaluating its parsed suffix"
+    );
+    assert_eq!(
+        run("func Probe() { var value = goto(41); return value + 1; }"),
+        Value::Int(42),
+        "an embedded goto call is an ordinary expression"
+    );
+    assert_eq!(
+        run("func Probe() { (goto(41)); return 99; }"),
+        Value::Int(99),
+        "a parenthesized goto does not start the legacy statement path"
+    );
+    assert_eq!(
+        run("func Goto(value) { return value; } func Probe() { Goto(41); return 99; }"),
+        Value::Int(99),
+        "the legacy spelling check is case-sensitive"
+    );
+    assert_eq!(
+        run("func Probe() { var goto; goto(41); return 99; }"),
+        Value::Int(99),
+        "a named binding takes precedence over the legacy goto hack"
+    );
+    assert_eq!(
+        run("func Probe() { goto(41); return 99; }\n#strict\n"),
+        Value::Int(99),
+        "the final origin strictness applies even when its directive is later"
+    );
+
+    let malformed = lc_script::Script::compile("#strict 2\nfunc Probe() { goto(@); return 99; }")
+        .expect("function recovery retains the malformed script");
+    assert!(
+        malformed
+            .parse_diagnostics()
+            .iter()
+            .any(|error| error.message() == "unexpected character '@'"),
+        "the leading-call probe must not consume and hide lexer errors"
+    );
+}
+
+#[test]
 fn handles_conditionals_and_loops() {
     let mut engine = Engine::new();
     load_script(
