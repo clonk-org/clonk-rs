@@ -4146,10 +4146,9 @@ fn world_object_mass(
     mass
 }
 
-/// C4SO_Mass reads the live cached `pFor->Mass`. The borrow-free Func-find
-/// path owns an older view by design, so prefer the current host scope when
-/// one exists; this also preserves mutations made by an earlier Find_Func or
-/// Sort_Func callback in the same search.
+/// C4SO_Mass reads the live cached `pFor->Mass`. Prefer the current host scope
+/// so contents and own-mass changes made by an earlier Find_Func or Sort_Func
+/// callback in the same search are reflected in the key.
 fn sort_object_mass(world: &impl WorldAccessor, target: ObjectId) -> i32 {
     let live = HOST_CONTEXT.with(|cell| {
         let borrow = cell.try_borrow().ok()?;
@@ -4206,60 +4205,47 @@ impl WorldAccessor for HostWorldContext {
     }
 }
 
-/// A borrow-free world view for Func-criterion searches: condition checks
-/// read this clone while the nested-call seam re-borrows the live
-/// HOST_CONTEXT per candidate. Snapshot semantics (mid-search mutations and
-/// callback spawns are not re-read) are part of the documented copy-in/
-/// copy-out divergence.
-struct FuncFindView {
-    world: HostWorldContext,
-    pending_objects: HashMap<ObjectId, HostWorldObject>,
-    pending_order: Vec<ObjectId>,
-    master_order_preview: Option<Vec<ObjectId>>,
-    live_shape_rects: HashMap<ObjectId, DefinitionRect>,
+/// Borrow-free handle for callback-backed Find/Sort evaluation. Every method
+/// takes and releases one short immutable HOST_CONTEXT borrow and returns an
+/// owned value; nested script dispatch therefore remains free to take the
+/// mutable borrow while all later observations see its completed scope.
+#[derive(Clone, Copy)]
+struct LiveFuncFindView;
+
+impl LiveFuncFindView {
+    fn new() -> Option<Self> {
+        HOST_CONTEXT.with(|cell| cell.borrow().as_ref().map(|_| Self))
+    }
+
+    fn read<T>(&self, f: impl FnOnce(&EffectHostContext) -> T) -> T {
+        HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow
+                .as_ref()
+                .expect("live Func-find view outlived its host context");
+            f(context)
+        })
+    }
 }
 
-impl WorldAccessor for FuncFindView {
+impl WorldAccessor for LiveFuncFindView {
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject> {
-        self.pending_objects
-            .get(&id)
-            .cloned()
-            .or_else(|| self.world.get(id))
+        self.read(|context| context.get_world_object(id))
     }
 
     fn object_ids(&self) -> Vec<ObjectId> {
-        if let Some(order) = &self.master_order_preview {
-            return order.clone();
-        }
-        let mut ids = self.world.object_ids();
-        ids.extend(self.pending_order.iter().copied());
-        ids
+        self.read(EffectHostContext::world_object_ids)
     }
 
     fn master_object_ids(&self) -> Vec<ObjectId> {
-        if let Some(order) = &self.master_order_preview {
-            return order.clone();
-        }
-        let mut ids = self.world.master_object_ids().to_vec();
-        ids.extend(self.pending_order.iter().copied());
-        ids
+        self.read(EffectHostContext::master_object_ids)
     }
 
     fn object_live_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
-        // A preceding Find_Func sibling may have called SetShape while this
-        // borrow-free view was evaluating the same candidate. C++ reads the
-        // live object for the next condition, so refresh this one field when
-        // the host context is available; retain snapshot semantics for every
-        // other Func-find field.
-        HOST_CONTEXT
-            .with(|cell| {
-                let borrow = cell.try_borrow().ok()?;
-                let context = borrow.as_ref()?;
-                let live_object = context.get_world_object(object.id)?;
-                Some(effect_object_live_shape_rect(context, &live_object))
-            })
-            .or_else(|| self.live_shape_rects.get(&object.id).copied())
-            .unwrap_or_else(|| self.world.object_live_shape_rect(object))
+        self.read(|context| match context.get_world_object(object.id) {
+            Some(live) => effect_object_live_shape_rect(context, &live),
+            None => effect_object_live_shape_rect(context, object),
+        })
     }
 
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
@@ -4267,122 +4253,51 @@ impl WorldAccessor for FuncFindView {
     }
 
     fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
-        let mut ids = self.world.object_sector_ids_in_rect(rect)?;
-        let mut seen = ids.iter().copied().collect::<HashSet<_>>();
-        for &id in &self.pending_order {
-            let Some(object) = self.pending_objects.get(&id) else {
-                continue;
-            };
-            if rect.contains_point(object.position.x, object.position.y) && seen.insert(id) {
-                ids.push(id);
-            }
-        }
-        Some(ids)
+        self.read(|context| {
+            <EffectHostContext as WorldAccessor>::object_sector_ids_in_rect(context, rect)
+        })
     }
 
     fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
-        let mut ids = self.world.shape_sector_ids_in_rect(rect)?;
-        let mut seen = ids.iter().copied().collect::<HashSet<_>>();
-        for &id in &self.pending_order {
-            let Some(object) = self.pending_objects.get(&id) else {
-                continue;
-            };
-            if self.object_shape_rect(object).overlaps(&rect) && seen.insert(id) {
-                ids.push(id);
-            }
-        }
-        Some(ids)
+        self.read(|context| {
+            <EffectHostContext as WorldAccessor>::shape_sector_ids_in_rect(context, rect)
+        })
     }
 
     fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
-        let mut lists = self.world.object_sector_id_lists_in_rect(rect)?;
-        let mut seen = lists.iter().flatten().copied().collect::<HashSet<_>>();
-        let pending: Vec<ObjectId> =
-            self.pending_order
-                .iter()
-                .copied()
-                .filter(|&id| {
-                    self.pending_objects.get(&id).is_some_and(|object| {
-                        rect.contains_point(object.position.x, object.position.y)
-                    }) && seen.insert(id)
-                })
-                .collect();
-        if !pending.is_empty() {
-            lists.push(pending);
-        }
-        Some(lists)
+        self.read(|context| {
+            <EffectHostContext as WorldAccessor>::object_sector_id_lists_in_rect(context, rect)
+        })
     }
 
     fn shape_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
-        let mut lists = self.world.shape_sector_id_lists_in_rect(rect)?;
-        let mut seen = lists.iter().flatten().copied().collect::<HashSet<_>>();
-        let pending: Vec<ObjectId> = self
-            .pending_order
-            .iter()
-            .copied()
-            .filter(|&id| {
-                self.pending_objects
-                    .get(&id)
-                    .is_some_and(|object| self.object_shape_rect(object).overlaps(&rect))
-                    && seen.insert(id)
-            })
-            .collect();
-        if !pending.is_empty() {
-            lists.push(pending);
-        }
-        Some(lists)
+        self.read(|context| {
+            <EffectHostContext as WorldAccessor>::shape_sector_id_lists_in_rect(context, rect)
+        })
     }
 
     fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata> {
-        HostWorldContext::definition_metadata(&self.world, id).cloned()
+        self.read(|context| <EffectHostContext as WorldAccessor>::definition_metadata(context, id))
     }
 
     fn script_function_known(&self, name: &str) -> bool {
-        self.world.script_function_known(name)
+        self.read(|context| {
+            <EffectHostContext as WorldAccessor>::script_function_known(context, name)
+        })
     }
 }
 
-/// Clones the active context's world view for a Func-criterion search.
-fn snapshot_func_find_view() -> Option<FuncFindView> {
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
-        let mut pending_objects = context.pending_objects.clone();
-        let mut live_shape_rects = pending_objects
-            .iter()
-            .map(|(&id, object)| (id, effect_object_live_shape_rect(context, object)))
-            .collect::<HashMap<_, _>>();
-        let scoped_ids = context
-            .scopes_in_call_order()
-            .map(ObjectScopeContext::id)
-            .collect::<Vec<_>>();
-        for id in scoped_ids {
-            if let Some(object) = context.get_world_object(id) {
-                live_shape_rects.insert(id, effect_object_live_shape_rect(context, &object));
-                pending_objects.insert(id, object);
-            }
-        }
-        Some(FuncFindView {
-            world: context.world.clone(),
-            pending_objects,
-            // Existing scoped ids remain in the world's master order. Only
-            // genuinely new objects belong in this appended list.
-            pending_order: context.pending_order.clone(),
-            master_order_preview: context.master_order_preview.clone(),
-            live_shape_rects,
-        })
-    })
+/// `CheckObjectStatus` erases only `Status == 0`; an object deactivated by a
+/// callback has nonzero C4OS_INACTIVE and remains in a result already being
+/// built even though it has left the active master list.
+fn object_present_after_callback(world: &impl WorldAccessor, id: ObjectId) -> bool {
+    world
+        .get_object(id)
+        .is_some_and(|object| object.status() != ObjectStatus::Deleted)
 }
 
-/// Drops candidates a Func callback destroyed — the C++ Status re-checks
-/// after `Check` (Find: C4FindObject.cpp:186-199; FindMany pre-sort erase:
-/// C4FindObject.cpp:217-218).
-fn retain_live_nested(ids: &mut Vec<ObjectId>) {
-    HOST_CONTEXT.with(|cell| {
-        if let Some(context) = cell.borrow().as_ref() {
-            ids.retain(|id| !context.nested_object_destroyed(*id));
-        }
-    });
+fn retain_present_after_callback(world: &impl WorldAccessor, ids: &mut Vec<ObjectId>) {
+    ids.retain(|id| object_present_after_callback(world, *id));
 }
 
 impl WorldAccessor for EffectHostContext {
@@ -30557,8 +30472,8 @@ enum SortCriterion {
     Speed,
     Mass,
     Value,
-    /// C4SortObjectFunc (C4FindObject.h:521-533). Cached evaluation lands
-    /// with the Sort_Func slice; until then all values compare equal.
+    /// C4SortObjectFunc (C4FindObject.h:521-533): evaluates the named
+    /// callback for each candidate and compares its integer result.
     Func {
         name: String,
         pars: Vec<Value>,
@@ -30588,6 +30503,24 @@ pub(crate) fn value_as_i32(value: &Value) -> i32 {
         Value::RawBool(value) => *value as u32 as i32,
         _ => 0,
     }
+}
+
+/// C4FindObjectFunc/C4SortObjectFunc store their arguments in C4Value cells.
+/// AssignRemoval clears registered object references synchronously, so a
+/// later candidate must receive nil even though Rust's parsed criterion tree
+/// owns an ordinary Value clone.
+fn live_find_callback_parameters(pars: &[Value]) -> Vec<Value> {
+    let mut live = pars.to_vec();
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return;
+        };
+        for value in &mut live {
+            clear_removed_object_references(value, &context.removed_object_references);
+        }
+    });
+    live
 }
 
 impl FindCondition {
@@ -30726,6 +30659,13 @@ impl FindCondition {
         world: &impl WorldAccessor,
         object: &HostWorldObject,
     ) -> Result<bool, RuntimeError> {
+        // Every C++ node dereferences the same live C4Object pointer. An
+        // earlier Func sibling (or an earlier candidate's callback) may
+        // have changed any field, so never retain the driver's clone across
+        // a condition boundary. A vanished pending preview falls back to the
+        // pointer-equivalent clone for the remainder of the current Check.
+        let refreshed = world.get_object(object.id);
+        let object = refreshed.as_ref().unwrap_or(object);
         Ok(match self {
             FindCondition::Not(child) => !child.check(world, object)?,
             FindCondition::And(children) => {
@@ -30788,7 +30728,8 @@ impl FindCondition {
             // overload visible to the object's def → silently false; the
             // result converts with raw C4Value truthiness, not getBool.
             FindCondition::Func { name, pars } => {
-                match call_world_object_function(object.id, name, pars) {
+                let pars = live_find_callback_parameters(pars);
+                match call_world_object_function(object.id, name, &pars) {
                     None => false,
                     Some(result) => value_raw_truthy(&result?),
                 }
@@ -30918,7 +30859,7 @@ impl FindCondition {
     }
 
     /// Whether any node needs the nested-call seam (drives the borrow-free
-    /// snapshot-view evaluation path in the drivers).
+    /// live-view evaluation path in the drivers).
     fn uses_func(&self) -> bool {
         match self {
             FindCondition::Not(child) => child.uses_func(),
@@ -31128,6 +31069,11 @@ impl SortCriterion {
         world: &impl WorldAccessor,
         object: &HostWorldObject,
     ) -> Result<i64, RuntimeError> {
+        // CompareGetValue dereferences the live pointer for every criterion.
+        // In particular, Multiple prepares one complete cache at a time, so
+        // a Func cache may mutate fields consumed by the next cache.
+        let refreshed = world.get_object(object.id);
+        let object = refreshed.as_ref().unwrap_or(object);
         Ok(match self {
             SortCriterion::Distance { x, y } => {
                 let position = object.position();
@@ -31181,7 +31127,8 @@ impl SortCriterion {
                 .unwrap_or(0),
             ),
             SortCriterion::Func { name, pars } => {
-                match call_world_object_function(object.id, name, pars) {
+                let pars = live_find_callback_parameters(pars);
+                match call_world_object_function(object.id, name, &pars) {
                     None => 0,
                     Some(result) => i64::from(result?.as_c4_int().unwrap_or(0)),
                 }
@@ -31282,6 +31229,21 @@ impl SortCriterion {
             }
         }
     }
+
+    fn compare_uncached_ids(
+        &self,
+        world: &impl WorldAccessor,
+        obj1: ObjectId,
+        obj2: ObjectId,
+    ) -> Result<i64, RuntimeError> {
+        let Some(obj1) = world.get_object(obj1) else {
+            return Ok(0);
+        };
+        let Some(obj2) = world.get_object(obj2) else {
+            return Ok(0);
+        };
+        self.compare_uncached(world, &obj1, &obj2)
+    }
 }
 
 /// The single-result Find with a sort attached (C4FindObject.cpp:272-308).
@@ -31312,10 +31274,10 @@ fn find_first_with_sort(
             }
         })
         .unwrap_or_else(|| vec![world.object_ids()]);
-    let mut best: Option<(ObjectId, HostWorldObject)> = None;
+    let mut best: Option<ObjectId> = None;
     for ids in lists {
         // inner Find(*pLst): the per-list best
-        let mut list_best: Option<(ObjectId, HostWorldObject)> = None;
+        let mut list_best: Option<ObjectId> = None;
         for object_id in ids {
             let Some(object) = world.get_object(object_id) else {
                 continue;
@@ -31326,32 +31288,42 @@ fn find_first_with_sort(
             if !condition.check(world, &object)? {
                 continue;
             }
+            // C4FindObject::Find rechecks Status after Check. Inactive is
+            // nonzero in C++ and therefore still eligible here; only a
+            // completed AssignRemoval is rejected.
+            if !object_present_after_callback(world, object_id) {
+                continue;
+            }
             list_best = match list_best {
-                None => Some((object_id, object)),
-                Some((best_id, best_object)) => {
-                    if sort.compare_uncached(world, &object, &best_object)? > 0 {
-                        Some((object_id, object))
+                None => Some(object_id),
+                Some(best_id) => {
+                    if sort.compare_uncached_ids(world, object_id, best_id)? > 0
+                        && object_present_after_callback(world, object_id)
+                    {
+                        Some(object_id)
                     } else {
-                        Some((best_id, best_object))
+                        Some(best_id)
                     }
                 }
             };
         }
         // outer walk: the list winner vs the running best
-        if let Some((list_id, list_object)) = list_best {
+        if let Some(list_id) = list_best {
             best = match best {
-                None => Some((list_id, list_object)),
-                Some((best_id, best_object)) => {
-                    if sort.compare_uncached(world, &list_object, &best_object)? > 0 {
-                        Some((list_id, list_object))
+                None => object_present_after_callback(world, list_id).then_some(list_id),
+                Some(best_id) => {
+                    if sort.compare_uncached_ids(world, list_id, best_id)? > 0
+                        && object_present_after_callback(world, list_id)
+                    {
+                        Some(list_id)
                     } else {
-                        Some((best_id, best_object))
+                        Some(best_id)
                     }
                 }
             };
         }
     }
-    Ok(best.map(|(id, _)| id))
+    Ok(best)
 }
 
 /// `CreateCriterionsFromPars` (C4Script.cpp:1985-2034): each argument array
@@ -31459,7 +31431,31 @@ fn find_condition_matches(
     Ok(matches)
 }
 
-/// Whether the criteria need the borrow-free Func evaluation path.
+/// Unsorted `C4FindObject::Find` stops immediately after the first matching
+/// object whose Status survived its callback. This is observably different
+/// from collecting a FindMany result when later predicates have side effects.
+fn find_first_condition_match(
+    world: &impl WorldAccessor,
+    condition: &FindCondition,
+) -> Result<Option<ObjectId>, RuntimeError> {
+    if condition.is_impossible(world) {
+        return Ok(None);
+    }
+    for object_id in find_candidate_ids(world, condition) {
+        let Some(object) = world.get_object(object_id) else {
+            continue;
+        };
+        if !object.status().is_active() {
+            continue;
+        }
+        if condition.check(world, &object)? && object_present_after_callback(world, object_id) {
+            return Ok(Some(object_id));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the criteria need the reentrant live-view evaluation path.
 fn criterions_use_func(condition: &FindCondition, sort: Option<&SortCriterion>) -> bool {
     condition.uses_func() || sort.map(SortCriterion::uses_func).unwrap_or(false)
 }
@@ -31473,7 +31469,7 @@ fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     };
     if criterions_use_func(&condition, sort.as_ref()) {
-        let Some(view) = snapshot_func_find_view() else {
+        let Some(view) = LiveFuncFindView::new() else {
             return Ok(Value::Nil);
         };
         let condition = condition.pruned(&view);
@@ -31482,11 +31478,8 @@ fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
                 .map(object_reference_value)
                 .unwrap_or(Value::Nil));
         }
-        let mut matches = find_condition_matches(&view, &condition)?;
-        retain_live_nested(&mut matches);
-        return Ok(matches
-            .first()
-            .map(|id| object_reference_value(*id))
+        return Ok(find_first_condition_match(&view, &condition)?
+            .map(object_reference_value)
             .unwrap_or(Value::Nil));
     }
     HOST_CONTEXT.with(|cell| {
@@ -31500,10 +31493,8 @@ fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
                 .map(object_reference_value)
                 .unwrap_or(Value::Nil));
         }
-        let matches = find_condition_matches(context, &condition)?;
-        Ok(matches
-            .first()
-            .map(|id| object_reference_value(*id))
+        Ok(find_first_condition_match(context, &condition)?
+            .map(object_reference_value)
             .unwrap_or(Value::Nil))
     })
 }
@@ -31516,36 +31507,35 @@ fn find_objects2(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     };
     if criterions_use_func(&condition, sort.as_ref()) {
-        let Some(view) = snapshot_func_find_view() else {
+        let Some(view) = LiveFuncFindView::new() else {
             return Ok(Value::Array(Vec::new()));
         };
         let condition = condition.pruned(&view);
         let mut matches = find_condition_matches(&view, &condition)?;
         // Pre-sort: erase objects deleted during Check
         // (C4FindObject.cpp:217-218).
-        retain_live_nested(&mut matches);
+        retain_present_after_callback(&view, &mut matches);
         if let Some(sort) = sort {
             sort.sort(&view, &mut matches)?;
+            // Post-sort: objects deleted by sort callbacks keep their slot
+            // as nil (CheckObjectStatusAfterSort, C4FindObject.cpp:223,
+            // 372-375). Inactive remains a non-null object.
+            return Ok(Value::Array(
+                matches
+                    .into_iter()
+                    .map(|id| {
+                        if object_present_after_callback(&view, id) {
+                            object_reference_value(id)
+                        } else {
+                            Value::Nil
+                        }
+                    })
+                    .collect(),
+            ));
         }
-        // Post-sort: objects deleted by sort callbacks keep their slot as
-        // nil (CheckObjectStatusAfterSort, C4FindObject.cpp:223,372-375).
-        return Ok(Value::Array(HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            matches
-                .into_iter()
-                .map(|id| {
-                    if borrow
-                        .as_ref()
-                        .map(|context| context.nested_object_destroyed(id))
-                        .unwrap_or(false)
-                    {
-                        Value::Nil
-                    } else {
-                        object_reference_value(id)
-                    }
-                })
-                .collect()
-        })));
+        return Ok(Value::Array(
+            matches.into_iter().map(object_reference_value).collect(),
+        ));
     }
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -31572,7 +31562,7 @@ fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     };
     if criterions_use_func(&condition, None) {
-        let Some(view) = snapshot_func_find_view() else {
+        let Some(view) = LiveFuncFindView::new() else {
             return Ok(Value::Int(0));
         };
         let condition = condition.pruned(&view);

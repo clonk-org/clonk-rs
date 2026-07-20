@@ -18740,6 +18740,297 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
     }
 
     #[test]
+    fn find_func_callbacks_expose_live_mutations_to_later_checks() {
+        // C4FindObjectAnd hands every child the same live C4Object pointer.
+        // A Func child can therefore change a primitive field before the
+        // next child, and a callback on an earlier object can change a later
+        // candidate before its Check begins (C4FindObject.cpp:180-225,
+        // 445-450, 576-579, 653-662).
+        let finder_script = r#"
+        global func FindPromoted(object later) {
+            return FindObjects(
+                [20, "PROB"],
+                [60, "Promote", later],
+                [22, 8]
+            );
+        }
+        "#;
+        let probe_script = r#"
+        func Promote(later) {
+            if (GetOwner() == 1) {
+                SetCategory(8);
+                SetCategory(8, later);
+            }
+            return true;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        let first = engine
+            .spawn_object(
+                SpawnConfig::new("PROB")
+                    .with_owner(1)
+                    .with_category(CATEGORY_OBJECT),
+            )
+            .expect("first probe spawns");
+        let later = engine
+            .spawn_object(
+                SpawnConfig::new("PROB")
+                    .with_owner(2)
+                    .with_category(CATEGORY_VEHICLE),
+            )
+            .expect("later probe spawns");
+        engine.tick_without_snapshot().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    finder_idx,
+                    "FindPromoted",
+                    vec![Value::Object(later.as_u64())],
+                )
+                .expect("live Find_Func search succeeds"),
+            Value::Array(vec![
+                Value::Object(first.as_u64()),
+                Value::Object(later.as_u64()),
+            ]),
+            "same-candidate and later-candidate Category checks see callback writes"
+        );
+    }
+
+    #[test]
+    fn find_func_parameters_clear_removed_object_references_between_candidates() {
+        // C4FindObjectFunc stores parameters as registered C4Values. Normal
+        // AssignRemoval clears the stored object pointer before the next
+        // candidate callback (C4Object.cpp:311-313; C4FindObject.cpp:
+        // 645-650), rather than replaying the original dead pointer.
+        let finder_script = r#"
+        global func Survivors(object victim) {
+            return FindObjects(
+                [20, "PROB"],
+                [60, "RemoveThenObserve", victim]
+            );
+        }
+        "#;
+        let probe_script = r#"
+        func RemoveThenObserve(victim) {
+            if (GetOwner() == 1) {
+                RemoveObject(victim);
+                return false;
+            }
+            return victim == nil;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        engine
+            .register_definition(
+                Definition::from_script("VICT", "Victim", "").expect("victim compiles"),
+            )
+            .expect("victim registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        let first = engine
+            .spawn_object(
+                SpawnConfig::new("PROB")
+                    .with_owner(1)
+                    .with_category(CATEGORY_OBJECT),
+            )
+            .expect("first probe spawns");
+        let later = engine
+            .spawn_object(
+                SpawnConfig::new("PROB")
+                    .with_owner(2)
+                    .with_category(CATEGORY_VEHICLE),
+            )
+            .expect("later probe spawns");
+        let victim = engine
+            .spawn_object(SpawnConfig::new("VICT"))
+            .expect("victim spawns");
+        engine.tick_without_snapshot().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    finder_idx,
+                    "Survivors",
+                    vec![Value::Object(victim.as_u64())],
+                )
+                .expect("Find_Func parameter probe succeeds"),
+            Value::Array(vec![Value::Object(later.as_u64())]),
+            "the later candidate receives nil for the removed parameter"
+        );
+        let first_idx = engine.find_object_index(first).expect("first remains");
+        assert_eq!(engine.objects[first_idx].state.status, ObjectStatus::Normal);
+        let victim_idx = engine
+            .find_object_index(victim)
+            .expect("victim not swept yet");
+        assert_eq!(
+            engine.objects[victim_idx].state.status,
+            ObjectStatus::Deleted
+        );
+    }
+
+    #[test]
+    fn find_object2_func_stops_after_the_first_live_match() {
+        // C4FindObject::Find returns immediately without evaluating later
+        // candidates once a live object passes Check (C4FindObject.cpp:
+        // 180-199). FindMany-style collection would run both callbacks.
+        let finder_script = r#"
+        global func First() { return FindObject2([20, "PROB"], [60, "Match"]); }
+        "#;
+        let probe_script = r#"
+        local calls;
+        func Match() { calls = calls + 1; return true; }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        let first = engine
+            .spawn_object(SpawnConfig::new("PROB").with_category(CATEGORY_OBJECT))
+            .expect("first probe spawns");
+        let later = engine
+            .spawn_object(SpawnConfig::new("PROB").with_category(CATEGORY_VEHICLE))
+            .expect("later probe spawns");
+        engine.tick_without_snapshot().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        assert_eq!(
+            engine
+                .call_object_function(finder_idx, "First", Vec::new())
+                .expect("FindObject2 succeeds"),
+            Value::Object(first.as_u64())
+        );
+        let first_idx = engine.find_object_index(first).expect("first exists");
+        let later_idx = engine.find_object_index(later).expect("later exists");
+        assert_eq!(
+            engine.objects[first_idx].state.local_vars.get("calls"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine.objects[later_idx].state.local_vars.get("calls"),
+            None,
+            "the later callback is never evaluated"
+        );
+    }
+
+    #[test]
+    fn find_func_removal_uses_each_cpp_driver_status_rule() {
+        // Find rechecks Status after Check and continues past a removed
+        // truthy candidate. Count deliberately has no post-Check recheck and
+        // still counts that same truthy result (C4FindObject.cpp:164-199).
+        let finder_script = r#"
+        global func FirstLive() {
+            return FindObject2([20, "PROB"], [60, "RemoveFirst"]);
+        }
+        global func CountRemoved() {
+            return ObjectCount2([20, "COUN"], [60, "RemoveAndMatch"]);
+        }
+        "#;
+        let probe_script = r#"
+        func RemoveFirst() {
+            if (GetOwner() == 1) { RemoveObject(); }
+            return true;
+        }
+        "#;
+        let counter_script = r#"
+        func RemoveAndMatch() { RemoveObject(); return true; }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        for (id, name, script) in [
+            ("FNDR", "Finder", finder_script),
+            ("PROB", "Probe", probe_script),
+            ("COUN", "Counter", counter_script),
+        ] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, name, script).expect("definition compiles"),
+                )
+                .expect("definition registers");
+        }
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        let removed_probe = engine
+            .spawn_object(
+                SpawnConfig::new("PROB")
+                    .with_owner(1)
+                    .with_category(CATEGORY_OBJECT),
+            )
+            .expect("first probe spawns");
+        let live_probe = engine
+            .spawn_object(
+                SpawnConfig::new("PROB")
+                    .with_owner(2)
+                    .with_category(CATEGORY_VEHICLE),
+            )
+            .expect("second probe spawns");
+        let counted = engine
+            .spawn_object(SpawnConfig::new("COUN"))
+            .expect("counter spawns");
+        engine.tick_without_snapshot().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        assert_eq!(
+            engine
+                .call_object_function(finder_idx, "FirstLive", Vec::new())
+                .expect("FindObject2 succeeds"),
+            Value::Object(live_probe.as_u64())
+        );
+        let finder_idx = engine.find_object_index(finder).expect("finder remains");
+        assert_eq!(
+            engine
+                .call_object_function(finder_idx, "CountRemoved", Vec::new())
+                .expect("ObjectCount2 succeeds"),
+            Value::Int(1),
+            "Count includes a truthy callback even when it removes its object"
+        );
+        for id in [removed_probe, counted] {
+            let index = engine.find_object_index(id).expect("not swept yet");
+            assert_eq!(engine.objects[index].state.status, ObjectStatus::Deleted);
+        }
+    }
+
+    #[test]
     fn find_func_callback_error_aborts_calling_script() {
         // fPassErrors=true (C4FindObject.cpp:661): a runtime error inside
         // the callback rethrows out of Check/Find and aborts the calling
@@ -18964,6 +19255,72 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
     }
 
     #[test]
+    fn sort_func_callbacks_expose_live_mutations_to_later_cached_criteria() {
+        // C4SortObjectMultiple prepares each child cache in order. The first
+        // Sort_Func cache can mutate an object before the later Distance
+        // cache dereferences that same live pointer (C4FindObject.cpp:
+        // 819-832, 877-883, 908-911, 934-956).
+        let finder_script = r#"
+        global func Ranked(object later) {
+            return FindObjects(
+                [20, "PROB"],
+                [102, [160, "MoveLater", later], [110, 0, 0]]
+            );
+        }
+        "#;
+        let probe_script = r#"
+        func MoveLater(later) {
+            if (GetOwner() == 1) { SetPosition(0, 0, later); }
+            return 0;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        let first = engine
+            .spawn_object(
+                SpawnConfig::new("PROB")
+                    .with_owner(1)
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 0)),
+            )
+            .expect("first probe spawns");
+        let later = engine
+            .spawn_object(
+                SpawnConfig::new("PROB")
+                    .with_owner(2)
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(100, 0)),
+            )
+            .expect("later probe spawns");
+        engine.tick_without_snapshot().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        assert_eq!(
+            engine
+                .call_object_function(finder_idx, "Ranked", vec![Value::Object(later.as_u64())],)
+                .expect("cached sort succeeds"),
+            Value::Array(vec![
+                Value::Object(later.as_u64()),
+                Value::Object(first.as_u64()),
+            ]),
+            "the Distance cache sees the preceding Sort_Func position write"
+        );
+    }
+
+    #[test]
     fn find_object2_with_sort_uses_uncached_pairwise_compare_like_cpp() {
         // The single-result Find path keeps a running best and calls the
         // UNCACHED Compare(candidate, best) per passing candidate
@@ -19035,6 +19392,132 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                 "uncached Compare evaluation counts (C4FindObject.cpp:188-199)"
             );
         }
+    }
+
+    #[test]
+    fn sort_func_callbacks_expose_live_mutations_to_later_uncached_criteria() {
+        // The single-result path compares candidate then best for each
+        // criterion. During Compare(second, first), the Func value for the
+        // second object moves the first before Distance reads either object.
+        let finder_script = r#"
+        global func Best(object first) {
+            return FindObject2(
+                [20, "PROB"],
+                [102, [160, "MoveBest", first], [110, 0, 0]]
+            );
+        }
+        "#;
+        let probe_script = r#"
+        func MoveBest(first) {
+            if (GetOwner() == 2) { SetPosition(0, 0, first); }
+            return 0;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        let first = engine
+            .spawn_object(
+                SpawnConfig::new("PROB")
+                    .with_owner(1)
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(100, 0)),
+            )
+            .expect("first probe spawns");
+        let second = engine
+            .spawn_object(
+                SpawnConfig::new("PROB")
+                    .with_owner(2)
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(10, 0)),
+            )
+            .expect("second probe spawns");
+        engine.tick_without_snapshot().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        assert_eq!(
+            engine
+                .call_object_function(finder_idx, "Best", vec![Value::Object(first.as_u64())],)
+                .expect("uncached sort succeeds"),
+            Value::Object(first.as_u64()),
+            "Distance sees the mutation made earlier in the same Compare"
+        );
+    }
+
+    #[test]
+    fn find_object2_sort_func_rejects_a_candidate_removed_during_compare() {
+        // Find rechecks a would-be winner's Status after Compare. The second
+        // object deliberately returns the smaller key but removes itself;
+        // it must not replace the first live best (C4FindObject.cpp:188-199).
+        let finder_script = r#"
+        global func Best() {
+            return FindObject2([20, "PROB"], [160, "RankAndVanish"]);
+        }
+        "#;
+        let probe_script = r#"
+        func RankAndVanish() {
+            if (GetOwner() == 2) {
+                RemoveObject();
+                return -1;
+            }
+            return 0;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script).expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        let first = engine
+            .spawn_object(
+                SpawnConfig::new("PROB")
+                    .with_owner(1)
+                    .with_category(CATEGORY_OBJECT),
+            )
+            .expect("first probe spawns");
+        let removed = engine
+            .spawn_object(
+                SpawnConfig::new("PROB")
+                    .with_owner(2)
+                    .with_category(CATEGORY_VEHICLE),
+            )
+            .expect("second probe spawns");
+        engine.tick_without_snapshot().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        assert_eq!(
+            engine
+                .call_object_function(finder_idx, "Best", Vec::new())
+                .expect("sorted FindObject2 succeeds"),
+            Value::Object(first.as_u64())
+        );
+        let removed_idx = engine.find_object_index(removed).expect("not swept yet");
+        assert_eq!(
+            engine.objects[removed_idx].state.status,
+            ObjectStatus::Deleted
+        );
     }
 
     #[test]
