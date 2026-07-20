@@ -6762,12 +6762,12 @@ fn main() -> Result<()> {
                 while !app.pending_screenshots.is_empty() {
                     let (width, height) = presenter.physical_size();
                     let result = app.save_next_screenshot(
-                        pixels.frame_mut(),
+                        Some(pixels.frame_mut()),
                         width,
                         height,
                         presenter.scale(),
                     );
-                    report_screenshot_result(result);
+                    app.report_screenshot_result(result);
                 }
                 if let Err(err) = pixels.render() {
                     tracing::error!(error = ?err, "present failed");
@@ -11398,6 +11398,13 @@ enum ScreenshotKind {
 struct ScreenshotRequest {
     kind: ScreenshotKind,
     gamma: lc_graphics::GammaRamp,
+}
+
+#[derive(Debug)]
+struct ScreenshotSaveOutcome {
+    kind: ScreenshotKind,
+    path: PathBuf,
+    result: Result<()>,
 }
 
 #[derive(Clone, Debug)]
@@ -19197,41 +19204,42 @@ fn encode_screenshot_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>
     Ok(buffer)
 }
 
-fn write_numbered_screenshot(
-    paths: Option<&AppPaths>,
-    width: u32,
-    height: u32,
-    rgba: &[u8],
-) -> Result<PathBuf> {
+fn prepare_numbered_screenshot_path(paths: Option<&AppPaths>) -> (PathBuf, Result<()>) {
     let (preferred, fallback) = screenshot_directories(paths);
-    let directory = match fs::create_dir_all(&preferred) {
-        Ok(()) => preferred,
+    let (directory, result) = match fs::create_dir_all(&preferred) {
+        Ok(()) => (preferred, Ok(())),
         Err(error) if preferred != fallback => {
             tracing::warn!(
                 path = %preferred.display(),
                 %error,
                 "failed to create screenshot folder; falling back to install root"
             );
-            fs::create_dir_all(&fallback).with_context(|| {
+            let result = fs::create_dir_all(&fallback).with_context(|| {
                 format!("failed to create screenshot fallback at {}", fallback.display())
-            })?;
-            fallback
+            });
+            (fallback, result)
         }
         Err(error) => {
-            return Err(error).with_context(|| {
-                format!("failed to create screenshot folder at {}", preferred.display())
-            });
+            let error = anyhow::Error::new(error).context(format!(
+                "failed to create screenshot folder at {}",
+                preferred.display()
+            ));
+            (preferred, Err(error))
         }
     };
     let path = next_screenshot_path(&directory);
+    (path, result)
+}
+
+fn write_screenshot(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
     let png = encode_screenshot_png(width, height, rgba)?;
-    let mut file = File::create(&path)
+    let mut file = File::create(path)
         .with_context(|| format!("failed to create screenshot at {}", path.display()))?;
     file.write_all(&png)
         .with_context(|| format!("failed to write screenshot at {}", path.display()))?;
     file.flush()
         .with_context(|| format!("failed to flush screenshot at {}", path.display()))?;
-    Ok(path)
+    Ok(())
 }
 
 fn scaled_screenshot_extent(extent: u32, scale: f32) -> Result<u32> {
@@ -19242,18 +19250,6 @@ fn scaled_screenshot_extent(extent: u32, scale: f32) -> Result<u32> {
         "scaled screenshot extent is out of range"
     );
     Ok(scaled as u32)
-}
-
-fn report_screenshot_result(result: Result<Option<PathBuf>>) {
-    match result {
-        Ok(Some(path)) => tracing::info!(path = %path.display(), "screenshot saved"),
-        Ok(None) => {}
-        Err(error) => {
-            // C4GraphicsSystem::SaveScreenshot reports a failed write without
-            // terminating the game.
-            tracing::error!(%error, "failed to save screenshot");
-        }
-    }
 }
 
 fn load_save_entry(path: &Path) -> Result<SaveEntry> {
@@ -33554,51 +33550,95 @@ impl GameApp {
 
     fn save_next_screenshot(
         &mut self,
-        presented_frame: &[u8],
+        presented_frame: Option<&[u8]>,
         physical_width: u32,
         physical_height: u32,
         scale: f32,
-    ) -> Result<Option<PathBuf>> {
-        let Some(request) = self.pending_screenshots.pop_front() else {
-            return Ok(None);
-        };
-
-        let path = match request.kind {
-            ScreenshotKind::PresentedFrame => write_numbered_screenshot(
-                self.app_paths.as_ref(),
-                physical_width,
-                physical_height,
-                presented_frame,
-            )?,
-            ScreenshotKind::FullLandscape => {
-                let surface = self
-                    .graphics
-                    .render_full_landscape_with_gamma(&self.snapshot, &request.gamma)
-                    .context("full-landscape screenshot requires an active viewport")?;
-                let width = scaled_screenshot_extent(surface.width(), scale)?;
-                let height = scaled_screenshot_extent(surface.height(), scale)?;
-                let frame_len = (width as usize)
-                    .checked_mul(height as usize)
-                    .and_then(|pixels| pixels.checked_mul(4))
-                    .context("full-landscape screenshot dimensions overflow")?;
-                let mut frame = vec![0_u8; frame_len];
-                lc_scaling::upscale_frame(
-                    surface.pixels(),
-                    surface.width(),
-                    surface.height(),
-                    &mut frame,
-                    width,
-                    height,
-                );
-                write_numbered_screenshot(self.app_paths.as_ref(), width, height, &frame)?
+    ) -> Option<ScreenshotSaveOutcome> {
+        let request = self.pending_screenshots.pop_front()?;
+        let kind = request.kind;
+        let (path, directory_result) =
+            prepare_numbered_screenshot_path(self.app_paths.as_ref());
+        let result = (|| -> Result<()> {
+            directory_result?;
+            // C4Application::isFullScreen distinguishes the graphical client
+            // from `/console`, not an OS fullscreen window. Rust has no
+            // console frontend, so only lpBack needs an explicit equivalent.
+            let presented_frame = presented_frame
+                .context("screenshot capture requires an initialized presentation back buffer")?;
+            match kind {
+                ScreenshotKind::PresentedFrame => write_screenshot(
+                    &path,
+                    physical_width,
+                    physical_height,
+                    presented_frame,
+                ),
+                ScreenshotKind::FullLandscape => {
+                    let surface = self
+                        .graphics
+                        .render_full_landscape_with_gamma(&self.snapshot, &request.gamma)
+                        .context("full-landscape screenshot requires an active viewport")?;
+                    let width = scaled_screenshot_extent(surface.width(), scale)?;
+                    let height = scaled_screenshot_extent(surface.height(), scale)?;
+                    let frame_len = (width as usize)
+                        .checked_mul(height as usize)
+                        .and_then(|pixels| pixels.checked_mul(4))
+                        .context("full-landscape screenshot dimensions overflow")?;
+                    let mut frame = vec![0_u8; frame_len];
+                    lc_scaling::upscale_frame(
+                        surface.pixels(),
+                        surface.width(),
+                        surface.height(),
+                        &mut frame,
+                        width,
+                        height,
+                    );
+                    write_screenshot(&path, width, height, &frame)
+                }
             }
-        };
+        })();
 
         // Both Rust paths already contain the gamma used for presentation:
         // F9 copies the physical frame and the full-map world pass encodes
         // fragments with the request-time installed ramp. Applying it again
         // would double it.
-        Ok(Some(path))
+        Some(ScreenshotSaveOutcome { kind, path, result })
+    }
+
+    fn screenshot_result_message(&self, path: &Path, success: bool) -> String {
+        let path = self
+            .app_paths
+            .as_ref()
+            .and_then(|paths| path.strip_prefix(paths.install_root()).ok())
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
+        let key = if success {
+            "IDS_PRC_SCREENSHOT"
+        } else {
+            "IDS_PRC_SCREENSHOTERROR"
+        };
+        format_resource_string(self.runtime_resource_string(key), &[&path])
+    }
+
+    fn report_screenshot_result(
+        &mut self,
+        outcome: Option<ScreenshotSaveOutcome>,
+    ) -> Option<String> {
+        let outcome = outcome?;
+        let message = self.screenshot_result_message(&outcome.path, outcome.result.is_ok());
+        match outcome.result {
+            Ok(()) => tracing::info!(kind = ?outcome.kind, "{message}"),
+            Err(error) => {
+                // SaveScreenshot uses ordinary Log() for both outcomes. Keep
+                // the lower-level detail as a structured field while the
+                // localized result line stays info-level.
+                tracing::info!(kind = ?outcome.kind, %error, "{message}");
+            }
+        }
+        let line = self.timestamp_log_line(message.clone());
+        self.enqueue_control_message_board_line(line);
+        Some(message)
     }
 
     fn load_saved_game_from_path(&mut self, path: &Path) -> Result<()> {
@@ -115983,14 +116023,28 @@ ScenInfoArea=70,5,25,90
         let user_data = tempdir().expect("screenshot user data");
         fs::create_dir_all(install.path().join("planet/System.c4g"))
             .expect("fixture System group");
+        fs::write(
+            install.path().join("planet/System.c4g/LanguageUS.txt"),
+            b"IDS_PRC_SCREENSHOT=Saved screenshot %s.\nIDS_PRC_SCREENSHOTERROR=Failure creating screenshot %s.\n",
+        )
+        .expect("fixture screenshot language resources");
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(install.path())),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
         let paths = AppPaths::discover().expect("fixture app paths");
+        paths.ensure_user_dirs().expect("fixture user directories");
+        fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
+            .expect("fixture runtime language selection");
 
         let mut app = new_running_sandbox_app();
         app.app_paths = Some(paths);
+        app.set_display_mode(DisplayMode::Window);
+        app.clear_message_board_log();
+        assert!(
+            !app.display_flags.is_fullscreen,
+            "C++ isFullScreen means non-console mode, so an OS window remains eligible"
+        );
         let presented = vec![
             1, 2, 3, 4, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120,
             130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240,
@@ -116003,10 +116057,29 @@ ScenInfoArea=70,5,25,90
             app.pending_screenshots.front().map(|request| request.kind),
             Some(ScreenshotKind::PresentedFrame)
         );
-        let first = app
-            .save_next_screenshot(&presented, 4, 2, 2.0)
-            .expect("save presented screenshot")
+        let first_outcome = app
+            .save_next_screenshot(Some(&presented), 4, 2, 2.0)
             .expect("screenshot request was pending");
+        assert!(
+            first_outcome.result.is_ok(),
+            "presented screenshot failed: {:?}",
+            first_outcome.result
+        );
+        let first = first_outcome.path.clone();
+        assert_eq!(
+            app.report_screenshot_result(Some(first_outcome)).as_deref(),
+            Some("Saved screenshot Screenshots/Screenshot001.png.")
+        );
+        assert_eq!(
+            app.message_board
+                .log_history
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            app.graphics.prepare_message_board_lines(
+                "Saved screenshot Screenshots/Screenshot001.png."
+            )
+        );
         assert_eq!(
             first,
             install.path().join("Screenshots/Screenshot001.png")
@@ -116062,10 +116135,30 @@ ScenInfoArea=70,5,25,90
         );
         app.graphics
             .apply_gamma_now(&app.snapshot.environment.gamma);
-        let second = app
-            .save_next_screenshot(&presented, 4, 2, 1.5)
-            .expect("save full-landscape screenshot")
+        app.clear_message_board_log();
+        let second_outcome = app
+            .save_next_screenshot(Some(&presented), 4, 2, 1.5)
             .expect("full screenshot request was pending");
+        assert!(
+            second_outcome.result.is_ok(),
+            "full-landscape screenshot failed: {:?}",
+            second_outcome.result
+        );
+        let second = second_outcome.path.clone();
+        assert_eq!(
+            app.report_screenshot_result(Some(second_outcome)).as_deref(),
+            Some("Saved screenshot Screenshots/Screenshot002.png.")
+        );
+        assert_eq!(
+            app.message_board
+                .log_history
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            app.graphics.prepare_message_board_lines(
+                "Saved screenshot Screenshots/Screenshot002.png."
+            )
+        );
         assert_eq!(
             second,
             install.path().join("Screenshots/Screenshot002.png")
@@ -116091,6 +116184,73 @@ ScenInfoArea=70,5,25,90
             ],
             "repeated keydown events queue distinct native screenshots"
         );
+    }
+
+    #[test]
+    fn l141_screenshot_failures_keep_localized_path_for_both_capture_kinds() {
+        let install = tempdir().expect("screenshot install root");
+        let user_data = tempdir().expect("screenshot user data");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("fixture System group");
+        fs::write(
+            install.path().join("planet/System.c4g/LanguageUS.txt"),
+            b"IDS_PRC_SCREENSHOT=Localized success: %s\nIDS_PRC_SCREENSHOTERROR=Localized failure: %s\n",
+        )
+        .expect("fixture localized screenshot resources");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("fixture app paths");
+        paths.ensure_user_dirs().expect("fixture user directories");
+        fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
+            .expect("fixture runtime language selection");
+
+        let mut app = new_running_sandbox_app();
+        app.app_paths = Some(paths);
+        app.set_display_mode(DisplayMode::Window);
+        let expected_path = install.path().join("Screenshots/Screenshot001.png");
+
+        for (modifiers, kind) in [
+            (ModifiersState::empty(), ScreenshotKind::PresentedFrame),
+            (ModifiersState::CTRL, ScreenshotKind::FullLandscape),
+        ] {
+            app.keyboard_modifiers = modifiers;
+            app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
+                .expect("running screenshot shortcut is implemented");
+            let outcome = app
+                .save_next_screenshot(None, 4, 2, 1.0)
+                .expect("screenshot request was pending");
+            assert_eq!(outcome.kind, kind);
+            assert_eq!(outcome.path, expected_path);
+            assert!(
+                outcome
+                    .result
+                    .as_ref()
+                    .expect_err("a missing back buffer must fail before capture")
+                    .to_string()
+                    .contains("initialized presentation back buffer")
+            );
+            app.clear_message_board_log();
+            assert_eq!(
+                app.report_screenshot_result(Some(outcome)).as_deref(),
+                Some("Localized failure: Screenshots/Screenshot001.png")
+            );
+            assert_eq!(
+                app.message_board
+                    .log_history
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                app.graphics.prepare_message_board_lines(
+                    "Localized failure: Screenshots/Screenshot001.png"
+                )
+            );
+            assert!(
+                !expected_path.exists(),
+                "a failed attempt leaves its numbered slot reusable"
+            );
+        }
     }
 
     fn loader_origin_fixture_paths(root: &Path) -> (EnvGuard, AppPaths, PathBuf) {
