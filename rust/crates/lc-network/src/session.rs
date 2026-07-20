@@ -305,7 +305,7 @@ pub struct HostConfig {
     pub password: lc_engine::LegacyCString,
     pub allow_join: bool,
     /// Optional C4NetIOUDP listener. TCP remains available through the
-    /// `TcpListener` passed to `start_host`.
+    /// separately prepared listener passed to the host startup API.
     pub udp_bind_address: Option<SocketAddr>,
     /// Resolved netpuncher endpoints in preference order. At most the first
     /// endpoint for each address family is connected through the shared UDP
@@ -1184,6 +1184,8 @@ impl HostHandle {
 pub enum HostError {
     #[error("failed to bind listener: {0}")]
     Bind(#[from] io::Error),
+    #[error("no host transport is available")]
+    NoTransport,
     #[error("host loop terminated unexpectedly")]
     HostLoopGone,
     #[error("host resource initialization failed: {0}")]
@@ -1558,10 +1560,14 @@ pub struct HostUdpBinding {
 
 impl HostUdpBinding {
     pub fn bind(config: &HostConfig) -> Self {
-        let udp_bind_address = config.udp_bind_address.or_else(|| {
-            (!config.netpuncher_addresses.is_empty())
-                .then_some(SocketAddr::from(([0_u16; 8], 0)))
-        });
+        let udp_bind_address = (config.configured_udp_port != Some(0))
+            .then(|| {
+                config.udp_bind_address.or_else(|| {
+                    (!config.netpuncher_addresses.is_empty())
+                        .then_some(SocketAddr::from(([0_u16; 8], 0)))
+                })
+            })
+            .flatten();
         match udp_bind_address {
             Some(bind_address) => match crate::ReliableUdpSessionHub::bind(bind_address) {
                 Ok(hub) => Self {
@@ -1587,11 +1593,27 @@ impl HostUdpBinding {
             .as_ref()
             .map(crate::ReliableUdpSessionHub::local_addr)
     }
+
+    /// Retains the optional UDP bind diagnostic until another transport has
+    /// been checked, so callers can fail only when both are unavailable.
+    pub fn bind_error(&self) -> Option<&str> {
+        self.start_error.as_deref()
+    }
 }
 
 /// Starts the multiplayer host loop after binding its optional UDP socket.
 pub async fn start_host_with_udp_binding(
     listener: TcpListener,
+    config: HostConfig,
+    udp_binding: HostUdpBinding,
+) -> Result<HostHandle, HostError> {
+    start_host_with_bindings(Some(listener), config, udp_binding).await
+}
+
+/// Starts the multiplayer host loop after independently preparing its TCP and
+/// UDP transports. At least one binding must be live.
+pub async fn start_host_with_bindings(
+    listener: Option<TcpListener>,
     config: HostConfig,
     udp_binding: HostUdpBinding,
 ) -> Result<HostHandle, HostError> {
@@ -1605,17 +1627,22 @@ pub async fn start_host_with_udp_binding(
 }
 
 async fn start_host_with_udp_binding_and_backend(
-    listener: TcpListener,
+    listener: Option<TcpListener>,
     config: HostConfig,
     udp_binding: HostUdpBinding,
     port_mapping_backend: &dyn crate::upnp::PortMappingBackend,
 ) -> Result<HostHandle, HostError> {
+    if listener.is_none() && udp_binding.local_addr().is_none() {
+        return Err(HostError::NoTransport);
+    }
     let resource_backend = build_host_resource_backend(&config)?;
     let HostUdpBinding {
         hub: udp_hub,
         start_error: udp_start_error,
     } = udp_binding;
-    let tcp_local_addr = listener.local_addr().ok();
+    let tcp_local_addr = listener
+        .as_ref()
+        .and_then(|listener| listener.local_addr().ok());
     let udp_local_addr = udp_hub
         .as_ref()
         .map(crate::ReliableUdpSessionHub::local_addr);
@@ -4964,6 +4991,15 @@ async fn accept_udp_session(
     }
 }
 
+async fn accept_tcp_connection(
+    listener: &mut Option<TcpListener>,
+) -> io::Result<(TcpStream, SocketAddr)> {
+    match listener {
+        Some(listener) => listener.accept().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn next_host_puncher_event(
     events: &mut Option<mpsc::Receiver<NetpuncherIoEvent>>,
 ) -> NetpuncherIoEvent {
@@ -5082,7 +5118,7 @@ async fn handle_host_puncher_event(
 }
 
 async fn run_host(
-    listener: TcpListener,
+    mut listener: Option<TcpListener>,
     mut udp_hub: Option<crate::ReliableUdpSessionHub>,
     udp_start_error: Option<String>,
     config: HostConfig,
@@ -5091,7 +5127,9 @@ async fn run_host(
     event_tx: mpsc::Sender<HostEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
-    let listener_addr = listener.local_addr().ok();
+    let listener_addr = listener
+        .as_ref()
+        .and_then(|listener| listener.local_addr().ok());
     let udp_listener_addr = udp_hub
         .as_ref()
         .map(crate::ReliableUdpSessionHub::local_addr);
@@ -5109,12 +5147,12 @@ async fn run_host(
         }
     }
     let udp_handle = udp_hub.as_ref().map(crate::ReliableUdpSessionHub::handle);
-    let puncher_tcp_port = config
-        .configured_tcp_port
-        .unwrap_or_else(|| listener_addr.map(|address| address.port()).unwrap_or(0));
-    let puncher_udp_port = config
-        .configured_udp_port
-        .unwrap_or_else(|| udp_listener_addr.map(|address| address.port()).unwrap_or(0));
+    let puncher_tcp_port = listener_addr
+        .map(|address| config.configured_tcp_port.unwrap_or(address.port()))
+        .unwrap_or(0);
+    let puncher_udp_port = udp_listener_addr
+        .map(|address| config.configured_udp_port.unwrap_or(address.port()))
+        .unwrap_or(0);
     let backlog_limit = config.backlog_limit;
     let mut coordinator = ControlCoordinator::with_start_tick(backlog_limit, config.start_tick);
     // The host is an active lockstep participant from session start. C++ keeps
@@ -5285,7 +5323,7 @@ async fn run_host(
                 )
                 .await;
             }
-            accept_result = listener.accept() => {
+            accept_result = accept_tcp_connection(&mut listener) => {
                 match accept_result {
                     Ok((stream, addr)) => {
                         let connection_id = state.next_connection_id;
@@ -11328,9 +11366,31 @@ mod tests {
             }],
             "an unavailable UDP listener must not map its configured port"
         );
+        assert_eq!(
+            host_port_mapping_requests(&config, None, Some(udp)),
+            vec![crate::upnp::PortMappingRequest {
+                protocol: crate::upnp::PortMappingProtocol::Udp,
+                internal_port: 31_113,
+                external_port: 0,
+            }],
+            "an unavailable TCP listener must not map its configured port"
+        );
 
         config.enable_upnp = false;
         assert!(host_port_mapping_requests(&config, Some(tcp), Some(udp)).is_empty());
+    }
+
+    #[test]
+    fn l075_configured_zero_udp_port_disables_the_udp_binding() {
+        let binding = HostUdpBinding::bind(&HostConfig {
+            udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+            netpuncher_addresses: vec![SocketAddr::from(([127, 0, 0, 1], 11_115))],
+            configured_udp_port: Some(0),
+            ..HostConfig::default()
+        });
+
+        assert_eq!(binding.local_addr(), None);
+        assert_eq!(binding.bind_error(), None);
     }
 
     #[tokio::test]
@@ -11346,9 +11406,14 @@ mod tests {
         let udp_binding = HostUdpBinding::bind(&config);
         assert!(udp_binding.local_addr().is_some());
         let backend = RecordingPortMappingBackend::default();
-        let host = start_host_with_udp_binding_and_backend(listener, config, udp_binding, &backend)
-            .await
-            .unwrap();
+        let host = start_host_with_udp_binding_and_backend(
+            Some(listener),
+            config,
+            udp_binding,
+            &backend,
+        )
+        .await
+        .unwrap();
         let expected = vec![
             crate::upnp::PortMappingRequest {
                 protocol: crate::upnp::PortMappingProtocol::Tcp,
@@ -13256,6 +13321,43 @@ mod tests {
         let udp_address = host
             .udp_local_addr()
             .expect("configured reliable-UDP listener");
+        let mut host_events = host.take_event_receiver();
+        let client = connect_udp_client(
+            udp_address,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .expect("reliable-UDP session admission");
+
+        activate_joined_client(&host, &mut host_events, client.client_id()).await;
+        client
+            .submit_control(legacy_packet(client.client_id(), 0, 0x12))
+            .await
+            .unwrap();
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x34))
+            .await
+            .unwrap();
+        let packet = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn l075_udp_only_host_completes_session_admission_and_control() {
+        let config = HostConfig {
+            udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+            configured_tcp_port: Some(0),
+            ..HostConfig::default()
+        };
+        let udp_binding = HostUdpBinding::bind(&config);
+        let udp_address = udp_binding
+            .local_addr()
+            .expect("configured reliable-UDP listener");
+        let mut host = start_host_with_bindings(None, config, udp_binding)
+            .await
+            .expect("UDP-only host startup");
         let mut host_events = host.take_event_receiver();
         let client = connect_udp_client(
             udp_address,

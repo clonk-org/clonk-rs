@@ -21,7 +21,7 @@ use lc_engine::{
 };
 use lc_network::{
     connect_client_addresses, decode_control_entry_payload, decode_control_packet,
-    encode_control_entry_payload, encode_control_packet, start_host_with_udp_binding, ClientConfig,
+    encode_control_entry_payload, encode_control_packet, start_host_with_bindings, ClientConfig,
     ClientEvent, ClientHandle, ClientId, ClientMeshPuncherConfig, ClientPlayerResourceRequest,
     ControlDelivery, ControlPacket, HostConfig, HostEvent, HostHandle, HostJoinSnapshot,
     HostUdpBinding, LegacyControlFrame, LegacyControlSet, NetpuncherGameIds, NetworkAddress,
@@ -4203,15 +4203,29 @@ fn normalize_resolved_netpuncher_addresses(
 }
 
 fn host_registration_addresses(
-    tcp_address: SocketAddr,
+    tcp_address: Option<SocketAddr>,
+    configured_tcp_port: Option<u16>,
+    udp_address: Option<SocketAddr>,
     configured_udp_port: Option<u16>,
 ) -> Vec<NetworkAddress> {
-    let mut addresses = vec![NetworkAddress::new(NetworkProtocol::Tcp, tcp_address)];
-    if let Some(configured_udp_port) = configured_udp_port.filter(|port| *port != 0) {
-        addresses.push(NetworkAddress::new(
-            NetworkProtocol::Udp,
-            SocketAddr::new(tcp_address.ip(), configured_udp_port),
-        ));
+    let mut addresses = Vec::with_capacity(2);
+    if let Some(tcp_address) = tcp_address {
+        let port = configured_tcp_port.unwrap_or(tcp_address.port());
+        if port != 0 {
+            addresses.push(NetworkAddress::new(
+                NetworkProtocol::Tcp,
+                SocketAddr::new(tcp_address.ip(), port),
+            ));
+        }
+    }
+    if let Some(udp_address) = udp_address {
+        let port = configured_udp_port.unwrap_or(udp_address.port());
+        if port != 0 {
+            addresses.push(NetworkAddress::new(
+                NetworkProtocol::Udp,
+                SocketAddr::new(udp_address.ip(), port),
+            ));
+        }
     }
     addresses
 }
@@ -4309,41 +4323,59 @@ async fn run_host_worker(
             ..HostConfig::default()
         },
     };
-    let listener = match TcpListener::bind(settings.bind_addr).await {
-        Ok(listener) => listener,
-        Err(err) => {
-            let message = format!(
-                "failed to bind host socket at {}: {err}",
-                settings.bind_addr
-            );
-            let _ = local_id_tx.send(Err(message.clone().into()));
-            return Err(anyhow!(message));
-        }
-    };
-    let bound_addr = match listener.local_addr() {
-        Ok(address) => address,
-        Err(error) => {
-            let message = format!("failed to read bound host socket address: {error}");
-            let _ = local_id_tx.send(Err(message.clone().into()));
-            return Err(anyhow!(message));
-        }
-    };
-    if settings.prepared.is_some() {
-        // HostSettings is the socket authority. Production supplies the
-        // configured TCP port; tests and embedders may deliberately request
-        // an ephemeral override.
-        host_config.configured_tcp_port = Some(bound_addr.port());
-    }
-    let udp_bind_address = SocketAddr::new(
-        bound_addr.ip(),
-        if settings.prepared.is_some() {
-            host_config.configured_udp_port.unwrap_or(bound_addr.port())
-        } else {
-            bound_addr.port()
+    let is_prepared = settings.prepared.is_some();
+    let tcp_bind_address = (!is_prepared || host_config.configured_tcp_port != Some(0))
+        .then_some(settings.bind_addr);
+    let (listener, bound_addr, tcp_bind_error) = match tcp_bind_address {
+        Some(bind_address) => match TcpListener::bind(bind_address).await {
+            Ok(listener) => match listener.local_addr() {
+                Ok(address) => (Some(listener), Some(address), None),
+                Err(error) => (
+                    None,
+                    None,
+                    Some(format!("failed to read bound host socket address: {error}")),
+                ),
+            },
+            Err(error) => (
+                None,
+                None,
+                Some(format!(
+                    "failed to bind host socket at {bind_address}: {error}"
+                )),
+            ),
         },
-    );
-    host_config.udp_bind_address = Some(udp_bind_address);
+        None => (None, None, None),
+    };
+    if is_prepared {
+        // Production supplies the configured TCP port. A nonzero prepared
+        // port may still be deliberately overridden with an ephemeral
+        // HostSettings address by tests and embedders.
+        host_config.configured_tcp_port = Some(bound_addr.map_or(0, |address| address.port()));
+    }
+    let udp_port = if is_prepared {
+        host_config.configured_udp_port.unwrap_or_else(|| {
+            bound_addr.map_or(settings.bind_addr.port(), |address| address.port())
+        })
+    } else {
+        bound_addr.map_or(settings.bind_addr.port(), |address| address.port())
+    };
+    let udp_bind_address = (udp_port != 0).then_some(SocketAddr::new(
+        bound_addr.map_or(settings.bind_addr.ip(), |address| address.ip()),
+        udp_port,
+    ));
+    host_config.udp_bind_address = udp_bind_address;
     let udp_binding = HostUdpBinding::bind(&host_config);
+    if listener.is_none() && udp_binding.local_addr().is_none() {
+        let udp_bind_error = udp_binding.bind_error();
+        let message = match (tcp_bind_error.as_deref(), udp_bind_error) {
+            (Some(tcp), Some(udp)) => format!("{tcp}; {udp}"),
+            (Some(tcp), None) => tcp.to_string(),
+            (None, Some(udp)) => udp.to_string(),
+            (None, None) => "no configured host transport is available".to_string(),
+        };
+        let _ = local_id_tx.send(Err(message.clone().into()));
+        return Err(anyhow!(message));
+    }
     let mut league_runtime = None;
     let mut league_record_runtime = None;
     let mut league_start_response = None;
@@ -4353,9 +4385,9 @@ async fn run_host_worker(
             let record_transport_config = league_config.transport.clone();
             let registration_addresses = host_registration_addresses(
                 bound_addr,
-                udp_binding
-                    .local_addr()
-                    .and(host_config.configured_udp_port),
+                host_config.configured_tcp_port,
+                udp_binding.local_addr(),
+                host_config.configured_udp_port,
             );
             let reference = match prepared_host
                 .initial_host_game_reference(false, &registration_addresses)
@@ -4427,8 +4459,8 @@ async fn run_host_worker(
                 }
             };
             host_config = prepared_host.host_config().clone();
-            host_config.configured_tcp_port = Some(bound_addr.port());
-            host_config.udp_bind_address = Some(udp_bind_address);
+            host_config.configured_tcp_port = Some(bound_addr.map_or(0, |address| address.port()));
+            host_config.udp_bind_address = udp_bind_address;
             league_start_response = Some(response);
             latest_league_reference = Some(reference);
             league_runtime = Some(runtime);
@@ -4445,7 +4477,7 @@ async fn run_host_worker(
     }
     let configured_tcp_port = host_config.configured_tcp_port;
     let configured_udp_port = host_config.configured_udp_port;
-    let mut host = match start_host_with_udp_binding(listener, host_config, udp_binding).await {
+    let mut host = match start_host_with_bindings(listener, host_config, udp_binding).await {
         Ok(host) => host,
         Err(err) => {
             if let (Some(runtime), Some(reference)) =
@@ -4461,12 +4493,14 @@ async fn run_host_worker(
         }
     };
     let mut local_addresses = Vec::new();
-    let advertised_tcp_port = configured_tcp_port.unwrap_or(bound_addr.port());
-    if advertised_tcp_port != 0 {
-        local_addresses.push(NetworkAddress::new(
-            NetworkProtocol::Tcp,
-            SocketAddr::new(bound_addr.ip(), advertised_tcp_port),
-        ));
+    if let Some(bound_addr) = bound_addr {
+        let advertised_tcp_port = configured_tcp_port.unwrap_or(bound_addr.port());
+        if advertised_tcp_port != 0 {
+            local_addresses.push(NetworkAddress::new(
+                NetworkProtocol::Tcp,
+                SocketAddr::new(bound_addr.ip(), advertised_tcp_port),
+            ));
+        }
     }
     if let Some(udp_addr) = host.udp_local_addr() {
         let advertised_udp_port = configured_udp_port.unwrap_or(udp_addr.port());
@@ -4485,6 +4519,9 @@ async fn run_host_worker(
         league_runtime_available: league_runtime.is_some(),
         league_record_runtime: league_record_runtime.clone(),
     }));
+    if let Some(error) = tcp_bind_error {
+        let _ = event_tx.send(NetworkEvent::Error(error));
+    }
     let _ = event_tx.send(NetworkEvent::PeerConnected {
         client_id: HOST_CLIENT_ID,
         name: settings.player_name.clone(),
@@ -6774,6 +6811,20 @@ mod tests {
         Arc::new(Mutex::new(NetworkNetpuncherState::default()))
     }
 
+    async fn reserve_tcp_and_udp_at_same_address() -> (
+        TcpListener,
+        tokio::net::UdpSocket,
+        SocketAddr,
+    ) {
+        loop {
+            let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = tcp.local_addr().unwrap();
+            if let Ok(udp) = tokio::net::UdpSocket::bind(address).await {
+                return (tcp, udp, address);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn event_pumps_unblock_inner_commands_when_event_channels_are_full() {
         let (host_event_tx, mut host_events) = tokio_mpsc::channel(1);
@@ -7033,19 +7084,21 @@ mod tests {
     #[test]
     fn league_start_addresses_keep_tcp_and_configured_udp_ports_distinct() {
         let tcp = "192.0.2.4:11112".parse().unwrap();
+        let udp = "192.0.2.4:11113".parse().unwrap();
         assert_eq!(
-            host_registration_addresses(tcp, Some(11_113)),
+            host_registration_addresses(Some(tcp), Some(11_112), Some(udp), Some(11_113)),
             vec![
                 NetworkAddress::new(NetworkProtocol::Tcp, tcp),
-                NetworkAddress::new(
-                    NetworkProtocol::Udp,
-                    "192.0.2.4:11113".parse().unwrap(),
-                ),
+                NetworkAddress::new(NetworkProtocol::Udp, udp),
             ]
         );
         assert_eq!(
-            host_registration_addresses(tcp, None),
+            host_registration_addresses(Some(tcp), Some(11_112), None, Some(11_113)),
             vec![NetworkAddress::new(NetworkProtocol::Tcp, tcp)]
+        );
+        assert_eq!(
+            host_registration_addresses(None, Some(0), Some(udp), Some(11_113)),
+            vec![NetworkAddress::new(NetworkProtocol::Udp, udp)]
         );
     }
 
@@ -7063,8 +7116,10 @@ mod tests {
         assert_eq!(binding.local_addr(), None);
         assert_eq!(
             host_registration_addresses(
-                "127.0.0.1:11112".parse().unwrap(),
-                binding.local_addr().and(config.configured_udp_port),
+                Some("127.0.0.1:11112".parse().unwrap()),
+                Some(11_112),
+                binding.local_addr(),
+                config.configured_udp_port,
             ),
             vec![NetworkAddress::new(
                 NetworkProtocol::Tcp,
@@ -7628,6 +7683,197 @@ mod tests {
             .await
             .expect("join host worker")
             .expect("host worker exits cleanly");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l075_prepared_host_survives_occupied_tcp_with_configured_udp() {
+        let (occupied_tcp, udp_reservation, configured_address) =
+            reserve_tcp_and_udp_at_same_address().await;
+        drop(udp_reservation);
+        let settings = HostSettings {
+            bind_addr: configured_address,
+            player_name: "Host".to_string(),
+            prepared: Some(PreparedHostBootstrap::transport_test_fixture(
+                configured_address.port(),
+                configured_address.port(),
+                None,
+            )),
+        };
+        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
+        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let netpuncher_state = test_netpuncher_state();
+        let worker_state = Arc::clone(&netpuncher_state);
+        let worker = tokio::spawn(async move {
+            run_host_worker(
+                settings,
+                0,
+                &mut command_rx,
+                &mut control_tick_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+                worker_state,
+            )
+            .await
+        });
+
+        let ready = local_id_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("host worker readiness timeout")
+            .expect("UDP fallback host readiness");
+        let expected_addresses = vec![NetworkAddress::new(
+            NetworkProtocol::Udp,
+            configured_address,
+        )];
+        assert_eq!(ready.local_addresses, expected_addresses);
+        assert_eq!(netpuncher_state.lock().local_addresses, expected_addresses);
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(2)),
+            Ok(NetworkEvent::Error(error))
+                if error.starts_with("failed to bind host socket at ")
+        ));
+
+        command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .expect("stop UDP fallback host worker");
+        worker
+            .await
+            .expect("join UDP fallback host worker")
+            .expect("UDP fallback host exits cleanly");
+        drop(occupied_tcp);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l075_prepared_zero_tcp_port_starts_udp_without_a_bind_error() {
+        let (occupied_tcp, udp_reservation, configured_address) =
+            reserve_tcp_and_udp_at_same_address().await;
+        drop(udp_reservation);
+        let settings = HostSettings {
+            bind_addr: configured_address,
+            player_name: "Host".to_string(),
+            prepared: Some(PreparedHostBootstrap::transport_test_fixture(
+                0,
+                configured_address.port(),
+                None,
+            )),
+        };
+        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
+        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            run_host_worker(
+                settings,
+                0,
+                &mut command_rx,
+                &mut control_tick_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+                test_netpuncher_state(),
+            )
+            .await
+        });
+
+        let ready = local_id_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("host worker readiness timeout")
+            .expect("configured UDP-only host readiness");
+        assert_eq!(
+            ready.local_addresses,
+            vec![NetworkAddress::new(
+                NetworkProtocol::Udp,
+                configured_address,
+            )]
+        );
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(2)),
+            Ok(NetworkEvent::PeerConnected {
+                client_id: HOST_CLIENT_ID,
+                ..
+            })
+        ));
+
+        command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .expect("stop configured UDP-only host worker");
+        worker
+            .await
+            .expect("join configured UDP-only host worker")
+            .expect("configured UDP-only host exits cleanly");
+        drop(occupied_tcp);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l075_prepared_host_fails_only_when_both_transports_are_unavailable() {
+        let (occupied_tcp, occupied_udp, configured_address) =
+            reserve_tcp_and_udp_at_same_address().await;
+        let league_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        league_listener.set_nonblocking(true).unwrap();
+        let league_endpoint = format!("http://{}/", league_listener.local_addr().unwrap());
+        let settings = HostSettings {
+            bind_addr: configured_address,
+            player_name: "Host".to_string(),
+            prepared: Some(PreparedHostBootstrap::transport_test_fixture(
+                configured_address.port(),
+                configured_address.port(),
+                Some(PreparedLeagueHostConfig {
+                    endpoint: league_endpoint,
+                    transport: lc_network::LeagueHttpTransportConfig::default(),
+                    update_period_secs: 120,
+                    league_server_signup: false,
+                }),
+            )),
+        };
+        let (_command_tx, mut command_rx) = tokio_mpsc::channel(8);
+        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let netpuncher_state = test_netpuncher_state();
+        let worker_state = Arc::clone(&netpuncher_state);
+        let worker = tokio::spawn(async move {
+            run_host_worker(
+                settings,
+                0,
+                &mut command_rx,
+                &mut control_tick_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+                worker_state,
+            )
+            .await
+        });
+
+        let error = local_id_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("host worker readiness timeout")
+            .expect_err("both unavailable transports must fail startup");
+        assert!(matches!(
+            error,
+            NetworkStartError::Other(message)
+                if message.starts_with("failed to bind host socket at ")
+                    && message.contains("failed to start reliable-UDP listener")
+        ));
+        assert!(worker.await.expect("join failed host worker").is_err());
+        assert!(netpuncher_state.lock().local_addresses.is_empty());
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected)
+        ));
+        assert_eq!(
+            league_listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "fatal transport setup must not partially publish a league Start"
+        );
+        drop((occupied_tcp, occupied_udp));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -657,6 +657,64 @@ impl PreparedHostBootstrap {
     }
 }
 
+#[cfg(test)]
+impl PreparedHostBootstrap {
+    #[allow(dead_code)]
+    pub(crate) fn transport_test_fixture(
+        configured_tcp_port: u16,
+        configured_udp_port: u16,
+        league: Option<PreparedLeagueHostConfig>,
+    ) -> Self {
+        let host_config = HostConfig {
+            configured_tcp_port: Some(configured_tcp_port),
+            configured_udp_port: Some(configured_udp_port),
+            ..HostConfig::default()
+        };
+        Self {
+            host_config,
+            initial_game: InitialNetworkGameData::default(),
+            has_initial_game: false,
+            admission: PreparedHostAdmission {
+                max_players: 8,
+                no_runtime_join: false,
+            },
+            start_time: 1,
+            initial_host_player_info_control: PlayerInfoControlData::default(),
+            runtime_team_metadata: InitialNetworkTeamMetadata {
+                active: false,
+                custom: false,
+                allow_hostility_change: true,
+                allow_team_switch: false,
+                auto_generate_teams: false,
+                last_team_id: 0,
+                team_distribution: lc_engine::InitialNetworkTeamDistribution::Free,
+                team_colors: false,
+                max_script_players: 0,
+                script_player_names: LegacyCString::default(),
+                random_team_count: 0,
+                teams: Vec::new(),
+            },
+            scenario_wire_name: LegacyCString::default(),
+            scenario_origin: String::new(),
+            dynamic_wire_name: LegacyCString::default(),
+            reference_icon: 0,
+            reference_comment: LegacyCString::default(),
+            netpuncher_address: LegacyCString::default(),
+            league,
+            stream_address: LegacyCString::default(),
+            local_player_resources: Vec::new(),
+            local_player_alternate_colors_by_resource: HashMap::new(),
+            pending_initial_league_players: None,
+            lifetime: Arc::new(PreparedHostLifetime {
+                temporary_files: Vec::new(),
+                scenario: Mutex::new(None),
+                host_launched: AtomicBool::new(false),
+                initial_player_info_installed: AtomicBool::new(false),
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PrepareHostBootstrapError {
     #[error("the selected local player could not be admitted into the scenario player slots")]
