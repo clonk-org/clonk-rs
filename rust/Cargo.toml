@@ -104,6 +104,22 @@ debug = false
 [profile.test.package.lc-engine]
 debug = false
 
+# Frontend debug data accounts for roughly 10 MiB of its test-profile rlib and
+# are repeatedly processed by the large app link. The inline frontend wrapper
+# already exercises the same source without debug data, while function names
+# and panic source locations remain available.
+[profile.test.package.lc-frontend]
+debug = false
+
+# Resources and script form the shared input/runtime spine for the app,
+# engine, frontend, and launcher harnesses. Their debug data adds another
+# roughly 8 MiB across those downstream links without changing test code.
+[profile.test.package.lc-resources]
+debug = false
+
+[profile.test.package.lc-script]
+debug = false
+
 # The large async lc-network harness is a cold-build tail, while its complete
 # suite remains only a few seconds without LLVM optimization. Skip optimization
 # and line tables for this crate's test-profile copy to shorten that tail.

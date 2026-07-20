@@ -1,9 +1,14 @@
-use crate::support::real_scenario::{join_local_player, load_installed_scenario};
+use crate::support::real_scenario::{
+    join_local_player, prepare_installed_scenario, PreparedInstalledScenario,
+};
 use lc_engine::{Engine, ObjectId, ObjectUpdate, SpawnConfig, COM_THROW};
 use lc_script::Value;
 
-fn arctic_inuk_with_harpoon(name: &str) -> (Engine, i32, ObjectId, ObjectId) {
-    let mut engine = load_installed_scenario("FarWorlds.c4f/Arctic.c4s", 0);
+fn arctic_inuk_with_harpoon(
+    prepared: &PreparedInstalledScenario,
+    name: &str,
+) -> (Engine, i32, ObjectId, ObjectId) {
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, name);
     let inuk = engine
         .crew_cursor(owner)
@@ -34,8 +39,9 @@ fn arctic_inuk_harpoon_throw_respects_down_double_drop_latch() {
     // Inuk.c4d/Script.c:188-205). C++ returns the live
     // C4Player::LastComDownDouble countdown (C4Script.cpp:2618-2622), which
     // PlayerObjectCommand then converts into Drop (C4ObjectCom.cpp:1020-1036).
+    let prepared = prepare_installed_scenario("FarWorlds.c4f/Arctic.c4s", 0);
     let (mut ordinary, _owner, inuk, harpoon) =
-        arctic_inuk_with_harpoon("Arctic ordinary harpoon throw");
+        arctic_inuk_with_harpoon(&prepared, "Arctic ordinary harpoon throw");
 
     let inuk_index = ordinary
         .find_object_index(inuk)
@@ -60,7 +66,7 @@ fn arctic_inuk_harpoon_throw_respects_down_double_drop_latch() {
     );
 
     let (mut dropping, owner, inuk, _harpoon) =
-        arctic_inuk_with_harpoon("Arctic down-double harpoon drop");
+        arctic_inuk_with_harpoon(&prepared, "Arctic down-double harpoon drop");
     dropping
         .player_mut(owner)
         .expect("the Arctic player remains joined")

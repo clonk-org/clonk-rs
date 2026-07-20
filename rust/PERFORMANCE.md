@@ -313,6 +313,26 @@ single-process libtest run immediately exposed races in process-global app
 state. Nextest process isolation therefore remains part of the correctness
 model rather than an interchangeable scheduling choice.
 
+### Debug-payload and scenario-preparation follow-up
+
+The next compile pass removed test-profile debug data from the production
+frontend, resources, and script crates. Their previous rlibs contained
+18,365,488 bytes (17.515 MiB) of object-file DWARF, measured with `size -m`.
+Those tables were repeatedly processed by the large app and engine links but
+did not affect generated code or test runtime. Panic-site text and exported
+function names remain available, while the development profile retains line
+tables for interactive debugging.
+
+The same pass eliminated four redundant installed-scenario preparations while
+preserving a fresh `Engine` and player for every assertion body. Tutorial05's
+long catapult test now prepares its immutable input once for both the original
+and restored engines, and four shorter Tutorial05 cases run in two balanced,
+failure-aggregating batches. The Arctic harpoon/drop test likewise prepares
+its immutable scenario once and instantiates two independent engines. Retained
+pre-change profiling samples totaled 14.293s across the five active Tutorial05
+cases and 7.112s for the Arctic case; those figures identify repeated work and
+are not presented as a same-command elapsed A/B.
+
 The first local reference baseline was recorded on 2026-07-12 from
 `dd32e5d3` with content `67a54d0`, Rust 1.87.0, macOS/Darwin arm64, and an
 Apple M4 Max. The representative command was:

@@ -2,7 +2,7 @@
 
 use std::error::Error;
 
-use crate::support::real_scenario::load_tutorial;
+use crate::support::real_scenario::{prepare_installed_scenario, PreparedInstalledScenario};
 use crate::support::virtual_player::VirtualPlayer;
 use lc_engine::math::{fixed100, FixedVec2};
 use lc_engine::{
@@ -12,8 +12,12 @@ use lc_engine::{
 };
 use lc_script::Value;
 
-fn load_tutorial05_with_controls(control_style: bool, auto_context_menu: bool) -> (Engine, i32) {
-    let mut engine = load_tutorial(5, 0);
+fn instantiate_tutorial05_with_controls(
+    prepared: &PreparedInstalledScenario,
+    control_style: bool,
+    auto_context_menu: bool,
+) -> (Engine, i32) {
+    let mut engine = prepared.instantiate();
     let owner = engine
         .join_player(JoinPlayerConfig {
             name: "Tutorial 5 virtual player".to_owned(),
@@ -37,8 +41,8 @@ fn load_tutorial05_with_controls(control_style: bool, auto_context_menu: bool) -
     (engine, owner)
 }
 
-fn load_tutorial05() -> (Engine, i32) {
-    load_tutorial05_with_controls(false, false)
+fn instantiate_tutorial05(prepared: &PreparedInstalledScenario) -> (Engine, i32) {
+    instantiate_tutorial05_with_controls(prepared, false, false)
 }
 
 fn object_with_definition(engine: &Engine, definition: &str) -> Option<ObjectId> {
@@ -97,7 +101,8 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
     // JumpAndRun.c AimUpdate helper, whose IntJnRAim timer advances one Ready
     // phase every eight frames (C4Object.cpp:3313-3323;
     // Catapult.c4d/Script.c:121-163; planet/System.c4g/JumpAndRun.c:53-119).
-    let (mut engine, owner) = load_tutorial05_with_controls(true, true);
+    let prepared = prepare_installed_scenario("Tutorial.c4f/Tutorial05.c4s", 0);
+    let (mut engine, owner) = instantiate_tutorial05_with_controls(&prepared, true, true);
     let constructor = engine
         .crew_cursor(owner)
         .expect("Tutorial05 starts on its constructor CLNK");
@@ -418,7 +423,8 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
         !saved.to_json_string()?.contains("view_target"),
         "serialized engine state must not contain the transient ViewTarget field"
     );
-    let (mut restored, restored_owner) = load_tutorial05_with_controls(true, true);
+    let (mut restored, restored_owner) =
+        instantiate_tutorial05_with_controls(&prepared, true, true);
     assert_eq!(restored_owner, owner);
     restored.restore_state(&saved)?;
     let restored_view = player_state(&restored, owner);
@@ -490,14 +496,76 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
 }
 
 #[test]
-fn tutorial05_catapult_restores_its_partial_tension_after_firing() -> Result<(), Box<dyn Error>> {
+fn tutorial05_shared_scenario_subcases_batch_1() {
+    let prepared = prepare_installed_scenario("Tutorial.c4f/Tutorial05.c4s", 0);
+    let mut failures = Vec::new();
+
+    run_tutorial05_subcase(
+        "catapult_restores_its_partial_tension_after_firing",
+        &mut failures,
+        || {
+            tutorial05_catapult_restores_its_partial_tension_after_firing(&prepared)
+                .expect("partial-tension catapult subcase succeeds")
+        },
+    );
+    run_tutorial05_subcase(
+        "cpp_crew_order_starts_at_constructor_then_cycles_to_valley",
+        &mut failures,
+        || tutorial05_cpp_crew_order_starts_at_constructor_then_cycles_to_valley(&prepared),
+    );
+
+    assert_no_tutorial05_subcase_failures(failures);
+}
+
+#[test]
+fn tutorial05_shared_scenario_subcases_batch_2() {
+    let prepared = prepare_installed_scenario("Tutorial.c4f/Tutorial05.c4s", 0);
+    let mut failures = Vec::new();
+
+    run_tutorial05_subcase(
+        "partial_elevator_starts_with_its_built_component_fraction",
+        &mut failures,
+        || tutorial05_partial_elevator_starts_with_its_built_component_fraction(&prepared),
+    );
+    run_tutorial05_subcase(
+        "cnmt_rule_stalls_the_unfed_elevator_at_eighty_percent",
+        &mut failures,
+        || tutorial05_cnmt_rule_stalls_the_unfed_elevator_at_eighty_percent(&prepared),
+    );
+
+    assert_no_tutorial05_subcase_failures(failures);
+}
+
+fn run_tutorial05_subcase(
+    name: &'static str,
+    failures: &mut Vec<&'static str>,
+    subcase: impl FnOnce(),
+) {
+    eprintln!("running shared Tutorial05 subcase `{name}`");
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(subcase)).is_err() {
+        eprintln!("shared Tutorial05 subcase `{name}` failed; continuing batch");
+        failures.push(name);
+    }
+}
+
+fn assert_no_tutorial05_subcase_failures(failures: Vec<&str>) {
+    assert!(
+        failures.is_empty(),
+        "Tutorial05 subcase(s) failed: {}",
+        failures.join(", ")
+    );
+}
+
+fn tutorial05_catapult_restores_its_partial_tension_after_firing(
+    prepared: &PreparedInstalledScenario,
+) -> Result<(), Box<dyn Error>> {
     // CATA stores every successful ControlConf phase in iPhase. Fire starts
     // at 7-iPhase, its ActMap transitions Fire -> Charge, and Charging stops
     // the rewind at that same iPhase (Catapult.c4d/Script.c:31-43,51-74,
     // 134-140; Catapult.c4d/ActMap.txt:11-32). Therefore a phase-three shot
     // launches at (+/-4,-6), with one shared RandomX(-50,+50) hundredth-pixel
     // deviation, and returns to Ready phase three rather than full tension.
-    let (mut engine, _) = load_tutorial05();
+    let (mut engine, _) = instantiate_tutorial05(prepared);
     let catapult = object_with_definition_near_x(&engine, "CATA", 240)
         .expect("Tutorial05 creates its real valley CATA");
     let payload = object_with_definition_near_x(&engine, "METL", 285)
@@ -592,13 +660,14 @@ fn tutorial05_catapult_restores_its_partial_tension_after_firing() -> Result<(),
     Ok(())
 }
 
-#[test]
-fn tutorial05_partial_elevator_starts_with_its_built_component_fraction() {
+fn tutorial05_partial_elevator_starts_with_its_built_component_fraction(
+    prepared: &PreparedInstalledScenario,
+) {
     // NewObject's initial DoCon calls ComponentConGain
     // (C4Object.cpp:1428-1465, especially :1464; :519-526). At 80% the
     // real ELEV therefore already owns floor(4*80%) WOOD and floor(2*80%)
     // METL; the player only has to deliver the remaining one of each.
-    let (engine, _) = load_tutorial05();
+    let (engine, _) = instantiate_tutorial05(prepared);
     let elevator = engine
         .snapshot()
         .objects
@@ -615,9 +684,10 @@ fn tutorial05_partial_elevator_starts_with_its_built_component_fraction() {
 // C4Object::Build then refuses to advance past the component ratio while no
 // full-con material is available (C4Object.cpp:1690-1738). Tutorial05 relies
 // on that stall before teaching the player to catapult WOOD and METL uphill.
-#[test]
-fn tutorial05_cnmt_rule_stalls_the_unfed_elevator_at_eighty_percent() {
-    let (mut engine, _) = load_tutorial05();
+fn tutorial05_cnmt_rule_stalls_the_unfed_elevator_at_eighty_percent(
+    prepared: &PreparedInstalledScenario,
+) {
+    let (mut engine, _) = instantiate_tutorial05(prepared);
     let elevator = engine
         .snapshot()
         .objects
@@ -641,15 +711,16 @@ fn tutorial05_cnmt_rule_stalls_the_unfed_elevator_at_eighty_percent() {
     );
 }
 
-#[test]
-fn tutorial05_cpp_crew_order_starts_at_constructor_then_cycles_to_valley() {
+fn tutorial05_cpp_crew_order_starts_at_constructor_then_cycles_to_valley(
+    prepared: &PreparedInstalledScenario,
+) {
     // PlaceReadyCrew adds each equal-definition CLNK to C4Player::Crew with
     // stMain ordering, so the newest recruit is first. Tutorial05 binds
     // GetCrew(plr,0) as the constructor and GetCrew(plr,1) as the valley
     // Clonk, then C4Player::AdjustCursorCommand chooses that first equal-rank
     // crew member (C4Player.cpp:481-570,1003-1020,1235-1258;
     // C4ObjectList.cpp:110-195; Tutorial05/Script.c:32-39).
-    let (mut engine, owner) = load_tutorial05();
+    let (mut engine, owner) = instantiate_tutorial05(prepared);
     let constructor = engine
         .crew_cursor(owner)
         .and_then(|id| engine.object_snapshot(id))
@@ -676,7 +747,8 @@ fn tutorial05_cpp_crew_order_starts_at_constructor_then_cycles_to_valley() {
 #[ignore = "over-constrained virtual tutorial driver; excluded from parity gates"]
 fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-    let (mut engine, owner) = load_tutorial05();
+    let prepared = prepare_installed_scenario("Tutorial.c4f/Tutorial05.c4s", 0);
+    let (mut engine, owner) = instantiate_tutorial05(&prepared);
     let constructor = engine
         .crew_cursor(owner)
         .expect("Tutorial05 starts on its constructor CLNK");
