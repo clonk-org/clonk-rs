@@ -382,6 +382,15 @@ enum AboutFocus {
     LicenseTabs,
 }
 
+/// Semantic focus target exposed to the application and parity tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AboutFocusTarget {
+    Back,
+    Update,
+    Licenses,
+    LicenseTabs,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AboutScrollbar {
     Credit(usize),
@@ -496,6 +505,16 @@ impl AboutDlgState {
 
     pub const fn current_page(&self) -> AboutPage {
         self.page
+    }
+
+    pub const fn focused_control(&self) -> Option<AboutFocusTarget> {
+        match self.focused {
+            Some(AboutFocus::Button(AboutButton::Back)) => Some(AboutFocusTarget::Back),
+            Some(AboutFocus::Button(AboutButton::Update)) => Some(AboutFocusTarget::Update),
+            Some(AboutFocus::Button(AboutButton::Licenses)) => Some(AboutFocusTarget::Licenses),
+            Some(AboutFocus::LicenseTabs) => Some(AboutFocusTarget::LicenseTabs),
+            None => None,
+        }
     }
 
     pub const fn pointer_position(&self) -> Option<GuiPoint> {
@@ -680,6 +699,12 @@ impl AboutDlgState {
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<AboutDlgAction> {
         self.handle_key_down_with_tab_direction(key, false)
+    }
+
+    /// `Dialog::KeyAdvanceFocus` route shared by Tab/Shift-Tab and the
+    /// configured primary gamepad's Right/Left buttons.
+    pub fn handle_gamepad_horizontal(&mut self, backwards: bool) -> Vec<AboutDlgAction> {
+        self.handle_key_down_with_tab_direction(KeyCode::Tab, backwards)
     }
 
     /// Dispatches an Alt mnemonic through the visible controls in their C++

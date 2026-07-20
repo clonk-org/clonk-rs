@@ -37433,6 +37433,22 @@ impl GameApp {
                                 && self.startup_view == StartupView::Options
                                 && self.startup_options_advanced_dialog.is_none();
                             match event {
+                                GamepadEvent::Direction {
+                                    button: ControlButton::Left | ControlButton::Right,
+                                    ..
+                                } if !eligible_gamepad_gui
+                                    && self.mode == AppMode::Menu
+                                    && matches!(
+                                        self.startup_view,
+                                        StartupView::NetworkGame
+                                            | StartupView::PlayerSelection
+                                            | StartupView::Options
+                                            | StartupView::About
+                                    ) =>
+                                {
+                                    // Dialog registers its gamepad focus keys
+                                    // only for configured primary-GUI input.
+                                }
                                 GamepadEvent::Direction { .. }
                                     if rename_active && !eligible_gamepad_gui =>
                                 {
@@ -38219,7 +38235,10 @@ impl GameApp {
             && matches!(button, ControlButton::Left | ControlButton::Right)
             && matches!(
                 self.startup_view,
-                StartupView::NetworkGame | StartupView::PlayerSelection | StartupView::Options
+                StartupView::NetworkGame
+                    | StartupView::PlayerSelection
+                    | StartupView::Options
+                    | StartupView::About
             )
         {
             if state == ElementState::Pressed {
@@ -38248,6 +38267,14 @@ impl GameApp {
                             .map(|dialog| dialog.handle_gamepad_horizontal(backwards))
                             .unwrap_or_default();
                         self.process_options_dialog_actions(actions)?;
+                    }
+                    StartupView::About => {
+                        let actions = self
+                            .startup_about_dialog
+                            .as_mut()
+                            .map(|dialog| dialog.handle_gamepad_horizontal(backwards))
+                            .unwrap_or_default();
+                        self.process_about_dialog_actions(actions)?;
                     }
                     _ => unreachable!(),
                 }
@@ -111658,6 +111685,93 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
             .expect("Alt+Space opens Font Size");
         assert!(app.context_menu.is_some());
+    }
+
+    #[test]
+    fn l132_about_gamepad_horizontal_matches_tab_order_and_primary_gui_gate() {
+        use lc_frontend::startup_about_dlg::{AboutFocusTarget, AboutPage};
+
+        let open_about = |gamepad_gui_control| {
+            let mut app = new_classic_menu_app(640, 480);
+            app.gamepad_gui_control = gamepad_gui_control;
+            app.open_about_dialog();
+            app.startup_dialog_fade = None;
+            app
+        };
+        let send_direction = |app: &mut GameApp, gamepad: u8, button: ControlButton| {
+            let gamepad_gui_control = app.gamepad_gui_control;
+            app.process_sourced_gamepad_event_batch(
+                [SourcedGamepadEvent {
+                    gamepad: usize::from(gamepad),
+                    cluster: 0,
+                    event: GamepadEvent::Direction {
+                        slot: GamepadSlot::new(gamepad),
+                        button,
+                        state: ElementState::Pressed,
+                    },
+                }],
+                gamepad_gui_control,
+            )
+        };
+        let focus = |app: &GameApp| {
+            app.startup_about_dialog
+                .as_ref()
+                .expect("About dialog")
+                .focused_control()
+        };
+
+        let mut disabled = open_about(false);
+        send_direction(&mut disabled, 0, ControlButton::Right)
+            .expect("disabled primary direction is ignored");
+        assert_eq!(focus(&disabled), None);
+
+        let mut secondary = open_about(true);
+        send_direction(&mut secondary, 1, ControlButton::Right)
+            .expect("secondary direction is ignored");
+        assert_eq!(focus(&secondary), None);
+
+        let mut app = open_about(true);
+        send_direction(&mut app, 0, ControlButton::Right)
+            .expect("focus Back");
+        assert_eq!(focus(&app), Some(AboutFocusTarget::Back));
+        send_direction(&mut app, 0, ControlButton::Right)
+            .expect("focus Update");
+        assert_eq!(focus(&app), Some(AboutFocusTarget::Update));
+        send_direction(&mut app, 0, ControlButton::Left)
+            .expect("reverse to Back");
+        assert_eq!(focus(&app), Some(AboutFocusTarget::Back));
+        send_direction(&mut app, 0, ControlButton::Right)
+            .expect("return to Update");
+        send_direction(&mut app, 0, ControlButton::Right)
+            .expect("focus Licenses");
+        assert_eq!(focus(&app), Some(AboutFocusTarget::Licenses));
+
+        app.handle_gamepad_action(
+            GamepadSlot::new(0),
+            GamepadActionType::Select,
+            ElementState::Pressed,
+        )
+        .expect("press focused Licenses");
+        app.handle_gamepad_action(
+            GamepadSlot::new(0),
+            GamepadActionType::Select,
+            ElementState::Released,
+        )
+        .expect("open the Licenses page");
+        assert_eq!(
+            app.startup_about_dialog
+                .as_ref()
+                .expect("About dialog")
+                .current_page(),
+            AboutPage::Licenses
+        );
+
+        send_direction(&mut app, 0, ControlButton::Right)
+            .expect("focus LicenseTabs");
+        assert_eq!(focus(&app), Some(AboutFocusTarget::LicenseTabs));
+        send_direction(&mut app, 0, ControlButton::Left)
+            .expect("reverse to visible Update");
+        assert_eq!(focus(&app), Some(AboutFocusTarget::Update));
     }
 
     #[test]
