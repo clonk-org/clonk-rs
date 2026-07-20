@@ -140,6 +140,31 @@ impl NetworkTeamAssignmentState {
         ))
     }
 
+    /// Execute the network host's direct `C4TeamList::SetRandomTeamCount`.
+    pub(crate) fn set_random_team_count(
+        &mut self,
+        player_infos: &mut ControlPlayerInfoRegistry,
+        count: i32,
+        has_or_will_have_lobby: bool,
+    ) -> Vec<PlayerInfoControlData> {
+        self.teams.random_team_count = count;
+        if !matches!(
+            self.teams.team_distribution,
+            InitialNetworkTeamDistribution::Random
+                | InitialNetworkTeamDistribution::RandomInvisible
+        ) {
+            return Vec::new();
+        }
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
+            self.generated_team_name_template.clone(),
+        );
+        player_infos.reassign_all_teams(
+            &mut self.teams,
+            &mut oracle,
+            has_or_will_have_lobby,
+        )
+    }
+
     /// Execute the host half of `C4TeamList::SetTeamColors`. Equal values are
     /// a true no-op. Attribute conflict paths that need host-local alternate
     /// colors fail in the registry before this synchronized flag changes.

@@ -116,7 +116,7 @@ use lc_frontend::game_lobby::{
     LobbyOptionKind, LobbyOptionLabels, LobbyOptionRow, LobbyPlayerRow, LobbyResourceRow,
     LobbyResources, LobbyRole, LobbyRosterHeader, LobbyRosterIcon, LobbyRosterId, LobbyRosterLayout,
     LobbyRosterRow, LobbyScenarioText, LobbySheet, LobbySound, LobbyTeamValue,
-    core_lobby_option_rows, core_runtime_option_rows,
+    LobbyTeamOptionState, core_lobby_option_rows, core_runtime_option_rows, team_lobby_option_rows,
 };
 use lc_frontend::game_option_buttons::{
     FairCrewConstraint, GameOptionAction, GameOptionButton, GameOptionButtons, GameOptionContext,
@@ -9924,6 +9924,9 @@ enum AppContextMenuCommand {
         option: LobbyOptionKind,
         value: i32,
     },
+    LobbyTeamDistribution(i32),
+    LobbyTeamColors(bool),
+    LobbyRandomTeamCount(i32),
     LobbyPlayerTakeOver {
         savegame_player_id: i32,
         player_id: i32,
@@ -47700,6 +47703,47 @@ impl GameApp {
         );
         labels.runtime_join_free =
             resource("IDS_NET_RUNTIMEJOINFREE", &labels.runtime_join_free);
+        labels.team_distribution = resource("IDS_MSG_TEAMDIST", &labels.team_distribution);
+        labels.team_distribution_tooltip = resource(
+            "IDS_MSG_TEAMDIST_DESC",
+            &labels.team_distribution_tooltip,
+        );
+        labels.team_distribution_free = resource(
+            "IDS_MSG_TEAMDIST_FREE",
+            &labels.team_distribution_free,
+        );
+        labels.team_distribution_host = resource(
+            "IDS_MSG_TEAMDIST_HOST",
+            &labels.team_distribution_host,
+        );
+        labels.team_distribution_none = resource(
+            "IDS_MSG_TEAMDIST_NONE",
+            &labels.team_distribution_none,
+        );
+        labels.team_distribution_random = resource(
+            "IDS_MSG_TEAMDIST_RND",
+            &labels.team_distribution_random,
+        );
+        labels.team_distribution_random_invisible = resource(
+            "IDS_MSG_TEAMDIST_RNDINV",
+            &labels.team_distribution_random_invisible,
+        );
+        labels.team_colors = resource("IDS_MSG_TEAMCOLORS", &labels.team_colors);
+        labels.team_colors_tooltip =
+            resource("IDS_MSG_TEAMCOLORS_DESC", &labels.team_colors_tooltip);
+        labels.enabled = resource("IDS_MSG_ENABLED", &labels.enabled);
+        labels.disabled = resource("IDS_MSG_DISABLED", &labels.disabled);
+        labels.random_team_count =
+            resource("IDS_MSG_RANDOMTEAMCOUNT", &labels.random_team_count);
+        labels.random_team_count_tooltip = resource(
+            "IDS_MSG_RANDOMTEAMCOUNT_DESC",
+            &labels.random_team_count_tooltip,
+        );
+        labels.automatic = resource("IDS_MSG_TEAMCOUNT_AUTO", &labels.automatic);
+        labels.automatic_tooltip = resource(
+            "IDS_MSG_TEAMCOUNT_AUTO_DESC",
+            &labels.automatic_tooltip,
+        );
         labels.select_template = resource("IDS_MSG_SELECT", &labels.select_template);
         labels
     }
@@ -47709,6 +47753,8 @@ impl GameApp {
         mode: &NetworkMode,
         control_rate: i32,
         runtime_join_allowed: bool,
+        active_player_count: i32,
+        teams: Option<&lc_engine::InitialNetworkTeamMetadata>,
     ) -> Vec<LobbyOptionRow> {
         let (role, control_mode) = match mode {
             NetworkMode::Host(HostSettings {
@@ -47726,13 +47772,30 @@ impl GameApp {
                     .map_or(-1, |join| join.status.control_mode),
             ),
         };
-        core_lobby_option_rows(
+        let labels = self.classic_lobby_option_labels();
+        let mut rows = core_lobby_option_rows(
             role,
-            &self.classic_lobby_option_labels(),
+            &labels,
             control_mode,
             control_rate,
             runtime_join_allowed,
-        )
+        );
+        if let Some(teams) = teams {
+            rows.extend(team_lobby_option_rows(
+                role,
+                &labels,
+                LobbyTeamOptionState {
+                    active: teams.active,
+                    auto_generate_teams: teams.auto_generate_teams,
+                    distribution: teams.team_distribution as i32,
+                    team_colors: teams.team_colors,
+                    random_team_count: teams.random_team_count,
+                    active_player_count,
+                    team_count: i32::try_from(teams.teams.len()).unwrap_or(i32::MAX),
+                },
+            ));
+        }
+        rows
     }
 
     fn current_classic_lobby_option_rows(&self) -> Option<Vec<LobbyOptionRow>> {
@@ -47745,10 +47808,29 @@ impl GameApp {
             .network_control_clock
             .map(NetworkControlClock::control_rate)
             .unwrap_or_else(|| self.engine.control_rate());
+        let active_player_count = i32::try_from(
+            self.control_player_infos
+                .retained_rows_snapshot()
+                .1
+                .iter()
+                .flat_map(|(_, _, players)| players)
+                .filter(|player| player.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED == 0)
+                .count(),
+        )
+        .unwrap_or(i32::MAX);
+        let teams = match mode {
+            NetworkMode::Host(_) => self
+                .network_team_assignment
+                .as_ref()
+                .map(NetworkTeamAssignmentState::teams),
+            NetworkMode::Client(_) => None,
+        };
         Some(self.classic_lobby_option_rows_for(
             mode,
             control_rate,
             runtime_join_allowed,
+            active_player_count,
+            teams,
         ))
     }
 
@@ -47770,6 +47852,9 @@ impl GameApp {
         let changed = lobby.controller.option_rows() != rows;
         if force || changed {
             lobby.controller.set_option_rows(rows);
+        }
+        if changed {
+            self.close_stale_classic_lobby_team_combo();
         }
         changed
     }
@@ -48189,10 +48274,19 @@ impl GameApp {
         let control_rate = initial_network_control_clock(Some(mode))
             .map(NetworkControlClock::control_rate)
             .unwrap_or_else(|| self.engine.control_rate());
+        let teams = match mode {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => Some(prepared.runtime_team_metadata()),
+            NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+        };
         controller.set_option_rows(self.classic_lobby_option_rows_for(
             mode,
             control_rate,
             runtime_join_allowed,
+            active_players,
+            teams,
         ));
         controller.set_league_mode(initial_network_is_league(Some(mode)));
         let mut values = staged.options.clone();
@@ -50749,6 +50843,21 @@ impl GameApp {
         })
     }
 
+    fn classic_lobby_option_accepts_choice(
+        &self,
+        option: LobbyOptionKind,
+        selected: i32,
+    ) -> bool {
+        self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+            lobby.controller.active_sheet() == LobbySheet::Options
+                && lobby.controller.option_rows().iter().any(|row| {
+                    row.kind == option
+                        && row.editable
+                        && row.choices.iter().any(|choice| choice.id == selected)
+                })
+        })
+    }
+
     fn open_classic_lobby_option_combo(
         &mut self,
         option: LobbyOptionKind,
@@ -50792,6 +50901,15 @@ impl GameApp {
                     }
                     LobbyOptionKind::RuntimeJoin => {
                         AppContextMenuCommand::LobbyRuntimeJoin(choice.id != 0)
+                    }
+                    LobbyOptionKind::TeamDistribution => {
+                        AppContextMenuCommand::LobbyTeamDistribution(choice.id)
+                    }
+                    LobbyOptionKind::TeamColors => {
+                        AppContextMenuCommand::LobbyTeamColors(choice.id != 0)
+                    }
+                    LobbyOptionKind::RandomTeamCount => {
+                        AppContextMenuCommand::LobbyRandomTeamCount(choice.id)
                     }
                     LobbyOptionKind::ControlMode => unreachable!("read-only lobby option"),
                 };
@@ -50936,6 +51054,9 @@ impl GameApp {
                     }
                 }
             }
+            LobbyOptionKind::TeamDistribution
+            | LobbyOptionKind::TeamColors
+            | LobbyOptionKind::RandomTeamCount => {}
         }
         self.refresh_runtime_client_list();
         Ok(())
@@ -50974,6 +51095,99 @@ impl GameApp {
             self.report_classic_lobby_error(format!(
                 "Unable to change the control rate: {error}"
             ));
+        }
+    }
+
+    fn submit_classic_lobby_team_setting(
+        &mut self,
+        option: LobbyOptionKind,
+        selected: i32,
+    ) {
+        let value_type = match option {
+            LobbyOptionKind::TeamDistribution => 3,
+            LobbyOptionKind::TeamColors => 4,
+            _ => return,
+        };
+        if !self.classic_lobby_option_accepts_choice(option, selected)
+            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || !self
+                .network
+                .as_ref()
+                .is_some_and(|network| network.local_client_id() == 0)
+        {
+            return;
+        }
+        let result = self.network.as_ref().map(|network| {
+            network.submit_control_set(lc_network::LegacyControlSet {
+                value_type,
+                data: selected,
+                by_client: 0,
+            })
+        });
+        if let Some(Err(error)) = result {
+            tracing::error!(%error, value_type, selected, "failed to submit lobby team setting");
+            self.report_classic_lobby_error(format!(
+                "Unable to change the team setting: {error}"
+            ));
+        }
+    }
+
+    fn set_classic_lobby_random_team_count(&mut self, selected: i32) {
+        if !self.classic_lobby_option_accepts_choice(
+            LobbyOptionKind::RandomTeamCount,
+            selected,
+        ) || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || !self
+                .network
+                .as_ref()
+                .is_some_and(|network| network.local_client_id() == 0)
+        {
+            return;
+        }
+        let has_or_will_have_lobby = self.has_or_will_have_network_lobby();
+        let Some((metadata, updates)) = self.network_team_assignment.as_mut().map(|assignment| {
+            let updates = assignment.set_random_team_count(
+                &mut self.control_player_infos,
+                selected,
+                has_or_will_have_lobby,
+            );
+            (assignment.teams().clone(), updates)
+        }) else {
+            return;
+        };
+
+        let runtime_teams = runtime_teams_from_initial_metadata(&metadata);
+        let team_snapshot = lc_network::join_team_list_snapshot(metadata);
+        self.engine.set_teams(runtime_teams.clone());
+        if let Some(prepared) = self
+            .loading_state
+            .as_mut()
+            .and_then(|loading| loading.prepared_go.as_mut())
+        {
+            prepared.team_registry = runtime_teams;
+        }
+        if let Some(join_data) = self.pending_network_join_data.as_mut() {
+            join_data.parameters.teams = team_snapshot.clone();
+        }
+        let mut host_snapshot_changed = false;
+        if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+            snapshot.parameters.teams = team_snapshot;
+            host_snapshot_changed = true;
+        }
+        host_snapshot_changed |= self.refresh_current_host_player_infos();
+        if let Some(network) = self.network.as_ref() {
+            for update in updates {
+                if let Err(error) = network.broadcast_player_info(update) {
+                    tracing::error!(%error, "failed to broadcast RandomTeamCount PlayerInfo update");
+                }
+            }
+        }
+        if host_snapshot_changed {
+            self.publish_updated_host_join_snapshot();
+        }
+        self.sync_classic_lobby_roster();
+        if self.refresh_classic_lobby_options(true) {
+            self.mark_menu_dirty();
         }
     }
 
@@ -51642,6 +51856,21 @@ impl GameApp {
                     }
                     AppContextMenuCommand::RuntimeClientOption { option, value } => {
                         self.apply_runtime_client_list_option(option, value)?;
+                    }
+                    AppContextMenuCommand::LobbyTeamDistribution(distribution) => {
+                        self.submit_classic_lobby_team_setting(
+                            LobbyOptionKind::TeamDistribution,
+                            distribution,
+                        );
+                    }
+                    AppContextMenuCommand::LobbyTeamColors(enabled) => {
+                        self.submit_classic_lobby_team_setting(
+                            LobbyOptionKind::TeamColors,
+                            i32::from(enabled),
+                        );
+                    }
+                    AppContextMenuCommand::LobbyRandomTeamCount(count) => {
+                        self.set_classic_lobby_random_team_count(count);
                     }
                     AppContextMenuCommand::LobbyPlayerTakeOver {
                         savegame_player_id,
@@ -60031,6 +60260,12 @@ impl GameApp {
 
         if host_snapshot_changed {
             self.publish_updated_host_join_snapshot();
+        }
+        if matches!(set.value_type, 3 | 4) {
+            self.sync_classic_lobby_roster();
+            if self.refresh_classic_lobby_options(false) {
+                self.mark_menu_dirty();
+            }
         }
         if set.value_type == 2 {
             self.append_control_message_log(
@@ -98234,6 +98469,176 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .get_in(Some("Network"), "NoRuntimeJoin"),
             Some("1")
         );
+    }
+
+    #[test]
+    fn l134_team_options_submit_exact_sets_and_refresh_from_echoes() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        let metadata = set_control_test_metadata(
+            false,
+            vec![
+                set_control_test_team(1, Vec::new(), 0),
+                set_control_test_team(2, Vec::new(), 0),
+            ],
+        );
+        app.network_team_assignment =
+            Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+        assert!(app.select_classic_lobby_sheet(LobbySheet::Options));
+
+        app.submit_classic_lobby_team_setting(LobbyOptionKind::TeamDistribution, 4);
+        app.submit_classic_lobby_team_setting(LobbyOptionKind::TeamColors, 1);
+        let sets = commands.take_submitted_control_sets();
+        assert_eq!(
+            sets,
+            [
+                lc_network::LegacyControlSet {
+                    value_type: 3,
+                    data: 4,
+                    by_client: 0,
+                },
+                lc_network::LegacyControlSet {
+                    value_type: 4,
+                    data: 1,
+                    by_client: 0,
+                },
+            ]
+        );
+        let teams = app.network_team_assignment.as_ref().unwrap().teams();
+        assert_eq!(
+            teams.team_distribution,
+            lc_engine::InitialNetworkTeamDistribution::Free
+        );
+        assert!(!teams.team_colors, "menu selections wait for host echoes");
+
+        app.execute_control_set(sets[0]);
+        app.execute_control_set(sets[1]);
+        let options = app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .option_rows();
+        assert!(options.iter().any(|row| {
+            row.kind == LobbyOptionKind::TeamDistribution && row.value == "surprise random!"
+        }));
+        assert!(options.iter().any(|row| {
+            row.kind == LobbyOptionKind::TeamColors && row.value == "enabled"
+        }));
+        assert!(options
+            .iter()
+            .any(|row| row.kind == LobbyOptionKind::RandomTeamCount));
+
+        app.submit_classic_lobby_team_setting(LobbyOptionKind::TeamDistribution, 2);
+        assert!(
+            commands.take_submitted_control_sets().is_empty(),
+            "None is not offered for predefined teams"
+        );
+    }
+
+    #[test]
+    fn l134_random_team_count_mutates_host_directly_and_tracks_distribution() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        let mut metadata = set_control_test_metadata(
+            true,
+            vec![
+                set_control_test_team(1, vec![1], 0),
+                set_control_test_team(2, vec![2], 0),
+            ],
+        );
+        metadata.team_distribution = lc_engine::InitialNetworkTeamDistribution::Random;
+        let mut snapshot = lc_network::HostConfig::default()
+            .initial_join_snapshot
+            .expect("default host JoinData");
+        snapshot.parameters.teams = lc_network::join_team_list_snapshot(metadata.clone());
+        app.host_join_snapshot = Some(snapshot);
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            metadata,
+        ));
+        app.control_player_infos.replace_snapshot(
+            3,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![
+                    set_control_test_player(1, 1, 0),
+                    set_control_test_player(2, 2, lc_engine::PLAYER_INFO_FLAG_INVISIBLE),
+                    set_control_test_player(3, 1, lc_engine::PLAYER_INFO_FLAG_REMOVED),
+                ],
+                ..Default::default()
+            }],
+        );
+        assert!(app.select_classic_lobby_sheet(LobbySheet::Options));
+        let random = app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .option_rows()
+            .iter()
+            .find(|row| row.kind == LobbyOptionKind::RandomTeamCount)
+            .expect("random mode shows the count row");
+        assert_eq!(
+            random
+                .choices
+                .iter()
+                .map(|choice| choice.id)
+                .collect::<Vec<_>>(),
+            [0, 2],
+            "the maximum includes invisible players and excludes removed players"
+        );
+
+        app.set_classic_lobby_random_team_count(2);
+        let (player_infos, snapshots) = commands.take_team_control_updates();
+        assert_eq!(player_infos.len(), 1);
+        assert_eq!(snapshots.len(), 1);
+        let teams = app.network_team_assignment.as_ref().unwrap().teams();
+        assert_eq!(teams.random_team_count, 2);
+        assert_eq!(teams.teams.len(), 2);
+        assert_eq!(
+            app.host_join_snapshot
+                .as_ref()
+                .unwrap()
+                .parameters
+                .teams
+                .random_team_count,
+            2
+        );
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .option_rows()
+            .iter()
+            .any(|row| row.kind == LobbyOptionKind::RandomTeamCount && row.value == "2"));
+
+        app.execute_control_set(lc_network::LegacyControlSet {
+            value_type: 3,
+            data: 0,
+            by_client: 0,
+        });
+        assert!(!app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .option_rows()
+            .iter()
+            .any(|row| row.kind == LobbyOptionKind::RandomTeamCount));
+        app.execute_control_set(lc_network::LegacyControlSet {
+            value_type: 3,
+            data: 4,
+            by_client: 0,
+        });
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .option_rows()
+            .iter()
+            .any(|row| row.kind == LobbyOptionKind::RandomTeamCount));
     }
 
     #[test]

@@ -122,12 +122,15 @@ impl LobbyScenarioText {
     }
 }
 
-/// One of the always-defined core rows in the lobby Options sheet.
+/// Semantic identity of one row in the lobby Options sheet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LobbyOptionKind {
     ControlMode,
     ControlRate,
     RuntimeJoin,
+    TeamDistribution,
+    TeamColors,
+    RandomTeamCount,
 }
 
 /// One selectable value supplied to the app-owned classic context menu.
@@ -138,7 +141,7 @@ pub struct LobbyOptionChoice {
     pub tooltip: String,
 }
 
-/// Localized strings needed to construct the three core lobby options.
+/// Localized strings needed to construct the lobby options list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LobbyOptionLabels {
     pub control_mode: String,
@@ -153,6 +156,21 @@ pub struct LobbyOptionLabels {
     pub runtime_join_tooltip: String,
     pub runtime_join_barred: String,
     pub runtime_join_free: String,
+    pub team_distribution: String,
+    pub team_distribution_tooltip: String,
+    pub team_distribution_free: String,
+    pub team_distribution_host: String,
+    pub team_distribution_none: String,
+    pub team_distribution_random: String,
+    pub team_distribution_random_invisible: String,
+    pub team_colors: String,
+    pub team_colors_tooltip: String,
+    pub enabled: String,
+    pub disabled: String,
+    pub random_team_count: String,
+    pub random_team_count_tooltip: String,
+    pub automatic: String,
+    pub automatic_tooltip: String,
     /// Named-brace or native `%s` template used by context-menu entries.
     pub select_template: String,
 }
@@ -176,6 +194,26 @@ impl Default for LobbyOptionLabels {
                 "Specifies whether additional computers may connect to the game after start.".into(),
             runtime_join_barred: "Runtime join prohibited".into(),
             runtime_join_free: "Runtime join allowed".into(),
+            team_distribution: "Team distribution".into(),
+            team_distribution_tooltip: "Specifies how players are distributed among teams"
+                .into(),
+            team_distribution_free: "Free".into(),
+            team_distribution_host: "by Host".into(),
+            team_distribution_none: "none".into(),
+            team_distribution_random: "random".into(),
+            team_distribution_random_invisible: "surprise random!".into(),
+            team_colors: "Team colors".into(),
+            team_colors_tooltip: "Specifies whether all players of a team have the same color, or individual colors are assigned for each team-member."
+                .into(),
+            enabled: "enabled".into(),
+            disabled: "disabled".into(),
+            random_team_count: "Team count".into(),
+            random_team_count_tooltip:
+                "Specifies how many teams should be filled by the random team distribution."
+                    .into(),
+            automatic: "Automatic".into(),
+            automatic_tooltip: "If teams are predefined all of them are filled.|If teams are automatically generated only two are filled."
+                .into(),
             select_template: "Select {value}".into(),
         }
     }
@@ -200,6 +238,18 @@ pub struct LobbyOptionRow {
     pub tooltip: String,
     pub editable: bool,
     pub choices: Vec<LobbyOptionChoice>,
+}
+
+/// Live C4TeamList inputs needed by the non-runtime lobby options.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LobbyTeamOptionState {
+    pub active: bool,
+    pub auto_generate_teams: bool,
+    pub distribution: i32,
+    pub team_colors: bool,
+    pub random_team_count: i32,
+    pub active_player_count: i32,
+    pub team_count: i32,
 }
 
 /// Construct the core non-runtime options in native add order.
@@ -367,6 +417,110 @@ pub fn core_runtime_option_rows(
             choices,
         });
     }
+    rows
+}
+
+/// Construct the scenario-gated team rows in native add order.
+pub fn team_lobby_option_rows(
+    role: LobbyRole,
+    labels: &LobbyOptionLabels,
+    state: LobbyTeamOptionState,
+) -> Vec<LobbyOptionRow> {
+    if !state.active {
+        return Vec::new();
+    }
+
+    let distribution_labels = [
+        labels.team_distribution_free.clone(),
+        labels.team_distribution_host.clone(),
+        labels.team_distribution_none.clone(),
+        labels.team_distribution_random.clone(),
+        labels.team_distribution_random_invisible.clone(),
+    ];
+    let distribution_value = usize::try_from(state.distribution)
+        .ok()
+        .and_then(|index| distribution_labels.get(index))
+        .cloned()
+        .unwrap_or_else(|| format!("TEAMDIST_undefined({})", state.distribution));
+    let distribution_choices = [0, 1, 2, 3, 4]
+        .into_iter()
+        .filter(|id| *id != 2 || state.auto_generate_teams)
+        .map(|id| {
+            let label = distribution_labels[id as usize].clone();
+            LobbyOptionChoice {
+                id,
+                tooltip: labels.select_tooltip(&label),
+                label,
+            }
+        })
+        .collect();
+    let color_choices = [
+        (1, labels.enabled.clone()),
+        (0, labels.disabled.clone()),
+    ]
+    .into_iter()
+    .map(|(id, label)| LobbyOptionChoice {
+        id,
+        tooltip: labels.select_tooltip(&label),
+        label,
+    })
+    .collect();
+    let mut rows = vec![
+        LobbyOptionRow {
+            kind: LobbyOptionKind::TeamDistribution,
+            caption: labels.team_distribution.clone(),
+            value: distribution_value,
+            tooltip: labels.team_distribution_tooltip.clone(),
+            editable: role == LobbyRole::Host,
+            choices: distribution_choices,
+        },
+        LobbyOptionRow {
+            kind: LobbyOptionKind::TeamColors,
+            caption: labels.team_colors.clone(),
+            value: if state.team_colors {
+                labels.enabled.clone()
+            } else {
+                labels.disabled.clone()
+            },
+            tooltip: labels.team_colors_tooltip.clone(),
+            editable: role == LobbyRole::Host,
+            choices: color_choices,
+        },
+    ];
+
+    if role == LobbyRole::Host && matches!(state.distribution, 3 | 4) {
+        let maximum = if state.auto_generate_teams {
+            state.active_player_count
+        } else {
+            state.team_count
+        };
+        let mut choices = vec![LobbyOptionChoice {
+            id: 0,
+            label: labels.automatic.clone(),
+            tooltip: labels.automatic_tooltip.clone(),
+        }];
+        choices.extend((2..=maximum).map(|count| {
+            let label = count.to_string();
+            LobbyOptionChoice {
+                id: count,
+                tooltip: labels.select_tooltip(&label),
+                label,
+            }
+        }));
+        rows.push(LobbyOptionRow {
+            kind: LobbyOptionKind::RandomTeamCount,
+            caption: labels.random_team_count.clone(),
+            value: if state.random_team_count > 1 {
+                state.random_team_count.to_string()
+            } else {
+                labels.automatic.clone()
+            },
+            tooltip: labels.random_team_count_tooltip.clone(),
+            editable: true,
+            choices,
+        });
+    }
+
     rows
 }
 
@@ -7050,6 +7204,125 @@ mod tests {
         assert!(!control_host_client
             .iter()
             .any(|row| row.kind == LobbyOptionKind::RuntimeJoin));
+    }
+
+    #[test]
+    fn l134_team_option_rows_follow_scenario_role_and_choice_gates() {
+        let labels = LobbyOptionLabels::default();
+        let mut state = LobbyTeamOptionState {
+            active: false,
+            auto_generate_teams: false,
+            distribution: 1,
+            team_colors: true,
+            random_team_count: 0,
+            active_player_count: 2,
+            team_count: 4,
+        };
+        assert!(team_lobby_option_rows(LobbyRole::Host, &labels, state).is_empty());
+
+        state.active = true;
+        let host = team_lobby_option_rows(LobbyRole::Host, &labels, state);
+        assert_eq!(
+            host.iter().map(|row| row.kind).collect::<Vec<_>>(),
+            [
+                LobbyOptionKind::TeamDistribution,
+                LobbyOptionKind::TeamColors,
+            ]
+        );
+        assert!(host.iter().all(|row| row.editable));
+        assert_eq!(host[0].value, labels.team_distribution_host);
+        assert_eq!(
+            host[0]
+                .choices
+                .iter()
+                .map(|choice| choice.id)
+                .collect::<Vec<_>>(),
+            [0, 1, 3, 4]
+        );
+        assert_eq!(
+            host[1]
+                .choices
+                .iter()
+                .map(|choice| choice.id)
+                .collect::<Vec<_>>(),
+            [1, 0]
+        );
+        assert_eq!(host[1].value, labels.enabled);
+
+        state.distribution = 3;
+        let client = team_lobby_option_rows(LobbyRole::Client, &labels, state);
+        assert_eq!(client.len(), 2);
+        assert!(client.iter().all(|row| !row.editable));
+        assert!(!client
+            .iter()
+            .any(|row| row.kind == LobbyOptionKind::RandomTeamCount));
+    }
+
+    #[test]
+    fn l134_random_team_count_row_tracks_both_random_modes_and_native_ranges() {
+        let labels = LobbyOptionLabels::default();
+        let mut state = LobbyTeamOptionState {
+            active: true,
+            auto_generate_teams: false,
+            distribution: 3,
+            team_colors: false,
+            random_team_count: 0,
+            active_player_count: 2,
+            team_count: 4,
+        };
+        let fixed = team_lobby_option_rows(LobbyRole::Host, &labels, state);
+        let random = fixed
+            .iter()
+            .find(|row| row.kind == LobbyOptionKind::RandomTeamCount)
+            .expect("Random distribution appends the team-count row");
+        assert_eq!(random.value, labels.automatic);
+        assert_eq!(
+            random
+                .choices
+                .iter()
+                .map(|choice| choice.id)
+                .collect::<Vec<_>>(),
+            [0, 2, 3, 4]
+        );
+        assert_eq!(random.choices[0].tooltip, labels.automatic_tooltip);
+
+        state.auto_generate_teams = true;
+        state.distribution = 4;
+        state.random_team_count = 3;
+        state.active_player_count = 3;
+        state.team_count = 8;
+        let generated = team_lobby_option_rows(LobbyRole::Host, &labels, state);
+        assert_eq!(
+            generated[0]
+                .choices
+                .iter()
+                .map(|choice| choice.id)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4]
+        );
+        let random = generated
+            .iter()
+            .find(|row| row.kind == LobbyOptionKind::RandomTeamCount)
+            .expect("surprise-random is also a random team mode");
+        assert_eq!(random.value, "3");
+        assert_eq!(
+            random
+                .choices
+                .iter()
+                .map(|choice| choice.id)
+                .collect::<Vec<_>>(),
+            [0, 2, 3]
+        );
+
+        for distribution in [0, 1, 2] {
+            state.distribution = distribution;
+            assert!(!team_lobby_option_rows(LobbyRole::Host, &labels, state)
+                .iter()
+                .any(|row| row.kind == LobbyOptionKind::RandomTeamCount));
+        }
+        state.active = false;
+        state.distribution = 3;
+        assert!(team_lobby_option_rows(LobbyRole::Host, &labels, state).is_empty());
     }
 
     #[test]
