@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::rc::Rc;
@@ -1766,16 +1766,101 @@ impl HostDefinitionTables {
 }
 
 // Not `derive(Debug)`: `ScriptEngine` (in `definition_scripts`) has no Debug.
+#[derive(Clone, Copy)]
+pub(crate) struct LazyHostWorldProvider {
+    source: *const (),
+    object: unsafe fn(*const (), ObjectId) -> Option<(usize, HostWorldObject)>,
+    objects:
+        unsafe fn(*const (), &HashSet<usize>) -> Vec<(usize, HostWorldObject)>,
+    landscape: unsafe fn(*const ()) -> Option<Landscape>,
+}
+
+impl LazyHostWorldProvider {
+    /// Create a provider whose source is borrowed for the complete lifetime
+    /// of every `HostWorldContext` clone carrying it.
+    ///
+    /// # Safety
+    ///
+    /// `source` must remain valid and at a stable address until those
+    /// contexts are dropped. Provider callbacks run only inside the
+    /// synchronous script invocation that created the context. While a
+    /// callback runs, the source objects and landscape may not be moved or
+    /// mutated through another path. An object already exclusively borrowed
+    /// by the caller must be seeded into the context; `objects` receives its
+    /// index in `excluded` and must not dereference that entry.
+    pub(crate) unsafe fn new(
+        source: *const (),
+        object: unsafe fn(*const (), ObjectId) -> Option<(usize, HostWorldObject)>,
+        objects: unsafe fn(*const (), &HashSet<usize>) -> Vec<(usize, HostWorldObject)>,
+        landscape: unsafe fn(*const ()) -> Option<Landscape>,
+    ) -> Self {
+        Self {
+            source,
+            object,
+            objects,
+            landscape,
+        }
+    }
+
+    fn object(self, id: ObjectId) -> Option<(usize, HostWorldObject)> {
+        // SAFETY: the constructor's source-lifetime and aliasing contract is
+        // upheld by the engine's synchronous callback wrappers.
+        unsafe { (self.object)(self.source, id) }
+    }
+
+    fn objects(self, excluded: &HashSet<usize>) -> Vec<(usize, HostWorldObject)> {
+        // SAFETY: see `object`; excluded indices are never dereferenced by a
+        // conforming provider.
+        unsafe { (self.objects)(self.source, excluded) }
+    }
+
+    fn landscape(self) -> Option<Landscape> {
+        // SAFETY: see `object`.
+        unsafe { (self.landscape)(self.source) }
+    }
+}
+
+#[derive(Clone, Default)]
+struct HostWorldObjectStore {
+    objects: HashMap<ObjectId, HostWorldObject>,
+    order: Vec<ObjectId>,
+    indices: HashMap<ObjectId, usize>,
+    removed: HashSet<ObjectId>,
+    complete: bool,
+}
+
+impl HostWorldObjectStore {
+    fn insert_ordered_by_index(&mut self, id: ObjectId, index: usize) {
+        // `get` materializes a previously absent object, so the id is not
+        // already in `order`. Insert after equal indices to match appending
+        // followed by stable `sort_by_key`, without re-sorting every prior
+        // materialization.
+        let indices = &self.indices;
+        let insert_at = self.order.partition_point(|object_id| {
+            indices
+                .get(object_id)
+                .copied()
+                .unwrap_or(usize::MAX)
+                <= index
+        });
+        self.order.insert(insert_at, id);
+    }
+}
+
 #[derive(Clone)]
 #[doc(hidden)]
 pub struct HostWorldContext {
-    objects: Rc<HashMap<ObjectId, HostWorldObject>>,
-    order: Rc<Vec<ObjectId>>,
+    /// Callback-local COW object view. The engine seeds the executing object;
+    /// an id-specific lookup materializes only that object, while enumeration
+    /// fills the complete map on demand.
+    object_store: RefCell<Rc<HostWorldObjectStore>>,
+    lazy_world: Option<LazyHostWorldProvider>,
     /// `Game.Objects` from First -> Next. The engine's `exec_list` is this
     /// order reversed; only APIs such as C4Game::FindBase explicitly walk
     /// the forward master list (C4Game.cpp:3732-3744).
     master_order: Rc<Vec<ObjectId>>,
-    landscape: Option<Rc<Landscape>>,
+    /// Uninitialized until a host API actually reads or mutates terrain.
+    landscape: OnceCell<Option<Rc<Landscape>>>,
     /// Fully defaulted, post-load `Game.C4S` reflection data. This remains
     /// separate from the evaluated runtime landscape: GetScenarioVal reads
     /// the scenario core, not C4Landscape's mutable state.
@@ -1994,10 +2079,13 @@ fn default_sky_fade() -> [RgbColor; 2] {
 impl Default for HostWorldContext {
     fn default() -> Self {
         Self {
-            objects: Rc::new(HashMap::new()),
-            order: Rc::new(Vec::new()),
+            object_store: RefCell::new(Rc::new(HostWorldObjectStore {
+                complete: true,
+                ..HostWorldObjectStore::default()
+            })),
+            lazy_world: None,
             master_order: Rc::new(Vec::new()),
-            landscape: None,
+            landscape: OnceCell::new(),
             scenario_values: Rc::new(ScenarioValueStore::default()),
             scenario_sections: Rc::new(HashSet::new()),
             movement_solid_masks: Rc::new(Vec::new()),
@@ -2092,21 +2180,72 @@ impl HostWorldContext {
     where
         I: IntoIterator<Item = HostWorldObject>,
     {
-        let map = objects.into_iter().collect::<Vec<HostWorldObject>>();
-        let mut order = Vec::with_capacity(map.len());
-        let mut lookup = HashMap::with_capacity(map.len());
-        for object in map {
+        let objects = objects.into_iter().collect::<Vec<HostWorldObject>>();
+        let mut store = HostWorldObjectStore {
+            objects: HashMap::with_capacity(objects.len()),
+            order: Vec::with_capacity(objects.len()),
+            indices: HashMap::with_capacity(objects.len()),
+            removed: HashSet::new(),
+            complete: true,
+        };
+        for (index, object) in objects.into_iter().enumerate() {
             let id = object.id;
-            order.push(id);
-            lookup.insert(id, object);
+            store.order.push(id);
+            store.indices.insert(id, index);
+            store.objects.insert(id, object);
         }
-        self.objects = Rc::new(lookup);
-        self.order = Rc::new(order);
-        if self.landscape.is_none() {
-            self.landscape = landscape.map(Rc::new);
+        self.object_store = RefCell::new(Rc::new(store));
+        self.lazy_world = None;
+        let replace_landscape = match self.landscape.get() {
+            None => true,
+            Some(current) => current.is_none() && landscape.is_some(),
+        };
+        if replace_landscape {
+            self.landscape = OnceCell::from(landscape.map(Rc::new));
         }
         self.sectors = RefCell::new(None);
         self
+    }
+
+    /// Attach the engine's synchronous lazy source. Empty fixture contexts
+    /// remain complete; only engine callback contexts opt into this state.
+    pub(crate) fn with_lazy_world_provider(
+        mut self,
+        provider: LazyHostWorldProvider,
+    ) -> Self {
+        self.lazy_world = Some(provider);
+        Rc::make_mut(self.object_store.get_mut()).complete = false;
+        if self.landscape.get().is_some_and(Option::is_none) {
+            self.landscape = OnceCell::new();
+        }
+        self
+    }
+
+    /// Seed an object that the callback already owns. This is both the fast
+    /// path for ordinary self-only callbacks and the aliasing boundary for a
+    /// live engine object held through `&mut` during the script call.
+    pub(crate) fn with_seeded_object(
+        mut self,
+        index: usize,
+        object: HostWorldObject,
+    ) -> Self {
+        self.seed_object(index, object);
+        self
+    }
+
+    pub(crate) fn seed_object(&mut self, index: usize, object: HostWorldObject) {
+        let id = object.id;
+        let store = Rc::make_mut(self.object_store.get_mut());
+        store.removed.remove(&id);
+        store.indices.insert(id, index);
+        store.objects.insert(id, object);
+        if !store.order.contains(&id) {
+            store.order.push(id);
+            store
+                .order
+                .sort_by_key(|object_id| store.indices.get(object_id).copied().unwrap_or(usize::MAX));
+        }
+        self.sectors = RefCell::new(None);
     }
 
     pub(crate) fn with_definition_tables(
@@ -2287,10 +2426,21 @@ impl HostWorldContext {
             .filter(|id| *id != 0)
             .collect();
         Self {
-            objects: Rc::new(lookup),
+            object_store: RefCell::new(Rc::new(HostWorldObjectStore {
+                objects: lookup,
+                order: order.as_ref().clone(),
+                indices: order
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(index, id)| (id, index))
+                    .collect(),
+                removed: HashSet::new(),
+                complete: true,
+            })),
+            lazy_world: None,
             master_order: Rc::clone(&order),
-            order,
-            landscape: landscape.map(Rc::new),
+            landscape: OnceCell::from(landscape.map(Rc::new)),
             scenario_values,
             scenario_sections: Rc::new(HashSet::new()),
             movement_solid_masks: Rc::new(Vec::new()),
@@ -2900,8 +3050,62 @@ impl HostWorldContext {
         (!self.definitions.is_empty()).then(|| self.definitions.contains_key(id))
     }
 
-    pub(crate) fn get(&self, id: ObjectId) -> Option<&HostWorldObject> {
-        self.objects.get(&id)
+    fn materialize_objects(&self) {
+        if self.object_store.borrow().complete {
+            return;
+        }
+        let Some(provider) = self.lazy_world else {
+            Rc::make_mut(&mut self.object_store.borrow_mut()).complete = true;
+            return;
+        };
+        let excluded = self
+            .object_store
+            .borrow()
+            .indices
+            .values()
+            .copied()
+            .collect::<HashSet<_>>();
+        let materialized = provider.objects(&excluded);
+        let mut store = self.object_store.borrow_mut();
+        let store = Rc::make_mut(&mut store);
+        for (index, object) in materialized {
+            let id = object.id;
+            if store.removed.contains(&id) || store.objects.contains_key(&id) {
+                continue;
+            }
+            store.indices.insert(id, index);
+            store.objects.insert(id, object);
+        }
+        store.order = store.objects.keys().copied().collect();
+        store.order.sort_by_key(|id| {
+            store.indices.get(id).copied().unwrap_or(usize::MAX)
+        });
+        store.complete = true;
+    }
+
+    pub(crate) fn get(&self, id: ObjectId) -> Option<HostWorldObject> {
+        {
+            let store = self.object_store.borrow();
+            if store.removed.contains(&id) {
+                return None;
+            }
+            if let Some(object) = store.objects.get(&id) {
+                return Some(object.clone());
+            }
+            if store.complete {
+                return None;
+            }
+        }
+        let (index, object) = self.lazy_world?.object(id)?;
+        let mut store = self.object_store.borrow_mut();
+        let store = Rc::make_mut(&mut store);
+        if store.removed.contains(&id) {
+            return None;
+        }
+        store.indices.insert(id, index);
+        store.objects.insert(id, object.clone());
+        store.insert_ordered_by_index(id, index);
+        Some(object)
     }
 
     /// Update the callback-visible identity of a live command target while
@@ -2909,7 +3113,9 @@ impl HostWorldContext {
     /// OnObjectChangedDef refreshes effect callback functions immediately;
     /// a cloned HostWorldContext otherwise keeps resolving the old script.
     pub(crate) fn preview_object_change_def(&mut self, id: ObjectId, definition_id: &str) {
-        if let Some(object) = Rc::make_mut(&mut self.objects).get_mut(&id) {
+        let _ = self.get(id);
+        let store = Rc::make_mut(self.object_store.get_mut());
+        if let Some(object) = store.objects.get_mut(&id) {
             object.definition_id = definition_id.to_string();
             object.unsorted = true;
         }
@@ -2923,7 +3129,9 @@ impl HostWorldContext {
         if let Some(definition_id) = update.change_def.as_deref() {
             self.preview_object_change_def(id, definition_id);
         }
-        let Some(object) = Rc::make_mut(&mut self.objects).get_mut(&id) else {
+        let _ = self.get(id);
+        let store = Rc::make_mut(self.object_store.get_mut());
+        let Some(object) = store.objects.get_mut(&id) else {
             return;
         };
         if let Some(position) = update.position {
@@ -2986,14 +3194,20 @@ impl HostWorldContext {
     }
 
     pub(crate) fn preview_object_destroyed(&mut self, id: ObjectId) {
-        Rc::make_mut(&mut self.objects).remove(&id);
-        Rc::make_mut(&mut self.order).retain(|object_id| *object_id != id);
+        let store = Rc::make_mut(self.object_store.get_mut());
+        store.objects.remove(&id);
+        // Keep the storage index as a provider exclusion even after the
+        // callback-private object is tombstoned. The engine may still hold
+        // this entry through an exclusive borrow for the rest of the call.
+        store.order.retain(|object_id| *object_id != id);
+        store.removed.insert(id);
         Rc::make_mut(&mut self.master_order).retain(|object_id| *object_id != id);
         self.solid_mask_instance_sequences.borrow_mut().remove(&id);
     }
 
-    pub(crate) fn object_ids(&self) -> &[ObjectId] {
-        self.order.as_ref().as_slice()
+    pub(crate) fn object_ids(&self) -> Vec<ObjectId> {
+        self.materialize_objects();
+        self.object_store.borrow().order.clone()
     }
 
     pub(crate) fn master_object_ids(&self) -> &[ObjectId] {
@@ -3017,8 +3231,41 @@ impl HostWorldContext {
         self
     }
 
+    fn landscape_slot(&self) -> &Option<Rc<Landscape>> {
+        self.landscape.get_or_init(|| {
+            self.lazy_world
+                .and_then(LazyHostWorldProvider::landscape)
+                .map(Rc::new)
+        })
+    }
+
+    fn ensure_landscape_initialized(&mut self) {
+        if self.landscape.get().is_none() {
+            let landscape = self
+                .lazy_world
+                .and_then(LazyHostWorldProvider::landscape)
+                .map(Rc::new);
+            let _ = self.landscape.set(landscape);
+        }
+    }
+
+    fn landscape_slot_mut(&mut self) -> &mut Option<Rc<Landscape>> {
+        self.ensure_landscape_initialized();
+        self.landscape
+            .get_mut()
+            .expect("landscape slot initialized above")
+    }
+
     pub(crate) fn landscape_ref(&self) -> Option<&Landscape> {
-        self.landscape.as_deref()
+        self.landscape_slot().as_deref()
+    }
+
+    fn landscape_shared(&self) -> Option<Rc<Landscape>> {
+        self.landscape_slot().clone()
+    }
+
+    fn landscape_mut(&mut self) -> Option<&mut Landscape> {
+        self.landscape_slot_mut().as_mut().map(Rc::make_mut)
     }
 
     /// Thread state-bearing landscape operations across effect callbacks
@@ -3034,7 +3281,7 @@ impl HostWorldContext {
                 map_creator,
                 ..
             } => {
-                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
                     return;
                 };
                 let _ = landscape.replace_runtime_texmap_state(texmap.clone());
@@ -3043,7 +3290,7 @@ impl HostWorldContext {
                 }
             }
             LandscapeOperation::SyncRuntimeTexMap { texmap } => {
-                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
                     return;
                 };
                 let _ = landscape.replace_runtime_texmap_state(texmap.clone());
@@ -3053,7 +3300,7 @@ impl HostWorldContext {
                 old_index,
                 new_index,
             } => {
-                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
                     return;
                 };
                 let _ = landscape.apply_runtime_texture_index_move(
@@ -3063,7 +3310,7 @@ impl HostWorldContext {
                 );
             }
             LandscapeOperation::RemoveUnusedTexMapEntries { cleared_slots } => {
-                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
                     return;
                 };
                 let _ = landscape.clear_runtime_texmap_entries(cleared_slots);
@@ -3074,7 +3321,13 @@ impl HostWorldContext {
                 height,
             } => {
                 let materials = self.materials.clone().unwrap_or_default();
-                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                self.ensure_landscape_initialized();
+                let Some(landscape) = self
+                    .landscape
+                    .get_mut()
+                    .and_then(Option::as_mut)
+                    .map(Rc::make_mut)
+                else {
                     return;
                 };
                 let bounds = crate::landscape::RasterChangeRect::new(
@@ -3112,7 +3365,7 @@ impl HostWorldContext {
                 density,
             } => {
                 let materials = self.materials.clone().unwrap_or_default();
-                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
                     return;
                 };
                 let landscape_height = landscape.estimated_height();
@@ -3133,7 +3386,13 @@ impl HostWorldContext {
                 vertices,
                 ift,
             } => {
-                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                self.ensure_landscape_initialized();
+                let Some(landscape) = self
+                    .landscape
+                    .get_mut()
+                    .and_then(Option::as_mut)
+                    .map(Rc::make_mut)
+                else {
                     return;
                 };
                 let bakes = Rc::make_mut(&mut self.solid_mask_bakes);
@@ -3156,7 +3415,13 @@ impl HostWorldContext {
                 random_offsets,
                 texmap,
             } => {
-                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                self.ensure_landscape_initialized();
+                let Some(landscape) = self
+                    .landscape
+                    .get_mut()
+                    .and_then(Option::as_mut)
+                    .map(Rc::make_mut)
+                else {
                     return;
                 };
                 let bakes = Rc::make_mut(&mut self.solid_mask_bakes);
@@ -3180,7 +3445,7 @@ impl HostWorldContext {
                 size,
                 material_byte,
             } => {
-                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
                     return;
                 };
                 let _ = landscape.draw_volcano_branch(*from, *to, *size, *material_byte);
@@ -3190,14 +3455,14 @@ impl HostWorldContext {
                 map_creator,
                 ..
             } => {
-                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) else {
                     return;
                 };
                 let _ = landscape.replace_runtime_texmap_state(texmap.clone());
                 let _ = landscape.replace_runtime_map_creator_state(map_creator.0.clone());
             }
             LandscapeOperation::MatAdjust { modulation } => {
-                if let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) {
+                if let Some(landscape) = self.landscape_slot_mut().as_mut().map(Rc::make_mut) {
                     landscape.set_modulation(*modulation);
                 }
             }
@@ -3293,7 +3558,13 @@ impl HostWorldContext {
                 | crate::HostSolidMaskOperation::Put { object_id, .. } => *object_id,
                 crate::HostSolidMaskOperation::Landscape { .. } => unreachable!(),
             };
-            let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+            self.ensure_landscape_initialized();
+            let Some(landscape) = self
+                .landscape
+                .get_mut()
+                .and_then(Option::as_mut)
+                .map(Rc::make_mut)
+            else {
                 continue;
             };
             let bakes = Rc::make_mut(&mut self.solid_mask_bakes);
@@ -3339,7 +3610,7 @@ impl HostWorldContext {
     }
 
     pub(crate) fn apply_host_raster_preview(&mut self, preview: HostRasterPreview) {
-        self.landscape = preview.landscape.map(Rc::new);
+        self.landscape = OnceCell::from(preview.landscape.map(Rc::new));
         self.solid_mask_bakes = Rc::new(preview.solid_mask_bakes);
         self.solid_mask_instance_sequences =
             Rc::new(RefCell::new(preview.solid_mask_instance_sequences));
@@ -3349,7 +3620,7 @@ impl HostWorldContext {
 
     pub(crate) fn host_raster_preview(&self) -> HostRasterPreview {
         HostRasterPreview {
-            landscape: self.landscape.as_deref().cloned(),
+            landscape: self.landscape_ref().cloned(),
             solid_mask_bakes: self.solid_mask_bakes.as_ref().clone(),
             solid_mask_instance_sequences: self.solid_mask_instance_sequences.borrow().clone(),
             next_solid_mask_instance_sequence: self.next_solid_mask_instance_sequence.get(),
@@ -3366,7 +3637,12 @@ impl HostWorldContext {
         landscape: &Landscape,
         bakes: Vec<(ObjectId, crate::SolidMaskBake)>,
     ) {
-        self.landscape = Some(Rc::new(landscape.clone()));
+        // If no terrain host call ran yet, the movement provider already
+        // points at this live landscape; preserve laziness instead of cloning
+        // it merely because DoMotion advanced.
+        if self.landscape.get().is_some() {
+            self.landscape = OnceCell::from(Some(Rc::new(landscape.clone())));
+        }
         Rc::make_mut(&mut self.movement_solid_masks)
             .retain(|mask| mask.object_id != mover);
         self.solid_mask_bakes = Rc::new(bakes);
@@ -3476,11 +3752,13 @@ impl HostWorldContext {
 
     /// The sector map over this context's objects, built on first use.
     fn sector_map(&self) -> Option<Rc<SectorMap>> {
-        let landscape = self.landscape.as_ref()?;
+        self.materialize_objects();
+        let landscape = self.landscape_ref()?;
         let mut cache = self.sectors.borrow_mut();
         if cache.is_none() {
+            let store = self.object_store.borrow();
             *cache = Some(Rc::new(build_host_sector_map(
-                self.order.iter().filter_map(|id| self.objects.get(id)),
+                store.order.iter().filter_map(|id| store.objects.get(id)),
                 &self.definitions,
                 landscape,
             )));
@@ -3703,11 +3981,11 @@ fn sort_object_mass(world: &impl WorldAccessor, target: ObjectId) -> i32 {
 
 impl WorldAccessor for HostWorldContext {
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject> {
-        self.get(id).cloned()
+        self.get(id)
     }
 
     fn object_ids(&self) -> Vec<ObjectId> {
-        self.object_ids().to_vec()
+        self.object_ids()
     }
 
     fn master_object_ids(&self) -> Vec<ObjectId> {
@@ -3760,14 +4038,14 @@ impl WorldAccessor for FuncFindView {
         self.pending_objects
             .get(&id)
             .cloned()
-            .or_else(|| self.world.get(id).cloned())
+            .or_else(|| self.world.get(id))
     }
 
     fn object_ids(&self) -> Vec<ObjectId> {
         if let Some(order) = &self.master_order_preview {
             return order.clone();
         }
-        let mut ids = self.world.object_ids().to_vec();
+        let mut ids = self.world.object_ids();
         ids.extend(self.pending_order.iter().copied());
         ids
     }
@@ -6806,8 +7084,8 @@ fn set_material_color(args: &[Value]) -> Result<Value, RuntimeError> {
             modulation => modulation,
         };
 
-        if let Some(landscape) = context.world.landscape.as_mut() {
-            Rc::make_mut(landscape).set_modulation(modulation);
+        if let Some(landscape) = context.world.landscape_mut() {
+            landscape.set_modulation(modulation);
         }
         context.register_landscape_operation(LandscapeOperation::MatAdjust { modulation });
         Ok(Value::Bool(true))
@@ -17531,6 +17809,31 @@ where
     )
 }
 
+struct EffectHostContextTlsGuard<'a> {
+    cell: &'a RefCell<Option<EffectHostContext>>,
+    active: bool,
+}
+
+impl EffectHostContextTlsGuard<'_> {
+    fn finish(mut self) -> EffectHostContext {
+        let context = self
+            .cell
+            .borrow_mut()
+            .take()
+            .expect("effect context must be present");
+        self.active = false;
+        context
+    }
+}
+
+impl Drop for EffectHostContextTlsGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.cell.borrow_mut().take();
+        }
+    }
+}
+
 fn with_effect_context_with_definition_state<F, T, E>(
     object: Option<HostObjectContext<'_>>,
     definition_context: Option<DefinitionId>,
@@ -17563,11 +17866,9 @@ where
             audio_state,
             game_over_triggered,
         ));
+        let guard = EffectHostContextTlsGuard { cell, active: true };
         let mut result = func();
-        let context = cell
-            .borrow_mut()
-            .take()
-            .expect("effect context must be present");
+        let context = guard.finish();
         // Nested engine callbacks deliberately use C4Script's fail-safe
         // policy and may turn an ordinary VM error into nil/false. The
         // SetPreSend network path is different: it reached authoritative
@@ -27404,7 +27705,7 @@ fn get_texture(args: &[Value]) -> Result<Value, RuntimeError> {
         if texture_index == 0 {
             return Ok(Value::Nil);
         }
-        let Some(texmap) = context.runtime_texmap.as_ref() else {
+        let Some(texmap) = context.runtime_texmap() else {
             return Ok(Value::Nil);
         };
         if texmap
@@ -27451,7 +27752,7 @@ fn set_texture_index(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_mut() else {
             return Ok(Value::Int(0));
         };
-        let Some(texmap) = context.runtime_texmap.as_mut() else {
+        let Some(texmap) = context.runtime_texmap_mut() else {
             return Ok(Value::Int(0));
         };
         let (succeeded, moved_indices) = texmap.set_texture_index(
@@ -27495,7 +27796,7 @@ fn remove_unused_texmap_entries(_args: &[Value]) -> Result<Value, RuntimeError> 
         else {
             return Ok(Value::Nil);
         };
-        let Some(texmap) = context.runtime_texmap.as_mut() else {
+        let Some(texmap) = context.runtime_texmap_mut() else {
             return Ok(Value::Nil);
         };
         let cleared_slots = texmap.remove_unused_entries(texture_usage);
@@ -28283,8 +28584,8 @@ fn set_mat_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetMatAdjust requires an active engine context"))?;
-        if let Some(landscape) = context.world.landscape.as_mut() {
-            Rc::make_mut(landscape).set_modulation(modulation);
+        if let Some(landscape) = context.world.landscape_mut() {
+            landscape.set_modulation(modulation);
         }
         context.register_landscape_operation(LandscapeOperation::MatAdjust { modulation });
         Ok(Value::Nil)
@@ -28301,8 +28602,7 @@ fn get_mat_adjust(_args: &[Value]) -> Result<Value, RuntimeError> {
             .ok_or_else(|| RuntimeError::new("GetMatAdjust requires an active engine context"))?;
         let modulation = context
             .world
-            .landscape
-            .as_ref()
+            .landscape_ref()
             .map_or(0, |landscape| landscape.modulation());
         Ok(Value::Int(modulation as i32))
     })
@@ -28499,7 +28799,7 @@ fn draw_mat_chunks(args: &[Value]) -> Result<Value, RuntimeError> {
         else {
             return Ok(Value::Int(0));
         };
-        let Some(texmap) = context.runtime_texmap.as_mut() else {
+        let Some(texmap) = context.runtime_texmap_mut() else {
             return Ok(Value::Int(0));
         };
 
@@ -28586,8 +28886,7 @@ fn draw_volcano_branch(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         };
         let Some(material_byte) = context
-            .runtime_texmap
-            .as_ref()
+            .runtime_texmap()
             .and_then(|texmap| texmap.default_material_entry_by_index(material))
         else {
             // C++'s direct material-map indexing is undefined for an invalid
@@ -28709,7 +29008,7 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
         let map_width = (clipped_width - 1) / map_zoom + 1;
         let map_height = (clipped_height - 1) / map_zoom + 1;
 
-        let Some(texmap) = context.runtime_texmap.take() else {
+        let Some(texmap) = context.take_runtime_texmap() else {
             return Ok(Value::Int(0));
         };
         let texmap_before = texmap.clone();
@@ -28746,7 +29045,7 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
         let texmap = classifier.into_runtime_state();
         // Parser-side texture allocations are live to later calls in this
         // VM session even if Render found no map.
-        context.runtime_texmap = Some(texmap.clone());
+        context.set_runtime_texmap(texmap.clone());
         let Some(bitmap) = rendered? else {
             if texmap != texmap_before {
                 let operation = LandscapeOperation::SyncRuntimeTexMap { texmap };
@@ -28822,7 +29121,7 @@ fn draw_def_map(args: &[Value]) -> Result<Value, RuntimeError> {
         let map_width = (clipped_width - 1) / map_zoom + 1;
         let map_height = (clipped_height - 1) / map_zoom + 1;
 
-        let Some(texmap) = context.runtime_texmap.take() else {
+        let Some(texmap) = context.take_runtime_texmap() else {
             return Ok(Value::Int(0));
         };
         let mut classifier = crate::scenario::MapPixelClassifier::from_runtime_state(texmap);
@@ -28843,7 +29142,7 @@ fn draw_def_map(args: &[Value]) -> Result<Value, RuntimeError> {
             ))
         });
         let texmap = classifier.into_runtime_state();
-        context.runtime_texmap = Some(texmap.clone());
+        context.set_runtime_texmap(texmap.clone());
         let Some(bitmap) = rendered? else {
             return Ok(Value::Int(0));
         };
@@ -31622,7 +31921,7 @@ fn preview_move_to_stop(actor: ObjectId) -> Result<(), RuntimeError> {
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
-        let landscape = context.world.landscape.clone();
+        let landscape = context.world.landscape_shared();
         let runtime = CommandRuntimeContext {
             rng: None,
             frame: context.world.frame,
@@ -31725,7 +32024,7 @@ fn preview_build_stop(actor: ObjectId) -> Result<(), RuntimeError> {
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
-        let landscape = context.world.landscape.clone();
+        let landscape = context.world.landscape_shared();
         let runtime = CommandRuntimeContext {
             rng: None,
             frame: context.world.frame,
@@ -31871,7 +32170,7 @@ fn preview_resume_throw_after_prelude(
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
-        let landscape = context.world.landscape.clone();
+        let landscape = context.world.landscape_shared();
         let runtime = CommandRuntimeContext {
             rng: None,
             frame: context.world.frame,
@@ -31927,7 +32226,7 @@ fn preview_resume_drop_after_prelude(
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
-        let landscape = context.world.landscape.clone();
+        let landscape = context.world.landscape_shared();
         let runtime = CommandRuntimeContext {
             rng: None,
             frame: context.world.frame,
@@ -43011,7 +43310,7 @@ struct EffectHostContext {
     /// allocated by earlier calls (C4Texture.cpp:319-369). DrawMap's pixel
     /// plane is still deferred: same-callback GBack* visibility needs a
     /// separate structural landscape-preview layer and remains explicit.
-    runtime_texmap: Option<crate::landscape::RuntimeTexMapState>,
+    runtime_texmap: OnceCell<Option<crate::landscape::RuntimeTexMapState>>,
     /// Live script-visible sky values. Host writes update this before their
     /// deferred landscape operation is folded into the engine.
     sky_adjustment: SkyAdjustment,
@@ -43067,10 +43366,6 @@ impl EffectHostContext {
         let scenario_script_counter = world.scenario_script_counter();
         let sky_adjustment = world.sky_adjustment();
         let teams = world.teams().to_vec();
-        let runtime_texmap = world
-            .landscape_ref()
-            .and_then(Landscape::raster_state)
-            .map(|state| state.texmap().clone());
         let solid_mask_bakes = world.solid_mask_bakes.as_ref().clone();
         let solid_mask_instance_sequences = Rc::clone(&world.solid_mask_instance_sequences);
         let next_solid_mask_instance_sequence = Rc::clone(&world.next_solid_mask_instance_sequence);
@@ -43279,7 +43574,7 @@ impl EffectHostContext {
             pending_menu_requests: Vec::new(),
             pending_command_events: Vec::new(),
             pending_landscape_ops: Vec::new(),
-            runtime_texmap,
+            runtime_texmap: OnceCell::new(),
             sky_adjustment,
             audio,
             next_object_id,
@@ -43455,7 +43750,7 @@ impl EffectHostContext {
     /// It restores saved bytes and re-puts every overlapping bake, including
     /// refreshing those masks' buffers exactly like C4SolidMask.cpp:233-283.
     fn remove_live_solid_mask(&mut self, id: ObjectId) -> Option<(usize, u64)> {
-        let landscape = self.world.landscape.as_mut().map(Rc::make_mut)?;
+        let landscape = self.world.landscape_mut()?;
         remove_host_solid_mask_raster(landscape, &mut self.solid_mask_bakes, id)
     }
 
@@ -43533,7 +43828,8 @@ impl EffectHostContext {
                 position,
                 instance_sequence,
             });
-        let Some(landscape) = self.world.landscape.as_mut().map(Rc::make_mut) else {
+        let world_order = self.world.object_ids();
+        let Some(landscape) = self.world.landscape_mut() else {
             return;
         };
         let Some(bake) = crate::put_solid_mask_raster(landscape, spec, position, instance_sequence)
@@ -43541,17 +43837,14 @@ impl EffectHostContext {
             return;
         };
         let insert_at = previous.map(|(index, _)| index).unwrap_or_else(|| {
-            let rank = self
-                .world
-                .order
+            let rank = world_order
                 .iter()
                 .position(|object_id| *object_id == id)
                 .unwrap_or(usize::MAX);
             self.solid_mask_bakes
                 .iter()
                 .position(|(other_id, _)| {
-                    self.world
-                        .order
+                    world_order
                         .iter()
                         .position(|object_id| object_id == other_id)
                         .unwrap_or(usize::MAX)
@@ -43744,7 +44037,7 @@ impl EffectHostContext {
         else {
             return;
         };
-        let Some(landscape) = self.world.landscape.as_mut().map(Rc::make_mut) else {
+        let Some(landscape) = self.world.landscape_mut() else {
             return;
         };
         let _ = landscape.preview_draw_material_chunks_with_masks(
@@ -43772,7 +44065,7 @@ impl EffectHostContext {
         else {
             return;
         };
-        let Some(landscape) = self.world.landscape.as_mut().map(Rc::make_mut) else {
+        let Some(landscape) = self.world.landscape_mut() else {
             return;
         };
         let _ = landscape.preview_draw_material_quad_with_masks(
@@ -43797,7 +44090,7 @@ impl EffectHostContext {
         else {
             return;
         };
-        let Some(landscape) = self.world.landscape.as_mut().map(Rc::make_mut) else {
+        let Some(landscape) = self.world.landscape_mut() else {
             return;
         };
         let _ = landscape.draw_volcano_branch(*from, *to, *size, *material_byte);
@@ -43832,9 +44125,7 @@ impl EffectHostContext {
             );
             let landscape = self
                 .world
-                .landscape
-                .as_mut()
-                .map(Rc::make_mut)
+                .landscape_mut()
                 .expect("mask-bracketed FreeRect has a landscape");
             landscape.preview_raster_transaction_with_masks(
                 &mut self.solid_mask_bakes,
@@ -43861,9 +44152,9 @@ impl EffectHostContext {
             self.world.solid_mask_bakes = Rc::new(self.solid_mask_bakes.clone());
         } else {
             for row in origin.y..origin.y.saturating_add(height) {
-                if let Some(landscape) = self.world.landscape.as_mut() {
+                if let Some(landscape) = self.world.landscape_mut() {
                     crate::Engine::mutate_clear_rect_landscape_row(
-                        Rc::make_mut(landscape),
+                        landscape,
                         materials.as_ref(),
                         origin.x,
                         row,
@@ -43908,7 +44199,7 @@ impl EffectHostContext {
         }
         let materials = self.world.materials.clone()?;
         let material = {
-            let landscape = Rc::make_mut(self.world.landscape.as_mut()?);
+            let landscape = self.world.landscape_mut()?;
             landscape
                 .extract_material_probe(position.x, position.y, materials.as_ref())
                 .map(|(material, _, _)| material)?
@@ -43926,10 +44217,10 @@ impl EffectHostContext {
         basement: i32,
     ) {
         if let (Some(materials), Some(landscape)) =
-            (self.world.materials.clone(), self.world.landscape.as_mut())
+            (self.world.materials.clone(), self.world.landscape_mut())
         {
             preview_construction_terrain(
-                Rc::make_mut(landscape),
+                landscape,
                 materials.as_ref(),
                 center_x,
                 bottom_y,
@@ -43948,16 +44239,15 @@ impl EffectHostContext {
     }
 
     fn resolve_runtime_material_texture(&mut self, material_texture: &str) -> bool {
-        self.runtime_texmap
-            .as_mut()
+        self.runtime_texmap_mut()
             .is_some_and(|texmap| texmap.get_index_mat_tex(material_texture, None) != 0)
     }
 
     fn preview_runtime_map_creator(&mut self, creator: crate::map_creator_s2::MapCreatorS2State) {
-        let Some(landscape) = self.world.landscape.as_mut() else {
+        let Some(landscape) = self.world.landscape_mut() else {
             return;
         };
-        let Some(raster) = Rc::make_mut(landscape).raster_state_mut() else {
+        let Some(raster) = landscape.raster_state_mut() else {
             return;
         };
         raster.set_map_creator(Some(creator));
@@ -43979,7 +44269,7 @@ impl EffectHostContext {
         let mut object = if let Some(object) = self.pending_objects.get(&id) {
             object.clone()
         } else {
-            self.world.get(id).cloned()?
+            self.world.get(id)?
         };
         // C++ mutates live state mid-call: an object with a scope in THIS
         // call (active, dormant outer, or finished nested) reads through
@@ -44444,7 +44734,7 @@ impl EffectHostContext {
     )> {
         let (objects, players, definitions, transfers) = self.command_runtime_data();
         let object_snapshot = objects.get(&target)?;
-        let landscape = self.world.landscape.clone();
+        let landscape = self.world.landscape_shared();
         let context = CommandRuntimeContext {
             rng,
             frame: self.world.frame,
@@ -44862,7 +45152,7 @@ impl EffectHostContext {
     /// here even though ordinary script values are handled separately.
     fn clear_object_action_and_command_pointers(&mut self, target: ObjectId) {
         let target_number = i32::try_from(target.as_u64()).ok();
-        let mut object_ids = self.world.object_ids().to_vec();
+        let mut object_ids = self.world.object_ids();
         for id in self.pending_order.iter().copied() {
             if !object_ids.contains(&id) {
                 object_ids.push(id);
@@ -45943,7 +46233,7 @@ impl EffectHostContext {
     /// Storage-order objects, including inactive entries omitted from the
     /// active master-list preview and same-call pending creations.
     fn all_world_object_ids(&self) -> Vec<ObjectId> {
-        let mut ids = self.world.object_ids().to_vec();
+        let mut ids = self.world.object_ids();
         ids.extend(self.pending_order.iter().copied());
         ids
     }
@@ -46118,6 +46408,47 @@ impl EffectHostContext {
 
     fn landscape_ref(&self) -> Option<&Landscape> {
         self.world.landscape_ref()
+    }
+
+    fn runtime_texmap(&self) -> Option<&crate::landscape::RuntimeTexMapState> {
+        self.runtime_texmap
+            .get_or_init(|| {
+                self.world
+                    .landscape_ref()
+                    .and_then(Landscape::raster_state)
+                    .map(|state| state.texmap().clone())
+            })
+            .as_ref()
+    }
+
+    fn runtime_texmap_mut(
+        &mut self,
+    ) -> Option<&mut crate::landscape::RuntimeTexMapState> {
+        if self.runtime_texmap.get().is_none() {
+            let initial = self
+                .world
+                .landscape_ref()
+                .and_then(Landscape::raster_state)
+                .map(|state| state.texmap().clone());
+            let _ = self.runtime_texmap.set(initial);
+        }
+        self.runtime_texmap
+            .get_mut()
+            .expect("runtime texture map slot initialized above")
+            .as_mut()
+    }
+
+    fn take_runtime_texmap(&mut self) -> Option<crate::landscape::RuntimeTexMapState> {
+        let _ = self.runtime_texmap_mut();
+        self.runtime_texmap.get_mut()?.take()
+    }
+
+    fn set_runtime_texmap(&mut self, texmap: crate::landscape::RuntimeTexMapState) {
+        if let Some(slot) = self.runtime_texmap.get_mut() {
+            *slot = Some(texmap);
+        } else {
+            let _ = self.runtime_texmap.set(Some(texmap));
+        }
     }
 
     fn snapshot(&self, scope: EffectScope) -> Option<Vec<EffectState>> {
@@ -46619,7 +46950,7 @@ impl EffectHostContext {
 
         let host_raster_preview = (!self.solid_mask_operations.is_empty()).then(|| {
             HostRasterPreview {
-                landscape: self.world.landscape.as_deref().cloned(),
+                landscape: self.world.landscape_ref().cloned(),
                 solid_mask_bakes: self.solid_mask_bakes.clone(),
                 solid_mask_instance_sequences: self
                     .solid_mask_instance_sequences
@@ -48677,6 +49008,80 @@ mod tests {
 
         assert_send_sync::<ObjectOrderFunction>();
         assert_send_sync::<ObjectOrderCommand>();
+    }
+
+    #[test]
+    fn lazy_get_inserts_objects_in_canonical_index_order() {
+        unsafe fn object(
+            source: *const (),
+            id: ObjectId,
+        ) -> Option<(usize, HostWorldObject)> {
+            // SAFETY: the test keeps the source vector at a stable address
+            // until after its only provider-bearing context is dropped.
+            let objects = unsafe { &*source.cast::<Vec<HostWorldObject>>() };
+            objects
+                .iter()
+                .enumerate()
+                .find(|(_, object)| object.id == id)
+                .map(|(index, object)| (index, object.clone()))
+        }
+
+        unsafe fn objects(
+            source: *const (),
+            excluded: &HashSet<usize>,
+        ) -> Vec<(usize, HostWorldObject)> {
+            // SAFETY: see `object`; excluded entries are skipped before use.
+            let objects = unsafe { &*source.cast::<Vec<HostWorldObject>>() };
+            objects
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !excluded.contains(index))
+                .map(|(index, object)| (index, object.clone()))
+                .collect()
+        }
+
+        unsafe fn landscape(_source: *const ()) -> Option<Landscape> {
+            None
+        }
+
+        let source = vec![
+            scenario_section_world_object(40, ObjectStatus::Normal),
+            scenario_section_world_object(10, ObjectStatus::Normal),
+            scenario_section_world_object(30, ObjectStatus::Normal),
+            scenario_section_world_object(20, ObjectStatus::Normal),
+        ];
+        // SAFETY: `source` remains at a stable address and outlives `world`.
+        let provider = unsafe {
+            LazyHostWorldProvider::new(
+                std::ptr::from_ref(&source).cast(),
+                object,
+                objects,
+                landscape,
+            )
+        };
+        let mut world = HostWorldContext::default().with_lazy_world_provider(provider);
+        world.seed_object(2, source[2].clone());
+
+        assert_eq!(
+            world.object_store.borrow().order.as_slice(),
+            &[ObjectId::new(30)]
+        );
+        for (id, expected) in [
+            (20, vec![30, 20]),
+            (40, vec![40, 30, 20]),
+            (10, vec![40, 10, 30, 20]),
+        ] {
+            let id = ObjectId::new(id);
+            assert_eq!(world.get(id).map(|object| object.id), Some(id));
+            let expected = expected
+                .into_iter()
+                .map(ObjectId::new)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                world.object_store.borrow().order.as_slice(),
+                expected.as_slice()
+            );
+        }
     }
 
     #[test]
@@ -56863,6 +57268,36 @@ public func RejectConstruction(x, y, builder)
     }
 
     #[test]
+    fn effect_context_is_cleared_and_dropped_when_callback_panics() {
+        let world = HostWorldContext::default();
+        let world_lifetime = Rc::downgrade(&world.master_order);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = with_effect_context(None, &[], world, 1, || -> Result<(), RuntimeError> {
+                panic!("effect callback panic probe")
+            });
+        }));
+
+        assert!(panic.is_err());
+        HOST_CONTEXT.with(|cell| {
+            assert!(
+                cell.borrow().is_none(),
+                "panicking callback must clear its TLS host context"
+            );
+        });
+        assert!(
+            world_lifetime.upgrade().is_none(),
+            "clearing TLS must drop the callback's world context"
+        );
+
+        let (result, _) =
+            with_effect_context(None, &[], HostWorldContext::default(), 1, || game_over(&[]));
+        assert_eq!(
+            result.expect("a callback after panic cleanup succeeds"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
     fn game_over_respects_existing_state() {
         let (result, outcome) =
             with_effect_context_with_state(None, &[], HostWorldContext::default(), 1, true, || {
@@ -57349,11 +57784,7 @@ public func RejectConstruction(x, y, builder)
 
     fn draw_mat_chunks_masked_world() -> HostWorldContext {
         let mut world = draw_mat_chunks_world();
-        let landscape = world
-            .landscape
-            .as_mut()
-            .map(Rc::make_mut)
-            .expect("landscape exists");
+        let landscape = world.landscape_mut().expect("landscape exists");
         for y in 4..6 {
             for x in 5..7 {
                 landscape.grid_write_byte(x, y, 2);
@@ -57798,11 +58229,7 @@ public func RejectConstruction(x, y, builder)
     #[test]
     fn set_texture_index_exact_landscape_without_retained_map_moves_entry_only() {
         let mut world = draw_map_world(8, 7, 1, false);
-        let landscape = world
-            .landscape
-            .as_mut()
-            .map(Rc::make_mut)
-            .expect("landscape exists");
+        let landscape = world.landscape_mut().expect("landscape exists");
         assert!(landscape.set_mode(crate::landscape::LANDSCAPE_MODE_EXACT));
         assert!(
             landscape
@@ -57860,11 +58287,7 @@ public func RejectConstruction(x, y, builder)
             height: 7,
             indices: retained_indices,
         };
-        let replay_landscape = replay_world
-            .landscape
-            .as_mut()
-            .map(Rc::make_mut)
-            .expect("landscape exists");
+        let replay_landscape = replay_world.landscape_mut().expect("landscape exists");
         assert!(replay_landscape.set_mode(crate::landscape::LANDSCAPE_MODE_STATIC));
         replay_landscape
             .raster_state_mut()
@@ -58778,9 +59201,7 @@ public func RejectConstruction(x, y, builder)
         let mut world = draw_mat_chunks_world();
         assert!(
             world
-                .landscape
-                .as_mut()
-                .map(Rc::make_mut)
+                .landscape_mut()
                 .is_some_and(|landscape| { landscape.set_surface32_pixel(15, 5, 0x0011_2233) })
         );
         let initial_landscape = world.landscape_ref().expect("landscape exists").clone();
@@ -58944,9 +59365,7 @@ public func RejectConstruction(x, y, builder)
         let mut world = draw_volcano_branch_world();
         assert!(
             world
-                .landscape
-                .as_mut()
-                .map(Rc::make_mut)
+                .landscape_mut()
                 .is_some_and(|landscape| { landscape.set_surface32_pixel(6, 2, 0x0011_2233) })
         );
         let initial_landscape = world.landscape_ref().expect("landscape exists").clone();

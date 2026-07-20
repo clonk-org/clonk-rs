@@ -16,7 +16,7 @@
 //!   semantics but render unsheared (no transform support).
 //! - FreeType rasterization: callers supply the 8-bit coverage bitmap.
 
-use crate::{Color, GammaRamp, Rect, Surface};
+use crate::{Color, GammaRamp, Rect, Surface, SurfaceDrawTarget};
 use std::collections::HashMap;
 
 /// Line height in pixels for a vector font, mirroring `CStdFont::Init`:
@@ -501,6 +501,23 @@ impl ClonkFont {
         self.draw_with_gamma_impl(surface, x, y, text, color, align, markup, gamma, None);
     }
 
+    /// Target-generic counterpart of [`Self::draw_with_gamma`] used by
+    /// zero-copy native framebuffer views.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with_gamma_to<T: SurfaceDrawTarget + ?Sized>(
+        &self,
+        surface: &mut T,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+    ) {
+        self.draw_with_gamma_impl(surface, x, y, text, color, align, markup, gamma, None);
+    }
+
     /// [`Self::draw_with_gamma`] with FontRegular's custom images.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_with_gamma_and_images(
@@ -528,10 +545,37 @@ impl ClonkFont {
         );
     }
 
+    /// Target-generic counterpart of [`Self::draw_with_gamma_and_images`].
     #[allow(clippy::too_many_arguments)]
-    fn draw_with_gamma_impl(
+    pub fn draw_with_gamma_and_images_to<T: SurfaceDrawTarget + ?Sized>(
         &self,
-        surface: &mut Surface,
+        surface: &mut T,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+        images: &dyn FontImageProvider,
+    ) {
+        self.draw_with_gamma_impl(
+            surface,
+            x,
+            y,
+            text,
+            color,
+            align,
+            markup,
+            gamma,
+            Some(images),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_with_gamma_impl<T: SurfaceDrawTarget + ?Sized>(
+        &self,
+        surface: &mut T,
         x: i32,
         y: i32,
         text: &str,
@@ -615,6 +659,23 @@ impl ClonkFont {
         );
     }
 
+    /// Target-generic counterpart of
+    /// [`Self::draw_lines_at_origins_with_gamma`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_lines_at_origins_with_gamma_to<T: SurfaceDrawTarget + ?Sized>(
+        &self,
+        surface: &mut T,
+        origins: &[(i32, i32)],
+        text: &str,
+        color: [u8; 4],
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+    ) {
+        self.draw_lines_at_origins_with_gamma_impl(
+            surface, origins, text, color, markup, gamma, None,
+        );
+    }
+
     /// [`Self::draw_lines_at_origins_with_gamma`] with custom images.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_lines_at_origins_with_gamma_and_images(
@@ -638,10 +699,34 @@ impl ClonkFont {
         );
     }
 
+    /// Target-generic counterpart of
+    /// [`Self::draw_lines_at_origins_with_gamma_and_images`].
     #[allow(clippy::too_many_arguments)]
-    fn draw_lines_at_origins_with_gamma_impl(
+    pub fn draw_lines_at_origins_with_gamma_and_images_to<T: SurfaceDrawTarget + ?Sized>(
         &self,
-        surface: &mut Surface,
+        surface: &mut T,
+        origins: &[(i32, i32)],
+        text: &str,
+        color: [u8; 4],
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+        images: &dyn FontImageProvider,
+    ) {
+        self.draw_lines_at_origins_with_gamma_impl(
+            surface,
+            origins,
+            text,
+            color,
+            markup,
+            gamma,
+            Some(images),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_lines_at_origins_with_gamma_impl<T: SurfaceDrawTarget + ?Sized>(
+        &self,
+        surface: &mut T,
         origins: &[(i32, i32)],
         text: &str,
         color: [u8; 4],
@@ -672,9 +757,9 @@ impl ClonkFont {
 
     /// One `CStdFont::DrawText` call (`src/StdFont.cpp:814-934`).
     #[allow(clippy::too_many_arguments)]
-    fn draw_line(
+    fn draw_line<T: SurfaceDrawTarget + ?Sized>(
         &self,
-        surface: &mut Surface,
+        surface: &mut T,
         x: i32,
         y: i32,
         line: &str,
@@ -984,8 +1069,8 @@ fn image_modulation_rgb(stack: &[MarkupTag], color: [u8; 4]) -> [u8; 3] {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn blit_font_image(
-    surface: &mut Surface,
+fn blit_font_image<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
     image: FontImageRef<'_>,
     width: i32,
     height: i32,
@@ -1087,8 +1172,8 @@ fn bilinear_font_image_sample(image: FontImageRef<'_>, sample_x: f32, sample_y: 
 /// `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)`. Clipped to the
 /// surface; malformed `pixels` lengths are tolerated.
 #[allow(clippy::too_many_arguments)]
-fn blit_cell(
-    surface: &mut Surface,
+fn blit_cell<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
     cell: &GlyphCell,
     cell_height: i32,
     x: i32,

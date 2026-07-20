@@ -120,6 +120,128 @@ pub enum SurfaceError {
     FormatMismatch { src: PixelFormat, dst: PixelFormat },
 }
 
+/// Minimal pixel target used by draw routines that can operate directly on
+/// either an owned [`Surface`] or a borrowed RGBA framebuffer.
+pub trait SurfaceDrawTarget {
+    fn width(&self) -> u32;
+    fn height(&self) -> u32;
+    fn clip(&self) -> Option<Rect>;
+    fn set_clip(&mut self, clip: Rect);
+    fn clear_clip(&mut self);
+    fn get_pixel(&self, x: u32, y: u32) -> Option<Color>;
+    fn set_pixel(&mut self, x: u32, y: u32, color: Color) -> Result<(), SurfaceError>;
+
+    /// Semantic text capture is an owned-surface facility. Borrowed native
+    /// presentation targets always rasterize immediately.
+    #[doc(hidden)]
+    fn capture_clonk_text(&mut self, _command: CapturedClonkText) -> bool {
+        false
+    }
+}
+
+/// Scoped, zero-copy drawing view over a tightly packed RGBA8 framebuffer.
+///
+/// Unlike [`Surface::from_bytes`], this target borrows the caller's bytes, so
+/// native-resolution overlays can blend in place without cloning and copying
+/// an entire physical frame for every draw batch.
+#[derive(Debug)]
+pub struct RgbaSurfaceViewMut<'a> {
+    width: u32,
+    height: u32,
+    stride: usize,
+    data: &'a mut [u8],
+    clip: Option<Rect>,
+}
+
+impl<'a> RgbaSurfaceViewMut<'a> {
+    pub fn new(width: u32, height: u32, data: &'a mut [u8]) -> Result<Self, SurfaceError> {
+        let stride = width as usize * PixelFormat::Rgba8888.bytes_per_pixel();
+        let expected = stride * height as usize;
+        if data.len() != expected {
+            return Err(SurfaceError::InvalidBufferLength {
+                expected,
+                actual: data.len(),
+            });
+        }
+        Ok(Self {
+            width,
+            height,
+            stride,
+            data,
+            clip: None,
+        })
+    }
+
+    fn pixel_in_clip(&self, x: u32, y: u32) -> bool {
+        self.clip.is_none_or(|clip| {
+            let x = i64::from(x);
+            let y = i64::from(y);
+            let left = i64::from(clip.x);
+            let top = i64::from(clip.y);
+            x >= left
+                && y >= top
+                && x < left + i64::from(clip.width)
+                && y < top + i64::from(clip.height)
+        })
+    }
+
+    fn pixel_offset(&self, x: u32, y: u32) -> usize {
+        y as usize * self.stride + x as usize * PixelFormat::Rgba8888.bytes_per_pixel()
+    }
+}
+
+impl SurfaceDrawTarget for RgbaSurfaceViewMut<'_> {
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+
+    fn clip(&self) -> Option<Rect> {
+        self.clip
+    }
+
+    fn set_clip(&mut self, clip: Rect) {
+        self.clip = Some(clip);
+    }
+
+    fn clear_clip(&mut self) {
+        self.clip = None;
+    }
+
+    fn get_pixel(&self, x: u32, y: u32) -> Option<Color> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let offset = self.pixel_offset(x, y);
+        Some(Color::new(
+            self.data[offset],
+            self.data[offset + 1],
+            self.data[offset + 2],
+            self.data[offset + 3],
+        ))
+    }
+
+    fn set_pixel(&mut self, x: u32, y: u32, color: Color) -> Result<(), SurfaceError> {
+        if x >= self.width || y >= self.height {
+            return Err(SurfaceError::OutOfBounds {
+                x,
+                y,
+                width: self.width,
+                height: self.height,
+            });
+        }
+        if !self.pixel_in_clip(x, y) {
+            return Ok(());
+        }
+        let offset = self.pixel_offset(x, y);
+        self.data[offset..offset + 4].copy_from_slice(&[color.r, color.g, color.b, color.a]);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Surface {
     width: u32,
@@ -865,6 +987,40 @@ impl Surface {
                 bytes[3] = color.a;
             }
         }
+    }
+}
+
+impl SurfaceDrawTarget for Surface {
+    fn width(&self) -> u32 {
+        Surface::width(self)
+    }
+
+    fn height(&self) -> u32 {
+        Surface::height(self)
+    }
+
+    fn clip(&self) -> Option<Rect> {
+        Surface::clip(self)
+    }
+
+    fn set_clip(&mut self, clip: Rect) {
+        Surface::set_clip(self, clip);
+    }
+
+    fn clear_clip(&mut self) {
+        Surface::clear_clip(self);
+    }
+
+    fn get_pixel(&self, x: u32, y: u32) -> Option<Color> {
+        Surface::get_pixel(self, x, y)
+    }
+
+    fn set_pixel(&mut self, x: u32, y: u32, color: Color) -> Result<(), SurfaceError> {
+        Surface::set_pixel(self, x, y, color)
+    }
+
+    fn capture_clonk_text(&mut self, command: CapturedClonkText) -> bool {
+        Surface::capture_clonk_text(self, command)
     }
 }
 

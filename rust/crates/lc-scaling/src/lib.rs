@@ -5,6 +5,7 @@
 //! nominal viewport, and clips any top/right overflow to the framebuffer.
 
 use lc_graphics::{ClipperProjection, Rect};
+use rayon::prelude::*;
 
 /// GUI layout size for a window pixel size: ceil(pixels / scale), at least
 /// one pixel — C4Application::SetResolution (C4Application.cpp:536-538).
@@ -129,6 +130,56 @@ pub fn upscale_frame(
     }
 }
 
+const MIN_PIXELS_PER_ROW_BAND_WORKER: usize = 128 * 1024;
+// Large 3x presentation surfaces leave enough work per band to keep more of
+// an M-class performance cluster busy while shortening compositor barriers.
+const MAX_ROW_BAND_WORKERS: usize = 12;
+
+fn row_band_worker_count(row_count: usize, affected_width: usize) -> usize {
+    let work = row_count.saturating_mul(affected_width);
+    let workers_by_size = work / MIN_PIXELS_PER_ROW_BAND_WORKER;
+    if row_count < 2 || workers_by_size < 2 {
+        return 1;
+    }
+    rayon::current_num_threads()
+        .min(MAX_ROW_BAND_WORKERS)
+        .min(workers_by_size)
+        .min(row_count)
+        .max(1)
+}
+
+fn process_row_bands(
+    rows: &mut [u8],
+    row_stride: usize,
+    first_row: usize,
+    affected_width: usize,
+    worker_count: Option<usize>,
+    process: impl Fn(usize, &mut [u8]) + Sync,
+) {
+    debug_assert!(row_stride != 0 && rows.len() % row_stride == 0);
+    let row_count = rows.len() / row_stride;
+    if row_count == 0 {
+        return;
+    }
+    let worker_count = worker_count
+        .unwrap_or_else(|| row_band_worker_count(row_count, affected_width))
+        .max(1)
+        .min(row_count);
+    if worker_count == 1 {
+        process(first_row, rows);
+        return;
+    }
+
+    let rows_per_band = (row_count + worker_count - 1) / worker_count;
+    let bytes_per_band = rows_per_band * row_stride;
+    rows.par_chunks_mut(bytes_per_band)
+        .enumerate()
+        .for_each(|(band_index, band)| {
+            let band_first_row = first_row + band_index * rows_per_band;
+            process(band_first_row, band);
+        });
+}
+
 /// Upscales into C++'s nominal GL viewport and writes only the part covered
 /// by the physical framebuffer. The viewport is anchored at OpenGL's
 /// lower-left, so top-down pixels lose overflow at the top and right.
@@ -143,6 +194,31 @@ fn upscale_frame_in_viewport(
     viewport_width: u32,
     viewport_height: u32,
 ) {
+    upscale_frame_in_viewport_with_row_workers(
+        src,
+        src_width,
+        src_height,
+        dst,
+        dst_width,
+        dst_height,
+        viewport_width,
+        viewport_height,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upscale_frame_in_viewport_with_row_workers(
+    src: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst: &mut [u8],
+    dst_width: u32,
+    dst_height: u32,
+    viewport_width: u32,
+    viewport_height: u32,
+    worker_count: Option<usize>,
+) {
     let (sw, sh) = (src_width as usize, src_height as usize);
     let (dw, dh) = (dst_width as usize, dst_height as usize);
     let (vw, vh) = (viewport_width as usize, viewport_height as usize);
@@ -155,32 +231,120 @@ fn upscale_frame_in_viewport(
 
     let x_taps: Vec<(usize, usize, u32)> = (0..dw).map(|x| axis_tap(x, vw, sw)).collect();
     let crop_top = vh.saturating_sub(dh);
-    let mut source_words = vec![0u32; sw];
-    let mut top = ScaledRow::new(dw);
-    let mut bottom = ScaledRow::new(dw);
+    process_row_bands(
+        &mut dst[..dw * dh * 4],
+        dw * 4,
+        0,
+        dw,
+        worker_count,
+        |first_dst_y, rows| {
+            let mut source_words = vec![0u32; sw];
+            let mut top = ScaledRow::new(dw);
+            let mut bottom = ScaledRow::new(dw);
 
-    for dst_y in 0..dh {
-        let viewport_y = dst_y + crop_top;
-        let (y0, y1, fy) = axis_tap(viewport_y, vh, sh);
-        if top.source != y0 {
-            if bottom.source == y0 {
-                std::mem::swap(&mut top, &mut bottom);
-            } else {
-                top.build(src, y0, sw, &x_taps, &mut source_words);
+            for (row_offset, out) in rows.chunks_exact_mut(dw * 4).enumerate() {
+                let dst_y = first_dst_y + row_offset;
+                let viewport_y = dst_y + crop_top;
+                let (y0, y1, fy) = axis_tap(viewport_y, vh, sh);
+                if top.source != y0 {
+                    if bottom.source == y0 {
+                        std::mem::swap(&mut top, &mut bottom);
+                    } else {
+                        top.build(src, y0, sw, &x_taps, &mut source_words);
+                    }
+                }
+                if bottom.source != y1 {
+                    bottom.build(src, y1, sw, &x_taps, &mut source_words);
+                }
+                for ((out_px, &above), &below) in out
+                    .chunks_exact_mut(4)
+                    .zip(top.words.iter())
+                    .zip(bottom.words.iter())
+                {
+                    out_px.copy_from_slice(&lerp_word(above, below, fy).to_le_bytes());
+                }
             }
-        }
-        if bottom.source != y1 {
-            bottom.build(src, y1, sw, &x_taps, &mut source_words);
-        }
-        let out = &mut dst[dst_y * dw * 4..(dst_y * dw + dw) * 4];
-        for ((out_px, &above), &below) in out
-            .chunks_exact_mut(4)
-            .zip(top.words.iter())
-            .zip(bottom.words.iter())
-        {
-            out_px.copy_from_slice(&lerp_word(above, below, fy).to_le_bytes());
+        },
+    );
+}
+
+/// Half-open logical-pixel bounds for a nonempty ordered layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PixelBounds {
+    left: usize,
+    top: usize,
+    right: usize,
+    bottom: usize,
+}
+
+impl PixelBounds {
+    #[cfg(test)]
+    fn full(width: usize, height: usize) -> Self {
+        Self {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
         }
     }
+}
+
+/// Returns the smallest source rectangle containing every byte-visible pixel.
+/// Checking all four channels is intentional: additive drawing can leave RGB
+/// in a transparent ordered layer while preserving alpha at zero.
+fn nonzero_pixel_bounds(src: &[u8], width: usize, height: usize) -> Option<PixelBounds> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    debug_assert!(src.len() >= width * height * 4);
+
+    let mut bounds = PixelBounds {
+        left: width,
+        top: height,
+        right: 0,
+        bottom: 0,
+    };
+    for (y, row) in src[..width * height * 4]
+        .chunks_exact(width * 4)
+        .enumerate()
+    {
+        let mut pixels = row.chunks_exact(4);
+        let Some(first) = pixels.clone().position(|pixel| pixel != [0, 0, 0, 0]) else {
+            continue;
+        };
+        let last = pixels
+            .rposition(|pixel| pixel != [0, 0, 0, 0])
+            .expect("a row with a first nonzero pixel also has a last one");
+        bounds.left = bounds.left.min(first);
+        bounds.top = bounds.top.min(y);
+        bounds.right = bounds.right.max(last + 1);
+        bounds.bottom = y + 1;
+    }
+
+    (bounds.right != 0).then_some(bounds)
+}
+
+/// Finds the contiguous destination interval whose exact bilinear taps can
+/// see a source interval. Axis taps are monotonic, but scanning them keeps the
+/// result tied to the same floating-point and rounding path used to render.
+fn affected_destination_range(
+    destination_len: usize,
+    source_start: usize,
+    source_end: usize,
+    mut tap: impl FnMut(usize) -> (usize, usize, u32),
+) -> Option<std::ops::Range<usize>> {
+    let mut first = None;
+    let mut end = 0;
+    for destination in 0..destination_len {
+        let (source0, source1, fraction) = tap(destination);
+        let source0_contributes = fraction < 256 && (source_start..source_end).contains(&source0);
+        let source1_contributes = fraction > 0 && (source_start..source_end).contains(&source1);
+        if source0_contributes || source1_contributes {
+            first.get_or_insert(destination);
+            end = destination + 1;
+        }
+    }
+    first.map(|start| start..end)
 }
 
 /// Scales one premultiplied-alpha logical layer into the nominal viewport and
@@ -197,11 +361,39 @@ fn composite_premultiplied_layer_in_viewport(
     src: &[u8],
     src_width: u32,
     src_height: u32,
+    source_bounds: PixelBounds,
     dst: &mut [u8],
     dst_width: u32,
     dst_height: u32,
     viewport_width: u32,
     viewport_height: u32,
+) {
+    composite_premultiplied_layer_in_viewport_with_row_workers(
+        src,
+        src_width,
+        src_height,
+        source_bounds,
+        dst,
+        dst_width,
+        dst_height,
+        viewport_width,
+        viewport_height,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn composite_premultiplied_layer_in_viewport_with_row_workers(
+    src: &[u8],
+    src_width: u32,
+    src_height: u32,
+    source_bounds: PixelBounds,
+    dst: &mut [u8],
+    dst_width: u32,
+    dst_height: u32,
+    viewport_width: u32,
+    viewport_height: u32,
+    worker_count: Option<usize>,
 ) {
     let (sw, sh) = (src_width as usize, src_height as usize);
     let (dw, dh) = (dst_width as usize, dst_height as usize);
@@ -212,37 +404,81 @@ fn composite_premultiplied_layer_in_viewport(
     debug_assert!(dw <= vw && dh <= vh);
     debug_assert!(src.len() >= sw * sh * 4);
     debug_assert!(dst.len() >= dw * dh * 4);
+    debug_assert!(source_bounds.left < source_bounds.right && source_bounds.right <= sw);
+    debug_assert!(source_bounds.top < source_bounds.bottom && source_bounds.bottom <= sh);
 
-    let x_taps: Vec<(usize, usize, u32)> = (0..dw).map(|x| axis_tap(x, vw, sw)).collect();
     let crop_top = vh.saturating_sub(dh);
-    let mut source_words = vec![0u32; sw];
-    let mut top = ScaledRow::new(dw);
-    let mut bottom = ScaledRow::new(dw);
+    let Some(x_range) =
+        affected_destination_range(dw, source_bounds.left, source_bounds.right, |x| {
+            axis_tap(x, vw, sw)
+        })
+    else {
+        return;
+    };
+    let Some(y_range) =
+        affected_destination_range(dh, source_bounds.top, source_bounds.bottom, |y| {
+            axis_tap(y + crop_top, vh, sh)
+        })
+    else {
+        return;
+    };
+    let x_taps: Vec<(usize, usize, u32)> = x_range.clone().map(|x| axis_tap(x, vw, sw)).collect();
+    let source_x_start = x_taps.iter().map(|tap| tap.0).min().unwrap();
+    let source_x_end = x_taps.iter().map(|tap| tap.1).max().unwrap() + 1;
+    let row_stride = dw * 4;
+    let rows = &mut dst[y_range.start * row_stride..y_range.end * row_stride];
+    process_row_bands(
+        rows,
+        row_stride,
+        y_range.start,
+        x_range.len(),
+        worker_count,
+        |first_dst_y, rows| {
+            let mut source_words = vec![0u32; source_x_end - source_x_start];
+            let mut top = ScaledRow::new(x_range.len());
+            let mut bottom = ScaledRow::new(x_range.len());
 
-    for dst_y in 0..dh {
-        let viewport_y = dst_y + crop_top;
-        let (y0, y1, fy) = axis_tap(viewport_y, vh, sh);
-        if top.source != y0 {
-            if bottom.source == y0 {
-                std::mem::swap(&mut top, &mut bottom);
-            } else {
-                top.build(src, y0, sw, &x_taps, &mut source_words);
+            for (row_offset, dst_row) in rows.chunks_exact_mut(row_stride).enumerate() {
+                let dst_y = first_dst_y + row_offset;
+                let viewport_y = dst_y + crop_top;
+                let (y0, y1, fy) = axis_tap(viewport_y, vh, sh);
+                if top.source != y0 {
+                    if bottom.source == y0 {
+                        std::mem::swap(&mut top, &mut bottom);
+                    } else {
+                        top.build_from_source_span(
+                            src,
+                            y0,
+                            sw,
+                            &x_taps,
+                            source_x_start,
+                            &mut source_words,
+                        );
+                    }
+                }
+                if bottom.source != y1 {
+                    bottom.build_from_source_span(
+                        src,
+                        y1,
+                        sw,
+                        &x_taps,
+                        source_x_start,
+                        &mut source_words,
+                    );
+                }
+
+                let out = &mut dst_row[x_range.start * 4..x_range.end * 4];
+                for ((out_px, &above), &below) in out
+                    .chunks_exact_mut(4)
+                    .zip(top.words.iter())
+                    .zip(bottom.words.iter())
+                {
+                    let source = lerp_word(above, below, fy).to_le_bytes();
+                    composite_premultiplied_pixel(out_px, source);
+                }
             }
-        }
-        if bottom.source != y1 {
-            bottom.build(src, y1, sw, &x_taps, &mut source_words);
-        }
-
-        let out = &mut dst[dst_y * dw * 4..(dst_y * dw + dw) * 4];
-        for ((out_px, &above), &below) in out
-            .chunks_exact_mut(4)
-            .zip(top.words.iter())
-            .zip(bottom.words.iter())
-        {
-            let source = lerp_word(above, below, fy).to_le_bytes();
-            composite_premultiplied_pixel(out_px, source);
-        }
-    }
+        },
+    );
 }
 
 /// Composites an isolated logical layer through the rounded viewport installed
@@ -253,10 +489,36 @@ fn composite_premultiplied_layer_with_clipper(
     src: &[u8],
     src_width: u32,
     src_height: u32,
+    source_bounds: PixelBounds,
     dst: &mut [u8],
     dst_width: u32,
     dst_height: u32,
     projection: ClipperProjection,
+) {
+    composite_premultiplied_layer_with_clipper_and_row_workers(
+        src,
+        src_width,
+        src_height,
+        source_bounds,
+        dst,
+        dst_width,
+        dst_height,
+        projection,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn composite_premultiplied_layer_with_clipper_and_row_workers(
+    src: &[u8],
+    src_width: u32,
+    src_height: u32,
+    source_bounds: PixelBounds,
+    dst: &mut [u8],
+    dst_width: u32,
+    dst_height: u32,
+    projection: ClipperProjection,
+    worker_count: Option<usize>,
 ) {
     let (sw, sh) = (src_width as usize, src_height as usize);
     let (dw, dh) = (dst_width as usize, dst_height as usize);
@@ -275,6 +537,8 @@ fn composite_premultiplied_layer_with_clipper(
     }
     debug_assert!(src.len() >= sw * sh * 4);
     debug_assert!(dst.len() >= dw * dh * 4);
+    debug_assert!(source_bounds.left < source_bounds.right && source_bounds.right <= sw);
+    debug_assert!(source_bounds.top < source_bounds.bottom && source_bounds.bottom <= sh);
 
     let Some(visible) = physical.intersection(Rect::new(0, 0, dst_width, dst_height)) else {
         return;
@@ -284,48 +548,106 @@ fn composite_premultiplied_layer_with_clipper(
     debug_assert!(logical_x + logical.width as usize <= sw);
     debug_assert!(logical_y + logical.height as usize <= sh);
 
-    let physical_x_offset = i64::from(visible.x) - i64::from(physical.x);
-    let x_taps = (0..visible.width as usize)
+    let physical_x_offset = (i64::from(visible.x) - i64::from(physical.x)) as usize;
+    let global_x_tap = |x: usize| {
+        let local_x = physical_x_offset + x;
+        let (x0, x1, fraction) = axis_tap(local_x, physical.width as usize, logical.width as usize);
+        (logical_x + x0, logical_x + x1, fraction)
+    };
+    let Some(x_range) = affected_destination_range(
+        visible.width as usize,
+        source_bounds.left,
+        source_bounds.right,
+        global_x_tap,
+    ) else {
+        return;
+    };
+    let x_taps = x_range
+        .clone()
         .map(|x| {
-            let local_x = (physical_x_offset + x as i64) as usize;
+            let local_x = physical_x_offset + x;
             let (x0, x1, fraction) =
                 axis_tap(local_x, physical.width as usize, logical.width as usize);
             (logical_x + x0, logical_x + x1, fraction)
         })
         .collect::<Vec<_>>();
-    let mut source_words = vec![0u32; sw];
-    let mut top = ScaledRow::new(visible.width as usize);
-    let mut bottom = ScaledRow::new(visible.width as usize);
-    let physical_y_offset = i64::from(visible.y) - i64::from(physical.y);
+    let source_x_start = x_taps.iter().map(|tap| tap.0).min().unwrap();
+    let source_x_end = x_taps.iter().map(|tap| tap.1).max().unwrap() + 1;
+    let physical_y_offset = (i64::from(visible.y) - i64::from(physical.y)) as usize;
+    let global_y_tap = |row: usize| {
+        let local_y = physical_y_offset + row;
+        let (y0, y1, fraction) =
+            axis_tap(local_y, physical.height as usize, logical.height as usize);
+        (logical_y + y0, logical_y + y1, fraction)
+    };
+    let Some(y_range) = affected_destination_range(
+        visible.height as usize,
+        source_bounds.top,
+        source_bounds.bottom,
+        global_y_tap,
+    ) else {
+        return;
+    };
+    let row_stride = dw * 4;
+    let first_dst_y = visible.y as usize + y_range.start;
+    let end_dst_y = visible.y as usize + y_range.end;
+    let rows = &mut dst[first_dst_y * row_stride..end_dst_y * row_stride];
+    process_row_bands(
+        rows,
+        row_stride,
+        y_range.start,
+        x_range.len(),
+        worker_count,
+        |first_row, rows| {
+            let mut source_words = vec![0u32; source_x_end - source_x_start];
+            let mut top = ScaledRow::new(x_range.len());
+            let mut bottom = ScaledRow::new(x_range.len());
 
-    for row in 0..visible.height as usize {
-        let local_y = (physical_y_offset + row as i64) as usize;
-        let (y0, y1, fy) = axis_tap(local_y, physical.height as usize, logical.height as usize);
-        let y0 = logical_y + y0;
-        let y1 = logical_y + y1;
-        if top.source != y0 {
-            if bottom.source == y0 {
-                std::mem::swap(&mut top, &mut bottom);
-            } else {
-                top.build(src, y0, sw, &x_taps, &mut source_words);
+            for (row_offset, dst_row) in rows.chunks_exact_mut(row_stride).enumerate() {
+                let row = first_row + row_offset;
+                let local_y = physical_y_offset + row;
+                let (y0, y1, fy) =
+                    axis_tap(local_y, physical.height as usize, logical.height as usize);
+                let y0 = logical_y + y0;
+                let y1 = logical_y + y1;
+                if top.source != y0 {
+                    if bottom.source == y0 {
+                        std::mem::swap(&mut top, &mut bottom);
+                    } else {
+                        top.build_from_source_span(
+                            src,
+                            y0,
+                            sw,
+                            &x_taps,
+                            source_x_start,
+                            &mut source_words,
+                        );
+                    }
+                }
+                if bottom.source != y1 {
+                    bottom.build_from_source_span(
+                        src,
+                        y1,
+                        sw,
+                        &x_taps,
+                        source_x_start,
+                        &mut source_words,
+                    );
+                }
+
+                let out_start = (visible.x as usize + x_range.start) * 4;
+                let out = &mut dst_row[out_start..out_start + x_range.len() * 4];
+                for ((out_px, &above), &below) in out
+                    .chunks_exact_mut(4)
+                    .zip(top.words.iter())
+                    .zip(bottom.words.iter())
+                {
+                    let source = lerp_word(above, below, fy).to_le_bytes();
+                    composite_premultiplied_pixel(out_px, source);
+                }
             }
-        }
-        if bottom.source != y1 {
-            bottom.build(src, y1, sw, &x_taps, &mut source_words);
-        }
-
-        let dst_y = visible.y as usize + row;
-        let dst_start = (dst_y * dw + visible.x as usize) * 4;
-        let out = &mut dst[dst_start..dst_start + visible.width as usize * 4];
-        for ((out_px, &above), &below) in out
-            .chunks_exact_mut(4)
-            .zip(top.words.iter())
-            .zip(bottom.words.iter())
-        {
-            let source = lerp_word(above, below, fy).to_le_bytes();
-            composite_premultiplied_pixel(out_px, source);
-        }
-    }
+        },
+    );
 }
 
 #[inline]
@@ -376,12 +698,34 @@ impl ScaledRow {
         x_taps: &[(usize, usize, u32)],
         source_words: &mut [u32],
     ) {
-        let row = &src[src_y * src_width * 4..(src_y * src_width + src_width) * 4];
+        self.build_from_source_span(src, src_y, src_width, x_taps, 0, source_words);
+    }
+
+    fn build_from_source_span(
+        &mut self,
+        src: &[u8],
+        src_y: usize,
+        src_width: usize,
+        x_taps: &[(usize, usize, u32)],
+        source_x_start: usize,
+        source_words: &mut [u32],
+    ) {
+        let source_x_end = source_x_start + source_words.len();
+        debug_assert!(source_x_end <= src_width);
+        debug_assert!(x_taps
+            .iter()
+            .all(|&(x0, x1, _)| source_x_start <= x0 && x1 < source_x_end));
+        let row_start = (src_y * src_width + source_x_start) * 4;
+        let row = &src[row_start..row_start + source_words.len() * 4];
         for (word, px) in source_words.iter_mut().zip(row.chunks_exact(4)) {
             *word = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
         }
         for (out, &(x0, x1, fx)) in self.words.iter_mut().zip(x_taps) {
-            *out = lerp_word(source_words[x0], source_words[x1], fx);
+            *out = lerp_word(
+                source_words[x0 - source_x_start],
+                source_words[x1 - source_x_start],
+                fx,
+            );
         }
         self.source = src_y;
     }
@@ -695,6 +1039,143 @@ mod tests {
     }
 
     #[test]
+    fn viewport_band_upscale_matches_serial_full_viewport_crop() {
+        // Large enough to cross the row-band threshold on a multi-core host,
+        // with nonuniform bytes on both sides of every likely band boundary.
+        let (sw, sh) = (97_u32, 67_u32);
+        let (dw, dh) = (641_u32, 421_u32);
+        let (vw, vh) = (647_u32, 433_u32);
+        let source = (0..sw as usize * sh as usize * 4)
+            .map(|index| ((index * 73 + index / 7 * 19 + index / 97 * 11) & 0xff) as u8)
+            .collect::<Vec<_>>();
+
+        let mut full_viewport = vec![0_u8; vw as usize * vh as usize * 4];
+        upscale_frame(&source, sw, sh, &mut full_viewport, vw, vh);
+        let mut expected = vec![0_u8; dw as usize * dh as usize * 4];
+        let crop_top = (vh - dh) as usize;
+        for y in 0..dh as usize {
+            let source_start = ((y + crop_top) * vw as usize) * 4;
+            let target_start = y * dw as usize * 4;
+            expected[target_start..target_start + dw as usize * 4]
+                .copy_from_slice(&full_viewport[source_start..source_start + dw as usize * 4]);
+        }
+
+        let physical_len = expected.len();
+        let mut serial = vec![0xa5_u8; physical_len + 31];
+        let mut parallel = serial.clone();
+        upscale_frame_in_viewport_with_row_workers(
+            &source,
+            sw,
+            sh,
+            &mut serial,
+            dw,
+            dh,
+            vw,
+            vh,
+            Some(1),
+        );
+        upscale_frame_in_viewport_with_row_workers(
+            &source,
+            sw,
+            sh,
+            &mut parallel,
+            dw,
+            dh,
+            vw,
+            vh,
+            Some(3),
+        );
+
+        assert_eq!(&serial[..physical_len], expected.as_slice());
+        assert_eq!(parallel, serial);
+        assert!(parallel[physical_len..].iter().all(|&byte| byte == 0xa5));
+    }
+
+    #[test]
+    fn viewport_band_composite_matches_serial_full_viewport_reference() {
+        let (sw, sh) = (97_u32, 67_u32);
+        let (dw, dh) = (641_u32, 421_u32);
+        let (vw, vh) = (647_u32, 433_u32);
+        let mut layer = vec![0_u8; sw as usize * sh as usize * 4];
+        for (index, pixel) in layer.chunks_exact_mut(4).enumerate() {
+            if index % 127 == 0 {
+                // Additive drawing can retain RGB under zero alpha.
+                pixel.copy_from_slice(&[
+                    (index * 3 + 1) as u8,
+                    (index * 5 + 2) as u8,
+                    (index * 7 + 3) as u8,
+                    0,
+                ]);
+            } else {
+                let alpha = ((index * 37 + 19) & 0xff) as u8;
+                let range = usize::from(alpha) + 1;
+                pixel.copy_from_slice(&[
+                    ((index * 11 + 3) % range) as u8,
+                    ((index * 17 + 5) % range) as u8,
+                    ((index * 23 + 7) % range) as u8,
+                    alpha,
+                ]);
+            }
+        }
+
+        let mut expected = vec![0_u8; dw as usize * dh as usize * 4];
+        for (index, pixel) in expected.chunks_exact_mut(4).enumerate() {
+            pixel.copy_from_slice(&[
+                (index * 13) as u8,
+                (index * 29) as u8,
+                (index * 43) as u8,
+                (index * 61) as u8,
+            ]);
+        }
+        let mut serial = expected.clone();
+        let mut parallel = expected.clone();
+
+        let mut full_viewport = vec![0_u8; vw as usize * vh as usize * 4];
+        upscale_frame(&layer, sw, sh, &mut full_viewport, vw, vh);
+        let crop_top = (vh - dh) as usize;
+        for y in 0..dh as usize {
+            for x in 0..dw as usize {
+                let source_start = ((y + crop_top) * vw as usize + x) * 4;
+                let source = full_viewport[source_start..source_start + 4]
+                    .try_into()
+                    .expect("RGBA source pixel");
+                let target_start = (y * dw as usize + x) * 4;
+                composite_premultiplied_pixel(
+                    &mut expected[target_start..target_start + 4],
+                    source,
+                );
+            }
+        }
+
+        composite_premultiplied_layer_in_viewport_with_row_workers(
+            &layer,
+            sw,
+            sh,
+            PixelBounds::full(sw as usize, sh as usize),
+            &mut serial,
+            dw,
+            dh,
+            vw,
+            vh,
+            Some(1),
+        );
+        composite_premultiplied_layer_in_viewport_with_row_workers(
+            &layer,
+            sw,
+            sh,
+            PixelBounds::full(sw as usize, sh as usize),
+            &mut parallel,
+            dw,
+            dh,
+            vw,
+            vh,
+            Some(3),
+        );
+        assert_eq!(serial, expected);
+        assert_eq!(parallel, serial);
+    }
+
+    #[test]
     fn presenter_skips_upscale_for_unchanged_frames() {
         let mut presenter = FramePresenter::new(2.0, 4, 4);
         let mut output = vec![0u8; 4 * 4 * 4];
@@ -804,6 +1285,128 @@ mod tests {
         assert_eq!(geometry.viewport_size(), (6, 5));
         assert_eq!(geometry.crop_top(), 1);
         assert_eq!(geometry.logical_to_physical(2.0, 2.0), (3.0, 2.0));
+    }
+
+    #[test]
+    fn sparse_viewport_composite_matches_full_fractional_reference() {
+        let (sw, sh) = (7_u32, 5_u32);
+        let (dw, dh) = (9_u32, 6_u32);
+        let (vw, vh) = (11_u32, 8_u32);
+        let mut layer = vec![0_u8; sw as usize * sh as usize * 4];
+        let first = (sw as usize + 2) * 4;
+        layer[first..first + 4].copy_from_slice(&[37, 11, 5, 0]);
+        let second = (3 * sw as usize + 4) * 4;
+        layer[second..second + 4].copy_from_slice(&[18, 72, 30, 128]);
+
+        let mut expected = vec![0_u8; dw as usize * dh as usize * 4];
+        for (index, pixel) in expected.chunks_exact_mut(4).enumerate() {
+            pixel.copy_from_slice(&[
+                (index * 17) as u8,
+                (index * 29) as u8,
+                (index * 43) as u8,
+                255,
+            ]);
+        }
+        let mut actual = expected.clone();
+        composite_premultiplied_layer_in_viewport_with_row_workers(
+            &layer,
+            sw,
+            sh,
+            PixelBounds::full(sw as usize, sh as usize),
+            &mut expected,
+            dw,
+            dh,
+            vw,
+            vh,
+            Some(1),
+        );
+        let sparse_bounds = nonzero_pixel_bounds(&layer, sw as usize, sh as usize).unwrap();
+        assert_eq!(
+            sparse_bounds,
+            PixelBounds {
+                left: 2,
+                top: 1,
+                right: 5,
+                bottom: 4,
+            }
+        );
+        composite_premultiplied_layer_in_viewport_with_row_workers(
+            &layer,
+            sw,
+            sh,
+            sparse_bounds,
+            &mut actual,
+            dw,
+            dh,
+            vw,
+            vh,
+            Some(3),
+        );
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn sparse_clipper_composite_matches_full_fractional_reference() {
+        let (sw, sh) = (8_u32, 7_u32);
+        let (dw, dh) = (12_u32, 10_u32);
+        let mut layer = vec![0_u8; sw as usize * sh as usize * 4];
+        let first = (2 * sw as usize + 3) * 4;
+        layer[first..first + 4].copy_from_slice(&[23, 9, 4, 0]);
+        let second = (3 * sw as usize + 4) * 4;
+        layer[second..second + 4].copy_from_slice(&[12, 64, 25, 128]);
+
+        let mut expected = vec![0_u8; dw as usize * dh as usize * 4];
+        for (index, pixel) in expected.chunks_exact_mut(4).enumerate() {
+            pixel.copy_from_slice(&[
+                (index * 13) as u8,
+                (index * 31) as u8,
+                (index * 47) as u8,
+                255,
+            ]);
+        }
+        let mut actual = expected.clone();
+        let projection = ClipperProjection::new(1.5, (sw, sh), dh, Rect::new(2, 1, 4, 4));
+        composite_premultiplied_layer_with_clipper_and_row_workers(
+            &layer,
+            sw,
+            sh,
+            PixelBounds::full(sw as usize, sh as usize),
+            &mut expected,
+            dw,
+            dh,
+            projection,
+            Some(1),
+        );
+        composite_premultiplied_layer_with_clipper_and_row_workers(
+            &layer,
+            sw,
+            sh,
+            nonzero_pixel_bounds(&layer, sw as usize, sh as usize).unwrap(),
+            &mut actual,
+            dw,
+            dh,
+            projection,
+            Some(3),
+        );
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn empty_ordered_layer_leaves_physical_output_unchanged() {
+        let mut presenter = FramePresenter::new(1.5, 5, 4);
+        let mut output = vec![0_u8; 5 * 4 * 4];
+        for (index, pixel) in output.chunks_exact_mut(4).enumerate() {
+            pixel.copy_from_slice(&[index as u8, (index * 7) as u8, 90, 255]);
+        }
+        let expected = output.clone();
+
+        let mut composer = presenter.ordered_composer(&mut output);
+        assert!(composer.begin_layer().iter().all(|&byte| byte == 0));
+        composer.composite_layer();
+
+        assert_eq!(output, expected);
     }
 
     #[test]
@@ -957,16 +1560,21 @@ impl OrderedFrameComposer<'_> {
         let (logical_width, logical_height) = self.geometry.logical_size();
         let (physical_width, physical_height) = self.geometry.physical_size();
         let (viewport_width, viewport_height) = self.geometry.viewport_size();
-        composite_premultiplied_layer_in_viewport(
-            self.layer,
-            logical_width,
-            logical_height,
-            self.output,
-            physical_width,
-            physical_height,
-            viewport_width,
-            viewport_height,
-        );
+        if let Some(source_bounds) =
+            nonzero_pixel_bounds(self.layer, logical_width as usize, logical_height as usize)
+        {
+            composite_premultiplied_layer_in_viewport(
+                self.layer,
+                logical_width,
+                logical_height,
+                source_bounds,
+                self.output,
+                physical_width,
+                physical_height,
+                viewport_width,
+                viewport_height,
+            );
+        }
         self.layer.fill(0);
     }
 
@@ -982,15 +1590,20 @@ impl OrderedFrameComposer<'_> {
             physical_height,
             logical_clip,
         );
-        composite_premultiplied_layer_with_clipper(
-            self.layer,
-            logical_width,
-            logical_height,
-            self.output,
-            physical_width,
-            physical_height,
-            projection,
-        );
+        if let Some(source_bounds) =
+            nonzero_pixel_bounds(self.layer, logical_width as usize, logical_height as usize)
+        {
+            composite_premultiplied_layer_with_clipper(
+                self.layer,
+                logical_width,
+                logical_height,
+                source_bounds,
+                self.output,
+                physical_width,
+                physical_height,
+                projection,
+            );
+        }
         self.layer.fill(0);
     }
 
@@ -1005,6 +1618,7 @@ impl OrderedFrameComposer<'_> {
 #[cfg(test)]
 mod perf_probe {
     use super::*;
+    use std::hint::black_box;
 
     #[test]
     #[ignore = "manual timing probe"]
@@ -1025,6 +1639,72 @@ mod perf_probe {
             dw,
             dh,
             start.elapsed() / iterations
+        );
+    }
+
+    #[test]
+    #[ignore = "manual timing probe"]
+    fn sparse_ordered_layer_timing_probe() {
+        let (sw, sh) = (1371_u32, 858_u32);
+        let (dw, dh) = (4113_u32, 2574_u32);
+        let mut layer = vec![0_u8; sw as usize * sh as usize * 4];
+        for y in 760..824_usize {
+            for x in 32..500_usize {
+                let offset = (y * sw as usize + x) * 4;
+                layer[offset..offset + 4].copy_from_slice(&[20, 40, 60, 128]);
+            }
+        }
+        let sparse_bounds = nonzero_pixel_bounds(&layer, sw as usize, sh as usize).unwrap();
+        let mut full_output = vec![17_u8; dw as usize * dh as usize * 4];
+        let mut sparse_output = full_output.clone();
+        let iterations = 5;
+
+        let full_start = std::time::Instant::now();
+        for _ in 0..iterations {
+            composite_premultiplied_layer_in_viewport(
+                black_box(&layer),
+                sw,
+                sh,
+                PixelBounds::full(sw as usize, sh as usize),
+                black_box(&mut full_output),
+                dw,
+                dh,
+                dw,
+                dh,
+            );
+        }
+        let full_elapsed = full_start.elapsed();
+
+        let sparse_start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let bounds = black_box(nonzero_pixel_bounds(
+                black_box(&layer),
+                sw as usize,
+                sh as usize,
+            ))
+            .unwrap();
+            composite_premultiplied_layer_in_viewport(
+                black_box(&layer),
+                sw,
+                sh,
+                bounds,
+                black_box(&mut sparse_output),
+                dw,
+                dh,
+                dw,
+                dh,
+            );
+        }
+        let sparse_elapsed = sparse_start.elapsed();
+
+        assert_eq!(sparse_bounds.left, 32);
+        assert_eq!(sparse_bounds.right, 500);
+        assert_eq!(sparse_output, full_output);
+        eprintln!(
+            "ordered 3x sparse layer: full {:?}/frame, bounded {:?}/frame ({:.1}x)",
+            full_elapsed / iterations,
+            sparse_elapsed / iterations,
+            full_elapsed.as_secs_f64() / sparse_elapsed.as_secs_f64(),
         );
     }
 }

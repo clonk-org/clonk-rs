@@ -43,6 +43,24 @@ debug = "line-tables-only"
 [profile.dev.package.lc-scaling]
 opt-level = 3
 
+# Scenario presentation and script callbacks dominate live gameplay. Keep the
+# hot workspace crates at production optimization even in the runnable dev
+# binary; debug assertions remain enabled for parity diagnostics.
+[profile.dev.package.lc-app]
+opt-level = 3
+
+[profile.dev.package.lc-frontend]
+opt-level = 3
+
+[profile.dev.package.lc-engine]
+opt-level = 3
+
+[profile.dev.package.lc-script]
+opt-level = 3
+
+[profile.dev.package.lc-graphics]
+opt-level = 3
+
 # Simulation-heavy integration tests spend most of their time in workspace
 # crates. Full optimization keeps their warm runtime low, while explicitly
 # disabling thin-local LTO avoids repeating an expensive whole-crate codegen

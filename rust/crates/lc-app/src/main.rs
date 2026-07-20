@@ -158,8 +158,8 @@ use lc_frontend::{
     viewport_edge_scroll, viewport_edge_scroll_at,
 };
 use lc_graphics::{
-    BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, Surface, TextFont,
-    Transform, TrueTypeFont,
+    BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, RgbaSurfaceViewMut,
+    Surface, TextFont, Transform, TrueTypeFont,
 };
 use lc_graphics::clonk_font::{
     FontImageProvider, FontImageRef, font_image_lookup_tag, inline_image_token,
@@ -236,8 +236,13 @@ use winit::window::{Fullscreen, UserAttentionType, Window, WindowBuilder};
 const PLAYER_OWNER: i32 = 1;
 const STARTUP_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const INGAME_FRAME_INTERVAL: Duration = Duration::from_millis(28);
-const MAX_REFRESH_INTERVAL: Duration = Duration::from_millis(30);
+// Native defaults Graphics.MaxRefreshDelay to 30 ms. Rust intentionally uses
+// 16 ms when the key is absent/invalid so a 28 ms game tick yields two 14 ms
+// presentation opportunities; any explicit positive native value still wins.
+const DEFAULT_MAX_REFRESH_DELAY_MS: u64 = 16;
 const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
+const PRESENTATION_BENCHMARK_ENV: &str = "LC_APP_PRESENTATION_BENCHMARK_SECONDS";
+const PRESENTATION_BENCHMARK_WARMUP: Duration = Duration::from_secs(2);
 static LOBBY_PRELOAD_SERIAL: AtomicU64 = AtomicU64::new(0);
 const NETWORK_CONTROL_OVERFLOW_LIMIT: u32 = 3;
 const NETWORK_RENDER_SKIP_BEHIND: u32 = 25;
@@ -676,6 +681,7 @@ fn run_console_event_loop(mut app: GameApp, commands: Receiver<ConsoleInputEvent
         app.mode,
         app.engine.game_tick_delay_ms(),
         app.engine.game_tick_delay_revision(),
+        app.max_refresh_delay_ms,
     );
 
     let outcome = (|| -> Result<()> {
@@ -696,6 +702,7 @@ fn run_console_event_loop(mut app: GameApp, commands: Receiver<ConsoleInputEvent
                 app.mode,
                 app.engine.game_tick_delay_ms(),
                 app.engine.game_tick_delay_revision(),
+                app.max_refresh_delay_ms,
                 &mut frame_schedule,
                 &mut accumulator,
                 frame_time,
@@ -923,6 +930,7 @@ struct PreparedGoLoadingState {
     fair_crew_strength: i32,
     fair_crew_forced: bool,
     allow_debug: bool,
+    auto_frame_skip: bool,
     team_configuration: TeamConfiguration,
     team_registry: Vec<lc_engine::TeamInfo>,
 }
@@ -1001,6 +1009,7 @@ impl ScenarioLoadingState {
         fair_crew_strength: i32,
         fair_crew_forced: bool,
         allow_debug: bool,
+        auto_frame_skip: bool,
         team_configuration: TeamConfiguration,
         team_registry: Vec<lc_engine::TeamInfo>,
     ) -> Self {
@@ -1031,6 +1040,7 @@ impl ScenarioLoadingState {
                 fair_crew_strength,
                 fair_crew_forced,
                 allow_debug,
+                auto_frame_skip,
                 team_configuration,
                 team_registry,
             }),
@@ -7371,6 +7381,18 @@ fn startup_config_integer(config: &[u8], section: &str, key: &str, default: i32)
         .unwrap_or(default)
 }
 
+fn configured_max_refresh_delay_ms(config: &[u8]) -> u64 {
+    u64::try_from(startup_config_integer(
+        config,
+        "Graphics",
+        "MaxRefreshDelay",
+        DEFAULT_MAX_REFRESH_DELAY_MS as i32,
+    ))
+    .ok()
+    .filter(|delay| *delay > 0)
+    .unwrap_or(DEFAULT_MAX_REFRESH_DELAY_MS)
+}
+
 fn startup_config_is_corrupted(config: &[u8]) -> bool {
     startup_config_integer(
         config,
@@ -7766,6 +7788,11 @@ fn main() -> Result<()> {
         .wgpu_backend(
             pixels::wgpu::util::backend_bits_from_env().unwrap_or(pixels::wgpu::Backends::PRIMARY),
         )
+        // StdGLCtx::PageFlip calls SDL_GL_SwapWindow without ever selecting
+        // a swap interval. Do not make drawable acquisition serialize the
+        // independently scheduled simulation and graphics timers behind an
+        // implicit FIFO-vsync wait that the C++ application does not request.
+        .enable_vsync(false)
         .build()
         .context("failed to create pixel framebuffer")?;
 
@@ -7802,7 +7829,11 @@ fn main() -> Result<()> {
         app.mode,
         app.engine.game_tick_delay_ms(),
         app.engine.game_tick_delay_revision(),
+        app.max_refresh_delay_ms,
     );
+    let mut next_graphics_deadline = previous_instant + frame_schedule.refresh_interval;
+    let mut automatic_frame_skip = AutomaticFrameSkip::default();
+    let mut presentation_benchmark = presentation_benchmark_from_env();
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -7862,18 +7893,16 @@ fn main() -> Result<()> {
                 let now = Instant::now();
                 let frame_time = now.saturating_duration_since(previous_instant);
                 previous_instant = now;
-                let mut did_update = match advance_game_clock_from_elapsed(
+                if let Err(err) = advance_game_clock_from_elapsed(
                     &mut app,
                     &mut game_clock_accumulator,
                     frame_time,
                 ) {
-                    Ok(changed) => changed,
-                    Err(err) => {
-                        tracing::error!(error = ?err, "one-second timer failed");
-                        control_flow.set_exit();
-                        return;
-                    }
-                };
+                    tracing::error!(error = ?err, "one-second timer failed");
+                    control_flow.set_exit();
+                    return;
+                }
+                let previous_frame_schedule = frame_schedule;
                 // SetGameTickDelay installs a new timer when C++ enters or
                 // leaves the running game. Do not carry a fractional tick
                 // from the old cadence across that boundary
@@ -7882,6 +7911,7 @@ fn main() -> Result<()> {
                     app.mode,
                     app.engine.game_tick_delay_ms(),
                     app.engine.game_tick_delay_revision(),
+                    app.max_refresh_delay_ms,
                     &mut frame_schedule,
                     &mut accumulator,
                     frame_time,
@@ -7905,7 +7935,6 @@ fn main() -> Result<()> {
                         return;
                     }
                 };
-                did_update |= simulation_pass.did_update;
                 if simulation_pass.skipped_render_frames > 0 {
                     tracing::trace!(
                         frames = simulation_pass.executed_frames,
@@ -7922,28 +7951,60 @@ fn main() -> Result<()> {
                         .as_ref()
                         .map_or(Ok(()), |notifier| notifier.show(notification))
                 });
+                let graphics_now = Instant::now();
+                if frame_schedule != previous_frame_schedule {
+                    // SetGameTickDelay replaces the application timer. Anchor
+                    // the first graphics opportunity to the new interval so
+                    // an old partial period cannot leak across game modes.
+                    next_graphics_deadline =
+                        graphics_now + frame_schedule.refresh_interval;
+                }
 
-                if !simulation_pass.skip_redraw
-                    && (did_update
-                        || (app.mode == AppMode::Running
-                            && frame_schedule.refresh_interval
-                                < frame_schedule.simulation_interval))
-                {
-                    window.request_redraw();
+                // Window/input/network events may wake Winit early. Native
+                // graphics still run only on the application timer, so keep
+                // an absolute deadline instead of treating every wake as a
+                // decoupled graphics opportunity.
+                let graphics_due = graphics_now >= next_graphics_deadline;
+                if graphics_due {
+                    next_graphics_deadline = advance_graphics_deadline(
+                        next_graphics_deadline,
+                        graphics_now,
+                        frame_schedule.refresh_interval,
+                    );
+                    if simulation_pass.skip_redraw {
+                        // Native's manual/network DoSkipFrame takes this same
+                        // graphics opportunity and clears the shared latch.
+                        automatic_frame_skip.consume_suppressed_graphics_pass();
+                    } else {
+                        window.request_redraw();
+                    }
+                }
+                if app.mode != AppMode::Running {
+                    automatic_frame_skip.consume_suppressed_graphics_pass();
                 }
 
                 if app.mode == AppMode::Running && app.full_speed {
                     *control_flow = ControlFlow::Poll;
                 } else {
-                    let wait_duration = frame_schedule.refresh_interval.min(
-                        frame_schedule
+                    let simulation_deadline = now
+                        + frame_schedule
                             .simulation_interval
-                            .saturating_sub(accumulator),
+                            .saturating_sub(accumulator);
+                    *control_flow = ControlFlow::WaitUntil(
+                        next_graphics_deadline.min(simulation_deadline),
                     );
-                    *control_flow = ControlFlow::WaitUntil(now + wait_duration);
                 }
             }
+            Event::RedrawRequested(id)
+                if id == window.id()
+                    && automatic_frame_skip.begin_graphics_pass(
+                        app.mode == AppMode::Running && app.auto_frame_skip,
+                    ) =>
+            {
+                tracing::trace!("automatic frame skip consumed one graphics pass");
+            }
             Event::RedrawRequested(id) if id == window.id() => {
+                let graphics_started = Instant::now();
                 app.graphics.set_presentation_scale(presenter.scale());
                 let ordered_native_text =
                     app.can_present_ordered_native_text(presenter.scale());
@@ -8028,9 +8089,35 @@ fn main() -> Result<()> {
                     );
                     app.report_screenshot_result(result);
                 }
-                if let Err(err) = pixels.render() {
-                    tracing::error!(error = ?err, "present failed");
-                    control_flow.set_exit();
+                match pixels.render() {
+                    Ok(()) => {
+                        let graphics_duration = graphics_started.elapsed();
+                        automatic_frame_skip.finish_graphics_pass(
+                            app.mode == AppMode::Running && app.auto_frame_skip,
+                            graphics_duration,
+                            frame_schedule.simulation_interval,
+                        );
+                        if let Some(benchmark) = presentation_benchmark.as_mut() {
+                            let completed_at = Instant::now();
+                            benchmark.record_successful_presentation(
+                                completed_at,
+                                graphics_duration,
+                                refreshed,
+                            );
+                            if let Some(report) = benchmark.poll(
+                                app.mode == AppMode::Running,
+                                completed_at,
+                                app.engine.frame(),
+                            ) {
+                                println!("{}", report.machine_line());
+                                control_flow.set_exit();
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!(error = ?err, "present failed");
+                        control_flow.set_exit();
+                    }
                 }
             }
             Event::LoopDestroyed => {
@@ -13414,6 +13501,12 @@ struct GameApp {
     /// controls. They are deliberately excluded from save capture/restore.
     full_speed: bool,
     frame_skip: i32,
+    /// Frozen `C4GameParameters::AutoFrameSkip` for the active round. Unlike
+    /// the startup option, this must not change while a game is running.
+    auto_frame_skip: bool,
+    /// Process-local Config.Graphics.MaxRefreshDelay used by the application
+    /// timer divisor. It is read once, then refreshed only after Options saves.
+    max_refresh_delay_ms: u64,
     /// C4Game::pNetworkStatistics exists for every running game. Only the
     /// Pings presentation tab is conditional on an enabled network session.
     network_stats: Option<NetworkStats>,
@@ -15509,6 +15602,196 @@ struct FrameSchedule {
     running_revision: Option<u64>,
 }
 
+/// C4Application's automatic `Game.DoSkipFrame` latch. A slow graphics pass
+/// arms exactly one skip; consuming that skip clears the latch before any
+/// later pass can arm it again (src/C4Application.cpp:463-476).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AutomaticFrameSkip {
+    skip_next_graphics: bool,
+}
+
+impl AutomaticFrameSkip {
+    /// Returns whether this graphics pass should be skipped. Disabling the
+    /// game parameter also clears any stale latch at a game-mode boundary.
+    fn begin_graphics_pass(&mut self, enabled: bool) -> bool {
+        if !enabled {
+            self.skip_next_graphics = false;
+            return false;
+        }
+        std::mem::take(&mut self.skip_next_graphics)
+    }
+
+    /// A manual/network `DoSkipFrame` consumes the same application pass as
+    /// an automatic skip, so an armed automatic latch must not spill into the
+    /// following graphics opportunity.
+    fn consume_suppressed_graphics_pass(&mut self) {
+        self.skip_next_graphics = false;
+    }
+
+    fn finish_graphics_pass(
+        &mut self,
+        enabled: bool,
+        graphics_duration: Duration,
+        game_tick_delay: Duration,
+    ) {
+        // Native uses `(pre_gfx + tick_delay) < now`, not `<=`.
+        self.skip_next_graphics = enabled && graphics_duration > game_tick_delay;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PresentationBenchmarkMeasurement {
+    started: Option<Instant>,
+    simulation_frame: u64,
+    submissions: u64,
+    refreshed_frames: u64,
+    graphics_total: Duration,
+    graphics_max: Duration,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PresentationBenchmarkReport {
+    elapsed: Duration,
+    submissions: u64,
+    refreshed_frames: u64,
+    simulation_frames: u64,
+    graphics_average: Duration,
+    graphics_max: Duration,
+}
+
+impl PresentationBenchmarkReport {
+    fn machine_line(self) -> String {
+        let elapsed_seconds = self.elapsed.as_secs_f64();
+        let submission_fps = self.submissions as f64 / elapsed_seconds;
+        let simulation_fps = self.simulation_frames as f64 / elapsed_seconds;
+        format!(
+            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds={elapsed_seconds:.6} successful_present_submissions={} presentation_submission_fps={submission_fps:.6} refreshed_frames={} simulation_frames={} simulation_fps={simulation_fps:.6} average_graphics_pass_ms={:.6} max_graphics_pass_ms={:.6}",
+            self.submissions,
+            self.refreshed_frames,
+            self.simulation_frames,
+            self.graphics_average.as_secs_f64() * 1_000.0,
+            self.graphics_max.as_secs_f64() * 1_000.0,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PresentationBenchmark {
+    window: Duration,
+    first_successful_presentation: Option<Instant>,
+    measurement: PresentationBenchmarkMeasurement,
+    finished: bool,
+}
+
+impl PresentationBenchmark {
+    fn new(window: Duration) -> Self {
+        Self {
+            window,
+            first_successful_presentation: None,
+            measurement: PresentationBenchmarkMeasurement::default(),
+            finished: false,
+        }
+    }
+
+    fn poll(
+        &mut self,
+        running: bool,
+        now: Instant,
+        simulation_frame: u64,
+    ) -> Option<PresentationBenchmarkReport> {
+        if self.finished {
+            return None;
+        }
+        if !running {
+            self.first_successful_presentation = None;
+            self.measurement = PresentationBenchmarkMeasurement::default();
+            return None;
+        }
+        let Some(first_presentation) = self.first_successful_presentation else {
+            return None;
+        };
+        let Some(started) = self.measurement.started else {
+            if now.saturating_duration_since(first_presentation) >= PRESENTATION_BENCHMARK_WARMUP {
+                self.measurement.started = Some(now);
+                self.measurement.simulation_frame = simulation_frame;
+            }
+            return None;
+        };
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed < self.window {
+            return None;
+        }
+
+        self.finished = true;
+        let submissions = self.measurement.submissions;
+        let graphics_average = if submissions == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(
+                self.measurement.graphics_total.as_secs_f64() / submissions as f64,
+            )
+        };
+        Some(PresentationBenchmarkReport {
+            elapsed,
+            submissions,
+            refreshed_frames: self.measurement.refreshed_frames,
+            simulation_frames: simulation_frame.saturating_sub(self.measurement.simulation_frame),
+            graphics_average,
+            graphics_max: self.measurement.graphics_max,
+        })
+    }
+
+    fn record_successful_presentation(
+        &mut self,
+        now: Instant,
+        graphics_duration: Duration,
+        refreshed: bool,
+    ) {
+        if self.finished {
+            return;
+        }
+        self.first_successful_presentation.get_or_insert(now);
+        if self.measurement.started.is_none() {
+            return;
+        }
+        self.measurement.submissions = self.measurement.submissions.saturating_add(1);
+        self.measurement.refreshed_frames = self
+            .measurement
+            .refreshed_frames
+            .saturating_add(u64::from(refreshed));
+        self.measurement.graphics_total = self
+            .measurement
+            .graphics_total
+            .saturating_add(graphics_duration);
+        self.measurement.graphics_max = self.measurement.graphics_max.max(graphics_duration);
+    }
+}
+
+fn parse_presentation_benchmark_window(raw: &str) -> Option<Duration> {
+    raw.parse::<u64>()
+        .ok()
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+}
+
+fn presentation_benchmark_from_env() -> Option<PresentationBenchmark> {
+    std::env::var(PRESENTATION_BENCHMARK_ENV)
+        .ok()
+        .as_deref()
+        .and_then(parse_presentation_benchmark_window)
+        .map(PresentationBenchmark::new)
+}
+
+fn advance_graphics_deadline(deadline: Instant, now: Instant, interval: Duration) -> Instant {
+    let next = deadline + interval;
+    if next > now {
+        next
+    } else {
+        // Coalesce missed timer periods instead of issuing catch-up redraws.
+        now + interval
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct NetworkControlPacing {
     behind: u32,
@@ -15528,6 +15811,7 @@ fn frame_schedule_for_mode(
     mode: AppMode,
     game_tick_delay_ms: u64,
     game_tick_delay_revision: u64,
+    max_refresh_delay_ms: u64,
 ) -> FrameSchedule {
     match mode {
         AppMode::Menu | AppMode::Loading => FrameSchedule {
@@ -15537,10 +15821,10 @@ fn frame_schedule_for_mode(
         },
         AppMode::Running => {
             let game_tick_delay_ms = game_tick_delay_ms.max(1);
-            let max_refresh_ms = MAX_REFRESH_INTERVAL.as_millis() as u64;
+            let max_refresh_ms = max_refresh_delay_ms.max(1);
             // C4Application::SetGameTickDelay keeps graphics/input wakeups
             // responsive at slow game speeds by choosing a divisor no larger
-            // than Config.Graphics.MaxRefreshDelay (default 30 ms).
+            // than the configured Graphics.MaxRefreshDelay.
             let refresh_ms = if game_tick_delay_ms < max_refresh_ms {
                 game_tick_delay_ms
             } else {
@@ -15560,6 +15844,7 @@ fn synchronize_frame_schedule(
     mode: AppMode,
     game_tick_delay_ms: u64,
     game_tick_delay_revision: u64,
+    max_refresh_delay_ms: u64,
     frame_schedule: &mut FrameSchedule,
     accumulator: &mut Duration,
 ) -> bool {
@@ -15567,6 +15852,7 @@ fn synchronize_frame_schedule(
         mode,
         game_tick_delay_ms,
         game_tick_delay_revision,
+        max_refresh_delay_ms,
     );
     if next_schedule == *frame_schedule {
         return false;
@@ -15580,6 +15866,7 @@ fn accumulate_frame_time_for_mode(
     mode: AppMode,
     game_tick_delay_ms: u64,
     game_tick_delay_revision: u64,
+    max_refresh_delay_ms: u64,
     frame_schedule: &mut FrameSchedule,
     accumulator: &mut Duration,
     elapsed: Duration,
@@ -15593,6 +15880,7 @@ fn accumulate_frame_time_for_mode(
         mode,
         game_tick_delay_ms,
         game_tick_delay_revision,
+        max_refresh_delay_ms,
         frame_schedule,
         accumulator,
     );
@@ -15665,6 +15953,7 @@ fn advance_simulation_pass(
             app.mode,
             app.engine.game_tick_delay_ms(),
             app.engine.game_tick_delay_revision(),
+            app.max_refresh_delay_ms,
             frame_schedule,
             accumulator,
         );
@@ -21965,6 +22254,23 @@ fn configured_allow_scripting_in_replays(config: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+fn configured_auto_frame_skip(config: &[u8]) -> bool {
+    lc_app::configured_native_boolean(config, "Graphics", "AutoFrameSkip").unwrap_or(true)
+}
+
+/// Freeze C4GameParameters at game activation. Network JoinData is
+/// authoritative; otherwise an embedded Parameters.txt overrides the current
+/// process configuration exactly as C4GameParameters::Load does.
+fn frozen_auto_frame_skip(
+    configured: bool,
+    embedded_parameters: Option<bool>,
+    synchronized_parameters: Option<bool>,
+) -> bool {
+    synchronized_parameters
+        .or(embedded_parameters)
+        .unwrap_or(configured)
+}
+
 fn configured_console_script_strictness(config: &[u8]) -> lc_engine::ScriptStrictness {
     let Some(value) = lc_app::configured_native_scalar(
         config,
@@ -24835,6 +25141,8 @@ impl GameApp {
             frames_since_second: 0,
             full_speed: false,
             frame_skip: 1,
+            auto_frame_skip: configured_auto_frame_skip(&native_config),
+            max_refresh_delay_ms: configured_max_refresh_delay_ms(&native_config),
             network_stats: None,
             network_stats_clients: HashSet::new(),
             network_stats_players: HashSet::new(),
@@ -25656,21 +25964,15 @@ impl GameApp {
                 composer
                     .draw_native(|physical, geometry| -> Result<()> {
                         let (width, height) = geometry.physical_size();
-                        let mut surface = Surface::from_bytes(
-                            width,
-                            height,
-                            PixelFormat::Rgba8888,
-                            physical.to_vec(),
-                        )?;
+                        let mut surface = RgbaSurfaceViewMut::new(width, height, physical)?;
                         let (logical_width, logical_height) = geometry.logical_size();
-                        loader.render_native_text(
+                        loader.render_native_text_to(
                             &mut surface,
                             default_fonts,
                             logical_width,
                             logical_height,
                             gamma,
                         )?;
-                        physical.copy_from_slice(surface.pixels());
                         Ok(())
                     })
                     .map_err(|error| self.loader_boundary(error.to_string()))?;
@@ -25681,10 +25983,8 @@ impl GameApp {
             let fonts = batch.fonts.as_deref().unwrap_or(default_fonts);
             composer.draw_native(|physical, geometry| -> Result<()> {
                 let (width, height) = geometry.physical_size();
-                let mut surface =
-                    Surface::from_bytes(width, height, PixelFormat::Rgba8888, physical.to_vec())?;
-                fonts.draw_captured_text(&mut surface, &batch.text, geometry.logical_size());
-                physical.copy_from_slice(surface.pixels());
+                let mut surface = RgbaSurfaceViewMut::new(width, height, physical)?;
+                fonts.draw_captured_text_to(&mut surface, &batch.text, geometry.logical_size());
                 Ok(())
             })?;
         }
@@ -39813,6 +40113,7 @@ impl GameApp {
             join_data.parameters.fair_crew_strength,
             join_data.parameters.fair_crew_forced,
             join_data.parameters.allow_debug,
+            join_data.parameters.auto_frame_skip,
             synchronized_team_configuration(&join_data.parameters),
             team_registry,
         ));
@@ -61340,8 +61641,9 @@ impl GameApp {
         self.show_log_timestamps = load_show_log_timestamps(paths);
         self.show_folder_maps = load_show_folder_maps(paths);
         self.ready_check_toasts_enabled = load_ready_check_toasts_enabled(paths);
-        self.allow_scripting_in_replays =
-            configured_allow_scripting_in_replays(&load_native_config_bytes(paths));
+        let native_config = load_native_config_bytes(paths);
+        self.allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
+        self.max_refresh_delay_ms = configured_max_refresh_delay_ms(&native_config);
         let record = load_recording_flag(paths);
         self.startup_view_flags.record = record;
         self.recording_enabled = record && self.recordings_dir.is_some();
@@ -61747,6 +62049,7 @@ impl GameApp {
                 fair_crew_strength,
                 fair_crew_forced,
                 allow_debug,
+                auto_frame_skip,
                 team_configuration,
                 team_registry,
             )) = self
@@ -61762,6 +62065,7 @@ impl GameApp {
                         snapshot.parameters.fair_crew_strength,
                         snapshot.parameters.fair_crew_forced,
                         snapshot.parameters.allow_debug,
+                        snapshot.parameters.auto_frame_skip,
                         synchronized_team_configuration(&snapshot.parameters),
                         runtime_teams_from_join_snapshot(&snapshot.parameters.teams),
                     )
@@ -61834,6 +62138,7 @@ impl GameApp {
                 fair_crew_strength,
                 fair_crew_forced,
                 allow_debug,
+                auto_frame_skip,
                 team_configuration,
                 team_registry,
             );
@@ -75605,13 +75910,15 @@ impl GameApp {
                 &mut self.graphics,
                 &mut self.pending_native_presentation,
             );
-            self.graphics.render_frame_hud_chrome(pending_chrome);
+            self.graphics
+                .render_frame_hud_chrome_without_atlas(pending_chrome);
             Self::next_native_overlay_parts(
                 &mut self.graphics,
                 &mut self.pending_native_presentation,
             );
         } else {
-            self.graphics.render_frame(&self.snapshot, &viewports);
+            self.graphics
+                .render_frame_without_atlas(&self.snapshot, &viewports);
         }
         // C4Viewport::AdjustPosition consumes ViewOffs for an ownerless
         // physical viewport after each successful draw, even when film mode
@@ -77391,7 +77698,7 @@ impl GameApp {
                 allow_debug: self.engine.allow_debug(),
                 is_network_game: self.network.is_some(),
                 control_rate: self.engine.control_rate(),
-                auto_frame_skip: false,
+                auto_frame_skip: self.auto_frame_skip,
                 rules: defaults.rules.clone(),
                 goals: defaults.goals.clone(),
                 league: legacy_text(&self.network_league_name),
@@ -77414,6 +77721,7 @@ impl GameApp {
         parameters.allow_debug = self.engine.allow_debug();
         parameters.is_network_game = self.network.is_some();
         parameters.control_rate = self.engine.control_rate();
+        parameters.auto_frame_skip = self.auto_frame_skip;
         parameters.player_infos = self.recording_player_info_snapshot();
         parameters.clients =
             lc_network::JoinClientRegistrySnapshot::new(self.control_clients.snapshot());
@@ -79014,6 +79322,20 @@ impl GameApp {
                     prepared.allow_debug,
                 )
             });
+        let synchronized_auto_frame_skip = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .map(|prepared| prepared.auto_frame_skip);
+        let embedded_auto_frame_skip = scenario_data
+            .lobby_metadata()
+            .and_then(ScenarioLobbyMetadata::embedded_game_parameter_values)
+            .map(|parameters| parameters.auto_frame_skip());
+        let auto_frame_skip = frozen_auto_frame_skip(
+            configured_auto_frame_skip(&load_native_config_bytes(self.app_paths.as_ref())),
+            embedded_auto_frame_skip,
+            synchronized_auto_frame_skip,
+        );
         let offline_startup_players = self
             .loading_state
             .as_mut()
@@ -79307,6 +79629,7 @@ impl GameApp {
         }
         self.advance_scenario_loader(95, "Scenario activation state prepared");
 
+        self.auto_frame_skip = auto_frame_skip;
         self.engine = engine;
         self.runtime_player_big_icons.clear();
         self.runtime_player_big_icon_misses.clear();
@@ -79721,6 +80044,8 @@ impl GameApp {
             scenario = %scenario.title,
             "starting sandbox fallback scenario"
         );
+        self.auto_frame_skip =
+            configured_auto_frame_skip(&load_native_config_bytes(self.app_paths.as_ref()));
 
         self.active_game_graphics = None;
         self.ingame_menu_gfx = None;
@@ -96514,6 +96839,7 @@ func Award()
             app.mode,
             app.engine.game_tick_delay_ms(),
             app.engine.game_tick_delay_revision(),
+            app.max_refresh_delay_ms,
         );
         let accumulator = schedule.simulation_interval;
         (app, schedule, accumulator)
@@ -96572,6 +96898,7 @@ func Award()
             app.mode,
             app.engine.game_tick_delay_ms(),
             app.engine.game_tick_delay_revision(),
+            app.max_refresh_delay_ms,
         );
         let mut accumulator = Duration::ZERO;
         let first_frame = app.engine.frame();
@@ -96633,6 +96960,146 @@ func Award()
     }
 
     #[test]
+    fn automatic_frame_skip_uses_cpp_strict_slow_graphics_threshold() {
+        let mut frame_skip = AutomaticFrameSkip::default();
+        let tick_delay = Duration::from_millis(28);
+
+        frame_skip.finish_graphics_pass(true, tick_delay, tick_delay);
+        assert!(!frame_skip.begin_graphics_pass(true));
+
+        frame_skip.finish_graphics_pass(
+            true,
+            tick_delay + Duration::from_millis(1),
+            tick_delay,
+        );
+        assert!(frame_skip.begin_graphics_pass(true));
+    }
+
+    #[test]
+    fn automatic_frame_skip_never_skips_two_consecutive_graphics_passes() {
+        let mut frame_skip = AutomaticFrameSkip::default();
+        frame_skip.finish_graphics_pass(
+            true,
+            Duration::from_millis(29),
+            Duration::from_millis(28),
+        );
+
+        assert!(frame_skip.begin_graphics_pass(true));
+        assert!(!frame_skip.begin_graphics_pass(true));
+    }
+
+    #[test]
+    fn automatic_frame_skip_is_consumed_by_an_already_suppressed_pass() {
+        let mut frame_skip = AutomaticFrameSkip::default();
+        frame_skip.finish_graphics_pass(
+            true,
+            Duration::from_millis(29),
+            Duration::from_millis(28),
+        );
+
+        frame_skip.consume_suppressed_graphics_pass();
+        assert!(!frame_skip.begin_graphics_pass(true));
+    }
+
+    #[test]
+    fn automatic_frame_skip_freezes_cpp_parameter_precedence() {
+        assert!(configured_auto_frame_skip(b""));
+        assert!(!configured_auto_frame_skip(
+            b"[Graphics]\nAutoFrameSkip=false\n"
+        ));
+        assert!(!frozen_auto_frame_skip(true, Some(false), None));
+        assert!(frozen_auto_frame_skip(false, Some(false), Some(true)));
+    }
+
+    #[test]
+    fn presentation_benchmark_parser_requires_positive_integer_seconds() {
+        assert_eq!(
+            parse_presentation_benchmark_window("5"),
+            Some(Duration::from_secs(5))
+        );
+        for rejected in ["", "0", "-1", "1.5", "five"] {
+            assert_eq!(parse_presentation_benchmark_window(rejected), None);
+        }
+    }
+
+    #[test]
+    fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
+        let base = Instant::now();
+        let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
+
+        assert_eq!(benchmark.poll(false, base, 10), None);
+        benchmark.record_successful_presentation(base, Duration::from_millis(100), true);
+        assert_eq!(benchmark.poll(true, base, 10), None);
+        assert_eq!(
+            benchmark.poll(
+                true,
+                base + PRESENTATION_BENCHMARK_WARMUP - Duration::from_millis(1),
+                69,
+            ),
+            None
+        );
+        assert_eq!(
+            benchmark.poll(true, base + PRESENTATION_BENCHMARK_WARMUP, 70),
+            None
+        );
+        benchmark.record_successful_presentation(
+            base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(10),
+            Duration::from_millis(10),
+            true,
+        );
+        benchmark.record_successful_presentation(
+            base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(20),
+            Duration::from_millis(20),
+            false,
+        );
+        assert_eq!(
+            benchmark.poll(
+                true,
+                base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(2_999),
+                174,
+            ),
+            None
+        );
+
+        let report = benchmark
+            .poll(
+                true,
+                base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_secs(3),
+                175,
+            )
+            .expect("measurement window completes");
+        assert_eq!(report.elapsed, Duration::from_secs(3));
+        assert_eq!(report.submissions, 2);
+        assert_eq!(report.refreshed_frames, 1);
+        assert_eq!(report.simulation_frames, 105);
+        assert_eq!(report.graphics_average, Duration::from_millis(15));
+        assert_eq!(report.graphics_max, Duration::from_millis(20));
+        assert_eq!(
+            report.machine_line(),
+            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000"
+        );
+        assert_eq!(benchmark.poll(true, base + Duration::from_secs(10), 999), None);
+    }
+
+    #[test]
+    fn graphics_deadline_ignores_early_wakes_and_coalesces_missed_periods() {
+        let base = Instant::now();
+        let interval = Duration::from_millis(14);
+        let deadline = base + interval;
+
+        assert!(base + Duration::from_millis(10) < deadline);
+        assert_eq!(
+            advance_graphics_deadline(deadline, deadline, interval),
+            base + Duration::from_millis(28)
+        );
+        let late = base + Duration::from_millis(50);
+        assert_eq!(
+            advance_graphics_deadline(deadline, late, interval),
+            late + interval
+        );
+    }
+
+    #[test]
     fn network_control_catch_up_stops_at_a_ready_tick_gap() {
         let mut gate = NetworkTickGate::default();
         gate.queue(7, 7, Vec::new());
@@ -96667,22 +97134,62 @@ func Award()
     }
 
     #[test]
+    fn max_refresh_delay_defaults_to_rust_16_ms_and_honors_positive_config() {
+        assert_eq!(configured_max_refresh_delay_ms(b""), 16);
+        assert_eq!(
+            configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=0\n"),
+            16
+        );
+        assert_eq!(
+            configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=-5\n"),
+            16
+        );
+        assert_eq!(
+            configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=30\n"),
+            30
+        );
+    }
+
+    #[test]
+    fn max_refresh_delay_uses_cpp_divisor_without_speeding_simulation() {
+        let default = frame_schedule_for_mode(AppMode::Running, 28, 1, 16);
+        assert_eq!(default.simulation_interval, Duration::from_millis(28));
+        assert_eq!(default.refresh_interval, Duration::from_millis(14));
+
+        let explicit_native_default = frame_schedule_for_mode(AppMode::Running, 28, 1, 30);
+        assert_eq!(
+            explicit_native_default.simulation_interval,
+            Duration::from_millis(28)
+        );
+        assert_eq!(
+            explicit_native_default.refresh_interval,
+            Duration::from_millis(28)
+        );
+
+        let slow = frame_schedule_for_mode(AppMode::Running, 1_000, 1, 16);
+        assert_eq!(slow.simulation_interval, Duration::from_millis(1_000));
+        assert_eq!(slow.refresh_interval, Duration::from_millis(15));
+    }
+
+    #[test]
     fn event_loop_uses_cpp_startup_and_ingame_tick_delays() {
         // C4Application starts and returns to startup at 16 ms, while
-        // C4Game::Init switches the running simulation to 28 ms
-        // (C4Application.cpp:44,234; C4Game.cpp:63,443).
+        // C4Game::Init switches the running simulation to 28 ms. Rust's
+        // intentional missing-key refresh cap divides that into 14 ms
+        // presentation opportunities (C4Application.cpp:44,234,510-531;
+        // C4Game.cpp:63,443).
         let startup = FrameSchedule {
             simulation_interval: STARTUP_FRAME_INTERVAL,
             refresh_interval: STARTUP_FRAME_INTERVAL,
             running_revision: None,
         };
-        assert_eq!(frame_schedule_for_mode(AppMode::Menu, 28, 1), startup);
-        assert_eq!(frame_schedule_for_mode(AppMode::Loading, 28, 1), startup);
+        assert_eq!(frame_schedule_for_mode(AppMode::Menu, 28, 1, 16), startup);
+        assert_eq!(frame_schedule_for_mode(AppMode::Loading, 28, 1, 16), startup);
         assert_eq!(
-            frame_schedule_for_mode(AppMode::Running, 28, 1),
+            frame_schedule_for_mode(AppMode::Running, 28, 1, 16),
             FrameSchedule {
                 simulation_interval: INGAME_FRAME_INTERVAL,
-                refresh_interval: INGAME_FRAME_INTERVAL,
+                refresh_interval: Duration::from_millis(14),
                 running_revision: Some(1),
             }
         );
@@ -96693,6 +97200,7 @@ func Award()
             AppMode::Running,
             28,
             1,
+            16,
             &mut schedule,
             &mut accumulator,
             Duration::from_millis(10),
@@ -96708,6 +97216,7 @@ func Award()
             AppMode::Running,
             28,
             1,
+            16,
             &mut schedule,
             &mut accumulator,
             Duration::from_millis(27),
@@ -96718,6 +97227,7 @@ func Award()
             AppMode::Running,
             28,
             2,
+            16,
             &mut schedule,
             &mut accumulator,
         ));
@@ -96727,15 +97237,17 @@ func Award()
             AppMode::Running,
             1_000,
             3,
+            16,
             &mut schedule,
             &mut accumulator,
         ));
         assert_eq!(schedule.simulation_interval, Duration::from_millis(1_000));
-        assert_eq!(schedule.refresh_interval, Duration::from_millis(29));
+        assert_eq!(schedule.refresh_interval, Duration::from_millis(15));
         accumulate_frame_time_for_mode(
             AppMode::Running,
             1_000,
             3,
+            16,
             &mut schedule,
             &mut accumulator,
             Duration::from_millis(1_000),
@@ -96746,6 +97258,7 @@ func Award()
             AppMode::Menu,
             1_000,
             3,
+            16,
             &mut schedule,
             &mut accumulator,
             Duration::from_millis(1),
@@ -157851,6 +158364,7 @@ protected func InputCallback(string answer, int player)
                 fair_crew_strength: 0,
                 fair_crew_forced: false,
                 allow_debug: true,
+                auto_frame_skip: true,
                 team_configuration: TeamConfiguration::default(),
                 team_registry: vec![
                     lc_engine::TeamInfo::new(1, "One", 0).with_player_ids(vec![20]),
@@ -178863,6 +179377,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 fair_crew_strength: 0,
                 fair_crew_forced: false,
                 allow_debug: true,
+                auto_frame_skip: true,
                 team_configuration: TeamConfiguration::default(),
                 team_registry: Vec::new(),
             }),
@@ -183195,6 +183710,7 @@ func ControlDig() { dig_count = 1; return(1); }
             app.mode,
             app.engine.game_tick_delay_ms(),
             app.engine.game_tick_delay_revision(),
+            app.max_refresh_delay_ms,
         );
         let mut accumulator = schedule.simulation_interval;
         let halted_pass = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)

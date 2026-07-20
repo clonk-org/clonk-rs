@@ -65,12 +65,16 @@ use lc_engine::{
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
-    SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont, Transform as GraphicsTransform,
+    SurfaceDrawTarget, SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont,
+    Transform as GraphicsTransform,
 };
 use lc_gui::{Rect as GuiRect, Size as GuiSize};
+use rayon::prelude::*;
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::convert::TryFrom;
 use std::hash::{Hash, Hasher};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub use input::InputDispatcher;
@@ -323,7 +327,10 @@ fn apply_material_pattern(
 #[cfg(test)]
 std::thread_local! {
     static MATERIAL_COMPOSITION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static LANDSCAPE_DESTINATION_SAMPLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    // Each test thread owns its counter while scoped Rayon workers receive an
+    // Arc clone from that originating thread. This retains test isolation and
+    // makes increments from parallel landscape rows race-free.
+    static LANDSCAPE_DESTINATION_SAMPLES: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
 }
 
 #[cfg(test)]
@@ -338,12 +345,12 @@ fn material_composition_calls() -> usize {
 
 #[cfg(test)]
 fn reset_landscape_destination_samples() {
-    LANDSCAPE_DESTINATION_SAMPLES.with(|samples| samples.set(0));
+    LANDSCAPE_DESTINATION_SAMPLES.with(|samples| samples.store(0, Ordering::Relaxed));
 }
 
 #[cfg(test)]
 fn landscape_destination_samples() -> usize {
-    LANDSCAPE_DESTINATION_SAMPLES.with(std::cell::Cell::get)
+    LANDSCAPE_DESTINATION_SAMPLES.with(|samples| samples.load(Ordering::Relaxed))
 }
 
 fn compose_material_pixel(
@@ -898,7 +905,7 @@ impl FogDrawContext {
 /// coordinates into chunks no larger than 64 pixels. ClrModMap is sampled at
 /// each transformed chunk corner and GL smooth-shades the two strip
 /// triangles; it does not call `GetModAt` independently for every fragment.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct FogColorQuad {
     x: (f32, f32),
     y: (f32, f32),
@@ -928,16 +935,24 @@ impl FogModulationSample {
     }
 
     fn combine_with(self, base: u32) -> u32 {
+        let [top_left, top_right, bottom_left, bottom_right] = self.modulation;
         interpolate_packed_modulation(
-            self.modulation.map(|fog| modulate_c4_colors(base, fog)),
+            [
+                modulate_c4_colors(base, top_left),
+                modulate_c4_colors(base, top_right),
+                modulate_c4_colors(base, bottom_left),
+                modulate_c4_colors(base, bottom_right),
+            ],
             self.weights,
         )
     }
 
     fn combined_quad_is_nonzero(self, base: u32) -> bool {
-        self.modulation
-            .into_iter()
-            .any(|fog| modulate_c4_colors(base, fog) != 0)
+        let [top_left, top_right, bottom_left, bottom_right] = self.modulation;
+        modulate_c4_colors(base, top_left) != 0
+            || modulate_c4_colors(base, top_right) != 0
+            || modulate_c4_colors(base, bottom_left) != 0
+            || modulate_c4_colors(base, bottom_right) != 0
     }
 }
 
@@ -945,13 +960,12 @@ fn interpolate_packed_modulation(modulation: [u32; 4], weights: [f32; 4]) -> u32
     let mut result = 0u32;
     for channel in 0..4 {
         let shift = channel * 8;
-        let value = modulation
-            .iter()
-            .zip(weights)
-            .map(|(color, weight)| ((color >> shift) & 0xff) as f32 * weight)
-            .sum::<f32>()
-            .round()
-            .clamp(0.0, 255.0) as u32;
+        let mut value = 0.0f32;
+        value += ((modulation[0] >> shift) & 0xff) as f32 * weights[0];
+        value += ((modulation[1] >> shift) & 0xff) as f32 * weights[1];
+        value += ((modulation[2] >> shift) & 0xff) as f32 * weights[2];
+        value += ((modulation[3] >> shift) & 0xff) as f32 * weights[3];
+        let value = value.round().clamp(0.0, 255.0) as u32;
         result |= value << shift;
     }
     result
@@ -964,6 +978,17 @@ struct FogSpriteSampler {
     x_ranges: Vec<(f32, f32)>,
     y_ranges: Vec<(f32, f32)>,
     quads: Vec<FogColorQuad>,
+}
+
+/// One axis of a rasterized fog sample. A blit reuses the same horizontal
+/// coordinate for every row and the same vertical coordinate for every
+/// column; resolving the source chunk once per axis avoids searching the
+/// chunk lists for every fragment while retaining the exact GL triangle
+/// weights.
+#[derive(Clone, Copy)]
+struct FogAxisSample {
+    chunk: usize,
+    offset: f32,
 }
 
 fn interpolate_quad_color(colors: [Color; 4], weights: [f32; 4]) -> Color {
@@ -1131,21 +1156,64 @@ impl FogSpriteSampler {
         normalized_x: f32,
         normalized_y: f32,
     ) -> (FogColorQuad, [f32; 4]) {
-        let local_x = normalized_x.clamp(0.0, 1.0) * self.source_width;
-        let local_y = normalized_y.clamp(0.0, 1.0) * self.source_height;
-        let column = self
-            .x_ranges
+        let x = Self::axis_sample(&self.x_ranges, self.source_width, normalized_x);
+        let y = Self::axis_sample(&self.y_ranges, self.source_height, normalized_y);
+        self.quad_and_weights_for_axes(x, y)
+    }
+
+    fn axis_sample(
+        ranges: &[(f32, f32)],
+        source_extent: f32,
+        normalized: f32,
+    ) -> FogAxisSample {
+        let local = normalized.clamp(0.0, 1.0) * source_extent;
+        let chunk = ranges
             .iter()
-            .position(|range| local_x < range.1)
-            .unwrap_or(self.x_ranges.len() - 1);
-        let row = self
-            .y_ranges
-            .iter()
-            .position(|range| local_y < range.1)
-            .unwrap_or(self.y_ranges.len() - 1);
-        let quad = self.quads[row * self.columns + column];
-        let u = ((local_x - quad.x.0) / (quad.x.1 - quad.x.0)).clamp(0.0, 1.0);
-        let v = ((local_y - quad.y.0) / (quad.y.1 - quad.y.0)).clamp(0.0, 1.0);
+            .position(|range| local < range.1)
+            .unwrap_or(ranges.len() - 1);
+        let range = ranges[chunk];
+        FogAxisSample {
+            chunk,
+            offset: ((local - range.0) / (range.1 - range.0)).clamp(0.0, 1.0),
+        }
+    }
+
+    fn raster_axes(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> (Vec<FogAxisSample>, Vec<FogAxisSample>) {
+        let width_f = width as f32;
+        let height_f = height as f32;
+        let x = (0..width)
+            .map(|position| {
+                Self::axis_sample(
+                    &self.x_ranges,
+                    self.source_width,
+                    (position as f32 + 0.5) / width_f,
+                )
+            })
+            .collect();
+        let y = (0..height)
+            .map(|position| {
+                Self::axis_sample(
+                    &self.y_ranges,
+                    self.source_height,
+                    (position as f32 + 0.5) / height_f,
+                )
+            })
+            .collect();
+        (x, y)
+    }
+
+    fn quad_and_weights_for_axes(
+        &self,
+        x: FogAxisSample,
+        y: FogAxisSample,
+    ) -> (FogColorQuad, [f32; 4]) {
+        let quad = self.quads[y.chunk * self.columns + x.chunk];
+        let u = x.offset;
+        let v = y.offset;
         let weights = if u + v <= 1.0 {
             [1.0 - u - v, u, v, 0.0]
         } else {
@@ -1170,8 +1238,29 @@ impl FogSpriteSampler {
         }
     }
 
+    fn modulation_sample_for_axes(
+        &self,
+        x: FogAxisSample,
+        y: FogAxisSample,
+    ) -> FogModulationSample {
+        let (quad, weights) = self.quad_and_weights_for_axes(x, y);
+        FogModulationSample {
+            modulation: quad.modulation,
+            weights,
+        }
+    }
+
     fn color_at(&self, color: Color, normalized_x: f32, normalized_y: f32) -> Color {
         let (quad, weights) = self.quad_and_weights(normalized_x, normalized_y);
+        interpolate_quad_color(
+            quad.modulation
+                .map(|modulation| modulate_surface_color(color, modulation)),
+            weights,
+        )
+    }
+
+    fn color_at_axes(&self, color: Color, x: FogAxisSample, y: FogAxisSample) -> Color {
+        let (quad, weights) = self.quad_and_weights_for_axes(x, y);
         interpolate_quad_color(
             quad.modulation
                 .map(|modulation| modulate_surface_color(color, modulation)),
@@ -1199,6 +1288,26 @@ impl FogSpriteSampler {
         )
     }
 
+    fn vertical_color_at_axes(
+        &self,
+        x: FogAxisSample,
+        y: FogAxisSample,
+        color_at_y: impl Fn(f32) -> Color,
+    ) -> Color {
+        let (quad, weights) = self.quad_and_weights_for_axes(x, y);
+        let top = color_at_y(quad.y.0 / self.source_height);
+        let bottom = color_at_y(quad.y.1 / self.source_height);
+        interpolate_quad_color(
+            [
+                modulate_surface_color(top, quad.modulation[0]),
+                modulate_surface_color(top, quad.modulation[1]),
+                modulate_surface_color(bottom, quad.modulation[2]),
+                modulate_surface_color(bottom, quad.modulation[3]),
+            ],
+            weights,
+        )
+    }
+
     fn blit_at(
         &self,
         mut blit: SpriteBlitState,
@@ -1206,6 +1315,16 @@ impl FogSpriteSampler {
         normalized_y: f32,
     ) -> SpriteBlitState {
         blit.fog_modulation = Some(self.modulation_sample(normalized_x, normalized_y));
+        blit
+    }
+
+    fn blit_at_axes(
+        &self,
+        mut blit: SpriteBlitState,
+        x: FogAxisSample,
+        y: FogAxisSample,
+    ) -> SpriteBlitState {
+        blit.fog_modulation = Some(self.modulation_sample_for_axes(x, y));
         blit
     }
 }
@@ -1703,9 +1822,10 @@ fn prepare_color_by_owner_fragment(
             modulation = modulate_c4_colors(modulation, global);
         }
     }
+    let uses_mod2 = blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0;
     let quad_modulation_is_nonzero = if modulation != 0 {
         blit.fog_modulation.map_or(true, |fog| {
-            let any_nonzero = fog.combined_quad_is_nonzero(modulation);
+            let any_nonzero = !uses_mod2 || fog.combined_quad_is_nonzero(modulation);
             modulation = fog.combine_with(modulation);
             any_nonzero
         })
@@ -1714,7 +1834,7 @@ fn prepare_color_by_owner_fragment(
     };
     // PerformBlt explicitly disables MOD2 for a completely black modulation
     // quad, not independently at each interpolated fragment (StdGL.cpp:471-472).
-    let mod2 = blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0 && quad_modulation_is_nonzero;
+    let mod2 = uses_mod2 && quad_modulation_is_nonzero;
     shader_modulate_fragment(source, modulation, mod2)
 }
 
@@ -1759,16 +1879,17 @@ fn prepare_sprite_fragment(
     }
 
     let mut modulation = blit.modulation.unwrap_or(0x00ff_ffff);
+    let uses_mod2 = blit.mode & C4GFXBLIT_MOD2 != 0;
     let quad_modulation_is_nonzero = if modulation != 0 {
         blit.fog_modulation.map_or(true, |fog| {
-            let any_nonzero = fog.combined_quad_is_nonzero(modulation);
+            let any_nonzero = !uses_mod2 || fog.combined_quad_is_nonzero(modulation);
             modulation = fog.combine_with(modulation);
             any_nonzero
         })
     } else {
         false
     };
-    let mod2 = blit.mode & C4GFXBLIT_MOD2 != 0 && quad_modulation_is_nonzero;
+    let mod2 = uses_mod2 && quad_modulation_is_nonzero;
     shader_modulate_fragment(source, modulation, mod2)
 }
 
@@ -2392,11 +2513,32 @@ impl CursorAtlas {
 pub struct SkyRenderState {
     settings: SkySettings,
     image: Option<ImageData>,
+    image_is_fully_opaque: bool,
 }
 
 impl SkyRenderState {
     pub fn new(settings: SkySettings, image: Option<ImageData>) -> Self {
-        Self { settings, image }
+        let image_is_fully_opaque = image.as_ref().is_some_and(|image| {
+            if image.width() == 0 || image.height() == 0 {
+                return false;
+            }
+            let Some(expected_len) = (image.width() as usize)
+                .checked_mul(image.height() as usize)
+                .and_then(|pixels| pixels.checked_mul(4))
+            else {
+                return false;
+            };
+            image.pixels().len() == expected_len
+                && image
+                    .pixels()
+                    .chunks_exact(4)
+                    .all(|pixel| pixel[3] == 255)
+        });
+        Self {
+            settings,
+            image,
+            image_is_fully_opaque,
+        }
     }
 
     pub fn settings(&self) -> &SkySettings {
@@ -2405,6 +2547,10 @@ impl SkyRenderState {
 
     pub fn image(&self) -> Option<&ImageData> {
         self.image.as_ref()
+    }
+
+    fn image_is_fully_opaque(&self) -> bool {
+        self.image_is_fully_opaque
     }
 }
 
@@ -2837,6 +2983,424 @@ struct LandscapeRenderCache {
     pixels: Vec<u8>,
 }
 
+// Below this size Rayon scheduling costs more than the independent landscape
+// row work it can distribute. Live viewports are substantially larger, while
+// tiny loader/test surfaces stay on the same scalar row implementation.
+const PARALLEL_LANDSCAPE_MIN_PIXELS: usize = 128 * 128;
+
+/// Immutable inputs for one visible landscape blit. Rows own disjoint RGBA
+/// destination slices; all remaining state is read-only and therefore safe to
+/// share through Rayon's persistent worker pool.
+struct LandscapeRowRenderContext<'a> {
+    grid: &'a PixelGrid,
+    cache_pixels: &'a [u8],
+    cache_width: i32,
+    cache_height: i32,
+    screen_width: u32,
+    screen_height: u32,
+    viewport_y: f32,
+    zoom: f32,
+    world_x: &'a [i32],
+    blit: SpriteBlitState,
+    fog: Option<&'a FogDrawContext>,
+    fog_sampler: Option<&'a FogSpriteSampler>,
+    fog_axes: Option<(&'a [FogAxisSample], &'a [FogAxisSample])>,
+    liquid_animation: Option<(&'a ImageData, [f32; 3])>,
+    gamma: Option<&'a lc_graphics::GammaRamp>,
+    clip: Option<SurfaceRect>,
+    #[cfg(test)]
+    destination_samples: Arc<AtomicUsize>,
+}
+
+impl LandscapeRowRenderContext<'_> {
+    fn visible_x_range(&self, screen_y: u32) -> Option<(usize, usize)> {
+        let Some(clip) = self.clip else {
+            return (self.screen_width != 0).then_some((0, self.screen_width as usize));
+        };
+        let y = i64::from(screen_y);
+        let top = i64::from(clip.y);
+        let bottom = top + i64::from(clip.height);
+        if y < top || y >= bottom {
+            return None;
+        }
+        let surface_right = i64::from(self.screen_width);
+        let left = i64::from(clip.x).clamp(0, surface_right);
+        let right = (i64::from(clip.x) + i64::from(clip.width)).clamp(0, surface_right);
+        (left < right).then_some((left as usize, right as usize))
+    }
+}
+
+/// Draws one landscape row. Both scalar and parallel dispatch use this exact
+/// function so fog interpolation, liquid phase math, gamma, clipping and
+/// alpha compositing cannot drift between paths.
+fn draw_ground_textured_row(
+    context: &LandscapeRowRenderContext<'_>,
+    screen_y: u32,
+    row: &mut [u8],
+) {
+    let row_bytes = context.screen_width as usize * 4;
+    if row.len() < row_bytes {
+        return;
+    }
+    let world_y =
+        (context.viewport_y + (screen_y as f32 + 0.5) / context.zoom).floor() as i32;
+    if world_y < 0 || world_y >= context.cache_height {
+        return;
+    }
+    let Some((start_x, end_x)) = context.visible_x_range(screen_y) else {
+        return;
+    };
+
+    for screen_x in start_x..end_x {
+        let world_x = context.world_x[screen_x];
+        if world_x < 0 || world_x >= context.cache_width {
+            continue;
+        }
+        let source_offset =
+            (world_y as usize * context.cache_width as usize + world_x as usize) * 4;
+        if context.cache_pixels[source_offset + 3] == 0 {
+            continue;
+        }
+        let color = Color::new(
+            context.cache_pixels[source_offset],
+            context.cache_pixels[source_offset + 1],
+            context.cache_pixels[source_offset + 2],
+            context.cache_pixels[source_offset + 3],
+        );
+        let pixel_blit = match (context.fog_sampler, context.fog_axes) {
+            (Some(sampler), Some((x_samples, y_samples))) => sampler.blit_at_axes(
+                context.blit,
+                x_samples[screen_x],
+                y_samples[screen_y as usize],
+            ),
+            _ => fog_sprite_blit_at(
+                None,
+                context.fog,
+                context.blit,
+                (screen_x as f32 + 0.5) / context.screen_width as f32,
+                (screen_y as f32 + 0.5) / context.screen_height as f32,
+                screen_x as i32,
+                screen_y as i32,
+            ),
+        };
+        let source = context
+            .liquid_animation
+            .filter(|_| {
+                context
+                    .grid
+                    .density_at(world_x, world_y)
+                    .is_some_and(|density| (25..50).contains(&density))
+            })
+            .map_or_else(
+                || prepare_sprite_fragment(color, None, None, pixel_blit),
+                |(image, modulation)| {
+                    let delta =
+                        LiquidAnimationCycle::delta_at(image, world_x, world_y, modulation);
+                    prepare_liquid_animation_fragment(color, delta, pixel_blit)
+                },
+            );
+        if source.alpha() == 0 {
+            continue;
+        }
+
+        let destination_offset = screen_x * 4;
+        let destination = if source.alpha() == 255 {
+            Color::transparent()
+        } else {
+            #[cfg(test)]
+            if context.gamma.is_some() {
+                context
+                    .destination_samples
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Color::new(
+                row[destination_offset],
+                row[destination_offset + 1],
+                row[destination_offset + 2],
+                row[destination_offset + 3],
+            )
+        };
+        let output =
+            composite_sprite_fragment(source, destination, pixel_blit, context.gamma);
+        row[destination_offset..destination_offset + 4]
+            .copy_from_slice(&[output.r, output.g, output.b, output.a]);
+    }
+}
+
+fn draw_ground_textured_rows(
+    context: &LandscapeRowRenderContext<'_>,
+    pixels: &mut [u8],
+    parallel: bool,
+) {
+    let row_bytes = context.screen_width as usize * 4;
+    if row_bytes == 0 || context.screen_height == 0 {
+        return;
+    }
+    let row_count = (pixels.len() / row_bytes).min(context.screen_height as usize);
+    let rows = &mut pixels[..row_count * row_bytes];
+    if parallel && row_count > 1 {
+        rows.par_chunks_mut(row_bytes)
+            .enumerate()
+            .for_each(|(screen_y, row)| {
+                draw_ground_textured_row(context, screen_y as u32, row)
+            });
+    } else {
+        for (screen_y, row) in rows.chunks_mut(row_bytes).enumerate() {
+            draw_ground_textured_row(context, screen_y as u32, row);
+        }
+    }
+}
+
+const PARALLEL_SKY_MIN_PIXELS: usize = 128 * 128;
+
+#[derive(Clone, Copy)]
+struct SkyTileBounds {
+    dest_x: i32,
+    dest_y: i32,
+    source_left: i32,
+    source_top: i32,
+    source_right: i32,
+    source_bottom: i32,
+}
+
+impl SkyTileBounds {
+    fn visible(
+        surface_width: u32,
+        surface_height: u32,
+        image_width: u32,
+        image_height: u32,
+        dest_x: i32,
+        dest_y: i32,
+    ) -> Option<Self> {
+        let width = i32::try_from(image_width).unwrap_or(i32::MAX);
+        let height = i32::try_from(image_height).unwrap_or(i32::MAX);
+        let source_left = (-dest_x).clamp(0, width);
+        let source_top = (-dest_y).clamp(0, height);
+        let source_right = (surface_width as i32 - dest_x).clamp(0, width);
+        let source_bottom = (surface_height as i32 - dest_y).clamp(0, height);
+        (source_left < source_right && source_top < source_bottom).then_some(Self {
+            dest_x,
+            dest_y,
+            source_left,
+            source_top,
+            source_right,
+            source_bottom,
+        })
+    }
+
+    fn width(self) -> i32 {
+        self.source_right - self.source_left
+    }
+
+    fn height(self) -> i32 {
+        self.source_bottom - self.source_top
+    }
+
+    fn pixel_count(self) -> usize {
+        self.width() as usize * self.height() as usize
+    }
+
+    fn target_left(self) -> i32 {
+        self.dest_x + self.source_left
+    }
+
+    fn target_top(self) -> i32 {
+        self.dest_y + self.source_top
+    }
+}
+
+struct SkyTileRegion {
+    bounds: SkyTileBounds,
+    fog_sampler: Option<FogSpriteSampler>,
+    fog_axes: Option<(Vec<FogAxisSample>, Vec<FogAxisSample>)>,
+}
+
+impl SkyTileRegion {
+    fn new(
+        bounds: SkyTileBounds,
+        fog: Option<&FogDrawContext>,
+        image_width: u32,
+        image_height: u32,
+    ) -> Self {
+        let fog_sampler = fog.and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
+                (
+                    bounds.target_left() as f32,
+                    bounds.target_top() as f32,
+                    bounds.width() as f32,
+                    bounds.height() as f32,
+                ),
+                (
+                    bounds.source_left as f32,
+                    bounds.source_top as f32,
+                    bounds.width() as f32,
+                    bounds.height() as f32,
+                ),
+                (image_width, image_height),
+                false,
+                |x, y| (x, y),
+            )
+        });
+        let fog_axes = fog_sampler.as_ref().map(|sampler| {
+            sampler.raster_axes(bounds.width() as u32, bounds.height() as u32)
+        });
+        Self {
+            bounds,
+            fog_sampler,
+            fog_axes,
+        }
+    }
+}
+
+struct SkyTileRowRenderContext<'a> {
+    lit_texels: &'a [Color],
+    image_width: usize,
+    surface_width: u32,
+    regions: &'a [SkyTileRegion],
+    region_indices_by_row: &'a [Vec<usize>],
+    base_blit: SpriteBlitState,
+    uses_blit_modulation: bool,
+    fog: Option<&'a FogDrawContext>,
+    gamma: Option<&'a lc_graphics::GammaRamp>,
+    clip: Option<SurfaceRect>,
+}
+
+impl SkyTileRowRenderContext<'_> {
+    fn visible_x_range(&self, screen_y: u32) -> Option<(usize, usize)> {
+        let Some(clip) = self.clip else {
+            return (self.surface_width != 0).then_some((0, self.surface_width as usize));
+        };
+        let y = i64::from(screen_y);
+        let top = i64::from(clip.y);
+        let bottom = top + i64::from(clip.height);
+        if y < top || y >= bottom {
+            return None;
+        }
+        let surface_right = i64::from(self.surface_width);
+        let left = i64::from(clip.x).clamp(0, surface_right);
+        let right = (i64::from(clip.x) + i64::from(clip.width)).clamp(0, surface_right);
+        (left < right).then_some((left as usize, right as usize))
+    }
+}
+
+fn lit_sky_texels(image: &ImageData, lighting: f32) -> Vec<Color> {
+    let expected = (image.width() as usize)
+        .checked_mul(image.height() as usize)
+        .unwrap_or(0);
+    image
+        .pixels()
+        .chunks_exact(4)
+        .take(expected)
+        .map(|pixel| Color::new(pixel[0], pixel[1], pixel[2], pixel[3]).modulate(lighting))
+        .collect()
+}
+
+fn draw_sky_tile_row(
+    context: &SkyTileRowRenderContext<'_>,
+    screen_y: u32,
+    row: &mut [u8],
+) {
+    let row_bytes = context.surface_width as usize * 4;
+    if row.len() < row_bytes {
+        return;
+    }
+    let Some((clip_left, clip_right)) = context.visible_x_range(screen_y) else {
+        return;
+    };
+    let Some(region_indices) = context.region_indices_by_row.get(screen_y as usize) else {
+        return;
+    };
+    for &region_index in region_indices {
+        let Some(region) = context.regions.get(region_index) else {
+            continue;
+        };
+        let bounds = region.bounds;
+        let source_y = screen_y as i32 - bounds.dest_y;
+        if source_y < bounds.source_top || source_y >= bounds.source_bottom {
+            continue;
+        }
+        let target_left = bounds.target_left() as usize;
+        let target_right = (bounds.dest_x + bounds.source_right) as usize;
+        let draw_left = target_left.max(clip_left);
+        let draw_right = target_right.min(clip_right);
+        for target_x in draw_left..draw_right {
+            let source_x = target_x as i32 - bounds.dest_x;
+            let source_index = source_y as usize * context.image_width + source_x as usize;
+            let Some(&color) = context.lit_texels.get(source_index) else {
+                continue;
+            };
+            if color.a == 0 {
+                continue;
+            }
+            let pixel_blit = if context.uses_blit_modulation {
+                match (region.fog_sampler.as_ref(), region.fog_axes.as_ref()) {
+                    (Some(sampler), Some((x_samples, y_samples))) => sampler.blit_at_axes(
+                        context.base_blit,
+                        x_samples[(source_x - bounds.source_left) as usize],
+                        y_samples[(source_y - bounds.source_top) as usize],
+                    ),
+                    _ => fog_sprite_blit_at(
+                        None,
+                        context.fog,
+                        context.base_blit,
+                        (source_x as f32 + 0.5 - bounds.source_left as f32)
+                            / bounds.width() as f32,
+                        (source_y as f32 + 0.5 - bounds.source_top as f32)
+                            / bounds.height() as f32,
+                        target_x as i32,
+                        screen_y as i32,
+                    ),
+                }
+            } else {
+                context.base_blit
+            };
+            let source = prepare_sprite_fragment(color, None, None, pixel_blit);
+            if source.alpha() == 0 {
+                continue;
+            }
+            let destination_offset = target_x * 4;
+            let destination = if source.alpha() == 255 {
+                Color::transparent()
+            } else {
+                Color::new(
+                    row[destination_offset],
+                    row[destination_offset + 1],
+                    row[destination_offset + 2],
+                    row[destination_offset + 3],
+                )
+            };
+            let output =
+                composite_sprite_fragment(source, destination, pixel_blit, context.gamma);
+            row[destination_offset..destination_offset + 4]
+                .copy_from_slice(&[output.r, output.g, output.b, output.a]);
+        }
+    }
+}
+
+fn draw_sky_tile_rows(
+    context: &SkyTileRowRenderContext<'_>,
+    pixels: &mut [u8],
+    surface_height: u32,
+    parallel: bool,
+) {
+    let row_bytes = context.surface_width as usize * 4;
+    if row_bytes == 0 || surface_height == 0 {
+        return;
+    }
+    let row_count = (pixels.len() / row_bytes).min(surface_height as usize);
+    let rows = &mut pixels[..row_count * row_bytes];
+    if parallel && row_count > 1 {
+        rows.par_chunks_mut(row_bytes)
+            .enumerate()
+            .for_each(|(screen_y, row)| draw_sky_tile_row(context, screen_y as u32, row));
+    } else {
+        for (screen_y, row) in rows.chunks_mut(row_bytes).enumerate() {
+            draw_sky_tile_row(context, screen_y as u32, row);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LiquidAnimationCycle {
     values: [f32; 3],
@@ -2908,8 +3472,138 @@ struct PendingViewportForeground {
     destination: SurfacePoint,
 }
 
+const MAX_TILED_UNDERLAY_CACHE_ENTRIES: usize = 8;
+
+struct TiledUnderlayCacheEntry {
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    origin_x: i32,
+    origin_y: i32,
+    surface: Surface,
+}
+
+/// Gamma-transformed `Background.png` tiles are presentation-invariant until
+/// the output geometry, image, gamma ramp, or tile origin changes. Retain the
+/// completed backing surfaces so ordinary frames only copy their bytes rather
+/// than running the fragment gamma lookup for every background pixel again.
+///
+/// The small fixed entry bound covers the fullscreen backing and the stable
+/// split-screen viewport rectangles without letting transient capture sizes or
+/// origins retain unbounded frame-sized allocations.
+struct TiledUnderlayCache {
+    frame_surface: Option<(u32, u32, PixelFormat)>,
+    background: Option<ImageData>,
+    gamma: Option<lc_graphics::GammaRamp>,
+    entries: Vec<TiledUnderlayCacheEntry>,
+    #[cfg(test)]
+    rasterizations: usize,
+}
+
+impl Default for TiledUnderlayCache {
+    fn default() -> Self {
+        Self {
+            frame_surface: None,
+            background: None,
+            gamma: None,
+            entries: Vec::new(),
+            #[cfg(test)]
+            rasterizations: 0,
+        }
+    }
+}
+
+impl TiledUnderlayCache {
+    fn begin_frame(
+        &mut self,
+        surface: &Surface,
+        background: Option<&ImageData>,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        let frame_surface = Some((surface.width(), surface.height(), surface.format()));
+        if self.frame_surface != frame_surface {
+            self.entries.clear();
+            self.frame_surface = frame_surface;
+        }
+        self.prepare_source(background, gamma);
+    }
+
+    fn prepare_source(
+        &mut self,
+        background: Option<&ImageData>,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        if self.background.as_ref() == background && self.gamma.as_ref() == gamma {
+            return;
+        }
+        self.entries.clear();
+        self.background = background.cloned();
+        self.gamma = gamma.cloned();
+    }
+
+    fn draw(
+        &mut self,
+        surface: &mut Surface,
+        background: &ImageData,
+        origin_x: i32,
+        origin_y: i32,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        self.prepare_source(Some(background), gamma);
+
+        let width = surface.width();
+        let height = surface.height();
+        let format = surface.format();
+        if let Some(entry) = self.entries.iter().find(|entry| {
+            entry.width == width
+                && entry.height == height
+                && entry.format == format
+                && entry.origin_x == origin_x
+                && entry.origin_y == origin_y
+        }) {
+            surface.pixels_mut().copy_from_slice(entry.surface.pixels());
+            return;
+        }
+
+        // Malformed or empty images make the uncached operation a no-op.
+        // Preserve that behavior instead of copying a zeroed cache surface.
+        let source_stride = (background.width() as usize).saturating_mul(4);
+        if background.width() == 0
+            || background.height() == 0
+            || width == 0
+            || height == 0
+            || background.pixels().len()
+                < source_stride.saturating_mul(background.height() as usize)
+            || surface.stride() < (width as usize).saturating_mul(4)
+        {
+            tile_image_on_surface(surface, background, origin_x, origin_y, gamma);
+            return;
+        }
+
+        let mut cached = Surface::new(width, height, format);
+        tile_image_on_surface(&mut cached, background, origin_x, origin_y, gamma);
+        surface.pixels_mut().copy_from_slice(cached.pixels());
+        if self.entries.len() >= MAX_TILED_UNDERLAY_CACHE_ENTRIES {
+            self.entries.remove(0);
+        }
+        self.entries.push(TiledUnderlayCacheEntry {
+            width,
+            height,
+            format,
+            origin_x,
+            origin_y,
+            surface: cached,
+        });
+        #[cfg(test)]
+        {
+            self.rasterizations += 1;
+        }
+    }
+}
+
 pub struct GraphicsSystem {
     surface: Surface,
+    tiled_underlay_cache: TiledUnderlayCache,
     font: Arc<dyn TextFont>,
     /// The CStdFont-faithful fonts; the HUD's FontRegular when present
     /// (C4GraphicsResource::InitFonts, src/C4GraphicsResource.cpp:144-169).
@@ -3032,6 +3726,7 @@ impl GraphicsSystem {
 
         Self {
             surface,
+            tiled_underlay_cache: TiledUnderlayCache::default(),
             font,
             clonk_fonts: None,
             scenario_label_text: scenario_label.to_string(),
@@ -3305,18 +4000,19 @@ impl GraphicsSystem {
         let (fog, sampler) = self
             .fog_box_sampler(world_aligned)
             .expect("active fog map yields a draw context");
+        let raster_axes = sampler
+            .as_ref()
+            .map(|sampler| sampler.raster_axes(self.surface_width, self.surface_height));
         for y in 0..self.surface_height {
             for x in 0..self.surface_width {
-                let color = sampler.as_ref().map_or_else(
-                    || fog.color_at(color, x as i32, y as i32),
-                    |sampler| {
-                        sampler.color_at(
-                            color,
-                            (x as f32 + 0.5) / self.surface_width as f32,
-                            (y as f32 + 0.5) / self.surface_height as f32,
-                        )
-                    },
-                );
+                let color = match (sampler.as_ref(), raster_axes.as_ref()) {
+                    (Some(sampler), Some((x_samples, y_samples))) => sampler.color_at_axes(
+                        color,
+                        x_samples[x as usize],
+                        y_samples[y as usize],
+                    ),
+                    _ => fog.color_at(color, x as i32, y as i32),
+                };
                 self.draw_prepared_world_color_pixel(x, y, color, gamma);
             }
         }
@@ -4469,6 +5165,20 @@ impl GraphicsSystem {
         self.render_frame_hud_chrome(pending)
     }
 
+    /// Render a complete frame without materializing the diagnostic sprite
+    /// atlas. Production callers that present [`Self::surface`] directly do
+    /// not need the per-surface snapshots returned by [`Self::render_frame`].
+    pub fn render_frame_without_atlas(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        viewports: &[ViewportInput<'_>],
+    ) {
+        let pending = self.render_frame_base(snapshot, viewports);
+        self.render_frame_foreground(&pending);
+        let pending = self.render_frame_hud_players(pending);
+        self.render_frame_hud_chrome_without_atlas(pending);
+    }
+
     /// Render the back buffer and viewports through world cursor labels. In
     /// native-capture mode, foreground-parallax objects are retained for the
     /// next ordered layer so they can still occlude those labels.
@@ -4543,6 +5253,18 @@ impl GraphicsSystem {
         let snapshots = self.collect_sprite_atlas(pending.snapshot);
         self.active_gamma_control_points = Some(pending.pending_gamma_control_points);
         snapshots
+    }
+
+    /// Complete the ordered HUD chrome and gamma lifecycle without
+    /// materializing the diagnostic sprite atlas.
+    pub fn render_frame_hud_chrome_without_atlas(
+        &mut self,
+        pending: PendingHudChromeFrame<'_>,
+    ) {
+        let pending = pending.0;
+        self.assert_pending_frame(&pending);
+        self.draw_hud_chrome(Some(&pending.gamma));
+        self.active_gamma_control_points = Some(pending.pending_gamma_control_points);
     }
 
     /// Render the complete landscape through the first active viewport's
@@ -4670,8 +5392,12 @@ impl GraphicsSystem {
     ) {
         self.active_viewports.clear();
         self.pending_viewport_foregrounds.clear();
-        if let Some(background) = self.hud_graphics.background.as_ref() {
-            tile_image_on_surface(&mut self.surface, background, 0, 0, gamma);
+        let background = self.hud_graphics.background.clone();
+        self.tiled_underlay_cache
+            .begin_frame(&self.surface, background.as_ref(), gamma);
+        if let Some(background) = background.as_ref() {
+            self.tiled_underlay_cache
+                .draw(&mut self.surface, background, 0, 0, gamma);
         } else {
             self.surface.fill(Color::opaque(8, 12, 24));
         }
@@ -4753,12 +5479,6 @@ impl GraphicsSystem {
 
         let rect = self.centered_viewport_rect(rect);
         let format = self.surface.format();
-        let mut viewport_surface = Surface::new(rect.width, rect.height, format);
-        if let Some(background) = self.hud_graphics.background.as_ref() {
-            tile_image_on_surface(&mut viewport_surface, background, rect.x, rect.y, gamma);
-        } else {
-            viewport_surface.fill(Color::opaque(0, 0, 0));
-        }
         self.surface_width = rect.width;
         self.surface_height = rect.height;
 
@@ -4867,13 +5587,6 @@ impl GraphicsSystem {
         self.surface_width = content_width;
         self.surface_height = content_height;
 
-        let capture_native_text = self.surface.is_clonk_text_capture_active();
-        let mut content_surface = Surface::new(content_width.max(1), content_height.max(1), format);
-        if capture_native_text {
-            content_surface.begin_clonk_text_capture();
-        }
-        let main_surface = std::mem::replace(&mut self.surface, content_surface);
-
         let fog_map = build_fog_modulation_map(
             snapshot,
             input.owner,
@@ -4882,18 +5595,59 @@ impl GraphicsSystem {
             view_width,
             view_height,
         );
-        if fog_map
+        let fade_transparent = fog_map
             .as_ref()
-            .is_some_and(|map| map.fade_transparent)
-        {
+            .is_some_and(|map| map.fade_transparent);
+        let has_scroll_borders = offset_x != 0
+            || offset_y != 0
+            || content_width != rect.width
+            || content_height != rect.height;
+        let background = self.hud_graphics.background.clone();
+        let mut viewport_surface = has_scroll_borders.then(|| {
+            let mut surface = Surface::new(rect.width, rect.height, format);
+            draw_viewport_underlay(
+                &mut self.tiled_underlay_cache,
+                &mut surface,
+                background.as_ref(),
+                rect.x,
+                rect.y,
+                gamma,
+            );
+            surface
+        });
+
+        let capture_native_text = self.surface.is_clonk_text_capture_active();
+        let mut content_surface = Surface::new(content_width.max(1), content_height.max(1), format);
+        if capture_native_text {
+            content_surface.begin_clonk_text_capture();
+        }
+        if fade_transparent && viewport_surface.is_none() {
+            // With no scroll borders the world content replaces the complete
+            // viewport. Seed that content directly from the viewport underlay
+            // for translucent FoW instead of allocating an equally-sized
+            // scratch surface, copying it into content, then copying it back.
+            draw_viewport_underlay(
+                &mut self.tiled_underlay_cache,
+                &mut content_surface,
+                background.as_ref(),
+                rect.x,
+                rect.y,
+                gamma,
+            );
+        }
+        let main_surface = std::mem::replace(&mut self.surface, content_surface);
+
+        if fade_transparent {
             // Reset draws FoWColor onto the viewport before enabling the map.
             // Preserve the tiled viewport underlay for translucent colors.
-            for y in 0..content_height {
-                for x in 0..content_width {
-                    if let Some(color) = viewport_surface
-                        .get_pixel((offset_x + x as i32) as u32, (offset_y + y as i32) as u32)
-                    {
-                        let _ = self.surface.set_pixel(x, y, color);
+            if let Some(viewport_surface) = viewport_surface.as_ref() {
+                for y in 0..content_height {
+                    for x in 0..content_width {
+                        if let Some(color) = viewport_surface
+                            .get_pixel((offset_x + x as i32) as u32, (offset_y + y as i32) as u32)
+                        {
+                            let _ = self.surface.set_pixel(x, y, color);
+                        }
                     }
                 }
             }
@@ -5060,8 +5814,14 @@ impl GraphicsSystem {
         self.world_width = saved_world_width;
         self.world_height = saved_world_height;
 
-        blit_surface(&mut viewport_surface, &content_surface, offset_x, offset_y);
-        blit_surface(&mut self.surface, &viewport_surface, rect.x, rect.y);
+        present_viewport_content(
+            &mut self.surface,
+            viewport_surface.as_mut(),
+            &content_surface,
+            rect,
+            offset_x,
+            offset_y,
+        );
         if capture_native_text {
             let _ = self.surface.extend_clonk_text_capture_from(
                 &mut content_surface,
@@ -5402,11 +6162,18 @@ impl GraphicsSystem {
                 .active_fog_map
                 .as_ref()
                 .is_some_and(|map| map.fade_transparent)
+            && !(state.image_is_fully_opaque()
+                && settings
+                    .modulation
+                    .is_none_or(|modulation| modulation >> 24 == 0))
         {
             // The legacy Rust surface starts transparent, while the native
-            // render target already has an opaque backing. Do not synthesize
-            // this backing when Reset has explicitly painted FoWColor: every
-            // world layer must fade independently onto that color.
+            // render target already has an opaque backing. A complete opaque
+            // sky tile with opaque modulation overwrites every destination,
+            // so materializing that otherwise-dead backing would repaint the
+            // whole viewport for no visible result. Do not synthesize it when
+            // Reset has explicitly painted FoWColor either: every world layer
+            // must fade independently onto that color.
             self.fill_world_color(Color::opaque(0, 0, 0), false, gamma);
         }
 
@@ -5491,6 +6258,11 @@ impl GraphicsSystem {
             return;
         }
         let fog = self.fog_box_sampler(true);
+        let fog_raster_axes = fog.as_ref().and_then(|(_, sampler)| {
+            sampler
+                .as_ref()
+                .map(|sampler| sampler.raster_axes(self.surface_width, self.surface_height))
+        });
         let height = self.surface_height.saturating_sub(1).max(1);
         // DrawBoxFade applies the active Sky.Modulation to each color vertex
         // before DrawQuadDw adds ClrModMap modulation at that same vertex.
@@ -5507,17 +6279,18 @@ impl GraphicsSystem {
                 let tinted = fog.as_ref().map_or(tinted, |(fog, sampler)| {
                     sampler.as_ref().map_or_else(
                         || fog.color_at(tinted, x as i32, y as i32),
-                        |sampler| {
-                            sampler.vertical_color_at(
-                                (x as f32 + 0.5) / self.surface_width as f32,
-                                (y as f32 + 0.5) / self.surface_height as f32,
+                        |sampler| match fog_raster_axes.as_ref() {
+                            Some((x_samples, y_samples)) => sampler.vertical_color_at_axes(
+                                x_samples[x as usize],
+                                y_samples[y as usize],
                                 |vertex_y| {
                                     let t = (vertex_y * self.surface_height as f32
                                         / height as f32)
                                         .clamp(0.0, 1.0);
                                     color_at_y(t)
                                 },
-                            )
+                            ),
+                            None => unreachable!("sampler axes accompany a fog sampler"),
                         },
                     )
                 });
@@ -5533,6 +6306,27 @@ impl GraphicsSystem {
         frame: Option<&SkyFrame>,
         lighting: f32,
         gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        let visible_pixels = (self.surface_width as usize)
+            .saturating_mul(self.surface_height as usize);
+        self.tile_sky_image_with_parallel_rows(
+            image,
+            settings,
+            frame,
+            lighting,
+            gamma,
+            visible_pixels >= PARALLEL_SKY_MIN_PIXELS,
+        );
+    }
+
+    fn tile_sky_image_with_parallel_rows(
+        &mut self,
+        image: &ImageData,
+        settings: &SkySettings,
+        frame: Option<&SkyFrame>,
+        lighting: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
+        parallel_rows: bool,
     ) {
         let width = image.width();
         let height = image.height();
@@ -5559,22 +6353,24 @@ impl GraphicsSystem {
         let offset_y = Self::normalize_offset(source_y, height_f);
         let modulation = settings.modulation;
 
+        let mut positions = Vec::new();
         let mut y = -offset_y;
         while y < self.surface_height as f32 {
             let mut x = -offset_x;
             while x < self.surface_width as f32 {
-                self.blit_sky_tile(
-                    image,
-                    x.round() as i32,
-                    y.round() as i32,
-                    modulation,
-                    lighting,
-                    gamma,
-                );
+                positions.push((x.round() as i32, y.round() as i32));
                 x += width_f;
             }
             y += height_f;
         }
+        self.draw_sky_tile_positions_with_parallel_rows(
+            image,
+            &positions,
+            modulation,
+            lighting,
+            gamma,
+            parallel_rows,
+        );
     }
 
     fn blit_sky_tile(
@@ -5586,45 +6382,95 @@ impl GraphicsSystem {
         lighting: f32,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
+        let visible_pixels = SkyTileBounds::visible(
+            self.surface_width,
+            self.surface_height,
+            image.width(),
+            image.height(),
+            dest_x,
+            dest_y,
+        )
+        .map_or(0, SkyTileBounds::pixel_count);
+        self.blit_sky_tile_with_parallel_rows(
+            image,
+            dest_x,
+            dest_y,
+            modulation,
+            lighting,
+            gamma,
+            visible_pixels >= PARALLEL_SKY_MIN_PIXELS,
+        );
+    }
+
+    fn blit_sky_tile_with_parallel_rows(
+        &mut self,
+        image: &ImageData,
+        dest_x: i32,
+        dest_y: i32,
+        modulation: Option<u32>,
+        lighting: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
+        parallel_rows: bool,
+    ) {
+        self.draw_sky_tile_positions_with_parallel_rows(
+            image,
+            &[(dest_x, dest_y)],
+            modulation,
+            lighting,
+            gamma,
+            parallel_rows,
+        );
+    }
+
+    fn draw_sky_tile_positions_with_parallel_rows(
+        &mut self,
+        image: &ImageData,
+        positions: &[(i32, i32)],
+        modulation: Option<u32>,
+        lighting: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
+        parallel_rows: bool,
+    ) {
         let width = image.width();
         let height = image.height();
-        let pixels = image.pixels();
-        let width_i32 = i32::try_from(width).unwrap_or(i32::MAX);
-        let height_i32 = i32::try_from(height).unwrap_or(i32::MAX);
-        // BlitSurfaceTile2 trims an edge tile to the visible source/dest
-        // rectangle before handing it to Blit. Those crop edges therefore
-        // become fresh ClrModMap vertices rather than retaining the vertices
-        // of the offscreen part of the repeated tile.
-        let source_left = (-dest_x).clamp(0, width_i32);
-        let source_top = (-dest_y).clamp(0, height_i32);
-        let source_right = (self.surface_width as i32 - dest_x).clamp(0, width_i32);
-        let source_bottom = (self.surface_height as i32 - dest_y).clamp(0, height_i32);
-        if source_left >= source_right || source_top >= source_bottom {
+        if width == 0 || height == 0 || positions.is_empty() {
             return;
         }
-        let visible_width = source_right - source_left;
-        let visible_height = source_bottom - source_top;
+        let surface_width = self.surface_width;
+        let surface_height = self.surface_height;
         let fog = self.fog_draw_context();
-        let fog_sampler = fog.as_ref().and_then(|fog| {
-            FogSpriteSampler::new(
-                fog,
-                (
-                    (dest_x + source_left) as f32,
-                    (dest_y + source_top) as f32,
-                    visible_width as f32,
-                    visible_height as f32,
-                ),
-                (
-                    source_left as f32,
-                    source_top as f32,
-                    visible_width as f32,
-                    visible_height as f32,
-                ),
-                (width, height),
-                false,
-                |x, y| (x, y),
-            )
-        });
+        // BlitSurfaceTile2 trims each edge tile before handing it to Blit.
+        // Build one sampler per cropped tile so those new crop edges remain
+        // the ClrModMap vertices even though all tiles now share one row pass.
+        let regions = positions
+            .iter()
+            .filter_map(|&(dest_x, dest_y)| {
+                SkyTileBounds::visible(
+                    surface_width,
+                    surface_height,
+                    width,
+                    height,
+                    dest_x,
+                    dest_y,
+                )
+            })
+            .map(|bounds| SkyTileRegion::new(bounds, fog.as_ref(), width, height))
+            .collect::<Vec<_>>();
+        if regions.is_empty() {
+            return;
+        }
+        let mut region_indices_by_row = vec![Vec::new(); surface_height as usize];
+        for (region_index, region) in regions.iter().enumerate() {
+            let top = region.bounds.target_top() as usize;
+            let bottom = (region.bounds.dest_y + region.bounds.source_bottom) as usize;
+            for row in &mut region_indices_by_row[top..bottom] {
+                row.push(region_index);
+            }
+        }
+        // Lighting is constant for the complete tiled draw. C++ applies it
+        // before per-tile modulation/fog, so caching these exact u8 texels
+        // removes repeated work without changing shader ordering.
+        let lit_texels = lit_sky_texels(image, lighting);
         // C4Sky leaves this packed modulation active while PerformBlt folds
         // the ClrModMap into every vertex. Keeping the two values in the blit
         // state preserves native `ModulateClr` ordering and transparency.
@@ -5634,57 +6480,24 @@ impl GraphicsSystem {
             fog_modulation: None,
         };
         let uses_blit_modulation = fog.is_some() || modulation.is_some();
-        for y in source_top as u32..source_bottom as u32 {
-            let target_y = dest_y + y as i32;
-            for x in source_left as u32..source_right as u32 {
-                let target_x = dest_x + x as i32;
-                let idx = ((y * width + x) * 4) as usize;
-                if idx + 3 >= pixels.len() {
-                    continue;
-                }
-                let color = Color::new(
-                    pixels[idx],
-                    pixels[idx + 1],
-                    pixels[idx + 2],
-                    pixels[idx + 3],
-                )
-                .modulate(lighting);
-                if color.a == 0 {
-                    continue;
-                }
-                if uses_blit_modulation {
-                    let pixel_blit = fog_sprite_blit_at(
-                        fog_sampler.as_ref(),
-                        fog.as_ref(),
-                        base_blit,
-                        (x as f32 + 0.5 - source_left as f32) / visible_width as f32,
-                        (y as f32 + 0.5 - source_top as f32) / visible_height as f32,
-                        target_x,
-                        target_y,
-                    );
-                    let source = prepare_sprite_fragment(color, None, None, pixel_blit);
-                    if source.alpha() == 0 {
-                        continue;
-                    }
-                    let destination = self
-                        .surface
-                        .get_pixel(target_x as u32, target_y as u32)
-                        .unwrap_or_default();
-                    let output =
-                        composite_sprite_fragment(source, destination, pixel_blit, gamma);
-                    let _ = self
-                        .surface
-                        .set_pixel(target_x as u32, target_y as u32, output);
-                    continue;
-                }
-                self.draw_prepared_world_color_pixel(
-                    target_x as u32,
-                    target_y as u32,
-                    color,
-                    gamma,
-                );
-            }
-        }
+        let row_context = SkyTileRowRenderContext {
+            lit_texels: &lit_texels,
+            image_width: width as usize,
+            surface_width,
+            regions: &regions,
+            region_indices_by_row: &region_indices_by_row,
+            base_blit,
+            uses_blit_modulation,
+            fog: fog.as_ref(),
+            gamma,
+            clip: self.surface.clip(),
+        };
+        draw_sky_tile_rows(
+            &row_context,
+            self.surface.pixels_mut(),
+            surface_height,
+            parallel_rows,
+        );
     }
 
     fn normalize_offset(offset: f32, dimension: f32) -> f32 {
@@ -5947,6 +6760,21 @@ impl GraphicsSystem {
         &mut self,
         landscape: Option<&Landscape>,
         gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let visible_pixels = (self.surface_width as usize)
+            .saturating_mul(self.surface_height as usize);
+        self.draw_ground_textured_with_parallel_rows(
+            landscape,
+            gamma,
+            visible_pixels >= PARALLEL_LANDSCAPE_MIN_PIXELS,
+        )
+    }
+
+    fn draw_ground_textured_with_parallel_rows(
+        &mut self,
+        landscape: Option<&Landscape>,
+        gamma: Option<&lc_graphics::GammaRamp>,
+        parallel_rows: bool,
     ) -> bool {
         let Some(landscape) = landscape else {
             return false;
@@ -6228,6 +7056,9 @@ impl GraphicsSystem {
                 |x, y| (x, y),
             )
         });
+        let fog_raster_axes = fog_sampler
+            .as_ref()
+            .map(|sampler| sampler.raster_axes(self.surface_width, self.surface_height));
         let liquid_animation = self.liquid_animation_image.as_ref().map(|image| {
             let modulation = self.liquid_animation_cycle.advance();
             (image.clone(), modulation)
@@ -6241,74 +7072,41 @@ impl GraphicsSystem {
         let cache_width = cache.width as i32;
         let cache_height = cache.height as i32;
         let cache_pixels = &cache.pixels;
-        for screen_y in 0..self.surface_height {
-            let world_y = (self.viewport_y + (screen_y as f32 + 0.5) / zoom).floor() as i32;
-            if world_y < 0 || world_y >= cache_height {
-                continue;
-            }
-            for screen_x in 0..self.surface_width {
-                let world_x = (self.viewport_x + (screen_x as f32 + 0.5) / zoom).floor() as i32;
-                if world_x < 0 || world_x >= cache_width {
-                    continue;
-                }
-                let src = ((world_y * cache_width + world_x) * 4) as usize;
-                if cache_pixels[src + 3] == 0 {
-                    continue;
-                }
-                let color = Color::new(
-                    cache_pixels[src],
-                    cache_pixels[src + 1],
-                    cache_pixels[src + 2],
-                    cache_pixels[src + 3],
-                );
-                let pixel_blit = fog_sprite_blit_at(
-                    fog_sampler.as_ref(),
-                    fog.as_ref(),
-                    blit,
-                    (screen_x as f32 + 0.5) / self.surface_width as f32,
-                    (screen_y as f32 + 0.5) / self.surface_height as f32,
-                    screen_x as i32,
-                    screen_y as i32,
-                );
-                let source = liquid_animation
-                    .as_ref()
-                    .filter(|_| {
-                        grid.density_at(world_x, world_y)
-                            .is_some_and(|density| (25..50).contains(&density))
-                    })
-                    .map_or_else(
-                        || prepare_sprite_fragment(color, None, None, pixel_blit),
-                        |(image, modulation)| {
-                            let delta =
-                                LiquidAnimationCycle::delta_at(
-                                    image,
-                                    world_x,
-                                    world_y,
-                                    *modulation,
-                                );
-                            prepare_liquid_animation_fragment(color, delta, pixel_blit)
-                        },
-                    );
-                if source.alpha() == 0 {
-                    continue;
-                }
-                let destination = if source.alpha() == 255 {
-                    Color::transparent()
-                } else {
-                    #[cfg(test)]
-                    if gamma.is_some() {
-                        LANDSCAPE_DESTINATION_SAMPLES
-                            .with(|samples| samples.set(samples.get() + 1));
-                    }
-                    self
-                        .surface
-                        .get_pixel(screen_x, screen_y)
-                        .unwrap_or_default()
-                };
-                let output = composite_sprite_fragment(source, destination, pixel_blit, gamma);
-                let _ = self.surface.set_pixel(screen_x, screen_y, output);
-            }
-        }
+        let world_x = (0..self.surface_width)
+            .map(|screen_x| {
+                (self.viewport_x + (screen_x as f32 + 0.5) / zoom).floor() as i32
+            })
+            .collect::<Vec<_>>();
+        let row_context = LandscapeRowRenderContext {
+            grid,
+            cache_pixels,
+            cache_width,
+            cache_height,
+            screen_width: self.surface_width,
+            screen_height: self.surface_height,
+            viewport_y: self.viewport_y,
+            zoom,
+            world_x: &world_x,
+            blit,
+            fog: fog.as_ref(),
+            fog_sampler: fog_sampler.as_ref(),
+            fog_axes: fog_raster_axes
+                .as_ref()
+                .map(|(x_samples, y_samples)| (x_samples.as_slice(), y_samples.as_slice())),
+            liquid_animation: liquid_animation
+                .as_ref()
+                .map(|(image, modulation)| (image, *modulation)),
+            gamma,
+            clip: self.surface.clip(),
+            #[cfg(test)]
+            destination_samples: LANDSCAPE_DESTINATION_SAMPLES
+                .with(|samples| Arc::clone(samples)),
+        };
+        draw_ground_textured_rows(
+            &row_context,
+            self.surface.pixels_mut(),
+            parallel_rows,
+        );
         true
     }
 
@@ -9968,6 +10766,41 @@ impl GraphicsSystem {
     }
 }
 
+fn draw_viewport_underlay(
+    cache: &mut TiledUnderlayCache,
+    surface: &mut Surface,
+    background: Option<&ImageData>,
+    origin_x: i32,
+    origin_y: i32,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    if let Some(background) = background {
+        cache.draw(surface, background, origin_x, origin_y, gamma);
+    } else {
+        surface.fill(Color::opaque(0, 0, 0));
+    }
+}
+
+fn present_viewport_content(
+    destination: &mut Surface,
+    viewport_underlay: Option<&mut Surface>,
+    content: &Surface,
+    rect: SurfaceRect,
+    offset_x: i32,
+    offset_y: i32,
+) {
+    if let Some(viewport_underlay) = viewport_underlay {
+        blit_surface(viewport_underlay, content, offset_x, offset_y);
+        blit_surface(destination, viewport_underlay, rect.x, rect.y);
+    } else {
+        debug_assert_eq!(offset_x, 0);
+        debug_assert_eq!(offset_y, 0);
+        debug_assert_eq!(content.width(), rect.width);
+        debug_assert_eq!(content.height(), rect.height);
+        blit_surface(destination, content, rect.x, rect.y);
+    }
+}
+
 fn tile_image_on_surface(
     surface: &mut Surface,
     image: &ImageData,
@@ -11868,8 +12701,8 @@ enum BilinearBlend {
 /// 637-786): one quad per power-of-two texture tile, GL_LINEAR sampling with
 /// GL_REPEAT wrap per tile, the blit shader's gamma lookup on the fragment
 /// color, and float blending rounded once on store.
-fn draw_image_bilinear_impl(
-    surface: &mut Surface,
+fn draw_image_bilinear_impl<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
     rect: &GuiRect,
     image: &ImageData,
     gamma: Option<&lc_graphics::GammaRamp>,
@@ -12249,6 +13082,22 @@ pub fn draw_image_bilinear(
     );
 }
 
+pub(crate) fn draw_image_bilinear_target<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
+    rect: &GuiRect,
+    image: &ImageData,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    draw_image_bilinear_impl(
+        surface,
+        rect,
+        image,
+        gamma,
+        BilinearBlend::AlphaOver,
+        None,
+    );
+}
+
 /// Owner-color surface counterpart of [`draw_image_bilinear`]. Filtering
 /// precedes packed C4 `ColorDw` modulation, matching the DrawClr shader.
 pub(crate) fn draw_image_bilinear_owner(
@@ -12416,6 +13265,22 @@ mod tests {
         assert_eq!(map.get_mod_at(32, 32), 0x0087_8787);
         assert_eq!(sampler.modulation_at(0.5, 0.5), 0x0060_6060);
 
+        let (x_samples, y_samples) = sampler.raster_axes(73, 41);
+        for y in 0..41 {
+            for x in 0..73 {
+                let normalized_x = (x as f32 + 0.5) / 73.0;
+                let normalized_y = (y as f32 + 0.5) / 41.0;
+                let scalar = sampler.modulation_sample(normalized_x, normalized_y);
+                let cached = sampler.modulation_sample_for_axes(
+                    x_samples[x as usize],
+                    y_samples[y as usize],
+                );
+                assert_eq!(cached.modulation, scalar.modulation);
+                assert_eq!(cached.weights, scalar.weights);
+                assert_eq!(cached.interpolate(), scalar.interpolate());
+            }
+        }
+
         let flipped_partial = FogSpriteSampler::new(
             &fog,
             (0.0, 0.0, 40.0, 1.0),
@@ -12489,6 +13354,130 @@ mod tests {
             alpha, 255,
             "one nonblack quad vertex keeps MOD2 active at its black corner",
         );
+    }
+
+    #[test]
+    fn cached_fog_axes_match_independent_multichunk_reference() {
+        fn legacy_quad_and_weights(
+            sampler: &FogSpriteSampler,
+            normalized_x: f32,
+            normalized_y: f32,
+        ) -> (FogColorQuad, [f32; 4]) {
+            let local_x = normalized_x.clamp(0.0, 1.0) * sampler.source_width;
+            let local_y = normalized_y.clamp(0.0, 1.0) * sampler.source_height;
+            let column = sampler
+                .x_ranges
+                .iter()
+                .position(|range| local_x < range.1)
+                .unwrap_or(sampler.x_ranges.len() - 1);
+            let row = sampler
+                .y_ranges
+                .iter()
+                .position(|range| local_y < range.1)
+                .unwrap_or(sampler.y_ranges.len() - 1);
+            let quad = sampler.quads[row * sampler.columns + column];
+            let u = ((local_x - quad.x.0) / (quad.x.1 - quad.x.0)).clamp(0.0, 1.0);
+            let v = ((local_y - quad.y.0) / (quad.y.1 - quad.y.0)).clamp(0.0, 1.0);
+            let weights = if u + v <= 1.0 {
+                [1.0 - u - v, u, v, 0.0]
+            } else {
+                [0.0, 1.0 - v, 1.0 - u, u + v - 1.0]
+            };
+            (quad, weights)
+        }
+
+        let map = ClrModMap {
+            resolution_x: 32,
+            resolution_y: 32,
+            width: 9,
+            height: 9,
+            origin_x: -17,
+            origin_y: 11,
+            fade_transparent: false,
+            cells: (0..81)
+                .map(|index| {
+                    let red = (index * 37 % 256) as u32;
+                    let green = (index * 71 % 256) as u32;
+                    let blue = (index * 113 % 256) as u32;
+                    (red << 16) | (green << 8) | blue
+                })
+                .collect(),
+        };
+        let fog = FogDrawContext {
+            map: Arc::new(map),
+            zoom: 1.25,
+        };
+
+        for flipped in [false, true] {
+            let sampler = FogSpriteSampler::new(
+                &fog,
+                (23.5, -9.25, 150.0, 130.0),
+                (13.0, 7.0, 150.0, 130.0),
+                (256, 192),
+                flipped,
+                |x, y| (x * 1.125 + 3.0, y * 0.75 - 4.0),
+            )
+            .unwrap();
+            assert!(sampler.x_ranges.len() > 2);
+            assert!(sampler.y_ranges.len() > 2);
+
+            // These dimensions put pixel centers exactly on the first global
+            // 64px source seams (local x=51 and y=57), pinning `< end`
+            // ownership as well as samples on both sides of every chunk.
+            let (x_samples, y_samples) = sampler.raster_axes(75, 65);
+            for y in 0..65 {
+                for x in 0..75 {
+                    let normalized_x = (x as f32 + 0.5) / 75.0;
+                    let normalized_y = (y as f32 + 0.5) / 65.0;
+                    let (quad, weights) =
+                        legacy_quad_and_weights(&sampler, normalized_x, normalized_y);
+                    let cached_axes = (x_samples[x as usize], y_samples[y as usize]);
+                    let (cached_quad, cached_weights) =
+                        sampler.quad_and_weights_for_axes(cached_axes.0, cached_axes.1);
+                    assert_eq!(cached_quad, quad);
+                    assert_eq!(cached_weights, weights);
+
+                    let color = Color::new(213, 147, 89, 255);
+                    let reference_color = interpolate_quad_color(
+                        quad.modulation
+                            .map(|modulation| modulate_surface_color(color, modulation)),
+                        weights,
+                    );
+                    assert_eq!(
+                        sampler.color_at_axes(color, cached_axes.0, cached_axes.1),
+                        reference_color,
+                    );
+
+                    let color_at_y = |vertex_y: f32| {
+                        Color::new(
+                            (vertex_y * 91.0).round().clamp(0.0, 255.0) as u8,
+                            (vertex_y * 53.0 + 17.0).round().clamp(0.0, 255.0) as u8,
+                            201,
+                            255,
+                        )
+                    };
+                    let top = color_at_y(quad.y.0 / sampler.source_height);
+                    let bottom = color_at_y(quad.y.1 / sampler.source_height);
+                    let reference_vertical = interpolate_quad_color(
+                        [
+                            modulate_surface_color(top, quad.modulation[0]),
+                            modulate_surface_color(top, quad.modulation[1]),
+                            modulate_surface_color(bottom, quad.modulation[2]),
+                            modulate_surface_color(bottom, quad.modulation[3]),
+                        ],
+                        weights,
+                    );
+                    assert_eq!(
+                        sampler.vertical_color_at_axes(
+                            cached_axes.0,
+                            cached_axes.1,
+                            color_at_y,
+                        ),
+                        reference_vertical,
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -12722,6 +13711,147 @@ mod tests {
 
         assert_eq!(graphics.surface().get_pixel(0, 0), Some(expected));
         assert_ne!(expected, stale_offscreen_vertex);
+    }
+
+    #[test]
+    fn parallel_tiled_sky_rows_match_scalar_crops_fog_modulation_and_gamma() {
+        const SURFACE_WIDTH: u32 = 173;
+        const SURFACE_HEIGHT: u32 = 131;
+        const IMAGE_WIDTH: u32 = 37;
+        const IMAGE_HEIGHT: u32 = 29;
+
+        let image = ImageData::new(
+            IMAGE_WIDTH,
+            IMAGE_HEIGHT,
+            (0..IMAGE_HEIGHT)
+                .flat_map(|y| {
+                    (0..IMAGE_WIDTH).flat_map(move |x| {
+                        let alpha = match (x * 5 + y * 7) % 4 {
+                            0 => 0,
+                            1 => 73,
+                            2 => 161,
+                            _ => 255,
+                        };
+                        [
+                            (19 + x * 11 + y * 3) as u8,
+                            (37 + x * 5 + y * 13) as u8,
+                            (53 + x * 17 + y * 7) as u8,
+                            alpha,
+                        ]
+                    })
+                })
+                .collect(),
+        );
+        let settings = SkySettings {
+            has_surface: true,
+            width: IMAGE_WIDTH,
+            height: IMAGE_HEIGHT,
+            parallax_x: 7,
+            parallax_y: 13,
+            modulation: Some(0x2080_c0f0),
+            ..SkySettings::default()
+        };
+        let frame = SkyFrame {
+            settings: settings.clone(),
+            offset_x: 3.375,
+            offset_y: -2.625,
+            fixed: None,
+        };
+        let fog = Arc::new(ClrModMap {
+            resolution_x: 19,
+            resolution_y: 17,
+            width: 14,
+            height: 12,
+            origin_x: -48,
+            origin_y: -35,
+            fade_transparent: false,
+            cells: (0..168)
+                .map(|index| {
+                    let transparency = (index * 13 % 80) as u32;
+                    let red = (64 + index * 17 % 192) as u32;
+                    let green = (48 + index * 29 % 208) as u32;
+                    let blue = (32 + index * 43 % 224) as u32;
+                    (transparency << 24) | (red << 16) | (green << 8) | blue
+                })
+                .collect(),
+        });
+        let make_graphics = || {
+            let mut graphics = GraphicsSystem::new(
+                SURFACE_WIDTH,
+                SURFACE_HEIGHT,
+                SURFACE_HEIGHT as i32,
+                "parallel sky rows",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.viewport_x = 18.75;
+            graphics.viewport_y = -7.25;
+            graphics.viewport_zoom = 1.3;
+            graphics.active_fog_map = Some(Arc::clone(&fog));
+            for (index, pixel) in graphics
+                .surface_mut()
+                .pixels_mut()
+                .chunks_exact_mut(4)
+                .enumerate()
+            {
+                let x = (index as u32 % SURFACE_WIDTH) as u8;
+                let y = (index as u32 / SURFACE_WIDTH) as u8;
+                pixel.copy_from_slice(&[
+                    11u8.wrapping_add(x),
+                    23u8.wrapping_add(y),
+                    41u8.wrapping_add(x ^ y),
+                    255,
+                ]);
+            }
+            graphics
+                .surface_mut()
+                .set_clip(SurfaceRect::new(6, 4, 161, 119));
+            graphics
+        };
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+
+        let mut scalar = make_graphics();
+        scalar.tile_sky_image_with_parallel_rows(
+            &image,
+            &settings,
+            Some(&frame),
+            0.67,
+            Some(&gamma),
+            false,
+        );
+        let mut parallel = make_graphics();
+        parallel.tile_sky_image_with_parallel_rows(
+            &image,
+            &settings,
+            Some(&frame),
+            0.67,
+            Some(&gamma),
+            true,
+        );
+
+        assert_eq!(parallel.surface().pixels(), scalar.surface().pixels());
+        assert_eq!(
+            scalar.surface().get_pixel(0, 0),
+            Some(Color::opaque(11, 23, 41)),
+            "the direct row path must retain pixels outside the surface clip",
+        );
+        assert!(
+            (4..123).any(|y| {
+                (6..167).any(|x| {
+                    let background = Color::opaque(
+                        11u8.wrapping_add(x as u8),
+                        23u8.wrapping_add(y as u8),
+                        41u8.wrapping_add(x as u8 ^ y as u8),
+                    );
+                    scalar.surface().get_pixel(x, y) != Some(background)
+                })
+            }),
+            "the cropped, rounded tiles must exercise the clipped draw region",
+        );
     }
 
     #[test]
@@ -15306,6 +16436,47 @@ mod tests {
     }
 
     #[test]
+    fn no_atlas_completions_match_snapshot_render_state() {
+        let snapshot = make_snapshot();
+        let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
+        let make_graphics = || {
+            GraphicsSystem::new(
+                128,
+                120,
+                120,
+                "No-atlas frame",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            )
+        };
+
+        let mut snapshot_render = make_graphics();
+        let atlas = snapshot_render.render_frame(&snapshot, &viewports);
+        assert!(!atlas.is_empty());
+
+        let mut direct = make_graphics();
+        direct.render_frame_without_atlas(&snapshot, &viewports);
+        assert_eq!(direct.surface().pixels(), snapshot_render.surface().pixels());
+        assert_eq!(
+            direct.active_gamma_control_points,
+            snapshot_render.active_gamma_control_points
+        );
+
+        let mut ordered = make_graphics();
+        let pending = ordered.render_frame_base(&snapshot, &viewports);
+        ordered.render_frame_foreground(&pending);
+        let pending = ordered.render_frame_hud_players(pending);
+        ordered.render_frame_hud_chrome_without_atlas(pending);
+        assert_eq!(ordered.surface().pixels(), snapshot_render.surface().pixels());
+        assert_eq!(
+            ordered.active_gamma_control_points,
+            snapshot_render.active_gamma_control_points
+        );
+    }
+
+    #[test]
     fn hud_chrome_phase_keeps_captured_gamma_after_transparent_seams() {
         let snapshot = make_snapshot();
         let mut changed = snapshot.clone();
@@ -15383,6 +16554,145 @@ mod tests {
     }
 
     #[test]
+    fn tiled_underlay_cache_matches_uncached_pixels_and_reuses_exact_key() {
+        let image = ImageData::new(
+            3,
+            2,
+            vec![
+                4, 32, 160, 255, 48, 96, 144, 192, 200, 120, 40, 128, 12, 64, 192, 96,
+                88, 136, 184, 64, 240, 176, 112, 32,
+            ],
+        );
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x102030, 0x506070, 0xa0b0c0,
+        ]);
+        let mut expected = Surface::new(7, 5, PixelFormat::Rgba8888);
+        tile_image_on_surface(&mut expected, &image, -2, 3, Some(&gamma));
+
+        let mut cache = TiledUnderlayCache::default();
+        let mut cached = Surface::new(7, 5, PixelFormat::Rgba8888);
+        cache.begin_frame(&cached, Some(&image), Some(&gamma));
+        cache.draw(&mut cached, &image, -2, 3, Some(&gamma));
+        assert_eq!(cached.pixels(), expected.pixels());
+        assert_eq!(cache.rasterizations, 1);
+
+        cached.fill(Color::opaque(1, 2, 3));
+        cache.draw(&mut cached, &image, -2, 3, Some(&gamma));
+        assert_eq!(cached.pixels(), expected.pixels());
+        assert_eq!(
+            cache.rasterizations, 1,
+            "an identical frame key must restore the retained backing without retiling"
+        );
+    }
+
+    #[test]
+    fn tiled_underlay_cache_invalidates_all_pixel_inputs() {
+        let image_a = ImageData::new(
+            2,
+            1,
+            vec![24, 72, 120, 255, 200, 160, 80, 128],
+        );
+        let image_b = ImageData::new(
+            2,
+            1,
+            vec![220, 40, 100, 64, 12, 180, 240, 192],
+        );
+        let gamma_a = lc_graphics::GammaRamp::standard();
+        let gamma_b = lc_graphics::GammaRamp::from_control_points([
+            0x081018, 0x405060, 0x90a0b0,
+        ]);
+        let mut cache = TiledUnderlayCache::default();
+
+        let mut surface = Surface::new(3, 2, PixelFormat::Rgba8888);
+        cache.begin_frame(&surface, Some(&image_a), Some(&gamma_a));
+        cache.draw(&mut surface, &image_a, 0, 0, Some(&gamma_a));
+        assert_eq!(cache.rasterizations, 1);
+
+        let mut resized = Surface::new(4, 2, PixelFormat::Rgba8888);
+        cache.begin_frame(&resized, Some(&image_a), Some(&gamma_a));
+        assert!(cache.entries.is_empty(), "an output resize drops old backings");
+        cache.draw(&mut resized, &image_a, 0, 0, Some(&gamma_a));
+        assert_eq!(cache.rasterizations, 2);
+
+        cache.begin_frame(&resized, Some(&image_b), Some(&gamma_a));
+        assert!(
+            cache.entries.is_empty(),
+            "replacing the HUD background drops old-image backings"
+        );
+        cache.draw(&mut resized, &image_b, 0, 0, Some(&gamma_a));
+        let mut expected = Surface::new(4, 2, PixelFormat::Rgba8888);
+        tile_image_on_surface(&mut expected, &image_b, 0, 0, Some(&gamma_a));
+        assert_eq!(resized.pixels(), expected.pixels());
+        assert_eq!(cache.rasterizations, 3);
+
+        cache.begin_frame(&resized, Some(&image_b), Some(&gamma_b));
+        assert!(cache.entries.is_empty(), "a new gamma ramp drops old pixels");
+        cache.draw(&mut resized, &image_b, 0, 0, Some(&gamma_b));
+        tile_image_on_surface(&mut expected, &image_b, 0, 0, Some(&gamma_b));
+        assert_eq!(resized.pixels(), expected.pixels());
+        assert_eq!(cache.rasterizations, 4);
+
+        let origin_zero = resized.pixels().to_vec();
+        cache.draw(&mut resized, &image_b, 1, -1, Some(&gamma_b));
+        tile_image_on_surface(&mut expected, &image_b, 1, -1, Some(&gamma_b));
+        assert_eq!(resized.pixels(), expected.pixels());
+        assert_ne!(resized.pixels(), origin_zero);
+        assert_eq!(cache.rasterizations, 5);
+
+        cache.draw(&mut resized, &image_b, 1, -1, Some(&gamma_b));
+        assert_eq!(resized.pixels(), expected.pixels());
+        assert_eq!(
+            cache.rasterizations, 5,
+            "the distinct origin becomes independently reusable"
+        );
+    }
+
+    #[test]
+    fn borderless_viewport_direct_presentation_matches_scratch_composition() {
+        let rect = SurfaceRect::new(2, 1, 3, 2);
+        let content = Surface::from_bytes(
+            rect.width,
+            rect.height,
+            PixelFormat::Rgba8888,
+            vec![
+                1, 2, 3, 0, 4, 5, 6, 64, 7, 8, 9, 255, 10, 11, 12, 127, 13, 14, 15, 192,
+                16, 17, 18, 255,
+            ],
+        )
+        .expect("valid content bytes");
+        let destination_bytes = (0..7 * 5)
+            .flat_map(|index| {
+                let value = index as u8;
+                [value, value.wrapping_add(1), value.wrapping_add(2), 255]
+            })
+            .collect::<Vec<_>>();
+        let mut scratch_path = Surface::from_bytes(
+            7,
+            5,
+            PixelFormat::Rgba8888,
+            destination_bytes.clone(),
+        )
+        .expect("valid destination bytes");
+        let mut direct_path =
+            Surface::from_bytes(7, 5, PixelFormat::Rgba8888, destination_bytes)
+                .expect("valid destination bytes");
+        let mut viewport_underlay = Surface::new(rect.width, rect.height, PixelFormat::Rgba8888);
+        viewport_underlay.fill(Color::opaque(91, 73, 55));
+
+        present_viewport_content(
+            &mut scratch_path,
+            Some(&mut viewport_underlay),
+            &content,
+            rect,
+            0,
+            0,
+        );
+        present_viewport_content(&mut direct_path, None, &content, rect, 0, 0);
+
+        assert_eq!(direct_path.pixels(), scratch_path.pixels());
+    }
+
+    #[test]
     fn gamma_render_seam_encodes_sky_channels_independently() {
         // C4Sky::Draw emits its solid/fade colours through DrawBoxDw/Fade;
         // DummyShader samples three independent gamma textures before output
@@ -15410,6 +16720,36 @@ mod tests {
         assert_eq!(
             graphics.surface().get_pixel(0, 0),
             Some(Color::new(17, 33, 49, 255))
+        );
+    }
+
+    #[test]
+    fn sky_render_state_caches_only_complete_opaque_rgba_images() {
+        let settings = SkySettings::default().with_surface(2, 1);
+        assert!(
+            SkyRenderState::new(
+                settings.clone(),
+                Some(ImageData::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255])),
+            )
+            .image_is_fully_opaque()
+        );
+        assert!(
+            !SkyRenderState::new(
+                settings.clone(),
+                Some(ImageData::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 254])),
+            )
+            .image_is_fully_opaque()
+        );
+        assert!(
+            !SkyRenderState::new(settings, Some(ImageData::new(2, 1, vec![1, 2, 3, 255])))
+                .image_is_fully_opaque()
+        );
+        assert!(
+            !SkyRenderState::new(
+                SkySettings::default().with_surface(0, 0),
+                Some(ImageData::new(0, 0, Vec::new())),
+            )
+            .image_is_fully_opaque()
         );
     }
 
@@ -23996,6 +25336,190 @@ mod tests {
             ],
             "disabling animation must retain the pre-animation renderer bytes"
         );
+    }
+
+    #[test]
+    fn parallel_landscape_rows_match_scalar_fog_liquid_gamma_and_clip() {
+        const WORLD_WIDTH: u32 = 128;
+        const WORLD_HEIGHT: u32 = 96;
+        const SCREEN_WIDTH: u32 = 96;
+        const SCREEN_HEIGHT: u32 = 80;
+
+        let bytes = (0..WORLD_HEIGHT)
+            .flat_map(|y| {
+                (0..WORLD_WIDTH).map(move |x| {
+                    if (x * 7 + y * 11) % 23 == 0 {
+                        0
+                    } else if (x + y * 3) % 5 < 2 {
+                        1
+                    } else {
+                        2
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut cache_pixels = vec![0; (WORLD_WIDTH * WORLD_HEIGHT * 4) as usize];
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            let x = (index as u32 % WORLD_WIDTH) as u8;
+            let y = (index as u32 / WORLD_WIDTH) as u8;
+            let color = match byte {
+                0 => Color::transparent(),
+                1 => Color::new(
+                    48u8.wrapping_add(x),
+                    112u8.wrapping_add(y),
+                    176u8.wrapping_sub(x / 2),
+                    127,
+                ),
+                _ => Color::opaque(
+                    96u8.wrapping_add(x / 3),
+                    64u8.wrapping_add(y / 2),
+                    32u8.wrapping_add((x ^ y) / 4),
+                ),
+            };
+            cache_pixels[index * 4..index * 4 + 4]
+                .copy_from_slice(&[color.r, color.g, color.b, color.a]);
+        }
+
+        let mut landscape = Landscape::flat(WORLD_WIDTH, WORLD_HEIGHT as i32);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WORLD_WIDTH,
+            WORLD_HEIGHT,
+            bytes,
+            vec![0, 25, 50],
+            vec![None, Some("Water".to_string()), Some("Earth".to_string())],
+            vec![None, Some("Smooth".to_string()), Some("Rough".to_string())],
+        ));
+        landscape.set_shade_materials(false);
+
+        let textures = Arc::new(HashMap::from([(
+            "rough".to_string(),
+            ImageData::new(1, 1, vec![128, 128, 128, 255]),
+        )]));
+        let materials = Arc::new(HashMap::from([(
+            "earth".to_string(),
+            MaterialRenderInfo::new([128; 9], [0; 6], None, 0, 50),
+        )]));
+        let fog = Arc::new(ClrModMap {
+            resolution_x: 16,
+            resolution_y: 16,
+            width: 10,
+            height: 8,
+            origin_x: -24,
+            origin_y: -16,
+            fade_transparent: false,
+            cells: (0..80)
+                .map(|index| {
+                    let red = (64 + index * 17 % 192) as u32;
+                    let green = (48 + index * 29 % 208) as u32;
+                    let blue = (32 + index * 43 % 224) as u32;
+                    (red << 16) | (green << 8) | blue
+                })
+                .collect(),
+        });
+        let grid = landscape.pixel_grid().expect("pixel grid").clone();
+        let border_state = (
+            landscape.left_open(),
+            landscape.right_open(),
+            landscape.top_open(),
+            landscape.bottom_open(),
+            landscape.grid_vehicle_byte(),
+        );
+        let make_graphics = || {
+            let mut graphics = GraphicsSystem::new(
+                SCREEN_WIDTH,
+                SCREEN_HEIGHT,
+                WORLD_HEIGHT as i32,
+                "parallel landscape rows",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.set_material_textures(Arc::clone(&textures));
+            graphics.set_material_render_info(Arc::clone(&materials));
+            graphics.set_liquid_animation(Some(ImageData::new(
+                3,
+                2,
+                vec![
+                    255, 128, 64, 255, 32, 192, 96, 255, 144, 16, 224, 255, 48, 240, 112,
+                    255, 208, 80, 160, 255, 96, 176, 16, 255,
+                ],
+            )));
+            graphics.active_fog_map = Some(Arc::clone(&fog));
+            graphics.viewport_x = 5.25;
+            graphics.viewport_y = 4.5;
+            graphics.viewport_zoom = 1.25;
+            for (index, pixel) in graphics
+                .surface_mut()
+                .pixels_mut()
+                .chunks_exact_mut(4)
+                .enumerate()
+            {
+                let x = (index as u32 % SCREEN_WIDTH) as u8;
+                let y = (index as u32 / SCREEN_WIDTH) as u8;
+                pixel.copy_from_slice(&[
+                    13u8.wrapping_add(x),
+                    29u8.wrapping_add(y),
+                    47u8.wrapping_add(x ^ y),
+                    255,
+                ]);
+            }
+            graphics
+                .surface_mut()
+                .set_clip(SurfaceRect::new(7, 5, 83, 69));
+            graphics.landscape_cache = Some(LandscapeRenderCache {
+                grid: grid.clone(),
+                width: WORLD_WIDTH,
+                height: WORLD_HEIGHT,
+                shade_materials: false,
+                border_state,
+                pixels: cache_pixels.clone(),
+            });
+            graphics
+        };
+
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x000000, 0x646464, 0xc8c8c8,
+        ]);
+        let mut scalar = make_graphics();
+        reset_landscape_destination_samples();
+        assert!(scalar.draw_ground_textured_with_parallel_rows(
+            Some(&landscape),
+            Some(&gamma),
+            false,
+        ));
+        let scalar_destination_samples = landscape_destination_samples();
+
+        let mut parallel = make_graphics();
+        reset_landscape_destination_samples();
+        assert!(parallel.draw_ground_textured_with_parallel_rows(
+            Some(&landscape),
+            Some(&gamma),
+            true,
+        ));
+        let parallel_destination_samples = landscape_destination_samples();
+
+        assert_eq!(parallel.surface().pixels(), scalar.surface().pixels());
+        assert_eq!(
+            parallel
+                .landscape_cache
+                .as_ref()
+                .expect("parallel cache")
+                .pixels
+                .as_slice(),
+            scalar
+                .landscape_cache
+                .as_ref()
+                .expect("scalar cache")
+                .pixels
+                .as_slice(),
+        );
+        assert_eq!(
+            parallel.liquid_animation_cycle.values.map(f32::to_bits),
+            scalar.liquid_animation_cycle.values.map(f32::to_bits),
+        );
+        assert!(scalar_destination_samples > 0);
+        assert_eq!(parallel_destination_samples, scalar_destination_samples);
     }
 
     #[test]

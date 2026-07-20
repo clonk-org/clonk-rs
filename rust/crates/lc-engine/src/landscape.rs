@@ -4,6 +4,9 @@ use std::mem;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use crate::material::TemperatureDirection;
 use crate::{math, C4Fixed, FixedVec2, MaterialId, MaterialSet, Vector2};
 #[cfg(test)]
@@ -32,6 +35,11 @@ const MAX_RENDER_DIRTY_RECTS: usize = 50;
 
 const RENDER_TOKEN_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const RENDER_TOKEN_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+#[cfg(test)]
+std::thread_local! {
+    static MATERIAL_COUNT_FULL_REBUILDS: Cell<usize> = const { Cell::new(0) };
+}
 
 #[cfg(windows)]
 const C_RAND_MAX: i32 = 32_767;
@@ -651,6 +659,8 @@ impl PixelGrid {
     }
 
     fn rebuild_material_counts(&mut self) {
+        #[cfg(test)]
+        MATERIAL_COUNT_FULL_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
         let count = self
             .materials
             .iter()
@@ -675,17 +685,48 @@ impl PixelGrid {
             .unwrap_or(0)
     }
 
+    /// C4Landscape::UpdateMatCnt subtracts the old contents of a change
+    /// rectangle in PrepareChange and adds the new contents in FinishChange.
+    /// Keep the same bounded work for bulk Surface8 writers instead of
+    /// recounting the complete landscape after every small polygon/chunk.
+    fn adjust_material_counts_in_rect(&mut self, rect: PixelGridDirtyRect, add: bool) {
+        if self.material_counts.is_empty() && self.materials.iter().any(Option::is_some) {
+            self.rebuild_material_counts();
+        }
+        for y in rect.y..rect.y.saturating_add(rect.height) {
+            let row = y as usize * self.width as usize;
+            for x in rect.x..rect.x.saturating_add(rect.width) {
+                let byte = self.bytes[row + x as usize];
+                let Some(material) = self.material_for_byte(byte) else {
+                    continue;
+                };
+                let count = &mut self.material_counts[material.index()];
+                *count = if add {
+                    count.wrapping_add(1)
+                } else {
+                    count.wrapping_sub(1)
+                };
+            }
+        }
+    }
+
     /// Keep the pixel lookup tables aligned with the mutable runtime texmap.
     /// Existing resolved material ids follow their material NAME to newly
     /// allocated texture slots; no pixel byte or render revision changes.
     fn sync_runtime_texmap(&mut self, texmap: &RuntimeTexMapState) {
+        if self.densities == texmap.densities
+            && self.material_names == texmap.material_names
+            && self.texture_names == texmap.texture_names
+        {
+            return;
+        }
         let old_materials = self
             .material_names
             .iter()
             .zip(&self.materials)
             .filter_map(|(name, material)| Some((name.as_deref()?, (*material)?)))
             .collect::<Vec<_>>();
-        self.materials = texmap
+        let materials = texmap
             .material_names
             .iter()
             .map(|name| {
@@ -696,11 +737,15 @@ impl PixelGrid {
                         .map(|(_, material)| *material)
                 })
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let material_mapping_changed = self.materials != materials;
+        self.materials = materials;
         self.densities.clone_from(&texmap.densities);
         self.material_names.clone_from(&texmap.material_names);
         self.texture_names.clone_from(&texmap.texture_names);
-        self.rebuild_material_counts();
+        if material_mapping_changed {
+            self.rebuild_material_counts();
+        }
     }
 
     fn record_render_change(
@@ -999,6 +1044,7 @@ impl PixelGrid {
         let storage_was_shared = Arc::strong_count(&self.bytes) > 1;
         let base_revision = self.revision;
         let base_token = self.render_token;
+        self.adjust_material_counts_in_rect(rect, false);
         let bytes = mem::take(Arc::make_mut(&mut self.bytes));
         let mut surface = crate::chunky::Surface8::from_bytes(
             self.width as i32,
@@ -1007,7 +1053,7 @@ impl PixelGrid {
         );
         crate::chunky::polygon(&mut surface, vertices, byte);
         self.bytes = Arc::new(surface.into_bytes());
-        self.rebuild_material_counts();
+        self.adjust_material_counts_in_rect(rect, true);
         self.revision = self.revision.wrapping_add(1);
         self.render_token = self.advance_rect_render_token(base_token, self.revision, rect);
         self.record_render_change(base_revision, base_token, rect, storage_was_shared);
@@ -1041,6 +1087,7 @@ impl PixelGrid {
         let storage_was_shared = Arc::strong_count(&self.bytes) > 1;
         let base_revision = self.revision;
         let base_token = self.render_token;
+        self.adjust_material_counts_in_rect(rect, false);
         let bytes = mem::take(Arc::make_mut(&mut self.bytes));
         let mut surface = crate::chunky::Surface8::from_bytes(
             self.width as i32,
@@ -1082,7 +1129,7 @@ impl PixelGrid {
         debug_assert!(offsets.next().is_none());
 
         self.bytes = Arc::new(surface.into_bytes());
-        self.rebuild_material_counts();
+        self.adjust_material_counts_in_rect(rect, true);
         self.revision = self.revision.wrapping_add(1);
         self.render_token = self.advance_rect_render_token(base_token, self.revision, rect);
         self.record_render_change(base_revision, base_token, rect, storage_was_shared);
@@ -8413,6 +8460,51 @@ func MoveMask(int x, int y)
             assert!(!landscape.is_tunnel_at(x, 4));
         }
         assert_eq!(landscape.surface(), &[6; 6]);
+    }
+
+    #[test]
+    fn draw_material_quad_updates_counts_without_full_landscape_rescan() {
+        // PrepareChange/FinishChange call UpdateMatCnt only for the quad's
+        // bounding rectangle (C4Landscape.cpp:2448-2468,2851-2967). A tiny
+        // runtime quad must therefore not scan the full Surface8 merely to
+        // maintain MatCount.
+        let mut engine = crate::Engine::with_seed(9);
+        let materials = MaterialSet::from_resource_library(
+            &MaterialLibrary::parse(
+                "[Material Earth]\nName=Earth\nDensity=100\n\n\
+                 [Material Vehicle]\nName=Vehicle\nDensity=100\n\n\
+                 [Material Water]\nName=Water\nDensity=25\n",
+            )
+            .expect("materials parse"),
+        );
+        engine.set_materials(materials);
+        engine.set_landscape(raster_grid_landscape(64, 48, vec![0; 64 * 48]));
+        MATERIAL_COUNT_FULL_REBUILDS.with(|rebuilds| rebuilds.set(0));
+
+        assert!(engine.draw_material_quad(
+            "Water",
+            [
+                Vector2::new(2, 3),
+                Vector2::new(5, 3),
+                Vector2::new(5, 7),
+                Vector2::new(2, 7),
+            ],
+            false,
+        ));
+
+        let grid = engine
+            .landscape()
+            .and_then(Landscape::pixel_grid)
+            .expect("quad keeps the pixel grid");
+        let water = grid.material_for_byte(3).expect("Water resolves");
+        assert_eq!(grid.material_count(water), 16);
+        MATERIAL_COUNT_FULL_REBUILDS.with(|rebuilds| {
+            assert_eq!(
+                rebuilds.get(),
+                0,
+                "bounded DrawQuad count maintenance cannot rebuild the full plane"
+            );
+        });
     }
 
     #[test]

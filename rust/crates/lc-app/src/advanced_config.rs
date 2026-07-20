@@ -417,7 +417,15 @@ fn graphics(config: &Config) -> AdvancedConfigSection {
         bool_row(config, section, "DisableGamma", false),
         i32_row(config, section, "Monitor", 0),
         bool_row(config, section, "FireParticles", true),
-        i32_row(config, section, "MaxRefreshDelay", 30),
+        // Keep the editor's materialized value aligned with Rust's intentional
+        // 60+ FPS presentation default. The C++ timer/divisor behavior is
+        // unchanged once this value is selected.
+        i32_row(
+            config,
+            section,
+            "MaxRefreshDelay",
+            crate::DEFAULT_MAX_REFRESH_DELAY_MS as i32,
+        ),
         bool_row(config, section, "Shader", false),
         bool_row(config, section, "AutoFrameSkip", true),
         i32_row(config, section, "CacheTexturesInRAM", 100),

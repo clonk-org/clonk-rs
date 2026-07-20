@@ -14,7 +14,7 @@ use lc_graphics::clonk_font::{
     CapturedFontImage, ClonkFont, ClonkFontRole, FontImageProvider, FontImageRef, GlyphCell,
     TextAlign,
 };
-use lc_graphics::{ClipperProjection, Color, GammaRamp, Surface};
+use lc_graphics::{ClipperProjection, Color, GammaRamp, Surface, SurfaceDrawTarget};
 use lc_gui::{ImageData, Rect as GuiRect};
 use std::collections::BTreeSet;
 
@@ -349,6 +349,24 @@ impl NativeClonkFont {
         projection: ClipperProjection,
         gamma: Option<&GammaRamp>,
     ) {
+        self.draw_to_physical_surface_with_clipper_to(
+            surface, x, y, text, color, align, markup, projection, gamma,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_to_physical_surface_with_clipper_to<T: SurfaceDrawTarget + ?Sized>(
+        &self,
+        surface: &mut T,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        projection: ClipperProjection,
+        gamma: Option<&GammaRamp>,
+    ) {
         self.draw_to_physical_surface_with_projection_impl(
             surface,
             x,
@@ -378,6 +396,27 @@ impl NativeClonkFont {
         gamma: Option<&GammaRamp>,
         images: &dyn FontImageProvider,
     ) {
+        self.draw_to_physical_surface_with_clipper_and_images_to(
+            surface, x, y, text, color, align, markup, projection, gamma, images,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_to_physical_surface_with_clipper_and_images_to<
+        T: SurfaceDrawTarget + ?Sized,
+    >(
+        &self,
+        surface: &mut T,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        projection: ClipperProjection,
+        gamma: Option<&GammaRamp>,
+        images: &dyn FontImageProvider,
+    ) {
         self.draw_to_physical_surface_with_projection_impl(
             surface,
             x,
@@ -393,9 +432,9 @@ impl NativeClonkFont {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_to_physical_surface_with_projection_impl(
+    fn draw_to_physical_surface_with_projection_impl<T: SurfaceDrawTarget + ?Sized>(
         &self,
-        surface: &mut Surface,
+        surface: &mut T,
         x: i32,
         y: i32,
         text: &str,
@@ -440,12 +479,13 @@ impl NativeClonkFont {
             .map(|(x, y)| (physical_integer(x), physical_integer(y)))
             .collect::<Vec<_>>();
         if let Some(images) = images {
-            self.raster.draw_lines_at_origins_with_gamma_and_images(
+            self.raster.draw_lines_at_origins_with_gamma_and_images_to(
                 surface, &origins, text, color, markup, gamma, images,
             );
         } else {
-            self.raster
-                .draw_lines_at_origins_with_gamma(surface, &origins, text, color, markup, gamma);
+            self.raster.draw_lines_at_origins_with_gamma_to(
+                surface, &origins, text, color, markup, gamma,
+            );
         }
     }
 
@@ -523,6 +563,24 @@ impl NativeClonkFont {
         projection: ClipperProjection,
         gamma: Option<&GammaRamp>,
     ) {
+        self.draw_string_to_physical_surface_with_clipper_to(
+            surface, x, y, text, color, align, markup, projection, gamma,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_string_to_physical_surface_with_clipper_to<T: SurfaceDrawTarget + ?Sized>(
+        &self,
+        surface: &mut T,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        projection: ClipperProjection,
+        gamma: Option<&GammaRamp>,
+    ) {
         self.draw_string_to_physical_surface_with_projection_impl(
             surface,
             x,
@@ -537,9 +595,9 @@ impl NativeClonkFont {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_string_to_physical_surface_with_projection_impl(
+    fn draw_string_to_physical_surface_with_projection_impl<T: SurfaceDrawTarget + ?Sized>(
         &self,
-        surface: &mut Surface,
+        surface: &mut T,
         x: i32,
         y: i32,
         text: &str,
@@ -579,7 +637,7 @@ impl NativeClonkFont {
             return;
         }
         if !text.contains('\n') && (!markup || !text.contains('|')) {
-            self.raster.draw_with_gamma(
+            self.raster.draw_with_gamma_to(
                 surface,
                 physical_integer(physical_origin.0),
                 physical_integer(physical_origin.1),
@@ -607,7 +665,7 @@ impl NativeClonkFont {
                 other => Some(other),
             })
             .collect();
-        raster.draw_with_gamma(
+        raster.draw_with_gamma_to(
             surface,
             physical_integer(physical_origin.0),
             physical_integer(physical_origin.1),
@@ -620,9 +678,9 @@ impl NativeClonkFont {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_fractional_lines_at_origins(
+    fn draw_fractional_lines_at_origins<T: SurfaceDrawTarget + ?Sized>(
         &self,
-        surface: &mut Surface,
+        surface: &mut T,
         origins: &[(f64, f64)],
         text: &str,
         color: [u8; 4],
@@ -658,9 +716,9 @@ impl NativeClonkFont {
     /// Those factors cancel at integer/exact scales, but not for e.g.
     /// FontMainSmall's `floor(13 * 1.5) / 13` effective scale.
     #[allow(clippy::too_many_arguments)]
-    fn draw_fractional_line(
+    fn draw_fractional_line<T: SurfaceDrawTarget + ?Sized>(
         &self,
-        surface: &mut Surface,
+        surface: &mut T,
         x: f64,
         y: f64,
         line: &str,
@@ -866,8 +924,8 @@ fn native_image_modulation_rgb(stack: &[NativeMarkupTag], color: [u8; 4]) -> [u8
 }
 
 #[allow(clippy::too_many_arguments)]
-fn blit_scaled_native_glyph(
-    surface: &mut Surface,
+fn blit_scaled_native_glyph<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
     cell: &GlyphCell,
     source_height: i32,
     x: f64,
@@ -903,8 +961,8 @@ fn blit_scaled_native_glyph(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn blit_scaled_native_image(
-    surface: &mut Surface,
+fn blit_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
     image: FontImageRef<'_>,
     x: f64,
     y: f64,
@@ -949,8 +1007,8 @@ fn modulated_native_pixel(pixel: [u8; 4], modulation: [u8; 3], color_alpha: u8) 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_scaled_native_image(
-    surface: &mut Surface,
+fn draw_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
     image: ImageData,
     x: f64,
     y: f64,
@@ -958,7 +1016,7 @@ fn draw_scaled_native_image(
     height: f64,
     gamma: Option<&GammaRamp>,
 ) {
-    crate::draw_image_bilinear(
+    crate::draw_image_bilinear_target(
         surface,
         &GuiRect::new(x as f32, y as f32, width as f32, height as f32),
         &image,
@@ -1021,6 +1079,15 @@ impl NativeClonkFontSet {
         commands: &[CapturedClonkText],
         logical_target_size: (u32, u32),
     ) {
+        self.draw_captured_text_to(surface, commands, logical_target_size);
+    }
+
+    pub fn draw_captured_text_to<T: SurfaceDrawTarget + ?Sized>(
+        &self,
+        surface: &mut T,
+        commands: &[CapturedClonkText],
+        logical_target_size: (u32, u32),
+    ) {
         let saved_clip = surface.clip();
         for command in commands {
             let logical_clip = command.clip.unwrap_or_else(|| {
@@ -1039,7 +1106,7 @@ impl NativeClonkFontSet {
             }
             let font = self.font_for_role(command.role);
             if command.images.is_empty() {
-                font.draw_to_physical_surface_with_clipper(
+                font.draw_to_physical_surface_with_clipper_to(
                     surface,
                     command.x,
                     command.y,
@@ -1052,7 +1119,7 @@ impl NativeClonkFontSet {
                 );
             } else {
                 let images = CapturedImageProvider(&command.images);
-                font.draw_to_physical_surface_with_clipper_and_images(
+                font.draw_to_physical_surface_with_clipper_and_images_to(
                     surface,
                     command.x,
                     command.y,
@@ -1926,7 +1993,7 @@ mod tests {
         };
         let mut surface = Surface::new(6, 6, lc_graphics::PixelFormat::Rgba8888);
 
-        fonts.draw_captured_text(&mut surface, &[command], (4, 4));
+        fonts.draw_captured_text(&mut surface, std::slice::from_ref(&command), (4, 4));
 
         assert_eq!(
             surface.get_pixel(1, 2),
@@ -1934,6 +2001,41 @@ mod tests {
             "logical clip-left x=1 projects to physical x=1, not round(1*1.5)=2",
         );
         assert_eq!(surface.get_pixel(2, 2), Some(Color::transparent()));
+
+        let mut replay_command = command;
+        replay_command.color = [96, 180, 240, 127];
+        replay_command.gamma = Some(GammaRamp::from_control_points([
+            0x000000, 0x304080, 0xffffff,
+        ]));
+        let initial = (0..6 * 6)
+            .flat_map(|index| {
+                let value = (index * 7) as u8;
+                [value, value.wrapping_add(19), value.wrapping_add(37), 255]
+            })
+            .collect::<Vec<_>>();
+        let mut owned = Surface::from_bytes(
+            6,
+            6,
+            lc_graphics::PixelFormat::Rgba8888,
+            initial.clone(),
+        )
+        .expect("valid owned framebuffer");
+        let mut borrowed = initial;
+        fonts.draw_captured_text(
+            &mut owned,
+            std::slice::from_ref(&replay_command),
+            (4, 4),
+        );
+        {
+            let mut view = lc_graphics::RgbaSurfaceViewMut::new(6, 6, &mut borrowed)
+                .expect("valid borrowed framebuffer");
+            fonts.draw_captured_text_to(
+                &mut view,
+                std::slice::from_ref(&replay_command),
+                (4, 4),
+            );
+        }
+        assert_eq!(borrowed, owned.pixels());
     }
 
     #[test]

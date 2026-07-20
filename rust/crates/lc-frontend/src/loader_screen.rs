@@ -14,7 +14,7 @@ use crate::clonk_fonts::{NativeClonkFont, NativeClonkFontSet};
 use crate::{ClonkFontSet, ImageData};
 use anyhow::{ensure, Result};
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
-use lc_graphics::{ClipperProjection, Color, GammaRamp, Rect, Surface};
+use lc_graphics::{ClipperProjection, Color, GammaRamp, Rect, Surface, SurfaceDrawTarget};
 use std::sync::Arc;
 
 /// `C4CFN_StartupBackgroundMain` (`src/C4Startup.h`).
@@ -615,6 +615,23 @@ impl LoaderScreen {
         logical_height: u32,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
+        self.render_native_text_to(
+            surface,
+            fonts,
+            logical_width,
+            logical_height,
+            gamma,
+        )
+    }
+
+    pub fn render_native_text_to<T: SurfaceDrawTarget + ?Sized>(
+        &self,
+        surface: &mut T,
+        fonts: &NativeClonkFontSet,
+        logical_width: u32,
+        logical_height: u32,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
         self.validate_render_text()?;
         ensure!(
             logical_width > 0 && logical_height > 0,
@@ -654,7 +671,7 @@ impl LoaderScreen {
             fonts.text.logical_line_height(),
             self.state.progress,
         );
-        fonts.title.draw_string_to_physical_surface_with_clipper(
+        fonts.title.draw_string_to_physical_surface_with_clipper_to(
             surface,
             layout.title_anchor.0,
             layout.title_anchor.1,
@@ -666,7 +683,7 @@ impl LoaderScreen {
             gamma,
         );
         let progress = self.state.progress;
-        fonts.text.draw_string_to_physical_surface_with_clipper(
+        fonts.text.draw_string_to_physical_surface_with_clipper_to(
             surface,
             layout.progress_text_anchor.0,
             layout.progress_text_anchor.1,
@@ -695,7 +712,7 @@ impl LoaderScreen {
                 continue;
             }
             let extent = fonts.mini.measure(line, true);
-            fonts.mini.draw_to_physical_surface_with_clipper(
+            fonts.mini.draw_to_physical_surface_with_clipper_to(
                 surface,
                 x,
                 y,
@@ -920,8 +937,8 @@ fn validate_supported_markup(role: &str, text: &str) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_native_process_suffix(
-    surface: &mut Surface,
+fn draw_native_process_suffix<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
     font: &NativeClonkFont,
     process: Option<i32>,
     mut x: i32,
@@ -938,7 +955,7 @@ fn draw_native_process_suffix(
     })?;
     y -= last_height;
     x += last_width;
-    font.draw_to_physical_surface_with_clipper(
+    font.draw_to_physical_surface_with_clipper_to(
         surface,
         x,
         y,

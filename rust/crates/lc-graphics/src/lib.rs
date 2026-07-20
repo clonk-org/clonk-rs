@@ -14,5 +14,8 @@ pub use clip_projection::ClipperProjection;
 pub use gamma::GammaRamp;
 pub use font::{BitmapFont, FontMetrics, TextFont, TrueTypeFont, TrueTypeFontError};
 pub use snapshot::{SnapshotHasher, SurfaceSnapshot};
-pub use surface::{BlitMode, PixelFormat, Point, Rect, Surface, SurfaceError};
+pub use surface::{
+    BlitMode, PixelFormat, Point, Rect, RgbaSurfaceViewMut, Surface, SurfaceDrawTarget,
+    SurfaceError,
+};
 pub use transform::Transform;

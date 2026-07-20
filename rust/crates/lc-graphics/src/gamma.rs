@@ -129,12 +129,14 @@ impl GammaRamp {
     /// blend stage receives that unrounded float (`StdGL.cpp:1081-1087,
     /// 1246-1255`). Callers performing alpha or additive blending must keep
     /// this value in float and round only when storing the final pixel.
+    #[inline]
     pub fn sample_channel_float(&self, channel: GammaChannel, x: f32) -> f32 {
         let index = Self::sample_index(x);
         // `u16 / 65535 * 255` is exactly `u16 / 257`.
         f32::from(self.channels[channel.index()][index]) / 257.0
     }
 
+    #[inline]
     fn sample_index(x: f32) -> usize {
         ((x.clamp(0.0, 255.0) * 256.0 / 255.0) as usize).min(255)
     }

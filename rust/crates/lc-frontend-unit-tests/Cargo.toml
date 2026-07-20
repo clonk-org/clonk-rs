@@ -26,5 +26,6 @@ lc-gui = { path = "../lc-gui" }
 lc-resources = { path = "../lc-resources" }
 lc-scaling = { path = "../lc-scaling" }
 lc-script = { path = "../lc-script" }
+rayon = "1.11.0"
 serde_json = "1.0"
 tempfile = "3"

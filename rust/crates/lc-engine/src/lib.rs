@@ -776,8 +776,8 @@ use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
     object_reference_value, AudioRegistry, DefinitionMetadata, EffectContextOutcome,
     EnvironmentDelta, HostSolidMaskImage, HostSolidMaskMetadata, HostWorldContext, HostWorldObject,
-    LandscapeOperation, NextMissionCommand, ObjectOrderCommand, ObjectOrderFunction, PhysicsDelta,
-    PlayerCommand,
+    LandscapeOperation, LazyHostWorldProvider, NextMissionCommand, ObjectOrderCommand,
+    ObjectOrderFunction, PhysicsDelta, PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use material::{
@@ -800,6 +800,7 @@ use std::sync::{Arc, OnceLock};
 #[cfg(test)]
 std::thread_local! {
     static HOST_WORLD_OBJECT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static HOST_WORLD_LANDSCAPE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 use crate::math::{
@@ -15424,8 +15425,7 @@ impl Definition {
         } else {
             context_object
                 .and_then(|object_id| world.get(object_id))
-                .and_then(|object| object.full_state())
-                .map(|state| state.local_vars.clone())
+                .and_then(|object| object.full_state().map(|state| state.local_vars.clone()))
                 .unwrap_or_default()
         };
         // The callback's LIVE local cells: registered as the object's
@@ -16710,6 +16710,19 @@ fn mission_access_store_updates_semicolon_modules_case_insensitively() {
     assert_eq!(store.update_modules("alpha;GAMMA", true), "Beta");
 }
 
+/// Stack-scoped source for Contact* callbacks while `Engine::objects` is
+/// split into exclusive slices by movement. The provider reborrows only the
+/// non-moving slices and never dereferences the separately seeded mover.
+struct MovementLazyHostWorldSource {
+    before: Cell<*const Object>,
+    before_len: usize,
+    after: Cell<*const Object>,
+    after_len: usize,
+    mover_index: usize,
+    definitions: *const HashMap<DefinitionId, Definition>,
+    landscape: Cell<*const Landscape>,
+}
+
 pub struct Engine {
     #[doc(hidden)] pub(crate) definitions: HashMap<DefinitionId, Definition>,
     /// Definition registration order — C++ links scripts in child
@@ -17714,6 +17727,16 @@ fn contact_callback_name(cnat: u32) -> Option<&'static str> {
         CNAT_BOTTOM => Some("ContactBottom"),
         _ => None,
     }
+}
+
+fn contact_callback_definition<'a>(
+    definitions: &'a HashMap<DefinitionId, Definition>,
+    definition_id: &str,
+    enabled: bool,
+) -> Option<&'a Definition> {
+    enabled
+        .then(|| definitions.get(definition_id))
+        .flatten()
 }
 
 fn contact_action_wall_tumble_x(cnat: u32) -> C4Fixed {
@@ -24589,6 +24612,163 @@ impl Engine {
         .with_last_energy_loss_cause(object.last_energy_loss_cause)
     }
 
+    /// Materialize one callback object from an engine that is synchronously
+    /// paused inside script execution.
+    ///
+    /// # Safety
+    ///
+    /// `source` must be the stable address of the originating `Engine`, its
+    /// object-index cache must match `objects_generation`, and object storage
+    /// may not change shape until the host context is dropped. A currently
+    /// mutably borrowed object is seeded before entering script, so this
+    /// function is never asked to dereference that entry.
+    unsafe fn lazy_host_world_object(
+        source: *const (),
+        id: ObjectId,
+    ) -> Option<(usize, HostWorldObject)> {
+        let engine = source.cast::<Self>();
+        // SAFETY: guaranteed by the provider contract above. Accessing the
+        // index-cache field does not touch any exclusively borrowed object.
+        let cache = unsafe { &*std::ptr::addr_of!((*engine).object_index_cache) }.borrow();
+        let index = cache.1.get(&id).copied()?;
+        drop(cache);
+        // SAFETY: object-vector shape is frozen for the synchronous call and
+        // the requested entry is not an outstanding exclusive seed.
+        let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
+        let object = unsafe { &*objects.as_ptr().add(index) };
+        if object.id != id {
+            return None;
+        }
+        let definitions = unsafe { &*std::ptr::addr_of!((*engine).definitions) };
+        Some((index, Self::host_world_object(definitions, object)))
+    }
+
+    /// Fill every not-yet-seeded object in storage order.
+    ///
+    /// # Safety
+    ///
+    /// The `lazy_host_world_object` contract applies. In particular,
+    /// `excluded` contains every object held through an outstanding exclusive
+    /// borrow, and those indices are skipped before their storage is read.
+    unsafe fn lazy_host_world_objects(
+        source: *const (),
+        excluded: &HashSet<usize>,
+    ) -> Vec<(usize, HostWorldObject)> {
+        let engine = source.cast::<Self>();
+        let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
+        let definitions = unsafe { &*std::ptr::addr_of!((*engine).definitions) };
+        let mut result = Vec::with_capacity(objects.len().saturating_sub(excluded.len()));
+        for index in 0..objects.len() {
+            if excluded.contains(&index) {
+                continue;
+            }
+            // SAFETY: skipped indices are the only entries that may be
+            // exclusively borrowed by the callback wrapper.
+            let object = unsafe { &*objects.as_ptr().add(index) };
+            result.push((index, Self::host_world_object(definitions, object)));
+        }
+        result
+    }
+
+    /// Clone the landscape shell only when a callback first invokes a terrain
+    /// host API.
+    ///
+    /// # Safety
+    ///
+    /// The engine is synchronously paused and its landscape is not mutably
+    /// accessed until the callback outcome is replayed.
+    unsafe fn lazy_host_world_landscape(source: *const ()) -> Option<Landscape> {
+        #[cfg(test)]
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        let engine = source.cast::<Self>();
+        unsafe { &*std::ptr::addr_of!((*engine).landscape) }.clone()
+    }
+
+    /// Resolve one non-mover object while movement owns the engine vector as
+    /// split mutable slices.
+    ///
+    /// # Safety
+    ///
+    /// `source` points to a live `MovementLazyHostWorldSource`; its slices,
+    /// definitions, and current landscape outlive the synchronous Contact*
+    /// call. The mover is always seeded and is not present in either slice.
+    unsafe fn lazy_movement_host_world_object(
+        source: *const (),
+        id: ObjectId,
+    ) -> Option<(usize, HostWorldObject)> {
+        let source = unsafe { &*source.cast::<MovementLazyHostWorldSource>() };
+        let definitions = unsafe { &*source.definitions };
+        let before = source.before.get();
+        let after = source.after.get();
+        for offset in 0..source.before_len {
+            let object = unsafe { &*before.add(offset) };
+            if object.id == id {
+                return Some((offset, Self::host_world_object(definitions, object)));
+            }
+        }
+        for offset in 0..source.after_len {
+            let object = unsafe { &*after.add(offset) };
+            if object.id == id {
+                let index = source.mover_index + 1 + offset;
+                return Some((index, Self::host_world_object(definitions, object)));
+            }
+        }
+        None
+    }
+
+    /// Materialize all non-mover entries from movement's scoped slices.
+    ///
+    /// # Safety
+    ///
+    /// The `lazy_movement_host_world_object` contract applies. Excluded
+    /// entries were already copied into the host context and are skipped
+    /// before dereference.
+    unsafe fn lazy_movement_host_world_objects(
+        source: *const (),
+        excluded: &HashSet<usize>,
+    ) -> Vec<(usize, HostWorldObject)> {
+        let source = unsafe { &*source.cast::<MovementLazyHostWorldSource>() };
+        let definitions = unsafe { &*source.definitions };
+        let before = source.before.get();
+        let after = source.after.get();
+        let mut result = Vec::with_capacity(
+            source
+                .before_len
+                .saturating_add(source.after_len)
+                .saturating_sub(excluded.len()),
+        );
+        for offset in 0..source.before_len {
+            if excluded.contains(&offset) {
+                continue;
+            }
+            let object = unsafe { &*before.add(offset) };
+            result.push((offset, Self::host_world_object(definitions, object)));
+        }
+        for offset in 0..source.after_len {
+            let index = source.mover_index + 1 + offset;
+            if excluded.contains(&index) {
+                continue;
+            }
+            let object = unsafe { &*after.add(offset) };
+            result.push((index, Self::host_world_object(definitions, object)));
+        }
+        result
+    }
+
+    /// Clone movement's current landscape only when Contact* queries it.
+    ///
+    /// # Safety
+    ///
+    /// The source updates this pointer at callback entry and the landscape
+    /// remains immutably borrowed until the script call returns.
+    unsafe fn lazy_movement_host_world_landscape(source: *const ()) -> Option<Landscape> {
+        #[cfg(test)]
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        let source = unsafe { &*source.cast::<MovementLazyHostWorldSource>() };
+        let landscape = source.landscape.get();
+        (!landscape.is_null()).then(|| unsafe { (&*landscape).clone() })
+    }
+
     /// Build the shared/static portion of a script host context without
     /// materializing every object's mutable script state or cloning the
     /// landscape shell. Movement can finish this lazily on first contact.
@@ -24741,11 +24921,31 @@ impl Engine {
     }
 
     fn host_world_context(&self) -> HostWorldContext {
-        self.host_world_context_base().with_objects_and_landscape(
-            self.objects
-                .iter()
-                .map(|object| Self::host_world_object(&self.definitions, object)),
-            self.landscape.clone(),
+        // Freeze the generation-stamped id lookup before a callback may hold
+        // one object through `&mut`. Script-side spawns/removals are staged and
+        // cannot change this vector until the context has been dropped.
+        if let Some(first) = self.objects.first() {
+            let _ = self.find_object_index(first.id);
+        }
+        // SAFETY: every use of this private context is synchronous. The
+        // callback wrappers drop it before replaying any operation that may
+        // move object storage or replace the authoritative landscape.
+        let provider = unsafe {
+            LazyHostWorldProvider::new(
+                std::ptr::from_ref(self).cast(),
+                Self::lazy_host_world_object,
+                Self::lazy_host_world_objects,
+                Self::lazy_host_world_landscape,
+            )
+        };
+        self.host_world_context_base()
+            .with_lazy_world_provider(provider)
+    }
+
+    fn host_world_context_for_object(&self, index: usize) -> HostWorldContext {
+        self.host_world_context().with_seeded_object(
+            index,
+            Self::host_world_object(&self.definitions, &self.objects[index]),
         )
     }
 
@@ -25943,7 +26143,7 @@ impl Engine {
         let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context();
+        let world = self.host_world_context_for_object(index);
         let (mut entries, audio_state, new_rng) = definition.call_menu_entries(
             &state_snapshot,
             object_id,
@@ -26010,7 +26210,7 @@ impl Engine {
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context();
+        let world = self.host_world_context_for_object(index);
         let (handled, outcome, audio_state, new_rng) = definition.call_menu_command(
             &state_snapshot,
             crew_id,
@@ -26074,7 +26274,7 @@ impl Engine {
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context();
+        let world = self.host_world_context_for_object(index);
         let (handled, outcome, audio_state, new_rng) = definition.call_menu_callback(
             &state_snapshot,
             object_id,
@@ -26133,7 +26333,7 @@ impl Engine {
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context();
+        let world = self.host_world_context_for_object(index);
         let call = definition.call_object_function(
             &state_snapshot,
             object_id,
@@ -26222,7 +26422,7 @@ impl Engine {
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context();
+        let world = self.host_world_context_for_object(index);
         let call = match strict_level {
             Some(strict_level) => definition.direct_exec_object_expression_at_strict(
                 &state_snapshot,
@@ -26404,7 +26604,7 @@ impl Engine {
         let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context();
+        let world = self.host_world_context_for_object(index);
         let call = definition.call_object_function(
             &state_snapshot,
             object_id,
@@ -26522,7 +26722,7 @@ impl Engine {
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context();
+        let world = self.host_world_context_for_object(index);
         let call = definition.call_control(
             &state_snapshot,
             cursor,
@@ -28618,7 +28818,7 @@ impl Engine {
             self.physics,
             self.environment,
             self.frame,
-            self.host_world_context(),
+            self.host_world_context_for_object(index),
             self.game_over_triggered,
             self.audio_registry.clone(),
         );
@@ -29760,7 +29960,7 @@ impl Engine {
                 let previous_container = self.objects[idx].state.container;
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
-                let world = self.host_world_context();
+                let world = self.host_world_context_for_object(idx);
                 let (
                     global_cmds,
                     emitted_particles,
@@ -30373,7 +30573,7 @@ impl Engine {
                         &self.global_effects,
                         self.physics,
                         self.environment,
-                        self.host_world_context(),
+                        self.host_world_context_for_object(idx),
                         self.game_over_triggered,
                         self.audio_registry.clone(),
                     )?
@@ -30562,7 +30762,7 @@ impl Engine {
 
                 if !effect_events.is_empty() {
                     let previous_container = self.objects[idx].state.container;
-                    let world = self.host_world_context();
+                    let world = self.host_world_context_for_object(idx);
                     let (
                         global_cmds,
                         emitted_particles,
@@ -31656,7 +31856,7 @@ impl Engine {
         let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context();
+        let world = self.host_world_context_for_object(index);
         let callback = callback_definition.call_action_callback(
             object_definition,
             function,
@@ -32181,7 +32381,7 @@ impl Engine {
             let definitions_ref = &self.definitions;
             let global_view = self.global_effects.clone();
             let rng_state = self.rng.clone();
-            let world = self.host_world_context();
+            let world = self.host_world_context_for_object(index);
             let object = &mut self.objects[index];
             let (
                 global_cmds,
@@ -32545,7 +32745,7 @@ impl Engine {
                 let definitions_ref = &self.definitions;
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
-                let world = self.host_world_context();
+                let world = self.host_world_context_for_object(index);
                 let object = &mut self.objects[index];
                 let (
                     global_cmds,
@@ -34137,7 +34337,7 @@ impl Engine {
         let previous_container = self.objects[idx].state.container;
         let global_view = self.global_effects.clone();
         let rng_state = self.rng.clone();
-        let world = self.host_world_context();
+        let world = self.host_world_context_for_object(idx);
         let (
             global_cmds,
             emitted_particles,
@@ -37134,13 +37334,11 @@ impl Engine {
             solid_masks: &solid_masks,
             object_id,
         };
-        // The contact-callback closure below early-outs unless the def
-        // sets ContactCalls=1 (rare) — don't pay a definition clone and
-        // a world snapshot per object for a closure that won't run.
-        let definition_for_contact = movement
-            .contact_function_calls
-            .then(|| self.definitions.get(definition_id).cloned())
-            .flatten();
+        // The contact-callback closure below early-outs unless the def sets
+        // ContactCalls=1 (rare). Keep the immutable definition borrowed from
+        // the definitions field: cloning it also cloned its pristine script
+        // AST and action tables for every moving ContactCalls object, even on
+        // frames with no contact.
         let mut contact_rng = self.rng.clone();
         let mut contact_audio = self.audio_registry.clone();
         let mut contact_next_object_id = self.next_object_id;
@@ -37153,8 +37351,6 @@ impl Engine {
         let contact_world_base = movement
             .contact_function_calls
             .then(|| self.host_world_context_base());
-        let contact_world = RefCell::new(None::<HostWorldContext>);
-        let contact_did_motion = Cell::new(false);
         let contact_physics = self.physics;
         let contact_environment = self.environment;
         let contact_frame = self.frame;
@@ -37166,6 +37362,11 @@ impl Engine {
         let mut contact_selection_changes = Vec::new();
         let contact_function_calls_enabled = movement.contact_function_calls;
         let contact_definitions = &self.definitions;
+        let definition_for_contact = contact_callback_definition(
+            contact_definitions,
+            definition_id,
+            contact_function_calls_enabled,
+        );
         let contact_material_capacity = self.materials.len();
         let mut mask_attachments = None;
         let mut movement_outcome = {
@@ -37175,8 +37376,32 @@ impl Engine {
             let sectors = self.sectors.as_ref();
             let (objects_before, objects_tail) = self.objects.split_at_mut(idx);
             let (object, objects_after) = objects_tail.split_first_mut().expect("index checked");
+            let movement_world_source = MovementLazyHostWorldSource {
+                before: Cell::new(objects_before.as_ptr()),
+                before_len: objects_before.len(),
+                after: Cell::new(objects_after.as_ptr()),
+                after_len: objects_after.len(),
+                mover_index: idx,
+                definitions: std::ptr::from_ref(contact_definitions),
+                landscape: Cell::new(std::ptr::null()),
+            };
+            // SAFETY: this provider is installed only on `contact_world`.
+            // Its declaration order below makes it drop before the
+            // stack-scoped source and split slices on every exit path; the
+            // successful path also empties it explicitly.
+            let movement_world_provider = unsafe {
+                LazyHostWorldProvider::new(
+                    std::ptr::from_ref(&movement_world_source).cast(),
+                    Self::lazy_movement_host_world_object,
+                    Self::lazy_movement_host_world_objects,
+                    Self::lazy_movement_host_world_landscape,
+                )
+            };
             let movement_others = RefCell::new((objects_before, objects_after));
-            let definition_for_contact = definition_for_contact.as_ref();
+            // Declared after both the raw provider source and the split-slice
+            // owner so reverse drop order destroys every provider-carrying
+            // context first, including on `?` returns and panic unwinding.
+            let contact_world = RefCell::new(None::<HostWorldContext>);
             let mut run_contact_callback = |object: &mut Object,
                                             landscape: &Landscape,
                                             contact_cnat: u32|
@@ -37210,38 +37435,26 @@ impl Engine {
                             object.state.position.x, object.state.position.y
                         ));
                     }
+                    movement_world_source
+                        .landscape
+                        .set(std::ptr::from_ref(landscape));
                     if contact_world.borrow().is_none() {
                         let Some(base) = contact_world_base.as_ref() else {
                             return Ok(());
                         };
-                        let others = movement_others.borrow();
-                        let (objects_before, objects_after) = &*others;
-                        let mut world = base.clone().with_objects_and_landscape(
-                            objects_before
-                                .iter()
-                                .chain(std::iter::once(&*object))
-                                .chain(objects_after.iter())
-                                .map(|world_object| {
-                                    Self::host_world_object(contact_definitions, world_object)
-                                }),
-                            Some(landscape.clone()),
+                        *contact_world.borrow_mut() = Some(
+                            base.clone()
+                                .with_lazy_world_provider(movement_world_provider),
                         );
-                        if contact_did_motion.get() {
-                            let bakes = objects_before
-                                .iter()
-                                .chain(std::iter::once(&*object))
-                                .chain(objects_after.iter())
-                                .filter_map(|world_object| {
-                                    world_object
-                                        .solid_mask_bake
-                                        .clone()
-                                        .map(|bake| (world_object.id, bake))
-                                })
-                                .collect();
-                            world.refresh_after_do_motion(object.id, landscape, bakes);
-                        }
-                        *contact_world.borrow_mut() = Some(world);
                     }
+                    contact_world
+                        .borrow_mut()
+                        .as_mut()
+                        .expect("contact world initialized for matching callback")
+                        .seed_object(
+                            idx,
+                            Self::host_world_object(contact_definitions, object),
+                        );
                     let state_snapshot = object.script_state_snapshot();
                     let world = contact_world
                         .borrow()
@@ -37378,7 +37591,6 @@ impl Engine {
                     true,
                     true,
                 );
-                contact_did_motion.set(true);
                 if let Some(world) = contact_world.borrow_mut().as_mut() {
                     let bakes = objects_before
                         .iter()
@@ -37393,6 +37605,14 @@ impl Engine {
                         .collect();
                     world.refresh_after_do_motion(object.id, landscape, bakes);
                 }
+                // The mutable slice reborrow above invalidates raw pointers
+                // derived before DoMotion. Re-derive them after the last
+                // slice access so a later Contact* callback has current
+                // provenance as well as the same stable addresses.
+                movement_world_source
+                    .before
+                    .set(objects_before.as_ptr());
+                movement_world_source.after.set(objects_after.as_ptr());
                 Ok(())
             };
             let mut outcome = object.advance_fixed_position_per_pixel(
@@ -37412,6 +37632,10 @@ impl Engine {
                 &mut run_contact_callback,
             )?;
             drop(on_do_motion);
+            drop(run_contact_callback);
+            // Drop every clone carrying the stack-scoped movement provider
+            // before its raw source and split slices leave this block.
+            let _ = contact_world.borrow_mut().take();
             outcome.any_contact |= rotation_contact;
             outcome.contact_cnat |= rotation_cnat;
             // DoMovement restores the accumulated iContacts after all
@@ -42714,7 +42938,7 @@ impl Engine {
             self.physics,
             self.environment,
             self.frame,
-            self.host_world_context(),
+            self.host_world_context_for_object(idx),
             self.game_over_triggered,
             self.audio_registry.clone(),
         );
@@ -42776,7 +43000,7 @@ impl Engine {
             self.physics,
             self.environment,
             self.frame,
-            self.host_world_context(),
+            self.host_world_context_for_object(idx),
             self.game_over_triggered,
             self.audio_registry.clone(),
         );
@@ -42834,7 +43058,7 @@ impl Engine {
             self.physics,
             self.environment,
             self.frame,
-            self.host_world_context(),
+            self.host_world_context_for_object(idx),
             self.game_over_triggered,
             self.audio_registry.clone(),
         );
@@ -42904,7 +43128,7 @@ impl Engine {
             self.physics,
             self.environment,
             self.frame,
-            self.host_world_context(),
+            self.host_world_context_for_object(idx),
             self.game_over_triggered,
             self.audio_registry.clone(),
         );
@@ -56362,8 +56586,7 @@ fn dispatch_global_effect_callback(
         .unwrap_or(Value::Nil);
     let context_locals = context_object
         .and_then(|object_id| world.get(object_id))
-        .and_then(|object| object.full_state())
-        .map(|state| state.local_vars.clone())
+        .and_then(|object| object.full_state().map(|state| state.local_vars.clone()))
         .unwrap_or_default();
     let context_cells = lc_script::LocalCells::from_local_vars(&context_locals);
 
@@ -60026,7 +60249,256 @@ mod command_contact_regression {
     }
 
     #[test]
-    fn contact_world_materialization_is_lazy_until_a_callback_fires() {
+    fn lazy_host_world_call_object_materializes_only_on_world_access() {
+        let mut engine = Engine::with_seed(0);
+        let mut landscape = Landscape::with_default_material(100, vec![100; 100], None)
+            .expect("query landscape");
+        landscape.set_world_height(100);
+        let mut pixels = vec![0; 100 * 100];
+        pixels[50 * 100 + 52] = 1;
+        landscape.set_pixel_grid(PixelGrid::new(
+            100,
+            100,
+            pixels,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+        engine.set_landscape(landscape);
+
+        engine
+            .register_definition(
+                Definition::from_script("FILL", "Filler", "#strict\n")
+                    .expect("filler compiles"),
+            )
+            .expect("filler registers");
+        let mut caller = Definition::from_script(
+            "LAZY",
+            "Lazy caller",
+            r#"#strict
+local self_calls, world_count, wall_seen;
+protected func SelfOnly()
+{
+    self_calls++;
+    return(GetX());
+}
+protected func QueryWorld()
+{
+    world_count = ObjectCount();
+    wall_seen = GBackSolid(2, 0);
+    return(world_count);
+}
+"#,
+        )
+        .expect("caller compiles");
+        caller.set_c4_callback_convention(true);
+        engine
+            .register_definition(caller)
+            .expect("caller registers");
+        for x in 0..64 {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("FILL").with_position(Vector2::new(x % 100, 10)),
+                )
+                .expect("filler spawns");
+        }
+        let caller = engine
+            .spawn_object(SpawnConfig::new("LAZY").with_position(Vector2::new(50, 50)))
+            .expect("caller spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "SelfOnly", Vec::new())
+                .expect("self-only callback succeeds"),
+            Value::Int(50),
+        );
+        assert_eq!(
+            HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+            1,
+            "callback setup copies only the executing object"
+        );
+        assert_eq!(
+            HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
+            0,
+            "an object-local callback never clones the landscape"
+        );
+
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "QueryWorld", Vec::new())
+                .expect("world-query callback succeeds"),
+            Value::Int(engine.objects.len() as i32 - 1),
+        );
+        assert_eq!(
+            HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+            engine.objects.len(),
+            "enumeration fills one complete object view exactly once"
+        );
+        assert_eq!(
+            HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
+            1,
+            "terrain is cloned on its first actual query"
+        );
+        assert_eq!(
+            engine.objects[caller_index]
+                .state
+                .local_vars
+                .get("wall_seen"),
+            Some(&Value::Bool(true)),
+            "the lazy landscape preserves object-relative GBackSolid behavior"
+        );
+    }
+
+    #[test]
+    fn lazy_host_world_action_callback_seeds_only_caller() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("FILL", "Filler", "#strict\n")
+                    .expect("filler compiles"),
+            )
+            .expect("filler registers");
+        let mut actor = Definition::from_script(
+            "ACTR",
+            "Action caller",
+            "#strict\nlocal phase_calls; protected func OnPhase() { phase_calls++; return(0); }",
+        )
+        .expect("actor compiles");
+        actor.set_c4_callback_convention(true);
+        actor.configure_actions(
+            Some("Swim".to_owned()),
+            HashMap::from([(
+                "Swim".to_owned(),
+                ActionSpec::default().with_phase_call("OnPhase"),
+            )]),
+        );
+        engine.register_definition(actor).expect("actor registers");
+        for x in 0..64 {
+            engine
+                .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)))
+                .expect("filler spawns");
+        }
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_action(ActionState::new("Swim")))
+            .expect("actor spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        let action_index = engine.objects[actor_index].state.action.act_map_index;
+
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
+        engine
+            .invoke_action_callback(
+                actor_index,
+                ActionCallbackKind::Phase,
+                "Swim",
+                action_index,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("phase callback succeeds");
+        assert_eq!(
+            HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+            1,
+            "a self-only PhaseCall copies no unrelated object"
+        );
+        assert_eq!(
+            HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
+            0,
+        );
+        assert_eq!(
+            engine.objects[actor_index]
+                .state
+                .local_vars
+                .get("phase_calls"),
+            Some(&Value::Int(1)),
+        );
+    }
+
+    #[test]
+    fn lazy_host_world_global_effect_without_world_access_copies_nothing() {
+        use std::sync::Mutex;
+
+        let calls = Arc::new(Mutex::new(0usize));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            hooks.set_on_call(move |name, _| {
+                if name == "FxLazyTimer" {
+                    *calls.lock().expect("call counter") += 1;
+                }
+            });
+        }
+        let mut definition = Definition::from_script(
+            "GFXL",
+            "Global lazy effect",
+            "#strict\nfunc FxLazyTimer(object target, int number, int time) { return(0); }",
+        )
+        .expect("effect definition compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_debugger_hooks(hooks);
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("effect definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("FILL", "Filler", "#strict\n")
+                    .expect("filler compiles"),
+            )
+            .expect("filler registers");
+        for x in 0..64 {
+            engine
+                .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)))
+                .expect("filler spawns");
+        }
+        let mut effect = EffectState::new("Lazy")
+            .with_interval(1)
+            .with_command_id(Some("GFXL"));
+        effect.number = 1;
+        engine.global_effects.push(effect);
+
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
+        engine.tick_global_effects().expect("global effect ticks");
+        assert_eq!(*calls.lock().expect("call counter"), 1);
+        assert_eq!(
+            HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+            0,
+            "a nil-target global callback copies no object"
+        );
+        assert_eq!(
+            HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
+            0,
+        );
+    }
+
+    #[test]
+    fn contact_callback_definition_is_borrowed_from_registry() {
+        let definition = Definition::from_script(
+            "CBRF",
+            "Borrowed contact definition",
+            "#strict\nprotected func ContactBottom() { return(0); }",
+        )
+        .expect("contact definition compiles");
+        let definitions = HashMap::from([("CBRF".to_owned(), definition)]);
+        let registered = definitions.get("CBRF").expect("definition registered");
+
+        let callback_definition = contact_callback_definition(&definitions, "CBRF", true)
+            .expect("enabled contact definition resolves");
+
+        assert!(std::ptr::eq(callback_definition, registered));
+        assert!(contact_callback_definition(&definitions, "CBRF", false).is_none());
+    }
+
+    #[test]
+    fn lazy_host_world_contact_materialization_is_deferred_until_query() {
         let mut engine = Engine::with_seed(0);
         let mut landscape = Landscape::with_default_material(100, vec![100; 100], None)
             .expect("contact landscape");
@@ -60098,6 +60570,7 @@ protected func ContactRight()
         let solid_mask_indices = engine.active_solid_mask_indices();
 
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
         engine
             .exec_object_movement(
                 swimmer_index,
@@ -60111,13 +60584,23 @@ protected func ContactRight()
             0,
             "free movement must not snapshot the world merely because ContactCalls=1"
         );
+        assert_eq!(
+            HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
+            0,
+            "free movement must not clone terrain merely because ContactCalls=1"
+        );
 
         engine
             .landscape
             .as_mut()
             .expect("landscape exists")
-            .grid_write_byte(53, 50, 1);
+            .grid_write_byte(54, 50, 1);
+        // Cross one free pixel first so DoMotion mutably reborrows the
+        // non-mover slices before the same movement reaches ContactRight.
+        engine.objects[swimmer_index]
+            .set_fixed_velocity(FixedVec2::from_ints(2, 0));
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
         engine
             .exec_object_movement(
                 swimmer_index,
@@ -60130,6 +60613,11 @@ protected func ContactRight()
             HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
             engine.objects.len(),
             "the first real Contact* call materializes one complete world"
+        );
+        assert_eq!(
+            HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
+            1,
+            "Contact* clones terrain only when GBackSolid first queries it"
         );
         assert_eq!(
             engine.objects[swimmer_index]
