@@ -6837,13 +6837,35 @@ mod tests {
         tokio::net::UdpSocket,
         SocketAddr,
     ) {
-        loop {
-            let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = tcp.local_addr().unwrap();
-            if let Ok(udp) = tokio::net::UdpSocket::bind(address).await {
-                return (tcp, udp, address);
+        const MAX_ATTEMPTS: usize = 32;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let udp = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("failed to bind UDP fixture on attempt {attempt}: {error}")
+                });
+            let address = udp.local_addr().unwrap_or_else(|error| {
+                panic!("failed to read UDP fixture address on attempt {attempt}: {error}")
+            });
+            match TcpListener::bind(address).await {
+                Ok(tcp) => return (tcp, udp, address),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AddrInUse
+                        && attempt < MAX_ATTEMPTS => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                    panic!(
+                        "failed to reserve TCP fixture at held UDP endpoints after {MAX_ATTEMPTS} attempts; last endpoint {address}: {error}"
+                    );
+                }
+                Err(error) => {
+                    panic!(
+                        "failed to bind TCP fixture at held UDP endpoint {address} on attempt {attempt}: {error}"
+                    );
+                }
             }
         }
+        unreachable!("same-address fixture attempt loop always returns or panics")
     }
 
     #[tokio::test]
@@ -8084,13 +8106,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_worker_adds_udp_route_on_the_configured_server_endpoint() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind host listener");
-        let address = listener.local_addr().expect("host address");
-        let udp_proxy = tokio::net::UdpSocket::bind(address)
-            .await
-            .expect("bind UDP proxy on the configured server endpoint");
+        let (listener, udp_proxy, address) = reserve_tcp_and_udp_at_same_address().await;
         let host = start_host(
             listener,
             HostConfig {
