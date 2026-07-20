@@ -9213,6 +9213,9 @@ enum AppContextMenuCommand {
     },
     LobbyPlayerRemove { client_id: i32, player_id: i32 },
     LobbyPlayerNewColor { client_id: i32, player_id: i32 },
+    LobbyClientToggleMute(i32),
+    LobbyClientToggleActivate(i32),
+    LobbyClientInfo(i32),
     LobbyKick(i32),
     LobbySheet(LobbySheet),
     NetworkJoinEdit(lc_frontend::startup_netdlg::NetDlgEditContextCommand),
@@ -11121,6 +11124,9 @@ struct GameApp {
     physical_viewports_authoritative: bool,
     /// Singleton runtime `C4Network2ClientListDlg`, toggled by bare F4.
     runtime_client_list: Option<lc_frontend::runtime_client_list::RuntimeClientListDialog>,
+    /// Keys owned by the modal lobby `C4Network2ClientDlg` until release,
+    /// including the Escape press that closes it.
+    runtime_client_list_consumed_keys: HashSet<VirtualKeyCode>,
     /// Both this dialog and game-over use C4GUI's default z=0. Preserve which
     /// one was shown most recently so equal-z rendering and input stay in the
     /// native insertion order.
@@ -11162,9 +11168,9 @@ struct GameApp {
     /// Core option row whose C4GUI::ComboBox owns the shared context menu.
     /// The frontend retains this identity to render its open arrow phase.
     context_menu_lobby_option: Option<LobbyOptionKind>,
-    /// Remote client row whose Kick popup owns the shared context menu. A
-    /// synchronized removal closes this menu before input can target a row
-    /// that no longer exists.
+    /// Client row whose popup owns the shared context menu. A synchronized
+    /// removal closes this menu before input can target a row that no longer
+    /// exists.
     context_menu_lobby_kick_client: Option<i32>,
     /// Player row whose root context menu is open. An authoritative update
     /// that removes the row closes the stale popup before it can dispatch.
@@ -13912,27 +13918,11 @@ impl NetworkLobbyState {
         changed
     }
 
-    fn classic_render_state(
-        &mut self,
-        surface: &Surface,
-        assets: &FrontendAssets,
-        scenario_game_options: &GameOptionButtons,
-    ) -> Result<(ClassicGameLobby, GameOptionButtons)> {
-        let now = Instant::now();
-        self.client_sound_status.retain(|_, (_, started)| {
-            now.checked_duration_since(*started)
-                .is_none_or(|elapsed| elapsed < Duration::from_secs(1))
-        });
-        let role = if self.is_host {
-            LobbyRole::Host
-        } else {
-            LobbyRole::Client
-        };
-        let participant_rows = || {
-            let mut rows = self
-                .participants
-                .iter()
-                .map(|(client_id, participant)| {
+    fn participant_roster_rows(&self) -> Vec<LobbyRosterRow> {
+        let mut rows = self
+            .participants
+            .iter()
+            .map(|(client_id, participant)| {
                 LobbyRosterRow::Client(LobbyClientRow {
                     id: i32::try_from(*client_id).unwrap_or(i32::MAX),
                     name: participant.name.clone(),
@@ -13959,19 +13949,49 @@ impl NetworkLobbyState {
                     ping_ms: None,
                 })
             })
-                .collect::<Vec<_>>();
-            apply_classic_lobby_client_telemetry(
-                &mut rows,
-                self.local_client_id,
-                &self.client_telemetry,
-            );
-            rows
-        };
-        let rows = if self.roster_rows.is_empty() {
-            participant_rows()
+            .collect::<Vec<_>>();
+        apply_classic_lobby_client_telemetry(
+            &mut rows,
+            self.local_client_id,
+            &self.client_telemetry,
+        );
+        rows
+    }
+
+    fn visible_roster_rows(&self) -> Vec<LobbyRosterRow> {
+        if self.roster_rows.is_empty() {
+            self.participant_roster_rows()
         } else {
             self.roster_rows.clone()
+        }
+    }
+
+    fn visible_client_is_local(&self, client_id: i32) -> Option<bool> {
+        self.visible_roster_rows()
+            .into_iter()
+            .find_map(|row| match row {
+                LobbyRosterRow::Client(client) if client.id == client_id => Some(client.local),
+                _ => None,
+            })
+    }
+
+    fn classic_render_state(
+        &mut self,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<(ClassicGameLobby, GameOptionButtons)> {
+        let now = Instant::now();
+        self.client_sound_status.retain(|_, (_, started)| {
+            now.checked_duration_since(*started)
+                .is_none_or(|elapsed| elapsed < Duration::from_secs(1))
+        });
+        let role = if self.is_host {
+            LobbyRole::Host
+        } else {
+            LobbyRole::Client
         };
+        let rows = self.visible_roster_rows();
         let active_players = rows
             .iter()
             .filter(|row| matches!(row, LobbyRosterRow::Player(_)))
@@ -14013,12 +14033,39 @@ impl NetworkLobbyState {
         Ok((controller, options))
     }
 
+    fn roster_context_request_at(
+        &mut self,
+        point: GuiPoint,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Option<(LobbyRosterId, GuiPoint)>> {
+        let fonts = assets
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful lobby fonts are unavailable")?;
+        let (mut controller, _) =
+            self.classic_render_state(surface, assets, scenario_game_options)?;
+        let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
+        let roster = controller.roster_layout(&layout, fonts.text.line_height);
+        Ok(controller
+            .pointer_secondary_down(point, &layout, &roster)
+            .into_iter()
+            .find_map(|action| match action {
+                ClassicLobbyAction::RosterContextRequested { row, position } => {
+                    Some((row, position))
+                }
+                _ => None,
+            }))
+    }
+
     fn render_classic(
         &mut self,
         surface: &mut Surface,
         assets: &FrontendAssets,
         scenario_game_options: &GameOptionButtons,
         include_tooltips: bool,
+        active: bool,
     ) -> Result<()> {
         let resources = assets.game_lobby_resources()?;
         let option_resources = assets.game_option_resources()?;
@@ -14030,7 +14077,7 @@ impl NetworkLobbyState {
                 &resources,
                 &options,
                 &option_resources,
-                true,
+                active,
                 Some(startup_gamma()),
             )
         } else {
@@ -14039,7 +14086,7 @@ impl NetworkLobbyState {
                 &resources,
                 &options,
                 &option_resources,
-                true,
+                active,
                 Some(startup_gamma()),
             )
         };
@@ -21221,6 +21268,7 @@ impl GameApp {
             next_physical_viewport_identity: 1,
             physical_viewports_authoritative: false,
             runtime_client_list: None,
+            runtime_client_list_consumed_keys: HashSet::new(),
             runtime_client_list_above_game_over: false,
             scoreboard_dialog: None,
             scoreboard_initial_reconcile_pending: false,
@@ -22476,6 +22524,13 @@ impl GameApp {
         if !self.message_dialogs.is_empty() && !self.running_chat_active() {
             return Ok(());
         }
+        if self
+            .runtime_client_list
+            .as_ref()
+            .is_some_and(|dialog| dialog.is_info_only())
+        {
+            return Ok(());
+        }
         if self.external_irc_dialog_visible && self.context_menu.is_some() {
             return Ok(());
         }
@@ -23325,6 +23380,13 @@ impl GameApp {
             return Ok(());
         }
         if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
+            return Ok(());
+        }
+        if self
+            .runtime_client_list
+            .as_ref()
+            .is_some_and(|dialog| dialog.is_info_only())
+        {
             return Ok(());
         }
         if self.external_irc_dialog_visible {
@@ -26006,14 +26068,20 @@ impl GameApp {
             return false;
         }
         let (options, rows, status) = self.runtime_client_list_snapshot();
-        if let Some(dialog) = self.runtime_client_list.as_mut() {
+        let close_info_only = self.runtime_client_list.as_mut().is_some_and(|dialog| {
             dialog.replace_snapshot(options, rows, status);
+            dialog.is_info_only() && dialog.info_client_id().is_none()
+        });
+        if close_info_only {
+            self.runtime_client_list = None;
+            self.runtime_client_list_above_game_over = false;
         }
         true
     }
 
     fn toggle_runtime_client_list(&mut self) -> Result<(), EngineError> {
         if self.runtime_client_list.take().is_some() {
+            self.runtime_client_list_consumed_keys.clear();
             self.runtime_client_list_above_game_over = false;
             return Ok(());
         }
@@ -26031,6 +26099,7 @@ impl GameApp {
                 .and_then(|resources| resources.validate()),
         )?;
         let (options, rows, status) = self.runtime_client_list_snapshot();
+        self.runtime_client_list_consumed_keys.clear();
         self.runtime_client_list_above_game_over = self.game_over_dialog.is_some();
         self.runtime_client_list = Some(
             lc_frontend::runtime_client_list::RuntimeClientListDialog::new(
@@ -26058,10 +26127,22 @@ impl GameApp {
         match action {
             RuntimeClientListAction::Close => {
                 self.runtime_client_list = None;
+                self.runtime_client_list_consumed_keys.clear();
                 self.runtime_client_list_above_game_over = false;
                 return Ok(());
             }
-            RuntimeClientListAction::OpenInfo(_) | RuntimeClientListAction::CloseInfo => {
+            RuntimeClientListAction::OpenInfo(_) => {
+                return Ok(());
+            }
+            RuntimeClientListAction::CloseInfo => {
+                if self
+                    .runtime_client_list
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.is_info_only())
+                {
+                    self.runtime_client_list = None;
+                    self.runtime_client_list_above_game_over = false;
+                }
                 return Ok(());
             }
             RuntimeClientListAction::ToggleMute(client_id) => {
@@ -26198,6 +26279,32 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
+        if self.runtime_client_list_consumed_keys.contains(&key) {
+            if state == ElementState::Released {
+                self.runtime_client_list_consumed_keys.remove(&key);
+            }
+            return Ok(true);
+        }
+        let info_only = self
+            .runtime_client_list
+            .as_ref()
+            .is_some_and(|dialog| dialog.is_info_only());
+        if info_only {
+            if state == ElementState::Pressed {
+                self.runtime_client_list_consumed_keys.insert(key);
+            }
+            let action = (key == VirtualKeyCode::Escape)
+                .then(|| {
+                    self.runtime_client_list
+                        .as_mut()
+                        .and_then(|dialog| dialog.handle_escape(state == ElementState::Pressed))
+                })
+                .flatten();
+            if let Some(action) = action {
+                self.handle_runtime_client_list_action(action)?;
+            }
+            return Ok(true);
+        }
         if self.runtime_client_list.is_none() || key != VirtualKeyCode::Escape {
             return Ok(false);
         }
@@ -26217,7 +26324,9 @@ impl GameApp {
         };
         self.runtime_client_list
             .as_mut()
-            .is_some_and(|dialog| dialog.handle_pointer_move(point, preferred, line_height))
+            .is_some_and(|dialog| {
+                dialog.handle_pointer_move(point, preferred, line_height) || dialog.is_info_only()
+            })
     }
 
     fn handle_runtime_client_list_pointer_button(
@@ -26227,8 +26336,12 @@ impl GameApp {
         let Some((preferred, line_height)) = self.runtime_client_list_input_geometry() else {
             return Ok(false);
         };
+        let info_only = self
+            .runtime_client_list
+            .as_ref()
+            .is_some_and(|dialog| dialog.is_info_only());
         let Some(point) = self.running_pointer_position else {
-            return Ok(false);
+            return Ok(info_only);
         };
         let (consumed, action) = self
             .runtime_client_list
@@ -26245,7 +26358,7 @@ impl GameApp {
                 }
             })
             .unwrap_or_default();
-        if consumed {
+        if consumed || info_only {
             self.suspend_ingame_pointer_for_gui();
             self.cancel_ingame_mouse_gestures();
         }
@@ -26253,7 +26366,7 @@ impl GameApp {
             self.play_ui_sound("Click");
             self.handle_runtime_client_list_action(action)?;
         }
-        Ok(consumed)
+        Ok(consumed || info_only)
     }
 
     fn handle_runtime_client_list_touch(
@@ -26261,7 +26374,7 @@ impl GameApp {
         position: GuiPoint,
         phase: TouchPhase,
     ) -> Result<bool, EngineError> {
-        if self.mode != AppMode::Running || self.runtime_client_list.is_none() {
+        if self.runtime_client_list.is_none() {
             return Ok(false);
         }
         self.running_pointer_position = Some(position);
@@ -26665,6 +26778,14 @@ impl GameApp {
         if message_dialog_was_open && self.handle_running_chat_open_key(key, state) {
             return Ok(());
         }
+        let lobby_client_info_owns_key = self
+            .runtime_client_list
+            .as_ref()
+            .is_some_and(|dialog| dialog.is_info_only())
+            || self.runtime_client_list_consumed_keys.contains(&key);
+        if lobby_client_info_owns_key && self.handle_runtime_client_list_key(key, state)? {
+            return Ok(());
+        }
         if self.external_irc_dialog_visible {
             let c4_modifiers = self.keyboard_modifiers
                 & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
@@ -27052,6 +27173,17 @@ impl GameApp {
         }
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_key(key, state);
+        }
+        if self.mode == AppMode::Menu
+            && self.startup_view == StartupView::NetworkLobby
+            && self.network_lobby.is_some()
+            && key == VirtualKeyCode::Apps
+            && self.keyboard_modifiers.is_empty()
+        {
+            if state == ElementState::Pressed {
+                self.handle_network_lobby_secondary_button(ElementState::Pressed)?;
+            }
+            return Ok(());
         }
         if self.handle_network_lobby_chat_key(key, state)? {
             return Ok(());
@@ -27639,6 +27771,7 @@ impl GameApp {
             self.cancel_classic_host_lobby_interaction();
         }
         self.message_dialog_consumed_keys.clear();
+        self.runtime_client_list_consumed_keys.clear();
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
         self.game_option_input_consumed_keys.clear();
@@ -33087,6 +33220,8 @@ impl GameApp {
         events: impl IntoIterator<Item = SourcedGamepadEvent>,
         gamepad_gui_control: bool,
     ) -> Result<(), EngineError> {
+        use lc_frontend::runtime_client_list::RuntimeClientListAction;
+
         self.guard_classic_global_gui_bootstrap()?;
         let events = events.into_iter().collect::<Vec<_>>();
         if !events.is_empty() {
@@ -33106,6 +33241,7 @@ impl GameApp {
             GamepadCapture,
             OptionsDevice,
             Message,
+            RuntimeClientInfo,
             Definition,
             ContextPending,
             Context,
@@ -33175,6 +33311,12 @@ impl GameApp {
                 ClusterOwner::ContextPending
             } else if !self.message_dialogs.is_empty() {
                 ClusterOwner::Message
+            } else if self
+                .runtime_client_list
+                .as_ref()
+                .is_some_and(|dialog| dialog.is_info_only())
+            {
+                ClusterOwner::RuntimeClientInfo
             } else if self.external_irc_dialog_visible {
                 // C4ChatDlg is the active shared-screen dialog. It has no
                 // legacy gamepad navigation callbacks, but the raw cluster
@@ -33260,6 +33402,37 @@ impl GameApp {
                                 self.handle_message_dialog_gamepad_event(event)?;
                             }
                         }
+                        ClusterOwner::RuntimeClientInfo => match event {
+                            GamepadEvent::GuiButton {
+                                class: GuiButtonClass::High,
+                                state: ElementState::Pressed,
+                                ..
+                            }
+                            | GamepadEvent::Action {
+                                action: GamepadActionType::Cancel,
+                                state: ElementState::Pressed,
+                                ..
+                            } => {
+                                if self
+                                    .runtime_client_list
+                                    .as_ref()
+                                    .is_some_and(|dialog| dialog.is_info_only())
+                                {
+                                    self.handle_runtime_client_list_action(
+                                        RuntimeClientListAction::CloseInfo,
+                                    )?;
+                                }
+                            }
+                            GamepadEvent::Clear { .. } => {
+                                if let Some(dialog) = self.runtime_client_list.as_mut() {
+                                    dialog.pointer_left();
+                                }
+                            }
+                            GamepadEvent::Direction { .. }
+                            | GamepadEvent::Button { .. }
+                            | GamepadEvent::GuiButton { .. }
+                            | GamepadEvent::Action { .. } => {}
+                        },
                         ClusterOwner::Definition => {
                             self.handle_definition_selector_gamepad_event(event)?;
                         }
@@ -33279,6 +33452,12 @@ impl GameApp {
                                     // keyboard-inactive, including the chat's
                                     // raw gamepad forwarding callback.
                                     ClusterOwner::Suppressed
+                                } else if self
+                                    .runtime_client_list
+                                    .as_ref()
+                                    .is_some_and(|dialog| dialog.is_info_only())
+                                {
+                                    ClusterOwner::RuntimeClientInfo
                                 } else if self.game_option_input_dialog.is_some() {
                                     ClusterOwner::Input
                                 } else if self.startup_player_properties_dialog.is_some() {
@@ -33751,6 +33930,35 @@ impl GameApp {
         self.note_classic_host_lobby_non_pointer_input();
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.context_menu_pointer_dismissed_lobby_option = None;
+        if self.message_dialogs.is_empty()
+            && self
+                .runtime_client_list
+                .as_ref()
+                .is_some_and(|dialog| dialog.is_info_only())
+        {
+            let close = matches!(
+                &event,
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                    ..
+                } | GamepadEvent::Action {
+                    action: GamepadActionType::Cancel,
+                    state: ElementState::Pressed,
+                    ..
+                }
+            );
+            if close {
+                self.handle_runtime_client_list_action(
+                    lc_frontend::runtime_client_list::RuntimeClientListAction::CloseInfo,
+                )?;
+            } else if matches!(&event, GamepadEvent::Clear { .. }) {
+                if let Some(dialog) = self.runtime_client_list.as_mut() {
+                    dialog.pointer_left();
+                }
+            }
+            return Ok(());
+        }
         match event {
             GamepadEvent::Direction {
                 slot,
@@ -37051,6 +37259,12 @@ impl GameApp {
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_secondary_button(button_state);
         }
+        if self.mode == AppMode::Menu
+            && self.startup_view == StartupView::NetworkLobby
+            && self.network_lobby.is_some()
+        {
+            return self.handle_network_lobby_secondary_button(button_state);
+        }
         match self.mode {
             AppMode::Menu => {
                 if button_state == ElementState::Pressed {
@@ -37125,6 +37339,13 @@ impl GameApp {
         self.mark_menu_dirty();
         self.startup_tooltip.note_pointer_button();
         if self.startup_network_transition_blocks_input() {
+            return Ok(());
+        }
+        if self
+            .runtime_client_list
+            .as_ref()
+            .is_some_and(|dialog| dialog.is_info_only())
+        {
             return Ok(());
         }
         if self.mode == AppMode::Running && self.ingame_captured_drag_active() {
@@ -40276,6 +40497,16 @@ impl GameApp {
             let sounds = dialog.controller.take_sound_events();
             self.play_input_dialog_sound_events(sounds);
             self.game_option_input_pointer_position = None;
+            return;
+        }
+        if self
+            .runtime_client_list
+            .as_ref()
+            .is_some_and(|dialog| dialog.is_info_only())
+        {
+            if let Some(dialog) = self.runtime_client_list.as_mut() {
+                dialog.pointer_left();
+            }
             return;
         }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
@@ -43898,7 +44129,11 @@ impl GameApp {
         let roster_active = self
             .classic_host_lobby
             .as_ref()
-            .is_some_and(|lobby| lobby.controller.active_sheet().is_roster());
+            .is_some_and(|lobby| lobby.controller.active_sheet().is_roster())
+            || self
+                .network_lobby
+                .as_ref()
+                .is_some_and(|lobby| lobby.active_sheet.is_roster());
         let stale_team_combo = self.context_menu_lobby_team_player.is_some_and(|player_id| {
             !roster_active
                 || self
@@ -43910,11 +44145,7 @@ impl GameApp {
         let stale_kick = self.context_menu_lobby_kick_client.is_some_and(|client_id| {
             !roster_active
                 || !self.control_clients.contains(client_id)
-                || !self.classic_host_lobby.as_ref().is_some_and(|lobby| {
-                    lobby.controller.rows().iter().any(|row| {
-                        matches!(row, LobbyRosterRow::Client(client) if client.id == client_id && !client.local)
-                    })
-                })
+                || self.visible_lobby_client_is_local(client_id).is_none()
         });
         let stale_player = self
             .context_menu_lobby_player
@@ -44759,6 +44990,91 @@ impl GameApp {
         Some((client_id, entries))
     }
 
+    fn visible_lobby_client_is_local(&self, client_id: i32) -> Option<bool> {
+        self.classic_host_lobby
+            .as_ref()
+            .and_then(|lobby| {
+                lobby.controller.rows().iter().find_map(|row| match row {
+                    LobbyRosterRow::Client(client) if client.id == client_id => {
+                        Some(client.local)
+                    }
+                    _ => None,
+                })
+            })
+            .or_else(|| {
+                self.network_lobby
+                    .as_ref()
+                    .and_then(|lobby| lobby.visible_client_is_local(client_id))
+            })
+    }
+
+    fn classic_lobby_client_context_entries(
+        &self,
+        client_id: i32,
+    ) -> Option<Vec<ContextMenuEntry<AppContextMenuCommand>>> {
+        if self.network.is_none() || !self.control_clients.contains(client_id) {
+            return None;
+        }
+        let local = self.visible_lobby_client_is_local(client_id)?;
+        let mut entries = Vec::new();
+        if !local {
+            let muted = self.control_messages.is_muted(client_id);
+            entries.push(
+                ContextMenuEntry::new(if muted {
+                    self.runtime_resource_text("IDS_NET_UNMUTE", "&Unmute")
+                } else {
+                    self.runtime_resource_text("IDS_NET_MUTE", "&Mute")
+                })
+                .with_tooltip(if muted {
+                    self.runtime_resource_text(
+                        "IDS_NET_UNMUTE_DESC",
+                        "Unmute /sound-commands by this client",
+                    )
+                } else {
+                    self.runtime_resource_text(
+                        "IDS_NET_MUTE_DESC",
+                        "Mute /sound commands of by this client",
+                    )
+                })
+                .with_action(AppContextMenuCommand::LobbyClientToggleMute(client_id)),
+            );
+        }
+        if matches!(self.network_mode, Some(NetworkMode::Host(_))) && !local {
+            entries.push(
+                ContextMenuEntry::new(
+                    self.runtime_resource_text("IDS_NET_KICKCLIENT", "&Kick"),
+                )
+                .with_tooltip(self.runtime_resource_text(
+                    "IDS_NET_KICKCLIENT_DESC",
+                    "Disconnect this client",
+                ))
+                .with_action(AppContextMenuCommand::LobbyKick(client_id)),
+            );
+            let activated = self.control_clients.is_activated(client_id);
+            entries.push(
+                ContextMenuEntry::new(if activated {
+                    self.runtime_resource_text("IDS_NET_DEACTIVATECLIENT", "De&activate")
+                } else {
+                    self.runtime_resource_text("IDS_NET_ACTIVATECLIENT", "&Activate")
+                })
+                .with_tooltip(self.runtime_resource_text(
+                    "IDS_NET_ACTIVATECLIENT_DESC",
+                    "Toggle player/observer-status",
+                ))
+                .with_action(AppContextMenuCommand::LobbyClientToggleActivate(client_id)),
+            );
+        }
+        entries.push(
+            ContextMenuEntry::new(self.runtime_resource_text("IDS_NET_CLIENTINFO", "&Info"))
+                .with_tooltip(self.runtime_resource_text(
+                    "IDS_NET_CLIENTINFO_DESC",
+                    "Show extended info",
+                ))
+                .with_action(AppContextMenuCommand::LobbyClientInfo(client_id)),
+        );
+        Some(entries)
+    }
+
     fn open_classic_lobby_roster_context(
         &mut self,
         row: LobbyRosterId,
@@ -44778,31 +45094,10 @@ impl GameApp {
                 Ok(opened)
             }
             LobbyRosterId::Client(client_id) => {
-                let local_client_id = self
-                    .network
-                    .as_ref()
-                    .and_then(|network| i32::try_from(network.local_client_id()).ok())
-                    .unwrap_or(0);
-                let visible_remote = self.classic_host_lobby.as_ref().is_some_and(|lobby| {
-                    lobby.controller.rows().iter().any(|row| {
-                        matches!(row, LobbyRosterRow::Client(client)
-                            if client.id == client_id && !client.local)
-                    })
-                });
-                if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
-                    || client_id == local_client_id
-                    || !visible_remote
-                    || !self.control_clients.contains(client_id)
-                {
+                let Some(entries) = self.classic_lobby_client_context_entries(client_id) else {
                     return Ok(false);
-                }
-                let opened = self.open_context_menu_at(
-                    vec![ContextMenuEntry::new("Kick")
-                        .with_tooltip("Remove this client from the game.")
-                        .with_icon(ContextMenuIcon::Empty)
-                        .with_action(AppContextMenuCommand::LobbyKick(client_id))],
-                    position,
-                )?;
+                };
+                let opened = self.open_context_menu_at(entries, position)?;
                 if opened {
                     self.context_menu_lobby_kick_client = Some(client_id);
                 }
@@ -44812,6 +45107,67 @@ impl GameApp {
                 ClassicGameLobbyChild::RosterContext(row),
             )),
         }
+    }
+
+    fn toggle_classic_lobby_client_mute(&mut self, client_id: i32) {
+        if self.control_clients.contains(client_id) {
+            let muted = !self.control_messages.is_muted(client_id);
+            self.control_messages.set_muted(client_id, muted);
+        }
+    }
+
+    fn toggle_classic_lobby_client_activation(&mut self, client_id: i32) {
+        if self.network.is_none()
+            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || self.visible_lobby_client_is_local(client_id) != Some(false)
+            || !self.control_clients.contains(client_id)
+        {
+            return;
+        }
+        let update = lc_engine::ClientUpdateControlData {
+            update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id,
+            data: i32::from(!self.control_clients.is_activated(client_id)),
+            by_client: 0,
+        };
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_client_update(update))
+        {
+            tracing::error!(%error, client_id, "failed to toggle lobby client activation");
+        }
+    }
+
+    fn open_classic_lobby_client_info(&mut self, client_id: i32) -> Result<bool, EngineError> {
+        if self.network.is_none()
+            || self.visible_lobby_client_is_local(client_id).is_none()
+            || !self.control_clients.contains(client_id)
+        {
+            return Ok(false);
+        }
+        Self::guard_gui_overlay_result(
+            "C4Network2ClientDlg",
+            self.assets
+                .runtime_client_list_resources()
+                .context("exact C4Network2ClientDlg resource set is absent")
+                .and_then(|resources| resources.validate()),
+        )?;
+        let (_, rows, _) = self.runtime_client_list_snapshot();
+        let Some(row) = rows.into_iter().find(|row| row.client_id == client_id) else {
+            return Ok(false);
+        };
+        self.cancel_underlying_interaction();
+        self.runtime_client_list_consumed_keys.clear();
+        self.runtime_client_list = Some(
+            lc_frontend::runtime_client_list::RuntimeClientListDialog::new_info(
+                self.runtime_resource_string("IDS_NET_CLIENT_INFO"),
+                row,
+            ),
+        );
+        self.runtime_client_list_above_game_over = false;
+        self.mark_menu_dirty();
+        Ok(true)
     }
 
     fn kick_classic_lobby_client(&mut self, client_id: i32) {
@@ -45992,6 +46348,15 @@ impl GameApp {
                         player_id,
                     } => {
                         self.reset_classic_lobby_player_color(client_id, player_id);
+                    }
+                    AppContextMenuCommand::LobbyClientToggleMute(client_id) => {
+                        self.toggle_classic_lobby_client_mute(client_id);
+                    }
+                    AppContextMenuCommand::LobbyClientToggleActivate(client_id) => {
+                        self.toggle_classic_lobby_client_activation(client_id);
+                    }
+                    AppContextMenuCommand::LobbyClientInfo(client_id) => {
+                        self.open_classic_lobby_client_info(client_id)?;
                     }
                     AppContextMenuCommand::LobbyKick(client_id) => {
                         self.kick_classic_lobby_client(client_id);
@@ -51138,6 +51503,40 @@ impl GameApp {
         self.process_classic_lobby_actions(actions)
     }
 
+    fn handle_network_lobby_secondary_button(
+        &mut self,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        if state == ElementState::Released {
+            return Ok(());
+        }
+        let Some(point) = self.network_lobby.as_ref().and_then(|lobby| lobby.pointer) else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        let request = self
+            .network_lobby
+            .as_mut()
+            .expect("network lobby was checked above")
+            .roster_context_request_at(
+                point,
+                self.graphics.surface(),
+                assets.as_ref(),
+                &self.scenario_game_options,
+            )
+            .map_err(|error| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Resources {
+                        detail: error.to_string(),
+                    }),
+                ))
+            })?;
+        if let Some((row, position)) = request {
+            self.open_classic_lobby_roster_context(row, position)?;
+        }
+        Ok(())
+    }
+
     fn handle_classic_lobby_middle_button(
         &mut self,
         state: ElementState,
@@ -52233,6 +52632,9 @@ impl GameApp {
         self.restore_startup_fonts();
         self.active_global_gui_overrides.clear();
         self.running_chat = None;
+        self.runtime_client_list = None;
+        self.runtime_client_list_consumed_keys.clear();
+        self.runtime_client_list_above_game_over = false;
         self.message_input_history.clear();
         self.close_context_menu_silently();
         self.abort_startup_crew_rename();
@@ -52965,6 +53367,7 @@ impl GameApp {
         self.network = None;
         self.network_mode = None;
         self.runtime_client_list = None;
+        self.runtime_client_list_consumed_keys.clear();
         self.runtime_client_list_above_game_over = false;
         self.control_messages.clear_clients();
         self.network_game_advertiser = None;
@@ -58412,7 +58815,9 @@ impl GameApp {
     fn render_ordered_startup_tooltips(&mut self) -> Result<()> {
         let _ = self.render_startup_element_tooltip()?;
         match self.startup_view {
-            StartupView::NetworkLobby if self.classic_host_lobby.is_none() => {
+            StartupView::NetworkLobby
+                if self.classic_host_lobby.is_none() && self.runtime_client_list.is_none() =>
+            {
                 let assets = Arc::clone(&self.assets);
                 if let Some(lobby) = self.network_lobby.as_mut() {
                     lobby.render_classic_tooltips(
@@ -58466,6 +58871,7 @@ impl GameApp {
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
             && self.message_dialogs.is_empty()
+            && self.runtime_client_list.is_none()
             && !self.external_irc_dialog_visible;
         let gamma = self.loader_gamma.as_ref();
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
@@ -58513,6 +58919,7 @@ impl GameApp {
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
             && self.message_dialogs.is_empty()
+            && self.runtime_client_list.is_none()
             && !self.external_irc_dialog_visible;
         lobby.controller.render_tooltips(
             self.graphics.surface_mut(),
@@ -58595,6 +59002,11 @@ impl GameApp {
                 self.advance_startup_player_portrait_thumbnail();
                 self.preflight_startup_presentation()?;
                 self.preflight_visible_gui_overlay_resources()?;
+                if self.startup_view == StartupView::NetworkLobby
+                    && self.classic_host_lobby.is_none()
+                {
+                    self.close_stale_classic_lobby_team_combo();
+                }
                 if self.startup_view == StartupView::NetworkGame
                     && !self.startup_network_transition_active()
                     && self
@@ -58671,6 +59083,16 @@ impl GameApp {
                             self.next_pending_native_overlay();
                         }
                     }
+                    if self
+                        .runtime_client_list
+                        .as_ref()
+                        .is_some_and(|dialog| dialog.is_info_only())
+                    {
+                        self.render_runtime_client_list_layer(
+                            gamma.as_ref().unwrap_or(startup_gamma()),
+                            ordered_native,
+                        )?;
+                    }
                     if !self.message_dialogs.is_empty() {
                         self.render_message_dialogs(gamma.as_ref())?;
                     }
@@ -58746,6 +59168,7 @@ impl GameApp {
                     && self.game_option_input_dialog.is_none()
                     && self.definition_selector.is_none()
                     && self.message_dialogs.is_empty()
+                    && self.runtime_client_list.is_none()
                     && !self.external_irc_dialog_visible
                     && !startup_tooltip_pending;
                 if cache_eligible {
@@ -58770,6 +59193,7 @@ impl GameApp {
                 let context_menu_open = self.context_menu.is_some()
                     || self.startup_player_properties_dialog.is_some()
                     || self.external_irc_dialog_visible
+                    || self.runtime_client_list.is_some()
                     || fade_draw_inactive;
                 let options_draw_focus =
                     self.startup_options_dialog_has_focus_owner() && !fade_draw_inactive;
@@ -58936,6 +59360,13 @@ impl GameApp {
                         self.next_pending_native_overlay();
                     }
                 }
+                if self
+                    .runtime_client_list
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.is_info_only())
+                {
+                    self.render_runtime_client_list_layer(startup_gamma(), ordered_native)?;
+                }
                 if !self.message_dialogs.is_empty() {
                     self.render_message_dialogs(Some(startup_gamma()))?;
                 }
@@ -58955,6 +59386,7 @@ impl GameApp {
                         || definition_selector_open
                         || game_option_input_open
                         || self.external_irc_dialog_visible
+                        || self.runtime_client_list.is_some()
                         || !self.message_dialogs.is_empty())
                 {
                     let surface = self.graphics.surface();
@@ -62054,6 +62486,7 @@ impl GameApp {
         self.clear_physical_viewport_states();
         self.physical_viewports_authoritative = false;
         self.runtime_client_list = None;
+        self.runtime_client_list_consumed_keys.clear();
         self.runtime_client_list_above_game_over = false;
         self.scoreboard_dialog = None;
         self.scoreboard_initial_reconcile_pending = false;
@@ -64724,6 +65157,7 @@ impl GameApp {
         self.runtime_help_visible = false;
         self.runtime_flash_message = None;
         self.runtime_client_list = None;
+        self.runtime_client_list_consumed_keys.clear();
         self.runtime_client_list_above_game_over = false;
         self.runtime_key_config_cache = OnceLock::new();
         let _ = self.runtime_key_config_cache.set(
@@ -65738,6 +66172,10 @@ fn render_startup_frame(
                         assets,
                         scenario_game_options,
                         !ordered_native,
+                        !context_menu_open
+                            && !definition_selector_open
+                            && !game_option_input_open
+                            && !message_dialog_open,
                     )?;
                     true
                 }
@@ -92300,6 +92738,283 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn l102_joined_client_roster_context_reaches_mute_and_info_without_host_actions() {
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Client")]);
+
+        let entries = app
+            .classic_lobby_client_context_entries(0)
+            .expect("remote host row is visible to the joined client");
+        assert_eq!(
+            entries
+                .iter()
+                .filter_map(|entry| entry.action.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                AppContextMenuCommand::LobbyClientToggleMute(0),
+                AppContextMenuCommand::LobbyClientInfo(0),
+            ]
+        );
+        assert!(entries.iter().all(|entry| entry.icon == ContextMenuIcon::None));
+        let mut labels = entries
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect::<Vec<_>>();
+        for label in &mut labels {
+            Markup::strip_markup(label);
+        }
+        assert_eq!(labels, vec!["Mute", "Info"]);
+
+        let point = {
+            let surface = app.graphics.surface();
+            let lobby = app.network_lobby.as_mut().expect("joined lobby");
+            let (mut controller, _) = lobby
+                .classic_render_state(surface, app.assets.as_ref(), &app.scenario_game_options)
+                .expect("build the production joined-client roster");
+            let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+            let layout = controller.layout(640, 480, fonts);
+            let roster = controller.roster_layout(&layout, fonts.text.line_height);
+            let row = roster
+                .rows
+                .iter()
+                .find(|row| {
+                    matches!(
+                        controller.rows().get(row.index),
+                        Some(LobbyRosterRow::Client(client)) if client.id == 0
+                    )
+                })
+                .expect("host client row layout");
+            GuiPoint::new(
+                (row.rect.x + row.rect.w / 2) as f32,
+                (row.rect.y + row.rect.h / 2) as f32,
+            )
+        };
+        app.network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .handle_panel_pointer_move(point);
+        app.handle_network_lobby_secondary_button(ElementState::Pressed)
+            .expect("right-click reaches the joined-client roster");
+        assert_eq!(
+            app.context_menu
+                .as_ref()
+                .expect("client context menu")
+                .layout()
+                .panels[0]
+                .rows
+                .len(),
+            2
+        );
+        assert!(
+            app.handle_context_menu_key(VirtualKeyCode::M, ElementState::Pressed)
+                .expect("select Mute")
+        );
+        assert!(app.control_messages.is_muted(0));
+        assert!(commands.take_submitted_client_updates().is_empty());
+        assert!(commands.take_submitted_client_removes().is_empty());
+        assert!(commands.take_submitted_votes().is_empty());
+
+        let entries = app
+            .classic_lobby_client_context_entries(0)
+            .expect("muted host row remains visible");
+        let mut label = entries[0].text.clone();
+        Markup::strip_markup(&mut label);
+        assert_eq!(label, "Unmute");
+    }
+
+    #[test]
+    fn l102_host_client_context_mutes_locally_and_submits_activation_without_optimism() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+        app.sync_classic_lobby_roster();
+
+        let entries = app
+            .classic_lobby_client_context_entries(7)
+            .expect("remote host-controlled row");
+        assert_eq!(
+            entries
+                .iter()
+                .filter_map(|entry| entry.action.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                AppContextMenuCommand::LobbyClientToggleMute(7),
+                AppContextMenuCommand::LobbyKick(7),
+                AppContextMenuCommand::LobbyClientToggleActivate(7),
+                AppContextMenuCommand::LobbyClientInfo(7),
+            ]
+        );
+        assert!(entries.iter().all(|entry| entry.icon == ContextMenuIcon::None));
+        let mut labels = entries
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect::<Vec<_>>();
+        for label in &mut labels {
+            Markup::strip_markup(label);
+        }
+        assert_eq!(labels, vec!["Mute", "Kick", "Deactivate", "Info"]);
+
+        app.toggle_classic_lobby_client_mute(7);
+        assert!(app.control_messages.is_muted(7));
+        assert!(commands.take_submitted_client_updates().is_empty());
+        assert!(commands.take_submitted_client_removes().is_empty());
+        assert!(commands.take_submitted_votes().is_empty());
+
+        app.toggle_classic_lobby_client_activation(7);
+        let update = lc_engine::ClientUpdateControlData {
+            update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id: 7,
+            data: 0,
+            by_client: 0,
+        };
+        assert_eq!(commands.take_submitted_client_updates(), vec![update.clone()]);
+        assert!(
+            app.control_clients.is_activated(7),
+            "the lobby waits for the synchronized client update"
+        );
+
+        app.control_clients.apply_update(&update);
+        let entries = app
+            .classic_lobby_client_context_entries(7)
+            .expect("authoritative inactive row");
+        let mut activation_label = entries[2].text.clone();
+        Markup::strip_markup(&mut activation_label);
+        assert_eq!(activation_label, "Activate");
+
+        let local_entries = app
+            .classic_lobby_client_context_entries(0)
+            .expect("local row retains unconditional Info");
+        assert_eq!(
+            local_entries
+                .iter()
+                .filter_map(|entry| entry.action.clone())
+                .collect::<Vec<_>>(),
+            vec![AppContextMenuCommand::LobbyClientInfo(0)]
+        );
+    }
+
+    #[test]
+    fn l102_lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
+        let mut app = new_real_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Client")]);
+
+        let mut base = vec![0_u8; 640 * 480 * 4];
+        app.render(&mut base).expect("render joined-client lobby");
+        assert!(
+            app.open_classic_lobby_client_info(0)
+                .expect("open client information")
+        );
+        let info = app.runtime_client_list.as_ref().expect("info dialog");
+        assert!(info.is_info_only());
+        assert_eq!(info.info_client_id(), Some(0));
+
+        let mut with_info = vec![0_u8; 640 * 480 * 4];
+        app.render(&mut with_info)
+            .expect("render client information over joined lobby");
+        assert_ne!(with_info, base);
+
+        app.handle_text_input('x')
+            .expect("covered lobby chat cannot receive text");
+        assert!(app
+            .network_lobby
+            .as_ref()
+            .expect("joined lobby")
+            .chat_edit
+            .text
+            .is_empty());
+        app.handle_other_mouse_button(ElementState::Pressed)
+            .expect("middle press belongs to client information");
+        app.handle_other_mouse_button(ElementState::Released)
+            .expect("middle release belongs to client information");
+        assert!(app.runtime_client_list.is_some());
+        assert!(app
+            .network_lobby
+            .as_ref()
+            .expect("joined lobby")
+            .chat_edit
+            .text
+            .is_empty());
+        app.running_pointer_position = Some(GuiPoint::new(0.0, 0.0));
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("outside press belongs to the modal info dialog");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("outside release belongs to the modal info dialog");
+        assert!(app.runtime_client_list.is_some());
+        assert!(app.context_menu.is_none());
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("Return is swallowed by client information");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("Return release remains owned by client information");
+        assert!(app.runtime_client_list.is_some());
+        assert!(commands.take_submitted_client_updates().is_empty());
+        assert!(commands.take_submitted_client_removes().is_empty());
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Escape closes client information");
+        assert!(app.runtime_client_list.is_none());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("an auto-repeated closing Escape remains owned");
+        assert_eq!(app.startup_view, StartupView::NetworkLobby);
+        assert!(app.network_lobby.is_some());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("closing Escape release stays latched");
+        assert_eq!(app.startup_view, StartupView::NetworkLobby);
+        assert!(app.network_lobby.is_some());
+
+        assert!(
+            app.open_classic_lobby_client_info(0)
+                .expect("reopen client information for gamepad ownership")
+        );
+        let slot = GamepadSlot::new(0);
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                slot,
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                slot,
+                action: GamepadActionType::Cancel,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("the modal owns the complete physical cancel cluster");
+        assert!(app.runtime_client_list.is_none());
+        assert_eq!(app.startup_view, StartupView::NetworkLobby);
+        assert!(app.network_lobby.is_some());
+    }
+
+    #[test]
     fn classic_lobby_remote_context_kicks_directly_or_starts_league_vote() {
         let setup = |league: bool| {
             let mut app = new_menu_app(640, 480);
@@ -92351,7 +93066,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 position: GuiPoint::new(200.0, 150.0),
             }])
             .expect("remote client context opens");
-        assert_eq!(direct.context_menu.as_ref().unwrap().layout().panels[0].rows.len(), 1);
+        assert_eq!(direct.context_menu.as_ref().unwrap().layout().panels[0].rows.len(), 4);
         assert!(direct.select_classic_lobby_sheet(LobbySheet::Resources));
         assert!(direct.context_menu.is_none());
         assert_eq!(direct.context_menu_lobby_kick_client, None);

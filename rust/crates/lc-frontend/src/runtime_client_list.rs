@@ -171,6 +171,7 @@ pub struct RuntimeClientListDialog {
     pointer: Option<GuiPoint>,
     pointer_capture: Option<HitTarget>,
     info_client_id: Option<i32>,
+    info_only: bool,
     scroll_row: Cell<usize>,
 }
 
@@ -190,6 +191,25 @@ impl RuntimeClientListDialog {
             pointer: None,
             pointer_capture: None,
             info_client_id: None,
+            info_only: false,
+            scroll_row: Cell::new(0),
+        }
+    }
+
+    /// Reuses the C4Network2ClientDlg-compatible detail presentation without
+    /// constructing the surrounding F4 client-list dialog.
+    pub fn new_info(caption: impl Into<String>, row: RuntimeClientRow) -> Self {
+        let client_id = row.client_id;
+        Self {
+            caption: String::new(),
+            info_caption: caption.into(),
+            options: Vec::new(),
+            rows: vec![row],
+            status: RuntimeClientListStatus::default(),
+            pointer: None,
+            pointer_capture: None,
+            info_client_id: Some(client_id),
+            info_only: true,
             scroll_row: Cell::new(0),
         }
     }
@@ -213,6 +233,10 @@ impl RuntimeClientListDialog {
 
     pub fn info_client_id(&self) -> Option<i32> {
         self.info_client_id
+    }
+
+    pub const fn is_info_only(&self) -> bool {
+        self.info_only
     }
 
     pub fn replace_snapshot(
@@ -450,6 +474,12 @@ impl RuntimeClientListDialog {
     ) -> Result<()> {
         resources.validate()?;
         let layout = self.layout(preferred, resources.fonts.text.line_height);
+        if self.info_only {
+            if let Some(client_id) = self.info_client_id {
+                self.draw_client_info(surface, client_id, &layout, resources, active, gamma);
+            }
+            return Ok(());
+        }
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
         resources.skin.draw_caption_with_right_indent(
             surface,
@@ -1106,6 +1136,19 @@ mod tests {
             dialog.handle_escape(true),
             Some(RuntimeClientListAction::Close)
         );
+    }
+
+    #[test]
+    fn standalone_client_info_starts_on_the_requested_row_and_closes_as_info() {
+        let mut dialog = RuntimeClientListDialog::new_info("Client information", row());
+        assert!(dialog.is_info_only());
+        assert_eq!(dialog.info_client_id(), Some(7));
+        assert_eq!(dialog.rows().len(), 1);
+        assert_eq!(
+            dialog.handle_escape(true),
+            Some(RuntimeClientListAction::CloseInfo)
+        );
+        assert_eq!(dialog.info_client_id(), None);
     }
 
     #[test]
