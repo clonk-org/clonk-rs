@@ -1090,6 +1090,187 @@ mod tests {
         cursor.into_inner()
     }
 
+    fn write_bytes(target: &mut [u8], offset: usize, value: &[u8]) {
+        target[offset..offset + value.len()].copy_from_slice(value);
+    }
+
+    fn write_le_u16(target: &mut [u8], offset: usize, value: u16) {
+        write_bytes(target, offset, &value.to_le_bytes());
+    }
+
+    fn write_le_u32(target: &mut [u8], offset: usize, value: u32) {
+        write_bytes(target, offset, &value.to_le_bytes());
+    }
+
+    fn write_be_u16(target: &mut [u8], offset: usize, value: u16) {
+        write_bytes(target, offset, &value.to_be_bytes());
+    }
+
+    fn minimal_mod_music() -> Vec<u8> {
+        // The original 15-sample Soundtracker layout has no magic signature,
+        // so this fixture also proves that format selection probes the bytes
+        // with the decoder instead of relying on a filename or fixed tag.
+        const PATTERN_OFFSET: usize = 600;
+        const SAMPLE_OFFSET: usize = PATTERN_OFFSET + 1_024;
+        let mut module = vec![0; SAMPLE_OFFSET + 32];
+
+        write_bytes(&mut module, 0, b"Synthetic MOD");
+        let sample = 20;
+        write_bytes(&mut module, sample, b"square");
+        write_be_u16(&mut module, sample + 22, 16); // 32 bytes, in 16-bit words
+        module[sample + 25] = 64;
+        write_be_u16(&mut module, sample + 28, 1);
+        module[470] = 1; // one order
+        module[472] = 0; // order zero uses pattern zero
+
+        // Sample 1, C-3 (period 428), no effect, followed by empty rows.
+        write_bytes(&mut module, PATTERN_OFFSET, &[0x01, 0xac, 0x10, 0]);
+        for (index, value) in module[SAMPLE_OFFSET..].iter_mut().enumerate() {
+            *value = if index % 2 == 0 { 127 } else { 128 };
+        }
+        module
+    }
+
+    fn minimal_xm_music() -> Vec<u8> {
+        const PATTERN_OFFSET: usize = 336;
+        const PATTERN_BYTES: usize = 64 * 4 * 5;
+        const INSTRUMENT_OFFSET: usize = PATTERN_OFFSET + 9 + PATTERN_BYTES;
+        const SAMPLE_HEADER_OFFSET: usize = INSTRUMENT_OFFSET + 263;
+        const SAMPLE_OFFSET: usize = SAMPLE_HEADER_OFFSET + 40;
+        let mut module = vec![0; SAMPLE_OFFSET + 32];
+
+        write_bytes(&mut module, 0, b"Extended Module: ");
+        write_bytes(&mut module, 17, b"Synthetic XM");
+        module[37] = 0x1a;
+        write_bytes(&mut module, 38, b"lc-audio tests");
+        write_le_u16(&mut module, 58, 0x0104);
+        write_le_u32(&mut module, 60, 276);
+        write_le_u16(&mut module, 64, 1); // song length
+        write_le_u16(&mut module, 68, 4); // channels
+        write_le_u16(&mut module, 70, 1); // patterns
+        write_le_u16(&mut module, 72, 1); // instruments
+        write_le_u16(&mut module, 76, 6); // initial speed
+        write_le_u16(&mut module, 78, 125); // initial tempo
+
+        write_le_u32(&mut module, PATTERN_OFFSET, 9);
+        write_le_u16(&mut module, PATTERN_OFFSET + 5, 64);
+        write_le_u16(&mut module, PATTERN_OFFSET + 7, PATTERN_BYTES as u16);
+        // C-4 on instrument 1; the rest of the uncompressed pattern is empty.
+        write_bytes(&mut module, PATTERN_OFFSET + 9, &[49, 1, 0, 0, 0]);
+
+        write_le_u32(&mut module, INSTRUMENT_OFFSET, 263);
+        write_bytes(&mut module, INSTRUMENT_OFFSET + 4, b"square");
+        write_le_u16(&mut module, INSTRUMENT_OFFSET + 27, 1);
+        write_le_u32(&mut module, INSTRUMENT_OFFSET + 29, 40);
+        write_le_u32(&mut module, SAMPLE_HEADER_OFFSET, 32);
+        module[SAMPLE_HEADER_OFFSET + 12] = 64;
+        module[SAMPLE_HEADER_OFFSET + 15] = 128;
+        write_bytes(&mut module, SAMPLE_HEADER_OFFSET + 18, b"square");
+        // XM stores 8-bit samples as deltas: these decode to +64, -64, ...
+        for (index, value) in module[SAMPLE_OFFSET..].iter_mut().enumerate() {
+            *value = if index % 2 == 0 { 64 } else { 128 };
+        }
+        module
+    }
+
+    fn minimal_s3m_music() -> Vec<u8> {
+        const INSTRUMENT_OFFSET: usize = 8 * 16;
+        const PATTERN_OFFSET: usize = 13 * 16;
+        const SAMPLE_OFFSET: usize = 20 * 16;
+        let mut module = vec![0; SAMPLE_OFFSET + 32];
+
+        write_bytes(&mut module, 0, b"Synthetic S3M");
+        module[28] = 0x1a;
+        module[29] = 0x10;
+        write_le_u16(&mut module, 32, 1); // orders
+        write_le_u16(&mut module, 34, 1); // instruments
+        write_le_u16(&mut module, 36, 1); // patterns
+        write_le_u16(&mut module, 40, 0x1320);
+        write_le_u16(&mut module, 42, 1); // signed sample data
+        write_bytes(&mut module, 44, b"SCRM");
+        module[48] = 64;
+        module[49] = 6;
+        module[50] = 125;
+        module[51] = 0xc0;
+        module[64..96].fill(255);
+        module[64] = 0;
+        module[96] = 0;
+        write_le_u16(&mut module, 97, 8);
+        write_le_u16(&mut module, 99, 13);
+
+        module[INSTRUMENT_OFFSET] = 1;
+        write_bytes(&mut module, INSTRUMENT_OFFSET + 1, b"SQUARE.RAW");
+        write_le_u16(&mut module, INSTRUMENT_OFFSET + 14, 20);
+        write_le_u32(&mut module, INSTRUMENT_OFFSET + 16, 32);
+        module[INSTRUMENT_OFFSET + 28] = 64;
+        write_le_u32(&mut module, INSTRUMENT_OFFSET + 32, 8_363);
+        write_bytes(&mut module, INSTRUMENT_OFFSET + 48, b"square");
+        write_bytes(&mut module, INSTRUMENT_OFFSET + 76, b"SCRS");
+
+        // Channel 0, C-4, instrument 1, then this and 63 more row terminators.
+        let packed_pattern_length = 4 + 63;
+        write_le_u16(&mut module, PATTERN_OFFSET, packed_pattern_length as u16);
+        write_bytes(&mut module, PATTERN_OFFSET + 2, &[0x20, 0x40, 1, 0]);
+        for (index, value) in module[SAMPLE_OFFSET..].iter_mut().enumerate() {
+            *value = if index % 2 == 0 { 127 } else { 128 };
+        }
+        module
+    }
+
+    fn minimal_it_music() -> Vec<u8> {
+        const SAMPLE_HEADER_OFFSET: usize = 208;
+        const PATTERN_OFFSET: usize = 288;
+        const SAMPLE_OFFSET: usize = 400;
+        let mut module = vec![0; SAMPLE_OFFSET + 32];
+
+        write_bytes(&mut module, 0, b"IMPM");
+        write_bytes(&mut module, 4, b"Synthetic IT");
+        write_le_u16(&mut module, 32, 1); // orders
+        write_le_u16(&mut module, 36, 1); // samples
+        write_le_u16(&mut module, 38, 1); // patterns
+        write_le_u16(&mut module, 40, 0x0214);
+        write_le_u16(&mut module, 42, 0x0200);
+        module[48] = 128;
+        module[49] = 48;
+        module[50] = 6;
+        module[51] = 125;
+        module[52] = 128;
+        module[64..128].fill(32);
+        module[128..192].fill(64);
+        module[192] = 0;
+        write_le_u32(&mut module, 193, SAMPLE_HEADER_OFFSET as u32);
+        write_le_u32(&mut module, 197, PATTERN_OFFSET as u32);
+
+        write_bytes(&mut module, SAMPLE_HEADER_OFFSET, b"IMPS");
+        write_bytes(&mut module, SAMPLE_HEADER_OFFSET + 4, b"SQUARE.RAW");
+        module[SAMPLE_HEADER_OFFSET + 17] = 64;
+        module[SAMPLE_HEADER_OFFSET + 18] = 1;
+        module[SAMPLE_HEADER_OFFSET + 19] = 64;
+        write_bytes(&mut module, SAMPLE_HEADER_OFFSET + 20, b"square");
+        module[SAMPLE_HEADER_OFFSET + 46] = 1; // signed sample conversion
+        module[SAMPLE_HEADER_OFFSET + 47] = 128;
+        write_le_u32(&mut module, SAMPLE_HEADER_OFFSET + 48, 32);
+        write_le_u32(&mut module, SAMPLE_HEADER_OFFSET + 60, 8_363);
+        write_le_u32(&mut module, SAMPLE_HEADER_OFFSET + 72, SAMPLE_OFFSET as u32);
+
+        // New mask for channel 1: note and sample, C-5, sample 1, row end.
+        let packed_pattern_length = 5 + 63;
+        write_le_u16(&mut module, PATTERN_OFFSET, packed_pattern_length as u16);
+        write_le_u16(&mut module, PATTERN_OFFSET + 2, 64);
+        write_bytes(&mut module, PATTERN_OFFSET + 8, &[0x81, 0x03, 60, 1, 0]);
+        for (index, value) in module[SAMPLE_OFFSET..].iter_mut().enumerate() {
+            *value = if index % 2 == 0 { 127 } else { 128 };
+        }
+        module
+    }
+
+    fn i16_energy(samples: &[i16]) -> u64 {
+        samples
+            .iter()
+            .map(|sample| i64::from(*sample).unsigned_abs())
+            .sum()
+    }
+
     #[test]
     fn l040_explicit_linear_resampling_mode_uses_linear_interpolation() {
         let frames = [[0.0, 0.0], [1.0, -1.0]];
@@ -1265,6 +1446,80 @@ mod tests {
         let mut first_pass_and_one_frame = vec![0i16; 11 * 2];
         mixer.mix_i16(&mut first_pass_and_one_frame);
         assert!(!mixer.music_is_playing());
+    }
+
+    #[test]
+    fn decodes_and_plays_cpp_tracker_music_formats() {
+        let formats = [
+            ("IT", minimal_it_music()),
+            ("MOD", minimal_mod_music()),
+            ("S3M", minimal_s3m_music()),
+            ("XM", minimal_xm_music()),
+        ];
+
+        for (format, data) in formats {
+            let mixer = AudioMixer::new(8_000, 1);
+            let music_id = mixer
+                .load_music(&data)
+                .unwrap_or_else(|error| panic!("failed to decode synthetic {format}: {error}"));
+            let decoded_frames = {
+                let state = mixer.state.lock().unwrap();
+                state
+                    .music
+                    .get(&music_id)
+                    .expect("loaded music remains available")
+                    .frames
+                    .len()
+            };
+            assert!(decoded_frames > 0, "{format} decoded to no PCM frames");
+
+            mixer.play_music(music_id, true).unwrap();
+            let mut frames_remaining = decoded_frames + 1;
+            let mut loop_energy = 0;
+            let mut output = vec![0i16; 1_024 * 2];
+            while frames_remaining > 0 {
+                let frames = frames_remaining.min(1_024);
+                mixer.mix_i16(&mut output[..frames * 2]);
+                loop_energy += i16_energy(&output[..frames * 2]);
+                frames_remaining -= frames;
+            }
+            assert!(loop_energy > 0, "{format} playback produced only silence");
+            assert!(
+                mixer.music_is_playing(),
+                "{format} did not loop after its decoded PCM was exhausted"
+            );
+
+            mixer.play_music(music_id, true).unwrap();
+            let mut full_volume = vec![0i16; 2_048 * 2];
+            mixer.mix_i16(&mut full_volume);
+            let full_energy = i16_energy(&full_volume);
+            mixer.play_music(music_id, true).unwrap();
+            mixer.music_set_volume(0.25);
+            let mut quarter_volume = vec![0i16; 2_048 * 2];
+            mixer.mix_i16(&mut quarter_volume);
+            let quarter_energy = i16_energy(&quarter_volume);
+            assert!(full_energy > 0, "{format} full-volume output was silent");
+            assert!(
+                quarter_energy > 0 && quarter_energy < full_energy / 2,
+                "{format} music volume did not attenuate output: full={full_energy}, quarter={quarter_energy}"
+            );
+
+            mixer.play_music(music_id, true).unwrap();
+            assert!(mixer.music_fade_out(1));
+            let mut fade = [0i16; 8 * 2];
+            mixer.mix_i16(&mut fade);
+            assert!(
+                !mixer.music_is_playing(),
+                "{format} fade did not stop playback"
+            );
+
+            mixer.play_music(music_id, true).unwrap();
+            mixer.halt_music();
+            assert!(
+                !mixer.music_is_playing(),
+                "{format} explicit halt did not stop playback"
+            );
+        }
     }
 
     #[test]

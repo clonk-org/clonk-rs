@@ -11,6 +11,11 @@ git submodule update --init --recursive
 CI uses Rust 1.87.0 and cargo-nextest 0.9.91. Using the same versions makes
 local and CI diagnostics comparable.
 
+Tracker music and its executable IT/MOD/S3M/XM tests require the libxmp 4
+runtime (`libxmp4` on Debian/Ubuntu, `libxmp` in Homebrew). Set
+`LC_LIBXMP_LIBRARY` to an explicit shared-library path when it is not installed
+in a standard system, executable, or macOS app-bundle location.
+
 ## Quick, change-aware feedback
 
 Use `dev-check` while editing. It maps changed paths to the smallest useful

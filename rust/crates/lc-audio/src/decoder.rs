@@ -11,6 +11,7 @@ pub enum AudioFormat {
     Ogg,
     Mp3,
     Midi,
+    Tracker,
 }
 
 #[derive(Debug, Error)]
@@ -25,6 +26,8 @@ pub enum AudioDecodeError {
     Mp3DecoderError(&'static str),
     #[error("MIDI decoder error: {0}")]
     MidiDecoderError(String),
+    #[error("tracker decoder error: {0}")]
+    TrackerDecoderError(String),
     #[error("io error")]
     IoError(#[from] std::io::Error),
 }
@@ -49,6 +52,7 @@ pub(crate) fn decode_audio_for_output(
         AudioFormat::Ogg => decode_ogg(data),
         AudioFormat::Mp3 => decode_mp3(data),
         AudioFormat::Midi => crate::fluidsynth::decode_midi(data, output_sample_rate),
+        AudioFormat::Tracker => crate::tracker::decode_tracker(data, output_sample_rate),
     }
 }
 
@@ -70,6 +74,12 @@ fn detect_format(data: &[u8]) -> Result<AudioFormat, AudioDecodeError> {
     }
     if data.len() >= 4 && &data[0..4] == b"MThd" {
         return Ok(AudioFormat::Midi);
+    }
+    if crate::tracker::looks_like_tracker(data) {
+        return Ok(AudioFormat::Tracker);
+    }
+    if crate::tracker::probe_tracker(data)? {
+        return Ok(AudioFormat::Tracker);
     }
     Err(AudioDecodeError::UnsupportedFormat)
 }
@@ -244,6 +254,30 @@ mod tests {
         assert!(matches!(
             detect_format(b"RIFF\x10\0\0\0RMIDdata\x04\0\0\0MThd"),
             Ok(AudioFormat::Midi)
+        ));
+    }
+
+    #[test]
+    fn malformed_tracker_data_returns_typed_decode_error() {
+        let mut s3m = vec![0_u8; 48];
+        s3m[44..48].copy_from_slice(b"SCRM");
+        let mut module = vec![0_u8; 1_084];
+        module[1_080..1_084].copy_from_slice(b"M.K.");
+
+        for malformed in [
+            b"IMPM".as_slice(),
+            b"Extended Module: ".as_slice(),
+            s3m.as_slice(),
+            module.as_slice(),
+        ] {
+            assert!(matches!(
+                decode_audio_for_output(malformed, 8_000),
+                Err(AudioDecodeError::TrackerDecoderError(_))
+            ));
+        }
+        assert!(matches!(
+            decode_audio_for_output(b"not audio", 8_000),
+            Err(AudioDecodeError::UnsupportedFormat)
         ));
     }
 }
