@@ -101,12 +101,8 @@ pub enum ControlRecordDecodeError {
     Control(#[from] LegacyControlError),
     #[error("control record chunk type {0:#x} is unsupported")]
     UnsupportedChunkType(u8),
-    #[error("control record contains bytes after its end marker")]
-    DataAfterEnd,
     #[error("control record ends in a partial chunk")]
     Truncated,
-    #[error("control record has no end marker")]
-    MissingEnd,
 }
 
 /// Incremental parser for a C++ `CtrlRec.c4b` stream.
@@ -135,11 +131,7 @@ impl ControlRecordParser {
         bytes: &[u8],
     ) -> Result<Vec<ControlRecordChunk>, ControlRecordDecodeError> {
         if self.ended {
-            return if bytes.is_empty() {
-                Ok(Vec::new())
-            } else {
-                Err(ControlRecordDecodeError::DataAfterEnd)
-            };
+            return Ok(Vec::new());
         }
         self.pending.extend_from_slice(bytes);
 
@@ -201,26 +193,26 @@ impl ControlRecordParser {
             }
         }
 
-        if ended && cursor != self.pending.len() {
-            return Err(ControlRecordDecodeError::DataAfterEnd);
-        }
-
         self.frame = frame;
         self.ended = ended;
-        if cursor != 0 {
+        if ended {
+            // C4Playback::ReadBinary stops at the first RCT_End without
+            // inspecting any bytes that follow it.
+            self.pending.clear();
+        } else if cursor != 0 {
             self.pending.drain(..cursor);
         }
         Ok(chunks)
     }
 
-    /// Validate that the complete input ended on an `RCT_End` boundary.
+    /// Validate the remaining non-sequential input at physical EOF.
+    ///
+    /// C++ does not require `RCT_End` and also ignores a lone byte that cannot
+    /// form a complete chunk header. A complete header whose known payload is
+    /// partial remains a truncation error.
     pub fn finish(&self) -> Result<(), ControlRecordDecodeError> {
-        if self.ended {
-            debug_assert!(self.pending.is_empty());
-            return Ok(());
-        }
-        if self.pending.is_empty() {
-            Err(ControlRecordDecodeError::MissingEnd)
+        if self.ended || self.pending.len() < 2 {
+            Ok(())
         } else {
             Err(ControlRecordDecodeError::Truncated)
         }
@@ -413,24 +405,64 @@ mod tests {
     }
 
     #[test]
-    fn parser_distinguishes_truncation_missing_end_and_unsupported_chunks() {
+    fn parser_distinguishes_truncation_and_unsupported_chunks() {
         let mut truncated = ControlRecordParser::new();
         assert!(truncated.push(&[5, RCT_CTRL, 0x86]).unwrap().is_empty());
         assert_eq!(truncated.finish(), Err(ControlRecordDecodeError::Truncated));
 
-        let mut missing_end = ControlRecordParser::new();
-        assert_eq!(
-            missing_end.push(&[1, RCT_FRAME]).unwrap(),
-            vec![ControlRecordChunk::Frame { frame: 1 }]
-        );
-        assert_eq!(
-            missing_end.finish(),
-            Err(ControlRecordDecodeError::MissingEnd)
-        );
-
         assert_eq!(
             decode_control_record(&[0, 0x55]),
             Err(ControlRecordDecodeError::UnsupportedChunkType(0x55))
+        );
+    }
+
+    #[test]
+    fn cpp_record_parser_accepts_clean_eof_and_ignores_after_end() {
+        let control = synchronize();
+        let mut writer = ControlRecordWriter::new();
+        writer.record_controls(5, &[control.clone()]).unwrap();
+        let without_end = writer.bytes().to_vec();
+        let expected_without_end = vec![ControlRecordChunk::Controls {
+            frame: 5,
+            controls: vec![control.clone()],
+        }];
+
+        assert_eq!(
+            decode_control_record(&without_end).unwrap(),
+            expected_without_end
+        );
+        assert!(decode_control_record(&[]).unwrap().is_empty());
+
+        let mut with_partial_header = without_end.clone();
+        with_partial_header.push(0xff);
+        assert_eq!(
+            decode_control_record(&with_partial_header).unwrap(),
+            expected_without_end
+        );
+
+        let mut playback = ControlRecordPlayback::from_bytes(&without_end).unwrap();
+        assert_eq!(playback.take_controls(5), vec![control.clone()]);
+        assert_eq!(playback.next_frame(), None);
+        assert!(!playback.is_finished());
+
+        let mut ended_with_suffix = writer.finish(5);
+        ended_with_suffix.extend_from_slice(&[0, 0x55, 0xff]);
+        let expected_ended = vec![
+            ControlRecordChunk::Controls {
+                frame: 5,
+                controls: vec![control],
+            },
+            ControlRecordChunk::End { frame: 47 },
+        ];
+        let mut parser = ControlRecordParser::new();
+        assert_eq!(parser.push(&ended_with_suffix).unwrap(), expected_ended);
+        assert!(parser.is_finished());
+        assert!(parser.push(&[0, RCT_CTRL, 0x86]).unwrap().is_empty());
+        parser.finish().unwrap();
+
+        assert_eq!(
+            decode_control_record(&[5, RCT_CTRL, 0x86]),
+            Err(ControlRecordDecodeError::Truncated)
         );
     }
 
