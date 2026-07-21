@@ -47,6 +47,17 @@ pub(crate) fn decode_audio_for_output(
     data: &[u8],
     output_sample_rate: u32,
 ) -> Result<DecodedAudio, AudioDecodeError> {
+    let original_error = match decode_audio_for_output_direct(data, output_sample_rate) {
+        Ok(decoded) => return Ok(decoded),
+        Err(error) => error,
+    };
+    retry_mpeg_layer3_candidates(data, original_error, |offset| decode_mp3(&data[offset..]))
+}
+
+fn decode_audio_for_output_direct(
+    data: &[u8],
+    output_sample_rate: u32,
+) -> Result<DecodedAudio, AudioDecodeError> {
     let format = detect_format(data)?;
     match format {
         AudioFormat::Wav => decode_wav(data),
@@ -118,6 +129,20 @@ enum MusicDecoder {
 
 impl MusicDecoder {
     fn open(data: Arc<[u8]>, output_sample_rate: u32) -> Result<Self, AudioDecodeError> {
+        let original_error = match Self::open_direct(data.clone(), output_sample_rate) {
+            Ok(decoder) => return Ok(decoder),
+            Err(error) => error,
+        };
+        let retry_data = data.clone();
+        retry_mpeg_layer3_candidates(data.as_ref(), original_error, move |offset| {
+            Ok(Self::Pcm(PcmStream::new(
+                PcmSource::Mp3(Mp3MusicStream::new_at(retry_data.clone(), offset)?),
+                output_sample_rate,
+            )?))
+        })
+    }
+
+    fn open_direct(data: Arc<[u8]>, output_sample_rate: u32) -> Result<Self, AudioDecodeError> {
         match detect_format(data.as_ref())? {
             AudioFormat::Wav => Ok(Self::Pcm(PcmStream::new(
                 PcmSource::Wav(WavMusicStream::new(data)?),
@@ -499,8 +524,14 @@ struct Mp3MusicStream {
 
 impl Mp3MusicStream {
     fn new(data: Arc<[u8]>) -> Result<Self, AudioDecodeError> {
+        Self::new_at(data, 0)
+    }
+
+    fn new_at(data: Arc<[u8]>, offset: usize) -> Result<Self, AudioDecodeError> {
+        let mut cursor = Cursor::new(data);
+        cursor.set_position(offset as u64);
         let mut stream = Self {
-            decoder: Mp3Decoder::new(Cursor::new(data)),
+            decoder: Mp3Decoder::new(cursor),
             sample_rate: 0,
             channels: 0,
             packet: Vec::new(),
@@ -623,6 +654,39 @@ fn stereo_i16_frame(samples: &[i16]) -> [f32; 2] {
 #[cfg(test)]
 fn frame_capacity(sample_capacity: usize, channels: usize) -> usize {
     sample_capacity / channels + usize::from(sample_capacity % channels != 0)
+}
+
+// C4AudioSystemSdl bounds its fallback search by the maximum possible MPEG
+// Layer III frame size: 144 * maximum bitrate / minimum sample rate + padding.
+const MAX_MPEG_LAYER3_FRAME_SIZE: usize = 144 * 320_000 / 8_000 + 1;
+
+fn retry_mpeg_layer3_candidates<T>(
+    data: &[u8],
+    original_error: AudioDecodeError,
+    mut load: impl FnMut(usize) -> Result<T, AudioDecodeError>,
+) -> Result<T, AudioDecodeError> {
+    let limit = data.len().min(MAX_MPEG_LAYER3_FRAME_SIZE);
+    for offset in 0..limit.saturating_sub(4) {
+        if !is_mpeg_layer3_header(&data[offset..offset + 4]) {
+            continue;
+        }
+        if let Ok(decoded) = load(offset) {
+            return Ok(decoded);
+        }
+    }
+    Err(original_error)
+}
+
+fn is_mpeg_layer3_header(header: &[u8]) -> bool {
+    let [byte1, byte2, byte3, byte4, ..] = header else {
+        return false;
+    };
+    *byte1 == 0xff
+        && (*byte2 & 0xe6) == 0xe2
+        && (*byte2 & 0x18) != 0x08
+        && (*byte3 & 0xf0) != 0xf0
+        && (*byte3 & 0x0c) != 0x0c
+        && (*byte4 & 0x03) != 0x02
 }
 
 fn detect_format(data: &[u8]) -> Result<AudioFormat, AudioDecodeError> {
@@ -808,6 +872,18 @@ fn convert_interleaved_i16_to_stereo(
 mod tests {
     use super::*;
 
+    fn silent_mpeg_layer3_frame() -> [u8; 72] {
+        // One independently decodable MPEG-2.5 Layer III mono frame: 576
+        // samples at 8 kHz in 72 compressed bytes.
+        let mut frame = [0x55_u8; 72];
+        frame[..13].copy_from_slice(&[
+            0xff, 0xe3, 0x18, 0xc4, 0x00, 0x00, 0x00, 0x03, 0x48, 0x00, 0x00, 0x00, 0x00,
+        ]);
+        frame[13..22].copy_from_slice(b"LAME3.100");
+        frame[53..62].copy_from_slice(b"LAME3.100");
+        frame
+    }
+
     fn mono_pcm16_wav(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
         let data_len = u32::try_from(samples.len() * 2).unwrap();
         let mut wav = Vec::with_capacity(44 + data_len as usize);
@@ -869,6 +945,125 @@ mod tests {
             decode_audio_for_output(b"not audio", 8_000),
             Err(AudioDecodeError::UnsupportedFormat)
         ));
+    }
+
+    #[test]
+    fn mp3_leading_junk_recovers_first_valid_layer3_frame() {
+        let clean_mp3 = silent_mpeg_layer3_frame().repeat(2);
+        let clean = decode_audio(&clean_mp3).expect("frame-zero MP3 decodes directly");
+        let mut data = b"legacy-prefix".to_vec();
+        let invalid_headers = [
+            [0xfe, 0xe3, 0x18, 0xc4], // incomplete frame sync
+            [0xff, 0xe5, 0x18, 0xc4], // not Layer III
+            [0xff, 0xea, 0x18, 0xc4], // reserved MPEG version
+            [0xff, 0xe3, 0xf8, 0xc4], // invalid bitrate index
+            [0xff, 0xe3, 0x1c, 0xc4], // reserved sample-rate index
+            [0xff, 0xe3, 0x18, 0xc6], // reserved emphasis
+        ];
+        for header in invalid_headers {
+            assert!(!is_mpeg_layer3_header(&header));
+            data.extend_from_slice(&header);
+        }
+        assert!(is_mpeg_layer3_header(&clean_mp3[..4]));
+        for byte2 in [0xe2, 0xe3, 0xf2, 0xf3, 0xfa, 0xfb] {
+            assert!(is_mpeg_layer3_header(&[0xff, byte2, 0x18, 0xc4]));
+        }
+        assert!(
+            is_mpeg_layer3_header(&[0xff, 0xe3, 0x08, 0xc4]),
+            "native prefilter permits the free-bitrate index"
+        );
+        for emphasis in [0, 1, 3] {
+            assert!(is_mpeg_layer3_header(&[0xff, 0xe3, 0x18, 0xc4 | emphasis,]));
+        }
+        data.extend_from_slice(&clean_mp3);
+
+        let decoded = decode_audio(&data).expect("sound decoder recovers later MP3 frame");
+        assert_eq!(decoded.sample_rate, clean.sample_rate);
+        assert_eq!(decoded.frames, clean.frames);
+
+        let source: Arc<[u8]> = Arc::from(data.into_boxed_slice());
+        let mut music = MusicStream::open(source, 8_000)
+            .expect("music stream recovers the same later MP3 frame");
+        let mut output = [[0.0_f32; 2]; 1];
+        assert_eq!(music.read_frames(&mut output).unwrap(), 1);
+        music.restart().expect("recovered MP3 stream restarts");
+        assert_eq!(music.read_frames(&mut output).unwrap(), 1);
+
+        let false_sync = b"junk\xff\xe3\x18\xc4\0";
+        assert!(matches!(
+            decode_audio(false_sync),
+            Err(AudioDecodeError::UnsupportedFormat)
+        ));
+        assert!(matches!(
+            MusicStream::open(Arc::from(false_sync.as_slice()), 8_000),
+            Err(AudioDecodeError::UnsupportedFormat)
+        ));
+
+        let mut malformed_wav = b"RIFF\0\0\0\0WAVE".to_vec();
+        malformed_wav.extend_from_slice(false_sync);
+        assert!(matches!(
+            decode_audio(&malformed_wav),
+            Err(AudioDecodeError::InvalidData("invalid WAV header"))
+        ));
+        assert!(matches!(
+            MusicStream::open(Arc::from(malformed_wav.into_boxed_slice()), 8_000),
+            Err(AudioDecodeError::InvalidData("invalid WAV header"))
+        ));
+
+        let mut candidate_data = vec![0_u8; 20];
+        for offset in [2, 8, 14] {
+            candidate_data[offset..offset + 4].copy_from_slice(&clean_mp3[..4]);
+        }
+        let mut attempted = Vec::new();
+        let recovered_offset = retry_mpeg_layer3_candidates(
+            &candidate_data,
+            AudioDecodeError::UnsupportedFormat,
+            |offset| {
+                attempted.push(offset);
+                if offset == 8 {
+                    Ok(offset)
+                } else {
+                    Err(AudioDecodeError::Mp3DecoderError("synthetic failure"))
+                }
+            },
+        )
+        .expect("second candidate succeeds");
+        assert_eq!(recovered_offset, 8);
+        assert_eq!(attempted, [2, 8]);
+
+        let mut last_included = vec![0_u8; MAX_MPEG_LAYER3_FRAME_SIZE - 5];
+        last_included.extend_from_slice(&clean_mp3);
+        assert!(decode_audio(&last_included).is_ok());
+        let mut first_excluded = vec![0_u8; MAX_MPEG_LAYER3_FRAME_SIZE - 4];
+        first_excluded.extend_from_slice(&clean_mp3);
+        assert!(matches!(
+            decode_audio(&first_excluded),
+            Err(AudioDecodeError::UnsupportedFormat)
+        ));
+
+        let id3_payload_len = MAX_MPEG_LAYER3_FRAME_SIZE;
+        let mut id3 = b"ID3\x04\0\0".to_vec();
+        id3.extend_from_slice(&[
+            ((id3_payload_len >> 21) & 0x7f) as u8,
+            ((id3_payload_len >> 14) & 0x7f) as u8,
+            ((id3_payload_len >> 7) & 0x7f) as u8,
+            (id3_payload_len & 0x7f) as u8,
+        ]);
+        id3.resize(10 + id3_payload_len, 0);
+        id3.extend_from_slice(&clean_mp3);
+        assert!(decode_audio(&id3).is_ok());
+        assert!(MusicStream::open(Arc::from(id3.into_boxed_slice()), 8_000).is_ok());
+
+        for len in 0..=4 {
+            let short = vec![0_u8; len];
+            let direct = decode_audio_for_output_direct(&short, 44_100).unwrap_err();
+            let recovered = decode_audio(&short).unwrap_err();
+            assert_eq!(
+                std::mem::discriminant(&recovered),
+                std::mem::discriminant(&direct)
+            );
+            assert_eq!(recovered.to_string(), direct.to_string());
+        }
     }
 
     #[test]
