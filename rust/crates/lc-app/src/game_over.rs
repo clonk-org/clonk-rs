@@ -383,6 +383,7 @@ pub struct GameOverState {
     entries: Vec<GameOverEntry>,
     evaluation: EvaluationViewModel,
     buttons: Vec<GameOverButton>,
+    host_or_cinematic_film: bool,
     hovered_goal: Option<usize>,
     hovered_button: Option<usize>,
     pressed_button: Option<usize>,
@@ -403,8 +404,8 @@ pub struct GameOverState {
 }
 
 impl GameOverState {
-    pub fn new(title: String, entries: Vec<GameOverEntry>) -> Self {
-        Self::with_next_mission(title, entries, u32::MAX, None)
+    pub fn new(title: String, entries: Vec<GameOverEntry>, host_or_cinematic_film: bool) -> Self {
+        Self::with_next_mission(title, entries, u32::MAX, None, host_or_cinematic_film)
     }
 
     pub fn with_next_mission(
@@ -412,6 +413,7 @@ impl GameOverState {
         mut entries: Vec<GameOverEntry>,
         screen_width: u32,
         next_mission: Option<NextMissionButton>,
+        host_or_cinematic_film: bool,
     ) -> Self {
         entries.sort_by(|left, right| {
             left.outcome
@@ -451,19 +453,24 @@ impl GameOverState {
                     .to_string(),
             },
         ];
-        if next_mission.is_none() || screen_width >= 1280 {
-            buttons.push(GameOverButton {
-                action: GameOverAction::Restart,
-                label: "&Restart".to_string(),
-                description: "Play this scenario again.".to_string(),
-            });
-        }
-        if let Some(next_mission) = next_mission {
-            buttons.push(GameOverButton {
-                action: GameOverAction::NextMission,
-                label: next_mission.label,
-                description: next_mission.description,
-            });
+        // C4GameOverDlg constructs these controls only for the control host
+        // or a cinematic film (Head.Film == 2). The same predicate also owns
+        // the dialog's expanded 1280x720 chrome below.
+        if host_or_cinematic_film {
+            if next_mission.is_none() || screen_width >= 1280 {
+                buttons.push(GameOverButton {
+                    action: GameOverAction::Restart,
+                    label: "&Restart".to_string(),
+                    description: "Play this scenario again.".to_string(),
+                });
+            }
+            if let Some(next_mission) = next_mission {
+                buttons.push(GameOverButton {
+                    action: GameOverAction::NextMission,
+                    label: next_mission.label,
+                    description: next_mission.description,
+                });
+            }
         }
 
         Self {
@@ -472,6 +479,7 @@ impl GameOverState {
             entries,
             evaluation: EvaluationViewModel::default(),
             buttons,
+            host_or_cinematic_film,
             hovered_goal: None,
             hovered_button: None,
             pressed_button: None,
@@ -580,7 +588,10 @@ impl GameOverState {
                 let buttons = &self.buttons;
                 let is_visible = |index: usize| {
                     buttons.get(index).is_some_and(|button| {
-                        !matches!(button.action, GameOverAction::End | GameOverAction::Continue)
+                        !matches!(
+                            button.action,
+                            GameOverAction::End | GameOverAction::Continue
+                        )
                     })
                 };
                 self.hovered_button = self.hovered_button.filter(|index| is_visible(*index));
@@ -746,13 +757,7 @@ impl GameOverState {
     /// Higher dialogs can consume pointer motion without forwarding it to
     /// this dialog, so rendering must not trust the cached hover left by the
     /// last event that did reach the evaluation screen.
-    pub fn tooltip_at(
-        &self,
-        x: f32,
-        y: f32,
-        surface_width: u32,
-        surface_height: u32,
-    ) -> &str {
+    pub fn tooltip_at(&self, x: f32, y: f32, surface_width: u32, surface_height: u32) -> &str {
         if let Some(index) = self
             .button_rects(surface_width, surface_height)
             .iter()
@@ -923,7 +928,10 @@ impl GameOverState {
     fn button_is_visible(&self, index: usize) -> bool {
         self.buttons.get(index).is_some_and(|button| {
             self.quit_buttons_visible
-                || !matches!(button.action, GameOverAction::End | GameOverAction::Continue)
+                || !matches!(
+                    button.action,
+                    GameOverAction::End | GameOverAction::Continue
+                )
         })
     }
 
@@ -1151,16 +1159,22 @@ impl GameOverState {
     ) -> ClassicGameOverLayout {
         let screen_width = surface_width as i32;
         let screen_height = surface_height as i32;
-        let dialog_width = if screen_width < 1280 {
+        let (width_threshold, width_cap, height_threshold, height_cap) =
+            if self.host_or_cinematic_film {
+                (1280, 1280, 720, 720)
+            } else {
+                (800, 800, 600, 600)
+            };
+        let dialog_width = if screen_width < width_threshold {
             screen_width - 10
         } else {
-            (screen_width - 150).min(1280)
+            (screen_width - 150).min(width_cap)
         }
         .max(1);
-        let dialog_height = if screen_height < 720 {
+        let dialog_height = if screen_height < height_threshold {
             screen_height - 10
         } else {
-            (screen_height - 150).min(720)
+            (screen_height - 150).min(height_cap)
         }
         .max(1);
         let dialog = IntRect {
@@ -2351,7 +2365,7 @@ mod tests {
 
     #[test]
     fn network_result_matches_cpp_pending_streaming_and_done_latches() {
-        let mut host = GameOverState::new("Evaluation".into(), Vec::new());
+        let mut host = GameOverState::new("Evaluation".into(), Vec::new(), true);
         host.initialize_network_result(true, true, "", None, 0, false);
         assert_eq!(host.network_result_label(), Some(""));
         assert!(!host.is_net_done());
@@ -2385,13 +2399,13 @@ mod tests {
         assert!(host.is_net_done());
         assert!(host.allows_escape_close());
 
-        let mut client = GameOverState::new("Evaluation".into(), Vec::new());
+        let mut client = GameOverState::new("Evaluation".into(), Vec::new(), false);
         client.initialize_network_result(true, false, "", None, 0, false);
         assert!(!client.is_net_done());
         assert!(client.allows_escape_close());
         assert!(client.actions().contains(&GameOverAction::End));
 
-        let mut local = GameOverState::new("Evaluation".into(), Vec::new());
+        let mut local = GameOverState::new("Evaluation".into(), Vec::new(), true);
         local.initialize_network_result(false, true, "ignored", None, 0, false);
         assert_eq!(local.network_result_label(), None);
         assert!(local.is_net_done());
@@ -2401,7 +2415,7 @@ mod tests {
     #[test]
     fn network_result_label_reserves_and_renders_the_native_two_line_area() {
         let fonts = endeavour_fonts();
-        let mut state = GameOverState::new("Evaluation".into(), Vec::new());
+        let mut state = GameOverState::new("Evaluation".into(), Vec::new(), true);
         state.initialize_network_result(
             true,
             true,
@@ -2465,6 +2479,7 @@ mod tests {
             Vec::new(),
             1024,
             next.clone(),
+            true,
         );
         assert_eq!(narrow.focused(), None);
         for expected in [
@@ -2478,8 +2493,13 @@ mod tests {
             assert_eq!(narrow.advance_focus(false), expected);
         }
 
-        let mut wide =
-            GameOverState::with_next_mission("Evaluation".to_string(), Vec::new(), 1280, next);
+        let mut wide = GameOverState::with_next_mission(
+            "Evaluation".to_string(),
+            Vec::new(),
+            1280,
+            next,
+            true,
+        );
         assert_eq!(wide.advance_focus(true), GameOverFocus::Button(3));
         assert_eq!(wide.focused_action(), Some(GameOverAction::NextMission));
         assert_eq!(wide.advance_focus(false), GameOverFocus::Close);
@@ -2487,7 +2507,7 @@ mod tests {
 
     #[test]
     fn focused_controls_use_native_down_up_sounds_and_direct_mnemonics() {
-        let mut state = GameOverState::new("Evaluation".to_string(), Vec::new());
+        let mut state = GameOverState::new("Evaluation".to_string(), Vec::new(), true);
         state.advance_focus(false);
         state.advance_focus(false);
         state.advance_focus(false);
@@ -2555,7 +2575,7 @@ mod tests {
     #[test]
     fn selection_disabled_player_list_can_take_pointer_focus_but_not_activate() {
         let fonts = endeavour_fonts();
-        let mut state = GameOverState::new("Evaluation".to_string(), Vec::new());
+        let mut state = GameOverState::new("Evaluation".to_string(), Vec::new(), true);
         state.configure_classic_fonts(Some(&fonts));
         let list = state
             .classic_player_list_rects(1024, 600)
@@ -2579,6 +2599,7 @@ mod tests {
         let mut state = GameOverState::new(
             "Tutorial 7".to_string(),
             vec![entry(1, "Player", GameOverOutcome::Victory, true)],
+            true,
         );
         let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
         let gamma = crate::tutorial_seven_gamma();
@@ -2670,7 +2691,7 @@ mod tests {
             entry(2, "Player", GameOverOutcome::Victory, true),
             entry(3, "Opponent", GameOverOutcome::Defeat, false),
         ];
-        let state = GameOverState::new("Goldmine".into(), entries);
+        let state = GameOverState::new("Goldmine".into(), entries, true);
         assert_eq!(state.subtitle(), "Victory!");
     }
 
@@ -2687,6 +2708,7 @@ mod tests {
                 label: "Next tutorial".into(),
                 description: "Continue learning".into(),
             }),
+            true,
         );
 
         assert_eq!(
@@ -2702,7 +2724,53 @@ mod tests {
     }
 
     #[test]
+    fn classic_client_layout_keeps_base_chrome_and_omits_privileged_actions() {
+        let fonts = endeavour_fonts();
+        let state = GameOverState::with_next_mission(
+            "A Clonk".into(),
+            Vec::new(),
+            1024,
+            Some(NextMissionButton {
+                label: "Next tutorial".into(),
+                description: "Continue learning".into(),
+            }),
+            false,
+        );
+        let layout = state.classic_layout(1024, 600, &fonts);
+
+        assert_eq!(
+            state.actions(),
+            &[GameOverAction::End, GameOverAction::Continue]
+        );
+        assert_eq!(
+            GameOverState::new("A Clonk".into(), Vec::new(), false).actions(),
+            &[GameOverAction::End, GameOverAction::Continue],
+            "an ineligible client must not gain Restart when Next Mission is empty"
+        );
+        assert_eq!(
+            GameOverState::new("A Clonk".into(), Vec::new(), true).actions(),
+            &[
+                GameOverAction::End,
+                GameOverAction::Continue,
+                GameOverAction::Restart,
+            ],
+            "an eligible host or Film 2 retains Restart without Next Mission"
+        );
+        assert_eq!(
+            layout.dialog,
+            IntRect {
+                x: 112,
+                y: 75,
+                w: 800,
+                h: 450,
+            }
+        );
+        assert_eq!(layout.buttons.len(), 2);
+    }
+
+    #[test]
     fn wide_game_over_keeps_restart_without_inventing_initial_focus() {
+        let fonts = endeavour_fonts();
         let mut state = GameOverState::with_next_mission(
             "A Clonk".into(),
             Vec::new(),
@@ -2711,6 +2779,7 @@ mod tests {
                 label: "Next tutorial".into(),
                 description: "Continue learning".into(),
             }),
+            true,
         );
         assert_eq!(
             state.actions(),
@@ -2723,6 +2792,17 @@ mod tests {
         );
 
         assert_eq!(state.hovered_action(), None);
+        let layout = state.classic_layout(1280, 720, &fonts);
+        assert_eq!(
+            layout.dialog,
+            IntRect {
+                x: 75,
+                y: 75,
+                w: 1130,
+                h: 570,
+            }
+        );
+        assert_eq!(layout.buttons.len(), 4);
         let next = state.button_rects(1280, 720)[3];
         state.handle_pointer_move(
             (next.x + next.width as i32 / 2) as f32,
@@ -2740,7 +2820,7 @@ mod tests {
     #[test]
     fn goal_hover_reports_exact_fulfilled_and_unfulfilled_tooltips() {
         let fonts = endeavour_fonts();
-        let mut state = GameOverState::new("A Clonk".into(), Vec::new());
+        let mut state = GameOverState::new("A Clonk".into(), Vec::new(), true);
         state.set_evaluation(EvaluationViewModel::new(
             vec![
                 EvaluationGoal {
@@ -2806,7 +2886,7 @@ mod tests {
             entry(1, "Player", GameOverOutcome::Defeat, false),
             entry(2, "Opponent", GameOverOutcome::Defeat, false),
         ];
-        let state = GameOverState::new("Goldmine".into(), entries);
+        let state = GameOverState::new("Goldmine".into(), entries, true);
         assert_eq!(state.subtitle(), "Defeat");
     }
 
@@ -2818,7 +2898,7 @@ mod tests {
             entry(2, "Bravo", GameOverOutcome::Victory, true),
             entry(4, "Delta", GameOverOutcome::Observer, false),
         ];
-        let state = GameOverState::new("Goldmine".into(), entries);
+        let state = GameOverState::new("Goldmine".into(), entries, true);
         let ids: Vec<i32> = state
             .entries()
             .iter()
@@ -2842,6 +2922,7 @@ mod tests {
                 label: "Next tutorial".into(),
                 description: "Continue learning".into(),
             }),
+            true,
         );
         let layout = state.classic_layout(1024, 600, &fonts);
 
@@ -2928,7 +3009,7 @@ mod tests {
         players[2].team_id = None;
         players[3].team_id = Some(1);
         let evaluation = EvaluationViewModel::new(Vec::new(), players).with_team_order([1, 2]);
-        let mut state = GameOverState::new("Evaluation".into(), Vec::new());
+        let mut state = GameOverState::new("Evaluation".into(), Vec::new(), true);
         state.set_evaluation(evaluation);
         state.initialize_network_result(
             true,
@@ -2965,12 +3046,7 @@ mod tests {
             )),
         );
         let commands = surface.take_clonk_text_capture();
-        for name in [
-            "Blue winner",
-            "Red loser",
-            "Teamless winner",
-            "Red winner",
-        ] {
+        for name in ["Blue winner", "Red loser", "Teamless winner", "Red winner"] {
             let command = commands
                 .iter()
                 .find(|command| command.text == name)
@@ -3025,6 +3101,7 @@ mod tests {
                 label: "Next tutorial".into(),
                 description: "Continue learning".into(),
             }),
+            true,
         );
         state.set_evaluation(evaluation);
         state
@@ -3078,7 +3155,7 @@ mod tests {
         players[3].won = false;
         let evaluation = EvaluationViewModel::new(Vec::new(), players)
             .with_dialog_context(String::new(), Some([1, 2]));
-        let mut state = GameOverState::new("Evaluation".into(), Vec::new());
+        let mut state = GameOverState::new("Evaluation".into(), Vec::new(), true);
         state.set_evaluation(evaluation);
         state.configure_classic_fonts(Some(&fonts));
 
@@ -3202,7 +3279,7 @@ mod tests {
         player.custom_evaluation_strings = "Personal note".into();
         let evaluation = EvaluationViewModel::new(Vec::new(), vec![player])
             .with_dialog_context("Global one|Global two".into(), None);
-        let mut state = GameOverState::new("Evaluation".into(), Vec::new());
+        let mut state = GameOverState::new("Evaluation".into(), Vec::new(), true);
         state.set_evaluation(evaluation);
         let layout = state.classic_evaluation_layout(1024, 600, &fonts);
         let custom = layout.custom_evaluation.expect("global custom text layout");
@@ -3274,7 +3351,7 @@ mod tests {
             .join("|");
         let evaluation =
             EvaluationViewModel::new(Vec::new(), Vec::new()).with_dialog_context(text, None);
-        let mut state = GameOverState::new("Evaluation".into(), Vec::new());
+        let mut state = GameOverState::new("Evaluation".into(), Vec::new(), true);
         state.set_evaluation(evaluation);
         state.configure_classic_fonts(Some(&fonts));
         let layout = state.classic_evaluation_layout(1024, 600, &fonts);
@@ -3495,6 +3572,7 @@ mod tests {
                 label: "Next tutorial".into(),
                 description: "Continue learning".into(),
             }),
+            true,
         );
         state.set_evaluation(EvaluationViewModel::new(
             Vec::new(),
@@ -3585,6 +3663,7 @@ mod tests {
                 label: "Next tutorial".into(),
                 description: "Continue learning".into(),
             }),
+            true,
         );
         state.pressed_button = Some(1);
         state.down_controls.push(GameOverFocus::Button(1));
@@ -3678,6 +3757,7 @@ mod tests {
                 label: "Next tutorial".into(),
                 description: "Continue learning".into(),
             }),
+            true,
         );
         state.set_evaluation(EvaluationViewModel::new(
             vec![EvaluationGoal {
@@ -3780,6 +3860,7 @@ mod tests {
         let mut state = GameOverState::new(
             "A Clonk".into(),
             vec![entry(1, "Player", GameOverOutcome::Victory, true)],
+            true,
         );
         state.configure_classic_fonts(Some(&fonts));
         let first = state.classic_layout(1024, 600, &fonts).buttons[0];
@@ -3809,7 +3890,7 @@ mod tests {
     #[test]
     fn classic_button_down_latch_is_shared_by_pointer_and_activation_keys() {
         let fonts = endeavour_fonts();
-        let mut state = GameOverState::new("Evaluation".to_string(), Vec::new());
+        let mut state = GameOverState::new("Evaluation".to_string(), Vec::new(), true);
         state.configure_classic_fonts(Some(&fonts));
         let first = state.classic_layout(1024, 600, &fonts).buttons[0];
         state.handle_pointer_move(
@@ -3862,6 +3943,7 @@ mod tests {
         let mut state = GameOverState::new(
             "A Clonk".into(),
             vec![entry(1, "Player", GameOverOutcome::Victory, true)],
+            true,
         );
         state.configure_classic_fonts(Some(&fonts));
         let layout = state.classic_layout(1024, 600, &fonts);
@@ -4012,6 +4094,7 @@ mod tests {
         let mut state = GameOverState::new(
             "A Clonk".into(),
             vec![entry(1, "Player", GameOverOutcome::Victory, true)],
+            true,
         );
         state.configure_classic_fonts(Some(&fonts));
         let layout = state.classic_layout(1024, 600, &fonts);

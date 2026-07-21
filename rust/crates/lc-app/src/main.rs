@@ -26538,6 +26538,7 @@ fn build_game_over_dialog(
     auto_generate_teams: bool,
     local_owner: i32,
     screen_width: u32,
+    host_or_cinematic_film: bool,
     title: String,
     next_mission: &lc_engine::NextMissionState,
     mut goal_presentation: impl FnMut(&str, bool) -> (Option<ImageData>, String),
@@ -26658,7 +26659,13 @@ fn build_game_over_dialog(
         label: next_mission.text.clone(),
         description: next_mission.description.clone(),
     });
-    let mut dialog = GameOverState::with_next_mission(title, entries, screen_width, next_mission);
+    let mut dialog = GameOverState::with_next_mission(
+        title,
+        entries,
+        screen_width,
+        next_mission,
+        host_or_cinematic_film,
+    );
     dialog.set_evaluation(evaluation);
     dialog
 }
@@ -74618,6 +74625,8 @@ impl GameApp {
             .as_ref()
             .map(|scenario| scenario.title.clone())
             .unwrap_or_else(|| "Scenario".to_string());
+        let host_or_cinematic_film =
+            self.engine.is_control_host() || self.engine.cinematic_film();
         let next_mission = self.engine.next_mission();
         let mut dialog = build_game_over_dialog(
             &self.snapshot,
@@ -74625,6 +74634,7 @@ impl GameApp {
             self.engine.auto_generate_teams(),
             self.local_owner,
             self.graphics.surface().width(),
+            host_or_cinematic_film,
             scenario_title.clone(),
             next_mission,
             |definition_id, fulfilled| {
@@ -201094,6 +201104,94 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
+    fn game_over_restart_and_next_mission_follow_control_host_film_policy() {
+        // C4GameOverDlg admits these two controls only for the control host
+        // or exact cinematic Film 2. Ordinary Film 1 is intentionally not an
+        // override, and 1280 is the first width that retains Restart beside a
+        // configured Next Mission (C4GameOverDlg.cpp:115-142,232-258).
+        let mut app = new_classic_running_sandbox_app();
+        let mut state = app.engine.capture_state();
+        state.next_mission = lc_engine::NextMissionState {
+            path: "Tutorial.c4f\\Tutorial02.c4s".into(),
+            text: "Next tutorial".into(),
+            description: "Continue learning".into(),
+        };
+        app.engine.restore_state(&state).expect("restore next mission");
+
+        for (control_host, film, width, expected) in [
+            (
+                false,
+                0,
+                1280,
+                vec![GameOverAction::End, GameOverAction::Continue],
+            ),
+            (
+                false,
+                1,
+                1280,
+                vec![GameOverAction::End, GameOverAction::Continue],
+            ),
+            (
+                true,
+                0,
+                1279,
+                vec![
+                    GameOverAction::End,
+                    GameOverAction::Continue,
+                    GameOverAction::NextMission,
+                ],
+            ),
+            (
+                true,
+                0,
+                1280,
+                vec![
+                    GameOverAction::End,
+                    GameOverAction::Continue,
+                    GameOverAction::Restart,
+                    GameOverAction::NextMission,
+                ],
+            ),
+            (
+                false,
+                2,
+                1279,
+                vec![
+                    GameOverAction::End,
+                    GameOverAction::Continue,
+                    GameOverAction::NextMission,
+                ],
+            ),
+            (
+                false,
+                2,
+                1280,
+                vec![
+                    GameOverAction::End,
+                    GameOverAction::Continue,
+                    GameOverAction::Restart,
+                    GameOverAction::NextMission,
+                ],
+            ),
+        ] {
+            app.dismiss_game_over_dialog();
+            app.resize(width, 720).expect("resize evaluation fixture");
+            set_test_scenario_head_flags(&mut app, 0, film);
+            app.engine.set_control_host(control_host);
+            app.finish_game_over_after_league()
+                .expect("construct evaluation dialog");
+            assert_eq!(
+                app.game_over_dialog
+                    .as_ref()
+                    .expect("evaluation dialog")
+                    .actions(),
+                expected,
+                "control_host={control_host}, Film={film}, width={width}"
+            );
+        }
+    }
+
+    #[test]
     fn evaluation_dialog_joins_frozen_results_by_player_info_id() {
         // C4GameOverDlg consumes C4RoundResults goals/player records, and
         // C4PlayerInfoListBox joins each record through C4PlayerInfo::GetID,
@@ -201160,6 +201258,7 @@ func ControlDig() { dig_count = 1; return(1); }
             false,
             99,
             1024,
+            true,
             "decoy title".into(),
             &next_mission,
             |definition_id, fulfilled| {
@@ -201219,6 +201318,7 @@ func ControlDig() { dig_count = 1; return(1); }
             false,
             99,
             1024,
+            true,
             "decoy title".into(),
             &next_mission,
             |_, _| (None, String::new()),
@@ -201288,6 +201388,7 @@ func ControlDig() { dig_count = 1; return(1); }
             false,
             10,
             1024,
+            true,
             "Scenario".into(),
             &lc_engine::NextMissionState::default(),
             |_, _| (None, String::new()),
@@ -201335,6 +201436,7 @@ func ControlDig() { dig_count = 1; return(1); }
             true,
             10,
             1024,
+            true,
             "Scenario".into(),
             &lc_engine::NextMissionState::default(),
             |_, _| (None, String::new()),
