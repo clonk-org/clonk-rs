@@ -7709,6 +7709,30 @@ fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String>
     })?;
     for control in &frame.controls {
         let (name, author) = match control {
+            lc_engine::ControlPacket::ClientJoin(control) => {
+                ("CID_ClientJoin", control.by_client)
+            }
+            lc_engine::ControlPacket::ClientUpdate(control) => {
+                ("CID_ClientUpdate", control.by_client)
+            }
+            lc_engine::ControlPacket::ClientRemove(control) => {
+                ("CID_ClientRemove", control.by_client)
+            }
+            lc_engine::ControlPacket::PlayerInfo(control) => {
+                ("CID_PlrInfo", control.by_client)
+            }
+            lc_engine::ControlPacket::JoinPlayer(control) => {
+                ("CID_JoinPlr", control.by_client)
+            }
+            lc_engine::ControlPacket::PlayerSelect(control) => {
+                ("CID_PlrSelect", control.by_client)
+            }
+            lc_engine::ControlPacket::PlayerControl(control) => {
+                ("CID_PlrControl", control.by_client)
+            }
+            lc_engine::ControlPacket::PlayerCommand(control) => {
+                ("CID_PlrCommand", control.by_client)
+            }
             lc_engine::ControlPacket::Script(script) => ("CID_Script", script.by_client),
             lc_engine::ControlPacket::MessageBoardAnswer(answer) => {
                 ("CID_MessageBoardAnswer", answer.by_client)
@@ -7736,12 +7760,25 @@ fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String>
                 ("CID_EliminatePlayer", control.by_client)
             }
             lc_engine::ControlPacket::RemovePlayer(remove) => ("CID_RemovePlr", remove.by_client),
-            control => {
-                let Some(set) = crate::LegacyControlSet::from_control_packet(control) else {
-                    continue;
-                };
-                ("CID_Set", set.by_client)
+            lc_engine::ControlPacket::Set(set) => ("CID_Set", set.by_client),
+            lc_engine::ControlPacket::Vote(vote) => ("CID_Vote", vote.by_client),
+            lc_engine::ControlPacket::VoteEnd(vote) => ("CID_VoteEnd", vote.by_client),
+            lc_engine::ControlPacket::InitScenarioPlayer(control) => {
+                ("CID_InitScenarioPlayer", control.by_client)
             }
+            lc_engine::ControlPacket::SurrenderPlayer(control) => {
+                ("CID_SurrenderPlayer", control.by_client)
+            }
+            lc_engine::ControlPacket::Synchronize(control) => {
+                ("CID_Synchronize", control.by_client)
+            }
+            lc_engine::ControlPacket::SyncCheck(control) => {
+                ("CID_SyncCheck", control.by_client)
+            }
+            // DebugRec has no inherited C4ControlPacket body, so the outer
+            // authenticated contribution is its only author identity.
+            lc_engine::ControlPacket::DebugRecord(_) => continue,
+            _ => continue,
         };
         if author != expected_author {
             return Err(format!(
@@ -8022,10 +8059,12 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::Vote(data) | lc_engine::ControlPacket::VoteEnd(data) => {
             data.by_client
         }
+        lc_engine::ControlPacket::Set(data) => data.by_client,
+        // C4ControlDebugRec contains only its opaque StdBuf. The authenticated
+        // control envelope is therefore its sole author identity.
+        lc_engine::ControlPacket::DebugRecord(_) => expected_author,
         lc_engine::ControlPacket::Unknown { .. } => {
-            crate::LegacyControlSet::from_control_packet(&control)
-                .map(|set| set.by_client)
-                .ok_or_else(|| "unsupported single control packet".to_string())?
+            return Err("unsupported single control packet".to_string())
         }
     };
     if author != expected_author {
@@ -18150,6 +18189,68 @@ mod tests {
             .expect_err("queued client may not forge host CID_Set");
         assert!(error.contains("claimed author 0"));
         assert!(error.contains("authenticated author is 7"));
+    }
+
+    #[test]
+    fn queued_vote_and_player_script_controls_authenticate_frame_author() {
+        let controls = |by_client| {
+            vec![
+                EngineControlPacket::Vote(lc_engine::VoteControlData {
+                    vote_type: lc_engine::VOTE_TYPE_KICK,
+                    approve: true,
+                    data: 3,
+                    by_client,
+                }),
+                EngineControlPacket::VoteEnd(lc_engine::VoteControlData {
+                    vote_type: lc_engine::VOTE_TYPE_KICK,
+                    approve: true,
+                    data: 3,
+                    by_client,
+                }),
+                EngineControlPacket::InitScenarioPlayer(
+                    lc_engine::InitScenarioPlayerControlData {
+                        team: 2,
+                        player: 4,
+                        by_client,
+                    },
+                ),
+                EngineControlPacket::SurrenderPlayer(lc_engine::SurrenderPlayerControlData {
+                    player: 4,
+                    by_client,
+                }),
+            ]
+        };
+        let packet = |controls| {
+            encode_control_packet(&LegacyControlFrame {
+                client_id: 7,
+                tick: 12,
+                timestamp_ms: 0,
+                controls,
+            })
+            .expect("encode queued controls")
+        };
+
+        validate_queued_control_authors(&packet(controls(7)))
+            .expect("matching queued authors");
+
+        for (name, forged) in [
+            "CID_Vote",
+            "CID_VoteEnd",
+            "CID_InitScenarioPlayer",
+            "CID_SurrenderPlayer",
+        ]
+        .into_iter()
+        .zip(controls(0))
+        {
+            let error = validate_queued_control_authors(&packet(vec![forged]))
+                .expect_err("queued control may not forge the host author");
+            assert!(error.contains(name), "{name}: {error}");
+            assert!(error.contains("claimed author 0"), "{name}: {error}");
+            assert!(
+                error.contains("authenticated author is 7"),
+                "{name}: {error}"
+            );
+        }
     }
 
     #[test]

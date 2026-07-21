@@ -368,10 +368,19 @@ impl ControlClientRegistry {
         };
         match update.update_type {
             crate::CLIENT_UPDATE_ACTIVATE => {
+                // Native SetActivated is skipped entirely when the requested
+                // activation bit already matches. This preserves even an
+                // inconsistent recorded core with Activated+Observer set.
+                if client.activated == (update.data != 0) {
+                    return;
+                }
                 client.activated = update.data != 0;
                 client.observer = false;
             }
             crate::CLIENT_UPDATE_SET_OBSERVER => {
+                if client.observer {
+                    return;
+                }
                 client.activated = false;
                 client.observer = true;
             }
@@ -4162,6 +4171,17 @@ mod tests {
         });
         assert!(!clients.is_activated(3));
         assert!(clients.is_observer(3));
+
+        clients.apply_update(&crate::ClientUpdateControlData {
+            update_type: crate::CLIENT_UPDATE_ACTIVATE,
+            client_id: 3,
+            data: 0,
+            by_client: 0,
+        });
+        assert!(
+            clients.is_observer(3),
+            "equal Activate request is a full native no-op"
+        );
     }
 
     #[test]

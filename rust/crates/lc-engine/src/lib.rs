@@ -73,14 +73,15 @@ pub use control::{
     ActivateGameGoalRuleControlData, ClientCoreControlData, ClientJoinControlData,
     ClientRemoveControlData, ClientUpdateControlData, CommandKind, ControlButton, ControlCommand,
     ControlEvent, ControlPacket, ControlPacketId, ControlPlayerInfoEntry, CustomCommandControlData,
-    EliminatePlayerControlData, EmDrawToolControlData, EmDropDefControlData,
+    DebugRecordControlData, EliminatePlayerControlData, EmDrawToolControlData, EmDropDefControlData,
     EmMoveObjectControlData,
     InitScenarioPlayerControlData,
     JoinPlayerControlData,
     JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData, MessageControlData,
     NetworkResourceCore, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
     PlayerInfoUpdateRequest, PlayerSelectControlData, RemovePlayerControlData, ScriptControlData,
-    ScriptStrictness, SetPlayerTeamControlData, SurrenderPlayerControlData, SyncCheckPacket,
+    ScriptStrictness, SetControlData, SetPlayerTeamControlData, SurrenderPlayerControlData,
+    ReplayPlayerInfosDocument, SyncCheckPacket, parse_replay_player_infos_ini,
     SynchronizeControlData, ToggleHostilityControlData, VoteControlData,
     CLIENT_UPDATE_ACTIVATE,
     CLIENT_UPDATE_SET_OBSERVER,
@@ -102,7 +103,9 @@ pub use control::{
     PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
     PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_FLAG_SAVEGAME_JOIN, PLAYER_INFO_FLAG_VOTED_OUT,
     PLAYER_INFO_FLAG_WON, PLAYER_INFO_TYPE_NONE, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
-    SCRIPT_SCOPE_CONSOLE, SCRIPT_SCOPE_GLOBAL,
+    SCRIPT_SCOPE_CONSOLE, SCRIPT_SCOPE_GLOBAL, SET_VALUE_CONTROL_RATE, SET_VALUE_DISABLE_DEBUG,
+    SET_VALUE_FAIR_CREW, SET_VALUE_MAX_PLAYER, SET_VALUE_NONE, SET_VALUE_TEAM_COLORS,
+    SET_VALUE_TEAM_DISTRIBUTION,
     VOTE_TYPE_CANCEL, VOTE_TYPE_KICK, VOTE_TYPE_NONE, VOTE_TYPE_PAUSE,
 };
 pub use control_execution::{
@@ -18006,8 +18009,9 @@ pub struct Engine {
     /// but native `RecheckPlayerSort` has observable insertion edge cases that
     /// cannot be reconstructed from the map alone.
     player_order: Vec<i32>,
-    /// Join inputs retained while C++ postpones `ScenarioInit` for runtime
-    /// team choice (`PS_TeamSelection`).
+    /// Join inputs retained for every live C4PlayerInfo-backed player.
+    /// `ScenarioAndTeamInit` may rerun `ScenarioInit` after the initial join,
+    /// not only while runtime team choice is pending.
     pending_player_joins: HashMap<i32, JoinPlayerConfig>,
     /// C4PlayerInfoList::iLastPlayerID, persisted and repaired across loads.
     #[doc(hidden)] pub last_player_info_id: i32,
@@ -21115,7 +21119,6 @@ impl Engine {
         );
         self.player_mut(number)?
             .set_status(PlayerStatus::TeamSelection);
-        self.pending_player_joins.insert(number, config);
         self.preinitialize_joining_player(number)?;
         // Game::JoinPlayer/Game::InitGameFinal calls FinalInit even while the
         // player is awaiting a team. ScenarioAndTeamInit performs the second,
@@ -21134,13 +21137,22 @@ impl Engine {
     }
 
     /// Executes the synchronized `InitScenarioPlayer(player, team)` call.
-    /// `Ok(None)` mirrors C++'s false return for a missing/unavailable team;
-    /// the pending player returns to the selection menu and may retry.
+    /// `C4Player::ScenarioAndTeamInit` accepts every live player with a
+    /// C4PlayerInfo, including one whose initial ScenarioInit already ran.
+    /// `Ok(None)` mirrors C++'s false return for a missing info/team; a
+    /// pending player returns to the selection menu and may retry.
     pub fn initialize_scenario_player(
         &mut self,
         number: i32,
         team: i32,
     ) -> Result<Option<JoinedPlayer>, EngineError> {
+        if !self
+            .players
+            .get(&number)
+            .is_some_and(|player| player.player_info_id() != 0)
+        {
+            return Ok(None);
+        }
         let Some(mut config) = self.pending_player_joins.get(&number).cloned() else {
             return Ok(None);
         };
@@ -21178,7 +21190,7 @@ impl Engine {
         self.recheck_runtime_team_memberships();
         let joined = self.scenario_init_for_player(number, &config, None)?;
         self.finalize_joining_player(number, false, true)?;
-        self.pending_player_joins.remove(&number);
+        self.pending_player_joins.insert(number, config);
         Ok(Some(joined))
     }
 
@@ -21348,6 +21360,7 @@ impl Engine {
             .insert(number, (0..config.crew.len()).rev().collect());
         self.bootstrap_player_crew_from_union(number);
         self.sync_player_cursor(number);
+        self.pending_player_joins.insert(number, config.clone());
         number
     }
 
@@ -22738,6 +22751,55 @@ impl Engine {
         self.remove_player_internal(id, true)
     }
 
+    /// `C4Game::Abort`'s `RemoveLocal(true, true)` followed by
+    /// `RemoveAtRemoteClient(true, true)`. Local-control user players are
+    /// removed first in C4PlayerList order. The second pass removes every
+    /// remaining player whose `AtClient` differs from the replay client,
+    /// preserving non-local players at `C4ClientIDUnknown`.
+    ///
+    /// The native `fNoCalls` path deliberately suppresses RemovePlayer,
+    /// NotifyOwnedObjects, crew-object removal, and game-over checks while
+    /// still detaching object infos and validating object owners.
+    #[doc(hidden)]
+    pub fn abort_players_without_callbacks(
+        &mut self,
+        replay_client_id: i32,
+    ) -> Result<Vec<Player>, EngineError> {
+        let local_players = self
+            .player_ids_in_order()
+            .into_iter()
+            .filter(|number| {
+                self.local_players.as_ref().map_or_else(
+                    || {
+                        self.players.get(number).is_some_and(|player| {
+                            player.at_client().get() == replay_client_id
+                                && !player.is_script_player()
+                        })
+                    },
+                    |local_players| local_players.contains(number),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut removed = Vec::with_capacity(self.players.len());
+        for number in local_players {
+            removed.push(self.remove_player_without_callbacks(number)?);
+        }
+
+        let remote_players = self
+            .player_ids_in_order()
+            .into_iter()
+            .filter(|number| {
+                self.players
+                    .get(number)
+                    .is_some_and(|player| player.at_client().get() != replay_client_id)
+            })
+            .collect::<Vec<_>>();
+        for number in remote_players {
+            removed.push(self.remove_player_without_callbacks(number)?);
+        }
+        Ok(removed)
+    }
+
     /// `C4Player::NotifyOwnedObjects`: visit the live main object list first,
     /// then the inactive list, and run the engine's private
     /// `~OnOwnerRemoved` fallback for each object still owned by the
@@ -22962,6 +23024,12 @@ impl Engine {
         // live (C4PlayerList.cpp:219-261).
         self.notify_owned_objects(id)?;
 
+        // C4PlayerList::Remove does not run C4Player::Evaluate here. For an
+        // unevaluated player it only snapshots the current profile values
+        // into C4RoundResultsPlayer before unlinking (C4PlayerList.cpp:228-242;
+        // C4RoundResults.cpp:52-75).
+        self.snapshot_player_round_results_for_removal(id)?;
+
         // C4PlayerList unlinks the departing player before walking its stored
         // Crew list and assigning every member removal. Preserve that roster
         // across the map removal below; deriving it from Owner afterwards is
@@ -22995,10 +23063,7 @@ impl Engine {
         for crew in departing_crew {
             let _ = self.assign_object_removal_with_contents(crew, true)?;
         }
-        self.crew_selection.remove(&id);
-        self.crew_roles.remove(&id);
-        self.eliminated_crew_owners.remove(&id);
-        self.known_crew_owners.remove(&id);
+        self.discard_removed_player_runtime_state(id);
         self.validate_object_player_references();
         self.refresh_elimination_state();
         if self.team_home_base_rule {
@@ -23009,6 +23074,97 @@ impl Engine {
         if check_game_over {
             self.check_game_over()?;
         }
+        Ok(player)
+    }
+
+    /// The result-only evaluation performed by `C4PlayerList::Remove`.
+    /// Unlike `C4Player::Evaluate`, this neither marks the player evaluated
+    /// nor changes score, round counters, crew participation, or play time.
+    fn snapshot_player_round_results_for_removal(
+        &mut self,
+        id: i32,
+    ) -> Result<(), EngineError> {
+        let player = self
+            .players
+            .get(&id)
+            .ok_or(EngineError::UnknownPlayer(id))?;
+        let state = player.to_state();
+        if state.player_info_id == 0 || state.evaluated {
+            return Ok(());
+        }
+        let league_progress_data = self
+            .player_info_league_progress_data
+            .get(&state.player_info_id)
+            .cloned()
+            .flatten();
+        match self
+            .round_results
+            .players
+            .iter_mut()
+            .find(|result| result.player_info_id == state.player_info_id)
+        {
+            Some(result) => {
+                result.total_playing_time = state.total_playing_time as u32;
+                result.score_old = state.score;
+                result.league_progress_data = league_progress_data;
+            }
+            None => self.round_results.players.push(RoundResultsPlayerState {
+                player_info_id: state.player_info_id,
+                total_playing_time: state.total_playing_time as u32,
+                score_old: state.score,
+                league_progress_data,
+                ..RoundResultsPlayerState::default()
+            }),
+        }
+        Ok(())
+    }
+
+    /// `C4ObjectInfoList::DetachFromObjects` plus destruction of the
+    /// departing player's process-local list projections.
+    fn discard_removed_player_runtime_state(&mut self, id: i32) {
+        let info_objects = self
+            .crew_info_links
+            .iter()
+            .filter_map(|(&object, link)| (link.player_id == id).then_some(object))
+            .collect::<Vec<_>>();
+        self.crew_info_control_counts
+            .retain(|link, _| link.player_id != id);
+        for object_id in info_objects {
+            Rc::make_mut(&mut self.crew_info_links).remove(&object_id);
+            Rc::make_mut(&mut self.crew_object_infos).remove(&object_id);
+            Rc::make_mut(&mut self.crew_ranks).remove(&object_id.as_u64());
+            if let Some(index) = self.find_object_index(object_id) {
+                self.objects[index].state.info_physical = None;
+            }
+        }
+        self.pending_player_joins.remove(&id);
+        self.crew_rosters.remove(&id);
+        self.crew_info_order.remove(&id);
+        self.crew_selection.remove(&id);
+        self.crew_roles.remove(&id);
+        self.eliminated_crew_owners.remove(&id);
+        self.known_crew_owners.remove(&id);
+    }
+
+    fn remove_player_without_callbacks(&mut self, id: i32) -> Result<Player, EngineError> {
+        self.snapshot_player_round_results_for_removal(id)?;
+        let player = self
+            .players
+            .remove(&id)
+            .ok_or(EngineError::UnknownPlayer(id))?;
+        self.player_order.retain(|number| *number != id);
+        if let Some(local_players) = self.local_players.as_mut() {
+            local_players.remove(&id);
+        }
+        if self
+            .active_message_board_input
+            .as_ref()
+            .is_some_and(|input| input.player == id)
+        {
+            self.active_message_board_input = None;
+        }
+        self.discard_removed_player_runtime_state(id);
+        self.validate_object_player_references();
         Ok(player)
     }
 
@@ -23732,6 +23888,15 @@ impl Engine {
         self.game_over_triggered
     }
 
+    /// Executes the `C4Game::DoGameOver` half of a synchronized control.
+    /// In particular, a successful `VoteEnd(VT_Kick, ClientIDUnknown)` ends
+    /// replay control without pretending that the unknown client is a
+    /// removable player owner.
+    #[doc(hidden)]
+    pub fn request_game_over_from_control(&mut self) -> Result<bool, EngineError> {
+        self.request_game_over()
+    }
+
     pub fn game_time(&self) -> i32 {
         self.game_time
     }
@@ -23752,6 +23917,19 @@ impl Engine {
             self.last_player_info_id = self.last_player_info_id.max(requested);
             requested
         }
+    }
+
+    /// Exact live `C4PlayerInfoList::iLastPlayerID` value.
+    #[doc(hidden)]
+    pub fn last_player_info_id(&self) -> i32 {
+        self.last_player_info_id
+    }
+
+    /// Install the exact persisted `C4PlayerInfoList::iLastPlayerID` after
+    /// replay PlayerInfo rows have been projected into the engine.
+    #[doc(hidden)]
+    pub fn set_last_player_info_id(&mut self, last_player_info_id: i32) {
+        self.last_player_info_id = last_player_info_id;
     }
 
     pub fn configure_objectives(&mut self, objectives: ScenarioObjectives) {
@@ -60666,6 +60844,18 @@ mod player_list_order_regression {
         )
     }
 
+    #[test]
+    fn replay_player_info_counter_install_preserves_exact_persisted_value() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(PlayerConfig::new(0, "Existing").with_player_info_id(41))
+            .expect("existing player registers");
+        assert_eq!(engine.last_player_info_id(), 41);
+
+        engine.set_last_player_info_id(12);
+        assert_eq!(engine.last_player_info_id(), 12);
+    }
+
     fn crew_info(name: &str) -> player_file::CrewInfo {
         player_file::CrewInfo {
             id: "CLNK".to_string(),
@@ -60953,6 +61143,318 @@ func ReadCallbackLog() { return callback_log; }
                 .expect("read callback order"),
             Value::Int(21),
             "player 1 callback must precede player 0 after the native reuse edge"
+        );
+    }
+
+    #[test]
+    fn player_list_remove_snapshots_without_running_player_evaluation() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(
+                PlayerConfig::new(7, "Departing")
+                    .with_player_info_id(41)
+                    .with_score(123)
+                    .with_rounds(8, 3, 5)
+                    .with_total_playing_time(456),
+            )
+            .expect("player registers");
+
+        let removed = engine.remove_player(7).expect("player removes");
+        let removed_state = removed.to_state();
+        assert!(!removed_state.evaluated);
+        assert_eq!(removed_state.score, 123);
+        assert_eq!(removed_state.rounds, 8);
+        assert_eq!(removed_state.total_playing_time, 456);
+        assert_eq!(engine.round_results.players.len(), 1);
+        let result = &engine.round_results.players[0];
+        assert_eq!(result.player_info_id, 41);
+        assert_eq!(result.total_playing_time, 456);
+        assert_eq!(result.score_old, 123);
+        assert_eq!(result.score_new, None);
+    }
+
+    #[test]
+    fn hard_abort_removes_local_then_remote_without_callbacks_or_crew_removal() {
+        let mut engine = Engine::new();
+        engine.set_teams(vec![TeamInfo::new(1, "One", 0)]);
+        for (number, client) in [
+            (0, PlayerAtClient::HOST),
+            (1, PlayerAtClient::new(7)),
+            (2, PlayerAtClient::UNKNOWN),
+            (3, PlayerAtClient::UNKNOWN),
+            (4, PlayerAtClient::UNKNOWN),
+        ] {
+            engine
+                .register_player(
+                    PlayerConfig::new(number, format!("Player {number}"))
+                        .with_player_info_id(100 + number)
+                        .with_team(Some(1))
+                        .with_score(10 + number)
+                        .with_rounds(7, 3, 4)
+                        .with_total_playing_time(20 + number),
+                )
+                .expect("player registers");
+            engine
+                .player_mut(number)
+                .expect("player remains")
+                .set_at_client(client);
+        }
+        engine
+            .player_mut(4)
+            .expect("unknown-client player remains")
+            .set_script_player(true);
+
+        // A direct legacy fixture supplies the GetInfo()==nullptr case. It
+        // is remote in the second pass and must not create a result row.
+        let mut no_info = PlayerConfig::new(5, "No info").build();
+        no_info.set_at_client(PlayerAtClient::new(8));
+        engine.players.insert(5, no_info);
+        engine.player_order = vec![3, 1, 4, 2, 0, 5];
+        // Explicit LocalControl is authoritative over the InitControl
+        // derivation: player 1 is local despite AtClient=7, while player 2
+        // is non-local despite being a user at the replay client id.
+        engine.set_local_players([3, 1]);
+
+        let mut crew_definition =
+            Definition::from_script("CLNK", "Crew", "").expect("crew definition compiles");
+        crew_definition.set_crew_member(true);
+        engine
+            .register_definition(crew_definition)
+            .expect("crew definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("OWND", "Owned", "")
+                    .expect("owned definition compiles"),
+            )
+            .expect("owned definition registers");
+        engine
+            .load_scenario_script_with_convention(
+                "AbortCallbacks",
+                "#strict 3\n\
+                 static RemoveCalls, GameOverCalls;\n\
+                 func Initialize() { RemoveCalls = 0; GameOverCalls = 0; }\n\
+                 func RemovePlayer() { RemoveCalls = RemoveCalls + 1; }\n\
+                 func OnGameOver() { GameOverCalls = GameOverCalls + 1; }\n\
+                 func ReadAbortCalls() { return RemoveCalls * 10 + GameOverCalls; }",
+                true,
+            )
+            .expect("callback probe loads");
+
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(3)
+                    .with_alive(true)
+                    .with_crew_member(false)
+                    .with_loaded(true),
+            )
+            .expect("crew object spawns");
+        engine.crew_rosters.insert(3, vec![crew_info("Retained")]);
+        engine.crew_info_order.insert(3, vec![0]);
+        engine.remember_legacy_object_info(crew, Some("Retained".to_string()));
+        engine
+            .initialize_scenario_script()
+            .expect("crew info attaches and callback counters initialize");
+        assert!(engine.crew_object_info(crew).is_some());
+
+        let owned = engine
+            .spawn_object(SpawnConfig::new("OWND").with_owner(3))
+            .expect("owned object spawns");
+        let removed = engine
+            .abort_players_without_callbacks(-1)
+            .expect("hard abort succeeds");
+
+        assert_eq!(
+            removed.iter().map(Player::id).collect::<Vec<_>>(),
+            vec![3, 1, 0, 5],
+            "RemoveLocal completes before RemoveAtRemoteClient"
+        );
+        assert!(removed.iter().all(|player| !player.to_state().evaluated));
+        assert_eq!(
+            engine.players().map(Player::id).collect::<Vec<_>>(),
+            vec![4, 2]
+        );
+        assert!(!engine.is_game_over());
+        assert_eq!(
+            engine
+                .call_scenario_script_value("ReadAbortCalls", &[])
+                .expect("callback counter reads"),
+            Some(Value::Int(0))
+        );
+
+        let crew_index = engine.find_object_index(crew).expect("crew object remains");
+        assert!(!engine.objects[crew_index].destroyed);
+        assert_eq!(engine.objects[crew_index].state.owner, OWNER_NONE);
+        assert!(engine.objects[crew_index].state.crew_member);
+        assert_eq!(engine.objects[crew_index].state.info_physical, None);
+        assert!(engine.crew_object_info(crew).is_none());
+        assert!(!engine.crew_info_links.contains_key(&crew));
+
+        let owned_index = engine.find_object_index(owned).expect("owned object remains");
+        assert_eq!(engine.objects[owned_index].state.owner, OWNER_NONE);
+        assert_ne!(
+            engine.objects[owned_index].state.owner,
+            4,
+            "NotifyOwnedObjects must not transfer to the preserved teammate"
+        );
+
+        assert_eq!(
+            engine
+                .round_results
+                .players
+                .iter()
+                .map(|result| result.player_info_id)
+                .collect::<Vec<_>>(),
+            vec![103, 101, 100]
+        );
+        assert!(engine.round_results.players.iter().all(|result| {
+            result.score_new.is_none() && result.score_old == result.player_info_id - 90
+        }));
+    }
+
+    #[test]
+    fn hard_abort_derives_local_control_when_no_projection_is_installed() {
+        let mut engine = Engine::new();
+        for number in 0..3 {
+            engine
+                .register_player(
+                    PlayerConfig::new(number, format!("Player {number}"))
+                        .with_player_info_id(20 + number),
+                )
+                .expect("player registers");
+        }
+        engine
+            .player_mut(0)
+            .expect("user player remains")
+            .set_at_client(PlayerAtClient::UNKNOWN);
+        engine
+            .player_mut(1)
+            .expect("script player remains")
+            .set_at_client(PlayerAtClient::UNKNOWN);
+        engine
+            .player_mut(1)
+            .expect("script player remains")
+            .set_script_player(true);
+        engine
+            .player_mut(2)
+            .expect("remote player remains")
+            .set_at_client(PlayerAtClient::new(7));
+        engine.player_order = vec![2, 1, 0];
+
+        let removed = engine
+            .abort_players_without_callbacks(-1)
+            .expect("derived hard abort succeeds");
+        assert_eq!(
+            removed.iter().map(Player::id).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        assert_eq!(engine.players().map(Player::id).collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn initialized_join_player_can_repeat_scenario_and_team_init() {
+        let mut engine = Engine::new();
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.set_teams(vec![
+            TeamInfo::new(1, "One", 0),
+            TeamInfo::new(2, "Two", 0),
+        ]);
+        engine
+            .load_scenario_script_with_convention(
+                "RepeatedScenarioInit",
+                "#strict 3\n\
+                 static InitCalls;\n\
+                 func Initialize() { InitCalls = 0; }\n\
+                 func InitializePlayer() { InitCalls = InitCalls + 1; }\n\
+                 func RepeatInit(plr, team) { return InitScenarioPlayer(plr, team); }\n\
+                 func ReadInitCalls() { return InitCalls; }",
+                true,
+            )
+            .expect("scenario probe loads");
+        engine
+            .initialize_scenario_script()
+            .expect("scenario probe initializes");
+
+        let mut config = joining_player("Repeatable");
+        config.player_info_id = 41;
+        config.team = Some(1);
+        let number = engine
+            .join_player(config)
+            .expect("initial join succeeds")
+            .number();
+        assert_eq!(
+            engine
+                .call_scenario_script_value(
+                    "RepeatInit",
+                    &[Value::Int(number), Value::Int(2)],
+                )
+                .expect("script-host repeated init succeeds"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(engine.player(number).and_then(Player::team), Some(2));
+        assert_eq!(engine.pending_player_joins[&number].team, Some(2));
+        assert!(engine
+            .initialize_scenario_player(number, 1)
+            .expect("second repeated init succeeds")
+            .is_some());
+        assert_eq!(engine.player(number).and_then(Player::team), Some(1));
+        assert_eq!(engine.pending_player_joins[&number].team, Some(1));
+        assert_eq!(
+            engine
+                .call_scenario_script_value("ReadInitCalls", &[])
+                .expect("init counter reads"),
+            Some(Value::Int(3))
+        );
+
+        let no_info_number = 9;
+        engine.players.insert(
+            no_info_number,
+            PlayerConfig::new(no_info_number, "No info").build(),
+        );
+        engine.player_order.push(no_info_number);
+        engine
+            .pending_player_joins
+            .insert(no_info_number, joining_player("No info"));
+        assert!(engine
+            .initialize_scenario_player(no_info_number, 1)
+            .expect("missing C4PlayerInfo is a clean false return")
+            .is_none());
+    }
+
+    #[test]
+    fn control_game_over_request_does_not_remove_a_player() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(PlayerConfig::new(0, "Replay").with_player_info_id(17))
+            .expect("player registers");
+        engine
+            .load_scenario_script_with_convention(
+                "ControlGameOver",
+                "#strict 3\n\
+                 static Calls;\n\
+                 func Initialize() { Calls = 0; }\n\
+                 func OnGameOver() { Calls = Calls + 1; }\n\
+                 func ReadCalls() { return Calls; }",
+                true,
+            )
+            .expect("game-over probe loads");
+        engine
+            .initialize_scenario_script()
+            .expect("game-over probe initializes");
+
+        assert!(engine
+            .request_game_over_from_control()
+            .expect("first request triggers game over"));
+        assert!(!engine
+            .request_game_over_from_control()
+            .expect("repeat request is idempotent"));
+        assert!(engine.player(0).is_some());
+        assert!(engine.player(0).unwrap().to_state().won);
+        assert_eq!(
+            engine
+                .call_scenario_script_value("ReadCalls", &[])
+                .expect("game-over counter reads"),
+            Some(Value::Int(1))
         );
     }
 }

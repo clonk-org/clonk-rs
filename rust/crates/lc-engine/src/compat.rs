@@ -40,7 +40,7 @@ use crate::{
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder,
     PathfinderDebugSnapshot, PauseGameRequest,
-    PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState, PlayerStatus, QueuedCommand,
+    PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState, QueuedCommand,
     RgbColor, ScoreboardState, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig,
     TeamConfiguration, TeamInfo, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
     encode_bridge_action_data,
@@ -5119,11 +5119,11 @@ fn get_player_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// `FnInitScenarioPlayer` (C4Script.cpp:5827-5832): resume a player whose
-/// ScenarioInit was postponed for runtime team selection. The copied host
-/// context predicts `ScenarioAndTeamInit`'s team-validation result; the
-/// ordered player command runs the existing authoritative initialization
-/// path when this VM call folds back into the engine.
+/// `FnInitScenarioPlayer` (C4Script.cpp:5827-5832): run
+/// `C4Player::ScenarioAndTeamInit` for any live C4PlayerInfo-backed player.
+/// The copied host context predicts its team-validation result; the ordered
+/// player command runs the authoritative initialization path when this VM
+/// call folds back into the engine.
 fn init_scenario_player(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 2 {
         return Err(RuntimeError::new(
@@ -5146,19 +5146,15 @@ fn init_scenario_player(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_mut() else {
             return Ok(Value::Bool(false));
         };
-        let Some((status, current_team)) = context
+        let Some((player_info_id, current_team)) = context
             .player_state(player_id)
-            .map(|player| (player.status, player.team))
+            .map(|player| (player.player_info_id, player.team))
         else {
             return Ok(Value::Bool(false));
         };
-        // The Rust core retains the postponed JoinPlayerConfig only while
-        // the player is in one of the team-selection states. Normal engine
-        // calls reach this builtin through CID_InitScenarioPlayer here.
-        if !matches!(
-            status,
-            PlayerStatus::TeamSelection | PlayerStatus::TeamSelectionPending
-        ) {
+        // C4Player::ScenarioAndTeamInit gates only on GetInfo(). A fully
+        // initialized player may run it again; status is not consulted.
+        if player_info_id == 0 {
             return Ok(Value::Bool(false));
         }
 

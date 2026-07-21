@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-
 use lc_engine::{
     ActivateGameGoalMenuControlData, ActivateGameGoalRuleControlData, ClientCoreControlData,
     ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
-    ControlPacket as EngineControlPacket, ControlPacketId, ControlPlayerInfoEntry,
+    ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, DebugRecordControlData,
     EmMoveObjectControlData,
     CustomCommandControlData, EliminatePlayerControlData, EmDrawToolControlData,
     EmDropDefControlData,
@@ -12,8 +10,8 @@ use lc_engine::{
     MessageControlData, NetworkResourceCore, PlayerCommandControlData, PlayerControlData,
     PlayerInfoControlData,
     PlayerInfoUpdateRequest, PlayerSelectControlData, RemovePlayerControlData, ScriptControlData,
-    ScriptStrictness, SetPlayerTeamControlData, SurrenderPlayerControlData, SyncCheckPacket,
-    SynchronizeControlData, ToggleHostilityControlData, VoteControlData,
+    ScriptStrictness, SetControlData, SetPlayerTeamControlData, SurrenderPlayerControlData,
+    SyncCheckPacket, SynchronizeControlData, ToggleHostilityControlData, VoteControlData,
     EMMO_SCRIPT, MESSAGE_TYPE_PRIVATE,
     CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
@@ -48,6 +46,7 @@ const CID_MESSAGE: u8 = 0x80 | 0x23;
 const CID_EM_MOVE_OBJECT: u8 = 0x80 | 0x30;
 const CID_EM_DRAW_TOOL: u8 = 0x80 | 0x31;
 const CID_EM_DROP_DEF: u8 = 0x80 | 0x32;
+const CID_DEBUG_RECORD: u8 = 0x80 | 0x40;
 const CID_INIT_SCENARIO_PLAYER: u8 = 0x80 | 0x52;
 const CID_SURRENDER_PLAYER: u8 = 0x80 | 0x55;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
@@ -131,6 +130,8 @@ pub enum LegacyEncodeError {
     PlayerSelectObjectCountTooLarge(usize),
     #[error("EMMoveObject object count {0} exceeds C++ int32")]
     EmMoveObjectCountTooLarge(usize),
+    #[error("DebugRec payload length {0} exceeds C++ uint32")]
+    DebugRecordTooLarge(usize),
     #[error("JoinData collection count {0} exceeds C++ int32")]
     JoinDataCollectionTooLarge(usize),
     #[error("JoinData client count {0} exceeds C++ uint32")]
@@ -416,10 +417,8 @@ fn encode_join_data_id_list(
 
 /// Decoded `C4ControlSet` fields carried by `CID_Set` (0x87).
 ///
-/// `lc-engine::ControlPacket` intentionally has no executable Set variant yet,
-/// so the legacy codec retains this data in its structured `Unknown` carrier.
-/// These conversions are the single typed boundary used by session
-/// authentication and the app network adapter.
+/// The engine owns the canonical typed packet; this compatibility wrapper
+/// preserves the established network API used by the live app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegacyControlSet {
     pub value_type: i32,
@@ -428,44 +427,35 @@ pub struct LegacyControlSet {
 }
 
 impl LegacyControlSet {
-    const PACKET_NAME: &'static str = "C4ControlSet";
-    const TYPE_FIELD: &'static str = "Type";
-    const DATA_FIELD: &'static str = "Data";
-    const BY_CLIENT_FIELD: &'static str = "ByClient";
-
     pub fn into_control_packet(self) -> EngineControlPacket {
-        let fields = HashMap::from([
-            (Self::TYPE_FIELD.to_string(), self.value_type.to_string()),
-            (Self::DATA_FIELD.to_string(), self.data.to_string()),
-            (
-                Self::BY_CLIENT_FIELD.to_string(),
-                self.by_client.to_string(),
-            ),
-        ]);
-        EngineControlPacket::Unknown {
-            id: ControlPacketId::new(CID_SET),
-            name: Some(Self::PACKET_NAME.to_string()),
-            fields,
-        }
+        EngineControlPacket::Set(self.into())
     }
 
     pub fn from_control_packet(control: &EngineControlPacket) -> Option<Self> {
-        let EngineControlPacket::Unknown {
-            id,
-            name: Some(name),
-            fields,
-        } = control
-        else {
+        let EngineControlPacket::Set(data) = control else {
             return None;
         };
-        if *id != ControlPacketId::new(CID_SET) || name != Self::PACKET_NAME {
-            return None;
+        Some((*data).into())
+    }
+}
+
+impl From<LegacyControlSet> for SetControlData {
+    fn from(value: LegacyControlSet) -> Self {
+        Self {
+            value_type: value.value_type,
+            data: value.data,
+            by_client: value.by_client,
         }
-        Some(Self {
-            value_type: fields.get(Self::TYPE_FIELD)?.parse().ok()?,
-            data: fields.get(Self::DATA_FIELD)?.parse().ok()?,
-            by_client: fields.get(Self::BY_CLIENT_FIELD)?.parse().ok()?,
-        })
+    }
+}
+
+impl From<SetControlData> for LegacyControlSet {
+    fn from(value: SetControlData) -> Self {
+        Self {
+            value_type: value.value_type,
+            data: value.data,
+            by_client: value.by_client,
+        }
     }
 }
 
@@ -693,6 +683,7 @@ fn decode_control(
         CID_EM_MOVE_OBJECT => decode_em_move_object(reader),
         CID_EM_DRAW_TOOL => decode_em_draw_tool(reader),
         CID_EM_DROP_DEF => decode_em_drop_def(reader),
+        CID_DEBUG_RECORD => decode_debug_record(reader),
         CID_INIT_SCENARIO_PLAYER => decode_init_scenario_player(reader),
         CID_SURRENDER_PLAYER => decode_surrender_player(reader),
         CID_SYNC_CHECK => decode_sync_check(reader),
@@ -735,6 +726,16 @@ fn decode_control_set(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Le
         by_client: reader.read_int32()?,
     }
     .into_control_packet())
+}
+
+fn decode_debug_record(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    // StdBuf casts its size to uint32_t before applying mkIntPackAdapt.
+    let size = reader.read_uint32()? as usize;
+    Ok(EngineControlPacket::DebugRecord(DebugRecordControlData {
+        data: reader.read_bytes(size)?.to_vec(),
+    }))
 }
 
 fn decode_remove_player(
@@ -1876,6 +1877,18 @@ fn encode_control_set(buffer: &mut Vec<u8>, data: LegacyControlSet) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_debug_record(
+    buffer: &mut Vec<u8>,
+    data: &DebugRecordControlData,
+) -> Result<(), LegacyEncodeError> {
+    let size = u32::try_from(data.data.len())
+        .map_err(|_| LegacyEncodeError::DebugRecordTooLarge(data.data.len()))?;
+    buffer.push(CID_DEBUG_RECORD);
+    append_uint32(buffer, size);
+    buffer.extend_from_slice(&data.data);
+    Ok(())
+}
+
 fn encode_remove_player(buffer: &mut Vec<u8>, data: &RemovePlayerControlData) {
     buffer.push(CID_REMOVE_PLR);
     append_int32(buffer, data.player);
@@ -1986,6 +1999,11 @@ fn encode_control(
             encode_client_remove(buffer, data);
             Ok(())
         }
+        EngineControlPacket::Set(data) => {
+            encode_control_set(buffer, (*data).into());
+            Ok(())
+        }
+        EngineControlPacket::DebugRecord(data) => encode_debug_record(buffer, data),
         EngineControlPacket::PlayerInfo(data) => encode_player_info(buffer, data),
         EngineControlPacket::JoinPlayer(data) => encode_join_player(buffer, data),
         EngineControlPacket::RemovePlayer(data) => {
@@ -2070,12 +2088,7 @@ fn encode_control(
             encode_eliminate_player(buffer, data);
             Ok(())
         }
-        EngineControlPacket::Unknown { .. } => {
-            let data = LegacyControlSet::from_control_packet(control)
-                .ok_or(LegacyEncodeError::UnsupportedPacket)?;
-            encode_control_set(buffer, data);
-            Ok(())
-        }
+        EngineControlPacket::Unknown { .. } => Err(LegacyEncodeError::UnsupportedPacket),
     }
 }
 
@@ -3295,6 +3308,24 @@ mod tests {
         let decoded = decode_control_entry_payload(&encoded).expect("decode CID_Set");
         assert_eq!(LegacyControlSet::from_control_packet(&decoded), Some(set));
         assert_eq!(decoded, control);
+    }
+
+    #[test]
+    fn debug_record_codec_preserves_opaque_bytes() {
+        let control = EngineControlPacket::DebugRecord(DebugRecordControlData {
+            data: vec![0x00, 0xff, 0x40, b'C', b'4'],
+        });
+        let encoded = encode_control_entry_payload(&control).expect("encode CID_DebugRec");
+
+        let mut expected = vec![CID_DEBUG_RECORD];
+        append_uint32(&mut expected, 5);
+        expected.extend([0x00, 0xff, 0x40, b'C', b'4']);
+        assert_eq!(encoded, expected);
+
+        assert_eq!(
+            decode_control_entry_payload(&encoded).expect("decode CID_DebugRec"),
+            control
+        );
     }
 
     #[test]

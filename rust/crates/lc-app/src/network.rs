@@ -2354,6 +2354,7 @@ pub enum NetworkControl {
     Synchronize(lc_engine::SynchronizeControlData),
     SyncCheck(SyncCheckPacket),
     Set(LegacyControlSet),
+    DebugRecord(lc_engine::DebugRecordControlData),
 }
 
 impl NetworkControl {
@@ -2398,6 +2399,7 @@ impl NetworkControl {
             Self::Synchronize(value) => lc_engine::ControlPacket::Synchronize(value),
             Self::SyncCheck(value) => lc_engine::ControlPacket::SyncCheck(value),
             Self::Set(value) => value.into_control_packet(),
+            Self::DebugRecord(value) => lc_engine::ControlPacket::DebugRecord(value),
         })
     }
 }
@@ -7561,9 +7563,6 @@ fn emit_scheduled_sync_controls(
 pub(crate) fn network_control_for_packet(
     control: lc_engine::ControlPacket,
 ) -> Option<NetworkControl> {
-    if let Some(set) = LegacyControlSet::from_control_packet(&control) {
-        return Some(NetworkControl::Set(set));
-    }
     match control {
         lc_engine::ControlPacket::ClientJoin(join) => Some(NetworkControl::ClientJoin(join)),
         lc_engine::ControlPacket::ClientUpdate(update) => {
@@ -7616,6 +7615,8 @@ pub(crate) fn network_control_for_packet(
         }
         lc_engine::ControlPacket::Vote(vote) => Some(NetworkControl::Vote(vote)),
         lc_engine::ControlPacket::VoteEnd(result) => Some(NetworkControl::VoteEnd(result)),
+        lc_engine::ControlPacket::Set(set) => Some(NetworkControl::Set(set.into())),
+        lc_engine::ControlPacket::DebugRecord(data) => Some(NetworkControl::DebugRecord(data)),
         lc_engine::ControlPacket::Unknown { .. } => None,
     }
 }
@@ -11536,6 +11537,23 @@ Message=Server says Andr\xe9\r\n\
                 controls: vec![NetworkControl::Set(set)],
             }
         );
+    }
+
+    #[test]
+    fn debug_record_projection_round_trips_opaque_bytes() {
+        let packet = lc_engine::ControlPacket::DebugRecord(lc_engine::DebugRecordControlData {
+            data: vec![0x00, 0xff, b'C', b'4'],
+        });
+
+        let projected = network_control_for_packet(packet.clone())
+            .expect("known CID_DebugRec remains in the execution stream");
+        assert_eq!(
+            projected,
+            NetworkControl::DebugRecord(lc_engine::DebugRecordControlData {
+                data: vec![0x00, 0xff, b'C', b'4'],
+            })
+        );
+        assert_eq!(projected.into_packet(), Some(packet));
     }
 
     #[test]

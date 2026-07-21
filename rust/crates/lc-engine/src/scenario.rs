@@ -18780,12 +18780,10 @@ RandomTeamCount=2
             (retired.rounds(), retired.rounds_won(), retired.rounds_lost()),
             (3, 1, 2)
         );
-        let info = &engine
-            .crew_rosters
-            .get(&3)
-            .expect("retired roster persists")[0];
-        assert_eq!((info.rounds, info.total_playing_time), (6, 13));
-        assert!(!info.in_action);
+        assert!(
+            !engine.crew_rosters.contains_key(&3),
+            "deleted retired player's C4ObjectInfoList does not persist"
+        );
         assert_eq!(
             engine
                 .round_results

@@ -44803,6 +44803,7 @@ impl GameApp {
                             | NetworkEvent::DirectControl(NetworkControl::ClientJoin(_))
                             | NetworkEvent::DirectControl(NetworkControl::ClientUpdate(_))
                             | NetworkEvent::DirectControl(NetworkControl::ClientRemove(_))
+                            | NetworkEvent::DirectControl(NetworkControl::DebugRecord(_))
                             | NetworkEvent::PeerConnected { .. }
                             | NetworkEvent::PeerDisconnected { .. }
                             | NetworkEvent::ResourceProgress { .. }
@@ -44839,7 +44840,8 @@ impl GameApp {
                             NetworkControl::PlayerInfo(_)
                             | NetworkControl::ClientJoin(_)
                             | NetworkControl::ClientUpdate(_)
-                            | NetworkControl::ClientRemove(_),
+                            | NetworkControl::ClientRemove(_)
+                            | NetworkControl::DebugRecord(_),
                         ) => None,
                         NetworkEvent::DirectControl(_) => Some("direct player/resource control"),
                         NetworkEvent::PeerConnected { .. } => None,
@@ -45300,6 +45302,9 @@ impl GameApp {
                             }
                             NetworkControl::Vote(vote) => self.execute_league_vote(vote)?,
                             NetworkControl::Set(set) => self.execute_control_set(set),
+                            NetworkControl::DebugRecord(_) => {
+                                // C4ControlDebugRec::Execute is intentionally empty.
+                            }
                             NetworkControl::Message(message) => {
                                 self.execute_message_control(message);
                             }
@@ -69392,6 +69397,7 @@ impl GameApp {
         self.clear_lobby_preload();
         let control_tick = self.engine.sync_check(local_client_id).control_tick;
         self.remove_remote_runtime_players(local_client_id);
+        self.snapshot.round_results = self.engine.snapshot().round_results;
         // RemoveRemote callbacks still run while C4GameControl is in network
         // mode. Apply any SetPreSend effects they produced before clearing the
         // live clock and client-name registry below.
@@ -70622,6 +70628,10 @@ impl GameApp {
                 }
                 NetworkControl::Set(set) => {
                     self.execute_control_set(set);
+                    Ok(())
+                }
+                NetworkControl::DebugRecord(_) => {
+                    // Preserve and record the native packet; execution is a no-op.
                     Ok(())
                 }
                 NetworkControl::ClientUpdate(update) => {

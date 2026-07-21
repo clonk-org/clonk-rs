@@ -32,6 +32,12 @@ pub enum ControlPacket {
     /// Synchronized client removal (`CID_ClientRemove`,
     /// C4Control.cpp:637-687).
     ClientRemove(ClientRemoveControlData),
+    /// Synchronized game/control parameter mutation (`CID_Set`,
+    /// C4Control.cpp:128-247).
+    Set(SetControlData),
+    /// Opaque debug-record payload (`CID_DebugRec`). Native execution is an
+    /// intentional no-op; retaining the bytes keeps known records decodable.
+    DebugRecord(DebugRecordControlData),
     /// A client's league vote (`CID_Vote`, C4Control.cpp:1446-1451).
     Vote(VoteControlData),
     /// The authoritative league vote result (`CID_VoteEnd`,
@@ -108,6 +114,18 @@ pub enum ControlPacket {
 
 pub const CLIENT_UPDATE_ACTIVATE: u8 = 0;
 pub const CLIENT_UPDATE_SET_OBSERVER: u8 = 1;
+
+/// Raw `C4CtrlValueType` values serialized by `C4ControlSet`.
+///
+/// The native compiler writes this enum through a fixed-width signed integer,
+/// so unknown values remain representable and execute as release-build no-ops.
+pub const SET_VALUE_NONE: i32 = -1;
+pub const SET_VALUE_CONTROL_RATE: i32 = 0;
+pub const SET_VALUE_DISABLE_DEBUG: i32 = 1;
+pub const SET_VALUE_MAX_PLAYER: i32 = 2;
+pub const SET_VALUE_TEAM_DISTRIBUTION: i32 = 3;
+pub const SET_VALUE_TEAM_COLORS: i32 = 4;
+pub const SET_VALUE_FAIR_CREW: i32 = 5;
 
 /// Raw `C4ControlMessageType` values serialized by `C4ControlMessage`.
 ///
@@ -244,6 +262,33 @@ pub struct ClientRemoveControlData {
     pub client_id: i32,
     pub reason: LegacyCString,
     pub by_client: i32,
+}
+
+/// Body of `C4ControlSet` (`src/C4Control.cpp:249-254`).
+///
+/// `value_type` deliberately remains a signed integer: `C4CVT_None` is -1
+/// and release builds tolerate otherwise unknown raw enum values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetControlData {
+    pub value_type: i32,
+    pub data: i32,
+    pub by_client: i32,
+}
+
+impl Default for SetControlData {
+    fn default() -> Self {
+        Self {
+            value_type: SET_VALUE_NONE,
+            data: 0,
+            by_client: -1,
+        }
+    }
+}
+
+/// Body of `C4ControlDebugRec` (`src/C4Control.cpp:1307-1314`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DebugRecordControlData {
+    pub data: Vec<u8>,
 }
 
 /// Body of `C4ControlRemovePlr` (`CID_RemovePlr`).
@@ -1238,8 +1283,14 @@ impl RawPacket {
         // a small subset so far; everything else is recorded as `Unknown`.
         // C4PacketType::PID_None (src/C4PacketBase.h).
         const PID_NONE: u8 = 0xff;
+        const CID_CLIENT_JOIN: u8 = 0x80;
+        const CID_CLIENT_UPDATE: u8 = 0x81;
+        const CID_CLIENT_REMOVE: u8 = 0x82;
+        const CID_VOTE: u8 = 0x83;
+        const CID_VOTE_END: u8 = 0x84;
         const CID_SYNC_CHECK: u8 = 0x85;
         const CID_SYNCHRONIZE: u8 = 0x86;
+        const CID_SET: u8 = 0x87;
         const CID_SCRIPT: u8 = 0x88;
         const CID_MESSAGE_BOARD_ANSWER: u8 = 0xd0;
         const CID_CUSTOM_COMMAND: u8 = 0xd1;
@@ -1255,9 +1306,106 @@ impl RawPacket {
         const CID_EM_MOVE_OBJECT: u8 = 0xB0;
         const CID_EM_DRAW_TOOL: u8 = 0xB1;
         const CID_EM_DROP_DEF: u8 = 0xB2;
+        const CID_DEBUG_RECORD: u8 = 0xC0;
+        const CID_INIT_SCENARIO_PLAYER: u8 = 0xD2;
+        const CID_SURRENDER_PLAYER: u8 = 0xD5;
 
         if id == PID_NONE {
             return Ok(None);
+        }
+
+        if id == CID_CLIENT_JOIN {
+            // C4ControlClientJoin nests C4ClientCore and then appends the
+            // inherited author. RawPacket's flattened field projection keeps
+            // those uniquely named values available here.
+            return Ok(Some(ControlPacket::ClientJoin(ClientJoinControlData {
+                core: ClientCoreControlData {
+                    client_id: parse_int_field_or(&self.fields, "ID", -1)?,
+                    activated: parse_bool_field_or(&self.fields, "Activated", false)?,
+                    observer: parse_bool_field_or(&self.fields, "Observer", false)?,
+                    name: parse_legacy_string_field_or(&self.fields, "Name")?,
+                    nick: parse_legacy_string_field_or(&self.fields, "Nick")?,
+                    lobby_ready: parse_bool_field_or(&self.fields, "LobbyReady", false)?,
+                },
+                by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+            })));
+        }
+
+        if id == CID_CLIENT_UPDATE {
+            let update_type = parse_u8_field_or(&self.fields, "Type", u8::MAX)?;
+            let data = if update_type == CLIENT_UPDATE_ACTIVATE {
+                parse_int_field_or(&self.fields, "Data", 0)?
+            } else {
+                0
+            };
+            return Ok(Some(ControlPacket::ClientUpdate(ClientUpdateControlData {
+                update_type,
+                client_id: parse_int_field_or(&self.fields, "ClientID", -1)?,
+                data,
+                by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+            })));
+        }
+
+        if id == CID_CLIENT_REMOVE {
+            return Ok(Some(ControlPacket::ClientRemove(ClientRemoveControlData {
+                client_id: parse_int_field_or(&self.fields, "ClientID", -1)?,
+                reason: parse_legacy_string_field_or(&self.fields, "Reason")?,
+                by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+            })));
+        }
+
+        if id == CID_VOTE || id == CID_VOTE_END {
+            let vote = VoteControlData {
+                vote_type: parse_u8_field_or(&self.fields, "Type", VOTE_TYPE_NONE)?,
+                approve: parse_bool_field_or(&self.fields, "Approve", true)?,
+                data: parse_int_field_or(&self.fields, "Data", 0)?,
+                by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+            };
+            return Ok(Some(if id == CID_VOTE {
+                ControlPacket::Vote(vote)
+            } else {
+                ControlPacket::VoteEnd(vote)
+            }));
+        }
+
+        if id == CID_SET {
+            return Ok(Some(ControlPacket::Set(SetControlData {
+                value_type: parse_int_field_or(&self.fields, "Type", SET_VALUE_NONE)?,
+                data: parse_int_field_or(&self.fields, "Data", 0)?,
+                by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+            })));
+        }
+
+        if id == CID_DEBUG_RECORD {
+            return Ok(Some(ControlPacket::DebugRecord(DebugRecordControlData {
+                data: self
+                    .fields
+                    // StdBuf is not wrapped in a naming adaptor here, so the
+                    // INI compiler writes it as the packet's own value.
+                    .get("Debug Rec")
+                    .or_else(|| self.fields.get("Data"))
+                    .map(|value| parse_std_buf(value))
+                    .unwrap_or_default(),
+            })));
+        }
+
+        if id == CID_INIT_SCENARIO_PLAYER {
+            return Ok(Some(ControlPacket::InitScenarioPlayer(
+                InitScenarioPlayerControlData {
+                    team: parse_int_field_or(&self.fields, "Team", 0)?,
+                    player: parse_int_field_or(&self.fields, "Plr", -1)?,
+                    by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+                },
+            )));
+        }
+
+        if id == CID_SURRENDER_PLAYER {
+            return Ok(Some(ControlPacket::SurrenderPlayer(
+                SurrenderPlayerControlData {
+                    player: parse_int_field_or(&self.fields, "Plr", -1)?,
+                    by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+                },
+            )));
         }
 
         if id == CID_SYNC_CHECK {
@@ -1704,197 +1852,13 @@ impl RawPacket {
             // flags in the packet body, one [Player] section per info
             // (C4PlayerInfo CompileFunc keys, C4PlayerInfo.cpp:177-268).
             let body = self.section_fields("Player Info").unwrap_or(&[]);
-            let field = |fields: &[(String, String)], key: &str| -> Option<String> {
-                fields
-                    .iter()
-                    .find(|(entry, _)| entry.eq_ignore_ascii_case(key))
-                    .map(|(_, value)| value.clone())
-            };
-            let int = |fields: &[(String, String)], key: &str, default: i32| {
-                match field(fields, key) {
-                    None => Ok(default),
-                    Some(value) => value.parse::<i32>().map_err(|_| {
-                        ControlParseError::InvalidIntegerField {
-                            field: key.to_string(),
-                            value,
-                        }
-                    }),
-                }
-            };
-            let uint = |fields: &[(String, String)], key: &str, default: u32| {
-                match field(fields, key) {
-                    None => Ok(default),
-                    Some(value) => value.parse::<u32>().map_err(|_| {
-                        ControlParseError::InvalidIntegerField {
-                            field: key.to_string(),
-                            value,
-                        }
-                    }),
-                }
-            };
-            let string = |fields: &[(String, String)], key: &str| {
-                LegacyCString::from_bytes(legacy_string_bytes(
-                    &field(fields, key).unwrap_or_default(),
-                ))
-                    .ok_or(ControlParseError::InteriorNulString {
-                        field: format!("Player.{key}"),
-                    })
-            };
-            let client_id = int(body, "ID", -1)?;
-            let mut client_flags = 0;
-            for token in field(body, "Flags")
-                .unwrap_or_default()
-                .split(['|', ','])
-                .map(str::trim)
-                .filter(|token| !token.is_empty())
-            {
-                if token.bytes().all(|byte| byte.is_ascii_digit()) {
-                    client_flags |= token.parse::<u32>().map_err(|_| {
-                        ControlParseError::InvalidIntegerField {
-                            field: "Player Info.Flags".to_string(),
-                            value: token.to_string(),
-                        }
-                    })?;
-                } else if token.eq_ignore_ascii_case("AddPlayers") {
-                    client_flags |= CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS;
-                } else if token.eq_ignore_ascii_case("Updated") {
-                    client_flags |= CLIENT_PLAYER_INFO_FLAG_UPDATED;
-                } else if token.eq_ignore_ascii_case("Initial") {
-                    client_flags |= CLIENT_PLAYER_INFO_FLAG_INITIAL;
-                }
-            }
-            let players = self
-                .sections
-                .iter()
-                .enumerate()
-                .filter(|(_, (name, _))| name.eq_ignore_ascii_case("Player"))
-                .map(
-                    |(index, (_, fields))| -> Result<ControlPlayerInfoEntry, ControlParseError> {
-                        let mut flags = 0;
-                        for token in field(fields, "Flags")
-                            .unwrap_or_default()
-                            .split(['|', ','])
-                            .map(str::trim)
-                            .filter(|token| !token.is_empty())
-                        {
-                            if token.bytes().all(|byte| byte.is_ascii_digit()) {
-                                flags |= token.parse::<u16>().map_err(|_| {
-                                    ControlParseError::InvalidIntegerField {
-                                        field: "Player.Flags".to_string(),
-                                        value: token.to_string(),
-                                    }
-                                })?;
-                                continue;
-                            }
-                            for (name, bit) in [
-                                ("Joined", PLAYER_INFO_FLAG_JOINED),
-                                ("Removed", PLAYER_INFO_FLAG_REMOVED),
-                                ("HasResource", PLAYER_INFO_FLAG_HAS_RESOURCE),
-                                ("JoinIssued", PLAYER_INFO_FLAG_JOIN_ISSUED),
-                                ("SavegameJoin", PLAYER_INFO_FLAG_SAVEGAME_JOIN),
-                                ("Disconnected", PLAYER_INFO_FLAG_DISCONNECTED),
-                                ("Won", PLAYER_INFO_FLAG_WON),
-                                ("VotedOut", PLAYER_INFO_FLAG_VOTED_OUT),
-                                ("AttributesFixed", PLAYER_INFO_FLAG_ATTRIBUTES_FIXED),
-                                ("NoScenarioInit", PLAYER_INFO_FLAG_NO_SCENARIO_INIT),
-                                (
-                                    "NoEliminationCheck",
-                                    PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
-                                ),
-                                ("Invisible", PLAYER_INFO_FLAG_INVISIBLE),
-                            ] {
-                                if token.eq_ignore_ascii_case(name) {
-                                    flags |= bit;
-                                    break;
-                                }
-                            }
-                        }
-                        let player_type = match field(fields, "Type") {
-                            None => PLAYER_INFO_TYPE_USER,
-                            Some(value) if value.eq_ignore_ascii_case("User") => {
-                                PLAYER_INFO_TYPE_USER
-                            }
-                            Some(value) if value.eq_ignore_ascii_case("Script") => {
-                                PLAYER_INFO_TYPE_SCRIPT
-                            }
-                            Some(value) => value.parse::<u8>().map_err(|_| {
-                                ControlParseError::InvalidPlayerType { value }
-                            })?,
-                        };
-                        if player_type != PLAYER_INFO_TYPE_SCRIPT {
-                            flags &= !PLAYER_INFO_FLAG_INVISIBLE;
-                        }
-                        let color = uint(fields, "Color", 0)?;
-                        let extra_data = field(fields, "ExtraData")
-                            .unwrap_or_else(|| "NONE".to_string());
-                        let extra_data: [u8; 4] = extra_data.as_bytes().try_into().map_err(|_| {
-                            ControlParseError::InvalidC4IdField {
-                                field: "ExtraData".to_string(),
-                                value: extra_data,
-                            }
-                        })?;
-                        let resource = if flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0 {
-                            let resource_fields = self
-                                .sections
-                                .get(index + 1)
-                                .filter(|(name, _)| name.eq_ignore_ascii_case("ResCore"))
-                                .map(|(_, fields)| fields.as_slice())
-                                .ok_or(ControlParseError::MissingPlayerInfoResource)?;
-                            Some(parse_network_resource_core(resource_fields)?)
-                        } else {
-                            None
-                        };
-                        Ok(ControlPlayerInfoEntry {
-                            name: string(fields, "Name")?,
-                            forced_name: string(fields, "ForcedName")?,
-                            filename: string(fields, "Filename")?,
-                            flags,
-                            id: int(fields, "ID", 0)?,
-                            player_type,
-                            color,
-                            original_color: uint(fields, "OriginalColor", color)?,
-                            savegame_player: int(fields, "SavgamePlayer", 0)?,
-                            team: int(fields, "Team", 0)?,
-                            auth_id: string(fields, "AUID")?,
-                            game_number: if flags & PLAYER_INFO_FLAG_JOINED != 0 {
-                                int(fields, "GameNumber", -1)?
-                            } else {
-                                -1
-                            },
-                            game_join_frame: if flags & PLAYER_INFO_FLAG_JOINED != 0 {
-                                int(fields, "GameJoinFrame", -1)?
-                            } else {
-                                -1
-                            },
-                            game_part_frame: if flags & PLAYER_INFO_FLAG_REMOVED != 0 {
-                                int(fields, "GamePartFrame", -1)?
-                            } else {
-                                -1
-                            },
-                            extra_data,
-                            league_account: string(fields, "LeagueAccount")?,
-                            league_score: int(fields, "LeagueScore", 0)?,
-                            league_rank: int(fields, "LeagueRank", 0)?,
-                            league_rank_symbol: int(fields, "LeagueRankSymbol", 0)?,
-                            league_projected_gain: int(fields, "ProjectedGain", -1)?,
-                            clan_tag: string(fields, "ClanTag")?,
-                            league_performance: int(fields, "LeaguePerformance", 0)?,
-                            // Compilation materializes a C-string value; the
-                            // legacy wire shape cannot preserve StdStrBuf's
-                            // pre-compilation null/allocated-empty distinction.
-                            league_progress_data_is_null: false,
-                            league_progress_data: string(fields, "LeagueProgressData")?,
-                            resource,
-                        })
-                    },
-                )
-                .collect::<Result<Vec<_>, _>>()?;
-            return Ok(Some(ControlPacket::PlayerInfo(PlayerInfoControlData {
-                client_id,
-                flags: client_flags,
-                players,
-                by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
-            })));
+            return Ok(Some(ControlPacket::PlayerInfo(
+                parse_player_info_client_data(
+                    body,
+                    &self.sections,
+                    parse_int_field_or(&self.fields, "ByClient", -1)?,
+                )?,
+            )));
         }
 
         if id == CID_PLR_CONTROL {
@@ -2000,15 +1964,211 @@ impl RawPacket {
     }
 }
 
+/// Compile one named `C4ClientPlayerInfos` body through the complete
+/// `C4PlayerInfo` projection shared by replay `PlayerInfos.txt` and
+/// `CID_PlrInfo` control packets.
+fn parse_player_info_client_data(
+    body: &[(String, String)],
+    sections: &[(String, Vec<(String, String)>)],
+    by_client: i32,
+) -> Result<PlayerInfoControlData, ControlParseError> {
+    let field = |fields: &[(String, String)], key: &str| -> Option<String> {
+        fields
+            .iter()
+            .find(|(entry, _)| entry.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.clone())
+    };
+    let int = |fields: &[(String, String)], key: &str, default: i32| match field(fields, key) {
+        None => Ok(default),
+        Some(value) => value
+            .parse::<i32>()
+            .map_err(|_| ControlParseError::InvalidIntegerField {
+                field: key.to_string(),
+                value,
+            }),
+    };
+    let uint = |fields: &[(String, String)], key: &str, default: u32| match field(fields, key) {
+        None => Ok(default),
+        Some(value) => value
+            .parse::<u32>()
+            .map_err(|_| ControlParseError::InvalidIntegerField {
+                field: key.to_string(),
+                value,
+            }),
+    };
+    let string = |fields: &[(String, String)], key: &str| {
+        LegacyCString::from_bytes(legacy_string_bytes(&field(fields, key).unwrap_or_default()))
+            .ok_or(ControlParseError::InteriorNulString {
+                field: format!("Player.{key}"),
+            })
+    };
+
+    let client_id = int(body, "ID", -1)?;
+    let mut client_flags = 0;
+    for token in field(body, "Flags")
+        .unwrap_or_default()
+        .split(['|', ','])
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        if token.bytes().all(|byte| byte.is_ascii_digit()) {
+            client_flags |=
+                token
+                    .parse::<u32>()
+                    .map_err(|_| ControlParseError::InvalidIntegerField {
+                        field: "Player Info.Flags".to_string(),
+                        value: token.to_string(),
+                    })?;
+        } else if token.eq_ignore_ascii_case("AddPlayers") {
+            client_flags |= CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS;
+        } else if token.eq_ignore_ascii_case("Updated") {
+            client_flags |= CLIENT_PLAYER_INFO_FLAG_UPDATED;
+        } else if token.eq_ignore_ascii_case("Initial") {
+            client_flags |= CLIENT_PLAYER_INFO_FLAG_INITIAL;
+        }
+    }
+
+    let players = sections
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| name.eq_ignore_ascii_case("Player"))
+        .map(
+            |(index, (_, fields))| -> Result<ControlPlayerInfoEntry, ControlParseError> {
+                let mut flags = 0;
+                for token in field(fields, "Flags")
+                    .unwrap_or_default()
+                    .split(['|', ','])
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                {
+                    if token.bytes().all(|byte| byte.is_ascii_digit()) {
+                        flags |= token.parse::<u16>().map_err(|_| {
+                            ControlParseError::InvalidIntegerField {
+                                field: "Player.Flags".to_string(),
+                                value: token.to_string(),
+                            }
+                        })?;
+                        continue;
+                    }
+                    for (name, bit) in [
+                        ("Joined", PLAYER_INFO_FLAG_JOINED),
+                        ("Removed", PLAYER_INFO_FLAG_REMOVED),
+                        ("HasResource", PLAYER_INFO_FLAG_HAS_RESOURCE),
+                        ("JoinIssued", PLAYER_INFO_FLAG_JOIN_ISSUED),
+                        ("SavegameJoin", PLAYER_INFO_FLAG_SAVEGAME_JOIN),
+                        ("Disconnected", PLAYER_INFO_FLAG_DISCONNECTED),
+                        ("Won", PLAYER_INFO_FLAG_WON),
+                        ("VotedOut", PLAYER_INFO_FLAG_VOTED_OUT),
+                        ("AttributesFixed", PLAYER_INFO_FLAG_ATTRIBUTES_FIXED),
+                        ("NoScenarioInit", PLAYER_INFO_FLAG_NO_SCENARIO_INIT),
+                        ("NoEliminationCheck", PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK),
+                        ("Invisible", PLAYER_INFO_FLAG_INVISIBLE),
+                    ] {
+                        if token.eq_ignore_ascii_case(name) {
+                            flags |= bit;
+                            break;
+                        }
+                    }
+                }
+                let player_type = match field(fields, "Type") {
+                    None => PLAYER_INFO_TYPE_USER,
+                    Some(value) if value.eq_ignore_ascii_case("User") => PLAYER_INFO_TYPE_USER,
+                    Some(value) if value.eq_ignore_ascii_case("Script") => PLAYER_INFO_TYPE_SCRIPT,
+                    Some(value) => value
+                        .parse::<u8>()
+                        .map_err(|_| ControlParseError::InvalidPlayerType { value })?,
+                };
+                // C4PlayerInfo::CompileFunc strips the local-only impossible
+                // combination after compiling the type.
+                if player_type != PLAYER_INFO_TYPE_SCRIPT {
+                    flags &= !PLAYER_INFO_FLAG_INVISIBLE;
+                }
+                let color = uint(fields, "Color", 0)?;
+                let extra_data = field(fields, "ExtraData").unwrap_or_else(|| "NONE".to_string());
+                let extra_data: [u8; 4] = extra_data.as_bytes().try_into().map_err(|_| {
+                    ControlParseError::InvalidC4IdField {
+                        field: "ExtraData".to_string(),
+                        value: extra_data,
+                    }
+                })?;
+                let resource = if flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0 {
+                    let resource_fields = sections
+                        .get(index + 1)
+                        .filter(|(name, _)| name.eq_ignore_ascii_case("ResCore"))
+                        .map(|(_, fields)| fields.as_slice())
+                        .ok_or(ControlParseError::MissingPlayerInfoResource)?;
+                    Some(parse_network_resource_core(resource_fields)?)
+                } else {
+                    None
+                };
+                Ok(ControlPlayerInfoEntry {
+                    name: string(fields, "Name")?,
+                    forced_name: string(fields, "ForcedName")?,
+                    filename: string(fields, "Filename")?,
+                    flags,
+                    id: int(fields, "ID", 0)?,
+                    player_type,
+                    color,
+                    original_color: uint(fields, "OriginalColor", color)?,
+                    savegame_player: int(fields, "SavgamePlayer", 0)?,
+                    team: int(fields, "Team", 0)?,
+                    auth_id: string(fields, "AUID")?,
+                    game_number: if flags & PLAYER_INFO_FLAG_JOINED != 0 {
+                        int(fields, "GameNumber", -1)?
+                    } else {
+                        -1
+                    },
+                    game_join_frame: if flags & PLAYER_INFO_FLAG_JOINED != 0 {
+                        int(fields, "GameJoinFrame", -1)?
+                    } else {
+                        -1
+                    },
+                    game_part_frame: if flags & PLAYER_INFO_FLAG_REMOVED != 0 {
+                        int(fields, "GamePartFrame", -1)?
+                    } else {
+                        -1
+                    },
+                    extra_data,
+                    league_account: string(fields, "LeagueAccount")?,
+                    league_score: int(fields, "LeagueScore", 0)?,
+                    league_rank: int(fields, "LeagueRank", 0)?,
+                    league_rank_symbol: int(fields, "LeagueRankSymbol", 0)?,
+                    league_projected_gain: int(fields, "ProjectedGain", -1)?,
+                    clan_tag: string(fields, "ClanTag")?,
+                    league_performance: int(fields, "LeaguePerformance", 0)?,
+                    // Compilation materializes a C-string value; the legacy
+                    // wire cannot preserve StdStrBuf's null/empty distinction.
+                    league_progress_data_is_null: false,
+                    league_progress_data: string(fields, "LeagueProgressData")?,
+                    resource,
+                })
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(PlayerInfoControlData {
+        client_id,
+        flags: client_flags,
+        players,
+        by_client,
+    })
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ControlParseError {
     #[error("control log did not start with [Control] section")]
     MissingControlSection,
+    #[error("replay player-info data did not start with [PlayerInfoList] section")]
+    MissingPlayerInfoListSection,
     #[error("unexpected section [{section}] inside control log")]
     UnexpectedSection { section: String },
+    #[error("unexpected section [{section}] inside replay player-info data")]
+    UnexpectedPlayerInfoSection { section: String },
     #[error("control log contained malformed line `{line}`")]
     MalformedLine { line: String },
+    #[error("replay player-info data contained malformed line `{line}`")]
+    MalformedPlayerInfoLine { line: String },
     #[error("field `{field}` missing from control packet")]
     MissingField { field: String },
     #[error("field `{field}` contained invalid integer `{value}`")]
@@ -2029,6 +2189,12 @@ pub enum ControlParseError {
     ZeroResourceChunkSize,
     #[error("player info with HasResource is missing its ResCore section")]
     MissingPlayerInfoResource,
+    #[error("replay player-info data contains {count} clients; C++ permits at most 5000")]
+    TooManyPlayerInfoClients { count: usize },
+    #[error(
+        "replay player-info client {client_id} contains {count} players; C++ permits at most 5000"
+    )]
+    TooManyClientPlayerInfos { client_id: i32, count: usize },
     #[error("resource-backed JoinPlayer is missing its ResCore section")]
     MissingJoinPlayerResource,
     #[error("script strictness {value} is outside the C++ range 0..=3")]
@@ -2164,6 +2330,165 @@ pub fn parse_control_ini(input: &str) -> Result<Vec<ControlPacket>, ControlParse
     Ok(packets)
 }
 
+/// Complete named `C4PlayerInfoList` stored in a replay's `PlayerInfos.txt`.
+///
+/// `last_player_id` is the exact persisted `C4PlayerInfoList::iLastPlayerID`;
+/// it is deliberately not repaired from the player rows while decoding.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReplayPlayerInfosDocument {
+    pub last_player_id: i32,
+    pub clients: Vec<PlayerInfoControlData>,
+}
+
+/// Parse the complete named `C4PlayerInfoList` stored in a replay's
+/// `PlayerInfos.txt` into its exact counter and ordered per-client packets.
+///
+/// `PlayerInfos.txt` has no control-packet author field. The returned snapshot
+/// packets use the authoritative host ID (`ByClient=0`) so callers can feed
+/// them through the same replay projection as an initial `CID_PlrInfo` list.
+/// All `C4ClientPlayerInfos`, `C4PlayerInfo`, and optional `C4Network2ResCore`
+/// fields are decoded by the same helper used for live control packets. The
+/// file is accepted as bytes because C++ INI strings use the legacy eight-bit
+/// character domain rather than UTF-8.
+pub fn parse_replay_player_infos_ini(
+    input: &[u8],
+) -> Result<ReplayPlayerInfosDocument, ControlParseError> {
+    const C4_MAX_CLIENT: usize = 5_000;
+    const C4_MAX_PLAYER: usize = 5_000;
+
+    #[derive(Default)]
+    struct RawClient {
+        body: Vec<(String, String)>,
+        sections: Vec<(String, Vec<(String, String)>)>,
+    }
+
+    let mut saw_root = false;
+    let mut last_player_id = 0;
+    let mut current_client = None::<RawClient>;
+    let mut clients = Vec::<RawClient>::new();
+    // Preserve the C++ compiler's byte-oriented string domain while reusing
+    // the existing textual INI machinery: every source byte becomes the
+    // same-valued Unicode scalar and `legacy_string_bytes` reverses this
+    // mapping exactly. In particular, this never performs lossy UTF-8
+    // decoding.
+    let input = input.iter().copied().map(char::from).collect::<String>();
+
+    for raw_line in input.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(name) = trimmed
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            let section = name.trim();
+            if !saw_root {
+                if !section.eq_ignore_ascii_case("PlayerInfoList") {
+                    return Err(ControlParseError::MissingPlayerInfoListSection);
+                }
+                saw_root = true;
+                continue;
+            }
+
+            if section.eq_ignore_ascii_case("Client") {
+                if let Some(client) = current_client.take() {
+                    clients.push(client);
+                }
+                if clients.len() >= C4_MAX_CLIENT {
+                    return Err(ControlParseError::TooManyPlayerInfoClients {
+                        count: clients.len() + 1,
+                    });
+                }
+                current_client = Some(RawClient::default());
+                continue;
+            }
+
+            let Some(client) = current_client.as_mut() else {
+                return Err(ControlParseError::UnexpectedPlayerInfoSection {
+                    section: section.to_string(),
+                });
+            };
+            if section.eq_ignore_ascii_case("Player") {
+                let count = client
+                    .sections
+                    .iter()
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("Player"))
+                    .count();
+                if count >= C4_MAX_PLAYER {
+                    let client_id = client
+                        .body
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("ID"))
+                        .and_then(|(_, value)| value.parse::<i32>().ok())
+                        .unwrap_or(-1);
+                    return Err(ControlParseError::TooManyClientPlayerInfos {
+                        client_id,
+                        count: count + 1,
+                    });
+                }
+                client.sections.push((section.to_string(), Vec::new()));
+                continue;
+            }
+            if section.eq_ignore_ascii_case("ResCore")
+                && client
+                    .sections
+                    .last()
+                    .is_some_and(|(name, _)| name.eq_ignore_ascii_case("Player"))
+            {
+                client.sections.push((section.to_string(), Vec::new()));
+                continue;
+            }
+            return Err(ControlParseError::UnexpectedPlayerInfoSection {
+                section: section.to_string(),
+            });
+        }
+
+        let Some((key, raw_value)) = trimmed.split_once('=') else {
+            return Err(ControlParseError::MalformedPlayerInfoLine {
+                line: line.to_string(),
+            });
+        };
+        if !saw_root {
+            return Err(ControlParseError::MissingPlayerInfoListSection);
+        }
+        let key = key.trim().to_string();
+        let value = unescape_value(raw_value.trim());
+        if let Some(client) = current_client.as_mut() {
+            if let Some((_, fields)) = client.sections.last_mut() {
+                fields.push((key, value));
+            } else {
+                client.body.push((key, value));
+            }
+        } else if key.eq_ignore_ascii_case("LastPlayerID") {
+            last_player_id = value
+                .parse::<i32>()
+                .map_err(|_| ControlParseError::InvalidIntegerField {
+                    field: "LastPlayerID".to_string(),
+                    value,
+                })?;
+        }
+    }
+
+    if !saw_root {
+        return Err(ControlParseError::MissingPlayerInfoListSection);
+    }
+    if let Some(client) = current_client {
+        clients.push(client);
+    }
+
+    let clients = clients
+        .iter()
+        .map(|client| parse_player_info_client_data(&client.body, &client.sections, 0))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ReplayPlayerInfosDocument {
+        last_player_id,
+        clients,
+    })
+}
+
 /// StdBuf textual form: `<size>:"escaped bytes"` (StdBuf::CompileFunc
 /// writes the int-packed size, SEP_PART2 `:`, then the raw data escaped —
 /// StdBuf.cpp:86-101, StdCompiler.cpp:79,383-396).
@@ -2248,6 +2573,66 @@ fn parse_int_field_or(
                 value: raw.clone(),
             }),
     }
+}
+
+fn parse_u8_field_or(
+    fields: &HashMap<String, String>,
+    name: &str,
+    default: u8,
+) -> Result<u8, ControlParseError> {
+    match fields.get(name) {
+        None => Ok(default),
+        Some(raw) => parse_cpp_ini_u8(raw).ok_or_else(|| {
+            ControlParseError::InvalidIntegerField {
+                field: name.to_string(),
+                value: raw.clone(),
+            }
+        }),
+    }
+}
+
+/// `StdCompilerINIRead::Byte(uint8_t&)` reads through `strtoul` and clamps
+/// into 0..=255. In particular, negative decimal input converts to a large
+/// unsigned value and therefore becomes 255 instead of being rejected.
+fn parse_cpp_ini_u8(raw: &str) -> Option<u8> {
+    let raw = raw.trim();
+    let (negative, unsigned) = match raw.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, raw.strip_prefix('+').unwrap_or(raw)),
+    };
+    let (radix, digits) = if !negative {
+        unsigned
+            .strip_prefix("0x")
+            .or_else(|| unsigned.strip_prefix("0X"))
+            .map_or((10, unsigned), |digits| (16, digits))
+    } else {
+        (10, unsigned)
+    };
+    if digits.is_empty()
+        || !digits
+            .bytes()
+            .all(|byte| if radix == 16 { byte.is_ascii_hexdigit() } else { byte.is_ascii_digit() })
+    {
+        return None;
+    }
+    let magnitude = u128::from_str_radix(digits, radix).unwrap_or(u128::MAX);
+    if negative && magnitude != 0 {
+        Some(u8::MAX)
+    } else {
+        Some(magnitude.min(u128::from(u8::MAX)) as u8)
+    }
+}
+
+fn parse_legacy_string_field_or(
+    fields: &HashMap<String, String>,
+    name: &str,
+) -> Result<LegacyCString, ControlParseError> {
+    let value = fields.get(name).map(String::as_str).unwrap_or_default();
+    LegacyCString::from_bytes(legacy_string_bytes(value)).ok_or_else(|| {
+        ControlParseError::InteriorNulString {
+            field: name.to_string(),
+        }
+    })
 }
 
 fn parse_bool_value(field: &str, value: &str) -> Result<bool, ControlParseError> {
@@ -2470,6 +2855,192 @@ fn unescape_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_every_previously_unprojected_known_control_family() {
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=128\n\
+    [Client Join]\n\
+      [ClientCore]\n\
+        ID=7\n\
+        Activated=true\n\
+        Observer=false\n\
+        Name=Alice\n\
+        Nick=Ally\n\
+        LobbyReady=true\n\
+      ByClient=0\n\
+  [IDPacket]\n\
+    ID=129\n\
+    [Client Update]\n\
+      Type=0\n\
+      ClientID=7\n\
+      Data=1\n\
+      ByClient=0\n\
+  [IDPacket]\n\
+    ID=130\n\
+    [Client Remove]\n\
+      ClientID=8\n\
+      Reason=gone\n\
+      ByClient=0\n\
+  [IDPacket]\n\
+    ID=131\n\
+    [Voting]\n\
+      Type=1\n\
+      Approve=false\n\
+      Data=8\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=132\n\
+    [Voting End]\n\
+      Type=2\n\
+      Data=1\n\
+      ByClient=0\n\
+  [IDPacket]\n\
+    ID=135\n\
+    [Set]\n\
+      Type=5\n\
+      Data=1234\n\
+      ByClient=0\n\
+  [IDPacket]\n\
+    ID=192\n\
+    Debug Rec=5:\"\\000\\377@C4\"\n\
+  [IDPacket]\n\
+    ID=210\n\
+    [Init Scenario Player]\n\
+      Team=4\n\
+      Plr=2\n\
+      ByClient=7\n\
+  [IDPacket]\n\
+    ID=213\n\
+    [Surrender Player]\n\
+      Plr=2\n\
+      ByClient=7\n";
+
+        assert_eq!(
+            parse_control_ini(input).expect("all known controls parse"),
+            vec![
+                ControlPacket::ClientJoin(ClientJoinControlData {
+                    core: ClientCoreControlData {
+                        client_id: 7,
+                        activated: true,
+                        observer: false,
+                        name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                        nick: LegacyCString::from_bytes(b"Ally".to_vec()).unwrap(),
+                        lobby_ready: true,
+                    },
+                    by_client: 0,
+                }),
+                ControlPacket::ClientUpdate(ClientUpdateControlData {
+                    update_type: CLIENT_UPDATE_ACTIVATE,
+                    client_id: 7,
+                    data: 1,
+                    by_client: 0,
+                }),
+                ControlPacket::ClientRemove(ClientRemoveControlData {
+                    client_id: 8,
+                    reason: LegacyCString::from_bytes(b"gone".to_vec()).unwrap(),
+                    by_client: 0,
+                }),
+                ControlPacket::Vote(VoteControlData {
+                    vote_type: VOTE_TYPE_KICK,
+                    approve: false,
+                    data: 8,
+                    by_client: 7,
+                }),
+                ControlPacket::VoteEnd(VoteControlData {
+                    vote_type: VOTE_TYPE_PAUSE,
+                    approve: true,
+                    data: 1,
+                    by_client: 0,
+                }),
+                ControlPacket::Set(SetControlData {
+                    value_type: SET_VALUE_FAIR_CREW,
+                    data: 1234,
+                    by_client: 0,
+                }),
+                ControlPacket::DebugRecord(DebugRecordControlData {
+                    data: vec![0x00, 0xff, b'@', b'C', b'4'],
+                }),
+                ControlPacket::InitScenarioPlayer(InitScenarioPlayerControlData {
+                    team: 4,
+                    player: 2,
+                    by_client: 7,
+                }),
+                ControlPacket::SurrenderPlayer(SurrenderPlayerControlData {
+                    player: 2,
+                    by_client: 7,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn newly_projected_control_defaults_match_cpp_compile_defaults() {
+        let input = "[Control]\n\
+[IDPacket]\nID=129\n[Client Update]\n\
+[IDPacket]\nID=131\n[Voting]\n\
+[IDPacket]\nID=135\n[Set]\n\
+[IDPacket]\nID=210\n[Init Scenario Player]\n\
+[IDPacket]\nID=213\n[Surrender Player]\n";
+        assert_eq!(
+            parse_control_ini(input).expect("omitted defaults parse"),
+            vec![
+                ControlPacket::ClientUpdate(ClientUpdateControlData {
+                    update_type: u8::MAX,
+                    client_id: -1,
+                    data: 0,
+                    by_client: -1,
+                }),
+                ControlPacket::Vote(VoteControlData {
+                    vote_type: VOTE_TYPE_NONE,
+                    approve: true,
+                    data: 0,
+                    by_client: -1,
+                }),
+                ControlPacket::Set(SetControlData::default()),
+                ControlPacket::InitScenarioPlayer(InitScenarioPlayerControlData::default()),
+                ControlPacket::SurrenderPlayer(SurrenderPlayerControlData {
+                    player: -1,
+                    by_client: -1,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn unsigned_byte_control_fields_follow_cpp_clamping() {
+        let packets = parse_control_ini(
+            "[Control]\n\
+             [IDPacket]\nID=129\n[Client Update]\nType=-1\n\
+             [IDPacket]\nID=131\n[Voting]\nType=999\n\
+             [IDPacket]\nID=132\n[Voting End]\nType=0x01\n",
+        )
+        .expect("C++ byte spellings parse");
+
+        assert!(matches!(
+            &packets[0],
+            ControlPacket::ClientUpdate(ClientUpdateControlData {
+                update_type: u8::MAX,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &packets[1],
+            ControlPacket::Vote(VoteControlData {
+                vote_type: u8::MAX,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &packets[2],
+            ControlPacket::VoteEnd(VoteControlData {
+                vote_type: VOTE_TYPE_KICK,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn player_info_model_defaults_match_cpp_clear() {
@@ -3687,6 +4258,206 @@ ID=\"HUT2\"\n";
         };
         assert_eq!(info.players[0].player_type, PLAYER_INFO_TYPE_NONE);
         assert_eq!(info.players[1].player_type, PLAYER_INFO_TYPE_SCRIPT);
+    }
+
+    #[test]
+    fn replay_player_infos_parser_preserves_client_and_player_order_and_full_state() {
+        let input = r#"[PlayerInfoList]
+LastPlayerID=12
+
+  [Client]
+  ID=7
+  Flags=Initial|Updated
+
+    [Player]
+    Name="Join\200ed"
+    ForcedName="Forced\377"
+    Flags=Joined|Invisible
+    ID=4
+    Type=User
+    Color=1122867
+    GameNumber=2
+    GameJoinFrame=33
+
+    [Player]
+    Name=Removed
+    Flags=Joined|Removed|Disconnected|VotedOut
+    ID=5
+    Type=Script
+    Team=2
+    GameNumber=3
+    GameJoinFrame=34
+    GamePartFrame=44
+
+  [Client]
+  ID=3
+  Flags=AddPlayers|Initial
+
+    [Player]
+    Name="Unjoined\201"
+    ID=6
+    GameNumber=99
+    GameJoinFrame=98
+    GamePartFrame=97
+
+    [Player]
+    Name=Resource
+    Flags=HasResource|Invisible
+    ID=8
+    Type=Script
+
+      [ResCore]
+      Type=Player
+      ID=23
+      Filename="Players/Plr\202.c4p"
+      Author="Host\377"
+"#;
+
+        let document =
+            parse_replay_player_infos_ini(input.as_bytes()).expect("parse PlayerInfos.txt");
+        assert_eq!(document.last_player_id, 12);
+        let clients = document.clients;
+        assert_eq!(clients.len(), 2);
+        assert_eq!(
+            clients
+                .iter()
+                .map(|client| client.client_id)
+                .collect::<Vec<_>>(),
+            vec![7, 3]
+        );
+        assert!(clients.iter().all(|client| client.by_client == 0));
+        assert_eq!(
+            clients[0].flags,
+            CLIENT_PLAYER_INFO_FLAG_INITIAL | CLIENT_PLAYER_INFO_FLAG_UPDATED
+        );
+        assert_eq!(
+            clients[1].flags,
+            CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS | CLIENT_PLAYER_INFO_FLAG_INITIAL
+        );
+
+        let joined = &clients[0].players[0];
+        assert_eq!(joined.name.as_bytes(), b"Join\x80ed");
+        assert_eq!(joined.forced_name.as_bytes(), b"Forced\xff");
+        assert_eq!(
+            (joined.id, joined.game_number, joined.game_join_frame),
+            (4, 2, 33)
+        );
+        assert_eq!(joined.game_part_frame, -1);
+        assert_eq!(joined.original_color, joined.color);
+        assert_eq!(joined.flags, PLAYER_INFO_FLAG_JOINED);
+
+        let removed = &clients[0].players[1];
+        assert_eq!(
+            removed.flags,
+            PLAYER_INFO_FLAG_JOINED
+                | PLAYER_INFO_FLAG_REMOVED
+                | PLAYER_INFO_FLAG_DISCONNECTED
+                | PLAYER_INFO_FLAG_VOTED_OUT
+        );
+        assert_eq!(
+            (
+                removed.game_number,
+                removed.game_join_frame,
+                removed.game_part_frame
+            ),
+            (3, 34, 44)
+        );
+
+        let unjoined = &clients[1].players[0];
+        assert_eq!(unjoined.name.as_bytes(), b"Unjoined\x81");
+        assert_eq!(
+            (
+                unjoined.game_number,
+                unjoined.game_join_frame,
+                unjoined.game_part_frame
+            ),
+            (-1, -1, -1),
+            "conditional in-game fields are reset when their flags are absent"
+        );
+
+        let resource_player = &clients[1].players[1];
+        assert_eq!(
+            resource_player.flags,
+            PLAYER_INFO_FLAG_HAS_RESOURCE | PLAYER_INFO_FLAG_INVISIBLE
+        );
+        let resource = resource_player
+            .resource
+            .as_ref()
+            .expect("HasResource compiles the following ResCore");
+        assert_eq!(
+            (resource.resource_type, resource.id, resource.derived_id),
+            (3, 23, -1)
+        );
+        assert!(resource.loadable);
+        assert_eq!((resource.file_size, resource.file_crc), (0, 0));
+        assert_eq!(resource.chunk_size, NETWORK_RESOURCE_DEFAULT_CHUNK_SIZE);
+        assert_eq!(resource.contents_crc, 0);
+        assert_eq!(resource.filename.as_bytes(), b"Players/Plr\x82.c4p");
+        assert_eq!(resource.author.as_bytes(), b"Host\xff");
+    }
+
+    #[test]
+    fn replay_player_infos_parser_applies_named_compile_defaults() {
+        let document =
+            parse_replay_player_infos_ini(b"[PlayerInfoList]\n  [Client]\n    [Player]\n")
+                .expect("minimal named list compiles with C++ defaults");
+
+        assert_eq!(document.last_player_id, 0);
+        let clients = document.clients;
+        assert_eq!(clients.len(), 1);
+        let client = &clients[0];
+        assert_eq!(
+            (client.client_id, client.flags, client.by_client),
+            (-1, 0, 0)
+        );
+        assert_eq!(client.players.len(), 1);
+        let player = &client.players[0];
+        assert!(player.name.is_empty());
+        assert!(player.forced_name.is_empty());
+        assert!(player.filename.is_empty());
+        assert_eq!(player.flags, 0);
+        assert_eq!(player.id, 0);
+        assert_eq!(player.player_type, PLAYER_INFO_TYPE_USER);
+        assert_eq!((player.color, player.original_color), (0, 0));
+        assert_eq!((player.savegame_player, player.team), (0, 0));
+        assert_eq!(
+            (
+                player.game_number,
+                player.game_join_frame,
+                player.game_part_frame
+            ),
+            (-1, -1, -1)
+        );
+        assert_eq!(player.extra_data, *b"NONE");
+        assert_eq!(player.league_projected_gain, -1);
+        assert!(!player.league_progress_data_is_null);
+        assert!(player.league_progress_data.is_empty());
+        assert!(player.resource.is_none());
+    }
+
+    #[test]
+    fn replay_player_infos_parser_preserves_raw_legacy_bytes() {
+        let mut input = b"[PlayerInfoList]\n[Client]\n[Player]\nName=\"Raw".to_vec();
+        input.extend_from_slice(&[0x80, 0xff]);
+        input.extend_from_slice(b"\\200\"\nFilename=\"Plr");
+        input.push(0xfe);
+        input.extend_from_slice(
+            b".c4p\"\nFlags=HasResource\nType=Script\n[ResCore]\nType=Player\nFilename=\"Res",
+        );
+        input.push(0xfc);
+        input.extend_from_slice(b".c4p\"\nAuthor=\"Host");
+        input.push(0xfd);
+        input.extend_from_slice(b"\"\n");
+
+        let document = parse_replay_player_infos_ini(&input).expect("parse legacy byte strings");
+        assert_eq!(document.last_player_id, 0);
+        let clients = document.clients;
+        let player = &clients[0].players[0];
+        assert_eq!(player.name.as_bytes(), b"Raw\x80\xff\x80");
+        assert_eq!(player.filename.as_bytes(), b"Plr\xfe.c4p");
+        let resource = player.resource.as_ref().expect("resource core retained");
+        assert_eq!(resource.filename.as_bytes(), b"Res\xfc.c4p");
+        assert_eq!(resource.author.as_bytes(), b"Host\xfd");
     }
 
     #[test]
