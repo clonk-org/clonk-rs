@@ -2961,7 +2961,9 @@ pub struct CrewOverlay {
     pub object_id: ObjectId,
     /// The crew member's name (`C4ObjectInfo::sName`).
     pub label: String,
-    pub energy_fraction: f32,
+    /// Raw `C4Object::Energy` and resolved `GetPhysical()->Energy`.
+    pub energy: i32,
+    pub energy_capacity: i32,
     /// Raw `C4Object::MagicEnergy` and resolved `GetPhysical()->Magic`.
     /// A non-zero level inserts the optional middle HUD bar
     /// (src/C4Viewport.cpp:934-938; src/C4Object.cpp:2722-2726).
@@ -10886,11 +10888,14 @@ impl GraphicsSystem {
                 }
                 let mut bar_slot = 0;
                 if crew.hide_hud_bars & lc_engine::HIDE_HUD_BAR_ENERGY == 0 {
-                    hud::draw_energy_bar_with_gamma(
+                    hud::draw_level_bar_with_gamma(
                         &mut self.surface,
                         &self.hud_graphics,
                         rect,
-                        crew.energy_fraction,
+                        hud::HudBarKind::Energy,
+                        0,
+                        crew.energy,
+                        crew.energy_capacity,
                         self.show_portraits,
                         gamma,
                     );
@@ -24989,7 +24994,8 @@ mod tests {
             crew: vec![CrewOverlay {
                 object_id,
                 label: "Joe".to_string(),
-                energy_fraction: 1.0,
+                energy: 100,
+                energy_capacity: 100,
                 magic_energy: 0,
                 magic_capacity: 0,
                 breath: 0,
@@ -25489,8 +25495,15 @@ mod tests {
         );
 
         graphics.hud_players[0].crew[0].magic_energy = 1_000;
-        graphics.hud_players[0].crew[0].magic_capacity = 2_000;
+        graphics.hud_players[0].crew[0].magic_capacity = 1_999;
         graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+        assert_eq!(
+            graphics
+                .surface()
+                .get_pixel(breath_x, portraitless_top_y as u32),
+            Some(standard_gamma_color(Color::opaque(0, 220, 0))),
+            "magic level and range are divided by 1000 separately before drawing"
+        );
         assert_eq!(
             graphics.surface().get_pixel(breath_x, bar_bottom_y as u32),
             Some(standard_gamma_color(Color::opaque(0, 220, 0))),
@@ -25510,7 +25523,8 @@ mod tests {
         let render = |hide_hud_elements: i32, hide_hud_bars: i32| {
             let (snapshot, mut graphics) = cursor_label_fixture(None);
             let crew = &mut graphics.hud_players[0].crew[0];
-            crew.energy_fraction = 1.0;
+            crew.energy = 100;
+            crew.energy_capacity = 100;
             crew.magic_energy = 1_000;
             crew.magic_capacity = 2_000;
             crew.breath = 50;

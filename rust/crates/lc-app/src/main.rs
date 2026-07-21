@@ -86392,7 +86392,8 @@ fn collect_player_overlays(
         for object_id in &overlay_objects {
             let (
                 label,
-                energy_fraction,
+                energy,
+                energy_capacity,
                 magic_energy,
                 magic_capacity,
                 breath,
@@ -86407,15 +86408,9 @@ fn collect_player_overlays(
                     .map(|index| engine.object_physical(index))
                     .or(object.temporary_physical)
                     .or(object.info_physical);
-                // Energy runs on the C4MaxPhysical scale against the
-                // crew's physical Energy (C4Object::DrawEnergy,
-                // src/C4Object.cpp:2692-2695).
-                let max_energy = physical.map(|physical| physical.energy).unwrap_or(0);
-                let energy_fraction = if max_energy > 0 {
-                    (object.energy.max(0) as f32 / max_energy as f32).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
+                // Keep both raw operands until DrawEnergyLevelEx applies its
+                // native integer BoundBy/multiply/divide sequence.
+                let energy_capacity = physical.map(|physical| physical.energy).unwrap_or(0);
                 let magic_capacity = physical
                     .map(|physical| physical.magic)
                     .unwrap_or(object.magic_capacity);
@@ -86427,7 +86422,8 @@ fn collect_player_overlays(
                     engine.definition_hide_hud_bars(object.definition_id.as_str());
                 (
                     label,
-                    energy_fraction,
+                    object.energy,
+                    energy_capacity,
                     object.magic_energy,
                     magic_capacity,
                     object.breath,
@@ -86438,12 +86434,13 @@ fn collect_player_overlays(
                 )
             } else {
                 let label = format!("Object #{}", object_id.as_u64());
-                (label, 0.0, 0, 0, 0, 0, false, 0, 0)
+                (label, 0, 0, 0, 0, 0, 0, false, 0, 0)
             };
             crew.push(CrewOverlay {
                 object_id: *object_id,
                 label,
-                energy_fraction,
+                energy,
+                energy_capacity,
                 magic_energy,
                 magic_capacity,
                 breath,
@@ -106996,7 +106993,7 @@ func Award()
         assert_eq!(focused.len(), 1, "only cursor object highlighted");
         let focus_entry = focused.pop().expect("focus highlight present");
         assert!(focus_entry.label.contains("Clonk"));
-        assert!((focus_entry.energy_fraction - 0.8).abs() < f32::EPSILON);
+        assert_eq!((focus_entry.energy, focus_entry.energy_capacity), (80, 100));
         assert_eq!(focus_entry.magic_energy, 25_000);
         assert_eq!(focus_entry.magic_capacity, 50_000);
         assert_eq!(focus_entry.breath, 50);
@@ -107015,7 +107012,7 @@ func Award()
             .find(|crew| crew.label.contains("Balloon"))
             .expect("non-focus crew present");
         assert!(!other_entry.is_focus);
-        assert!((other_entry.energy_fraction - 0.4).abs() < f32::EPSILON);
+        assert_eq!((other_entry.energy, other_entry.energy_capacity), (40, 100));
         assert_eq!(other_entry.object_id, teammate);
         assert_eq!(other_entry.hide_hud_elements, 0);
         assert_eq!(other_entry.hide_hud_bars, 0);
@@ -107057,6 +107054,138 @@ func Award()
                 .map(|crew| (crew.hide_hud_elements, crew.hide_hud_bars)),
             Some((0, 0))
         );
+    }
+
+    #[test]
+    fn live_temporary_physicals_feed_all_integer_hud_bar_ranges() {
+        let mut app = new_state_only_running_sandbox_app();
+        let crew = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox player has a live cursor");
+        let mut update = ObjectUpdate::new();
+        update.energy = Some(1);
+        update.magic_energy = Some(1_000);
+        update.breath = Some(1);
+        app.engine
+            .apply_object_update(crew, update)
+            .expect("install half-full raw HUD levels");
+        let target_object =
+            i32::try_from(crew.as_u64()).expect("sandbox cursor id fits script control");
+        for (name, value) in [("Energy", 2), ("Magic", 2_000), ("Breath", 2)] {
+            app.engine
+                .execute_script_control(
+                    &lc_engine::ScriptControlData {
+                        target_object,
+                        strictness: lc_engine::ScriptStrictness::Strict3,
+                        script: lc_engine::LegacyCString::from_bytes(
+                            format!("SetPhysical(\"{name}\", {value}, 2)").into_bytes(),
+                        )
+                        .expect("temporary-physical script is NUL-free"),
+                        by_client: 0,
+                    },
+                    ScriptControlPolicy::live(false),
+                )
+                .unwrap_or_else(|error| panic!("install temporary {name} physical: {error}"));
+        }
+        app.snapshot = app.engine.snapshot();
+
+        let crew_index = app
+            .engine
+            .find_object_index(crew)
+            .expect("cursor remains live");
+        let before_object = app.engine.object_snapshot(crew).expect("cursor snapshot");
+        let before_physical = app.engine.object_physical(crew_index);
+        let overlays = collect_player_overlays(
+            &mut app.engine,
+            &app.snapshot,
+            Some(crew),
+            &app.bindings,
+            &app.gamepad_bindings,
+        );
+        assert_eq!(app.engine.object_snapshot(crew), Some(before_object));
+        assert_eq!(app.engine.object_physical(crew_index), before_physical);
+
+        let crew = overlays
+            .iter()
+            .find(|player| player.owner == app.local_owner)
+            .and_then(|player| player.crew.iter().find(|entry| entry.object_id == crew))
+            .expect("live cursor reaches the HUD overlay");
+        assert_eq!((crew.energy, crew.energy_capacity), (1, 2));
+        assert_eq!((crew.magic_energy, crew.magic_capacity), (1_000, 2_000));
+        assert_eq!((crew.breath, crew.breath_capacity), (1, 2));
+
+        let columns = [
+            [220, 0, 0, 255],
+            [70, 0, 0, 255],
+            [0, 220, 0, 255],
+            [0, 70, 0, 255],
+            [0, 0, 220, 255],
+            [0, 0, 70, 255],
+        ];
+        let pixels = (0..3)
+            .flat_map(|_| columns.into_iter().flatten())
+            .collect();
+        let hud = HudGraphics {
+            energy_bars: Some(ImageData::new(6, 3, pixels)),
+            ..HudGraphics::default()
+        };
+        let mut surface = Surface::new(40, 200, PixelFormat::Rgba8888);
+        let viewport = lc_graphics::Rect::new(0, 0, 40, 200);
+        for (kind, slot, level, range) in [
+            (
+                lc_frontend::hud::HudBarKind::Energy,
+                0,
+                crew.energy,
+                crew.energy_capacity,
+            ),
+            (
+                lc_frontend::hud::HudBarKind::Magic,
+                1,
+                crew.magic_energy / 1_000,
+                crew.magic_capacity / 1_000,
+            ),
+            (
+                lc_frontend::hud::HudBarKind::Breath,
+                2,
+                crew.breath,
+                crew.breath_capacity,
+            ),
+        ] {
+            lc_frontend::hud::draw_level_bar(
+                &mut surface,
+                &hud,
+                viewport,
+                kind,
+                slot,
+                level,
+                range,
+                true,
+            );
+        }
+
+        let empty = [
+            Color::opaque(70, 0, 0),
+            Color::opaque(0, 70, 0),
+            Color::opaque(0, 0, 70),
+        ];
+        let filled = [
+            Color::opaque(220, 0, 0),
+            Color::opaque(0, 220, 0),
+            Color::opaque(0, 0, 220),
+        ];
+        for (slot, x) in [5_u32, 7, 9].into_iter().enumerate() {
+            assert_eq!(
+                surface.get_pixel(x, 107),
+                Some(empty[slot]),
+                "105px half bar keeps local row 52 empty"
+            );
+            assert_eq!(
+                surface.get_pixel(x, 108),
+                Some(filled[slot]),
+                "105px half bar begins filling at local row 53"
+            );
+        }
     }
 
     #[test]

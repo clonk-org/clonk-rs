@@ -2076,49 +2076,9 @@ pub enum HudBarKind {
     Breath = 2,
 }
 
-pub fn draw_energy_bar(
-    surface: &mut Surface,
-    hud: &HudGraphics,
-    viewport: SurfaceRect,
-    energy_fraction: f32,
-    show_portraits: bool,
-) {
-    draw_energy_bar_with_gamma(
-        surface,
-        hud,
-        viewport,
-        energy_fraction,
-        show_portraits,
-        None,
-    );
-}
-
-pub(crate) fn draw_energy_bar_with_gamma(
-    surface: &mut Surface,
-    hud: &HudGraphics,
-    viewport: SurfaceRect,
-    energy_fraction: f32,
-    show_portraits: bool,
-    gamma: Option<&GammaRamp>,
-) {
-    draw_bar(
-        surface,
-        hud,
-        viewport,
-        HudBarKind::Energy,
-        0,
-        show_portraits,
-        |height| {
-            let fraction = energy_fraction.clamp(0.0, 1.0);
-            height - (fraction * height as f32).round() as i32
-        },
-        gamma,
-    );
-}
-
-/// Integer-level variant of `C4Facet::DrawEnergyLevelEx`. `slot` is the
-/// compact left-to-right position after applying C++'s optional-bar gates;
-/// `kind` selects the corresponding filled/empty pair in EnergyBars.png.
+/// `C4Facet::DrawEnergyLevelEx`. `slot` is the compact left-to-right position
+/// after applying C++'s optional-bar gates; `kind` selects the corresponding
+/// filled/empty pair in EnergyBars.png.
 pub fn draw_level_bar(
     surface: &mut Surface,
     hud: &HudGraphics,
@@ -2161,16 +2121,24 @@ pub(crate) fn draw_level_bar_with_gamma(
         kind,
         slot,
         show_portraits,
-        |height| {
-            let bounded = if range > 0 {
-                level.clamp(0, range)
-            } else {
-                0
-            };
-            height - (i64::from(bounded) * i64::from(height) / i64::from(range.max(1))) as i32
-        },
+        |height| level_bar_y(height, level, range),
         gamma,
     );
+}
+
+/// Native `BoundBy(level, 0, range) * height / max(range, 1)` arithmetic.
+/// LegacyClonk performs the intermediate operations in signed 32-bit values;
+/// wrapping keeps script-set overflow deterministic while matching every
+/// defined C++ input.
+fn level_bar_y(height: i32, level: i32, range: i32) -> i32 {
+    let bounded = if level < 0 {
+        0
+    } else if level > range {
+        range
+    } else {
+        level
+    };
+    height.wrapping_sub(bounded.wrapping_mul(height) / range.max(1))
 }
 
 fn draw_bar(
@@ -3895,7 +3863,7 @@ mod tests {
     }
 
     #[test]
-    fn energy_bar_tracks_portrait_offset_and_draws_filled_column_from_the_bottom() {
+    fn energy_bar_uses_effective_physical_range_and_cpp_integer_threshold() {
         // DrawEnergyLevelEx: rows below yBar sample the filled column 0,
         // rows above the empty column 1 (src/C4Facet.cpp:334-389).
         let mut target = surface(40, 200);
@@ -3911,15 +3879,33 @@ mod tests {
             ..HudGraphics::default()
         };
         let viewport = SurfaceRect::new(0, 0, 40, 200);
-        draw_energy_bar(&mut target, &hud, viewport, 0.5, true);
-        // Bar spans y = 55 .. 55 + (200 - 95) = 160; yBar at half.
+        draw_level_bar(
+            &mut target,
+            &hud,
+            viewport,
+            HudBarKind::Energy,
+            0,
+            1,
+            2,
+            true,
+        );
+        // Bar spans y=55..160 with height 105. Native integer division fills
+        // 1*105/2=52 rows, so local row 52 stays empty and row 53 is filled.
+        // The removed float path rounded 52.5 up and filled one row too many.
         let bar_top = SYMBOL_SIZE + 2 * SYMBOL_BORDER + 10;
         let bar_height = 200 - 3 * SYMBOL_BORDER - 2 * SYMBOL_SIZE - 10;
         let x = SYMBOL_BORDER as u32;
+        assert_eq!(bar_height, 105);
+        assert_eq!(level_bar_y(bar_height, 1, 2), 53);
         assert_eq!(
-            target.get_pixel(x, (bar_top + 1) as u32),
+            target.get_pixel(x, (bar_top + 52) as u32),
             Some(Color::opaque(60, 60, 60)),
-            "top of a half-full bar is empty"
+            "the last C++-empty fractional boundary row remains empty"
+        );
+        assert_eq!(
+            target.get_pixel(x, (bar_top + 53) as u32),
+            Some(Color::opaque(200, 0, 0)),
+            "the native threshold row begins the filled half"
         );
         assert_eq!(
             target.get_pixel(x, (bar_top + bar_height - 2) as u32),
@@ -3928,7 +3914,16 @@ mod tests {
         );
 
         let mut without_portraits = surface(40, 200);
-        draw_energy_bar(&mut without_portraits, &hud, viewport, 0.5, false);
+        draw_level_bar(
+            &mut without_portraits,
+            &hud,
+            viewport,
+            HudBarKind::Energy,
+            0,
+            1,
+            2,
+            false,
+        );
         let portraitless_top = SYMBOL_SIZE + 2 * SYMBOL_BORDER;
         let portraitless_height = 200 - 3 * SYMBOL_BORDER - 2 * SYMBOL_SIZE;
         assert_eq!(
@@ -3953,6 +3948,11 @@ mod tests {
         );
         assert_eq!(portraitless_height, bar_height + 10);
         assert_eq!(portraitless_top + portraitless_height, bar_top + bar_height);
+
+        // BoundBy tests the lower bound before the inverted upper bound.
+        assert_eq!(level_bar_y(105, -1, -2), 105);
+        assert_eq!(level_bar_y(105, 0, 0), 105);
+        assert_eq!(level_bar_y(105, 0, -2), 315);
     }
 
     #[test]
