@@ -1,10 +1,11 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use hound::{SampleFormat, WavReader};
 use lewton::inside_ogg::OggStreamReader;
 use minimp3::{Decoder as Mp3Decoder, Error as Mp3Error};
 use thiserror::Error;
+
+use crate::wav::WavStream;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioFormat {
@@ -145,7 +146,7 @@ impl MusicDecoder {
     fn open_direct(data: Arc<[u8]>, output_sample_rate: u32) -> Result<Self, AudioDecodeError> {
         match detect_format(data.as_ref())? {
             AudioFormat::Wav => Ok(Self::Pcm(PcmStream::new(
-                PcmSource::Wav(WavMusicStream::new(data)?),
+                PcmSource::Wav(WavStream::new(data)?),
                 output_sample_rate,
             )?)),
             AudioFormat::Ogg => Ok(Self::Pcm(PcmStream::new(
@@ -315,7 +316,7 @@ impl PcmStream {
 }
 
 enum PcmSource {
-    Wav(WavMusicStream),
+    Wav(WavStream),
     Ogg(OggMusicStream),
     Mp3(Mp3MusicStream),
     Tracker(crate::tracker::TrackerStream),
@@ -324,7 +325,7 @@ enum PcmSource {
 impl PcmSource {
     fn sample_rate(&self) -> u32 {
         match self {
-            Self::Wav(stream) => stream.sample_rate,
+            Self::Wav(stream) => stream.sample_rate(),
             Self::Ogg(stream) => stream.sample_rate,
             Self::Mp3(stream) => stream.sample_rate,
             Self::Tracker(stream) => stream.sample_rate(),
@@ -353,7 +354,7 @@ impl PcmSource {
     #[cfg(test)]
     fn buffered_frames(&self) -> usize {
         match self {
-            Self::Wav(_) => 0,
+            Self::Wav(stream) => stream.buffered_frames(),
             Self::Ogg(stream) => stream.buffered_frames(),
             Self::Mp3(stream) => stream.buffered_frames(),
             Self::Tracker(stream) => stream.buffered_frames(),
@@ -363,85 +364,10 @@ impl PcmSource {
     #[cfg(test)]
     fn peak_buffered_frames(&self) -> usize {
         match self {
-            Self::Wav(_) => 0,
+            Self::Wav(stream) => stream.peak_buffered_frames(),
             Self::Ogg(stream) => stream.peak_packet_frames,
             Self::Mp3(stream) => stream.peak_packet_frames,
             Self::Tracker(stream) => stream.peak_buffered_frames(),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum WavSampleKind {
-    Int8,
-    Int16,
-    Float32,
-}
-
-struct WavMusicStream {
-    reader: WavReader<Cursor<Arc<[u8]>>>,
-    sample_rate: u32,
-    channels: usize,
-    sample_kind: WavSampleKind,
-}
-
-impl WavMusicStream {
-    fn new(data: Arc<[u8]>) -> Result<Self, AudioDecodeError> {
-        let reader = WavReader::new(Cursor::new(data))
-            .map_err(|_| AudioDecodeError::InvalidData("invalid WAV header"))?;
-        let spec = reader.spec();
-        if spec.sample_rate == 0 {
-            return Err(AudioDecodeError::InvalidData("WAV sample rate is zero"));
-        }
-        if spec.channels == 0 {
-            return Err(AudioDecodeError::InvalidData("WAV channel count is zero"));
-        }
-        let sample_kind = match (spec.sample_format, spec.bits_per_sample) {
-            (SampleFormat::Int, 8) => WavSampleKind::Int8,
-            (SampleFormat::Int, 16) => WavSampleKind::Int16,
-            (SampleFormat::Float, 32) => WavSampleKind::Float32,
-            _ => {
-                return Err(AudioDecodeError::InvalidData(
-                    "unsupported WAV bit depth or format",
-                ));
-            }
-        };
-        Ok(Self {
-            reader,
-            sample_rate: spec.sample_rate,
-            channels: usize::from(spec.channels),
-            sample_kind,
-        })
-    }
-
-    fn next_frame(&mut self) -> Result<Option<[f32; 2]>, AudioDecodeError> {
-        let channels = self.channels;
-        read_stereo_frame(channels, || self.next_sample())
-    }
-
-    fn next_sample(&mut self) -> Result<Option<f32>, AudioDecodeError> {
-        match self.sample_kind {
-            WavSampleKind::Int8 => self
-                .reader
-                .samples::<i8>()
-                .next()
-                .transpose()
-                .map(|sample| sample.map(|value| f32::from(value) / 128.0))
-                .map_err(|_| AudioDecodeError::InvalidData("invalid WAV 8-bit PCM data")),
-            WavSampleKind::Int16 => self
-                .reader
-                .samples::<i16>()
-                .next()
-                .transpose()
-                .map(|sample| sample.map(|value| f32::from(value) / f32::from(i16::MAX)))
-                .map_err(|_| AudioDecodeError::InvalidData("invalid WAV PCM data")),
-            WavSampleKind::Float32 => self
-                .reader
-                .samples::<f32>()
-                .next()
-                .transpose()
-                .map(|sample| sample.map(|value| value.clamp(-1.0, 1.0)))
-                .map_err(|_| AudioDecodeError::InvalidData("invalid WAV float data")),
         }
     }
 }
@@ -601,32 +527,6 @@ impl Mp3MusicStream {
     }
 }
 
-fn read_stereo_frame(
-    channels: usize,
-    mut next_sample: impl FnMut() -> Result<Option<f32>, AudioDecodeError>,
-) -> Result<Option<[f32; 2]>, AudioDecodeError> {
-    let mut left = 0.0;
-    let mut right = 0.0;
-    let mut left_count = 0_usize;
-    let mut right_count = 0_usize;
-    for channel in 0..channels {
-        let Some(sample) = next_sample()? else {
-            return Ok(None);
-        };
-        if channel == 0 || (channel >= 2 && (channel - 2) % 2 == 0) {
-            left += sample;
-            left_count += 1;
-        } else {
-            right += sample;
-            right_count += 1;
-        }
-    }
-    if channels == 1 {
-        return Ok(Some([left, left]));
-    }
-    Ok(Some([left / left_count as f32, right / right_count as f32]))
-}
-
 fn stereo_i16_frame(samples: &[i16]) -> [f32; 2] {
     let mut left = f32::from(samples[0]);
     if samples.len() == 1 {
@@ -718,47 +618,13 @@ fn detect_format(data: &[u8]) -> Result<AudioFormat, AudioDecodeError> {
 }
 
 fn decode_wav(data: &[u8]) -> Result<DecodedAudio, AudioDecodeError> {
-    let cursor = Cursor::new(data);
-    let mut reader =
-        WavReader::new(cursor).map_err(|_| AudioDecodeError::InvalidData("invalid WAV header"))?;
-    let spec = reader.spec();
-    let sample_rate = spec.sample_rate;
-    if sample_rate == 0 {
-        return Err(AudioDecodeError::InvalidData("WAV sample rate is zero"));
+    let source: Arc<[u8]> = Arc::from(data);
+    let mut stream = WavStream::new(source)?;
+    let sample_rate = stream.sample_rate();
+    let mut frames = Vec::new();
+    while let Some(frame) = stream.next_frame()? {
+        frames.push(frame);
     }
-    if spec.channels == 0 {
-        return Err(AudioDecodeError::InvalidData("WAV channel count is zero"));
-    }
-    let channel_count = spec.channels as usize;
-
-    let samples = match (spec.sample_format, spec.bits_per_sample) {
-        (SampleFormat::Int, 8) => {
-            // 8-bit PCM WAV is unsigned (0-255), hound converts to i8 (-128 to 127)
-            // Normalize to [-1.0, 1.0): divide by 128.0
-            reader
-                .samples::<i8>()
-                .map(|sample| sample.map(|value| value as f32 / 128.0))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| AudioDecodeError::InvalidData("invalid WAV 8-bit PCM data"))?
-        }
-        (SampleFormat::Int, 16) => reader
-            .samples::<i16>()
-            .map(|sample| sample.map(|value| value as f32 / i16::MAX as f32))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| AudioDecodeError::InvalidData("invalid WAV PCM data"))?,
-        (SampleFormat::Float, 32) => reader
-            .samples::<f32>()
-            .map(|sample| sample.map(|value| value.clamp(-1.0, 1.0)))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| AudioDecodeError::InvalidData("invalid WAV float data"))?,
-        _ => {
-            return Err(AudioDecodeError::InvalidData(
-                "unsupported WAV bit depth or format",
-            ));
-        }
-    };
-
-    let frames = convert_interleaved_to_stereo(&samples, channel_count)?;
     Ok(DecodedAudio {
         frames,
         sample_rate,
@@ -902,6 +768,33 @@ mod tests {
         for sample in samples {
             wav.extend_from_slice(&sample.to_le_bytes());
         }
+        wav
+    }
+
+    fn mono_ima_adpcm_wav(sample_rate: u32, initial: i16, payload: [u8; 4]) -> Vec<u8> {
+        let mut fmt = Vec::with_capacity(20);
+        fmt.extend_from_slice(&0x11_u16.to_le_bytes());
+        fmt.extend_from_slice(&1_u16.to_le_bytes());
+        fmt.extend_from_slice(&sample_rate.to_le_bytes());
+        fmt.extend_from_slice(&(sample_rate * 8 / 9).to_le_bytes());
+        fmt.extend_from_slice(&8_u16.to_le_bytes());
+        fmt.extend_from_slice(&4_u16.to_le_bytes());
+        fmt.extend_from_slice(&2_u16.to_le_bytes());
+        fmt.extend_from_slice(&9_u16.to_le_bytes());
+
+        let mut data = Vec::with_capacity(8);
+        data.extend_from_slice(&initial.to_le_bytes());
+        data.extend_from_slice(&[0, 0]);
+        data.extend_from_slice(&payload);
+
+        let mut wav = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        wav.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&fmt);
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        let riff_len = u32::try_from(wav.len() - 8).unwrap();
+        wav[4..8].copy_from_slice(&riff_len.to_le_bytes());
         wav
     }
 
@@ -1081,5 +974,25 @@ mod tests {
         stream.restart().unwrap();
         assert_eq!(stream.read_frames(&mut output[..2]).unwrap(), 2);
         assert_eq!(output[..2], [[0.0; 2], [0.5; 2]]);
+    }
+
+    #[test]
+    fn compressed_wav_music_streams_in_bounded_blocks_and_resamples() {
+        let source: Arc<[u8]> = Arc::from(mono_ima_adpcm_wav(2, 0, [0x11; 4]).into_boxed_slice());
+        let mut stream = MusicStream::open(source, 4).unwrap();
+        assert_eq!(stream.buffered_frames(), 11);
+        assert_eq!(stream.peak_buffered_frames(), 11);
+
+        let mut output = [[0.0_f32; 2]; 4];
+        assert_eq!(stream.read_frames(&mut output).unwrap(), 4);
+        let scale = f32::from(i16::MAX);
+        for (frame, expected) in output.iter().zip([0.0, 0.5, 1.0, 1.5]) {
+            assert!((frame[0] - expected / scale).abs() < 1.0e-7);
+            assert_eq!(frame[0], frame[1]);
+        }
+
+        stream.restart().unwrap();
+        assert_eq!(stream.read_frames(&mut output[..2]).unwrap(), 2);
+        assert!((output[1][0] - 0.5 / scale).abs() < 1.0e-7);
     }
 }
