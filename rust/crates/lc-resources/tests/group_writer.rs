@@ -225,15 +225,335 @@ fn mutable_group_rename_preserves_cpp_cached_new_crc_for_imported_file() {
     }
 }
 
+#[test]
+fn rewrite_preserves_unopenable_child_when_crc_calculation_fails() {
+    const CHILD_NAME: &str = "Broken.c4g";
+    const CHILD_TIME: u32 = 0x1234_5678;
+    const FIRST_CORE: usize = 204;
+    const CORE_SIZE: usize = 316;
+    const ENTRY_COUNT: usize = 2;
+
+    let invalid_child = vec![0xa5; 211];
+    for (crc_state, stored_crc) in [(0, 0x1020_3040), (1, 0x5060_7080)] {
+        let mut source = MutableGroup::new("Opaque.bin");
+        source
+            .add_packed_child_with_metadata(
+                CHILD_NAME,
+                invalid_child.clone(),
+                0xdead_beef,
+                CHILD_TIME,
+                true,
+            )
+            .unwrap();
+        source
+            .add_file_with_metadata("Sibling.txt", b"old".to_vec(), 7, false)
+            .unwrap();
+        let mut source_image = source.pack_raw().unwrap();
+        set_entry_crc(&mut source_image, 0, crc_state, stored_crc);
+        let original_core = source_image[FIRST_CORE..FIRST_CORE + CORE_SIZE].to_vec();
+
+        let source = Group::from_memory(PathBuf::from("Opaque.bin"), source_image).unwrap();
+        let broken = source
+            .entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.name_bytes == CHILD_NAME.as_bytes())
+            .unwrap();
+        assert_eq!(
+            source.read_entry_bytes_exact(&broken).unwrap(),
+            invalid_child,
+            "state {crc_state} has a complete physical payload"
+        );
+        assert!(
+            source.open_child(CHILD_NAME).is_err(),
+            "state {crc_state} payload must remain unopenable"
+        );
+
+        let mut rewritten = MutableGroup::from_group(&source).unwrap();
+        assert!(matches!(
+            rewritten.child_mut(CHILD_NAME),
+            Err(MutableGroupError::SourceGroup(_))
+        ));
+        rewritten
+            .add_file_with_metadata("Sibling.txt", b"changed".to_vec(), 9, false)
+            .unwrap();
+        assert_eq!(rewritten.entry_crc(CHILD_NAME), Some(0));
+        assert_eq!(rewritten.contents_crc(), 0);
+
+        let rewritten_image = rewritten.pack_raw().unwrap();
+        assert_eq!(
+            &rewritten_image[FIRST_CORE..FIRST_CORE + CORE_SIZE],
+            original_core.as_slice(),
+            "state {crc_state} child core"
+        );
+        let payload_start = FIRST_CORE + ENTRY_COUNT * CORE_SIZE;
+        assert_eq!(
+            &rewritten_image[payload_start..payload_start + invalid_child.len()],
+            invalid_child.as_slice(),
+            "state {crc_state} child payload"
+        );
+        assert_eq!(
+            entry_crc_core(&rewritten_image, 1),
+            (0, 0),
+            "CRC traversal stops before the replacement sibling"
+        );
+
+        let reopened = Group::from_memory(PathBuf::from("Opaque.bin"), rewritten_image).unwrap();
+        let entries = reopened.entries().unwrap();
+        let broken = entries
+            .iter()
+            .find(|entry| entry.name_bytes == CHILD_NAME.as_bytes())
+            .unwrap();
+        assert_eq!(
+            (broken.crc_state, broken.stored_crc),
+            (crc_state, stored_crc)
+        );
+        assert_eq!(broken.time, CHILD_TIME);
+        assert!(broken.executable);
+        assert_eq!(reopened.read_file("Sibling.txt").unwrap(), b"changed");
+    }
+}
+
+#[test]
+fn rewrite_rejects_truncated_unopenable_child_payload() {
+    let mut source = MutableGroup::new("Truncated.bin");
+    source
+        .add_packed_child_with_metadata("Broken.c4g", vec![0xa5; 211], 0xdead_beef, 7, false)
+        .unwrap();
+    let mut source_image = source.pack_raw().unwrap();
+    set_entry_crc(&mut source_image, 0, 0, 0x1020_3040);
+    source_image.pop();
+
+    let source = Group::from_memory(PathBuf::from("Truncated.bin"), source_image).unwrap();
+    let entry = source.entries().unwrap().remove(0);
+    assert!(source.read_entry_bytes_exact(&entry).is_err());
+    assert!(matches!(
+        MutableGroup::from_group(&source),
+        Err(MutableGroupError::SourceGroup(message)) if message.contains("exceeds group bounds")
+    ));
+}
+
+#[test]
+fn rewrite_promotes_openable_child_with_nested_crc_failure_to_zero() {
+    let mut child = MutableGroup::new("Direct.c4g");
+    child
+        .add_packed_child_with_metadata("Nested.c4g", vec![0x5a; 204], 0x1111_2222, 3, false)
+        .unwrap();
+    let mut child_image = child.pack_raw().unwrap();
+    set_entry_crc(&mut child_image, 0, 0, 0x3333_4444);
+
+    let mut parent = MutableGroup::new("Parent.bin");
+    parent
+        .add_packed_child_with_metadata("Direct.c4g", child_image, 0x5555_6666, 5, false)
+        .unwrap();
+    let sibling_payload = b"sibling";
+    parent
+        .add_file("Sibling.txt", sibling_payload.to_vec())
+        .unwrap();
+    let mut parent_image = parent.pack_raw().unwrap();
+    set_entry_crc(&mut parent_image, 0, 1, 0x7777_8888);
+    set_entry_crc(&mut parent_image, 1, 0, 0x9999_aaaa);
+
+    let source = Group::from_memory(PathBuf::from("Parent.bin"), parent_image).unwrap();
+    let rewritten = MutableGroup::from_group(&source).unwrap();
+    let sibling_crc = c4group_entry_crc(sibling_payload, b"Sibling.txt");
+    assert_eq!(rewritten.entry_crc("Direct.c4g"), Some(0));
+    assert_eq!(rewritten.contents_crc(), sibling_crc);
+    let rewritten_image = rewritten.pack_raw().unwrap();
+    assert_eq!(entry_crc_core(&rewritten_image, 0), (2, 0));
+    assert_eq!(entry_crc_core(&rewritten_image, 1), (2, sibling_crc));
+}
+
+#[test]
+fn rewrite_crc_pass_stops_after_first_unopenable_child() {
+    let mut source = MutableGroup::new("Player.c4p");
+    source
+        .add_packed_child_with_metadata("Broken.c4i", vec![0xa5; 211], 0x1111_2222, 2, false)
+        .unwrap();
+    source.add_file("After.raw", b"after".to_vec()).unwrap();
+    source.add_file("Player.txt", b"old".to_vec()).unwrap();
+    let mut source_image = source.pack_raw().unwrap();
+    set_entry_crc(&mut source_image, 0, 0, 0x0102_0304);
+    set_entry_crc(&mut source_image, 1, 1, 0x1112_1314);
+    set_entry_crc(&mut source_image, 2, 1, 0x2122_2324);
+
+    let source = Group::from_memory(PathBuf::from("Player.c4p"), source_image).unwrap();
+    let mut rewritten = MutableGroup::from_group(&source).unwrap();
+    let replacement = b"replacement";
+    rewritten
+        .add_file("Player.txt", replacement.to_vec())
+        .unwrap();
+    let rewritten_image = rewritten.pack_raw().unwrap();
+
+    assert_eq!(
+        entry_crc_core(&rewritten_image, 0),
+        (2, c4group_entry_crc(replacement, b"Player.txt")),
+        "Player.txt is visited before the earlier-inserted *.c4i after stock sorting"
+    );
+    assert_eq!(entry_crc_core(&rewritten_image, 1), (1, 0x1112_1314));
+    assert_eq!(entry_crc_core(&rewritten_image, 2), (1, 0x2122_2324));
+}
+
+#[test]
+fn rewrite_cached_unopenable_child_does_not_stop_crc_pass() {
+    let cached_crc = 0xcafe_babe;
+    let sibling_payload = b"sibling";
+    let sibling_crc = c4group_entry_crc(sibling_payload, b"Sibling.txt");
+    let mut source = MutableGroup::new("Cached.bin");
+    source
+        .add_packed_child_with_metadata("Broken.c4g", vec![0xa5; 211], cached_crc, 4, false)
+        .unwrap();
+    source
+        .add_file("Sibling.txt", sibling_payload.to_vec())
+        .unwrap();
+    let mut source_image = source.pack_raw().unwrap();
+    set_entry_crc(&mut source_image, 1, 0, 0x0102_0304);
+
+    let source = Group::from_memory(PathBuf::from("Cached.bin"), source_image).unwrap();
+    let mut rewritten = MutableGroup::from_group(&source).unwrap();
+    assert_eq!(rewritten.entry_crc("Broken.c4g"), Some(cached_crc));
+    assert_eq!(rewritten.contents_crc(), cached_crc ^ sibling_crc);
+    assert!(matches!(
+        rewritten.child_mut("Broken.c4g"),
+        Err(MutableGroupError::SourceGroup(_))
+    ));
+
+    let rewritten_image = rewritten.pack_raw().unwrap();
+    assert_eq!(entry_crc_core(&rewritten_image, 0), (2, cached_crc));
+    assert_eq!(entry_crc_core(&rewritten_image, 1), (2, sibling_crc));
+}
+
+#[test]
+fn rewrite_child_crc_uses_open_as_child_wildcard_rejection() {
+    let mut valid_child = MutableGroup::new("Wildcard.c4g");
+    valid_child
+        .add_file("Inside.txt", b"valid".to_vec())
+        .unwrap();
+    let valid_crc = valid_child.contents_crc();
+    let mut source = MutableGroup::new("Nested.bin");
+    source
+        .add_packed_child_with_metadata(
+            "A*.c4g",
+            valid_child.pack_raw().unwrap(),
+            valid_crc,
+            6,
+            false,
+        )
+        .unwrap();
+    let mut source_image = source.pack_raw().unwrap();
+    set_entry_crc(&mut source_image, 0, 0, 0x1234_5678);
+
+    let source = Group::from_raw_memory(PathBuf::from("Nested.bin"), source_image).unwrap();
+    let rewritten = MutableGroup::from_group(&source).unwrap();
+    assert_eq!(rewritten.entry_crc("A*.c4g"), Some(0));
+    assert_eq!(
+        entry_crc_core(&rewritten.pack_raw().unwrap(), 0),
+        (0, 0x1234_5678)
+    );
+}
+
+#[test]
+fn rewrite_nested_child_crc_uses_open_as_child_wildcard_rejection() {
+    let mut leaf = MutableGroup::new("Leaf.c4g");
+    leaf.add_file("Inside.txt", b"valid".to_vec()).unwrap();
+    let leaf_crc = leaf.contents_crc();
+
+    let mut middle = MutableGroup::new("Middle.c4g");
+    middle
+        .add_packed_child_with_metadata("A*.c4g", leaf.pack_raw().unwrap(), leaf_crc, 6, false)
+        .unwrap();
+    let mut middle_image = middle.pack_raw().unwrap();
+    set_entry_crc(&mut middle_image, 0, 0, 0x1234_5678);
+    let opened_middle =
+        Group::from_raw_memory(PathBuf::from("Middle.c4g"), middle_image.clone()).unwrap();
+    assert!(opened_middle.contents_crc().is_err());
+    assert_eq!(opened_middle.contents_crc_or_zero(), 0);
+
+    let sibling_payload = b"sibling";
+    let sibling_crc = c4group_entry_crc(sibling_payload, b"Sibling.txt");
+    let mut parent = MutableGroup::new("Parent.bin");
+    parent
+        .add_packed_child_with_metadata("Middle.c4g", middle_image, 0x8765_4321, 7, false)
+        .unwrap();
+    parent
+        .add_file("Sibling.txt", sibling_payload.to_vec())
+        .unwrap();
+    let mut parent_image = parent.pack_raw().unwrap();
+    set_entry_crc(&mut parent_image, 0, 0, 0x1122_3344);
+    set_entry_crc(&mut parent_image, 1, 0, 0x5566_7788);
+
+    let source = Group::from_memory(PathBuf::from("Parent.bin"), parent_image).unwrap();
+    let rewritten = MutableGroup::from_group(&source).unwrap();
+    assert_eq!(rewritten.entry_crc("Middle.c4g"), Some(0));
+    assert_eq!(rewritten.contents_crc(), sibling_crc);
+    let rewritten_image = rewritten.pack_raw().unwrap();
+    assert_eq!(entry_crc_core(&rewritten_image, 0), (2, 0));
+    assert_eq!(entry_crc_core(&rewritten_image, 1), (2, sibling_crc));
+}
+
+#[test]
+fn materialized_child_crc_uses_child_close_sort_for_question_match() {
+    let mut pattern_child = MutableGroup::new("A?.c4g");
+    pattern_child
+        .add_file("Inside.txt", b"valid".to_vec())
+        .unwrap();
+
+    let mut player = MutableGroup::new("Player.c4p");
+    player
+        .add_child("A?.c4g", pattern_child)
+        .expect("question-mark child is accepted inside a nested group");
+    player
+        .add_file("A0.c4g", b"plain first match after sorting".to_vec())
+        .unwrap();
+
+    let mut parent = MutableGroup::new("Parent.bin");
+    parent.add_child("Player.c4p", player).unwrap();
+    let parent_image = parent.pack_raw().unwrap();
+    assert_eq!(entry_crc_core(&parent_image, 0), (2, 0));
+
+    let opened_parent = Group::from_memory(PathBuf::from("Parent.bin"), parent_image).unwrap();
+    let opened_player = opened_parent.open_child("Player.c4p").unwrap();
+    let entries = opened_player.entries().unwrap();
+    assert_eq!(entries[0].name_bytes, b"A0.c4g");
+    assert_eq!(entries[0].crc_state, 2);
+    assert_eq!(entries[1].name_bytes, b"A?.c4g");
+    assert_eq!(entries[1].crc_state, 0);
+    assert!(opened_player.contents_crc().is_err());
+    assert_eq!(opened_player.contents_crc_or_zero(), 0);
+}
+
 fn with_first_entry_crc(mut image: Vec<u8>, crc_state: u8, stored_crc: u32) -> Vec<u8> {
+    set_entry_crc(&mut image, 0, crc_state, stored_crc);
+    image
+}
+
+fn set_entry_crc(image: &mut [u8], index: usize, crc_state: u8, stored_crc: u32) {
     const FIRST_ENTRY_CORE: usize = 204;
+    const ENTRY_CORE_SIZE: usize = 316;
     const CRC_STATE_OFFSET: usize = 284;
     const STORED_CRC_OFFSET: usize = 285;
 
-    image[FIRST_ENTRY_CORE + CRC_STATE_OFFSET] = crc_state;
-    image[FIRST_ENTRY_CORE + STORED_CRC_OFFSET..FIRST_ENTRY_CORE + STORED_CRC_OFFSET + 4]
+    let core = FIRST_ENTRY_CORE + index * ENTRY_CORE_SIZE;
+    image[core + CRC_STATE_OFFSET] = crc_state;
+    image[core + STORED_CRC_OFFSET..core + STORED_CRC_OFFSET + 4]
         .copy_from_slice(&stored_crc.to_le_bytes());
-    image
+}
+
+fn entry_crc_core(image: &[u8], index: usize) -> (u8, u32) {
+    const FIRST_ENTRY_CORE: usize = 204;
+    const ENTRY_CORE_SIZE: usize = 316;
+    const CRC_STATE_OFFSET: usize = 284;
+    const STORED_CRC_OFFSET: usize = 285;
+
+    let core = FIRST_ENTRY_CORE + index * ENTRY_CORE_SIZE;
+    (
+        image[core + CRC_STATE_OFFSET],
+        u32::from_le_bytes(
+            image[core + STORED_CRC_OFFSET..core + STORED_CRC_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        ),
+    )
 }
 
 fn crc32_update(initial: u32, data: &[u8]) -> u32 {

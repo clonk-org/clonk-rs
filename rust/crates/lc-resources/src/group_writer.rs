@@ -139,7 +139,9 @@ pub(crate) enum MutableGroupEntryData {
     Child(Box<MutableGroup>),
     PackedChild {
         data: Vec<u8>,
-        contents_crc: u32,
+        crc_state: u8,
+        stored_crc: u32,
+        child_contents_crc: Option<u32>,
     },
 }
 
@@ -351,9 +353,9 @@ impl MutableGroup {
         )
     }
 
-    /// Imports the raw uncompressed image stored for a packed child group.
-    /// C4Group copies unchanged child payloads as opaque bytes when rewriting
-    /// their parent (`C4Group::AppendEntry2StdFile`).
+    /// Imports a raw uncompressed child image with its trusted, already-new
+    /// contents CRC. C4Group copies such unchanged payloads as opaque bytes
+    /// when rewriting their parent (`C4Group::AppendEntry2StdFile`).
     pub fn add_packed_child_with_metadata(
         &mut self,
         name: impl Into<String>,
@@ -381,7 +383,39 @@ impl MutableGroup {
     ) -> Result<(), MutableGroupError> {
         self.add_entry_bytes(
             name.into(),
-            MutableGroupEntryData::PackedChild { data, contents_crc },
+            MutableGroupEntryData::PackedChild {
+                data,
+                crc_state: 2,
+                stored_crc: contents_crc,
+                child_contents_crc: Some(contents_crc),
+            },
+            time,
+            executable,
+        )
+    }
+
+    /// Imports a packed child's original CRC core plus the result of the
+    /// Close-time calculation, if the complete child image can be opened.
+    /// Keeping both lets the ordered CRC pass retain this core when an earlier
+    /// entry fails, exactly like `C4Group::EntryCRC32`.
+    pub(crate) fn add_imported_packed_child_core_bytes_with_metadata(
+        &mut self,
+        name: impl Into<Vec<u8>>,
+        data: Vec<u8>,
+        crc_state: u8,
+        stored_crc: u32,
+        child_contents_crc: Option<u32>,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        self.add_entry_bytes(
+            name.into(),
+            MutableGroupEntryData::PackedChild {
+                data,
+                crc_state,
+                stored_crc,
+                child_contents_crc,
+            },
             time,
             executable,
         )
@@ -416,16 +450,23 @@ impl MutableGroup {
     }
 
     pub fn entry_crc(&self, name: &str) -> Option<u32> {
-        self.entries
+        let entries = self.ordered_entries();
+        entries
             .iter()
             .find(|entry| entry.name_bytes.eq_ignore_ascii_case(name.as_bytes()))
-            .map(MutableGroupEntry::contents_crc)
+            .map(|entry| entry.calculated_crc(&entries).unwrap_or(0))
     }
 
     pub fn contents_crc(&self) -> u32 {
-        self.entries
+        let entries = self.ordered_entries();
+        entries
             .iter()
-            .fold(0, |crc, entry| crc ^ entry.contents_crc())
+            .try_fold(0, |crc, entry| {
+                entry
+                    .calculated_crc(&entries)
+                    .map(|entry_crc| crc ^ entry_crc)
+            })
+            .unwrap_or(0)
     }
 
     pub fn pack_raw(&self) -> Result<Vec<u8>, MutableGroupError> {
@@ -437,13 +478,15 @@ impl MutableGroup {
             .iter()
             .map(|entry| PackedEntry::from_entry(entry))
             .collect::<Result<Vec<_>, MutableGroupError>>()?;
+        let crc_cores = close_crc_cores(&entries);
 
         let mut offset = 0_i32;
         let entry_cores = packed_entries
             .iter()
             .zip(&entries)
-            .map(|(packed, entry)| {
-                let core = encode_entry_core(entry, packed, offset)?;
+            .zip(&crc_cores)
+            .map(|((packed, entry), crc_core)| {
+                let core = encode_entry_core(entry, packed, *crc_core, offset)?;
                 offset = offset
                     .checked_add(packed.size)
                     .ok_or(MutableGroupError::GroupDataTooLarge)?;
@@ -749,6 +792,12 @@ struct PackedEntry {
     child: bool,
 }
 
+#[derive(Clone, Copy)]
+struct EntryCoreCrc {
+    state: u8,
+    value: u32,
+}
+
 impl PackedEntry {
     fn from_entry(entry: &MutableGroupEntry) -> Result<Self, MutableGroupError> {
         let (data, child) = match &entry.data {
@@ -787,6 +836,7 @@ fn encode_header(
 fn encode_entry_core(
     entry: &MutableGroupEntry,
     packed: &PackedEntry,
+    crc: EntryCoreCrc,
     offset: i32,
 ) -> Result<[u8; GROUP_ENTRY_SIZE], MutableGroupError> {
     validate_entry_name(&entry.name_bytes)?;
@@ -796,10 +846,33 @@ fn encode_entry_core(
     core[268..272].copy_from_slice(&packed.size.to_le_bytes());
     core[276..280].copy_from_slice(&offset.to_le_bytes());
     core[280..284].copy_from_slice(&entry.time.to_le_bytes());
-    core[284] = 2;
-    core[285..289].copy_from_slice(&entry.contents_crc().to_le_bytes());
+    core[284] = crc.state;
+    core[285..289].copy_from_slice(&crc.value.to_le_bytes());
     core[289] = u8::from(entry.executable);
     Ok(core)
+}
+
+/// Simulates the one ordered `EntryCRC32(nullptr)` pass performed by
+/// `C4Group::Close`. A direct calculation failure leaves that entry and every
+/// later entry at their pre-pass CRC state/value; earlier successes stay new.
+fn close_crc_cores(entries: &[&MutableGroupEntry]) -> Vec<EntryCoreCrc> {
+    let mut calculation_failed = false;
+    entries
+        .iter()
+        .map(|entry| {
+            let original = entry.original_crc_core();
+            if calculation_failed || original.state == 2 {
+                return original;
+            }
+            match entry.calculated_crc(entries) {
+                Some(value) => EntryCoreCrc { state: 2, value },
+                None => {
+                    calculation_failed = true;
+                    original
+                }
+            }
+        })
+        .collect()
 }
 
 fn mem_scramble(buffer: &mut [u8]) {
@@ -883,17 +956,72 @@ impl MutableGroupEntry {
         self.executable = false;
     }
 
-    fn contents_crc(&self) -> u32 {
+    fn original_crc_core(&self) -> EntryCoreCrc {
         match &self.data {
-            MutableGroupEntryData::File(data) => c4group_entry_crc(data, &self.name_bytes),
+            MutableGroupEntryData::File(_) | MutableGroupEntryData::Child(_) => {
+                EntryCoreCrc { state: 0, value: 0 }
+            }
+            MutableGroupEntryData::ExistingFile {
+                crc_state,
+                stored_crc,
+                ..
+            }
+            | MutableGroupEntryData::PackedChild {
+                crc_state,
+                stored_crc,
+                ..
+            } => EntryCoreCrc {
+                state: *crc_state,
+                value: *stored_crc,
+            },
+        }
+    }
+
+    /// Returns the value native CalcCRC32 would produce when this entry is
+    /// visited. `None` is the direct packed-child open failure that aborts the
+    /// containing group's CRC traversal; nested failures are already projected
+    /// to a successful numeric zero by the importer.
+    fn calculated_crc(&self, entries: &[&MutableGroupEntry]) -> Option<u32> {
+        let original = self.original_crc_core();
+        if original.state == 2 {
+            return Some(original.value);
+        }
+        match &self.data {
+            MutableGroupEntryData::File(data) => Some(c4group_entry_crc(data, &self.name_bytes)),
             MutableGroupEntryData::ExistingFile {
                 data,
                 crc_state,
                 stored_crc,
-            } => imported_file_entry_crc(data, &self.name_bytes, *crc_state, *stored_crc),
-            MutableGroupEntryData::Child(child) => child.contents_crc(),
-            MutableGroupEntryData::PackedChild { contents_crc, .. } => *contents_crc,
+            } => Some(imported_file_entry_crc(
+                data,
+                &self.name_bytes,
+                *crc_state,
+                *stored_crc,
+            )),
+            MutableGroupEntryData::Child(_) | MutableGroupEntryData::PackedChild { .. } => {
+                calculated_child_crc(&self.name_bytes, entries)
+            }
         }
+    }
+}
+
+/// Applies the same direct-child lookup CalcCRC32 reaches through
+/// OpenAsChild: `*` rejects the request, `?` scans final entry order, and the
+/// first name match is terminal even when it is not an openable child.
+fn calculated_child_crc(pattern: &[u8], entries: &[&MutableGroupEntry]) -> Option<u32> {
+    if pattern.contains(&b'*') {
+        return None;
+    }
+    let selected = entries
+        .iter()
+        .copied()
+        .find(|entry| wildcard_match(pattern, &entry.name_bytes))?;
+    match &selected.data {
+        MutableGroupEntryData::Child(child) => Some(child.contents_crc()),
+        MutableGroupEntryData::PackedChild {
+            child_contents_crc, ..
+        } => *child_contents_crc,
+        MutableGroupEntryData::File(_) | MutableGroupEntryData::ExistingFile { .. } => None,
     }
 }
 

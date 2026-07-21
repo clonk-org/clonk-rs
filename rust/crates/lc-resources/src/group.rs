@@ -356,35 +356,24 @@ impl Group {
         }
     }
 
-    fn entry_contents_crc(
+    fn direct_child_contents_crc(
         &self,
         entry: &GroupEntry,
         physical_data: &[u8],
     ) -> Result<u32, GroupError> {
-        if entry.crc_state == 2 {
-            return Ok(entry.stored_crc);
-        }
-        if entry.is_directory {
-            let child = match &self.kind {
-                GroupKind::Directory(_) => self.open_child(&entry.relative_path)?,
-                GroupKind::Packed(packed) => Group::from_raw_memory(
-                    packed
-                        .path
-                        .join(path_component_from_name_bytes(&entry.name_bytes)),
-                    physical_data.to_vec(),
-                )?,
-            };
-            return child.contents_crc();
-        }
-        if entry.size == 0 {
-            return Ok(0);
-        }
-        let data_crc = if entry.crc_state == 1 {
-            entry.stored_crc
-        } else {
-            crc32(0, physical_data)
+        let child = match &self.kind {
+            GroupKind::Directory(_) => self.open_child(&entry.relative_path)?,
+            GroupKind::Packed(packed) => Group::from_raw_memory(
+                packed
+                    .path
+                    .join(path_component_from_name_bytes(&entry.name_bytes)),
+                physical_data.to_vec(),
+            )?,
         };
-        Ok(crc32(data_crc, &entry.name_bytes))
+        // Child.EntryCRC32 exposes a recursive failure as the numeric value
+        // zero; only failure to open this direct child aborts the containing
+        // group's CRC pass.
+        Ok(child.contents_crc_or_zero())
     }
 
     /// Computes C4Group::EntryCRC32's observable return value when a nested
@@ -486,9 +475,7 @@ impl MutableGroup {
                     let data = child
                         .raw_image()
                         .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
-                    let contents_crc = child
-                        .contents_crc()
-                        .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
+                    let contents_crc = child.contents_crc_or_zero();
                     mutable.add_packed_child_bytes_with_metadata(
                         entry.name_bytes,
                         data,
@@ -504,13 +491,17 @@ impl MutableGroup {
                 .read_entry_bytes_exact(&entry)
                 .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
             if entry.is_directory {
-                let contents_crc = group
-                    .entry_contents_crc(&entry, &data)
-                    .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
-                mutable.add_packed_child_bytes_with_metadata(
+                // Preserve the original core even when this complete payload
+                // cannot be opened. Close calculates CRCs in final entry
+                // order, so the writer also retains the successful result for
+                // use only if traversal actually reaches this entry.
+                let child_contents_crc = group.direct_child_contents_crc(&entry, &data).ok();
+                mutable.add_imported_packed_child_core_bytes_with_metadata(
                     entry.name_bytes,
                     data,
-                    contents_crc,
+                    entry.crc_state,
+                    entry.stored_crc,
+                    child_contents_crc,
                     entry.time,
                     entry.executable,
                 )?;
@@ -787,7 +778,7 @@ impl PackedGroup {
             let entry_crc = if entry.crc_state == 2 {
                 entry.stored_crc
             } else if entry.is_directory {
-                self.open_child_entry(entry)?.contents_crc()?
+                self.open_child_for_crc(entry)?.contents_crc()?
             } else if entry.size == 0 {
                 0
             } else {
@@ -807,7 +798,7 @@ impl PackedGroup {
             let entry_crc = if entry.crc_state == 2 {
                 entry.stored_crc
             } else if entry.is_directory {
-                self.open_child_entry(entry)?.contents_crc_or_zero()
+                self.open_child_for_crc(entry)?.contents_crc_or_zero()
             } else if entry.size == 0 {
                 0
             } else {
@@ -820,6 +811,18 @@ impl PackedGroup {
             };
             Ok(crc ^ entry_crc)
         })
+    }
+
+    /// Mirrors the `CalcCRC32 -> OpenAsChild` path for one child-marked core.
+    /// Only `*` is rejected; `?` selects the first stored-order match and that
+    /// selection is terminal even when it is an ordinary file.
+    fn open_child_for_crc(&self, entry: &PackedEntry) -> Result<Group, GroupError> {
+        if entry.name_bytes.contains(&b'*') {
+            return Err(GroupError::InvalidGroup(
+                "OpenAsChild: No wildcards allowed".to_string(),
+            ));
+        }
+        self.open_child(&path_component_from_name_bytes(&entry.name_bytes))
     }
 
     fn open_child(&self, relative: &Path) -> Result<Group, GroupError> {
