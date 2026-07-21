@@ -1,6 +1,5 @@
 use crate::{
-    language::component_language_string, ComponentGroups, Group, GroupEntry, GroupError,
-    LanguagePacks,
+    language::component_language_string, ComponentGroups, Group, GroupError, LanguagePacks,
 };
 use image::{load_from_memory, ImageError};
 use serde::Deserialize;
@@ -538,7 +537,8 @@ fn collect_children_from_group(
         // C4StartupScenSelDlg.cpp:973-1014); extension-less subdirectories
         // inside groups are not regarded (:588).
         if is_scenario_filename_bytes(name) {
-            let child_group = open_group_child_entry_exact(group, &entry)
+            let child_group = group
+                .open_child_entry_exact(&entry)
                 .map_err(|err| group_error(&group.root().join(&entry.relative_path), err))?;
             result.push(build_scenario_entry(
                 &child_group,
@@ -548,7 +548,8 @@ fn collect_children_from_group(
                 language_packs,
             )?);
         } else if is_folder_filename_bytes(name) {
-            let child_group = open_group_child_entry_exact(group, &entry)
+            let child_group = group
+                .open_child_entry_exact(&entry)
                 .map_err(|err| group_error(&group.root().join(&entry.relative_path), err))?;
             result.push(build_folder_entry(
                 &child_group,
@@ -1486,32 +1487,6 @@ fn has_extension_bytes(name: &[u8], extension: &[u8]) -> bool {
     name.iter()
         .rposition(|byte| *byte == b'.')
         .is_some_and(|dot| name[dot + 1..].eq_ignore_ascii_case(extension))
-}
-
-fn open_group_child_entry_exact(group: &Group, entry: &GroupEntry) -> Result<Group, GroupError> {
-    if group.is_directory() || !entry.is_directory {
-        return group.open_child(&entry.relative_path);
-    }
-
-    let data = group.read_entry_bytes_exact(entry)?;
-    Group::from_raw_memory(
-        group
-            .root()
-            .join(path_component_from_name_bytes(&entry.name_bytes)),
-        data,
-    )
-}
-
-#[cfg(unix)]
-fn path_component_from_name_bytes(name: &[u8]) -> PathBuf {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    PathBuf::from(std::ffi::OsStr::from_bytes(name))
-}
-
-#[cfg(not(unix))]
-fn path_component_from_name_bytes(name: &[u8]) -> PathBuf {
-    PathBuf::from(lc_script::c4_string_from_bytes(name))
 }
 
 fn sort_entries(entries: &mut [ScenarioEntry]) {

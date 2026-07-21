@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -9893,14 +9894,19 @@ pub fn load_system_scripts_with_components<S: AsRef<str>>(
 ) -> Result<Vec<(String, String)>, ScenarioError> {
     let mut sources = Vec::new();
     for entry in group.entries()? {
-        if entry.is_directory {
+        if !legacy_group_wildcard_match(b"*.c", &entry.name_bytes) {
             continue;
         }
-        let name = entry.relative_path.to_string_lossy().to_string();
-        if !name.to_ascii_lowercase().ends_with(".c") {
-            continue;
-        }
-        let bytes = group.read_file(&entry.relative_path)?;
+        let name = lc_script::c4_string_from_bytes(&entry.name_bytes);
+        let bytes = match group.read_entry_bytes_exact(&entry) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                // C4Game registers the host before C4ScriptHost::Load and
+                // ignores a load failure, so later matching entries remain.
+                sources.push((name, String::new()));
+                continue;
+            }
+        };
         let source = lc_script::c4_string_from_bytes(&bytes);
         let source = localize_script_source_with_components(components, &source, languages)?;
         sources.push((name, source));
@@ -15555,20 +15561,25 @@ fn open_group_relative_case_insensitive(
             }
             return Err(GroupError::EntryNotFound(relative.to_path_buf()));
         };
-        let name = name.to_string_lossy();
+        let name_bytes = legacy_group_path_component_bytes(name);
         let entry = group
             .entries()?
             .into_iter()
-            .find(|entry| {
-                entry
-                    .relative_path
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&name)
-            })
+            .find(|entry| entry.name_bytes.eq_ignore_ascii_case(&name_bytes))
             .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))?;
-        group = group.open_child(&entry.relative_path)?;
+        group = group.open_child_entry_exact(&entry)?;
     }
     Ok(group)
+}
+
+#[cfg(unix)]
+fn legacy_group_path_component_bytes(name: &OsStr) -> Vec<u8> {
+    name.as_encoded_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn legacy_group_path_component_bytes(name: &OsStr) -> Vec<u8> {
+    lc_script::c4_string_bytes(name.to_string_lossy().as_ref())
 }
 
 /// Opens physical groups and virtual paths nested inside packed groups. A
@@ -15640,13 +15651,10 @@ fn folder_local_definition_groups(scenario: &Group) -> Result<Vec<Group>, Scenar
             Err(error) if is_missing_group_error(&error) => continue,
             Err(error) => return Err(ScenarioError::Resources(error)),
         };
-        let has_immediate_definition = group.entries()?.into_iter().any(|entry| {
-            entry
-                .relative_path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("c4d"))
-        });
+        let has_immediate_definition = group
+            .entries()?
+            .into_iter()
+            .any(|entry| legacy_group_wildcard_match(b"*.c4d", &entry.name_bytes));
         if has_immediate_definition {
             groups.push(group);
         }
@@ -15732,13 +15740,12 @@ fn collect_definitions_from_group<S: AsRef<str>>(
 
     // C4DefList::Load recursively visits only *.c4d children.
     for entry in group.entries()? {
-        let name = entry.relative_path.to_string_lossy().to_ascii_lowercase();
-        if !name.ends_with(".c4d") {
+        if !legacy_group_wildcard_match(b"*.c4d", &entry.name_bytes) {
             continue;
         }
         // FindNextEntry("*.c4d") also sees normal files and corrupt packed
         // entries. C4Group::OpenAsChild failure simply skips that candidate.
-        let Ok(child) = group.open_child(&entry.relative_path) else {
+        let Ok(child) = group.open_child_entry_exact(&entry) else {
             continue;
         };
         // The recursive call omits fLoadSysGroups in C++, so its default true
@@ -22233,6 +22240,113 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn system_script_enumeration_preserves_non_utf8_group_entry_name_bytes() {
+        const NATIVE_SCRIPT_NAME: &[u8] = b"Gr\xfcn.C";
+
+        let mut packed = lc_resources::MutableGroup::new("native-order.bin");
+        for (name, source) in [
+            (b"Zulu.c".as_slice(), b"// zulu\n".as_slice()),
+            (b"Ignore.txt".as_slice(), b"not a script\n".as_slice()),
+            (NATIVE_SCRIPT_NAME, b"// native\n".as_slice()),
+        ] {
+            packed
+                .add_file_bytes_with_metadata(name.to_vec(), source.to_vec(), 1, false)
+                .expect("add native-order System entry");
+        }
+        packed
+            .add_packed_child_bytes_with_metadata(
+                b"Child.c".to_vec(),
+                b"// child-marked\n".to_vec(),
+                0,
+                1,
+                false,
+            )
+            .expect("add child-marked System entry");
+        packed
+            .add_file_bytes_with_metadata(
+                b"Alpha.c".to_vec(),
+                b"// alpha\n".to_vec(),
+                1,
+                false,
+            )
+            .expect("add final native-order System entry");
+        let group = Group::from_raw_memory(
+            PathBuf::from("System.c4g"),
+            packed.pack_raw().expect("pack native-order System group"),
+        )
+        .expect("open native-order System group");
+        let entries = group.entries().expect("enumerate native-order scripts");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name_bytes.as_slice())
+                .collect::<Vec<_>>(),
+            [
+                b"Zulu.c".as_slice(),
+                b"Ignore.txt".as_slice(),
+                NATIVE_SCRIPT_NAME,
+                b"Child.c".as_slice(),
+                b"Alpha.c".as_slice(),
+            ]
+        );
+        assert_ne!(
+            entries[2].relative_path.as_os_str().as_encoded_bytes(),
+            NATIVE_SCRIPT_NAME,
+            "the fixture must lose identity when projected through its display path"
+        );
+
+        let scripts = load_system_scripts(&group).expect("load exact native-byte scripts");
+        assert_eq!(
+            scripts
+                .iter()
+                .map(|(name, _)| lc_script::c4_string_bytes(name))
+                .collect::<Vec<_>>(),
+            [
+                b"Zulu.c".to_vec(),
+                NATIVE_SCRIPT_NAME.to_vec(),
+                b"Child.c".to_vec(),
+                b"Alpha.c".to_vec(),
+            ]
+        );
+        assert_eq!(
+            scripts
+                .iter()
+                .map(|(_, source)| source.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "// zulu\n",
+                "// native\n",
+                "// child-marked\n",
+                "// alpha\n",
+            ]
+        );
+    }
+
+    #[test]
+    fn system_script_enumeration_keeps_failed_host_and_continues() {
+        let directory = tempdir().expect("System directory");
+        std::fs::create_dir(directory.path().join("Bad.c")).expect("child-marked script directory");
+        std::fs::write(directory.path().join("Good.c"), "// good\n").expect("write later script");
+        let group = Group::open(directory.path()).expect("open System directory");
+
+        let scripts = load_system_scripts(&group).expect("failed script load is nonfatal");
+        assert_eq!(
+            scripts
+                .iter()
+                .find(|(name, _)| name == "Bad.c")
+                .map(|(_, source)| source.as_str()),
+            Some("")
+        );
+        assert_eq!(
+            scripts
+                .iter()
+                .find(|(name, _)| name == "Good.c")
+                .map(|(_, source)| source.as_str()),
+            Some("// good\n")
+        );
+    }
+
+    #[test]
     fn system_script_string_table_keeps_candidate_major_pack_priority() {
         let dir = tempdir().expect("tempdir");
         let install = dir.path().join("install");
@@ -25664,6 +25778,76 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn child_definition_enumeration_preserves_lossy_colliding_native_names_in_group_order() {
+        const U_CHILD_NAME: &[u8] = b"Gr\xfcn.C4D";
+        const O_CHILD_NAME: &[u8] = b"Gr\xf6n.C4D";
+
+        let graphics = encode_indexed_bmp(&[&[0x83]]);
+        let definition = |id: &str| {
+            let mut child = lc_resources::MutableGroup::new("definition.bin");
+            child
+                .add_file(
+                    "DefCore.txt",
+                    format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n").into_bytes(),
+                )
+                .expect("add child DefCore");
+            child
+                .add_file("Script.c", format!("// {id}\n").into_bytes())
+                .expect("add child script");
+            child
+                .add_file("Graphics.bmp", graphics.clone())
+                .expect("add child graphics");
+            child
+        };
+
+        // A .bin writer has no stock C4Group sort list, so this deliberately
+        // non-lexical insertion order is the stored native order under test.
+        let mut packed = lc_resources::MutableGroup::new("native-order.bin");
+        packed
+            .add_child_bytes_with_metadata(U_CHILD_NAME.to_vec(), definition("UDEF"), 1, false)
+            .expect("add U child definition");
+        packed
+            .add_child_bytes_with_metadata(O_CHILD_NAME.to_vec(), definition("ODEF"), 1, false)
+            .expect("add O child definition");
+        let group = Group::from_raw_memory(
+            PathBuf::from("Definitions.c4d"),
+            packed.pack_raw().expect("pack colliding child definitions"),
+        )
+        .expect("open colliding child definitions");
+        let entries = group.entries().expect("enumerate child definitions");
+        assert_eq!(entries[0].name_bytes, U_CHILD_NAME);
+        assert_eq!(entries[1].name_bytes, O_CHILD_NAME);
+        assert_ne!(entries[0].name_bytes, entries[1].name_bytes);
+        assert_eq!(
+            entries[0].relative_path, entries[1].relative_path,
+            "both legacy names must collide under lossy UTF-8 projection"
+        );
+
+        let mut collected = Vec::new();
+        collect_definitions_from_group(
+            &group,
+            false,
+            &HashSet::new(),
+            &["US"],
+            &LanguagePacks::default(),
+            &group,
+            None,
+            &mut collected,
+        )
+        .expect("collect exact colliding child definitions");
+        assert_eq!(
+            collected
+                .iter()
+                .filter_map(|item| match item {
+                    CollectedDefinition::Definition(definition) => Some(definition.id.as_str()),
+                    CollectedDefinition::SystemScripts(_) => None,
+                })
+                .collect::<Vec<_>>(),
+            ["UDEF", "ODEF"]
+        );
+    }
+
+    #[test]
     fn scenario_local_definition_children_load_and_override_packs() {
         // C++ loads the scenario group itself as the LAST definition source
         // with fOverload (C4Game::InitDefs): any .c4d child of the .c4s is
@@ -25850,6 +26034,47 @@ public func ActualizePhase(pClonk)
                 .game_parameter_resolution(),
             ScenarioGameParameterResolution::RequiresRuntimeConfiguration
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn packed_group_path_reopens_native_byte_child_exactly() {
+        const CHILD_NAME: &[u8] = b"Gr\xfcn.c4f";
+
+        let mut child = lc_resources::MutableGroup::new("native-child.bin");
+        child
+            .add_file("marker.txt", b"exact child".to_vec())
+            .expect("add exact child marker");
+        let mut outer = lc_resources::MutableGroup::new("Outer.c4f");
+        outer
+            .add_child_bytes_with_metadata(CHILD_NAME.to_vec(), child, 1, false)
+            .expect("add native-byte child");
+
+        let directory = tempdir().expect("packed parent directory");
+        let outer_path = directory.path().join("Outer.c4f");
+        std::fs::write(&outer_path, outer.pack().expect("pack native-byte parent"))
+            .expect("write native-byte parent");
+        let outer = Group::open(&outer_path).expect("open native-byte parent");
+        let entry = outer
+            .entries()
+            .expect("enumerate native-byte parent")
+            .into_iter()
+            .find(|entry| entry.name_bytes == CHILD_NAME)
+            .expect("native-byte child entry");
+        let child = outer
+            .open_child_entry_exact(&entry)
+            .expect("open native-byte child exactly");
+        assert_eq!(
+            child
+                .root()
+                .file_name()
+                .expect("child path has a filename")
+                .as_encoded_bytes(),
+            CHILD_NAME
+        );
+
+        let reopened = open_group_path(child.root()).expect("reopen retained native-byte path");
+        assert_eq!(reopened.read_file("marker.txt").unwrap(), b"exact child");
     }
 
     #[test]

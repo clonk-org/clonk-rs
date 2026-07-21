@@ -312,6 +312,27 @@ impl Group {
         Ok(child)
     }
 
+    /// Opens the concrete child returned by [`Self::entries`] without
+    /// round-tripping its legacy byte-string name through UTF-8.
+    pub fn open_child_entry_exact(&self, entry: &GroupEntry) -> Result<Self, GroupError> {
+        if entry.name_bytes.contains(&b'*') {
+            return Err(GroupError::InvalidGroup(
+                "OpenAsChild: No wildcards allowed".to_string(),
+            ));
+        }
+        match &self.kind {
+            GroupKind::Directory(root) => {
+                let path = root.join(&entry.relative_path);
+                if path.is_dir() {
+                    Self::open(path)
+                } else {
+                    Self::from_child_bytes(path.clone(), fs::read(path)?)
+                }
+            }
+            GroupKind::Packed(packed) => packed.open_child_by_name(&entry.name_bytes),
+        }
+    }
+
     fn open_direct_child(&self, relative: &Path) -> Result<Self, GroupError> {
         match &self.kind {
             GroupKind::Directory(root) => {
@@ -347,7 +368,9 @@ impl Group {
             let child = match &self.kind {
                 GroupKind::Directory(_) => self.open_child(&entry.relative_path)?,
                 GroupKind::Packed(packed) => Group::from_raw_memory(
-                    packed.path.join(&entry.relative_path),
+                    packed
+                        .path
+                        .join(path_component_from_name_bytes(&entry.name_bytes)),
                     physical_data.to_vec(),
                 )?,
             };
@@ -808,6 +831,15 @@ impl PackedGroup {
         Group::from_raw_memory(self.path.join(relative), data)
     }
 
+    fn open_child_by_name(&self, name: &[u8]) -> Result<Group, GroupError> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.name_bytes == name)
+            .ok_or_else(|| GroupError::EntryNotFound(path_component_from_name_bytes(name)))?;
+        self.open_child_entry(entry)
+    }
+
     fn open_child_entry(&self, entry: &PackedEntry) -> Result<Group, GroupError> {
         if !entry.is_directory {
             return Err(GroupError::InvalidGroup(format!(
@@ -816,7 +848,11 @@ impl PackedGroup {
             )));
         }
         let data = self.read_entry_bytes(entry)?;
-        Group::from_raw_memory(self.path.join(&entry.relative_path), data)
+        Group::from_raw_memory(
+            self.path
+                .join(path_component_from_name_bytes(&entry.name_bytes)),
+            data,
+        )
     }
 }
 
@@ -1069,6 +1105,18 @@ fn child_group_entry_filename_bytes(name: &[u8]) -> &[u8] {
         *byte == b'/' || (cfg!(windows) && *byte == b'\\')
     });
     separator.map_or(name, |index| &name[index + 1..])
+}
+
+#[cfg(unix)]
+fn path_component_from_name_bytes(name: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    PathBuf::from(std::ffi::OsStr::from_bytes(name))
+}
+
+#[cfg(not(unix))]
+fn path_component_from_name_bytes(name: &[u8]) -> PathBuf {
+    PathBuf::from(lc_script::c4_string_from_bytes(name))
 }
 
 fn crc32(initial: u32, data: &[u8]) -> u32 {
@@ -1714,6 +1762,45 @@ mod tests {
     }
 
     #[test]
+    fn packed_exact_child_open_preserves_distinct_legacy_name_bytes() {
+        let u_child = packed_group_image_with_entry("marker.txt", false, b"u-child");
+        let o_child = packed_group_image_with_entry("marker.txt", false, b"o-child");
+        let image = packed_group_image_with_byte_entries(&[
+            (b"Gr\xfcn.c4d", true, &u_child),
+            (b"Gr\xf6n.C4D", true, &o_child),
+            (b"Gr\xe4n.c4d", false, &u_child),
+        ]);
+        let root_path = PathBuf::from("legacy-children.c4g");
+        let group = Group::from_memory(root_path.clone(), image).expect("valid packed group");
+        let entries = group.entries().expect("enumerate exact child entries");
+
+        let u_child = group
+            .open_child_entry_exact(&entries[0])
+            .expect("first exact legacy child opens");
+        let o_child = group
+            .open_child_entry_exact(&entries[1])
+            .expect("second exact legacy child opens");
+        assert_eq!(u_child.read_file("marker.txt").unwrap(), b"u-child");
+        assert_eq!(o_child.read_file("marker.txt").unwrap(), b"o-child");
+        assert_eq!(
+            u_child.root(),
+            root_path.join(path_component_from_name_bytes(b"Gr\xfcn.c4d"))
+        );
+        assert_eq!(
+            o_child.root(),
+            root_path.join(path_component_from_name_bytes(b"Gr\xf6n.C4D"))
+        );
+
+        let error = group
+            .open_child_entry_exact(&entries[2])
+            .expect_err("a concrete plain entry must not open as a child");
+        assert!(matches!(
+            error,
+            GroupError::InvalidGroup(message) if message.contains("not a child group")
+        ));
+    }
+
+    #[test]
     fn packed_duplicate_entry_replaces_earlier_case_insensitive_name() {
         // C4Group::AddEntry marks an existing same-name entry deleted before
         // appending the replacement (src/C4Group.cpp:849-891). GetEntry uses
@@ -1873,6 +1960,31 @@ mod tests {
                     if message == "OpenAsChild: No wildcards allowed"
             ));
         }
+    }
+
+    #[test]
+    fn exact_child_open_rejects_asterisk_in_enumerated_name() {
+        let child = packed_group_image();
+        let nested = packed_group_image_with_entry("Wild*.c4d", true, &child);
+        let outer = packed_group_image_with_entry("Nested.c4f", true, &nested);
+        let root = Group::from_memory(PathBuf::from("outer.c4f"), outer)
+            .expect("valid packed outer group");
+        let nested = root.open_child("Nested.c4f").expect("nested mother opens");
+        let entry = nested
+            .entries()
+            .expect("enumerate nested mother")
+            .into_iter()
+            .next()
+            .expect("wildcard child entry");
+        assert_eq!(entry.name_bytes, b"Wild*.c4d");
+
+        let error = nested
+            .open_child_entry_exact(&entry)
+            .expect_err("OpenAsChild rejects an asterisk even after enumeration");
+        assert!(matches!(
+            error,
+            GroupError::InvalidGroup(message) if message == "OpenAsChild: No wildcards allowed"
+        ));
     }
 
     #[test]
