@@ -44009,12 +44009,9 @@ impl Engine {
         fn inner(
             engine: &Engine,
             index: usize,
-            depth: usize,
+            is_root: bool,
             visiting: &mut HashSet<ObjectId>,
         ) -> i32 {
-            if depth > 8 {
-                return 1;
-            }
             let object = &engine.objects[index];
             if let Some(mass) = engine.valid_compiled_object_mass(index) {
                 return mass;
@@ -44037,8 +44034,8 @@ impl Engine {
             if !no_component_mass {
                 for content in &object.state.contents {
                     if let Some(content_idx) = engine.find_object_index(*content) {
-                        let m = inner(engine, content_idx, depth + 1, visiting);
-                        if depth == 0
+                        let m = inner(engine, content_idx, false, visiting);
+                        if is_root
                             && object.state.contents.len() > 20
                             && std::env::var("LC_MASSDBG").is_ok()
                         {
@@ -44055,7 +44052,7 @@ impl Engine {
             visiting.remove(&object.id);
             mass
         }
-        inner(self, index, 0, &mut HashSet::new())
+        inner(self, index, true, &mut HashSet::new())
     }
 
     fn push_object(
@@ -60739,6 +60736,97 @@ mod legacy_contents_order_regression {
             .expect("percent-crossing DoCon succeeds");
         let expected = (100 * engine.objects[index].state.construction / FULL_CON).max(1);
         assert_eq!(engine.effective_object_mass(index), expected);
+    }
+
+    #[test]
+    fn effective_object_mass_has_no_nesting_depth_cutoff() {
+        let mut engine = Engine::new();
+        let mut mass = Definition::from_script(
+            "MASS",
+            "Mass",
+            "#strict\npublic func TryEnter(target) { return Enter(target); }\n",
+        )
+        .expect("mass definition compiles");
+        mass.set_mass(10);
+        engine
+            .register_definition(mass)
+            .expect("mass definition registers");
+
+        let mut no_component =
+            Definition::from_script("NCMP", "No component mass", "")
+                .expect("NoComponentMass definition compiles");
+        no_component.set_mass(7);
+        no_component.set_no_component_mass(true);
+        engine
+            .register_definition(no_component)
+            .expect("NoComponentMass definition registers");
+
+        let mut hidden = Definition::from_script("HEAV", "Hidden cargo", "")
+            .expect("hidden-cargo definition compiles");
+        hidden.set_mass(1_000);
+        engine
+            .register_definition(hidden)
+            .expect("hidden-cargo definition registers");
+
+        let root = engine
+            .spawn_object(SpawnConfig::new("MASS"))
+            .expect("root object spawns");
+        let mut chain = vec![root];
+        let mut expected_mass = 10;
+        for depth in 1..=12 {
+            let construction = if depth == 5 {
+                FULL_CON / 2
+            } else {
+                FULL_CON
+            };
+            let mut config = SpawnConfig::new("MASS")
+                .with_container(*chain.last().expect("chain has a parent"))
+                .with_construction(construction);
+            config.own_mass = Some(depth);
+            let child = engine
+                .spawn_object(config)
+                .expect("nested object spawns");
+            chain.push(child);
+            expected_mass += ((10 + depth) * construction / FULL_CON).max(1);
+        }
+
+        let no_component = engine
+            .spawn_object(SpawnConfig::new("NCMP").with_container(root))
+            .expect("NoComponentMass object spawns");
+        engine
+            .spawn_object(SpawnConfig::new("HEAV").with_container(no_component))
+            .expect("hidden nested cargo spawns");
+        expected_mass += 7;
+
+        let no_component_index = engine
+            .find_object_index(no_component)
+            .expect("NoComponentMass object exists");
+        assert_eq!(engine.effective_object_mass(no_component_index), 7);
+        let root_index = engine.find_object_index(root).expect("root object exists");
+        assert_eq!(engine.effective_object_mass(root_index), expected_mass);
+
+        let deepest = *chain.last().expect("chain has a deepest object");
+        let root_before = engine.object_snapshot(root).expect("root snapshot exists");
+        let deepest_before = engine
+            .object_snapshot(deepest)
+            .expect("deepest snapshot exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    root_index,
+                    "TryEnter",
+                    vec![Value::Object(deepest.as_u64())],
+                )
+                .expect("cycle attempt returns normally"),
+            Value::Bool(false)
+        );
+        let root_after = engine.object_snapshot(root).expect("root remains");
+        let deepest_after = engine.object_snapshot(deepest).expect("deepest remains");
+        assert_eq!(root_after.container, root_before.container);
+        assert_eq!(root_after.contents, root_before.contents);
+        assert_eq!(deepest_after.container, deepest_before.container);
+        assert_eq!(deepest_after.contents, deepest_before.contents);
+        assert_eq!(engine.effective_object_mass(root_index), expected_mass);
     }
 
     #[test]

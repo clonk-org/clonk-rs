@@ -2513,7 +2513,7 @@ fn serialize_persisted_objects(
         if engine.is_user_player_object_snapshot(snapshot) {
             continue;
         }
-        let mass = section_object_mass(engine, &objects, index, 0);
+        let mass = section_object_mass(engine, &objects, index, &mut HashSet::new());
         serialize_object(&mut writer, engine, object, mass, strings);
     }
     writer.finish()
@@ -2649,7 +2649,7 @@ fn serialize_initial_section_objects(
         .collect::<Vec<_>>();
     let mut writer = TextComponentWriter::default();
     for (index, object) in objects.iter().enumerate().rev() {
-        let mass = section_object_mass(engine, &objects, index, 0);
+        let mass = section_object_mass(engine, &objects, index, &mut HashSet::new());
         serialize_object(&mut writer, engine, object, mass, strings);
     }
     writer.finish()
@@ -2791,13 +2791,18 @@ fn section_spawn_object(
     Some(object)
 }
 
-fn section_object_mass(engine: &Engine, objects: &[Object], index: usize, depth: usize) -> i32 {
-    if depth > 8 {
-        return 1;
-    }
+fn section_object_mass(
+    engine: &Engine,
+    objects: &[Object],
+    index: usize,
+    visiting: &mut HashSet<ObjectId>,
+) -> i32 {
     let object = &objects[index];
     if let Some(mass) = object.compiled_mass {
         return mass;
+    }
+    if !visiting.insert(object.id) {
+        return 1;
     }
     let (definition_mass, no_component_mass) = engine
         .definitions
@@ -2811,10 +2816,11 @@ fn section_object_mass(engine: &Engine, objects: &[Object], index: usize, depth:
     if !no_component_mass {
         for content in &object.state.contents {
             if let Some(content_index) = objects.iter().position(|object| object.id == *content) {
-                mass += section_object_mass(engine, objects, content_index, depth + 1);
+                mass += section_object_mass(engine, objects, content_index, visiting);
             }
         }
     }
+    visiting.remove(&object.id);
     mass
 }
 
@@ -4785,6 +4791,42 @@ mod tests {
         assert!(bytes
             .windows(b"Mass=777\r\n".len())
             .any(|window| window == b"Mass=777\r\n"));
+    }
+
+    #[test]
+    fn section_object_mass_has_no_nesting_depth_cutoff() {
+        let mut definition =
+            crate::Definition::from_script("MASS", "Mass", "").expect("definition compiles");
+        definition.set_mass(10);
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let root = engine
+            .spawn_object(crate::SpawnConfig::new("MASS"))
+            .expect("root object spawns");
+        let mut parent = root;
+        for _ in 1..12 {
+            parent = engine
+                .spawn_object(crate::SpawnConfig::new("MASS").with_container(parent))
+                .expect("nested object spawns");
+        }
+
+        let state = engine.capture_state();
+        let objects = state
+            .objects
+            .iter()
+            .filter_map(|object| restored_section_object(&engine, object))
+            .collect::<Vec<_>>();
+        let root_index = objects
+            .iter()
+            .position(|object| object.id == root)
+            .expect("root is restored for section serialization");
+        assert_eq!(
+            section_object_mass(&engine, &objects, root_index, &mut HashSet::new()),
+            120
+        );
     }
 
     #[test]
