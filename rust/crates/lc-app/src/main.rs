@@ -115,6 +115,7 @@ use lc_engine::{
     MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL, MESSAGE_TYPE_PRIVATE,
     MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM, MESSAGE_TYPE_TEAM,
 };
+use lc_frontend::clonk_fonts::expand_hotkey_markup;
 use lc_frontend::context_menu::{
     ClassicContextMenu, ClassicTooltipTracker, ContextMenuDirection, ContextMenuEntry,
     ContextMenuEvent, ContextMenuIcon, ContextMenuOutcome, ContextMenuPointerButton,
@@ -18126,6 +18127,7 @@ enum LobbyPointerRegion {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LobbyButton {
+    Exit,
     Ready,
     Start,
     Preload,
@@ -18136,6 +18138,7 @@ enum LobbyButton {
 
 #[derive(Clone, Debug)]
 struct NetworkLobbyLayout {
+    exit_button: GuiRect,
     ready_button: GuiRect,
     start_button: Option<GuiRect>,
     preload_button: Option<GuiRect>,
@@ -18197,6 +18200,7 @@ impl NetworkLobbyLayout {
             })
             .unwrap_or_default();
         Self {
+            exit_button: as_gui_rect(layout.exit_button),
             ready_button: as_gui_rect(layout.ready_checkbox),
             start_button: layout.run_button.map(as_gui_rect),
             preload_button: layout.preload_button.map(as_gui_rect),
@@ -18244,6 +18248,7 @@ struct NetworkLobbyState {
     selected_title: Option<String>,
     hover_button: Option<LobbyButton>,
     pressed_button: Option<LobbyButton>,
+    sound_events: Vec<LobbySound>,
     /// Raw C++ countdown timer. `None` is the distinguished abort packet;
     /// `Some(0)` is the final start transition.
     countdown: Option<i32>,
@@ -18253,6 +18258,7 @@ struct NetworkLobbyState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LobbyAction {
+    ExitRequested,
     ToggleReady,
     StartGame,
     Preload,
@@ -18261,6 +18267,12 @@ enum LobbyAction {
     OpenExternalIrcChat,
     SubmitMessage(String),
     ChatEdited,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum NetworkLobbyContextRequest {
+    Tabs { position: GuiPoint },
+    Roster { row: LobbyRosterId, position: GuiPoint },
 }
 
 const DEFAULT_LOBBY_COUNTDOWN_SECONDS: i32 = 5;
@@ -18520,6 +18532,7 @@ impl NetworkLobbyState {
             selected_title: None,
             hover_button: None,
             pressed_button: None,
+            sound_events: Vec::new(),
             countdown: None,
             layout: None,
             pointer: None,
@@ -18606,11 +18619,21 @@ impl NetworkLobbyState {
 
     fn handle_panel_pointer_move(&mut self, point: GuiPoint) {
         self.pointer = Some(point);
-        self.hover_button = self.hit_test_button(point);
+        let hovered = self.hit_test_button(point);
+        if self.pressed_button == Some(LobbyButton::Exit)
+            && (self.hover_button == Some(LobbyButton::Exit))
+                != (hovered == Some(LobbyButton::Exit))
+        {
+            self.sound_events.push(LobbySound::ArrowHit);
+        }
+        self.hover_button = hovered;
     }
 
     fn handle_panel_pointer_down(&mut self, point: GuiPoint) {
         self.pressed_button = self.hit_test_button(point);
+        if self.pressed_button == Some(LobbyButton::Exit) {
+            self.sound_events.push(LobbySound::ArrowHit);
+        }
     }
 
     fn handle_panel_pointer_up(&mut self, point: GuiPoint) -> Option<LobbyAction> {
@@ -18618,6 +18641,10 @@ impl NetworkLobbyState {
         let hit = self.hit_test_button(point);
         if pressed.is_some() && hit == pressed {
             match hit {
+                Some(LobbyButton::Exit) => {
+                    self.sound_events.push(LobbySound::Click);
+                    Some(LobbyAction::ExitRequested)
+                }
                 Some(LobbyButton::Ready) => Some(LobbyAction::ToggleReady),
                 Some(LobbyButton::Start) => Some(LobbyAction::StartGame),
                 Some(LobbyButton::Preload) => Some(LobbyAction::Preload),
@@ -18637,6 +18664,14 @@ impl NetworkLobbyState {
         self.hover_button = None;
         self.pressed_button = None;
         self.pointer = None;
+    }
+
+    fn take_sound_events(&mut self) -> Vec<LobbySound> {
+        std::mem::take(&mut self.sound_events)
+    }
+
+    fn exit_hotkey(&self) -> Option<char> {
+        expand_hotkey_markup(&self.labels.exit).1
     }
 
     fn register_peer(&mut self, client_id: ClientId, name: String, kind: ParticipantKind) {
@@ -18873,13 +18908,13 @@ impl NetworkLobbyState {
         Ok((controller, options))
     }
 
-    fn roster_context_request_at(
+    fn context_request_at(
         &mut self,
         point: GuiPoint,
         surface: &Surface,
         assets: &FrontendAssets,
         scenario_game_options: &GameOptionButtons,
-    ) -> Result<Option<(LobbyRosterId, GuiPoint)>> {
+    ) -> Result<Option<NetworkLobbyContextRequest>> {
         let fonts = assets
             .clonk_fonts
             .as_deref()
@@ -18892,8 +18927,11 @@ impl NetworkLobbyState {
             .pointer_secondary_down(point, &layout, &roster)
             .into_iter()
             .find_map(|action| match action {
+                ClassicLobbyAction::TabContextRequested { position } => {
+                    Some(NetworkLobbyContextRequest::Tabs { position })
+                }
                 ClassicLobbyAction::RosterContextRequested { row, position } => {
-                    Some((row, position))
+                    Some(NetworkLobbyContextRequest::Roster { row, position })
                 }
                 _ => None,
             }))
@@ -19026,6 +19064,7 @@ impl NetworkLobbyState {
             return None;
         }
         match key {
+            KeyCode::Escape => Some(LobbyAction::ExitRequested),
             KeyCode::Enter => Some(LobbyAction::SubmitMessage(self.take_chat_submission())),
             KeyCode::Up => {
                 // The app routes history so lobby and running dialogs share
@@ -19062,6 +19101,9 @@ impl NetworkLobbyState {
 
     fn hit_test_button(&self, point: GuiPoint) -> Option<LobbyButton> {
         let layout = self.layout.as_ref()?;
+        if point_in_rect(point, &layout.exit_button) {
+            return Some(LobbyButton::Exit);
+        }
         if point_in_rect(point, &layout.roster_client) {
             if let Some((resource_id, _)) = layout
                 .resource_save_buttons
@@ -38962,6 +39004,9 @@ impl GameApp {
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_key(key, state);
         }
+        if self.handle_joined_lobby_hotkey(key, state)? {
+            return Ok(());
+        }
         if self.mode == AppMode::Menu
             && self.startup_view == StartupView::NetworkLobby
             && self.network_lobby.is_some()
@@ -49631,6 +49676,7 @@ impl GameApp {
                                 }),
                                 LobbyPointerRegion::Panel => {
                                     lobby.handle_panel_pointer_move(point);
+                                    self.play_network_lobby_sounds();
                                     self.menu_state.set_pointer_position(None);
                                     Ok(())
                                 }
@@ -54937,6 +54983,7 @@ impl GameApp {
                                             LobbyPointerRegion::Panel
                                         ) {
                                             lobby.handle_panel_pointer_down(point);
+                                            self.play_network_lobby_sounds();
                                             return Ok(());
                                         }
                                     }
@@ -54953,9 +55000,9 @@ impl GameApp {
                                             lobby.pointer_region(point),
                                             LobbyPointerRegion::Panel
                                         ) {
-                                            if let Some(action) =
-                                                lobby.handle_panel_pointer_up(point)
-                                            {
+                                            let action = lobby.handle_panel_pointer_up(point);
+                                            self.play_network_lobby_sounds();
+                                            if let Some(action) = action {
                                                 self.process_lobby_action(action)?;
                                             }
                                             return Ok(());
@@ -55954,6 +56001,7 @@ impl GameApp {
                             LobbyPointerRegion::Panel => {
                                 lobby.handle_panel_pointer_move(position);
                                 lobby.handle_panel_pointer_down(position);
+                                self.play_network_lobby_sounds();
                                 self.menu_state.set_pointer_position(None);
                                 Ok(())
                             }
@@ -55965,6 +56013,7 @@ impl GameApp {
                             }),
                             LobbyPointerRegion::Panel => {
                                 lobby.handle_panel_pointer_move(position);
+                                self.play_network_lobby_sounds();
                                 self.menu_state.set_pointer_position(None);
                                 Ok(())
                             }
@@ -55980,7 +56029,9 @@ impl GameApp {
                             }
                             LobbyPointerRegion::Panel => {
                                 lobby.handle_panel_pointer_move(position);
-                                if let Some(action) = lobby.handle_panel_pointer_up(position) {
+                                let action = lobby.handle_panel_pointer_up(position);
+                                self.play_network_lobby_sounds();
+                                if let Some(action) = action {
                                     self.process_lobby_action(action)?;
                                 }
                                 self.pointer_left_unchecked();
@@ -61225,6 +61276,12 @@ impl GameApp {
         changed
     }
 
+    fn exit_startup_lobby_to_main(&mut self) {
+        self.restart_restore_roster_items.clear();
+        self.show_main_menu();
+        self.resume_startup_music_after_failed_open_game();
+    }
+
     fn select_classic_lobby_sheet(&mut self, sheet: LobbySheet) -> bool {
         let has_teams = self
             .network_team_assignment
@@ -61265,11 +61322,10 @@ impl GameApp {
         true
     }
 
-    fn open_classic_lobby_tab_context(&mut self, position: GuiPoint) -> Result<bool, EngineError> {
-        let has_teams = self
-            .network_team_assignment
-            .as_ref()
-            .is_some_and(|assignment| assignment.teams().active);
+    fn lobby_tab_context_entries(
+        has_teams: bool,
+        options_available: bool,
+    ) -> Vec<ContextMenuEntry<AppContextMenuCommand>> {
         let mut entries = vec![
             ContextMenuEntry::new("Players")
                 .with_icon(ContextMenuIcon::Phase(9))
@@ -61282,15 +61338,41 @@ impl GameApp {
                     .with_action(AppContextMenuCommand::LobbySheet(LobbySheet::Teams)),
             );
         }
-        entries.extend([
+        entries.push(
             ContextMenuEntry::new("Resources")
                 .with_icon(ContextMenuIcon::Phase(10))
                 .with_action(AppContextMenuCommand::LobbySheet(LobbySheet::Resources)),
-            ContextMenuEntry::new("Options")
-                .with_icon(ContextMenuIcon::Phase(14))
-                .with_action(AppContextMenuCommand::LobbySheet(LobbySheet::Options)),
-        ]);
-        self.open_context_menu_at(entries, position)
+        );
+        if options_available {
+            entries.push(
+                ContextMenuEntry::new("Options")
+                    .with_icon(ContextMenuIcon::Phase(14))
+                    .with_action(AppContextMenuCommand::LobbySheet(LobbySheet::Options)),
+            );
+        }
+        entries
+    }
+
+    fn open_lobby_tab_context(&mut self, position: GuiPoint) -> Result<bool, EngineError> {
+        let (has_teams, options_available) = if self.classic_host_lobby_active() {
+            (
+                self.network_team_assignment
+                    .as_ref()
+                    .is_some_and(|assignment| assignment.teams().active),
+                true,
+            )
+        } else if let Some(lobby) = self.network_lobby.as_ref() {
+            // C++ always offers Options. Until the joined read-only Options
+            // sheet is available, expose only actions this adapter can
+            // dispatch instead of opening a typed child boundary.
+            (lobby.has_teams, false)
+        } else {
+            return Ok(false);
+        };
+        self.open_context_menu_at(
+            Self::lobby_tab_context_entries(has_teams, options_available),
+            position,
+        )
     }
 
     fn classic_lobby_player_is_owned(&self, client_id: i32) -> bool {
@@ -63070,10 +63152,14 @@ impl GameApp {
                         self.kick_classic_lobby_client(client_id);
                     }
                     AppContextMenuCommand::LobbySheet(sheet) => {
-                        if !self.select_classic_lobby_sheet(sheet) {
-                            return Err(classic_game_lobby_child_error(
-                                ClassicGameLobbyChild::Sheet(sheet),
-                            ));
+                        if self.classic_host_lobby_active() {
+                            if !self.select_classic_lobby_sheet(sheet) {
+                                return Err(classic_game_lobby_child_error(
+                                    ClassicGameLobbyChild::Sheet(sheet),
+                                ));
+                            }
+                        } else {
+                            self.process_lobby_action(LobbyAction::SelectSheet(sheet))?;
                         }
                     }
                     AppContextMenuCommand::NetworkJoinEdit(command) => {
@@ -66598,6 +66684,38 @@ impl GameApp {
         result.map(|_| ())
     }
 
+    fn handle_joined_lobby_hotkey(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::NetworkLobby
+            || self.network_lobby.is_none()
+        {
+            return Ok(false);
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if modifiers != ModifiersState::ALT
+            && modifiers != (ModifiersState::ALT | ModifiersState::SHIFT)
+        {
+            return Ok(false);
+        }
+        let hotkey = startup_dialog_hotkey(key);
+        let exit_hotkey = self
+            .network_lobby
+            .as_ref()
+            .and_then(NetworkLobbyState::exit_hotkey);
+        if hotkey.is_none() || hotkey != exit_hotkey {
+            return Ok(false);
+        }
+        if state == ElementState::Pressed {
+            self.process_lobby_action(LobbyAction::ExitRequested)?;
+        }
+        Ok(true)
+    }
+
     fn handle_network_lobby_chat_key(
         &mut self,
         key: VirtualKeyCode,
@@ -66706,6 +66824,10 @@ impl GameApp {
 
     fn process_lobby_action(&mut self, action: LobbyAction) -> Result<(), EngineError> {
         match action {
+            LobbyAction::ExitRequested => {
+                self.exit_startup_lobby_to_main();
+                return Ok(());
+            }
             LobbyAction::ToggleReady => {
                 if !self.admission_resources.lobby_ready_available() {
                     return Ok(());
@@ -66846,12 +66968,7 @@ impl GameApp {
         Ok((layout, roster))
     }
 
-    fn play_classic_lobby_sounds(&mut self) {
-        let sounds = self
-            .classic_host_lobby
-            .as_mut()
-            .map(|state| state.controller.take_sounds())
-            .unwrap_or_default();
+    fn play_lobby_sound_events(&mut self, sounds: Vec<LobbySound>) {
         for sound in sounds {
             match sound {
                 LobbySound::StartElevatorLoop => {
@@ -66873,6 +66990,24 @@ impl GameApp {
                 LobbySound::Blast3 => self.play_global_sound_effect("Blast3"),
             }
         }
+    }
+
+    fn play_network_lobby_sounds(&mut self) {
+        let sounds = self
+            .network_lobby
+            .as_mut()
+            .map(NetworkLobbyState::take_sound_events)
+            .unwrap_or_default();
+        self.play_lobby_sound_events(sounds);
+    }
+
+    fn play_classic_lobby_sounds(&mut self) {
+        let sounds = self
+            .classic_host_lobby
+            .as_mut()
+            .map(|state| state.controller.take_sounds())
+            .unwrap_or_default();
+        self.play_lobby_sound_events(sounds);
         let option_sounds = self.scenario_game_options.take_sound_events();
         self.play_game_option_sound_events(option_sounds);
     }
@@ -67091,9 +67226,7 @@ impl GameApp {
                     // the lobby still exists so pointer/key activation keeps
                     // that ordering; Escape and Alt+X enqueue no click.
                     self.play_classic_lobby_sounds();
-                    self.restart_restore_roster_items.clear();
-                    self.show_main_menu();
-                    self.resume_startup_music_after_failed_open_game();
+                    self.exit_startup_lobby_to_main();
                     return Ok(());
                 }
                 ClassicLobbyAction::StartRequested {
@@ -67121,7 +67254,7 @@ impl GameApp {
                     self.apply_classic_lobby_ready_change(ready)?;
                 }
                 ClassicLobbyAction::TabContextRequested { position } => {
-                    self.open_classic_lobby_tab_context(position)?;
+                    self.open_lobby_tab_context(position)?;
                 }
                 ClassicLobbyAction::RosterContextRequested { row, position } => {
                     self.open_classic_lobby_roster_context(row, position)?;
@@ -69187,7 +69320,7 @@ impl GameApp {
             .network_lobby
             .as_mut()
             .expect("network lobby was checked above")
-            .roster_context_request_at(
+            .context_request_at(
                 point,
                 self.graphics.surface(),
                 assets.as_ref(),
@@ -69200,8 +69333,14 @@ impl GameApp {
                     }),
                 ))
             })?;
-        if let Some((row, position)) = request {
-            self.open_classic_lobby_roster_context(row, position)?;
+        match request {
+            Some(NetworkLobbyContextRequest::Tabs { position }) => {
+                self.open_lobby_tab_context(position)?;
+            }
+            Some(NetworkLobbyContextRequest::Roster { row, position }) => {
+                self.open_classic_lobby_roster_context(row, position)?;
+            }
+            None => {}
         }
         Ok(())
     }
@@ -122088,6 +122227,199 @@ public func Grant(password) { return GainMissionAccess(password); }
             chooser.color,
             "the roster waits for the authoritative echo"
         );
+    }
+
+    #[test]
+    fn joined_lobby_chrome_routes_exit_and_right_tab_context() {
+        fn joined_app() -> GameApp {
+            let mut app = new_menu_app(640, 480);
+            app.startup_view = StartupView::NetworkLobby;
+            app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+            let (network, _events) = NetworkManager::test_stub_for_client_id(7);
+            app.network = Some(network);
+            app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+                "Client",
+            )));
+            app
+        }
+
+        fn right_caption_context_point(app: &mut GameApp) -> GuiPoint {
+            let surface = app.graphics.surface();
+            let lobby = app.network_lobby.as_mut().expect("joined lobby");
+            let (controller, _) = lobby
+                .classic_render_state(surface, app.assets.as_ref(), &app.scenario_game_options)
+                .expect("build the production joined-client lobby");
+            let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+            let layout = controller.layout(640, 480, fonts);
+            GuiPoint::new(
+                (layout.right_caption.x + 1) as f32,
+                (layout.right_caption.y + layout.right_caption.h / 2) as f32,
+            )
+        }
+
+        let joined_entries = GameApp::lobby_tab_context_entries(false, false);
+        assert_eq!(
+            joined_entries
+                .iter()
+                .filter_map(|entry| entry.action.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                AppContextMenuCommand::LobbySheet(LobbySheet::Players),
+                AppContextMenuCommand::LobbySheet(LobbySheet::Resources),
+            ]
+        );
+        assert_eq!(
+            joined_entries
+                .iter()
+                .map(|entry| entry.icon)
+                .collect::<Vec<_>>(),
+            vec![ContextMenuIcon::Phase(9), ContextMenuIcon::Phase(10)]
+        );
+        let joined_team_entries = GameApp::lobby_tab_context_entries(true, false);
+        assert_eq!(
+            joined_team_entries
+                .iter()
+                .filter_map(|entry| entry.action.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                AppContextMenuCommand::LobbySheet(LobbySheet::Players),
+                AppContextMenuCommand::LobbySheet(LobbySheet::Teams),
+                AppContextMenuCommand::LobbySheet(LobbySheet::Resources),
+            ]
+        );
+        assert_eq!(
+            joined_team_entries
+                .iter()
+                .map(|entry| entry.icon)
+                .collect::<Vec<_>>(),
+            vec![
+                ContextMenuIcon::Phase(9),
+                ContextMenuIcon::Phase(19),
+                ContextMenuIcon::Phase(10),
+            ]
+        );
+
+        let mut app = joined_app();
+
+        let caption = right_caption_context_point(&mut app);
+        app.network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .handle_panel_pointer_move(caption);
+        app.handle_network_lobby_secondary_button(ElementState::Pressed)
+            .expect("right-click opens the available joined tab context");
+        assert_eq!(
+            app.context_menu
+                .as_ref()
+                .expect("joined tab context")
+                .layout()
+                .panels[0]
+                .rows
+                .len(),
+            2,
+            "without teams, only Players and Resources are available"
+        );
+        app.close_context_menu_silently();
+
+        app.network_lobby.as_mut().expect("joined lobby").has_teams = true;
+        let caption = right_caption_context_point(&mut app);
+        app.network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .handle_panel_pointer_move(caption);
+        app.handle_network_lobby_secondary_button(ElementState::Pressed)
+            .expect("right-click opens the team-aware joined tab context");
+        let resource_point = {
+            let layout = app
+                .context_menu
+                .as_ref()
+                .expect("joined tab context")
+                .layout();
+            assert_eq!(
+                layout.panels[0].rows.len(),
+                3,
+                "Players, Teams and Resources are the complete available subset"
+            );
+            let row = &layout.panels[0].rows[2];
+            GuiPoint::new(
+                (row.rect.x + row.rect.w / 2) as f32,
+                (row.rect.y + row.rect.h / 2) as f32,
+            )
+        };
+        assert!(
+            app.handle_context_menu_pointer_move(resource_point)
+                .expect("hover Resources")
+        );
+        assert!(
+            app.handle_context_menu_pointer_button(
+                ElementState::Pressed,
+                ContextMenuPointerButton::Left,
+            )
+            .expect("dispatch Resources")
+        );
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .active_sheet,
+            LobbySheet::Resources
+        );
+        assert!(app.context_menu.is_none());
+
+        let exit = {
+            let rect = app
+                .network_lobby
+                .as_ref()
+                .and_then(|lobby| lobby.layout.as_ref())
+                .expect("joined lobby layout")
+                .exit_button;
+            GuiPoint::new(
+                rect.origin.x + rect.size.width / 2.0,
+                rect.origin.y + rect.size.height / 2.0,
+            )
+        };
+        app.network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .handle_panel_pointer_move(exit);
+        app.ui_sound_log.clear();
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press the production joined Exit button");
+        assert_eq!(app.ui_sound_log, ["ArrowHit".to_string()]);
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release the production joined Exit button");
+        assert_eq!(
+            app.ui_sound_log,
+            ["ArrowHit".to_string(), "Click".to_string()]
+        );
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert!(app.network_lobby.is_none());
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+
+        let mut escape = joined_app();
+        escape.ui_sound_log.clear();
+        escape
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Escape exits the production joined lobby");
+        assert_eq!(escape.startup_view, StartupView::MainMenu);
+        assert!(escape.network_lobby.is_none());
+        assert!(escape.network.is_none());
+        assert!(escape.network_mode.is_none());
+        assert!(escape.ui_sound_log.is_empty(), "Escape is silent");
+
+        let mut hotkey = joined_app();
+        hotkey.keyboard_modifiers = ModifiersState::ALT;
+        hotkey.ui_sound_log.clear();
+        hotkey
+            .handle_key(VirtualKeyCode::X, ElementState::Pressed)
+            .expect("Alt+X exits the production joined lobby");
+        assert_eq!(hotkey.startup_view, StartupView::MainMenu);
+        assert!(hotkey.network_lobby.is_none());
+        assert!(hotkey.network.is_none());
+        assert!(hotkey.network_mode.is_none());
+        assert!(hotkey.ui_sound_log.is_empty(), "the Exit hotkey is silent");
     }
 
     #[test]
