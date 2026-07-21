@@ -7,21 +7,98 @@ use std::sync::{Arc, Once};
 use libloading::Library;
 
 use crate::decoder::{AudioDecodeError, DecodedAudio};
-use crate::midi::{parse_timeline, MidiCommand, MidiTimeline, MAX_PRERENDER_SECONDS};
+use crate::midi::{parse_timeline, MidiCommand, MidiTimeline};
 
 const MAX_RENDER_BLOCK_FRAMES: usize = 4_096;
 const RELEASE_POLL_FRAMES: usize = 64;
+// `decode_audio` remains an eager public compatibility API (music playback no
+// longer uses it). Bound only that collector so hostile sparse MIDI cannot
+// force an effectively unbounded Vec allocation; MidiStream itself has no
+// playback-duration ceiling.
+const MAX_EAGER_DECODE_SECONDS: u64 = 15 * 60;
+// This is a synthesizer-liveness bound, not a MIDI duration or PCM allocation
+// bound. A broken or hostile SoundFont must not keep a finished stream alive
+// forever by reporting an active voice that never releases.
+const MAX_VOICE_RELEASE_SECONDS: u64 = 15 * 60;
 const SDL_MIXER_FALLBACK_SOUNDFONT: &str = "/usr/share/sounds/sf2/FluidR3_GM.sf2";
 
+pub(crate) struct MidiStream {
+    timeline: MidiTimeline,
+    synth: FluidSynth,
+    state: MidiStreamState,
+}
+
+impl MidiStream {
+    pub(crate) fn new(data: &[u8], sample_rate: u32) -> Result<Self, AudioDecodeError> {
+        let timeline = parse_timeline(data, sample_rate)?;
+        validate_timeline(&timeline)?;
+        let soundfonts = midi_soundfont_candidates();
+        let synth = FluidSynth::new(sample_rate, &soundfonts)?;
+        Ok(Self {
+            timeline,
+            synth,
+            state: MidiStreamState::default(),
+        })
+    }
+
+    pub(crate) fn read_frames(
+        &mut self,
+        output: &mut [[f32; 2]],
+    ) -> Result<usize, AudioDecodeError> {
+        read_timeline_frames(&self.timeline, &mut self.synth, &mut self.state, output)
+    }
+
+    pub(crate) fn restart(&mut self) -> Result<(), AudioDecodeError> {
+        // System reset keeps the loaded SoundFonts while restoring channels and
+        // controllers, so a loop never reloads files inside the mixer callback.
+        self.synth.reset()?;
+        self.state = MidiStreamState::default();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn buffered_frames(&self) -> usize {
+        0
+    }
+}
+
 pub(crate) fn decode_midi(data: &[u8], sample_rate: u32) -> Result<DecodedAudio, AudioDecodeError> {
-    let timeline = parse_timeline(data, sample_rate)?;
-    let soundfonts = midi_soundfont_candidates();
-    let mut synth = FluidSynth::new(sample_rate, &soundfonts)?;
-    let frames = render_timeline(&timeline, &mut synth)?;
+    let mut stream = MidiStream::new(data, sample_rate)?;
+    let max_frames = u64::from(sample_rate)
+        .checked_mul(MAX_EAGER_DECODE_SECONDS)
+        .and_then(|frames| usize::try_from(frames).ok())
+        .ok_or_else(|| midi_error("MIDI eager-decode limit exceeds platform limits"))?;
+    let mut frames = Vec::new();
+    let mut block = vec![[0.0, 0.0]; MAX_RENDER_BLOCK_FRAMES];
+    loop {
+        let read = stream.read_frames(&mut block)?;
+        if read == 0 {
+            break;
+        }
+        ensure_eager_output_fits(frames.len(), read, max_frames)?;
+        frames
+            .try_reserve(read)
+            .map_err(|_| midi_error("MIDI output is too large"))?;
+        frames.extend_from_slice(&block[..read]);
+    }
     Ok(DecodedAudio {
         frames,
         sample_rate,
     })
+}
+
+fn ensure_eager_output_fits(
+    current: usize,
+    additional: usize,
+    max_frames: usize,
+) -> Result<(), AudioDecodeError> {
+    current
+        .checked_add(additional)
+        .filter(|total| *total <= max_frames)
+        .map(|_| ())
+        .ok_or_else(|| {
+            midi_error("MIDI is too long for eager decode; use streaming music playback")
+        })
 }
 
 trait MidiSynth {
@@ -34,16 +111,28 @@ trait MidiSynth {
     fn render(&mut self, output: &mut [[f32; 2]]) -> Result<(), AudioDecodeError>;
 }
 
-fn render_timeline<S: MidiSynth>(
-    timeline: &MidiTimeline,
-    synth: &mut S,
-) -> Result<Vec<[f32; 2]>, AudioDecodeError> {
-    let max_frames = u64::from(timeline.sample_rate)
-        .checked_mul(MAX_PRERENDER_SECONDS)
-        .and_then(|frames| usize::try_from(frames).ok())
-        .ok_or_else(|| midi_error("MIDI prerender limit exceeds platform limits"))?;
-    if timeline.body_end_frame > timeline.end_frame
-        || timeline.end_frame > max_frames
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum MidiStreamPhase {
+    #[default]
+    Body,
+    Release,
+    Grace,
+    Done,
+}
+
+#[derive(Default)]
+struct MidiStreamState {
+    phase: MidiStreamPhase,
+    event_index: usize,
+    body_frame: usize,
+    release_poll_remaining: usize,
+    released_frames: usize,
+    grace_frames: usize,
+}
+
+fn validate_timeline(timeline: &MidiTimeline) -> Result<(), AudioDecodeError> {
+    if timeline.sample_rate == 0
+        || timeline.body_end_frame > timeline.end_frame
         || timeline
             .events
             .iter()
@@ -55,57 +144,127 @@ fn render_timeline<S: MidiSynth>(
     {
         return Err(midi_error("invalid MIDI render timeline"));
     }
-
-    let mut frames = Vec::new();
-    frames
-        .try_reserve_exact(timeline.body_end_frame)
-        .map_err(|_| midi_error("MIDI output is too large"))?;
-    frames.resize(timeline.body_end_frame, [0.0, 0.0]);
-
-    let mut cursor = 0;
-    for event in &timeline.events {
-        synth.render(&mut frames[cursor..event.frame])?;
-        synth.dispatch(&event.command)?;
-        cursor = event.frame;
-    }
-    synth.render(&mut frames[cursor..timeline.body_end_frame])?;
-    synth.finish();
-
-    let grace_frames = timeline.end_frame - timeline.body_end_frame;
-    let release_end_limit = max_frames
-        .checked_sub(grace_frames)
-        .ok_or_else(|| midi_error("invalid MIDI grace duration"))?;
-    while synth.active_voice_count() != 0 {
-        let remaining = release_end_limit
-            .checked_sub(frames.len())
-            .ok_or_else(|| midi_error("MIDI voice release exceeds prerender limit"))?;
-        if remaining == 0 {
-            return Err(midi_error("MIDI voice release exceeds prerender limit"));
-        }
-        append_rendered_frames(
-            &mut frames,
-            remaining.min(synth.release_poll_frames()),
-            synth,
-        )?;
-    }
-    append_rendered_frames(&mut frames, grace_frames, synth)?;
-    Ok(frames)
+    voice_release_frame_limit(timeline.sample_rate)?;
+    Ok(())
 }
 
-fn append_rendered_frames<S: MidiSynth>(
-    frames: &mut Vec<[f32; 2]>,
-    count: usize,
+fn voice_release_frame_limit(sample_rate: u32) -> Result<usize, AudioDecodeError> {
+    u64::from(sample_rate)
+        .checked_mul(MAX_VOICE_RELEASE_SECONDS)
+        .and_then(|frames| usize::try_from(frames).ok())
+        .ok_or_else(|| midi_error("MIDI voice release safety limit exceeds platform limits"))
+}
+
+fn read_timeline_frames<S: MidiSynth>(
+    timeline: &MidiTimeline,
     synth: &mut S,
-) -> Result<(), AudioDecodeError> {
-    let start = frames.len();
-    let end = start
-        .checked_add(count)
-        .ok_or_else(|| midi_error("MIDI output duration overflow"))?;
-    frames
-        .try_reserve_exact(count)
-        .map_err(|_| midi_error("MIDI output is too large"))?;
-    frames.resize(end, [0.0, 0.0]);
-    synth.render(&mut frames[start..])
+    state: &mut MidiStreamState,
+    output: &mut [[f32; 2]],
+) -> Result<usize, AudioDecodeError> {
+    if output.is_empty() || state.phase == MidiStreamPhase::Done {
+        return Ok(0);
+    }
+
+    let release_frame_limit = voice_release_frame_limit(timeline.sample_rate)?;
+    let grace_frame_limit = timeline.end_frame - timeline.body_end_frame;
+    let mut written = 0;
+    loop {
+        match state.phase {
+            MidiStreamPhase::Body => {
+                while let Some(event) = timeline.events.get(state.event_index) {
+                    if event.frame != state.body_frame {
+                        break;
+                    }
+                    synth.dispatch(&event.command)?;
+                    state.event_index += 1;
+                }
+                if state.body_frame == timeline.body_end_frame {
+                    synth.finish();
+                    state.phase = MidiStreamPhase::Release;
+                    continue;
+                }
+                if written == output.len() {
+                    return Ok(written);
+                }
+
+                let next_event_frame = timeline
+                    .events
+                    .get(state.event_index)
+                    .map_or(timeline.body_end_frame, |event| event.frame);
+                let count = (next_event_frame - state.body_frame)
+                    .min(output.len() - written)
+                    .min(MAX_RENDER_BLOCK_FRAMES);
+                synth.render(&mut output[written..written + count])?;
+                state.body_frame += count;
+                written += count;
+            }
+            MidiStreamPhase::Release => {
+                if written == output.len() {
+                    return Ok(written);
+                }
+                if state.release_poll_remaining == 0 {
+                    if synth.active_voice_count() == 0 {
+                        state.phase = MidiStreamPhase::Grace;
+                        continue;
+                    }
+                    let remaining = release_frame_limit
+                        .checked_sub(state.released_frames)
+                        .ok_or_else(|| midi_error("MIDI voice release exceeds safety limit"))?;
+                    if remaining == 0 {
+                        return Err(midi_error("MIDI voice release exceeds safety limit"));
+                    }
+                    state.release_poll_remaining =
+                        synth.release_poll_frames().max(1).min(remaining);
+                }
+
+                let count = state
+                    .release_poll_remaining
+                    .min(output.len() - written)
+                    .min(MAX_RENDER_BLOCK_FRAMES);
+                synth.render(&mut output[written..written + count])?;
+                state.release_poll_remaining -= count;
+                state.released_frames += count;
+                written += count;
+            }
+            MidiStreamPhase::Grace => {
+                if state.grace_frames == grace_frame_limit {
+                    state.phase = MidiStreamPhase::Done;
+                    continue;
+                }
+                if written == output.len() {
+                    return Ok(written);
+                }
+                let count = (grace_frame_limit - state.grace_frames)
+                    .min(output.len() - written)
+                    .min(MAX_RENDER_BLOCK_FRAMES);
+                synth.render(&mut output[written..written + count])?;
+                state.grace_frames += count;
+                written += count;
+            }
+            MidiStreamPhase::Done => return Ok(written),
+        }
+    }
+}
+
+#[cfg(test)]
+fn render_timeline<S: MidiSynth>(
+    timeline: &MidiTimeline,
+    synth: &mut S,
+) -> Result<Vec<[f32; 2]>, AudioDecodeError> {
+    validate_timeline(timeline)?;
+    let mut state = MidiStreamState::default();
+    let mut frames = Vec::new();
+    let mut block = [[0.0, 0.0]; 257];
+    loop {
+        let read = read_timeline_frames(timeline, synth, &mut state, &mut block)?;
+        if read == 0 {
+            return Ok(frames);
+        }
+        frames
+            .try_reserve(read)
+            .map_err(|_| midi_error("MIDI output is too large"))?;
+        frames.extend_from_slice(&block[..read]);
+    }
 }
 
 struct FluidSynth {
@@ -113,6 +272,10 @@ struct FluidSynth {
     settings: *mut c_void,
     synth: *mut c_void,
 }
+
+// A FluidSynth instance is only accessed through `&mut self`; moving ownership
+// to the audio thread does not introduce concurrent access to either C object.
+unsafe impl Send for FluidSynth {}
 
 impl FluidSynth {
     fn new(sample_rate: u32, soundfonts: &[PathBuf]) -> Result<Self, AudioDecodeError> {
@@ -216,6 +379,14 @@ impl FluidSynth {
         Err(midi_error(last_error.unwrap_or_else(|| {
             "no SoundFont found; set SDL_SOUNDFONTS to an SF2/SF3 path".to_owned()
         })))
+    }
+
+    fn reset(&mut self) -> Result<(), AudioDecodeError> {
+        let result = unsafe { (self.api.fluid_synth_system_reset)(self.synth) };
+        if result != 0 {
+            return Err(midi_error("FluidSynth failed to reset MIDI playback"));
+        }
+        Ok(())
     }
 }
 
@@ -394,6 +565,7 @@ struct FluidApi {
     fluid_synth_channel_pressure: unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_int,
     fluid_synth_key_pressure: unsafe extern "C" fn(*mut c_void, c_int, c_int, c_int) -> c_int,
     fluid_synth_pitch_bend: unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_int,
+    fluid_synth_system_reset: unsafe extern "C" fn(*mut c_void) -> c_int,
     fluid_synth_get_active_voice_count: unsafe extern "C" fn(*mut c_void) -> c_int,
     fluid_synth_get_internal_bufsize: unsafe extern "C" fn(*mut c_void) -> c_int,
     fluid_synth_sysex: unsafe extern "C" fn(
@@ -475,6 +647,9 @@ impl FluidApi {
                 load_symbol(&library, b"fluid_synth_key_pressure\0")?
             },
             fluid_synth_pitch_bend: unsafe { load_symbol(&library, b"fluid_synth_pitch_bend\0")? },
+            fluid_synth_system_reset: unsafe {
+                load_symbol(&library, b"fluid_synth_system_reset\0")?
+            },
             fluid_synth_get_active_voice_count: unsafe {
                 load_symbol(&library, b"fluid_synth_get_active_voice_count\0")?
             },
@@ -670,6 +845,13 @@ mod tests {
         rendered: usize,
     }
 
+    #[derive(Default)]
+    struct CountingSynth {
+        rendered: usize,
+        largest_block: usize,
+        finish_count: usize,
+    }
+
     impl MidiSynth for ReleasingSynth {
         fn dispatch(&mut self, command: &MidiCommand) -> Result<(), AudioDecodeError> {
             if matches!(command, MidiCommand::NoteOn { .. }) {
@@ -713,6 +895,27 @@ mod tests {
 
         fn render(&mut self, output: &mut [[f32; 2]]) -> Result<(), AudioDecodeError> {
             self.rendered += output.len();
+            Ok(())
+        }
+    }
+
+    impl MidiSynth for CountingSynth {
+        fn dispatch(&mut self, _command: &MidiCommand) -> Result<(), AudioDecodeError> {
+            Ok(())
+        }
+
+        fn finish(&mut self) {
+            self.finish_count += 1;
+        }
+
+        fn active_voice_count(&self) -> usize {
+            0
+        }
+
+        fn render(&mut self, output: &mut [[f32; 2]]) -> Result<(), AudioDecodeError> {
+            self.rendered += output.len();
+            self.largest_block = self.largest_block.max(output.len());
+            output.fill([0.0, 0.0]);
             Ok(())
         }
     }
@@ -828,9 +1031,71 @@ mod tests {
     }
 
     #[test]
+    fn long_music_streams_with_bounded_memory_and_no_prerender_limit() {
+        let sample_rate = 1_000;
+        let long_midi = [
+            b'M', b'T', b'h', b'd', 0, 0, 0, 6, 0, 0, 0, 1, 0, 1, b'M', b'T', b'r', b'k', 0, 0, 0,
+            5, 0x8e, 0x09, 0xff, 0x2f, 0,
+        ];
+        let timeline = parse_timeline(&long_midi, sample_rate).expect("long sparse MIDI");
+        assert!(timeline.body_end_frame > 15 * 60 * sample_rate as usize);
+        validate_timeline(&timeline).expect("long timeline");
+        let mut synth = CountingSynth::default();
+        let mut state = MidiStreamState::default();
+        let mut output = [[0.0, 0.0]; 31];
+
+        let read = read_timeline_frames(&timeline, &mut synth, &mut state, &mut output)
+            .expect("bounded streaming prefix");
+
+        assert_eq!(read, output.len());
+        assert_eq!(synth.rendered, output.len());
+        assert!(synth.largest_block <= output.len());
+        assert!(synth.largest_block <= MAX_RENDER_BLOCK_FRAMES);
+        assert_eq!(synth.finish_count, 0);
+        assert_eq!(state.body_frame, output.len());
+    }
+
+    #[test]
+    fn eager_decode_keeps_an_independent_allocation_ceiling() {
+        assert!(ensure_eager_output_fits(899, 1, 900).is_ok());
+        assert!(ensure_eager_output_fits(900, 1, 900).is_err());
+        assert!(ensure_eager_output_fits(usize::MAX, 1, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn renderer_state_can_restart_after_eof() {
+        let timeline = MidiTimeline {
+            events: Vec::new(),
+            body_end_frame: 1,
+            end_frame: 3,
+            sample_rate: 1,
+        };
+        let mut synth = CountingSynth::default();
+        let mut state = MidiStreamState::default();
+        let mut output = [[0.0, 0.0]; 8];
+
+        assert_eq!(
+            read_timeline_frames(&timeline, &mut synth, &mut state, &mut output).unwrap(),
+            3
+        );
+        assert_eq!(
+            read_timeline_frames(&timeline, &mut synth, &mut state, &mut output).unwrap(),
+            0
+        );
+        state = MidiStreamState::default();
+        synth = CountingSynth::default();
+
+        assert_eq!(
+            read_timeline_frames(&timeline, &mut synth, &mut state, &mut output).unwrap(),
+            3
+        );
+        assert_eq!(synth.finish_count, 1);
+    }
+
+    #[test]
     fn renderer_rejects_a_voice_that_never_releases() {
-        // C4AudioSystemSdl.cpp:280-282 streams through SDL_mixer; the Rust eager
-        // renderer needs a finite resource ceiling for pathological SoundFonts.
+        // This independent liveness ceiling protects against a pathological
+        // SoundFont; it does not limit the MIDI body's playback duration.
         let timeline = MidiTimeline {
             events: vec![TimedMidiEvent {
                 frame: 0,
@@ -849,7 +1114,7 @@ mod tests {
         let error = render_timeline(&timeline, &mut synth).expect_err("release must be bounded");
 
         assert!(error.to_string().contains("voice release exceeds"));
-        assert_eq!(synth.rendered, 898);
+        assert_eq!(synth.rendered, MAX_VOICE_RELEASE_SECONDS as usize);
     }
 
     #[test]
@@ -874,7 +1139,10 @@ mod tests {
         let frames = render_timeline(&timeline, &mut synth).expect("native MIDI synthesis");
 
         assert!(frames.len() >= 20_000);
-        assert!(frames.len() <= 8_000 * MAX_PRERENDER_SECONDS as usize);
+        assert!(
+            frames.len()
+                <= timeline.end_frame + 8_000 * usize::try_from(MAX_VOICE_RELEASE_SECONDS).unwrap()
+        );
         assert!(frames.iter().any(|frame| frame != &[0.0, 0.0]));
     }
 }

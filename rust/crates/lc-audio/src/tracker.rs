@@ -5,7 +5,6 @@ use std::sync::Arc;
 use libloading::Library;
 
 use crate::decoder::{AudioDecodeError, DecodedAudio};
-use crate::midi::MAX_PRERENDER_SECONDS;
 
 const XMP_END: c_int = 1;
 const XMP_ERROR_FORMAT: c_int = 3;
@@ -21,19 +20,103 @@ const C4_TRACKER_SAMPLE_RATE: u32 = 44_100;
 // interface requests exactly that block size and retains the terminal block's
 // zero padding before the following call reports XMP_END.
 const RENDER_BLOCK_FRAMES: usize = 1_024;
+// `decode_audio` remains an eager public compatibility API (music playback no
+// longer uses it). Bound only that collector so a hostile module cannot force
+// an effectively unbounded Vec allocation; TrackerStream itself has no
+// playback-duration ceiling.
+const MAX_EAGER_DECODE_SECONDS: u64 = 15 * 60;
 
 type XmpContext = *mut c_char;
+
+pub(crate) struct TrackerStream {
+    context: TrackerContext,
+    sample_rate: u32,
+    interleaved: [i16; RENDER_BLOCK_FRAMES * 2],
+    block_position: usize,
+}
+
+impl TrackerStream {
+    pub(crate) fn new(data: &[u8], requested_sample_rate: u32) -> Result<Self, AudioDecodeError> {
+        let sample_rate = compatible_sample_rate(requested_sample_rate);
+        let api = LibXmpApi::load()?;
+        let mut context = TrackerContext::new(api)?;
+        context.load(data)?;
+        context.start(sample_rate)?;
+        Ok(Self {
+            context,
+            sample_rate,
+            interleaved: [0; RENDER_BLOCK_FRAMES * 2],
+            block_position: RENDER_BLOCK_FRAMES,
+        })
+    }
+
+    pub(crate) fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub(crate) fn next_frame(&mut self) -> Result<Option<[f32; 2]>, AudioDecodeError> {
+        if self.block_position == RENDER_BLOCK_FRAMES && !self.render_block()? {
+            return Ok(None);
+        }
+
+        let sample = self.block_position * 2;
+        self.block_position += 1;
+        Ok(Some([
+            f32::from(self.interleaved[sample]) / f32::from(i16::MAX),
+            f32::from(self.interleaved[sample + 1]) / f32::from(i16::MAX),
+        ]))
+    }
+
+    pub(crate) fn restart(&mut self) -> Result<(), AudioDecodeError> {
+        unsafe { (self.context.api.restart_module)(self.context.raw) };
+        self.block_position = RENDER_BLOCK_FRAMES;
+        Ok(())
+    }
+
+    fn render_block(&mut self) -> Result<bool, AudioDecodeError> {
+        let result = unsafe {
+            (self.context.api.play_buffer)(
+                self.context.raw,
+                self.interleaved.as_mut_ptr().cast(),
+                c_int::try_from(std::mem::size_of_val(&self.interleaved))
+                    .map_err(|_| tracker_error("tracker render block is too large"))?,
+                1,
+            )
+        };
+        if result == -XMP_END {
+            return Ok(false);
+        }
+        if result != 0 {
+            return Err(xmp_error("render tracker audio", result));
+        }
+        self.block_position = 0;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn buffered_frames(&self) -> usize {
+        RENDER_BLOCK_FRAMES
+    }
+
+    #[cfg(test)]
+    pub(crate) fn peak_buffered_frames(&self) -> usize {
+        RENDER_BLOCK_FRAMES
+    }
+}
+
+fn compatible_sample_rate(requested_sample_rate: u32) -> u32 {
+    if (XMP_MIN_SAMPLE_RATE..=XMP_COMPAT_MAX_SAMPLE_RATE).contains(&requested_sample_rate) {
+        requested_sample_rate
+    } else {
+        C4_TRACKER_SAMPLE_RATE
+    }
+}
 
 pub(crate) fn decode_tracker(
     data: &[u8],
     output_sample_rate: u32,
 ) -> Result<DecodedAudio, AudioDecodeError> {
-    let sample_rate =
-        if (XMP_MIN_SAMPLE_RATE..=XMP_COMPAT_MAX_SAMPLE_RATE).contains(&output_sample_rate) {
-            output_sample_rate
-        } else {
-            C4_TRACKER_SAMPLE_RATE
-        };
+    let sample_rate = compatible_sample_rate(output_sample_rate);
 
     let api = LibXmpApi::load()?;
     let mut context = TrackerContext::new(api)?;
@@ -41,9 +124,9 @@ pub(crate) fn decode_tracker(
     context.start(sample_rate)?;
 
     let max_frames = u64::from(sample_rate)
-        .checked_mul(MAX_PRERENDER_SECONDS)
+        .checked_mul(MAX_EAGER_DECODE_SECONDS)
         .and_then(|frames| usize::try_from(frames).ok())
-        .ok_or_else(|| tracker_error("tracker prerender limit exceeds platform limits"))?;
+        .ok_or_else(|| tracker_error("tracker eager-decode limit exceeds platform limits"))?;
     let mut frames = Vec::new();
     let mut interleaved = vec![0_i16; RENDER_BLOCK_FRAMES * 2];
     loop {
@@ -66,7 +149,9 @@ pub(crate) fn decode_tracker(
         // terminal padded block straddles the limit can report XMP_END. A
         // successful additional block proves that the module exceeds it.
         if frames.len() >= max_frames {
-            return Err(tracker_error("tracker exceeds 15 minute prerender limit"));
+            return Err(tracker_error(
+                "tracker is too long for eager decode; use streaming music playback",
+            ));
         }
         frames
             .try_reserve(RENDER_BLOCK_FRAMES)
@@ -130,6 +215,11 @@ struct TrackerContext {
     module_loaded: bool,
     player_started: bool,
 }
+
+// SAFETY: TrackerContext uniquely owns its xmp_context. Every operation on it
+// requires `&mut self`, it is never shared with another thread, and libxmp
+// permits independently created contexts to be used by different threads.
+unsafe impl Send for TrackerContext {}
 
 impl TrackerContext {
     fn new(api: Arc<LibXmpApi>) -> Result<Self, AudioDecodeError> {
@@ -196,6 +286,7 @@ struct LibXmpApi {
     release_module: unsafe extern "C" fn(XmpContext),
     start_player: unsafe extern "C" fn(XmpContext, c_int, c_int) -> c_int,
     play_buffer: unsafe extern "C" fn(XmpContext, *mut c_void, c_int, c_int) -> c_int,
+    restart_module: unsafe extern "C" fn(XmpContext),
     end_player: unsafe extern "C" fn(XmpContext),
 }
 
@@ -232,6 +323,7 @@ impl LibXmpApi {
             release_module: unsafe { load_symbol(&library, b"xmp_release_module\0")? },
             start_player: unsafe { load_symbol(&library, b"xmp_start_player\0")? },
             play_buffer: unsafe { load_symbol(&library, b"xmp_play_buffer\0")? },
+            restart_module: unsafe { load_symbol(&library, b"xmp_restart_module\0")? },
             end_player: unsafe { load_symbol(&library, b"xmp_end_player\0")? },
             _library: library,
         })

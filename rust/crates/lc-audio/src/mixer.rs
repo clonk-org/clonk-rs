@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::decoder::{decode_audio, decode_audio_for_output, AudioDecodeError, DecodedAudio};
+use crate::decoder::{decode_audio, AudioDecodeError, DecodedAudio, MusicStream};
 
 const SDL_MIXER_MAX_VOLUME: f32 = 128.0;
 const SDL_MIXER_MAX_PANNING: f32 = 255.0;
@@ -14,6 +14,10 @@ const MAXIMUM_MUSIC_VOLUME: f32 = 80.0;
 const MAXIMUM_SOUND_VOLUME: f32 = 100.0;
 const MAXIMUM_PANNING_VOLUME: f32 = 192.0;
 const MAXIMUM_SOUND_INPUT: f32 = SDL_MIXER_MAX_VOLUME / MAXIMUM_SOUND_VOLUME;
+/// SDL_mixer pulls music in callback-sized blocks. Keep the Rust music path
+/// similarly bounded instead of retaining one stereo-f32 frame per track
+/// frame for the complete duration.
+const MUSIC_DECODE_BUFFER_FRAMES: usize = 4_096;
 
 /// Mixer slot plus allocation generation; stale handles cannot control a
 /// later sound that reuses the same numeric slot.
@@ -160,10 +164,7 @@ impl AudioSystem {
         Self::new_null_with_resampling(max_channels, ResamplingMode::Default)
     }
 
-    pub fn new_null_with_resampling(
-        max_channels: usize,
-        resampling_mode: ResamplingMode,
-    ) -> Self {
+    pub fn new_null_with_resampling(max_channels: usize, resampling_mode: ResamplingMode) -> Self {
         let mixer = Arc::new(AudioMixer::new_with_resampling(
             44_100,
             max_channels,
@@ -216,9 +217,13 @@ impl AudioSystem {
         Ok(MusicHandle::new(self.mixer.clone(), id))
     }
 
-    /// A cheap `Send + Sync` handle onto the shared mixer so expensive
-    /// music decodes (a full MIDI render through FluidSynth) can run off
-    /// the caller's thread and start playback when ready.
+    pub fn load_music_owned(&self, data: Vec<u8>) -> Result<MusicHandle, AudioError> {
+        let id = self.mixer.load_music_owned(data)?;
+        Ok(MusicHandle::new(self.mixer.clone(), id))
+    }
+
+    /// A cheap `Send + Sync` handle onto the shared mixer so bounded decoder
+    /// initialization and source parsing can run off the caller's thread.
     pub fn worker_handle(&self) -> AudioWorkerHandle {
         AudioWorkerHandle {
             mixer: self.mixer.clone(),
@@ -425,6 +430,13 @@ impl AudioWorkerHandle {
         Ok(MusicHandle::new(self.mixer.clone(), id))
     }
 
+    /// Transfers the compressed bytes into the streaming decoder without a
+    /// second full-source copy.
+    pub fn load_music_owned(&self, data: Vec<u8>) -> Result<MusicHandle, AudioError> {
+        let id = self.mixer.load_music_owned(data)?;
+        Ok(MusicHandle::new(self.mixer.clone(), id))
+    }
+
     pub fn play_music(&self, music: &MusicHandle, looped: bool) -> Result<(), AudioError> {
         if let Some(backend) = &self.deferred_null_backend {
             backend.ensure_running();
@@ -512,7 +524,7 @@ pub struct AudioMixer {
 
 struct MixerState {
     sounds: HashMap<SoundId, Arc<AudioClip>>,
-    music: HashMap<MusicId, Arc<AudioClip>>,
+    music: HashMap<MusicId, Arc<MusicAsset>>,
     channels: Vec<Option<ChannelPlayback>>,
     channel_generations: Vec<u64>,
     active_music: Option<MusicPlayback>,
@@ -523,6 +535,14 @@ struct MixerState {
 #[derive(Debug)]
 struct AudioClip {
     frames: Arc<Vec<[f32; 2]>>,
+}
+
+/// A loaded music object retains the compressed source, as C4's SDL_mixer
+/// backend does. The first prepared decoder makes `play_music` cheap; replay
+/// constructs another bounded decoder from the same source.
+struct MusicAsset {
+    source: Arc<[u8]>,
+    prepared: Mutex<Option<MusicStream>>,
 }
 
 #[derive(Debug)]
@@ -542,10 +562,11 @@ struct FadeState {
     total_samples: usize,
 }
 
-#[derive(Debug)]
 struct MusicPlayback {
-    clip: Arc<AudioClip>,
-    position: usize,
+    stream: MusicStream,
+    decode_buffer: Box<[[f32; 2]]>,
+    buffer_position: usize,
+    buffer_length: usize,
     looping: bool,
     volume: f32,
     fade_out: Option<FadeState>,
@@ -606,12 +627,23 @@ impl AudioMixer {
     }
 
     pub(crate) fn load_music(&self, data: &[u8]) -> Result<MusicId, AudioError> {
-        let decoded = decode_audio_for_output(data, self.sample_rate)?;
-        let clip = self.prepare_clip(decoded);
+        self.load_music_owned(data.to_vec())
+    }
+
+    pub(crate) fn load_music_owned(&self, data: Vec<u8>) -> Result<MusicId, AudioError> {
+        let source: Arc<[u8]> = Arc::from(data.into_boxed_slice());
+        // Opening validates the format and performs only bounded decoder
+        // initialization. In particular, MIDI parses its event schedule but
+        // does not synthesize a duration-sized PCM vector.
+        let prepared = MusicStream::open(source.clone(), self.sample_rate)?;
+        let asset = Arc::new(MusicAsset {
+            source,
+            prepared: Mutex::new(Some(prepared)),
+        });
         let mut state = self.state.lock().unwrap();
         let id = MusicId(state.next_music_id);
         state.next_music_id += 1;
-        state.music.insert(id, clip);
+        state.music.insert(id, asset);
         Ok(id)
     }
 
@@ -688,12 +720,7 @@ impl AudioMixer {
                 .is_some()
     }
 
-    pub fn channel_set_volume_and_pan(
-        &self,
-        channel: ChannelId,
-        volume: f32,
-        pan: f32,
-    ) -> bool {
+    pub fn channel_set_volume_and_pan(&self, channel: ChannelId, volume: f32, pan: f32) -> bool {
         let mut state = self.state.lock().unwrap();
         if state.channel_generations.get(channel.0) != Some(&channel.1) {
             return false;
@@ -708,19 +735,30 @@ impl AudioMixer {
     }
 
     pub(crate) fn play_music(&self, id: MusicId, looped: bool) -> Result<(), AudioError> {
+        let asset = {
+            let state = self.state.lock().unwrap();
+            state
+                .music
+                .get(&id)
+                .cloned()
+                .ok_or(AudioError::InvalidChannel)?
+        };
+        let stream = asset
+            .prepared
+            .lock()
+            .unwrap()
+            .take()
+            .map(Ok)
+            .unwrap_or_else(|| MusicStream::open(asset.source.clone(), self.sample_rate))?;
+
         let mut state = self.state.lock().unwrap();
-        let clip = state
-            .music
-            .get(&id)
-            .cloned()
-            .ok_or(AudioError::InvalidChannel)?;
-        state.active_music = Some(MusicPlayback {
-            clip,
-            position: 0,
-            looping: looped,
-            volume: 1.0,
-            fade_out: None,
-        });
+        let Some(current_asset) = state.music.get(&id) else {
+            return Err(AudioError::InvalidChannel);
+        };
+        if !Arc::ptr_eq(current_asset, &asset) {
+            return Err(AudioError::InvalidChannel);
+        }
+        state.active_music = Some(MusicPlayback::new(stream, looped));
         Ok(())
     }
 
@@ -732,6 +770,24 @@ impl AudioMixer {
     pub fn music_is_playing(&self) -> bool {
         let state = self.state.lock().unwrap();
         state.active_music.is_some()
+    }
+
+    #[cfg(test)]
+    fn music_buffered_frame_capacity(&self) -> Option<usize> {
+        let state = self.state.lock().unwrap();
+        state
+            .active_music
+            .as_ref()
+            .map(|music| music.decode_buffer.len() + music.stream.buffered_frames())
+    }
+
+    #[cfg(test)]
+    fn music_peak_buffered_frame_capacity(&self) -> Option<usize> {
+        let state = self.state.lock().unwrap();
+        state
+            .active_music
+            .as_ref()
+            .map(|music| music.decode_buffer.len() + music.stream.peak_buffered_frames())
     }
 
     pub fn music_set_volume(&self, volume: f32) {
@@ -877,21 +933,9 @@ impl AudioMixer {
                     }
                 }
 
-                if let Some(music) = state.active_music.as_mut() {
-                    let frames_len = music.clip.frames.len();
-                    if frames_len == 0 {
-                        finished_music = true;
-                    } else {
-                        if music.position >= frames_len {
-                            if music.looping {
-                                music.position = 0;
-                            } else {
-                                finished_music = true;
-                            }
-                        }
-                        if !finished_music {
-                            let frame = music.clip.frames[music.position];
-                            music.position += 1;
+                if !finished_music {
+                    if let Some(music) = state.active_music.as_mut() {
+                        if let Some(frame) = music.next_frame() {
                             let mut volume =
                                 music.volume * (MAXIMUM_MUSIC_VOLUME / SDL_MIXER_MAX_VOLUME);
                             if let Some(fade) = music.fade_out.as_mut() {
@@ -909,6 +953,8 @@ impl AudioMixer {
                             }
                             left += frame[0] * volume;
                             right += frame[1] * volume;
+                        } else {
+                            finished_music = true;
                         }
                     }
                 }
@@ -955,6 +1001,59 @@ impl AudioMixer {
                             handler(index);
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+impl MusicPlayback {
+    fn new(stream: MusicStream, looping: bool) -> Self {
+        Self {
+            stream,
+            decode_buffer: vec![[0.0, 0.0]; MUSIC_DECODE_BUFFER_FRAMES].into_boxed_slice(),
+            buffer_position: 0,
+            buffer_length: 0,
+            looping,
+            volume: 1.0,
+            fade_out: None,
+        }
+    }
+
+    fn next_frame(&mut self) -> Option<[f32; 2]> {
+        if self.buffer_position >= self.buffer_length && !self.refill() {
+            return None;
+        }
+        let frame = self.decode_buffer[self.buffer_position];
+        self.buffer_position += 1;
+        Some(frame)
+    }
+
+    fn refill(&mut self) -> bool {
+        self.buffer_position = 0;
+        self.buffer_length = 0;
+        let mut restarted = false;
+        loop {
+            match self.stream.read_frames(&mut self.decode_buffer) {
+                Ok(0) if self.looping && !restarted => {
+                    if let Err(error) = self.stream.restart() {
+                        tracing::warn!(%error, "music stream restart failed");
+                        return false;
+                    }
+                    // An empty looping source must terminate instead of
+                    // spinning forever inside an audio callback.
+                    restarted = true;
+                }
+                Ok(0) => return false,
+                Ok(read) => {
+                    self.buffer_length = read;
+                    return true;
+                }
+                Err(error) => {
+                    // SDL_mixer treats a pull-time decoder failure as an ended
+                    // music stream. Do the same without poisoning the mixer.
+                    tracing::warn!(%error, "music stream decode failed");
+                    return false;
                 }
             }
         }
@@ -1271,6 +1370,20 @@ mod tests {
             .sum()
     }
 
+    fn long_silent_mp3() -> Vec<u8> {
+        // One independently decodable MPEG-2.5 Layer III mono frame: 576
+        // samples at 8 kHz in 72 compressed bytes. Repetition creates a valid
+        // track just beyond 15 minutes while keeping the fixture below 1 MiB.
+        let mut frame = [0x55_u8; 72];
+        frame[..13].copy_from_slice(&[
+            0xff, 0xe3, 0x18, 0xc4, 0x00, 0x00, 0x00, 0x03, 0x48, 0x00, 0x00, 0x00, 0x00,
+        ]);
+        frame[13..22].copy_from_slice(b"LAME3.100");
+        frame[53..62].copy_from_slice(b"LAME3.100");
+        let frames_for_more_than_fifteen_minutes = (15 * 60 * 8_000 / 576) + 1;
+        frame.repeat(frames_for_more_than_fifteen_minutes)
+    }
+
     #[test]
     fn l040_explicit_linear_resampling_mode_uses_linear_interpolation() {
         let frames = [[0.0, 0.0], [1.0, -1.0]];
@@ -1462,31 +1575,26 @@ mod tests {
             let music_id = mixer
                 .load_music(&data)
                 .unwrap_or_else(|error| panic!("failed to decode synthetic {format}: {error}"));
-            let decoded_frames = {
-                let state = mixer.state.lock().unwrap();
-                state
-                    .music
-                    .get(&music_id)
-                    .expect("loaded music remains available")
-                    .frames
-                    .len()
-            };
-            assert!(decoded_frames > 0, "{format} decoded to no PCM frames");
 
             mixer.play_music(music_id, true).unwrap();
-            let mut frames_remaining = decoded_frames + 1;
             let mut loop_energy = 0;
             let mut output = vec![0i16; 1_024 * 2];
-            while frames_remaining > 0 {
-                let frames = frames_remaining.min(1_024);
-                mixer.mix_i16(&mut output[..frames * 2]);
-                loop_energy += i16_energy(&output[..frames * 2]);
-                frames_remaining -= frames;
+            // These fixtures contain one 64-row pattern (about 7.7 seconds
+            // at 8 kHz); eighty native-sized pulls cross the first EOF and
+            // exercise libxmp's in-place restart.
+            for _ in 0..80 {
+                mixer.mix_i16(&mut output);
+                loop_energy += i16_energy(&output);
             }
             assert!(loop_energy > 0, "{format} playback produced only silence");
             assert!(
                 mixer.music_is_playing(),
-                "{format} did not loop after its decoded PCM was exhausted"
+                "{format} did not loop after its streamed PCM was exhausted"
+            );
+            assert!(
+                mixer.music_peak_buffered_frame_capacity().unwrap()
+                    <= MUSIC_DECODE_BUFFER_FRAMES + 1_024 + 2,
+                "{format} retained an unbounded PCM working set"
             );
 
             mixer.play_music(music_id, true).unwrap();
@@ -1523,6 +1631,37 @@ mod tests {
     }
 
     #[test]
+    fn long_music_streams_with_bounded_memory_and_no_prerender_limit() {
+        let mixer = AudioMixer::new(1_000, 1);
+        let music_id = mixer
+            .load_music_owned(long_silent_mp3())
+            .expect("long compressed music opens without a full decode");
+        mixer.play_music(music_id, false).unwrap();
+
+        let initial_capacity = mixer.music_buffered_frame_capacity().unwrap();
+        assert!(
+            initial_capacity <= MUSIC_DECODE_BUFFER_FRAMES + minimp3::MAX_SAMPLES_PER_FRAME + 2,
+            "stream retains {initial_capacity} decoded frames"
+        );
+
+        let mut output = vec![0.0_f32; MUSIC_DECODE_BUFFER_FRAMES * 2];
+        let mut frames_remaining = 15 * 60 * 1_000 + 1;
+        while frames_remaining != 0 {
+            let frames = frames_remaining.min(MUSIC_DECODE_BUFFER_FRAMES);
+            mixer.mix_f32(&mut output[..frames * 2]);
+            frames_remaining -= frames;
+        }
+        assert!(
+            mixer.music_is_playing(),
+            "compressed stream ended at the former 15-minute ceiling"
+        );
+        assert!(
+            mixer.music_peak_buffered_frame_capacity().unwrap()
+                <= MUSIC_DECODE_BUFFER_FRAMES + minimp3::MAX_SAMPLES_PER_FRAME + 2
+        );
+    }
+
+    #[test]
     fn music_fade_out_finishes_playback() {
         let data = generate_sine_wave(400, 440.0, 44_100);
         let mixer = AudioMixer::new(44_100, 2);
@@ -1534,6 +1673,34 @@ mod tests {
         for _ in 0..200 {
             mixer.mix_i16(&mut buffer);
         }
+        assert!(!mixer.music_is_playing());
+    }
+
+    #[test]
+    fn streaming_music_loops_replays_and_outlives_its_loaded_handle() {
+        let data = generate_sine_wave(10, 440.0, 1_000);
+        let mixer = Arc::new(AudioMixer::new(1_000, 1));
+        let music_id = mixer.load_music(&data).unwrap();
+        let handle = MusicHandle::new(mixer.clone(), music_id);
+
+        mixer.play_music(music_id, true).unwrap();
+        let mut beyond_one_pass = vec![0.0_f32; 25 * 2];
+        mixer.mix_f32(&mut beyond_one_pass);
+        assert!(mixer.music_is_playing(), "loop rewinds the pull decoder");
+
+        mixer.play_music(music_id, false).unwrap();
+        drop(handle);
+        assert!(
+            mixer.music_is_playing(),
+            "active stream owns its source bytes"
+        );
+        assert!(matches!(
+            mixer.play_music(music_id, false),
+            Err(AudioError::InvalidChannel)
+        ));
+
+        let mut replay_and_one_frame = vec![0.0_f32; 11 * 2];
+        mixer.mix_f32(&mut replay_and_one_frame);
         assert!(!mixer.music_is_playing());
     }
 

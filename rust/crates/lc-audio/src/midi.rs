@@ -4,7 +4,10 @@ use midly::{Format, MetaMessage, MidiMessage, Smf, Timing, TrackEventKind};
 const DEFAULT_TEMPO_MICROS_PER_QUARTER: u64 = 500_000;
 const MICROS_PER_SECOND: u128 = 1_000_000;
 const TAIL_SECONDS: u64 = 2;
-pub(crate) const MAX_PRERENDER_SECONDS: u64 = 15 * 60;
+// These limits bound parsing and the owned event schedule, independently of how
+// long the MIDI takes to play. PCM is synthesized incrementally by `MidiStream`.
+// Track count bounds merge/sort work, input bytes bound the parser's borrowed
+// structure, event count bounds the owned schedule, and SysEx bounds one copy.
 const MAX_TRACKS: usize = 128;
 const MAX_MIDI_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEDULED_EVENTS: usize = 1_000_000;
@@ -99,7 +102,7 @@ pub(crate) fn parse_timeline(
 
 fn validate_input_len(len: usize) -> Result<(), AudioDecodeError> {
     if len > MAX_MIDI_BYTES {
-        return Err(invalid("MIDI exceeds 8 MiB prerender input limit"));
+        return Err(invalid("MIDI exceeds 8 MiB parser input limit"));
     }
     Ok(())
 }
@@ -138,7 +141,7 @@ fn checked_event_total(current: usize, additional: usize) -> Result<usize, Audio
     current
         .checked_add(additional)
         .filter(|total| *total <= MAX_SCHEDULED_EVENTS)
-        .ok_or_else(|| invalid("MIDI has too many events to prerender"))
+        .ok_or_else(|| invalid("MIDI has too many events to schedule"))
 }
 
 fn schedule_events(
@@ -152,9 +155,6 @@ fn schedule_events(
     let tail_frames = u64::from(sample_rate)
         .checked_mul(TAIL_SECONDS)
         .ok_or_else(|| invalid("MIDI tail duration overflow"))?;
-    let max_frames = u64::from(sample_rate)
-        .checked_mul(MAX_PRERENDER_SECONDS)
-        .ok_or_else(|| invalid("MIDI prerender limit overflow"))?;
     let mut events = Vec::new();
     events
         .try_reserve_exact(ordered.len())
@@ -172,9 +172,6 @@ fn schedule_events(
         elapsed_numerator =
             checked_elapsed_numerator(elapsed_numerator, delta, tempo, sample_rate)?;
         event_end_frame = rounded_frame(elapsed_numerator, denominator)?;
-        if event_end_frame > max_frames {
-            return Err(invalid("MIDI exceeds 15 minute prerender limit"));
-        }
         last_tick = event.tick;
 
         match event.kind {
@@ -204,9 +201,6 @@ fn schedule_events(
     let end_frame = event_end_frame
         .checked_add(tail_frames)
         .ok_or_else(|| invalid("MIDI output duration overflow"))?;
-    if end_frame > max_frames {
-        return Err(invalid("MIDI exceeds 15 minute prerender limit"));
-    }
     Ok(MidiTimeline {
         events,
         body_end_frame: usize::try_from(event_end_frame)
@@ -299,7 +293,7 @@ fn sysex_command(data: &[u8]) -> Result<MidiCommand, AudioDecodeError> {
         return Err(invalid("MIDI SysEx payload contains a status byte"));
     }
     if payload.len() > MAX_SYSEX_BYTES {
-        return Err(invalid("MIDI SysEx payload is too large to prerender"));
+        return Err(invalid("MIDI SysEx payload is too large to schedule"));
     }
     let mut owned = Vec::new();
     owned
@@ -599,33 +593,25 @@ mod tests {
     }
 
     #[test]
-    fn caps_eager_midi_prerendering() {
-        // C4AudioSystemSdl.cpp:280-282 streams through SDL_mixer; Rust currently
-        // prerenders, so it must reject clips that exceed its bounded buffer.
-        let exactly_fifteen_minutes = smf(
+    fn schedules_midi_beyond_the_former_fifteen_minute_limit() {
+        // C4AudioSystemSdl.cpp:280-282 streams through SDL_mixer, so playback
+        // duration is not a parser or event-schedule allocation limit.
+        let long_midi = smf(
             0,
             1,
-            &[&[0x8E, 0x04, 0xFF, 0x2F, 0x00]], // tick 1796: 898 s + 2 s tail
-        );
-        let over_limit = smf(
-            0,
-            1,
-            &[&[0x8E, 0x05, 0xFF, 0x2F, 0x00]], // tick 1797: 898.5 s + tail
+            &[&[0x8E, 0x09, 0xFF, 0x2F, 0x00]], // tick 1801: 900.5 s + tail
         );
 
-        assert_eq!(
-            parse_timeline(&exactly_fifteen_minutes, 1_000)
-                .expect("duration at limit")
-                .end_frame,
-            900_000
-        );
-        assert!(parse_timeline(&over_limit, 1_000).is_err());
+        let timeline = parse_timeline(&long_midi, 1_000).expect("long MIDI timeline");
+
+        assert_eq!(timeline.body_end_frame, 900_500);
+        assert_eq!(timeline.end_frame, 902_500);
     }
 
     #[test]
-    fn caps_eager_midi_event_scheduling() {
-        // C4AudioSystemSdl.cpp:280-282 streams through SDL_mixer; Rust currently
-        // duplicates scheduled events while prerendering and must bound that copy.
+    fn caps_owned_midi_event_scheduling() {
+        // Streaming still owns a compact command for every event, so this bound
+        // protects the schedule allocation rather than the output duration.
         assert_eq!(
             checked_event_total(MAX_SCHEDULED_EVENTS - 1, 1).unwrap(),
             MAX_SCHEDULED_EVENTS
@@ -634,9 +620,9 @@ mod tests {
     }
 
     #[test]
-    fn caps_eager_midi_input_parsing() {
-        // C4AudioSystemSdl.cpp:280-282 streams through SDL_mixer; Rust parses the
-        // complete file eagerly and bounds that user-input allocation surface.
+    fn caps_midi_input_parsing() {
+        // Streaming still parses the complete file and bounds that untrusted
+        // input allocation surface independently of output duration.
         assert!(validate_input_len(MAX_MIDI_BYTES).is_ok());
         assert!(validate_input_len(MAX_MIDI_BYTES + 1).is_err());
     }

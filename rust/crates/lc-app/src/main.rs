@@ -9225,9 +9225,10 @@ impl AudioContext {
         identity: Option<Arc<MusicAssetIdentity>>,
     ) -> Result<(), AudioError> {
         self.stop_music();
-        // Decode off-thread: a MIDI track is a full FluidSynth render and
-        // was the single largest scenario-activation cost. C++ streams
-        // music through SDL_mixer with zero load-time work.
+        // Initialize the pull decoder off-thread. This retains the compressed
+        // bytes and parses bounded source state (including a MIDI event
+        // schedule) without rendering the complete track to PCM, matching
+        // C++'s SDL_mixer ownership model.
         let generation = lock_unpoisoned(&self.music_control).generation;
         let worker = self.system.worker_handle();
         let data = data.to_vec();
@@ -9247,7 +9248,7 @@ impl AudioContext {
         let load_pending = Arc::clone(&self.music_load_pending);
         std::thread::spawn(move || {
             let _pending_guard = PendingMusicLoadGuard(load_pending, generation);
-            let music = match worker.load_music(&data) {
+            let music = match worker.load_music_owned(data) {
                 Ok(music) => music,
                 Err(error) => {
                     tracing::warn!(%error, "music decode failed");
