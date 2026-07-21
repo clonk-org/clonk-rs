@@ -81,11 +81,19 @@ fn load_script_string_table<S: AsRef<str>>(
 ) -> Result<(Vec<u8>, PathBuf), GroupError> {
     let mut table = None;
     let mut table_path = None;
-    for candidate in std::iter::once("StringTbl.txt".to_string()).chain(
-        languages
-            .iter()
-            .map(|language| format!("StringTbl{}.txt", language.as_ref())),
-    ) {
+    // C4ComponentHost copies at most two native bytes from each LanguageEx
+    // segment, and its C string input stops at the first NUL.
+    for candidate in
+        std::iter::once("StringTbl.txt".to_string()).chain(languages.iter().map(|language| {
+            let code = lc_script::c4_string_bytes(language.as_ref());
+            let visible = code
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(code.len());
+            let code = lc_script::c4_string_from_bytes(&code[..visible.min(2)]);
+            format!("StringTbl{code}.txt")
+        }))
+    {
         let Some(component) = components.read(&candidate)? else {
             continue;
         };
@@ -266,6 +274,29 @@ mod tests {
         let localized =
             localize_script_source(&group, "$Before$/$After$", &["US"]).expect("source localizes");
         assert_eq!(localized, "kept/$After$");
+    }
+
+    #[test]
+    fn script_string_table_uses_two_native_language_bytes_before_nul() {
+        let directory = tempdir().expect("tempdir");
+        std::fs::write(directory.path().join("StringTblDE.txt"), b"Code=two-byte\n")
+            .expect("write two-byte table");
+        std::fs::write(
+            directory.path().join("StringTblDE-extra.txt"),
+            b"Code=untruncated\n",
+        )
+        .expect("write untruncated decoy");
+        std::fs::write(directory.path().join("StringTblD.txt"), b"Code=pre-nul\n")
+            .expect("write pre-NUL table");
+        let group = Group::open(directory.path()).expect("open group");
+
+        let truncated = localize_script_source(&group, "$Code$", &["DE-extra"])
+            .expect("long language code localizes");
+        assert_eq!(truncated, "two-byte");
+
+        let nul_terminated = localize_script_source(&group, "$Code$", &["D\0E"])
+            .expect("NUL-terminated language code localizes");
+        assert_eq!(nul_terminated, "pre-nul");
     }
 
     #[test]

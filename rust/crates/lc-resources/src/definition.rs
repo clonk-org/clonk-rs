@@ -2118,33 +2118,33 @@ fn load_scripts<S: AsRef<str>>(
 ) -> Result<DefinitionScript, DefinitionError> {
     // C4Def loads C4CFN_Script through C4ComponentHost::LoadAppend. That
     // template has three top-level segments, and each localized segment
-    // independently takes the first match in language-sequence order.
+    // independently takes the first candidate that can actually be read in
+    // language-sequence order. C4Def ignores a segment's read failures.
+    let language_codes = if languages.is_empty() {
+        vec![String::new()]
+    } else {
+        languages
+            .iter()
+            .map(|language| component_language_code(language.as_ref()))
+            .collect()
+    };
     let mut candidates = Vec::with_capacity(3);
-    if group.exists("Script.c") {
-        candidates.push("Script.c".to_string());
+    if let Ok(data) = group.read_file("Script.c") {
+        candidates.push(("Script.c".to_string(), data));
     }
     for stem in ["Script", "C4Script"] {
-        let candidate = if languages.is_empty() {
-            // SCopySegment("", 0, ...) yields one empty language code.
-            let candidate = format!("{stem}.c");
-            group.exists(&candidate).then_some(candidate)
-        } else {
-            languages
-                .iter()
-                .map(|language| format!("{stem}{}.c", language.as_ref()))
-                .find(|candidate| group.exists(candidate))
-        };
-        if let Some(candidate) = candidate {
-            candidates.push(candidate);
+        for language in &language_codes {
+            let candidate = format!("{stem}{language}.c");
+            if let Ok(data) = group.read_file(&candidate) {
+                candidates.push((candidate, data));
+                break;
+            }
         }
     }
 
     let mut files = Vec::with_capacity(candidates.len());
     let mut combined = String::new();
-    for candidate in candidates {
-        let data = group
-            .read_file(&candidate)
-            .map_err(DefinitionError::Resources)?;
+    for (candidate, data) in candidates {
         // LoadAppend copies with SCopy: a NUL ends this component without
         // suppressing later selected components.
         let data = data.split(|byte| *byte == 0).next().unwrap_or_default();
@@ -7320,8 +7320,11 @@ Category=C4D_Object
         )
         .unwrap();
 
-        let script = load_scripts(&Group::open(temp.path()).unwrap(), &["US", "DE"])
-            .expect("script components load");
+        let script = load_scripts(
+            &Group::open(temp.path()).unwrap(),
+            &["US-extra", "DE-extra"],
+        )
+        .expect("script components load");
         let paths = script
             .files()
             .iter()
@@ -7434,6 +7437,81 @@ Category=C4D_Object
             .windows(b"func After() {}".len())
             .any(|window| window == b"func After() {}"));
         assert!(!combined.contains(&0));
+    }
+
+    #[test]
+    fn unreadable_definition_script_candidate_falls_through_to_next_language() {
+        let bad_us = vec![b'x'; 64];
+        let mut packed = crate::MutableGroup::new("unreadable-script.bin");
+        packed
+            .add_file(
+                "DefCore.txt",
+                b"[DefCore]\nid=FALL\nCategory=C4D_Object\n".to_vec(),
+            )
+            .unwrap();
+        packed
+            .add_file(
+                "ScriptDE.c",
+                b"func Fallback() {}\0func Hidden() {}".to_vec(),
+            )
+            .unwrap();
+        packed
+            .add_file("C4ScriptUS.c", b"func Legacy() {}".to_vec())
+            .unwrap();
+        packed.add_file("ScriptUS.c", bad_us.clone()).unwrap();
+
+        let mut raw = packed.pack_raw().unwrap();
+        raw.truncate(raw.len() - bad_us.len());
+        let group = Group::from_memory(
+            PathBuf::from("unreadable-script.c4d"),
+            crate::compress_c4group_image(&raw).unwrap(),
+        )
+        .unwrap();
+        assert!(group.exists("ScriptUS.c"));
+        assert!(group.read_file("ScriptUS.c").is_err());
+        assert_eq!(
+            group.read_file("ScriptDE.c").unwrap(),
+            b"func Fallback() {}\0func Hidden() {}"
+        );
+
+        let definition =
+            Definition::load_with_languages(&group, &["US", "DE"]).expect("fallback loads");
+        let paths = definition
+            .script
+            .files()
+            .iter()
+            .map(|file| file.path.as_path())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![Path::new("ScriptDE.c"), Path::new("C4ScriptUS.c")]
+        );
+        assert_eq!(
+            definition.script.combined(),
+            "\nfunc Fallback() {}\nfunc Legacy() {}"
+        );
+
+        let no_fallback =
+            Definition::load_with_languages(&group, &["US"]).expect("failed segment is optional");
+        assert_eq!(no_fallback.script.files().len(), 1);
+        assert_eq!(
+            no_fallback.script.files()[0].path,
+            Path::new("C4ScriptUS.c")
+        );
+        assert_eq!(no_fallback.script.combined(), "\nfunc Legacy() {}");
+    }
+
+    #[test]
+    fn readable_empty_definition_script_candidate_blocks_language_fallback() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("ScriptUS.c"), []).unwrap();
+        fs::write(temp.path().join("ScriptDE.c"), b"func MustNotLoad() {}").unwrap();
+
+        let script = load_scripts(&Group::open(temp.path()).unwrap(), &["US", "DE"])
+            .expect("empty candidate loads");
+        assert_eq!(script.files().len(), 1);
+        assert_eq!(script.files()[0].path, Path::new("ScriptUS.c"));
+        assert_eq!(script.combined(), "\n");
     }
 
     #[test]
