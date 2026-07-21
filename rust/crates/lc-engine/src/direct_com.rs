@@ -5853,12 +5853,18 @@ impl Engine {
         Ok(false)
     }
 
-    /// `ObjectComDig` (C4ObjectCom.cpp:353-362): CanDig gate + Dig action.
-    /// The IDS_OBJ_NODIG message is display-only and not yet ported.
-    fn object_com_dig(&mut self, index: usize) -> Result<bool, EngineError> {
+    /// `ObjectComDig` (C4ObjectCom.cpp:353-362): CanDig gate + Dig action,
+    /// with the native localized object message on either failure path.
+    pub(crate) fn object_com_dig(&mut self, index: usize) -> Result<bool, EngineError> {
+        let actor_id = self.objects[index].id;
         let physical = self.object_physical(index);
         let definition_id = self.objects[index].definition_id.clone();
         if physical.can_dig == 0 || !self.action_with_calls(index, &definition_id, "Dig")? {
+            let name = self.object_message_name(actor_id);
+            let text = self
+                .object_no_dig_resource_string
+                .replacen("%s", &name, 1);
+            self.game_msg_object(actor_id, text);
             return Ok(false);
         }
         // ObjectActionDig resets the Dig2Object request (:143).
@@ -6020,7 +6026,7 @@ impl Engine {
         });
     }
 
-    fn line_construction_object_name(&self, object_id: ObjectId) -> String {
+    fn object_message_name(&self, object_id: ObjectId) -> String {
         self.find_object_index(object_id)
             .map(|index| &self.objects[index])
             .and_then(|object| {
@@ -6028,6 +6034,7 @@ impl Engine {
                     .state
                     .custom_name
                     .clone()
+                    .filter(|name| !name.is_empty())
                     .or_else(|| {
                         self.crew_object_infos
                             .get(&object_id)
@@ -6042,10 +6049,9 @@ impl Engine {
             .unwrap_or_default()
     }
 
-    /// `GameMsgObject` with the shipped US `LoadResStr` result. The engine's
-    /// process-global language table is not generalized yet, but ordering,
-    /// target replacement, and the classic text are still simulation-visible.
-    fn line_construction_message(&mut self, target: ObjectId, text: String) {
+    /// `GameMsgObject` after its caller resolves the active `LoadResStr` text.
+    /// Ordering and target replacement are simulation-visible.
+    fn game_msg_object(&mut self, target: ObjectId, text: String) {
         // C4GameMessageList::New replaces prior messages before its deleted
         // target guard, so a failed GameMsgObject still performs the clear.
         self.messages.clear_for_object(target);
@@ -6091,8 +6097,8 @@ impl Engine {
             return Ok(false);
         };
         if self.object_physical(clonk_index).can_construct == 0 {
-            let clonk_name = self.line_construction_object_name(clonk_id);
-            self.line_construction_message(clonk_id, format!("{clonk_name} cannot create lines."));
+            let clonk_name = self.object_message_name(clonk_id);
+            self.game_msg_object(clonk_id, format!("{clonk_name} cannot create lines."));
             return Ok(false);
         }
 
@@ -6155,8 +6161,8 @@ impl Engine {
             };
             if endpoint_is_linekit(self, first) || endpoint_is_linekit(self, second) {
                 self.play_line_construction_sound("Error", clonk_id);
-                let line_name = self.line_construction_object_name(self.objects[line_index].id);
-                self.line_construction_message(
+                let line_name = self.object_message_name(self.objects[line_index].id);
+                self.game_msg_object(
                     clonk_id,
                     format!("{line_name} is not fixed at the other end."),
                 );
@@ -6196,9 +6202,9 @@ impl Engine {
                     self.objects[line_index].state.action.target2 = Some(linekit_id);
                 }
             }
-            let line_name = self.line_construction_object_name(line_id);
-            let structure_name = self.line_construction_object_name(structure_id);
-            self.line_construction_message(
+            let line_name = self.object_message_name(line_id);
+            let structure_name = self.object_message_name(structure_id);
+            self.game_msg_object(
                 structure_id,
                 format!("{line_name} disconnected|from {structure_name}."),
             );
@@ -6214,7 +6220,7 @@ impl Engine {
             self.at_object(position, ocf::LINE_CONSTRUCT, Some(clonk_id))
         else {
             self.play_line_construction_sound("Error", clonk_id);
-            self.line_construction_message(
+            self.game_msg_object(
                 clonk_id,
                 if active_line.is_some() {
                     "Connection not possible.".to_owned()
@@ -6226,7 +6232,7 @@ impl Engine {
         };
         if structure_ocf & ocf::LINE_CONSTRUCT == 0 {
             self.play_line_construction_sound("Error", clonk_id);
-            self.line_construction_message(
+            self.game_msg_object(
                 clonk_id,
                 if active_line.is_some() {
                     "Connection not possible.".to_owned()
@@ -6243,8 +6249,8 @@ impl Engine {
             if first == Some(structure_id) || second == Some(structure_id) {
                 self.play_line_construction_sound("Connect", clonk_id);
                 let line_id = self.objects[line_index].id;
-                let line_name = self.line_construction_object_name(line_id);
-                self.line_construction_message(structure_id, format!("{line_name} disconnected."));
+                let line_name = self.object_message_name(line_id);
+                self.game_msg_object(structure_id, format!("{line_name} disconnected."));
                 let _ = self.assign_object_removal(line_id)?;
                 return Ok(true);
             }
@@ -6271,9 +6277,9 @@ impl Engine {
             };
             if !connect_ok {
                 self.play_line_construction_sound("Error", clonk_id);
-                let line_name = self.line_construction_object_name(self.objects[line_index].id);
-                let structure_name = self.line_construction_object_name(structure_id);
-                self.line_construction_message(
+                let line_name = self.object_message_name(self.objects[line_index].id);
+                let structure_name = self.object_message_name(structure_id);
+                self.game_msg_object(
                     structure_id,
                     format!("{line_name} cannot be connected|to {structure_name}."),
                 );
@@ -6299,9 +6305,9 @@ impl Engine {
                 )?;
             }
             let _ = self.assign_object_removal(linekit_id)?;
-            let line_name = self.line_construction_object_name(self.objects[line_index].id);
-            let structure_name = self.line_construction_object_name(structure_id);
-            self.line_construction_message(
+            let line_name = self.object_message_name(self.objects[line_index].id);
+            let structure_name = self.object_message_name(structure_id);
+            self.game_msg_object(
                 structure_id,
                 format!("{line_name} conntected|to {structure_name}"),
             );
@@ -6333,15 +6339,15 @@ impl Engine {
         };
         let Some(line_definition) = line_definition else {
             self.play_line_construction_sound("Error", clonk_id);
-            self.line_construction_message(clonk_id, "Cannot create a new line here.".to_owned());
+            self.game_msg_object(clonk_id, "Cannot create a new line here.".to_owned());
             return Ok(false);
         };
         let owner = self.objects[clonk_index].state.owner;
         let created = self.create_line_object(line_definition, owner, structure_id, linekit_id)?;
         if let Some(line_id) = created {
             self.play_line_construction_sound("Connect", clonk_id);
-            let line_name = self.line_construction_object_name(line_id);
-            self.line_construction_message(structure_id, format!("New|{line_name}."));
+            let line_name = self.object_message_name(line_id);
+            self.game_msg_object(structure_id, format!("New|{line_name}."));
         }
         Ok(created.is_some())
     }
@@ -9446,6 +9452,147 @@ protected func OnActionJump()
     }
 
     #[test]
+    fn object_com_dig_failure_emits_no_dig_object_message() {
+        fn run_failure_case(can_dig: i32, reject_action: bool, name: &str) {
+            let mut engine = Engine::new();
+            engine.set_object_no_dig_resource_string("%s kann|nicht graben.");
+            let mut definition =
+                Definition::from_script("CLNK", "Clonk", "#strict\n").expect("definition");
+            let walk = ActionSpec::default()
+                .with_procedure("walk")
+                .with_no_other_action(reject_action);
+            definition.configure_actions(
+                Some("Walk".to_string()),
+                HashMap::from([
+                    ("Walk".to_string(), walk),
+                    (
+                        "Dig".to_string(),
+                        ActionSpec::default().with_procedure("dig"),
+                    ),
+                ]),
+            );
+            definition.set_physical(PhysicalInfo {
+                can_dig,
+                ..Default::default()
+            });
+            engine
+                .register_definition(definition)
+                .expect("definition registers");
+            let actor = engine
+                .spawn_object(
+                    SpawnConfig::new("CLNK")
+                        .with_action(ActionState::new("Walk"))
+                        .with_custom_name(name),
+                )
+                .expect("actor spawns");
+            let index = engine.find_object_index(actor).expect("actor exists");
+            let action_before = engine.objects[index].state.action.clone();
+
+            assert!(!engine.object_com_dig(index).expect("ObjectComDig runs"));
+
+            let index = engine.find_object_index(actor).expect("actor survives");
+            assert_eq!(engine.objects[index].state.action, action_before);
+            let messages = engine.messages.snapshot();
+            assert_eq!(messages.len(), 1, "each failure emits exactly one message");
+            let message = &messages[0];
+            assert_eq!(message.kind, message::MessageKind::Target);
+            assert_eq!(message.target, Some(actor));
+            assert_eq!(message.player, None);
+            assert_eq!(message.offset, Vector2::ZERO);
+            assert_eq!(message.color, 0xffff_ffff);
+            assert_eq!(message.flags, 0);
+            assert_eq!(
+                message.lines,
+                vec![format!("{name} kann"), "nicht graben.".to_string()]
+            );
+        }
+
+        run_failure_case(0, false, "Nichtgräber");
+        run_failure_case(1, true, "Gesperrt");
+    }
+
+    #[test]
+    fn queued_dig_routes_action_rejection_through_object_com_dig() {
+        let mut engine = Engine::new();
+        engine.set_object_no_dig_resource_string("%s cannot dig.");
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", "#strict\n").expect("definition");
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("walk")
+                        .with_no_other_action(true),
+                ),
+                (
+                    "Dig".to_string(),
+                    ActionSpec::default().with_procedure("dig"),
+                ),
+            ]),
+        );
+        definition.set_physical(PhysicalInfo {
+            can_dig: 1,
+            ..Default::default()
+        });
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_action(ActionState::new("Walk"))
+                    .with_custom_name("Queue"),
+            )
+            .expect("actor spawns");
+        let index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[index].apply_command_operations([CommandOperation::PushFront(
+            CommandRequest::new(CommandId::Dig)
+                .with_tx(Some(0))
+                .with_ty(Some(100)),
+        )]);
+
+        engine.tick_without_snapshot().expect("queued Dig executes");
+
+        let snapshot = engine.object_snapshot(actor).expect("actor survives");
+        assert_eq!(snapshot.action.name, "Walk");
+        assert!(snapshot.command_stack.command_names().is_empty());
+        let messages = engine.messages.snapshot();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].target, Some(actor));
+        assert_eq!(messages[0].lines, vec!["Queue cannot dig."]);
+    }
+
+    #[test]
+    fn queued_dig_applies_post_helper_data_and_steering_in_the_same_execute() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_action(ActionState::new("Walk"))
+                    .with_position(Vector2::new(0, 0)),
+            )
+            .expect("actor spawns");
+        let index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[index].apply_command_operations([CommandOperation::PushFront(
+            CommandRequest::new(CommandId::Dig)
+                .with_tx(Some(0))
+                .with_ty(Some(100))
+                .with_data(CommandData::Integer(1)),
+        )]);
+
+        engine.tick_without_snapshot().expect("queued Dig executes");
+
+        let snapshot = engine.object_snapshot(actor).expect("actor survives");
+        assert_eq!(snapshot.action.name, "Dig");
+        assert_eq!(snapshot.action.data, 1);
+        assert_eq!(snapshot.command_direction, CommandDirection::DownLeft);
+        assert!(engine.messages.snapshot().is_empty());
+    }
+
+    #[test]
     fn dig_pressed_twice_activates_contents_via_dig_double() {
         // Two dig presses inside C4DoubleClick become COM_Dig_D
         // (C4Player::InCom, C4Player.cpp:1532-1533) → ObjectComDigDouble
@@ -9750,7 +9897,7 @@ public func Activate(object clonk)
         let target = engine
             .spawn_object(SpawnConfig::new("TARG"))
             .expect("target spawns");
-        engine.line_construction_message(target, "old".to_owned());
+        engine.game_msg_object(target, "old".to_owned());
         assert_eq!(
             engine
                 .messages
@@ -9765,7 +9912,7 @@ public func Activate(object clonk)
             .expect("target remains linked");
         let _ = engine.objects[target_index].mark_destroyed();
 
-        engine.line_construction_message(target, "new".to_owned());
+        engine.game_msg_object(target, "new".to_owned());
 
         assert!(
             engine

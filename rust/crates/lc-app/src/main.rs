@@ -4242,6 +4242,14 @@ fn needed_material_resource_strings(table: &RuntimeLanguageTable) -> (String, St
     (get("IDS_CON_BUILDMATNEED"), get("IDS_CON_BUILDMATNONE"))
 }
 
+fn object_no_dig_resource_string(table: &RuntimeLanguageTable) -> String {
+    table
+        .entries
+        .get("IDS_OBJ_NODIG")
+        .cloned()
+        .unwrap_or_else(|| "[Undefined: IDS_OBJ_NODIG]".to_string())
+}
+
 fn default_rank_resource_names(table: &RuntimeLanguageTable) -> Vec<String> {
     table
         .entries
@@ -13594,6 +13602,9 @@ struct GameApp {
     /// reinstalled on every fresh Engine.
     needed_material_need: String,
     needed_material_none: String,
+    /// Process-global localized `IDS_OBJ_NODIG`, reinstalled on every fresh
+    /// engine and refreshed immediately after an Options language change.
+    object_no_dig: String,
     /// Game.Rank names frozen by the latest C4Game::PreInit analogue. Startup
     /// Options may reload the process language table afterward, but a game
     /// started from that same startup session retains these names.
@@ -25567,6 +25578,10 @@ impl GameApp {
                     "%s needs|no more material.".to_owned(),
                 )
             });
+        let object_no_dig = runtime_language_table
+            .as_ref()
+            .map(|table| object_no_dig_resource_string(table))
+            .unwrap_or_else(|_| "%s cannot dig.".to_owned());
         let default_rank_names = runtime_language_table
             .as_ref()
             .ok()
@@ -25584,6 +25599,7 @@ impl GameApp {
             needed_material_need.clone(),
             needed_material_none.clone(),
         );
+        engine.set_object_no_dig_resource_string(object_no_dig.clone());
         if let Some(names) = default_rank_names.as_ref() {
             engine.set_default_rank_names(names.clone());
         }
@@ -25610,6 +25626,7 @@ impl GameApp {
             standard_names,
             needed_material_need,
             needed_material_none,
+            object_no_dig,
             default_rank_names,
             loaded_default_rank_names,
             startup_tooltip_resources,
@@ -29075,6 +29092,8 @@ impl GameApp {
             self.needed_material_need.clone(),
             self.needed_material_none.clone(),
         );
+        self.engine
+            .set_object_no_dig_resource_string(self.object_no_dig.clone());
         if let Some(names) = self.default_rank_names.as_ref() {
             self.engine.set_default_rank_names(names.clone());
         }
@@ -29095,6 +29114,7 @@ impl GameApp {
             self.needed_material_need.clone(),
             self.needed_material_none.clone(),
         );
+        engine.set_object_no_dig_resource_string(self.object_no_dig.clone());
         if let Some(names) = self.default_rank_names.as_ref() {
             engine.set_default_rank_names(names.clone());
         }
@@ -68560,12 +68580,16 @@ impl GameApp {
             .cloned()
             .unwrap_or_else(|| "[Undefined: IDS_LANG_CHARSET]".to_string());
         let (needed_material_need, needed_material_none) = needed_material_resource_strings(&table);
+        let object_no_dig = object_no_dig_resource_string(&table);
         self.needed_material_need = needed_material_need.clone();
         self.needed_material_none = needed_material_none.clone();
+        self.object_no_dig = object_no_dig.clone();
         self.loaded_default_rank_names = Some(default_rank_resource_names(&table));
         self.startup_tooltip_resources = table.entries.clone();
         self.engine
             .set_needed_material_resource_strings(needed_material_need, needed_material_none);
+        self.engine
+            .set_object_no_dig_resource_string(object_no_dig);
 
         self.runtime_help_text_cache = OnceLock::new();
         let _ = self
@@ -136712,6 +136736,7 @@ ScenInfoArea=70,5,25,90
         codes.sort_unstable();
         assert_eq!(codes, vec!["DE", "US"]);
         assert_eq!(app.needed_material_need, "%s|braucht noch");
+        assert_eq!(app.object_no_dig, "%s kann|nicht graben.");
         assert_eq!(
             app.default_rank_names
                 .as_deref()
@@ -136749,6 +136774,7 @@ ScenInfoArea=70,5,25,90
         assert_eq!(program.language_text, "US - English");
         assert_eq!(program.language_ex, "US,DE");
         assert_eq!(app.needed_material_need, "%s|needs");
+        assert_eq!(app.object_no_dig, "%s cannot dig.");
         assert_eq!(
             app.default_rank_names
                 .as_deref()
@@ -186408,6 +186434,10 @@ func ControlDig() { dig_count = 1; return(1); }
         let (need, none) = needed_material_resource_strings(&table);
         assert_eq!(need, "%s|braucht noch");
         assert_eq!(none, "%s braucht kein|weiteres Baumaterial.");
+        assert_eq!(
+            object_no_dig_resource_string(&table),
+            "%s kann|nicht graben."
+        );
         assert_eq!(default_rank_resource_names(&table)[1], "Fähnrich");
         let columns = build_runtime_help_columns(&table.entries).expect("build German help");
         assert!(columns.left.starts_with("[Spielfunktionen]\n"));
@@ -186560,6 +186590,7 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(!columns.left.contains("Spielfunktionen"));
         assert_eq!(app.needed_material_need, "%s|needs");
         assert_eq!(app.needed_material_none, "%s needs|no more material.");
+        assert_eq!(app.object_no_dig, "%s cannot dig.");
     }
 
     #[test]

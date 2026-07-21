@@ -5503,7 +5503,7 @@ mod tests {
     }
 
     #[test]
-    fn dig_sets_dig_action_when_walking() {
+    fn dig_requests_live_object_com_dig_when_walking() {
         let actor_id = ObjectId::new(62);
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.action_procedure = ActionProcedure::Walk;
@@ -5540,15 +5540,17 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
-        let update = result.update.expect("dig should issue an update");
         assert_eq!(
-            update.command_direction,
-            Some(CommandDirection::DownLeft),
-            "the C++ tx-DigRange guard overwrites straight Down"
+            result.events,
+            vec![CommandEvent::ObjectComDig {
+                actor_id,
+                dig_out_material: true,
+                direction: Some(CommandDirection::DownLeft),
+                command_instance_id: 0,
+            }],
+            "the live helper retains the C++ tx-DigRange steering quirk"
         );
-        let action_update = update.action.expect("dig should start the dig action");
-        assert_eq!(action_update.name.as_deref(), Some("Dig"));
-        assert_eq!(action_update.data, Some(1));
+        assert!(result.update.is_none());
     }
 
     #[test]
@@ -5659,7 +5661,7 @@ mod tests {
     }
 
     #[test]
-    fn dig_fails_on_the_start_frame_without_can_dig() {
+    fn dig_routes_can_dig_failure_through_the_live_helper() {
         let mut actor = snapshot_with_id(66);
         actor.action_procedure = ActionProcedure::Walk;
         actor.physical.can_dig = 0;
@@ -5670,9 +5672,13 @@ mod tests {
                 .with_tx(Some(0))
                 .with_ty(Some(20)),
         );
-        assert_eq!(result.status, CommandStatus::Failed);
+        assert_eq!(result.status, CommandStatus::Running);
         assert!(result.update.is_none(), "the Dig action never starts");
         assert!(result.operations.is_empty());
+        assert!(matches!(
+            result.events.as_slice(),
+            [CommandEvent::ObjectComDig { actor_id, .. }] if *actor_id == ObjectId::new(66)
+        ));
     }
 
     #[test]
@@ -16133,6 +16139,17 @@ pub enum CommandEvent {
         object_id: ObjectId,
         tx: i32,
     },
+    /// C4Command::Dig calls the callbackful ObjectComDig before writing
+    /// Dig2Object and steering. Its failure message and action rejection
+    /// must therefore resolve against live state (C4Command.cpp:468-484;
+    /// C4ObjectCom.cpp:353-361).
+    ObjectComDig {
+        actor_id: ObjectId,
+        dig_out_material: bool,
+        direction: Option<CommandDirection>,
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
     /// C4Command::Exit's collection-area branch calls ObjectComJump
     /// directly and only finishes Exit after the callbackful helper returns
     /// (C4Command.cpp:643-649). Keep this separate from the Jump-command
@@ -17968,6 +17985,33 @@ impl CommandStack {
         state.completion_pending = false;
         entry.finished = Some(CommandStatus::Completed);
         true
+    }
+
+    /// Resolve the live ObjectComDig boundary against the exact command
+    /// instance which emitted it. A successful SetAction callback may unlink
+    /// the command; both failure exits precede callbacks and remain attached.
+    pub(crate) fn resolve_dig_attempt(
+        &mut self,
+        command_instance_id: u64,
+        succeeded: bool,
+    ) -> Option<CommandFailureFeedback> {
+        if let Some(index) = self.entries.iter().position(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(&entry.state, CommandState::Dig(state) if state.start_pending)
+        }) {
+            if let CommandState::Dig(state) = &mut self.entries[index].state {
+                state.start_pending = false;
+            }
+            if succeeded {
+                return None;
+            }
+            self.entries[index].finished = Some(CommandStatus::Failed);
+            return self.record_failure_at(index);
+        }
+
+        // Both false exits happen before SetAction begins callbacks, so a
+        // missing exact instance can only be a callback-detached success.
+        None
     }
 
     /// Finish the exact Throw whose live ObjectComPutTake helper returned.
@@ -20880,6 +20924,11 @@ struct DigState {
     dig_out_material: bool,
     ungrab_requested: bool,
     exit_requested: bool,
+    /// Transient live ObjectComDig boundary. Command snapshots taken by an
+    /// action callback retain it, while persisted saves never observe the
+    /// synchronous event in flight.
+    #[serde(skip)]
+    start_pending: bool,
 }
 
 impl DigState {
@@ -20899,6 +20948,7 @@ impl DigState {
             dig_out_material,
             ungrab_requested: false,
             exit_requested: false,
+            start_pending: false,
         })
     }
 
@@ -21051,18 +21101,18 @@ impl DigState {
             if ctx.object.action_procedure != ActionProcedure::Walk {
                 return CommandStepResult::running(pending_update);
             }
-            if ctx.object.physical.can_dig == 0 {
-                return CommandStepResult::failed(pending_update);
+            if self.start_pending {
+                return CommandStepResult::running(pending_update);
             }
-            let mut update = pending_update.unwrap_or_default();
-            let action_update = ActionUpdate::default()
-                .with_name("Dig")
-                .with_force(true)
-                .with_phase(0)
-                .with_ticks(0)
-                .with_data(0);
-            update = update.with_action_update(action_update);
-            pending_update = Some(update);
+            self.start_pending = true;
+            return CommandStepResult::running(pending_update).with_events(vec![
+                CommandEvent::ObjectComDig {
+                    actor_id: ctx.object.id,
+                    dig_out_material: self.dig_out_material,
+                    direction: self.desired_direction(ctx.position, target),
+                    command_instance_id: 0,
+                },
+            ]);
         }
 
         if self.dig_out_material {
@@ -24802,6 +24852,10 @@ impl ActiveCommand {
                     ..
                 }
                 | CommandEvent::ObjectComExitJump {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ObjectComDig {
                     command_instance_id,
                     ..
                 }

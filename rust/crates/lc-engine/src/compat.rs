@@ -1954,6 +1954,9 @@ pub struct HostWorldContext {
     next_object_id: u64,
     team_home_base_rule: bool,
     needed_material_strings: Rc<crate::NeededMaterialStrings>,
+    /// Process-local `IDS_OBJ_NODIG` template used by synchronous queued-Dig
+    /// execution inside a script callback.
+    object_no_dig_resource_string: Rc<String>,
     /// `C4GameParameters::isLeague`: league games forbid every scripted
     /// team switch, including an otherwise successful same-team no-op.
     league_game: bool,
@@ -2169,6 +2172,7 @@ impl Default for HostWorldContext {
             crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
             team_home_base_rule: false,
             needed_material_strings: Rc::new(crate::NeededMaterialStrings::default()),
+            object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
             linked_script_hosts: Rc::new(Vec::new()),
@@ -2299,6 +2303,11 @@ impl HostWorldContext {
         strings: Rc<crate::NeededMaterialStrings>,
     ) -> Self {
         self.needed_material_strings = strings;
+        self
+    }
+
+    pub(crate) fn with_object_no_dig_resource_string(mut self, template: Rc<String>) -> Self {
+        self.object_no_dig_resource_string = template;
         self
     }
 
@@ -2498,6 +2507,7 @@ impl HostWorldContext {
             next_object_id,
             team_home_base_rule,
             needed_material_strings: Rc::new(crate::NeededMaterialStrings::default()),
+            object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
             league_game: false,
             game_tick_delay_ms: Rc::new(Cell::new(crate::DEFAULT_GAME_TICK_DELAY_MS)),
             game_tick_delay_revision: Rc::new(Cell::new(0)),
@@ -33652,6 +33662,70 @@ fn preview_object_com_stop(actor: ObjectId) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+/// Synchronous host twin of ObjectComDig for script ExecuteCommand. The
+/// physical gate, callbackful SetAction, localized GameMsgObject failure and
+/// Action.Data reset all complete before the caller's next script instruction.
+fn preview_object_com_dig(actor: ObjectId) -> Result<bool, RuntimeError> {
+    let can_dig = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        if !context.ensure_object_scope(actor) {
+            return None;
+        }
+        context
+            .object_scope(actor)
+            .map(|scope| scope.resolved_physical(false).can_dig != 0)
+    });
+    let succeeded = can_dig == Some(true) && native_set_action_by_name(actor, "Dig")?;
+    if succeeded {
+        HOST_CONTEXT.with(|cell| {
+            if let Some(scope) = cell
+                .borrow_mut()
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(actor))
+            {
+                scope.reset_action_data();
+            }
+        });
+        return Ok(true);
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        let name = context.object_effective_name(actor).unwrap_or_default();
+        let text = if context
+            .get_world_object(actor)
+            .is_some_and(|object| object.is_present())
+        {
+            context
+                .world
+                .object_no_dig_resource_string
+                .replacen("%s", &name, 1)
+        } else {
+            // An empty non-Multiple target message performs the native
+            // replacement clear without leaving a message behind.
+            String::new()
+        };
+        context.register_message(MessageCommand::Add(MessageSpec {
+            kind: MessageKind::Target,
+            text,
+            target: Some(actor),
+            player: None,
+            offset: Vector2::ZERO,
+            color: 0xffff_ffff,
+            flags: 0,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        }));
+    });
+    Ok(false)
+}
+
 /// Script-level ExecuteCommand twin of CommandEvent::ObjectComStopMoveTo.
 /// ObjectComStop callbacks and the retained command continuation must both
 /// complete before ExecuteCommand returns to its caller.
@@ -34818,6 +34892,7 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
         move_to_stops,
         build_stops,
         build_actions,
+        dig_attempts,
     )) = preview
     else {
         return Ok(Value::Bool(false));
@@ -34835,7 +34910,8 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
         || !failure_feedback.is_empty()
         || !move_to_stops.is_empty()
         || !build_stops.is_empty()
-        || !build_actions.is_empty();
+        || !build_actions.is_empty()
+        || !dig_attempts.is_empty();
     for (actor_id, base_id, definition_id, buyer, payer, count) in buy_attempts {
         preview_evaluate_buy(actor_id, base_id, &definition_id, buyer, payer, count)?;
     }
@@ -34850,6 +34926,31 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     for (actor_id, target_id, stop_first) in build_actions {
         preview_object_com_build(actor_id, target_id, stop_first)?;
+    }
+    for (actor_id, dig_out_material, direction, command_instance_id) in dig_attempts {
+        let succeeded = preview_object_com_dig(actor_id)?;
+        let feedback = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let context = borrow.as_mut()?;
+            let scope = context.object_scope_mut(actor_id)?;
+            if succeeded {
+                if dig_out_material {
+                    scope.set_action_data(1);
+                }
+                if let Some(direction) = direction {
+                    scope.set_command_direction(direction);
+                }
+            }
+            let feedback = scope
+                .live_commands
+                .resolve_dig_attempt(command_instance_id, succeeded);
+            scope.command_stack_replaced = true;
+            scope.command_count = scope.live_commands.len();
+            Some(feedback)
+        });
+        if let Some(feedback) = feedback.flatten() {
+            preview_command_failure_feedback(actor_id, feedback)?;
+        }
     }
     for (actor_id, target_id) in grab_attempts {
         preview_grab_attempt(actor_id, target_id)?;
@@ -46871,6 +46972,7 @@ impl EffectHostContext {
         Vec<ObjectId>,
         Vec<ObjectId>,
         Vec<(ObjectId, ObjectId, bool)>,
+        Vec<(ObjectId, bool, Option<CommandDirection>, u64)>,
     )> {
         let (objects, players, definitions, transfers) = self.command_runtime_data();
         let object_snapshot = objects.get(&target)?;
@@ -46931,6 +47033,7 @@ impl EffectHostContext {
         let mut move_to_stops = Vec::new();
         let mut build_stops = Vec::new();
         let mut build_actions = Vec::new();
+        let mut dig_attempts = Vec::new();
         for event in events.drain(..) {
             match event {
                 CommandEvent::EvaluateBuy {
@@ -47034,6 +47137,17 @@ impl EffectHostContext {
                     target_id,
                     stop_first,
                 } => build_actions.push((object_id, target_id, stop_first)),
+                CommandEvent::ObjectComDig {
+                    actor_id,
+                    dig_out_material,
+                    direction,
+                    command_instance_id,
+                } => dig_attempts.push((
+                    actor_id,
+                    dig_out_material,
+                    direction,
+                    command_instance_id,
+                )),
                 CommandEvent::OpenMenu(request) => self.pending_menu_requests.push(request),
                 other => deferred_events.push(other),
             }
@@ -47060,6 +47174,7 @@ impl EffectHostContext {
             move_to_stops,
             build_stops,
             build_actions,
+            dig_attempts,
         ))
     }
 

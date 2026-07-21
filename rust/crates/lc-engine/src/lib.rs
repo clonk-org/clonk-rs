@@ -18205,6 +18205,10 @@ pub struct Engine {
     crew_info_control_counts: HashMap<CrewInfoLink, i32>,
     team_home_base_rule: bool,
     needed_material_strings: Rc<NeededMaterialStrings>,
+    /// Process-local `IDS_OBJ_NODIG` template from Application.ResStrTable.
+    /// The app refreshes it with the active language and reinstalls it on
+    /// fresh engines; headless engines retain the shipped US fallback.
+    object_no_dig_resource_string: Rc<String>,
     /// Process-local `Game.Rank` names frozen from IDS_GAME_DEFRANKS during
     /// game initialization. Rank numbers and experience remain synchronized;
     /// this localized presentation table deliberately stays out of snapshots.
@@ -20356,6 +20360,7 @@ impl Engine {
             crew_info_control_counts: HashMap::new(),
             team_home_base_rule: false,
             needed_material_strings: Rc::new(NeededMaterialStrings::default()),
+            object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
             default_rank_names: Rc::new(us_default_rank_names()),
             construction_needs_material: false,
             structures_need_energy: false,
@@ -24084,6 +24089,11 @@ impl Engine {
     }
 
     #[doc(hidden)]
+    pub fn set_object_no_dig_resource_string(&mut self, template: impl Into<String>) {
+        self.object_no_dig_resource_string = Rc::new(template.into());
+    }
+
+    #[doc(hidden)]
     pub fn set_default_rank_names(&mut self, names: Vec<String>) {
         self.default_rank_names = Rc::new(names);
     }
@@ -26604,6 +26614,7 @@ impl Engine {
             self.team_home_base_rule,
         )
         .with_needed_material_strings(Rc::clone(&self.needed_material_strings))
+        .with_object_no_dig_resource_string(Rc::clone(&self.object_no_dig_resource_string))
         .with_control_key_names(Rc::clone(&self.control_key_names))
         .with_solid_mask_metadata(solid_mask_metadata)
         .with_solid_mask_bakes(
@@ -53139,6 +53150,42 @@ impl Engine {
             }
             CommandEvent::ObjectComJump { object_id, tx } => {
                 self.execute_jump_command(object_id, tx)?;
+            }
+            CommandEvent::ObjectComDig {
+                actor_id,
+                dig_out_material,
+                direction,
+                command_instance_id,
+            } => {
+                let succeeded = match self.find_object_index(actor_id) {
+                    Some(index) => self.object_com_dig(index)?,
+                    None => false,
+                };
+
+                // These writes follow ObjectComDig and all SetAction calls
+                // synchronously in C4Command::Dig. They use the target and
+                // position captured before the callbackful helper.
+                if succeeded {
+                    if let Some(index) = self.find_object_index(actor_id) {
+                        if dig_out_material {
+                            self.objects[index].state.action.data = 1;
+                        }
+                        if let Some(direction) = direction {
+                            self.objects[index].state.command_direction = direction;
+                        }
+                    }
+                }
+
+                let feedback = self.find_object_index(actor_id).and_then(|index| {
+                    self.objects[index]
+                        .commands
+                        .resolve_dig_attempt(command_instance_id, succeeded)
+                });
+                if let Some(feedback) = feedback {
+                    // Dig's C4Command::Fail branch deliberately contributes
+                    // no second text; ObjectComDig already emitted NODIG.
+                    self.execute_command_failure_feedback(actor_id, feedback, None)?;
+                }
             }
             CommandEvent::ObjectComExitJump {
                 object_id,

@@ -29276,6 +29276,156 @@ protected func ControlCommandFinished(command) { finished = command; }
     }
 
     #[test]
+    fn execute_command_dig_failure_is_synchronous_and_localized() {
+        // C4Command::Dig calls ObjectComDig inside the same ExecuteCommand
+        // invocation. The NODIG message and failed-command removal therefore
+        // happen before the enclosing script call returns.
+        let script = r#"#strict
+local after_action, after_command;
+public func RunNow()
+{
+  SetCommand(this(), "Dig", 0, 0, 100, 0, 1);
+  ExecuteCommand();
+  after_action = GetAction();
+  after_command = GetCommand(0);
+  return true;
+}
+"#;
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", script).expect("definition compiles");
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default()
+                        .with_procedure("WALK")
+                        .with_no_other_action(true),
+                ),
+                (
+                    "Dig".to_string(),
+                    ActionSpec::default().with_procedure("DIG"),
+                ),
+            ]),
+        );
+        definition.set_physical(PhysicalInfo {
+            can_dig: 1,
+            ..Default::default()
+        });
+        let mut engine = Engine::new();
+        engine.set_object_no_dig_resource_string("%s kann|nicht graben.");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_action(ActionState::new("Walk"))
+                    .with_custom_name("Skript"),
+            )
+            .expect("actor spawns");
+        let index = engine.find_object_index(actor).expect("actor exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "RunNow", Vec::new())
+                .expect("RunNow succeeds"),
+            Value::Bool(true)
+        );
+
+        let index = engine.find_object_index(actor).expect("actor survives");
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("after_action"),
+            Some(&Value::String("Walk".to_string().into()))
+        );
+        assert_eq!(
+            engine.objects[index]
+                .state
+                .local_vars
+                .get("after_command"),
+            Some(&Value::Nil)
+        );
+        assert!(engine.objects[index].commands.is_empty());
+        let messages = engine.snapshot().hud.messages;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].target, Some(actor));
+        assert_eq!(messages[0].lines, vec!["Skript kann", "nicht graben."]);
+    }
+
+    #[test]
+    fn execute_command_dig_success_applies_data_and_steering_synchronously() {
+        let script = r#"#strict
+local after_action, after_data, after_dir;
+public func RunNow()
+{
+  SetCommand(this(), "Dig", 0, 0, 100, 0, 1);
+  ExecuteCommand();
+  after_action = GetAction();
+  after_data = GetActionData();
+  after_dir = GetComDir();
+  return true;
+}
+"#;
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", script).expect("definition compiles");
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_procedure("WALK"),
+                ),
+                (
+                    "Dig".to_string(),
+                    ActionSpec::default().with_procedure("DIG"),
+                ),
+            ]),
+        );
+        definition.set_physical(PhysicalInfo {
+            can_dig: 1,
+            ..Default::default()
+        });
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK").with_action(ActionState::new("Walk")),
+            )
+            .expect("actor spawns");
+        let index = engine.find_object_index(actor).expect("actor exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "RunNow", Vec::new())
+                .expect("RunNow succeeds"),
+            Value::Bool(true)
+        );
+
+        let index = engine.find_object_index(actor).expect("actor survives");
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("after_action"),
+            Some(&Value::String("Dig".to_string().into()))
+        );
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("after_data"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(
+            engine.objects[index].state.local_vars.get("after_dir"),
+            Some(&Value::Int(CommandDirection::DownLeft.to_script_value()))
+        );
+        assert_eq!(engine.objects[index].state.action.name, "Dig");
+        assert_eq!(engine.objects[index].state.action.data, 1);
+        assert_eq!(
+            engine.objects[index].state.command_direction,
+            CommandDirection::DownLeft
+        );
+        assert!(engine.snapshot().hud.messages.is_empty());
+    }
+
+    #[test]
     fn finished_callback_can_replace_the_front_before_clear_like_cpp() {
         // The clear loop re-reads `Command` after the callback
         // (C4Object.cpp:4001-4005). A callback SetCommand therefore
