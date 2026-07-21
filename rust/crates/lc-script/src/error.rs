@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::vm::ScriptHostIdentity;
+
 #[derive(Debug, Error)]
 pub enum ScriptError {
     #[error("parse error at {0}:{1}: {2}")]
@@ -12,23 +14,101 @@ impl ScriptError {
     pub fn parse(message: impl Into<String>, line: usize, column: usize) -> Self {
         ScriptError::Parse(line, column, message.into())
     }
+
+    pub fn call_frames(&self) -> &[RuntimeCallFrame] {
+        match self {
+            Self::Runtime(error) => error.call_frames(),
+            Self::Parse(..) => &[],
+        }
+    }
 }
 
 #[derive(Debug, Error)]
 #[error("{message}")]
 pub struct RuntimeError {
     message: String,
+    call_frames: Vec<RuntimeCallFrame>,
+}
+
+/// One active C4Aul script context captured when a runtime error is raised.
+/// Frames are stored in native dump order: innermost first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeCallFrame {
+    function: String,
+    arguments: String,
+    object_context: Option<String>,
+    definition_context: Option<String>,
+    source_host_identity: Option<ScriptHostIdentity>,
+    source_name: Option<String>,
+    source_line: usize,
+}
+
+impl RuntimeCallFrame {
+    pub(crate) fn new(
+        function: String,
+        arguments: String,
+        object_context: Option<String>,
+        definition_context: Option<String>,
+        source_host_identity: Option<ScriptHostIdentity>,
+        source_name: Option<String>,
+        source_line: usize,
+    ) -> Self {
+        Self {
+            function,
+            arguments,
+            object_context,
+            definition_context,
+            source_host_identity,
+            source_name,
+            source_line,
+        }
+    }
+
+    pub fn function(&self) -> &str {
+        &self.function
+    }
+
+    pub fn arguments(&self) -> &str {
+        &self.arguments
+    }
+
+    pub fn object_context(&self) -> Option<&str> {
+        self.object_context.as_deref()
+    }
+
+    pub fn definition_context(&self) -> Option<&str> {
+        self.definition_context.as_deref()
+    }
+
+    pub fn source_host_identity(&self) -> Option<ScriptHostIdentity> {
+        self.source_host_identity
+    }
+
+    pub fn source_name(&self) -> Option<&str> {
+        self.source_name.as_deref()
+    }
+
+    /// Zero-based declaration line used when the tree-walking VM has no
+    /// bytecode-program-counter location for the active expression.
+    pub fn source_line(&self) -> usize {
+        self.source_line
+    }
 }
 
 impl RuntimeError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            call_frames: crate::vm::snapshot_active_runtime_frames(),
         }
     }
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub fn call_frames(&self) -> &[RuntimeCallFrame] {
+        &self.call_frames
     }
 }
 

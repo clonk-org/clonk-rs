@@ -171,6 +171,9 @@ pub struct Function {
     /// destination owner changes. Bound when the parsed script is installed
     /// in an [`Engine`](crate::Engine).
     pub(crate) source_host: Option<crate::vm::ScriptHostIdentity>,
+    /// Human-readable name of the original script host (`pOrgScript`'s
+    /// `ScriptName`) used by runtime call-stack diagnostics.
+    pub(crate) source_name: Option<String>,
     /// Zero-based source line of the function name, matching
     /// `C4AulScriptFunc::SGetLine`.
     pub(crate) source_line: usize,
@@ -208,6 +211,7 @@ impl Function {
                 && a.description == b.description
                 && a.strict_level == b.strict_level
                 && a.source_host == b.source_host
+                && a.source_name == b.source_name
                 && a.source_line == b.source_line
                 && a.global_link_host == b.global_link_host
         }
@@ -266,9 +270,24 @@ impl Function {
         }
     }
 
+    /// Stamp the original script's diagnostic name. Linked copies retain the
+    /// name already assigned by their declaring host.
+    pub(crate) fn bind_source_name(&mut self, name: &str) {
+        if self.source_name.is_none() {
+            self.source_name = Some(name.to_owned());
+        }
+        if let Some(overloaded) = self.overloaded.as_mut() {
+            std::sync::Arc::make_mut(overloaded).bind_source_name(name);
+        }
+    }
+
     /// Original script host (`pOrgScript`) for diagnostic/source lookup.
     pub fn source_host_identity(&self) -> Option<crate::vm::ScriptHostIdentity> {
         self.source_host
+    }
+
+    pub fn source_name(&self) -> Option<&str> {
+        self.source_name.as_deref()
     }
 
     /// Zero-based declaration line, matching C4Aul's `SGetLine` output.

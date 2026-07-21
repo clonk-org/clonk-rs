@@ -294,6 +294,7 @@ impl<'a> Parser<'a> {
             // diagnostics use conventional one-based lines.
             source_line: name_token.line.saturating_sub(1),
             source_host: None,
+            source_name: None,
             // Bound to the destination ScriptEngine when the script is added.
             global_link_host: None,
             // Linked when a later script or an #include overload collides.
@@ -363,6 +364,7 @@ impl<'a> Parser<'a> {
                 strict_level: None,
                 source_line: name_token.line.saturating_sub(1),
                 source_host: None,
+                source_name: None,
                 global_link_host: None,
                 overloaded: None,
             },
@@ -404,6 +406,7 @@ impl<'a> Parser<'a> {
             strict_level: None,
             source_line: name_token.line.saturating_sub(1),
             source_host: None,
+            source_name: None,
             global_link_host: None,
             overloaded: None,
         })
@@ -480,6 +483,7 @@ impl<'a> Parser<'a> {
                 strict_level: None,
                 source_line: name_token.line.saturating_sub(1),
                 source_host: None,
+                source_name: None,
                 global_link_host: None,
                 overloaded: None,
             },

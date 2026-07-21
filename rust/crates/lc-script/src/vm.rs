@@ -15,7 +15,7 @@ use crate::debugger::DebuggerHooks;
 use crate::engine::{
     GlobalCallContextHook, HostFunction, HostReferenceFunction, RegisteredHostFunction,
 };
-use crate::error::RuntimeError;
+use crate::error::{RuntimeCallFrame, RuntimeError};
 use crate::value::{
     c4_id_text, c4_string_bytes, c4_string_from_bytes, c4_strings_equal, C4StringValue, C4VType,
     Literal, Value, ValueMap,
@@ -252,6 +252,12 @@ type ScriptTraceSink = Arc<dyn Fn(&str) + Send + Sync>;
 struct ActiveDiagnosticFrame {
     profile_host_identity: Option<ScriptHostIdentity>,
     function: String,
+    arguments: Vec<(Value, bool)>,
+    object_context: Option<String>,
+    definition_context: Option<String>,
+    source_host_identity: Option<ScriptHostIdentity>,
+    source_name: Option<String>,
+    source_line: usize,
     profile_started_at: Option<Instant>,
 }
 
@@ -278,6 +284,47 @@ thread_local! {
     // top-level calls and follow synchronous calls into another script host.
     static EXECUTION_DIAGNOSTICS: RefCell<ExecutionDiagnostics> =
         RefCell::new(ExecutionDiagnostics::default());
+}
+
+/// Snapshot the singleton executor stack without changing its lifetime.
+/// `RuntimeError::new` calls this before propagation can drop a diagnostic
+/// guard, matching C++'s dump-before-unwind ordering.
+pub(crate) fn snapshot_active_runtime_frames() -> Vec<RuntimeCallFrame> {
+    EXECUTION_DIAGNOSTICS.with(|cell| {
+        cell.borrow()
+            .frames
+            .iter()
+            .rev()
+            .map(|frame| {
+                let mut arguments = frame.arguments.iter().collect::<Vec<_>>();
+                while arguments
+                    .last()
+                    .is_some_and(|(argument, reference)| !reference && matches!(argument, Value::Nil))
+                {
+                    arguments.pop();
+                }
+                RuntimeCallFrame::new(
+                    frame.function.clone(),
+                    arguments
+                        .into_iter()
+                        .map(|(value, reference)| {
+                            let mut value = value.to_string();
+                            if *reference {
+                                value.push('*');
+                            }
+                            value
+                        })
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    frame.object_context.clone(),
+                    frame.definition_context.clone(),
+                    frame.source_host_identity,
+                    frame.source_name.clone(),
+                    frame.source_line,
+                )
+            })
+            .collect()
+    })
 }
 
 /// One completed script function in a [`stop_script_profiler`] report.
@@ -366,6 +413,10 @@ impl ScriptDiagnosticGuard {
         name: &str,
         profile_host_identity: Option<ScriptHostIdentity>,
         args: &[Value],
+        arg_references: &[bool],
+        this_value: &Value,
+        owner_definition_name: Option<&str>,
+        function: &Function,
     ) -> Self {
         let emission = EXECUTION_DIAGNOSTICS.with(|cell| {
             let mut diagnostics = cell.borrow_mut();
@@ -390,9 +441,26 @@ impl ScriptDiagnosticGuard {
                     Some(target) => profile_host_identity == Some(target),
                 })
                 .map(|_| Instant::now());
+            let object_context = match this_value {
+                Value::Object(0) | Value::Nil => None,
+                Value::Object(_) => Some(this_value.to_string()),
+                _ => None,
+            };
             diagnostics.frames.push(ActiveDiagnosticFrame {
                 profile_host_identity,
                 function: name.to_string(),
+                arguments: args
+                    .iter()
+                    .cloned()
+                    .zip(arg_references.iter().copied())
+                    .collect(),
+                object_context,
+                definition_context: (function.access != AccessLevel::Global)
+                    .then(|| owner_definition_name.map(str::to_owned))
+                    .flatten(),
+                source_host_identity: function.source_host_identity(),
+                source_name: function.source_name().map(str::to_owned),
+                source_line: function.source_line(),
                 profile_started_at,
             });
             emission
@@ -2434,6 +2502,8 @@ impl Drop for GlobalCallContextGuard<'_> {
 pub struct Vm<'a> {
     functions: &'a HashMap<String, Function>,
     host_identity: ScriptHostIdentity,
+    /// Destination definition name for local-function diagnostics.
+    owner_definition_name: Option<&'a str>,
     /// Destination script strictness for `Func->Owner->Strict`. None means
     /// this bare VM has no configured base script; Some(None) is an
     /// explicitly NONSTRICT destination.
@@ -2500,6 +2570,7 @@ impl<'a> Vm<'a> {
         Self {
             functions,
             host_identity: ScriptHostIdentity::fresh(),
+            owner_definition_name: None,
             owner_strict_level: None,
             host_functions,
             host_reference_functions: None,
@@ -2543,6 +2614,11 @@ impl<'a> Vm<'a> {
 
     pub(crate) fn with_host_identity(mut self, identity: ScriptHostIdentity) -> Self {
         self.host_identity = identity;
+        self
+    }
+
+    pub(crate) fn with_owner_definition_name(mut self, name: Option<&'a str>) -> Self {
+        self.owner_definition_name = name;
         self
     }
 
@@ -3227,6 +3303,7 @@ impl<'a> Vm<'a> {
         Vm {
             functions: self.functions,
             host_identity: self.host_identity,
+            owner_definition_name: None,
             owner_strict_level: self.owner_strict_level,
             host_functions: self.host_functions,
             host_reference_functions: self.host_reference_functions,
@@ -3399,6 +3476,10 @@ impl<'a> Vm<'a> {
             }
         }
 
+        let debug_arg_references = args[..debug_arg_count]
+            .iter()
+            .map(|arg| matches!(arg, CallArg::Reference(_)))
+            .collect::<Vec<_>>();
         let debug_args = self.call_args_to_values(&args)?;
         let profile_host_identity =
             (function.access != AccessLevel::Global).then_some(self.host_identity);
@@ -3406,6 +3487,10 @@ impl<'a> Vm<'a> {
             name,
             profile_host_identity,
             &debug_args[..debug_arg_count],
+            &debug_arg_references,
+            &self.this_value,
+            self.owner_definition_name,
+            function,
         );
         if let Some(debugger) = &self.debugger {
             if let Some(callback) = debugger.on_call() {

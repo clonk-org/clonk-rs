@@ -829,6 +829,10 @@ pub struct Engine {
     /// Rust moves and copy-on-write Engine clones so global Function
     /// `LinkedTo` provenance never depends on a HashMap's address.
     host_identity: crate::vm::ScriptHostIdentity,
+    /// Native `C4AulScript::ScriptName` used in call-stack diagnostics.
+    script_name: Option<String>,
+    /// Destination `C4Def::Name` for objectless local-function frames.
+    definition_name: Option<String>,
     /// Strictness of this C4AulScript host itself. Linked include/append
     /// function copies keep their source strictness for expression semantics,
     /// but native calls inspect `Func->Owner->Strict` (the destination host).
@@ -909,6 +913,8 @@ impl Engine {
         Self {
             functions: HashMap::new(),
             host_identity: crate::vm::ScriptHostIdentity::fresh(),
+            script_name: None,
+            definition_name: None,
             owner_strict_level: None,
             host_functions: HashMap::new(),
             host_reference_functions: HashMap::new(),
@@ -945,6 +951,23 @@ impl Engine {
     /// back to the exact retained engine without consulting the object def.
     pub fn host_identity(&self) -> crate::vm::ScriptHostIdentity {
         self.host_identity
+    }
+
+    /// Assign the native script-host label used for runtime diagnostics.
+    /// Existing functions are updated as well so embedders may name a host
+    /// before or after installing its first parsed script.
+    pub fn set_script_name(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        for function in self.functions.values_mut() {
+            function.bind_source_name(&name);
+        }
+        self.script_name = Some(name);
+    }
+
+    /// Assign the destination definition label used by objectless local
+    /// function frames. Scenario and engine-global hosts leave this unset.
+    pub fn set_definition_name(&mut self, name: impl Into<String>) {
+        self.definition_name = Some(name.into());
     }
 
     /// Installs the engine-global script function table (System.c4g
@@ -1010,6 +1033,9 @@ impl Engine {
         self.string_literals.extend(script.string_literals.iter().cloned());
         for function in script.functions.values_mut() {
             function.bind_source_host(self.host_identity);
+            if let Some(script_name) = &self.script_name {
+                function.bind_source_name(script_name);
+            }
             function.bind_global_link_host(self.host_identity);
         }
         if self.owner_strict_level.is_none() {
@@ -1068,6 +1094,9 @@ impl Engine {
         self.string_literals.clone_from(&script.string_literals);
         for function in script.functions.values_mut() {
             function.bind_source_host(self.host_identity);
+            if let Some(script_name) = &self.script_name {
+                function.bind_source_name(script_name);
+            }
             function.bind_global_link_host(self.host_identity);
         }
         self.owner_strict_level = Some(script.strict_level);
@@ -1516,6 +1545,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1550,6 +1580,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1590,6 +1621,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1635,6 +1667,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1687,6 +1720,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1725,6 +1759,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1762,6 +1797,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1799,6 +1835,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1834,6 +1871,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1869,6 +1907,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1901,6 +1940,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1955,6 +1995,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -2010,6 +2051,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))

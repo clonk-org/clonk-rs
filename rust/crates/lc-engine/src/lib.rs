@@ -8493,6 +8493,7 @@ fn apply_fair_crew_physical_script(
                             error = %error,
                             "script error in fair-crew physical callback; retaining numeric value"
                         );
+                        log_runtime_call_frames(&definition_id, error.call_frames());
                     }
                 }
             }
@@ -8513,6 +8514,22 @@ fn fair_crew_physical_with_script(
     apply_fair_crew_physical_script(definition, numeric, rank, definition_id, script)
 }
 
+fn log_runtime_call_frames(definition: &str, frames: &[lc_script::RuntimeCallFrame]) {
+    for frame in frames {
+        let mut dump = format!("{}({})", frame.function(), frame.arguments());
+        if let Some(object) = frame.object_context() {
+            dump.push_str(&format!(" (obj {object})"));
+        } else if let Some(definition) = frame.definition_context() {
+            dump.push_str(&format!(" (def {definition})"));
+        }
+        let source_name = frame.source_name().unwrap_or(definition);
+        if !source_name.is_empty() {
+            dump.push_str(&format!(" ({source_name}:{})", frame.source_line()));
+        }
+        tracing::info!(" by: {dump}");
+    }
+}
+
 fn tolerate_script_error<T>(result: Result<T, EngineError>) -> Result<Option<T>, EngineError> {
     match result {
         Ok(value) => Ok(Some(value)),
@@ -8530,6 +8547,7 @@ fn tolerate_script_error<T>(result: Result<T, EngineError>) -> Result<Option<T>,
                 error = %source,
                 "script error in engine callback; continuing like the C++ fail-safe exec"
             );
+            log_runtime_call_frames(&definition, source.call_frames());
             Ok(None)
         }
         Err(other) => Err(other),
@@ -8547,6 +8565,204 @@ fn script_execution_error(
         function,
         source,
         recovery,
+    }
+}
+
+#[cfg(test)]
+mod failsafe_call_stack_diagnostic_regression {
+    use super::*;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::{Level, subscriber};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+    use tracing_subscriber::registry::Registry;
+
+    #[derive(Clone)]
+    struct WarningLayer {
+        messages: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<S> Layer<S> for WarningLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            if !matches!(*event.metadata().level(), Level::WARN | Level::INFO) {
+                return;
+            }
+            let mut visitor = MessageVisitor::default();
+            event.record(&mut visitor);
+            if let Some(message) = visitor.message {
+                self.messages.lock().unwrap().push(message);
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct MessageVisitor {
+        message: Option<String>,
+    }
+
+    impl Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            if field.name() == "message" {
+                self.message = Some(format!("{value:?}").trim_matches('"').to_owned());
+            }
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "message" {
+                self.message = Some(value.to_owned());
+            }
+        }
+    }
+
+    fn capture_warnings<T>(run: impl FnOnce() -> T) -> (T, Vec<String>) {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(WarningLayer {
+            messages: Arc::clone(&messages),
+        });
+        let result = subscriber::with_default(subscriber, run);
+        let captured = messages.lock().unwrap().clone();
+        (result, captured)
+    }
+
+    #[test]
+    fn failsafe_runtime_error_logs_cpp_call_stack_frames() {
+        let script = r#"#strict 3
+public func Outer(first, gap, tail) { return Middle(first, gap, tail); }
+private func Middle(first, gap, tail) { return Inner(first, gap, tail); }
+private func Inner(first, gap, tail) { return MissingFromInner(); }
+public func Healthy() { return 9; }
+public func Lone() { return MissingFromLone(); }
+"#;
+        let mut engine = Engine::with_seed(47);
+        engine
+            .register_definition(
+                Definition::from_script("STAK", "Stack fixture", script)
+                    .expect("stack fixture compiles"),
+            )
+            .expect("stack fixture registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("STAK"))
+            .expect("stack fixture spawns");
+        let index = engine.find_object_index(object).expect("object exists");
+
+        let (recovered, warnings) = capture_warnings(|| {
+            tolerate_script_error(engine.call_object_function(
+                index,
+                "Outer",
+                vec![Value::Int(7), Value::Nil, Value::from("tail")],
+            ))
+        });
+        assert_eq!(recovered.expect("script error is tolerated"), None);
+        let frames = warnings
+            .iter()
+            .filter(|message| message.starts_with(" by: "))
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 3, "one native-style record per active frame");
+        assert!(frames[0].contains("Inner(7,nil,\"tail\")"));
+        assert!(frames[1].contains("Middle(7,nil,\"tail\")"));
+        assert!(frames[2].contains("Outer(7,nil,\"tail\")"));
+        assert!(frames.iter().all(|frame| frame.contains("(obj <object ")));
+        assert!(frames.iter().all(|frame| frame.contains("(STAK:")));
+
+        let raw_script = Arc::clone(
+            &engine
+                .definitions
+                .get("STAK")
+                .expect("definition exists")
+                .script,
+        );
+        let raw_args = vec![Value::Int(8), Value::Nil, Value::from("raw")];
+        let world = engine.host_world_context();
+        let rng = engine.rng.clone();
+        let frame = engine.frame;
+        let global_effects = engine.global_effects.clone();
+        let physics = engine.physics;
+        let environment = engine.environment;
+        let audio = engine.audio_registry.clone();
+        let game_over = engine.game_over_triggered;
+        let (raw_result, warnings) = capture_warnings(|| {
+            ScenarioScript::execute_value_for_script(
+                "STAK",
+                Some("STAK".to_owned()),
+                "Outer",
+                &raw_args,
+                world,
+                rng,
+                frame,
+                &global_effects,
+                physics,
+                environment,
+                audio,
+                game_over,
+                || raw_script.call_with_ref_args("Outer", &raw_args),
+            )
+        });
+        assert!(raw_result.0.is_none());
+        assert!(raw_result.5.is_some());
+        let frames = warnings
+            .iter()
+            .filter(|message| message.starts_with(" by: "))
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 3, "raw fail-safe path logs every frame");
+        assert!(frames.iter().all(|frame| frame.contains("(def Stack fixture)")));
+        assert!(frames.iter().all(|frame| !frame.contains("(obj ")));
+
+        let mut scenario_host = ScriptEngine::new();
+        scenario_host.set_script_name("Scenario");
+        scenario_host.add_script(
+            lc_script::Script::compile_c4_string(
+                "#strict 3\nfunc SceneOuter() { return SceneInner(); }\nfunc SceneInner() { return MissingScene(); }",
+            )
+            .expect("scenario fixture compiles"),
+        );
+        let (scenario_result, warnings) = capture_warnings(|| {
+            ScenarioScript::execute_value_for_script(
+                "Scenario",
+                None,
+                "SceneOuter",
+                &[],
+                engine.host_world_context(),
+                engine.rng.clone(),
+                engine.frame,
+                &engine.global_effects,
+                engine.physics,
+                engine.environment,
+                engine.audio_registry.clone(),
+                engine.game_over_triggered,
+                || scenario_host.call_with_ref_args("SceneOuter", &[]),
+            )
+        });
+        assert!(scenario_result.0.is_none());
+        let frames = warnings
+            .iter()
+            .filter(|message| message.starts_with(" by: "))
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 2);
+        assert!(frames.iter().all(|frame| !frame.contains("(def ")));
+        assert!(frames.iter().all(|frame| frame.contains("(Scenario:")));
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Healthy", Vec::new())
+                .expect("execution continues after fail-safe recovery"),
+            Value::Int(9)
+        );
+
+        let (recovered, warnings) = capture_warnings(|| {
+            tolerate_script_error(engine.call_object_function(index, "Lone", Vec::new()))
+        });
+        assert_eq!(recovered.expect("second script error is tolerated"), None);
+        let frames = warnings
+            .iter()
+            .filter(|message| message.starts_with(" by: "))
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 1, "recovered frames must not leak into later calls");
+        assert!(frames[0].contains("Lone()"));
+        assert!(!frames[0].contains("Inner") && !frames[0].contains("Outer"));
     }
 }
 
@@ -11752,6 +11968,8 @@ impl Definition {
         let appends = compiled_script.appends().to_vec();
 
         let mut script = ScriptEngine::new();
+        script.set_script_name(id.clone());
+        script.set_definition_name(name.clone());
         script.add_script(compiled_script.clone());
         compat::register_host_functions(&mut script);
         // Synthetic command-DSL fixtures historically declare these as
@@ -11907,6 +12125,7 @@ impl Definition {
     }
 
     fn set_name(&mut self, name: String) {
+        Arc::make_mut(&mut self.script).set_definition_name(name.clone());
         self.name = name;
     }
 
@@ -16278,6 +16497,7 @@ impl ScenarioScript {
     fn from_source(name: impl Into<String>, source: &str) -> Result<Self, EngineError> {
         let name = name.into();
         let mut script = ScriptEngine::new();
+        script.set_script_name(name.clone());
         let compiled =
             lc_script::Script::compile_c4_string(source).map_err(|source| EngineError::Script {
                 definition: name.clone(),
@@ -16827,6 +17047,7 @@ impl ScenarioScript {
                         %source,
                         "script callback error (continuing like C++ fail-safe exec)"
                     );
+                    log_runtime_call_frames(script_name, source.call_frames());
                 }
                 // The unwound call loses the cells; C++ would keep par
                 // mutations made before the error — narrow documented
@@ -28289,6 +28510,7 @@ impl Engine {
                         );
                     }
                     let mut script = ScriptEngine::new();
+                    script.set_script_name(name.clone());
                     script.add_script(compiled.clone().without_static_declarations());
                     script.set_global_variables(self.script_globals.clone());
                     script.set_global_slots(self.script_global_slots.clone());
@@ -28373,10 +28595,10 @@ impl Engine {
                     None => continue,
                 },
                 ScriptLinkSource::Scenario => {
-                    let Some(script) = self
+                    let Some((script, script_name)) = self
                         .scenario_script
                         .as_ref()
-                        .map(|scenario| scenario.base_script.clone())
+                        .map(|scenario| (scenario.base_script.clone(), scenario.name.clone()))
                     else {
                         continue;
                     };
@@ -28385,6 +28607,7 @@ impl Engine {
                         continue;
                     }
                     let mut engine = ScriptEngine::new();
+                    engine.set_script_name(script_name);
                     engine.add_script(script.without_static_declarations());
                     engine.set_global_variables(self.script_globals.clone());
                     engine.set_global_slots(self.script_global_slots.clone());
@@ -36279,6 +36502,7 @@ impl Engine {
                         error = %source,
                         "script error in effect callback; continuing like the C++ fail-safe exec"
                     );
+                    log_runtime_call_frames(&definition, source.call_frames());
                     rng = rng_backup;
                     current_audio = audio_backup;
                     continue;
@@ -55849,6 +56073,7 @@ impl Engine {
                         error = %source,
                         "script error in global effect callback; continuing like the C++ fail-safe exec"
                     );
+                    log_runtime_call_frames(&definition, source.call_frames());
                     rng = rng_backup;
                     current_audio = audio_backup;
                     continue;
@@ -58108,6 +58333,7 @@ fn recover_effect_callback_error(
                     error = %source,
                     "script error in effect callback; continuing like the C++ fail-safe exec"
                 );
+                log_runtime_call_frames(&definition, source.call_frames());
                 Ok(Some((Value::Nil, context_cells.snapshot())))
             }
             fatal => Err(fatal),

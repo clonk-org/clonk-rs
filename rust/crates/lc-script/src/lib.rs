@@ -27,7 +27,7 @@ pub use crate::vm::{
     stop_script_profiler, value_cell, CallerVarSlots, HostCallArg, HostCallerStrictness, LocalCells,
     ScriptHostIdentity, ScriptProfileEntry, ValueCell, ValueReference,
 };
-pub use crate::error::{ParseError, RuntimeError, ScriptError};
+pub use crate::error::{ParseError, RuntimeCallFrame, RuntimeError, ScriptError};
 pub use crate::value::{
     c4_hash_combine, c4_id_from_raw, c4_id_parse, c4_id_raw, c4_id_serde, c4_id_text,
     c4_optional_id_serde, c4_optional_string_serde, c4_string_byte, c4_string_byte_len,
