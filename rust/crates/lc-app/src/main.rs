@@ -2895,9 +2895,11 @@ fn resolve_game_graphics_resources(
         background: Some(load("Background")?),
     };
     let options = Some(Arc::new(load("Options")?));
-    let liquid_animation = liquid_animation_enabled
-        .then(|| load("Liquid").map(Arc::new))
-        .transpose()?;
+    // C4GraphicsResource::Init validates the selected Liquid surface as part
+    // of its mandatory resource chain. ColorAnimation/Shader only control
+    // whether the already-valid surface is installed for landscape drawing.
+    let liquid_animation_image = load("Liquid")?;
+    let liquid_animation = liquid_animation_enabled.then(|| Arc::new(liquid_animation_image));
 
     // PreInit fills fctCursors[0..7] from the sized files. Clear deliberately
     // keeps those cached facets. A valid game-local Cursor.* suppresses the
@@ -5304,9 +5306,14 @@ struct FrontendAssets {
     /// state-only fixtures intentionally exercise non-presentation behavior.
     classic_hud_resources_required: bool,
     game_palette: Arc<GamePalette>,
-    /// Graphics.c4g/Liquid.png, present only when both legacy graphics
-    /// switches required for the landscape shader are enabled.
+    /// Selected Liquid graphic, retained only when both legacy graphics
+    /// switches required for the landscape shader are enabled. The resource
+    /// is validated during every install-backed graphics initialization even
+    /// when this remains `None`.
     liquid_animation: Option<ImageData>,
+    /// Mandatory selected-Liquid failure swallowed by the presentation asset
+    /// collector and surfaced at the shared classic bootstrap boundary.
+    liquid_animation_issue: Option<ClassicGuiBootstrapIssue>,
     liquid_animation_enabled: bool,
 }
 
@@ -5347,6 +5354,7 @@ impl FrontendAssets {
         let mut hud_graphics = HudGraphics::default();
         let mut game_palette = GamePalette::default();
         let mut liquid_animation = None;
+        let mut liquid_animation_issue = None;
 
         if let Some(paths) = paths {
             let graphics_path = paths.planet_dir().join("Graphics.c4g");
@@ -5414,8 +5422,6 @@ impl FrontendAssets {
                     }
                     cursor_atlas = Self::load_cursor_atlas(&graphics);
                     hud_graphics = Self::load_hud_graphics(&graphics);
-                    liquid_animation =
-                        Self::load_liquid_animation(&graphics, liquid_animation_enabled);
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -5467,6 +5473,7 @@ impl FrontendAssets {
                         liquid_animation_enabled,
                     ) {
                         Ok(resources) => {
+                            liquid_animation_issue = None;
                             cursor_atlas = resources.cursor_atlas.as_ref().clone();
                             hud_graphics = resources.hud_graphics.as_ref().clone();
                             game_palette = resources.palette.as_ref().clone();
@@ -5480,6 +5487,7 @@ impl FrontendAssets {
                             }
                         }
                         Err(error) => {
+                            liquid_animation_issue = Self::liquid_animation_issue(&error);
                             tracing::warn!(
                                 %error,
                                 "failed to resolve startup game graphics bundle"
@@ -5534,6 +5542,7 @@ impl FrontendAssets {
             classic_hud_resources_required,
             game_palette: Arc::new(game_palette),
             liquid_animation,
+            liquid_animation_issue,
             liquid_animation_enabled,
         }
     }
@@ -6314,6 +6323,9 @@ impl FrontendAssets {
                 "CursorSmall..CursorXXXXXLarge",
             ));
         }
+        if let Some(issue) = self.liquid_animation_issue.as_ref() {
+            issues.push(issue.clone());
+        }
         issues
     }
 
@@ -6646,19 +6658,19 @@ impl FrontendAssets {
         hud
     }
 
-    fn load_liquid_animation(
-        graphics: &GraphicsResource,
-        enabled: bool,
-    ) -> Option<ImageData> {
-        if !enabled {
+    fn liquid_animation_issue(error: &anyhow::Error) -> Option<ClassicGuiBootstrapIssue> {
+        if error.to_string() != "failed to load game graphics resource `Liquid`" {
             return None;
         }
-        match graphics.load_image("Liquid.png") {
-            Ok(image) => Some(Self::image_to_data(image)),
-            Err(err) => {
-                tracing::warn!(error = %err, "Liquid.png animation texture missing");
-                None
-            }
+        let detail = format!("{error:#}");
+        if detail.contains("classic graphics resource `Liquid` is unavailable") {
+            Some(ClassicGuiBootstrapIssue::missing("Liquid"))
+        } else {
+            Some(ClassicGuiBootstrapIssue::malformed(
+                "Liquid",
+                "a readable selected bmp/jpeg/jpg/png surface",
+                detail,
+            ))
         }
     }
 
@@ -187508,15 +187520,144 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn liquid_animation_asset_load_is_conditional() {
-        let graphics = GraphicsResource::open(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../planet/Graphics.c4g"),
+    fn graphics_resources_validate_liquid_even_when_animation_disabled() {
+        let directory = tempdir().expect("Liquid validation fixture");
+        let base_path = directory.path().join("base.c4g");
+        let override_path = directory.path().join("override.c4g");
+        fs::create_dir(&base_path).expect("base graphics group");
+        fs::create_dir(&override_path).expect("override graphics group");
+
+        for stem in [
+            "Player",
+            "Flag",
+            "Crew",
+            "Score",
+            "Wealth",
+            "Rank",
+            "Captain",
+            "Fire",
+            "Menu",
+            "UpperBoard",
+            "Logo",
+            "Construction",
+            "Energy",
+            "Magic",
+            "Arrow",
+            "Exit",
+            "Hand",
+            "Build",
+            "EnergyBars",
+            "SelectMark",
+            "Control",
+            "Gamepad",
+            "Background",
+            "Options",
+            "Cursor",
+        ] {
+            write_preview_png(&base_path.join(format!("{stem}.png")), [9, 8, 7, 255]);
+        }
+        fs::write(base_path.join("C4.pal"), vec![0_u8; GamePalette::BYTE_LEN])
+            .expect("base game palette");
+        let cached_cursors = Arc::new(CursorAtlas::new(vec![
+            Some(ImageData::new(1, 1, vec![1, 2, 3, 255]));
+            8
+        ]));
+
+        let missing = resolve_game_graphics_resources(
+            &[],
+            &Group::open(&base_path).expect("open missing-Liquid base"),
+            Some(Arc::clone(&cached_cursors)),
+            false,
         )
-        .expect("open shipped Graphics.c4g");
-        assert!(FrontendAssets::load_liquid_animation(&graphics, false).is_none());
-        let image = FrontendAssets::load_liquid_animation(&graphics, true)
-            .expect("load enabled Liquid.png animation texture");
-        assert_eq!((image.width(), image.height()), (64, 64));
+        .err()
+        .expect("disabled animation still rejects a missing Liquid resource");
+        assert_eq!(
+            missing.to_string(),
+            "failed to load game graphics resource `Liquid`"
+        );
+        assert_eq!(
+            FrontendAssets::liquid_animation_issue(&missing),
+            Some(ClassicGuiBootstrapIssue::missing("Liquid"))
+        );
+
+        write_preview_image(
+            &base_path.join("Liquid.bmp"),
+            [10, 20, 30, 255],
+            image::ImageFormat::Bmp,
+        );
+        fs::write(override_path.join("Liquid.png"), b"not a png")
+            .expect("malformed winning Liquid.png");
+        let malformed_registration = [LoaderGroupRegistration {
+            priority: 200,
+            registration_order: 0,
+            group: Group::open(&override_path).expect("open malformed override"),
+        }];
+        let malformed = resolve_game_graphics_resources(
+            &malformed_registration,
+            &Group::open(&base_path).expect("open valid BMP fallback"),
+            Some(Arc::clone(&cached_cursors)),
+            false,
+        )
+        .err()
+        .expect("disabled animation still decodes the winning Liquid resource");
+        assert_eq!(
+            malformed.to_string(),
+            "failed to load game graphics resource `Liquid`"
+        );
+        assert!(format!("{malformed:#}").contains("Liquid.png"));
+        let malformed_issue = FrontendAssets::liquid_animation_issue(&malformed)
+            .expect("malformed selected Liquid reaches the startup boundary");
+        assert!(matches!(
+            &malformed_issue,
+            ClassicGuiBootstrapIssue {
+                resource: "Liquid",
+                defect: ClassicGuiBootstrapDefect::Malformed { .. },
+            }
+        ));
+        let mut startup_assets = synthetic_classic_test_assets();
+        startup_assets.liquid_animation_issue = Some(malformed_issue.clone());
+        assert_eq!(
+            startup_assets
+                .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+                .expect_err("startup must reject a malformed selected Liquid resource"),
+            ClassicParityBoundary::GlobalGuiBootstrapResources {
+                issues: vec![malformed_issue],
+            }
+        );
+
+        write_preview_png(
+            &override_path.join("Liquid.png"),
+            [170, 180, 190, 255],
+        );
+        let valid_registration = [LoaderGroupRegistration {
+            priority: 200,
+            registration_order: 0,
+            group: Group::open(&override_path).expect("open valid override"),
+        }];
+        let disabled = resolve_game_graphics_resources(
+            &valid_registration,
+            &Group::open(&base_path).expect("open valid disabled base"),
+            Some(Arc::clone(&cached_cursors)),
+            false,
+        )
+        .expect("valid Liquid is accepted while animation is disabled");
+        assert!(disabled.liquid_animation.is_none());
+
+        let enabled = resolve_game_graphics_resources(
+            &valid_registration,
+            &Group::open(&base_path).expect("open valid enabled base"),
+            Some(cached_cursors),
+            true,
+        )
+        .expect("valid Liquid is retained while animation is enabled");
+        assert_eq!(
+            enabled
+                .liquid_animation
+                .as_deref()
+                .expect("enabled Liquid animation")
+                .pixels(),
+            [170, 180, 190, 255]
+        );
     }
 
     #[test]
