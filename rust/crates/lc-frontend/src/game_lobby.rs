@@ -1703,6 +1703,7 @@ pub struct GameLobby {
     pointer: Option<GuiPoint>,
     tooltip_pointer_active: bool,
     pointer_pressed: Option<HitTarget>,
+    pointer_pressed_roster_id: Option<LobbyRosterId>,
     pointer_inside_pressed: bool,
     key_pressed: Option<(LobbyControl, KeyCode)>,
     selected_row: Option<usize>,
@@ -1776,6 +1777,7 @@ impl GameLobby {
             pointer: None,
             tooltip_pointer_active: false,
             pointer_pressed: None,
+            pointer_pressed_roster_id: None,
             pointer_inside_pressed: false,
             key_pressed: None,
             selected_row: None,
@@ -1806,6 +1808,82 @@ impl GameLobby {
 
     pub const fn role(&self) -> LobbyRole {
         self.role
+    }
+
+    pub fn set_scenario_title(&mut self, scenario_title: impl Into<String>) {
+        self.scenario_title = scenario_title.into();
+    }
+
+    /// Updates whether the optional Teams sheet and per-player team controls
+    /// exist, clearing interaction state that would otherwise point at a
+    /// removed control.
+    pub fn set_has_teams(&mut self, has_teams: bool) {
+        if self.has_teams == has_teams {
+            return;
+        }
+        self.has_teams = has_teams;
+        if has_teams {
+            return;
+        }
+
+        self.open_team_combo_player = None;
+        if self.active_sheet == LobbySheet::Teams {
+            self.set_active_sheet(LobbySheet::Players);
+        }
+        self.focus = match self.focus {
+            LobbyControl::TeamsTab => LobbyControl::PlayersTab,
+            LobbyControl::RosterTeam if self.active_sheet.is_roster() => LobbyControl::Roster,
+            LobbyControl::RosterTeam => LobbyControl::ChatInput,
+            focus => focus,
+        };
+        if self.key_pressed.is_some_and(|(control, _)| {
+            matches!(control, LobbyControl::TeamsTab | LobbyControl::RosterTeam)
+        }) {
+            self.key_pressed = None;
+        }
+        if matches!(
+            self.hovered,
+            HitTarget::Tab(LobbyControl::TeamsTab) | HitTarget::Team(_)
+        ) {
+            self.hovered = HitTarget::None;
+        }
+        if matches!(
+            self.pointer_pressed,
+            Some(HitTarget::Tab(LobbyControl::TeamsTab) | HitTarget::Team(_))
+        ) {
+            self.pointer_pressed = None;
+            self.pointer_pressed_roster_id = None;
+            self.pointer_inside_pressed = false;
+        }
+    }
+
+    /// Updates whether the optional external-chat button exists, clearing
+    /// interaction state that would otherwise point at the removed button.
+    pub fn set_has_external_chat(&mut self, has_external_chat: bool) {
+        if self.has_external_chat == has_external_chat {
+            return;
+        }
+        self.has_external_chat = has_external_chat;
+        if has_external_chat {
+            return;
+        }
+
+        if self.focus == LobbyControl::ChatDialog {
+            self.focus = LobbyControl::ChatInput;
+        }
+        if self
+            .key_pressed
+            .is_some_and(|(control, _)| control == LobbyControl::ChatDialog)
+        {
+            self.key_pressed = None;
+        }
+        if self.hovered == HitTarget::Tab(LobbyControl::ChatDialog) {
+            self.hovered = HitTarget::None;
+        }
+        if self.pointer_pressed == Some(HitTarget::Tab(LobbyControl::ChatDialog)) {
+            self.pointer_pressed = None;
+            self.pointer_inside_pressed = false;
+        }
     }
 
     pub const fn active_sheet(&self) -> LobbySheet {
@@ -1865,6 +1943,7 @@ impl GameLobby {
             )
         ) {
             self.pointer_pressed = None;
+            self.pointer_pressed_roster_id = None;
             self.pointer_inside_pressed = false;
         }
         if !sheet.is_roster()
@@ -2053,19 +2132,23 @@ impl GameLobby {
     pub fn accepted_roster_click_id(
         &self,
         point: GuiPoint,
-        layout: &LobbyLayout,
-        roster: &LobbyRosterLayout,
+        _layout: &LobbyLayout,
+        _roster: &LobbyRosterLayout,
     ) -> Option<LobbyRosterId> {
-        let hit = self.hit_test(point, layout, roster);
-        if self.pointer_pressed != Some(hit) || !self.pointer_inside_pressed {
+        let pressed_id = self.pointer_pressed_roster_id.as_ref()?;
+        let last_point = self.pointer?;
+        if !matches!(self.pointer_pressed, Some(HitTarget::RosterRow(_)))
+            || !self.pointer_inside_pressed
+            || last_point.x as i32 != point.x as i32
+            || last_point.y as i32 != point.y as i32
+        {
             return None;
         }
-        let index = match hit {
-            HitTarget::RosterRow(index) => index,
-            _ => return None,
-        };
-        let id = self.rows.get(index).map(LobbyRosterRow::id)?;
-        (self.selected_roster_id.as_ref() == Some(&id)).then_some(id)
+        self.rows
+            .iter()
+            .any(|row| &row.id() == pressed_id)
+            .then(|| pressed_id.clone())
+            .filter(|id| self.selected_roster_id.as_ref() == Some(id))
     }
 
     /// Mirrors the per-row C4GUI::ComboBox `iOpenMenu` presentation state.
@@ -2136,7 +2219,35 @@ impl GameLobby {
         self.option_scroll = scroll.max(0);
     }
 
+    fn remapped_roster_hit(&self, target: HitTarget, id: &LobbyRosterId) -> Option<HitTarget> {
+        let index = self.rows.iter().position(|row| row.id() == *id)?;
+        match (target, self.rows.get(index)) {
+            (HitTarget::RosterRow(_), Some(_)) => Some(HitTarget::RosterRow(index)),
+            (
+                HitTarget::AddPlayer(_),
+                Some(
+                    LobbyRosterRow::Client(LobbyClientRow { local: true, .. })
+                    | LobbyRosterRow::Header(LobbyHeaderRow {
+                        kind: LobbyRosterHeader::ScriptPlayers,
+                        can_add_player: true,
+                        ..
+                    }),
+                ),
+            ) => Some(HitTarget::AddPlayer(index)),
+            (HitTarget::Team(_), Some(LobbyRosterRow::Player(_))) if self.has_teams => {
+                Some(HitTarget::Team(index))
+            }
+            _ => None,
+        }
+    }
+
     pub fn set_rows(&mut self, rows: Vec<LobbyRosterRow>) {
+        let hovered_roster = match self.hovered {
+            target @ (HitTarget::RosterRow(index)
+            | HitTarget::AddPlayer(index)
+            | HitTarget::Team(index)) => self.rows.get(index).map(|row| (target, row.id())),
+            _ => None,
+        };
         let selected_id = self.selected_roster_id.clone().or_else(|| {
             self.selected_row
                 .and_then(|index| self.rows.get(index))
@@ -2150,6 +2261,31 @@ impl GameLobby {
             self.collapsed_roster = false;
         }
         self.rows = rows;
+        if let Some((target, id)) = hovered_roster {
+            self.hovered = self
+                .remapped_roster_hit(target, &id)
+                .unwrap_or(HitTarget::None);
+            if self.hovered == HitTarget::None {
+                self.hover_since = Instant::now();
+            }
+        }
+        if let (Some(target), Some(id)) =
+            (self.pointer_pressed, self.pointer_pressed_roster_id.clone())
+        {
+            if matches!(
+                target,
+                HitTarget::RosterRow(_) | HitTarget::AddPlayer(_) | HitTarget::Team(_)
+            ) {
+                self.pointer_pressed = self.remapped_roster_hit(target, &id);
+                if self.pointer_pressed.is_none() {
+                    if self.pointer_inside_pressed && target.button_control().is_some() {
+                        self.sounds.push(LobbySound::ArrowHit);
+                    }
+                    self.pointer_pressed_roster_id = None;
+                    self.pointer_inside_pressed = false;
+                }
+            }
+        }
         self.selected_row = selected_id
             .as_ref()
             .and_then(|selected| self.rows.iter().position(|row| row.id() == *selected));
@@ -2179,6 +2315,14 @@ impl GameLobby {
             _ => true,
         };
         if !child_focus_valid {
+            if self.key_pressed.is_some_and(|(control, _)| {
+                matches!(
+                    control,
+                    LobbyControl::RosterTeam | LobbyControl::RosterAddPlayer
+                )
+            }) {
+                self.key_pressed = None;
+            }
             self.focus = if self.active_sheet.is_roster() {
                 LobbyControl::Roster
             } else {
@@ -2863,7 +3007,16 @@ impl GameLobby {
                 self.pointer_inside_pressed = false;
                 self.sounds.push(LobbySound::ArrowHit);
             }
-            let now_inside = pressed == hit;
+            let now_inside = match (self.pointer_pressed_roster_id.as_ref(), pressed, hit) {
+                (Some(pressed_id), HitTarget::RosterRow(_), HitTarget::RosterRow(index))
+                | (Some(pressed_id), HitTarget::AddPlayer(_), HitTarget::AddPlayer(index))
+                | (Some(pressed_id), HitTarget::Team(_), HitTarget::Team(index)) => self
+                    .rows
+                    .get(index)
+                    .is_some_and(|row| &row.id() == pressed_id),
+                (Some(_), _, _) => false,
+                (None, _, _) => pressed == hit,
+            };
             if let Some(control) = pressed.button_control() {
                 if self.pointer_inside_pressed && !now_inside {
                     self.pointer_inside_pressed = false;
@@ -2874,10 +3027,7 @@ impl GameLobby {
                     {
                         self.key_pressed = None;
                     }
-                } else if !self.pointer_inside_pressed
-                    && now_inside
-                    && previous_hover != hit
-                {
+                } else if !self.pointer_inside_pressed && now_inside && previous_hover != hit {
                     let key_already_down = self
                         .key_pressed
                         .is_some_and(|(pressed_control, _)| pressed_control == control);
@@ -2886,6 +3036,8 @@ impl GameLobby {
                         self.sounds.push(LobbySound::ArrowHit);
                     }
                 }
+            } else if self.pointer_pressed_roster_id.is_some() {
+                self.pointer_inside_pressed = now_inside;
             }
         }
         let mut actions = Vec::new();
@@ -2919,6 +3071,7 @@ impl GameLobby {
         let hit = self.hit_test(point, layout, roster);
         self.hovered = hit;
         self.hover_since = Instant::now();
+        self.pointer_pressed_roster_id = None;
         match hit {
             HitTarget::GameOption(_) => {
                 // Buttons deliberately preserve chat focus on mouse clicks.
@@ -2933,6 +3086,7 @@ impl GameLobby {
                 self.change_focus(LobbyControl::Roster, false);
                 let mut actions = self.select_row(Some(index), true, layout, roster);
                 self.pointer_pressed = Some(hit);
+                self.pointer_pressed_roster_id = self.rows.get(index).map(LobbyRosterRow::id);
                 self.pointer_inside_pressed = true;
                 if changed {
                     actions.insert(0, LobbyAction::FocusChanged(LobbyControl::Roster));
@@ -2962,6 +3116,7 @@ impl GameLobby {
                     self.sounds.push(LobbySound::ArrowHit);
                 }
                 self.pointer_pressed = Some(hit);
+                self.pointer_pressed_roster_id = self.rows.get(index).map(LobbyRosterRow::id);
                 self.pointer_inside_pressed = true;
                 self.append_game_option_focus_clear(previous_focus, &mut actions);
                 return actions;
@@ -3143,6 +3298,7 @@ impl GameLobby {
         self.hovered = hit;
         self.hover_since = Instant::now();
         self.scrollbar_drag = None;
+        let pressed_roster_id = self.pointer_pressed_roster_id.take();
         if matches!(self.pointer_pressed, Some(HitTarget::GameOption(_))) {
             self.pointer_pressed = None;
             self.pointer_inside_pressed = false;
@@ -3176,7 +3332,23 @@ impl GameLobby {
             return self.try_toggle_ready(now);
         }
         let pressed = self.pointer_pressed;
-        if pressed != Some(hit) && self.pointer_inside_pressed {
+        let semantic_child_hit = match (pressed, pressed_roster_id.as_ref()) {
+            (Some(target @ (HitTarget::AddPlayer(_) | HitTarget::Team(_))), Some(pressed_id))
+                if self.pointer_inside_pressed =>
+            {
+                self.remapped_roster_hit(target, pressed_id)
+                    .filter(|remapped| *remapped == hit)
+            }
+            (Some(HitTarget::AddPlayer(_) | HitTarget::Team(_)), Some(_)) => None,
+            _ => Some(hit),
+        };
+        let pressed_matches = match (pressed, pressed_roster_id.as_ref()) {
+            (Some(HitTarget::AddPlayer(_) | HitTarget::Team(_)), Some(_)) => {
+                semantic_child_hit.is_some()
+            }
+            _ => pressed == Some(hit),
+        };
+        if !pressed_matches && self.pointer_inside_pressed {
             if let Some(control) = pressed.and_then(HitTarget::button_control) {
                 self.pointer_inside_pressed = false;
                 self.sounds.push(LobbySound::ArrowHit);
@@ -3193,13 +3365,14 @@ impl GameLobby {
             .is_some_and(|control| self.button_is_down(control));
         self.pointer_pressed = None;
         self.pointer_inside_pressed = false;
-        if pressed != Some(hit) || !button_was_down {
+        if !pressed_matches || !button_was_down {
             return Vec::new();
         }
         if pressed.is_some() {
             self.sounds.push(LobbySound::Click);
         }
-        if let Some(control) = hit.button_control() {
+        let activated = semantic_child_hit.unwrap_or(hit);
+        if let Some(control) = activated.button_control() {
             if self
                 .key_pressed
                 .is_some_and(|(pressed_control, _)| pressed_control == control)
@@ -3207,7 +3380,7 @@ impl GameLobby {
                 self.key_pressed = None;
             }
         }
-        self.activate_hit(hit)
+        self.activate_hit(activated)
     }
 
     pub fn pointer_secondary_down(
@@ -3253,24 +3426,27 @@ impl GameLobby {
                 point,
             ))]
         } else if let HitTarget::RosterRow(index) = hit {
-            match self.rows.get(index) {
-                Some(LobbyRosterRow::Header(LobbyHeaderRow {
-                    kind: LobbyRosterHeader::Team(team_id),
-                    ..
-                })) => vec![LobbyAction::MoveLocalPlayersIntoTeamRequested {
-                    team_id: *team_id,
-                }],
-                Some(LobbyRosterRow::Header(LobbyHeaderRow {
-                    kind: LobbyRosterHeader::RandomTeam,
-                    ..
-                }))
-                | Some(LobbyRosterRow::Client(_))
-                | Some(LobbyRosterRow::Player(_))
-                | Some(LobbyRosterRow::Header(_))
-                | None => Vec::new(),
-            }
+            let row = self.rows.get(index).map(LobbyRosterRow::id);
+            row.as_ref()
+                .map(|row| self.roster_double_click(row))
+                .unwrap_or_default()
         } else {
             Vec::new()
+        }
+    }
+
+    /// Dispatches a roster double-click through the semantic row captured on
+    /// pointer-down. Collapsing the previously selected player can move rows
+    /// before button-up; native list items retain their identity across that
+    /// reflow rather than re-targeting the release by its new coordinates.
+    pub fn roster_double_click(&self, row: &LobbyRosterId) -> Vec<LobbyAction> {
+        match row {
+            LobbyRosterId::Header(LobbyRosterHeader::Team(team_id)) => {
+                vec![LobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: *team_id }]
+            }
+            LobbyRosterId::Client(_) | LobbyRosterId::Player(_) | LobbyRosterId::Header(_) => {
+                Vec::new()
+            }
         }
     }
 
@@ -3321,6 +3497,7 @@ impl GameLobby {
 
     pub fn touch_cancel(&mut self) -> Vec<LobbyAction> {
         let pressed = self.pointer_pressed.take();
+        self.pointer_pressed_roster_id = None;
         let was_inside = self.pointer_inside_pressed;
         self.scrollbar_drag = None;
         self.pointer_inside_pressed = false;
@@ -3497,6 +3674,10 @@ impl GameLobby {
             LobbyControl::Roster => match key {
                 KeyCode::Up => return self.move_selection(-1, layout, roster),
                 KeyCode::Down => return self.move_selection(1, layout, roster),
+                KeyCode::Home => return self.edge_selection(false, layout, roster),
+                KeyCode::End => return self.edge_selection(true, layout, roster),
+                KeyCode::PageUp => return self.page_selection(false, layout, roster),
+                KeyCode::PageDown => return self.page_selection(true, layout, roster),
                 _ => {}
             },
             LobbyControl::OptionsList => match key {
@@ -3656,6 +3837,17 @@ impl GameLobby {
             self.append_game_option_focus_clear(previous, &mut actions);
             actions
         }
+    }
+
+    pub fn focus_chat_input(&mut self) -> Vec<LobbyAction> {
+        if self.focus == LobbyControl::ChatInput {
+            return Vec::new();
+        }
+        self.change_focus(LobbyControl::ChatInput, true);
+        vec![
+            LobbyAction::FocusChanged(LobbyControl::ChatInput),
+            LobbyAction::Chat(LobbyChatRequest::FocusInput),
+        ]
     }
 
     pub fn chat_edit_key(
@@ -4148,6 +4340,113 @@ impl GameLobby {
         self.select_row(Some(next), true, layout, roster)
     }
 
+    fn edge_selection(
+        &mut self,
+        end: bool,
+        layout: &LobbyLayout,
+        roster: &LobbyRosterLayout,
+    ) -> Vec<LobbyAction> {
+        if !self.active_sheet.is_roster() || self.rows.is_empty() {
+            return Vec::new();
+        }
+        let index = if end { self.rows.len() - 1 } else { 0 };
+        self.select_row(Some(index), true, layout, roster)
+    }
+
+    fn page_selection(
+        &mut self,
+        down: bool,
+        layout: &LobbyLayout,
+        roster: &LobbyRosterLayout,
+    ) -> Vec<LobbyAction> {
+        if !self.active_sheet.is_roster() || self.rows.is_empty() {
+            return Vec::new();
+        }
+
+        let old_scroll = self.roster_scroll;
+        let viewport_height = layout.roster_client.h.max(0);
+        let content_range = |index: usize| {
+            roster
+                .rows
+                .iter()
+                .find(|row| row.index == index)
+                .map(|row| {
+                    let top = row.rect.y - layout.roster_client.y + old_scroll;
+                    (top, top + row.rect.h)
+                })
+        };
+        let fully_visible_at = |index: usize, scroll: i32| {
+            content_range(index)
+                .is_some_and(|(top, bottom)| top >= scroll && bottom <= scroll + viewport_height)
+        };
+
+        let current = self
+            .selected_row
+            .unwrap_or(if down { 0 } else { self.rows.len() - 1 });
+        let adjacent = if down {
+            current
+                .checked_add(1)
+                .filter(|index| *index < self.rows.len())
+        } else {
+            current.checked_sub(1)
+        };
+        let Some(mut target) = adjacent else {
+            return self
+                .selected_row
+                .is_none()
+                .then(|| self.select_row(Some(current), true, layout, roster))
+                .unwrap_or_default();
+        };
+
+        let mut page_scroll = None;
+        if fully_visible_at(target, old_scroll) {
+            loop {
+                let candidate = if down {
+                    target
+                        .checked_add(1)
+                        .filter(|index| *index < self.rows.len())
+                } else {
+                    target.checked_sub(1)
+                };
+                let Some(candidate) =
+                    candidate.filter(|index| fully_visible_at(*index, old_scroll))
+                else {
+                    break;
+                };
+                target = candidate;
+            }
+        } else {
+            let scroll = if down {
+                old_scroll.saturating_add(viewport_height)
+            } else {
+                old_scroll.saturating_sub(viewport_height)
+            }
+            .clamp(0, roster.max_scroll);
+            page_scroll = Some(scroll);
+            target = if down {
+                (0..self.rows.len())
+                    .rev()
+                    .find(|index| fully_visible_at(*index, scroll))
+                    .unwrap_or(0)
+            } else {
+                (0..self.rows.len())
+                    .find(|index| fully_visible_at(*index, scroll))
+                    .unwrap_or(self.rows.len() - 1)
+            };
+        }
+
+        let actions = self.select_row(Some(target), true, layout, roster);
+        if let Some(scroll) = page_scroll {
+            self.roster_scroll = scroll;
+            self.roster_scroll_pin = scroll_to_pin(
+                scroll,
+                roster.max_scroll,
+                scrollbar_max_pin(layout.roster_scrollbar),
+            );
+        }
+        actions
+    }
+
     fn select_row(
         &mut self,
         selected: Option<usize>,
@@ -4204,13 +4503,13 @@ impl GameLobby {
             HitTarget::Run => self.activate_control(LobbyControl::Run),
             HitTarget::Preload => self.activate_control(LobbyControl::Preload),
             HitTarget::AddPlayer(index) => match self.rows.get(index) {
-                Some(LobbyRosterRow::Client(client)) => {
+                Some(LobbyRosterRow::Client(client)) if client.local => {
                     vec![LobbyAction::AddPlayerRequested {
                         client_id: client.id,
                     }]
                 }
                 Some(LobbyRosterRow::Header(header))
-                    if header.kind == LobbyRosterHeader::ScriptPlayers =>
+                    if header.kind == LobbyRosterHeader::ScriptPlayers && header.can_add_player =>
                 {
                     vec![LobbyAction::AddScriptPlayerRequested]
                 }
@@ -4642,6 +4941,12 @@ impl GameLobby {
         {
             return None;
         }
+        let text = self.tooltip_text()?;
+        let pointer = self.pointer?;
+        Some(LobbyTooltip { pointer, text })
+    }
+
+    fn tooltip_text(&self) -> Option<String> {
         let text = match self.hovered {
             HitTarget::ChatInput | HitTarget::ChatLabel => self.labels.tooltip_chat.clone(),
             HitTarget::Exit => self.labels.tooltip_exit.clone(),
@@ -4681,8 +4986,7 @@ impl GameLobby {
             }
             _ => return None,
         };
-        let pointer = self.pointer?;
-        (!text.is_empty()).then_some(LobbyTooltip { pointer, text })
+        (!text.is_empty()).then_some(text)
     }
 
     pub fn tooltip_state_with_roster_at(
@@ -6854,6 +7158,64 @@ mod tests {
     }
 
     #[test]
+    fn live_lobby_chrome_updates_clear_removed_control_interactions() {
+        let fonts = endeavour_font_set();
+        let mut lobby = GameLobby::new(
+            LobbyRole::Client,
+            "Old Title",
+            1,
+            4,
+            true,
+            true,
+            true,
+            false,
+            5,
+            vec![team_player(2)],
+        );
+
+        lobby.set_scenario_title("New Title");
+        assert_eq!(lobby.title(), "New Title - Lobby");
+
+        lobby.set_active_sheet(LobbySheet::Teams);
+        lobby.set_open_team_combo_player(Some(2));
+        lobby.focus = LobbyControl::RosterTeam;
+        lobby.hovered = HitTarget::Team(0);
+        lobby.pointer_pressed = Some(HitTarget::Team(0));
+        lobby.pointer_inside_pressed = true;
+        lobby.key_pressed = Some((LobbyControl::RosterTeam, KeyCode::Space));
+        lobby.set_has_teams(false);
+        assert_eq!(lobby.active_sheet(), LobbySheet::Players);
+        assert_eq!(lobby.focus(), LobbyControl::Roster);
+        assert_eq!(lobby.open_team_combo_player(), None);
+        assert_eq!(lobby.hovered, HitTarget::None);
+        assert_eq!(lobby.pointer_pressed, None);
+        assert!(!lobby.pointer_inside_pressed);
+        assert_eq!(lobby.key_pressed, None);
+        assert!(!lobby
+            .layout(1280, 720, &fonts)
+            .tab_buttons
+            .iter()
+            .any(|tab| tab.control == LobbyControl::TeamsTab));
+
+        lobby.focus = LobbyControl::ChatDialog;
+        lobby.hovered = HitTarget::Tab(LobbyControl::ChatDialog);
+        lobby.pointer_pressed = Some(HitTarget::Tab(LobbyControl::ChatDialog));
+        lobby.pointer_inside_pressed = true;
+        lobby.key_pressed = Some((LobbyControl::ChatDialog, KeyCode::Enter));
+        lobby.set_has_external_chat(false);
+        assert_eq!(lobby.focus(), LobbyControl::ChatInput);
+        assert_eq!(lobby.hovered, HitTarget::None);
+        assert_eq!(lobby.pointer_pressed, None);
+        assert!(!lobby.pointer_inside_pressed);
+        assert_eq!(lobby.key_pressed, None);
+        assert!(!lobby
+            .layout(1280, 720, &fonts)
+            .tab_buttons
+            .iter()
+            .any(|tab| tab.control == LobbyControl::ChatDialog));
+    }
+
+    #[test]
     fn resource_rows_use_cpp_id_order_basename_progress_and_geometry() {
         let fonts = endeavour_font_set();
         let mut lobby = lobby(LobbyRole::Host, vec![client(1, true)]);
@@ -7697,6 +8059,126 @@ mod tests {
     }
 
     #[test]
+    fn semantic_roster_capture_survives_selection_induced_collapse_reflow() {
+        let fonts = endeavour_font_set();
+        let mut lobby = GameLobby::new(
+            LobbyRole::Client,
+            "Gold Mine",
+            1,
+            4,
+            true,
+            false,
+            true,
+            false,
+            5,
+            vec![player(2), header(LobbyRosterHeader::Team(7), false)],
+        );
+        lobby.set_active_sheet(LobbySheet::Teams);
+        lobby.collapsed_roster = true;
+        lobby.collapse_player_limit = 0;
+        lobby.selected_row = Some(0);
+        lobby.selected_roster_id = Some(LobbyRosterId::Player(2));
+
+        let layout = lobby.layout(640, 480, &fonts);
+        let roster = lobby.roster_layout(&layout, fonts.text.line_height);
+        let team = roster.rows[1].rect;
+        let point = GuiPoint::new((team.x + 1) as f32, (team.y + 1) as f32);
+        lobby.pointer_down(point, &layout, &roster);
+        assert_eq!(
+            lobby.selected_roster_id(),
+            Some(&LobbyRosterId::Header(LobbyRosterHeader::Team(7)))
+        );
+
+        let reflowed = lobby.roster_layout(&layout, fonts.text.line_height);
+        let clicked = lobby
+            .accepted_roster_click_id(point, &layout, &reflowed)
+            .expect("captured semantic team survives the selected-player collapse");
+        assert_eq!(clicked, LobbyRosterId::Header(LobbyRosterHeader::Team(7)));
+        assert_eq!(
+            lobby.roster_double_click(&clicked),
+            [LobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: 7 }]
+        );
+    }
+
+    #[test]
+    fn semantic_add_capture_and_hover_survive_authoritative_reordering() {
+        let fonts = endeavour_font_set();
+        let mut lobby = lobby(LobbyRole::Host, vec![client(1, true), client(2, true)]);
+        let layout = lobby.layout(640, 480, &fonts);
+        let roster = lobby.roster_layout(&layout, fonts.text.line_height);
+        let add = roster.rows[0].add_player.expect("first Add Player button");
+        let point = GuiPoint::new((add.x + 1) as f32, (add.y + 1) as f32);
+
+        lobby.pointer_move(point, &layout, &roster);
+        lobby.pointer_down(point, &layout, &roster);
+        let hover_started = lobby.hover_since;
+        lobby.set_rows(vec![client(2, true), client(1, true)]);
+        assert_eq!(lobby.hovered, HitTarget::AddPlayer(1));
+        assert_eq!(lobby.pointer_pressed, Some(HitTarget::AddPlayer(1)));
+        assert_eq!(lobby.hover_since, hover_started);
+        assert!(lobby
+            .tooltip_state_at(hover_started + TOOLTIP_DELAY)
+            .is_some_and(|tooltip| tooltip.text.contains("Client 1")));
+
+        let reordered = lobby.roster_layout(&layout, fonts.text.line_height);
+        assert!(lobby
+            .pointer_up(point, &layout, &reordered, Instant::now())
+            .is_empty());
+        let moved_add = reordered.rows[1]
+            .add_player
+            .expect("moved semantic Add Player button");
+        let moved_point = GuiPoint::new((moved_add.x + 1) as f32, (moved_add.y + 1) as f32);
+        lobby.pointer_down(moved_point, &layout, &reordered);
+        assert_eq!(
+            lobby.pointer_up(moved_point, &layout, &reordered, Instant::now()),
+            [LobbyAction::AddPlayerRequested { client_id: 1 }]
+        );
+
+        lobby.set_rows(vec![client(1, true), client(2, true)]);
+        let roster = lobby.roster_layout(&layout, fonts.text.line_height);
+        let add = roster.rows[0]
+            .add_player
+            .expect("restored Add Player button");
+        let point = GuiPoint::new((add.x + 1) as f32, (add.y + 1) as f32);
+        lobby.pointer_down(point, &layout, &roster);
+        let _ = lobby.take_sounds();
+        lobby.pointer_move(GuiPoint::new(0.0, 0.0), &layout, &roster);
+        assert_eq!(lobby.take_sounds(), [LobbySound::ArrowHit]);
+        lobby.pointer_move(point, &layout, &roster);
+        assert_eq!(lobby.take_sounds(), [LobbySound::ArrowHit]);
+        lobby.set_rows(vec![client(2, true)]);
+        assert_eq!(lobby.take_sounds(), [LobbySound::ArrowHit]);
+        let removed = lobby.roster_layout(&layout, fonts.text.line_height);
+        assert!(lobby
+            .pointer_up(point, &layout, &removed, Instant::now())
+            .is_empty());
+    }
+
+    #[test]
+    fn authoritative_refresh_clears_removed_roster_child_key_latch() {
+        let fonts = endeavour_font_set();
+        let mut lobby = lobby(LobbyRole::Host, vec![client(1, true)]);
+        lobby.selected_row = Some(0);
+        lobby.selected_roster_id = Some(LobbyRosterId::Client(1));
+        lobby.focus = LobbyControl::RosterAddPlayer;
+        let layout = lobby.layout(640, 480, &fonts);
+        let roster = lobby.roster_layout(&layout, fonts.text.line_height);
+
+        assert!(lobby
+            .key_down(KeyCode::Space, false, &layout, &roster, Instant::now())
+            .is_empty());
+        assert_eq!(
+            lobby.key_pressed,
+            Some((LobbyControl::RosterAddPlayer, KeyCode::Space))
+        );
+
+        lobby.set_rows(vec![client(1, false)]);
+        assert_eq!(lobby.focus(), LobbyControl::Roster);
+        assert_eq!(lobby.key_pressed, None);
+        assert!(lobby.key_up(KeyCode::Space).is_empty());
+    }
+
+    #[test]
     fn non_roster_sheets_cannot_select_or_open_roster_rows() {
         let fonts = endeavour_font_set();
         let mut lobby = lobby(LobbyRole::Host, vec![client(1, true), player(2)]);
@@ -8225,6 +8707,47 @@ mod tests {
         assert_eq!(lobby.focus(), LobbyControl::Run);
         assert_eq!(actions, [LobbyAction::FocusChanged(LobbyControl::Run)]);
         assert!(!lobby.focus_order().contains(&LobbyControl::Ready));
+    }
+
+    #[test]
+    fn roster_listbox_edges_pages_and_recursive_tab_directions_match_native() {
+        let rows = (1..=40).map(|id| client(id, id == 1)).collect::<Vec<_>>();
+        let mut lobby = lobby(LobbyRole::Client, rows);
+        let layout = game_lobby_layout(640, 360, 34, 22, LobbyRole::Client, false, false);
+        let mut roster = lobby.roster_layout(&layout, 22);
+        assert!(roster.max_scroll > 0);
+        lobby.focus = LobbyControl::Roster;
+
+        lobby.key_down(KeyCode::PageDown, false, &layout, &roster, Instant::now());
+        let first_page = lobby
+            .selected_row
+            .expect("last fully visible first-page row");
+        assert!(first_page > 0);
+        assert_eq!(lobby.roster_scroll(), 0);
+
+        roster = lobby.roster_layout(&layout, 22);
+        lobby.key_down(KeyCode::PageDown, false, &layout, &roster, Instant::now());
+        assert!(lobby.selected_row.unwrap() > first_page);
+        assert!(lobby.roster_scroll() > 0);
+
+        roster = lobby.roster_layout(&layout, 22);
+        lobby.key_down(KeyCode::End, false, &layout, &roster, Instant::now());
+        assert_eq!(lobby.selected_row, Some(39));
+        assert_eq!(lobby.roster_scroll(), roster.max_scroll);
+
+        roster = lobby.roster_layout(&layout, 22);
+        lobby.key_down(KeyCode::Home, false, &layout, &roster, Instant::now());
+        assert_eq!(lobby.selected_row, Some(0));
+        assert_eq!(lobby.roster_scroll(), 0);
+
+        roster = lobby.roster_layout(&layout, 22);
+        lobby.key_down(KeyCode::Tab, false, &layout, &roster, Instant::now());
+        assert_eq!(lobby.focus(), LobbyControl::RosterAddPlayer);
+        lobby.key_down(KeyCode::Tab, false, &layout, &roster, Instant::now());
+        assert_eq!(lobby.focus(), LobbyControl::Exit);
+        lobby.focus = LobbyControl::Roster;
+        lobby.key_down(KeyCode::Tab, true, &layout, &roster, Instant::now());
+        assert_eq!(lobby.focus(), LobbyControl::ScenarioTab);
     }
 
     #[test]

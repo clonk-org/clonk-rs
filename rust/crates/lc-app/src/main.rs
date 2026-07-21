@@ -15299,7 +15299,7 @@ struct GameApp {
     context_menu_lobby_kick_client: Option<i32>,
     /// Player row whose root context menu is open. An authoritative update
     /// that removes the row closes the stale popup before it can dispatch.
-    context_menu_lobby_player: Option<(i32, i32)>,
+    context_menu_lobby_player: Option<(i32, i32, bool)>,
     /// C4GUI::ComboBox remembers the last menu index after Screen closes an
     /// outside-clicked menu. Retain that owner for the remainder of the same
     /// pointer-down so clicking the open combo closes instead of reopening it.
@@ -18366,19 +18366,22 @@ impl NetworkLobbyLayout {
 #[derive(Clone, Debug)]
 struct NetworkLobbyState {
     /// The native client constructs one C4GameLobby::MainDlg for the whole
-    /// lobby lifetime. Keep the Rust controller equally persistent so edit
-    /// capture and TextWindow scroll state survive rendering projections.
+    /// lobby lifetime. Keep the Rust controller equally persistent so roster
+    /// selection/focus/scroll, edit capture and TextWindow scroll state all
+    /// survive rendering projections and authoritative refreshes.
     controller: ClassicGameLobby,
-    /// Constructor-only MainDlg inputs are frozen on first projection, just
-    /// as C++ snapshots them when entering DoLobby.
-    controller_initialized: bool,
     participants: BTreeMap<ClientId, LobbyParticipantState>,
     /// Authoritative PlayerInfo projection shared with the host's persistent
     /// controller so peer lobbies converge after the same direct control.
     roster_rows: Vec<LobbyRosterRow>,
+    /// Distinguishes the initial participant-only fallback from an
+    /// authoritative projection that is legitimately empty.
+    roster_rows_authoritative: bool,
     client_telemetry: lc_network::RuntimeLobbyClientTelemetry,
+    active_players: i32,
     max_players: i32,
     has_teams: bool,
+    league_mode: bool,
     /// Construction-time snapshot of C4ChatDlg::IsChatActive(). The native
     /// lobby does not add or remove this button as IRC state later changes.
     has_external_chat: bool,
@@ -18408,6 +18411,7 @@ struct NetworkLobbyState {
     countdown: Option<i32>,
     layout: Option<NetworkLobbyLayout>,
     pointer: Option<GuiPoint>,
+    last_roster_click: Option<(LobbyRosterId, Instant)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18655,30 +18659,32 @@ impl NetworkLobbyState {
                 .entry(0)
                 .or_insert_with(|| LobbyParticipantState::new("Host", ParticipantKind::Player));
         }
-        let role = if is_host {
-            LobbyRole::Host
-        } else {
-            LobbyRole::Client
-        };
+        let controller = ClassicGameLobby::new(
+            if is_host {
+                LobbyRole::Host
+            } else {
+                LobbyRole::Client
+            },
+            String::new(),
+            0,
+            1,
+            false,
+            false,
+            false,
+            false,
+            DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+            Vec::new(),
+        );
         Self {
-            controller: ClassicGameLobby::new(
-                role,
-                String::new(),
-                0,
-                1,
-                false,
-                false,
-                false,
-                false,
-                DEFAULT_LOBBY_COUNTDOWN_SECONDS,
-                Vec::new(),
-            ),
-            controller_initialized: false,
+            controller,
             participants,
             roster_rows: Vec::new(),
+            roster_rows_authoritative: false,
             client_telemetry: lc_network::RuntimeLobbyClientTelemetry::default(),
+            active_players: 0,
             max_players: 1,
             has_teams: false,
+            league_mode: false,
             has_external_chat: false,
             active_sheet: LobbySheet::Players,
             resource_rows: BTreeMap::new(),
@@ -18701,11 +18707,13 @@ impl NetworkLobbyState {
             countdown: None,
             layout: None,
             pointer: None,
+            last_roster_click: None,
         }
     }
 
     fn with_external_chat(mut self, has_external_chat: bool) -> Self {
         self.has_external_chat = has_external_chat;
+        self.controller.set_has_external_chat(has_external_chat);
         self
     }
 
@@ -18733,6 +18741,7 @@ impl NetworkLobbyState {
 
     fn set_scenario_title(&mut self, title: &str) {
         self.selected_title = (!title.is_empty()).then(|| title.to_string());
+        self.controller.set_scenario_title(title);
     }
 
     fn update_layout(&mut self, width: f32, height: f32) -> &NetworkLobbyLayout {
@@ -18817,6 +18826,7 @@ impl NetworkLobbyState {
         self.hover_button = None;
         self.pressed_button = None;
         self.pointer = None;
+        self.last_roster_click = None;
         self.controller.pointer_left();
     }
 
@@ -18915,6 +18925,7 @@ impl NetworkLobbyState {
             self.client_sound_status
                 .insert(client_id, (muted, Instant::now()));
         }
+        self.controller.note_client_sound(client_id, muted);
     }
 
     fn set_client_telemetry(
@@ -18972,10 +18983,10 @@ impl NetworkLobbyState {
     }
 
     fn visible_roster_rows(&self) -> Vec<LobbyRosterRow> {
-        if self.roster_rows.is_empty() {
-            self.participant_roster_rows()
-        } else {
+        if self.roster_rows_authoritative {
             self.roster_rows.clone()
+        } else {
+            self.participant_roster_rows()
         }
     }
 
@@ -18989,35 +19000,31 @@ impl NetworkLobbyState {
     }
 
     fn sync_classic_controller(&mut self) {
+        let now = Instant::now();
+        self.client_sound_status.retain(|_, (_, started)| {
+            now.checked_duration_since(*started)
+                .is_none_or(|elapsed| elapsed < Duration::from_secs(1))
+        });
         let rows = self.visible_roster_rows();
-        let active_players = rows
-            .iter()
-            .filter(|row| matches!(row, LobbyRosterRow::Player(_)))
-            .count() as i32;
-        if !self.controller_initialized {
-            self.controller = ClassicGameLobby::new(
-                if self.is_host {
-                    LobbyRole::Host
-                } else {
-                    LobbyRole::Client
-                },
-                self.selected_title.clone().unwrap_or_default(),
-                active_players,
-                self.max_players.max(1),
-                self.has_teams,
-                self.has_external_chat,
-                self.resources_loaded,
-                self.local_ready(),
-                DEFAULT_LOBBY_COUNTDOWN_SECONDS,
-                rows.clone(),
-            );
-            self.controller_initialized = true;
+        let local_ready = self.local_ready();
+        if !self.has_teams && self.active_sheet == LobbySheet::Teams {
+            self.active_sheet = LobbySheet::Players;
         }
         self.controller
-            .set_player_count(active_players, self.max_players.max(1));
+            .set_scenario_title(self.selected_title.as_deref().unwrap_or_default());
+        self.controller.set_has_teams(self.has_teams);
+        self.controller.set_league_mode(self.league_mode);
+        self.controller
+            .set_has_external_chat(self.has_external_chat);
         if self.controller.rows() != rows {
             self.controller.set_rows(rows);
         }
+        self.controller
+            .set_player_count(self.active_players, self.max_players.max(1));
+        if self.controller.resources_loaded() != self.resources_loaded {
+            let _ = self.controller.set_resources_loaded(self.resources_loaded);
+        }
+        self.controller.set_ready(local_ready);
         if self.controller.labels() != &self.labels {
             self.controller.set_labels(self.labels.clone());
         }
@@ -19031,15 +19038,11 @@ impl NetworkLobbyState {
                 .set_scenario_text(self.scenario_description.text.clone());
         }
         self.controller.set_scenario_scroll(self.scenario_scroll);
-        let resource_rows = self.resource_rows.values().cloned().collect::<Vec<_>>();
-        if self.controller.resource_rows() != resource_rows {
-            self.controller.set_resource_rows(resource_rows);
+        let resources = self.resource_rows.values().cloned().collect::<Vec<_>>();
+        if self.controller.resource_rows() != resources {
+            self.controller.set_resource_rows(resources);
         }
         self.controller.set_resource_scroll(self.resource_scroll);
-        if self.controller.resources_loaded() != self.resources_loaded {
-            let _ = self.controller.set_resources_loaded(self.resources_loaded);
-        }
-        self.controller.set_ready(self.local_ready());
         if self.controller.logs() != self.logs {
             self.controller.set_logs(self.logs.clone());
         }
@@ -19048,36 +19051,31 @@ impl NetworkLobbyState {
         }
     }
 
-    fn retain_classic_controller(&mut self, controller: ClassicGameLobby) {
-        self.resource_scroll = controller.resource_scroll();
-        self.scenario_scroll = controller.scenario_scroll();
-        self.chat_edit = controller.chat_edit_view().clone();
-        self.controller = controller;
+    /// Reads interaction-owned state back out of the retained controller
+    /// after it has processed input, so the adapter's authoritative fields
+    /// stay coherent with what the one live MainDlg now shows.
+    fn retain_controller_state(&mut self) {
+        self.resource_scroll = self.controller.resource_scroll();
+        self.scenario_scroll = self.controller.scenario_scroll();
+        self.chat_edit = self.controller.chat_edit_view().clone();
     }
 
-    fn classic_render_state(
+    fn synchronize_classic_controller(
         &mut self,
-        surface: &Surface,
-        assets: &FrontendAssets,
+        width: i32,
+        height: i32,
+        fonts: &lc_frontend::ClonkFontSet,
         scenario_game_options: &GameOptionButtons,
-    ) -> Result<(ClassicGameLobby, GameOptionButtons)> {
-        let now = Instant::now();
-        self.client_sound_status.retain(|_, (_, started)| {
-            now.checked_duration_since(*started)
-                .is_none_or(|elapsed| elapsed < Duration::from_secs(1))
-        });
+    ) -> (LobbyLayout, LobbyRosterLayout, GameOptionButtons) {
         self.sync_classic_controller();
-        let role = self.controller.role();
-        let controller = self.controller.clone();
-        let fonts = assets
-            .clonk_fonts
-            .as_deref()
-            .context("CStdFont-faithful lobby fonts are unavailable")?;
         let mut option_values = scenario_game_options.values().clone();
+        option_values.lobby_is_league = self.league_mode;
         option_values.countdown = self.countdown.is_some();
-        let mut options = GameOptionButtons::new(role.game_option_context(), option_values);
-        let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
+        let mut options = GameOptionButtons::new(self.controller.role().game_option_context(), option_values);
+        let layout = self.controller.layout(width, height, fonts);
         options.set_bounds(layout.game_option_strip);
+        let _ = self.controller.chat_scroll_metrics(&layout, &fonts.text);
+        let roster = self.controller.right_list_layout(&layout, fonts);
         self.layout = Some(NetworkLobbyLayout::from_classic(
             &layout,
             self.active_sheet,
@@ -19085,7 +19083,27 @@ impl NetworkLobbyState {
             self.resource_scroll,
             fonts.text.line_height,
         ));
-        Ok((controller, options))
+        (layout, roster, options)
+    }
+
+    #[cfg(test)]
+    fn classic_render_state(
+        &mut self,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<(ClassicGameLobby, GameOptionButtons)> {
+        let fonts = assets
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful lobby fonts are unavailable")?;
+        let (_, _, options) = self.synchronize_classic_controller(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+            scenario_game_options,
+        );
+        Ok((self.controller.clone(), options))
     }
 
     fn with_classic_controller_input<T>(
@@ -19103,13 +19121,14 @@ impl NetworkLobbyState {
             .clonk_fonts
             .as_deref()
             .context("CStdFont-faithful lobby fonts are unavailable")?;
-        let (mut controller, _) =
-            self.classic_render_state(surface, assets, scenario_game_options)?;
-        let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
-        let _ = controller.chat_scroll_metrics(&layout, &fonts.text);
-        let roster = controller.right_list_layout(&layout, fonts);
-        let result = input(&mut controller, &layout, &roster);
-        self.retain_classic_controller(controller);
+        let (layout, roster, _) = self.synchronize_classic_controller(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+            scenario_game_options,
+        );
+        let result = input(&mut self.controller, &layout, &roster);
+        self.retain_controller_state();
         Ok(result)
     }
 
@@ -19305,10 +19324,18 @@ impl NetworkLobbyState {
     ) -> Result<()> {
         let resources = assets.game_lobby_resources()?;
         let option_resources = assets.game_option_resources()?;
-        let (mut controller, options) =
-            self.classic_render_state(surface, assets, scenario_game_options)?;
+        let fonts = assets
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful lobby fonts are unavailable")?;
+        let (_, _, options) = self.synchronize_classic_controller(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+            scenario_game_options,
+        );
         let result = if include_tooltips {
-            controller.render(
+            self.controller.render(
                 surface,
                 &resources,
                 &options,
@@ -19317,7 +19344,7 @@ impl NetworkLobbyState {
                 Some(gamma),
             )
         } else {
-            controller.render_without_tooltips(
+            self.controller.render_without_tooltips(
                 surface,
                 &resources,
                 &options,
@@ -19326,7 +19353,7 @@ impl NetworkLobbyState {
                 Some(gamma),
             )
         };
-        self.retain_classic_controller(controller);
+        self.retain_controller_state();
         result
     }
 
@@ -19339,9 +19366,17 @@ impl NetworkLobbyState {
     ) -> Result<()> {
         let resources = assets.game_lobby_resources()?;
         let option_resources = assets.game_option_resources()?;
-        let (mut controller, options) =
-            self.classic_render_state(surface, assets, scenario_game_options)?;
-        controller.render_tooltips(
+        let fonts = assets
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful lobby fonts are unavailable")?;
+        let (_, _, options) = self.synchronize_classic_controller(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+            scenario_game_options,
+        );
+        self.controller.render_tooltips(
             surface,
             &resources,
             &options,
@@ -19365,11 +19400,12 @@ impl NetworkLobbyState {
             .clonk_fonts
             .as_deref()
             .context("CStdFont-faithful lobby fonts are unavailable")?;
-        let (mut controller, _) =
-            self.classic_render_state(surface, assets, scenario_game_options)?;
-        let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
-        let _ = controller.chat_scroll_metrics(&layout, &fonts.text);
-        let roster = controller.right_list_layout(&layout, fonts);
+        let (layout, roster, _) = self.synchronize_classic_controller(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+            scenario_game_options,
+        );
         let contains = |rect: lc_frontend::classic_gui::IntRect| {
             point.x >= rect.x as f32
                 && point.y >= rect.y as f32
@@ -19378,12 +19414,13 @@ impl NetworkLobbyState {
         };
         let scroll_window_captured =
             contains(layout.chat_log_client) || contains(layout.roster_client);
-        controller.note_pointer_wheel();
+        self.controller.note_pointer_wheel();
         let outside_scroll_window = contains(layout.chat_log)
             && !contains(layout.chat_log_client)
             || contains(layout.roster) && !contains(layout.roster_client);
-        let changed = !outside_scroll_window && controller.wheel(point, delta, &layout, &roster);
-        self.retain_classic_controller(controller);
+        let changed =
+            !outside_scroll_window && self.controller.wheel(point, delta, &layout, &roster);
+        self.retain_controller_state();
         Ok((changed, scroll_window_captured))
     }
 
@@ -39813,6 +39850,13 @@ impl GameApp {
             }
             return Ok(());
         }
+        if self.mode == AppMode::Menu
+            && self.startup_view == StartupView::NetworkLobby
+            && self.network_lobby.is_some()
+            && self.handle_joined_lobby_roster_key(key, state)?
+        {
+            return Ok(());
+        }
         if self.handle_network_lobby_chat_key(key, state)? {
             return Ok(());
         }
@@ -50640,11 +50684,20 @@ impl GameApp {
                         self.process_main_menu_actions(actions)
                     }
                     StartupView::NetworkLobby => {
-                        if let Some(lobby) = self.network_lobby.as_mut() {
-                            let width = self.graphics.surface().width() as f32;
-                            let height = self.graphics.surface().height() as f32;
-                            lobby.update_layout(width, height);
-                            match lobby.pointer_region(point) {
+                        if self.network_lobby.is_some() {
+                            let (width, height) = {
+                                let surface = self.graphics.surface();
+                                (surface.width() as f32, surface.height() as f32)
+                            };
+                            let region = self
+                                .network_lobby
+                                .as_mut()
+                                .map(|lobby| {
+                                    lobby.update_layout(width, height);
+                                    lobby.pointer_region(point)
+                                })
+                                .unwrap_or(LobbyPointerRegion::Menu);
+                            match region {
                                 LobbyPointerRegion::Menu => self.handle_menu_input(|state| {
                                     state.set_pointer_position(Some(point));
                                     state.menu().handle_pointer_move(point)
@@ -55948,23 +56001,27 @@ impl GameApp {
                         Ok(())
                     }
                     StartupView::NetworkLobby => {
-                        if let Some(lobby) = self.network_lobby.as_mut() {
-                            let width = self.graphics.surface().width() as f32;
-                            let height = self.graphics.surface().height() as f32;
-                            lobby.update_layout(width, height);
-
+                        if self.network_lobby.is_some() {
+                            let (width, height) = {
+                                let surface = self.graphics.surface();
+                                (surface.width() as f32, surface.height() as f32)
+                            };
+                            let panel_pointer = self.network_lobby.as_mut().and_then(|lobby| {
+                                lobby.update_layout(width, height);
+                                lobby.pointer_position().filter(|point| {
+                                    matches!(
+                                        lobby.pointer_region(*point),
+                                        LobbyPointerRegion::Panel
+                                    )
+                                })
+                            });
                             match button_state {
                                 ElementState::Pressed => {
-                                    if let Some(point) = lobby.pointer_position() {
-                                        if matches!(
-                                            lobby.pointer_region(point),
-                                            LobbyPointerRegion::Panel
-                                        ) {
-                                            return self.handle_network_lobby_pointer_button(
-                                                ElementState::Pressed,
-                                                left_double_click,
-                                            );
-                                        }
+                                    if panel_pointer.is_some() {
+                                        return self.handle_network_lobby_pointer_button(
+                                            ElementState::Pressed,
+                                            left_double_click,
+                                        );
                                     }
                                     if let Some(point) = self.menu_state.pointer_position() {
                                         self.handle_menu_input(|state| {
@@ -55974,16 +56031,11 @@ impl GameApp {
                                     Ok(())
                                 }
                                 ElementState::Released => {
-                                    if let Some(point) = lobby.pointer_position() {
-                                        if matches!(
-                                            lobby.pointer_region(point),
-                                            LobbyPointerRegion::Panel
-                                        ) {
-                                            return self.handle_network_lobby_pointer_button(
-                                                ElementState::Released,
-                                                false,
-                                            );
-                                        }
+                                    if panel_pointer.is_some() {
+                                        return self.handle_network_lobby_pointer_button(
+                                            ElementState::Released,
+                                            false,
+                                        );
                                     }
                                     if let Some(point) = self.menu_state.pointer_position() {
                                         self.handle_menu_input(|state| {
@@ -56965,12 +57017,21 @@ impl GameApp {
                 self.process_main_menu_actions(actions)
             }
             StartupView::NetworkLobby => {
-                if let Some(lobby) = self.network_lobby.as_mut() {
-                    let width = self.graphics.surface().width() as f32;
-                    let height = self.graphics.surface().height() as f32;
-                    lobby.update_layout(width, height);
+                if self.network_lobby.is_some() {
+                    let (width, height) = {
+                        let surface = self.graphics.surface();
+                        (surface.width() as f32, surface.height() as f32)
+                    };
+                    let region = self
+                        .network_lobby
+                        .as_mut()
+                        .map(|lobby| {
+                            lobby.update_layout(width, height);
+                            lobby.pointer_region(position)
+                        })
+                        .unwrap_or(LobbyPointerRegion::Menu);
                     match phase {
-                        TouchPhase::Started => match lobby.pointer_region(position) {
+                        TouchPhase::Started => match region {
                             LobbyPointerRegion::Menu => self.handle_menu_input(|state| {
                                 state.set_pointer_position(Some(position));
                                 state.menu().handle_pointer_down(position)
@@ -56983,7 +57044,7 @@ impl GameApp {
                                 )
                             }
                         },
-                        TouchPhase::Moved => match lobby.pointer_region(position) {
+                        TouchPhase::Moved => match region {
                             LobbyPointerRegion::Menu => self.handle_menu_input(|state| {
                                 state.set_pointer_position(Some(position));
                                 state.menu().handle_pointer_move(position)
@@ -56996,7 +57057,7 @@ impl GameApp {
                                 )
                             }
                         },
-                        TouchPhase::Ended => match lobby.pointer_region(position) {
+                        TouchPhase::Ended => match region {
                             LobbyPointerRegion::Menu => {
                                 let result = self.handle_menu_input(|state| {
                                     state.set_pointer_position(Some(position));
@@ -59992,7 +60053,11 @@ impl GameApp {
                 .initial_join_snapshot
                 .as_ref()
                 .map(|snapshot| &snapshot.parameters),
-            NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+            NetworkMode::Client(_) => self
+                .pending_network_join_data
+                .as_ref()
+                .map(|join| &join.parameters),
+            NetworkMode::Host(_) => None,
         };
         let teams = parameters.map(|parameters| &parameters.teams);
         let league_mode = parameters.is_some_and(synchronized_parameters_are_league);
@@ -61258,10 +61323,113 @@ impl GameApp {
         self.open_context_menu_at_with_minimum_width(entries, anchor, 0, None)
     }
 
+    fn visible_classic_lobby_controller(&self) -> Option<&ClassicGameLobby> {
+        self.classic_host_lobby
+            .as_ref()
+            .map(|lobby| &lobby.controller)
+            .or_else(|| {
+                self.network_lobby
+                    .as_ref()
+                    .map(|lobby| &lobby.controller)
+            })
+    }
+
+    fn visible_classic_lobby_controller_mut(&mut self) -> Option<&mut ClassicGameLobby> {
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            Some(&mut lobby.controller)
+        } else {
+            self.network_lobby
+                .as_mut()
+                .map(|lobby| &mut lobby.controller)
+        }
+    }
+
+    fn visible_classic_lobby_player_context_target(
+        &self,
+        player_id: i32,
+    ) -> Option<(i32, bool)> {
+        self.visible_classic_lobby_controller().and_then(|controller| {
+            let mut free_savegame_group = false;
+            controller.rows().iter().find_map(|row| match row {
+                LobbyRosterRow::Header(header) => {
+                    free_savegame_group = matches!(
+                        header.kind,
+                        LobbyRosterHeader::UnassignedSavegamePlayers
+                    );
+                    None
+                }
+                LobbyRosterRow::Client(_) => {
+                    free_savegame_group = false;
+                    None
+                }
+                LobbyRosterRow::Player(player) if player.id == player_id => {
+                    Some((player.client_id, free_savegame_group))
+                }
+                LobbyRosterRow::Player(_) => None,
+            })
+        })
+    }
+
+    fn classic_lobby_restore_player(
+        &self,
+        player_id: i32,
+    ) -> Option<&lc_engine::ControlPlayerInfoEntry> {
+        fn find(
+            snapshot: &lc_network::PlayerInfoListSnapshot,
+            player_id: i32,
+        ) -> Option<&lc_engine::ControlPlayerInfoEntry> {
+            snapshot
+                .clients
+                .iter()
+                .flat_map(|client| &client.players)
+                .find(|player| player.id == player_id)
+        }
+        self.pending_network_join_data
+            .as_ref()
+            .and_then(|join| find(&join.parameters.restore_player_infos, player_id))
+            .or_else(|| {
+                self.host_join_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| {
+                        find(&snapshot.parameters.restore_player_infos, player_id)
+                    })
+            })
+            .or_else(|| {
+                self.network_mode.as_ref().and_then(|mode| match mode {
+                    NetworkMode::Host(HostSettings {
+                        prepared: Some(prepared),
+                        ..
+                    }) => prepared
+                        .host_config()
+                        .initial_join_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| {
+                            find(&snapshot.parameters.restore_player_infos, player_id)
+                        }),
+                    NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+                })
+            })
+    }
+
+    fn visible_classic_lobby_team_metadata(
+        &self,
+    ) -> Option<lc_engine::InitialNetworkTeamMetadata> {
+        self.network_team_assignment
+            .as_ref()
+            .map(|assignment| assignment.teams().clone())
+            .or_else(|| {
+                self.pending_network_join_data
+                    .as_ref()
+                    .and_then(|join| {
+                        initial_team_metadata_from_join_snapshot(&join.parameters.teams)
+                    })
+            })
+    }
+
     fn set_context_menu_lobby_team_player(&mut self, player_id: Option<i32>) {
         self.context_menu_lobby_team_player = player_id;
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
-            lobby.controller.set_open_team_combo_player(player_id);
+        if let Some(controller) = self.visible_classic_lobby_controller_mut() {
+            controller.set_open_team_combo_player(player_id);
         }
     }
 
@@ -61277,19 +61445,13 @@ impl GameApp {
 
     fn close_stale_classic_lobby_team_combo(&mut self) {
         let roster_active = self
-            .classic_host_lobby
-            .as_ref()
-            .is_some_and(|lobby| lobby.controller.active_sheet().is_roster())
-            || self
-                .network_lobby
-                .as_ref()
-                .is_some_and(|lobby| lobby.active_sheet.is_roster());
+            .visible_classic_lobby_controller()
+            .is_some_and(|controller| controller.active_sheet().is_roster());
         let stale_team_combo = self.context_menu_lobby_team_player.is_some_and(|player_id| {
             !roster_active
                 || self
-                    .classic_host_lobby
-                    .as_ref()
-                    .and_then(|lobby| lobby.controller.open_team_combo_player())
+                    .visible_classic_lobby_controller()
+                    .and_then(ClassicGameLobby::open_team_combo_player)
                     != Some(player_id)
         });
         let stale_kick = self.context_menu_lobby_kick_client.is_some_and(|client_id| {
@@ -61299,14 +61461,14 @@ impl GameApp {
         });
         let stale_player = self
             .context_menu_lobby_player
-            .is_some_and(|(client_id, player_id)| {
+            .is_some_and(|(client_id, player_id, opened_as_free_savegame)| {
                 !roster_active
-                    || !self.classic_host_lobby.as_ref().is_some_and(|lobby| {
-                        lobby.controller.rows().iter().any(|row| {
-                            matches!(row, LobbyRosterRow::Player(player)
-                                if player.id == player_id && player.client_id == client_id)
+                    || !self
+                        .visible_classic_lobby_player_context_target(player_id)
+                        .is_some_and(|(visible_client_id, free_savegame_player)| {
+                            visible_client_id == client_id
+                                && free_savegame_player == opened_as_free_savegame
                         })
-                    })
             });
         let stale_option = self.context_menu_lobby_option.is_some_and(|option| {
             let lobby_owns = self.classic_host_lobby.as_ref().is_some_and(|lobby| {
@@ -61639,6 +61801,11 @@ impl GameApp {
             .classic_host_lobby
             .as_ref()
             .map(|lobby| lobby.controller.active_sheet())
+            .or_else(|| {
+                self.network_lobby
+                    .as_ref()
+                    .map(|lobby| lobby.controller.active_sheet())
+            })
             .unwrap_or(LobbySheet::Players);
         let local_client_id = self
             .network
@@ -61806,8 +61973,14 @@ impl GameApp {
         let previous_clients = self
             .classic_host_lobby
             .as_ref()
+            .map(|lobby| lobby.controller.rows())
+            .or_else(|| {
+                self.network_lobby
+                    .as_ref()
+                    .map(|lobby| lobby.controller.rows())
+            })
             .into_iter()
-            .flat_map(|lobby| lobby.controller.rows())
+            .flatten()
             .filter_map(|row| match row {
                 LobbyRosterRow::Client(client) => Some((client.id, client.clone())),
                 _ => None,
@@ -61843,9 +62016,18 @@ impl GameApp {
             lobby.controller.set_player_count(active_players, maximum);
         }
         if let Some(lobby) = self.network_lobby.as_mut() {
-            lobby.roster_rows = rows;
+            lobby.roster_rows = rows.clone();
+            lobby.roster_rows_authoritative = true;
+            lobby.active_players = active_players;
             lobby.max_players = maximum;
             lobby.has_teams = has_teams;
+            lobby.league_mode = self.network_is_league;
+            lobby.controller.set_has_teams(has_teams);
+            lobby.controller.set_league_mode(self.network_is_league);
+            lobby.controller.set_rows(rows);
+            lobby
+                .controller
+                .set_player_count(active_players, maximum);
         }
         self.close_stale_classic_lobby_team_combo();
         self.refresh_classic_lobby_client_telemetry();
@@ -62419,16 +62601,16 @@ impl GameApp {
         &self,
         player_id: i32,
     ) -> Option<(i32, Vec<ContextMenuEntry<AppContextMenuCommand>>)> {
-        let client_id = self.classic_host_lobby.as_ref().and_then(|lobby| {
-            lobby.controller.rows().iter().find_map(|row| match row {
-                LobbyRosterRow::Player(player) if player.id == player_id => {
-                    Some(player.client_id)
-                }
-                _ => None,
-            })
-        })?;
+        let (client_id, free_savegame_player) =
+            self.visible_classic_lobby_player_context_target(player_id)?;
 
-        if client_id == -1 {
+        if free_savegame_player {
+            if self
+                .classic_lobby_restore_player(player_id)
+                .is_some_and(lc_engine::ControlPlayerInfoEntry::is_script_player)
+            {
+                return Some((client_id, Vec::new()));
+            }
             return Some((
                 client_id,
                 vec![ContextMenuEntry::new(
@@ -62443,16 +62625,21 @@ impl GameApp {
             ));
         }
 
-        let Some(player) = self
-            .control_player_infos
-            .client_update_request(client_id)
-            .and_then(|request| {
-                request
-                    .players
-                    .into_iter()
-                    .find(|player| player.id == player_id)
-            })
-        else {
+        let player = if client_id == -1 {
+            // Replay rows deliberately use the synthetic client -1 while
+            // looking up presentation data in the global PlayerInfos list.
+            self.control_player_infos.get(player_id).cloned()
+        } else {
+            self.control_player_infos
+                .client_update_request(client_id)
+                .and_then(|request| {
+                    request
+                        .players
+                        .into_iter()
+                        .find(|player| player.id == player_id)
+                })
+        };
+        let Some(player) = player else {
             return Some((client_id, Vec::new()));
         };
         if !self.classic_lobby_player_is_owned(client_id) {
@@ -62477,9 +62664,8 @@ impl GameApp {
             );
         }
         let team_colors = self
-            .network_team_assignment
-            .as_ref()
-            .is_some_and(|assignment| assignment.teams().team_colors);
+            .visible_classic_lobby_team_metadata()
+            .is_some_and(|teams| teams.team_colors);
         if player.color != player.original_color && (!team_colors || player.team == 0) {
             entries.push(
                 ContextMenuEntry::new(
@@ -62548,7 +62734,7 @@ impl GameApp {
                 .with_action(AppContextMenuCommand::LobbyClientToggleMute(client_id)),
             );
         }
-        if matches!(self.network_mode, Some(NetworkMode::Host(_))) && !local {
+        if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             entries.push(
                 ContextMenuEntry::new(
                     self.runtime_resource_text("IDS_NET_KICKCLIENT", "&Kick"),
@@ -62598,7 +62784,11 @@ impl GameApp {
                 };
                 let opened = self.open_context_menu_at(entries, position)?;
                 if opened {
-                    self.context_menu_lobby_player = Some((client_id, player_id));
+                    let opened_as_free_savegame = self
+                        .visible_classic_lobby_player_context_target(player_id)
+                        .is_some_and(|(_, free_savegame_player)| free_savegame_player);
+                    self.context_menu_lobby_player =
+                        Some((client_id, player_id, opened_as_free_savegame));
                 }
                 Ok(opened)
             }
@@ -62628,7 +62818,7 @@ impl GameApp {
     fn toggle_classic_lobby_client_activation(&mut self, client_id: i32) {
         if self.network.is_none()
             || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
-            || self.visible_lobby_client_is_local(client_id) != Some(false)
+            || self.visible_lobby_client_is_local(client_id).is_none()
             || !self.control_clients.contains(client_id)
         {
             return;
@@ -62737,8 +62927,8 @@ impl GameApp {
             .network
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
-        let local_row = self.classic_host_lobby.as_ref().is_some_and(|lobby| {
-            lobby.controller.rows().iter().any(|row| {
+        let local_row = self.visible_classic_lobby_controller().is_some_and(|controller| {
+            controller.rows().iter().any(|row| {
                 matches!(row, LobbyRosterRow::Client(client) if client.id == client_id && client.local)
             })
         });
@@ -62788,8 +62978,8 @@ impl GameApp {
         };
         let root = root.to_string_lossy().into_owned();
         self.close_context_menu_silently();
-        if let Some(lobby) = self.classic_host_lobby.as_mut() {
-            lobby.controller.cancel_interaction();
+        if let Some(controller) = self.visible_classic_lobby_controller_mut() {
+            controller.cancel_interaction();
         }
         self.startup_tooltip.pointer_left();
         self.definition_selector = Some(
@@ -62832,10 +63022,12 @@ impl GameApp {
             return;
         }
         let countdown_active = self
-            .classic_host_lobby
-            .as_ref()
-            .is_some_and(|lobby| lobby.controller.countdown().is_any());
+            .visible_classic_lobby_controller()
+            .is_some_and(|controller| controller.countdown().is_locked());
         if countdown_active {
+            if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+                return;
+            }
             let abort = lc_network::LobbyCountdownPacket::new(
                 lc_network::LobbyCountdownPacket::ABORT,
             );
@@ -62850,8 +63042,8 @@ impl GameApp {
                 ));
                 return;
             }
-            if let Some(lobby) = self.classic_host_lobby.as_mut() {
-                let _ = lobby.controller.apply_countdown_packet(
+            if let Some(controller) = self.visible_classic_lobby_controller_mut() {
+                let _ = controller.apply_countdown_packet(
                     lc_frontend::game_lobby::LobbyCountdownPacket::Abort,
                 );
             }
@@ -62984,16 +63176,14 @@ impl GameApp {
             return Ok(false);
         }
 
-        let (_, roster) = self.classic_host_lobby_layouts()?;
+        let (_, roster) = self.visible_classic_lobby_layouts()?;
         let Some((client_id, current_team, anchor, minimum_width)) = self
-            .classic_host_lobby
-            .as_ref()
-            .and_then(|lobby| {
-                if lobby.controller.countdown().is_locked() {
+            .visible_classic_lobby_controller()
+            .and_then(|controller| {
+                if controller.countdown().is_locked() {
                     return None;
                 }
-                let (index, player) = lobby
-                    .controller
+                let (index, player) = controller
                     .rows()
                     .iter()
                     .enumerate()
@@ -63026,11 +63216,11 @@ impl GameApp {
         let select_template = load_runtime_language_table(self.app_paths.as_ref())
             .ok()
             .and_then(|table| table.entries.get("IDS_MSG_SELECT").cloned());
-        let entries = self
-            .network_team_assignment
+        let metadata = self.visible_classic_lobby_team_metadata();
+        let entries = metadata
             .as_ref()
             .into_iter()
-            .flat_map(|assignment| assignment.teams().teams.iter())
+            .flat_map(|metadata| metadata.teams.iter())
             .filter(|team| {
                 team.id == current_team
                     || team.max_players == 0
@@ -63465,20 +63655,19 @@ impl GameApp {
         if !player_is_eligible {
             return false;
         }
-        let Some(metadata) = self
-            .network_team_assignment
-            .as_ref()
-            .map(NetworkTeamAssignmentState::teams)
-        else {
+        let Some(metadata) = self.visible_classic_lobby_team_metadata() else {
             return false;
         };
-        if !metadata.active
-            || !matches!(
-                metadata.team_distribution,
-                lc_engine::InitialNetworkTeamDistribution::Free
-                    | lc_engine::InitialNetworkTeamDistribution::Host
-            )
-        {
+        let distribution_allows_change = match metadata.team_distribution {
+            lc_engine::InitialNetworkTeamDistribution::Free => true,
+            lc_engine::InitialNetworkTeamDistribution::Host => {
+                matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            }
+            lc_engine::InitialNetworkTeamDistribution::None
+            | lc_engine::InitialNetworkTeamDistribution::Random
+            | lc_engine::InitialNetworkTeamDistribution::RandomInvisible => false,
+        };
+        if !metadata.active || !distribution_allows_change {
             return false;
         }
         if metadata.auto_generate_teams {
@@ -63498,11 +63687,11 @@ impl GameApp {
     }
 
     fn submit_classic_lobby_team_selection(&mut self, player_id: i32, team_id: i32) {
-        let Some(client_id) = self.classic_host_lobby.as_ref().and_then(|lobby| {
-            if lobby.controller.countdown().is_locked() {
+        let Some(client_id) = self.visible_classic_lobby_controller().and_then(|controller| {
+            if controller.countdown().is_locked() {
                 return None;
             }
-            lobby.controller.rows().iter().find_map(|row| match row {
+            controller.rows().iter().find_map(|row| match row {
                 LobbyRosterRow::Player(player)
                     if player.id == player_id
                         && player.team.as_ref().is_some_and(|team| team.selectable) =>
@@ -63518,15 +63707,8 @@ impl GameApp {
             return;
         }
         if !self
-            .network_team_assignment
-            .as_ref()
-            .is_some_and(|assignment| {
-                assignment
-                    .teams()
-                    .teams
-                    .iter()
-                    .any(|team| team.id == team_id)
-            })
+            .visible_classic_lobby_team_metadata()
+            .is_some_and(|metadata| metadata.teams.iter().any(|team| team.id == team_id))
         {
             return;
         }
@@ -63552,17 +63734,12 @@ impl GameApp {
 
     fn move_local_classic_lobby_players_into_team(&mut self, team_id: i32) {
         if self
-            .classic_host_lobby
-            .as_ref()
-            .is_none_or(|lobby| lobby.controller.countdown().is_any())
+            .visible_classic_lobby_controller()
+            .is_none_or(|controller| controller.countdown().is_locked())
         {
             return;
         }
-        let Some(metadata) = self
-            .network_team_assignment
-            .as_ref()
-            .map(NetworkTeamAssignmentState::teams)
-        else {
+        let Some(metadata) = self.visible_classic_lobby_team_metadata() else {
             return;
         };
         if !metadata.active {
@@ -63624,8 +63801,8 @@ impl GameApp {
         player_id != 0
             && self.network.is_some()
             && self.classic_lobby_player_is_owned(client_id)
-            && self.classic_host_lobby.as_ref().is_some_and(|lobby| {
-                lobby.controller.rows().iter().any(|row| {
+            && self.visible_classic_lobby_controller().is_some_and(|controller| {
+                controller.rows().iter().any(|row| {
                     matches!(row, LobbyRosterRow::Player(player)
                         if player.id == player_id && player.client_id == client_id)
                 })
@@ -63646,12 +63823,11 @@ impl GameApp {
         savegame_player_id: i32,
         player_id: i32,
     ) {
-        let target_is_free = self.classic_host_lobby.as_ref().is_some_and(|lobby| {
-            lobby.controller.rows().iter().any(|row| {
-                matches!(row, LobbyRosterRow::Player(player)
-                    if player.id == savegame_player_id && player.client_id == -1)
-            })
-        });
+        let target_is_free = self
+            .visible_classic_lobby_player_context_target(savegame_player_id)
+            .is_some_and(|(client_id, free_savegame_player)| {
+                client_id == -1 && free_savegame_player
+            });
         if !target_is_free || player_id == 0 {
             return;
         }
@@ -63694,9 +63870,8 @@ impl GameApp {
             return;
         }
         let countdown_locked = self
-            .classic_host_lobby
-            .as_ref()
-            .is_some_and(|lobby| lobby.controller.countdown().is_locked());
+            .visible_classic_lobby_controller()
+            .is_some_and(|controller| controller.countdown().is_locked());
         if countdown_locked {
             if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
                 return;
@@ -67612,28 +67787,17 @@ impl GameApp {
                     self.request_control_message_attention();
                 }
                 ClassicLobbyAction::AppendLog(line) => {
-                    let removed_frontend_copy = if let Some(lobby) =
-                        self.classic_host_lobby.as_mut()
-                    {
-                        let mut logs = lobby.controller.logs().to_vec();
-                        if logs.last() != Some(&line) {
-                            false
-                        } else {
-                            logs.pop();
-                            lobby.controller.set_logs(logs);
-                            true
-                        }
-                    } else {
-                        self.network_lobby.as_mut().is_some_and(|lobby| {
-                            let mut logs = lobby.controller.logs().to_vec();
+                    let removed_frontend_copy = self
+                        .visible_classic_lobby_controller_mut()
+                        .is_some_and(|controller| {
+                            let mut logs = controller.logs().to_vec();
                             if logs.last() != Some(&line) {
                                 return false;
                             }
                             logs.pop();
-                            lobby.controller.set_logs(logs);
+                            controller.set_logs(logs);
                             true
-                        })
-                    };
+                        });
                     if removed_frontend_copy {
                         let color = (u32::from(line.color[0]) << 16)
                             | (u32::from(line.color[1]) << 8)
@@ -68106,6 +68270,13 @@ impl GameApp {
                     ) || sheet == LobbySheet::Teams && lobby.has_teams;
                     if supported {
                         lobby.active_sheet = sheet;
+                        lobby.last_roster_click = None;
+                        lobby.controller.set_active_sheet(sheet);
+                        if sheet == LobbySheet::Resources {
+                            lobby.controller.set_resource_rows(
+                                lobby.resource_rows.values().cloned().collect(),
+                            );
+                        }
                     }
                     supported
                 });
@@ -68116,6 +68287,9 @@ impl GameApp {
                 }
                 if sheet == LobbySheet::Scenario {
                     let _ = self.refresh_lobby_scenario_description();
+                }
+                if sheet.is_roster() {
+                    self.sync_classic_lobby_roster();
                 }
             }
             LobbyAction::StartGame => self.start_network_lobby_countdown()?,
@@ -68199,6 +68373,44 @@ impl GameApp {
         Ok((layout, roster))
     }
 
+    fn joined_lobby_layouts(
+        &mut self,
+    ) -> std::result::Result<(LobbyLayout, LobbyRosterLayout), EngineError> {
+        let fonts = self.assets.clonk_fonts.clone().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Resources {
+                    detail: "CStdFont-faithful lobby fonts are unavailable".to_string(),
+                }),
+            ))
+        })?;
+        let surface = self.graphics.surface();
+        let (width, height) = (surface.width() as i32, surface.height() as i32);
+        let state = self.network_lobby.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model {
+                    detail: "exact joined lobby state is absent".to_string(),
+                }),
+            ))
+        })?;
+        let (layout, roster, _) = state.synchronize_classic_controller(
+            width,
+            height,
+            &fonts,
+            &self.scenario_game_options,
+        );
+        Ok((layout, roster))
+    }
+
+    fn visible_classic_lobby_layouts(
+        &mut self,
+    ) -> std::result::Result<(LobbyLayout, LobbyRosterLayout), EngineError> {
+        if self.classic_host_lobby.is_some() {
+            self.classic_host_lobby_layouts()
+        } else {
+            self.joined_lobby_layouts()
+        }
+    }
+
     fn play_lobby_sound_events(&mut self, sounds: Vec<LobbySound>) {
         for sound in sounds {
             match sound {
@@ -68239,11 +68451,10 @@ impl GameApp {
     }
 
     fn play_classic_lobby_sounds(&mut self) {
-        let sounds = if let Some(state) = self.classic_host_lobby.as_mut() {
-            state.controller.take_sounds()
-        } else {
-            self.take_network_lobby_sounds()
-        };
+        let sounds = self
+            .visible_classic_lobby_controller_mut()
+            .map(ClassicGameLobby::take_sounds)
+            .unwrap_or_default();
         self.play_lobby_sound_events(sounds);
         let option_sounds = self.scenario_game_options.take_sound_events();
         self.play_game_option_sound_events(option_sounds);
@@ -68259,6 +68470,8 @@ impl GameApp {
             lobby.controller.cancel_interaction();
         } else if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.pointer = None;
+            lobby.last_roster_click = None;
+            lobby.hover_button = None;
             lobby.pressed_button = None;
             lobby.sync_classic_controller();
             lobby.controller.cancel_interaction();
@@ -70805,10 +71018,20 @@ impl GameApp {
                 ClassicLobbyAction::TabContextRequested { position } => {
                     self.open_lobby_tab_context(position)?;
                 }
-                // The existing joined-lobby adapter still owns non-chat
-                // commands. L168 routes the retained Edit/TextWindow and the
-                // already-landed roster/tab context controls through this
-                // controller without changing other command ownership.
+                // The retained roster routes its locally authorized actions
+                // through the same packet-backed handlers as the persistent
+                // host controller.
+                action @ (ClassicLobbyAction::RosterSelectionChanged(_)
+                | ClassicLobbyAction::AddPlayerRequested { .. }
+                | ClassicLobbyAction::AddScriptPlayerRequested
+                | ClassicLobbyAction::TeamSelectionRequested { .. }
+                | ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { .. }) => {
+                    self.process_classic_lobby_actions(vec![action])?;
+                }
+                // The reduced joined-lobby adapter still owns the remaining
+                // commands (sheets, ready, start, Exit) through its legacy
+                // panel actions; the retained controller only supplies their
+                // native sounds.
                 _ => {}
             }
         }
@@ -70864,7 +71087,9 @@ impl GameApp {
                 .expect("joined lobby pointer came from live state");
             match state {
                 ElementState::Pressed => {
-                    if !double_click {
+                    if double_click {
+                        lobby.last_roster_click = None;
+                    } else {
                         lobby.handle_panel_pointer_down(point);
                     }
                     (
@@ -70880,17 +71105,42 @@ impl GameApp {
                         None,
                     )
                 }
-                ElementState::Released => (
-                    lobby
-                        .classic_pointer_up(
-                            point,
+                ElementState::Released => {
+                    // Discrete-click platforms never deliver LeftDouble, so
+                    // synthesize C4MC_Button_LeftDouble from the retained
+                    // semantic row exactly like the persistent host path.
+                    let now = Instant::now();
+                    let (mut actions, clicked) = lobby
+                        .with_classic_controller_input(
                             self.graphics.surface(),
                             assets.as_ref(),
                             &self.scenario_game_options,
+                            |controller, layout, roster| {
+                                let clicked = controller
+                                    .accepted_roster_click_id(point, layout, roster);
+                                let actions =
+                                    controller.pointer_up(point, layout, roster, now);
+                                (actions, clicked)
+                            },
                         )
-                        .map_err(Self::joined_lobby_input_error)?,
-                    lobby.handle_panel_pointer_up(point),
-                ),
+                        .map_err(Self::joined_lobby_input_error)?;
+                    let synthesized_double = clicked.as_ref().is_some_and(|clicked| {
+                        lobby.last_roster_click.as_ref().is_some_and(|(last, at)| {
+                            last == clicked
+                                && now.saturating_duration_since(*at)
+                                    < CPP_DOUBLE_CLICK_INTERVAL
+                        })
+                    });
+                    lobby.last_roster_click = if synthesized_double {
+                        None
+                    } else {
+                        clicked.clone().map(|row| (row, now))
+                    };
+                    if let Some(clicked) = clicked.as_ref().filter(|_| synthesized_double) {
+                        actions.extend(lobby.controller.roster_double_click(clicked));
+                    }
+                    (actions, lobby.handle_panel_pointer_up(point))
+                }
             }
         };
         self.process_joined_lobby_controller_actions(actions)?;
@@ -70939,6 +71189,7 @@ impl GameApp {
                 }
                 TouchPhase::Cancelled => {
                     lobby.pressed_button = None;
+                    lobby.last_roster_click = None;
                     None
                 }
             };
@@ -71014,23 +71265,116 @@ impl GameApp {
                     lobby.last_roster_click = if double_click {
                         None
                     } else {
-                        clicked.map(|row| (row, now))
+                        clicked.clone().map(|row| (row, now))
                     };
                     let mut actions = lobby
                         .controller
                         .pointer_up(point, &layout, &roster, now);
-                    if double_click {
-                        actions.extend(
-                            lobby
-                                .controller
-                                .pointer_double_click(point, &layout, &roster),
-                        );
+                    if let Some(clicked) = clicked.as_ref().filter(|_| double_click) {
+                        actions.extend(lobby.controller.roster_double_click(clicked));
                     }
                     actions
                 })
                 .unwrap_or_default(),
         };
         self.process_classic_lobby_actions(actions)
+    }
+
+    fn handle_joined_lobby_roster_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        let Some(focus) = self
+            .network_lobby
+            .as_ref()
+            .map(|lobby| lobby.controller.focus())
+        else {
+            return Ok(false);
+        };
+        let tab = state == ElementState::Pressed
+            && key == VirtualKeyCode::Tab
+            && (self.keyboard_modifiers.is_empty()
+                || self.keyboard_modifiers == ModifiersState::SHIFT);
+        let no_modifiers = self.keyboard_modifiers.is_empty();
+        let default_focus_modifiers =
+            no_modifiers || self.keyboard_modifiers == ModifiersState::SHIFT;
+        let combo_open_modifiers =
+            no_modifiers || self.keyboard_modifiers == ModifiersState::ALT;
+        let roster_has_rows = self
+            .network_lobby
+            .as_ref()
+            .is_some_and(|lobby| !lobby.controller.rows().is_empty());
+        // C4GUI::Dialog advances focus for Tab regardless of which control
+        // holds it; only the non-traversal keys stay focus-specific here.
+        // The C4GUI listbox binds no confirm keys and Dialog::CharIn excludes
+        // space from default-control refocusing (src/C4GuiDialogs.cpp:552-567),
+        // so eat them here instead of leaking them to the frontend's
+        // default-focus fallback or the generic menu shim.
+        if focus == LobbyControl::Roster
+            && no_modifiers
+            && matches!(
+                key,
+                VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter | VirtualKeyCode::Space
+            )
+        {
+            return Ok(true);
+        }
+        let accepted = tab
+            || match focus {
+                LobbyControl::Roster => {
+                    no_modifiers
+                        && matches!(
+                            key,
+                            VirtualKeyCode::Up
+                                | VirtualKeyCode::Down
+                                | VirtualKeyCode::Home
+                                | VirtualKeyCode::End
+                        )
+                        || no_modifiers
+                            && roster_has_rows
+                            && matches!(key, VirtualKeyCode::PageUp | VirtualKeyCode::PageDown)
+                }
+                LobbyControl::RosterTeam => {
+                    combo_open_modifiers
+                        && matches!(key, VirtualKeyCode::Down | VirtualKeyCode::Space)
+                        || default_focus_modifiers && key == VirtualKeyCode::Up
+                }
+                LobbyControl::RosterAddPlayer => {
+                    no_modifiers
+                        && matches!(
+                            key,
+                            VirtualKeyCode::Return
+                                | VirtualKeyCode::NumpadEnter
+                                | VirtualKeyCode::Space
+                        )
+                }
+                _ => false,
+            };
+        if !accepted {
+            return Ok(false);
+        }
+        let Some(key_code) = map_key_code(key) else {
+            return Ok(false);
+        };
+        let (layout, roster) = self.joined_lobby_layouts()?;
+        let shift = self.keyboard_modifiers.shift();
+        let actions = self
+            .network_lobby
+            .as_mut()
+            .map(|lobby| match state {
+                ElementState::Pressed => lobby.controller.key_down(
+                    key_code,
+                    shift,
+                    &layout,
+                    &roster,
+                    Instant::now(),
+                ),
+                ElementState::Released => lobby.controller.key_up(key_code),
+            })
+            .unwrap_or_default();
+        self.process_joined_lobby_controller_actions(actions)?;
+        Ok(true)
     }
 
     fn handle_classic_lobby_secondary_button(
@@ -80912,6 +81256,10 @@ impl GameApp {
                 let startup_tooltip_pending = self.startup_element_tooltip_pending();
                 let cache_eligible = !ordered_native
                     && !fade_was_active
+                    // A retained lobby advances held scrollbars, expires
+                    // transient status icons, and matures its own 500 ms
+                    // tooltip clock even without another input event.
+                    && self.startup_view != StartupView::NetworkLobby
                     && self.context_menu.is_none()
                     && self.startup_player_properties_dialog.is_none()
                     && self.startup_options_advanced_dialog.is_none()
@@ -124269,6 +124617,21 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn installed_empty_joined_roster_does_not_revive_participant_fallback() {
+        let mut lobby = NetworkLobbyState::new(7, "Client".to_string(), false);
+        assert!(
+            !lobby.visible_roster_rows().is_empty(),
+            "the pre-projection adapter exposes its participant fallback"
+        );
+
+        lobby.roster_rows_authoritative = true;
+        assert!(
+            lobby.visible_roster_rows().is_empty(),
+            "an authoritative empty projection remains empty"
+        );
+    }
+
+    #[test]
     fn generic_client_resource_save_hit_target_emits_the_resource_id() {
         let mut lobby = NetworkLobbyState::new(7, "Client".to_string(), false);
         lobby.active_sheet = LobbySheet::Resources;
@@ -124480,6 +124843,12 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("test lobby")
             .controller
             .set_rows(vec![
+                LobbyRosterRow::Header(LobbyHeaderRow {
+                    kind: LobbyRosterHeader::UnassignedSavegamePlayers,
+                    label: "Player assignment".to_string(),
+                    icon: LobbyRosterIcon::Standard(12),
+                    can_add_player: false,
+                }),
                 LobbyRosterRow::Player(LobbyPlayerRow {
                     id: player_id,
                     client_id: -1,
@@ -124499,7 +124868,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     fn l098_takeover_submenu_lists_only_local_unissued_unassociated_players() {
         let mut app = new_menu_app(640, 480);
         install_test_free_savegame_player_row(&mut app, 50);
-        let (network, _events, _commands) =
+        let (network, _events, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(network);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
@@ -124609,6 +124978,33 @@ public func Grant(password) { return GainMissionAccess(password); }
         let layout = app.context_menu.as_ref().unwrap().layout();
         assert_eq!(layout.panels.len(), 2);
         assert_eq!(layout.panels[1].rows.len(), 2);
+
+        let mut rows = app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .rows()
+            .to_vec();
+        let LobbyRosterRow::Header(header) = &mut rows[0] else {
+            panic!("free savegame group header");
+        };
+        header.kind = LobbyRosterHeader::ReplayPlayers;
+        app.classic_host_lobby
+            .as_mut()
+            .unwrap()
+            .controller
+            .set_rows(rows);
+        app.close_stale_classic_lobby_team_combo();
+        assert!(
+            app.context_menu.is_none(),
+            "regrouping the target as a replay player closes a stale takeover menu"
+        );
+        app.take_over_classic_lobby_savegame_player(50, 11);
+        assert!(
+            commands.take_player_info_updates().is_empty(),
+            "the activation guard rejects a replay target even when invoked directly"
+        );
     }
 
     #[test]
@@ -124728,8 +125124,21 @@ public func Grant(password) { return GainMissionAccess(password); }
             original_color: 0x0065_4321,
             ..Default::default()
         };
+        let replay_player = lc_engine::ControlPlayerInfoEntry {
+            id: 51,
+            name: LegacyCString::from_bytes(b"Replay".to_vec()).unwrap(),
+            color: 0x0012_3456,
+            original_color: 0x0065_4321,
+            ..Default::default()
+        };
+        let free_script = lc_engine::ControlPlayerInfoEntry {
+            id: 52,
+            name: LegacyCString::from_bytes(b"Free script".to_vec()).unwrap(),
+            player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+            ..Default::default()
+        };
         app.control_player_infos.replace_snapshot(
-            9,
+            51,
             [
                 lc_engine::PlayerInfoControlData {
                     client_id: 0,
@@ -124743,8 +125152,26 @@ public func Grant(password) { return GainMissionAccess(password); }
                     players: vec![associated_script.clone()],
                     by_client: 0,
                 },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 8,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                    players: vec![replay_player],
+                    by_client: 0,
+                },
             ],
         );
+        let mut host_snapshot = lc_network::HostConfig::default()
+            .initial_join_snapshot
+            .expect("default host JoinData");
+        host_snapshot.parameters.restore_player_infos = lc_network::PlayerInfoListSnapshot {
+            last_player_id: 52,
+            clients: vec![lc_network::ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![free_script],
+            }],
+        };
+        app.host_join_snapshot = Some(host_snapshot);
         let player_row = |id, client_id, name: &str, team| {
             LobbyRosterRow::Player(LobbyPlayerRow {
                 id,
@@ -124774,7 +125201,21 @@ public func Grant(password) { return GainMissionAccess(password); }
             .unwrap()
             .controller
             .set_rows(vec![
+                LobbyRosterRow::Header(LobbyHeaderRow {
+                    kind: LobbyRosterHeader::UnassignedSavegamePlayers,
+                    label: "Player assignment".to_string(),
+                    icon: LobbyRosterIcon::Standard(12),
+                    can_add_player: false,
+                }),
                 player_row(50, -1, "Free restore", 0),
+                player_row(52, -1, "Free script", 0),
+                LobbyRosterRow::Header(LobbyHeaderRow {
+                    kind: LobbyRosterHeader::ReplayPlayers,
+                    label: "Replay players".to_string(),
+                    icon: LobbyRosterIcon::Standard(21),
+                    can_add_player: false,
+                }),
+                player_row(51, -1, "Replay", 0),
                 client_row,
                 player_row(7, 0, "Chooser", 1),
                 player_row(9, 7, "Script", 0),
@@ -124795,6 +125236,45 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(free[0].hotkey, Some('T'));
         assert_eq!(free[0].action, None);
         assert!(free[0].has_submenu());
+        assert!(
+            app.classic_lobby_player_context_entries(52)
+                .expect("visible free script row")
+                .1
+                .is_empty(),
+            "native free script rows omit Take Over"
+        );
+        let (_, replay) = app
+            .classic_lobby_player_context_entries(51)
+            .expect("visible replay row");
+        assert_eq!(
+            replay
+                .iter()
+                .map(|entry| entry.action.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(AppContextMenuCommand::LobbyPlayerRemove {
+                    client_id: -1,
+                    player_id: 51,
+                }),
+                Some(AppContextMenuCommand::LobbyPlayerNewColor {
+                    client_id: -1,
+                    player_id: 51,
+                }),
+            ],
+            "a replay player has native ordinary entries, not free-savegame Take Over"
+        );
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
+            row: LobbyRosterId::Player(51),
+            position: GuiPoint::new(200.0, 150.0),
+        }])
+        .expect("replay context opens");
+        app.close_stale_classic_lobby_team_combo();
+        assert!(
+            app.context_menu.is_some(),
+            "an unchanged replay group keeps its ordinary context menu"
+        );
+        assert_eq!(app.context_menu_lobby_player, Some((-1, 51, false)));
+        app.close_context_menu_silently();
         app.process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
             row: LobbyRosterId::Player(50),
             position: GuiPoint::new(200.0, 150.0),
@@ -124867,7 +125347,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         }])
         .expect("C++ opens an empty root for an unowned player");
         assert!(app.context_menu.is_some());
-        assert_eq!(app.context_menu_lobby_player, Some((0, 7)));
+        assert_eq!(app.context_menu_lobby_player, Some((0, 7, false)));
     }
 
     #[test]
@@ -125288,6 +125768,963 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn joined_lobby_roster_routes_and_retains_classic_interactions() {
+        fn row_point(app: &mut GameApp, id: LobbyRosterId) -> GuiPoint {
+            let (_, roster) = app.joined_lobby_layouts().expect("joined roster layout");
+            let lobby = app.network_lobby.as_ref().expect("joined lobby");
+            let row = roster
+                .rows
+                .iter()
+                .find(|layout_row| {
+                    lobby
+                        .controller
+                        .rows()
+                        .get(layout_row.index)
+                        .is_some_and(|row| row.id() == id)
+                })
+                .expect("semantic joined roster row");
+            GuiPoint::new((row.rect.x + 2) as f32, (row.rect.y + 2) as f32)
+        }
+
+        fn tab_point(app: &mut GameApp, sheet: LobbySheet) -> GuiPoint {
+            let layout = app
+                .network_lobby
+                .as_mut()
+                .expect("joined lobby")
+                .update_layout(640.0, 480.0)
+                .clone();
+            let rect = layout
+                .sheet_buttons
+                .iter()
+                .find(|(candidate, _)| *candidate == sheet)
+                .expect("joined lobby tab")
+                .1;
+            GuiPoint::new(
+                rect.origin.x + rect.size.width / 2.0,
+                rect.origin.y + rect.size.height / 2.0,
+            )
+        }
+
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("joined lobby user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_menu_app(640, 480);
+        app.app_paths = Some(paths);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_max_players = 64;
+
+        let chooser = lc_engine::ControlPlayerInfoEntry {
+            id: 31,
+            name: LegacyCString::from_bytes(b"Chooser".to_vec()).unwrap(),
+            team: 1,
+            color: 0x0012_3456,
+            original_color: 0x0065_4321,
+            league_rank_symbol: 5,
+            ..Default::default()
+        };
+        let companion = lc_engine::ControlPlayerInfoEntry {
+            id: 32,
+            name: LegacyCString::from_bytes(b"Companion".to_vec()).unwrap(),
+            team: 3,
+            flags: lc_engine::PLAYER_INFO_FLAG_JOIN_ISSUED,
+            ..Default::default()
+        };
+        let script = lc_engine::ControlPlayerInfoEntry {
+            id: 33,
+            name: LegacyCString::from_bytes(b"Script".to_vec()).unwrap(),
+            team: 1,
+            player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+            flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+            ..Default::default()
+        };
+        let foreign = lc_engine::ControlPlayerInfoEntry {
+            id: 41,
+            name: LegacyCString::from_bytes(b"Foreign".to_vec()).unwrap(),
+            team: 2,
+            ..Default::default()
+        };
+        let packet_flags = lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL;
+        app.control_player_infos.replace_snapshot(
+            50,
+            [
+                lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    flags: 0,
+                    players: vec![foreign.clone()],
+                    by_client: 0,
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    flags: packet_flags,
+                    players: vec![chooser.clone(), companion.clone(), script.clone()],
+                    by_client: 7,
+                },
+            ],
+        );
+
+        let mut clients = vec![message_client(0, b"Host"), message_client(7, b"Client")];
+        for id in 8..30 {
+            clients.push(message_client(id, format!("Filler {id}").as_bytes()));
+        }
+        app.control_clients.replace_snapshot(clients.clone());
+
+        let free_restore = lc_engine::ControlPlayerInfoEntry {
+            id: 50,
+            name: LegacyCString::from_bytes(b"Free restore".to_vec()).unwrap(),
+            player_type: lc_engine::PLAYER_INFO_TYPE_USER,
+            flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+            color: 0x0012_3456,
+            original_color: 0x0012_3456,
+            ..Default::default()
+        };
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host JoinData");
+        snapshot.parameters.max_players = 64;
+        snapshot.parameters.league_address =
+            LegacyCString::from_bytes(b"https://league.example/".to_vec()).unwrap();
+        snapshot.parameters.clients = lc_network::JoinClientRegistrySnapshot {
+            clients: clients.clone(),
+            local_client_id: Some(7),
+        };
+        snapshot.parameters.player_infos = lc_network::PlayerInfoListSnapshot {
+            last_player_id: 50,
+            clients: vec![
+                lc_network::ClientPlayerInfosSnapshot {
+                    client_id: 0,
+                    flags: 0,
+                    players: vec![foreign.clone()],
+                },
+                lc_network::ClientPlayerInfosSnapshot {
+                    client_id: 7,
+                    flags: packet_flags,
+                    players: vec![chooser.clone(), companion.clone(), script.clone()],
+                },
+            ],
+        };
+        snapshot.parameters.restore_player_infos = lc_network::PlayerInfoListSnapshot {
+            last_player_id: 50,
+            clients: vec![lc_network::ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![free_restore],
+            }],
+        };
+        snapshot.parameters.teams = lc_network::join_team_list_snapshot(
+            set_control_test_metadata(
+                false,
+                vec![
+                    set_control_test_team(2, vec![41], 1),
+                    set_control_test_team(1, vec![31, 33], 0),
+                    set_control_test_team(3, vec![32], 0),
+                ],
+            ),
+        );
+        app.pending_network_join_data = Some(lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 0,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        });
+        app.network_is_league = true;
+        app.sync_classic_lobby_roster();
+        app.joined_lobby_layouts()
+            .expect("synchronize retained joined player count");
+
+        let lobby = app.network_lobby.as_ref().expect("joined lobby");
+        assert_eq!(
+            lobby.controller.players_title(),
+            "&Players (4/64)",
+            "free restore rows do not inflate the authoritative player count"
+        );
+        assert!(lobby.controller.league_mode());
+        let chooser_index = lobby
+            .controller
+            .rows()
+            .iter()
+            .position(|row| matches!(row, LobbyRosterRow::Player(player) if player.id == 31))
+            .expect("league chooser row");
+        assert!(matches!(
+            &lobby.controller.rows()[chooser_index],
+            LobbyRosterRow::Player(player) if player.league_rank == Some(5)
+        ));
+        assert!(lobby.controller.rows().iter().any(|row| matches!(
+            row,
+            LobbyRosterRow::Header(LobbyHeaderRow {
+                kind: LobbyRosterHeader::UnassignedSavegamePlayers,
+                ..
+            })
+        )));
+        assert!(lobby.controller.rows().iter().any(|row| matches!(
+            row,
+            LobbyRosterRow::Player(player) if player.id == 50 && player.client_id == -1
+        )));
+
+        let free_point = row_point(&mut app, LobbyRosterId::Player(50));
+        app.handle_network_lobby_pointer_move(free_point)
+            .expect("hover free savegame player");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press free savegame player");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("select free savegame player");
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert_eq!(
+            lobby.controller.selected_roster_id(),
+            Some(&LobbyRosterId::Player(50))
+        );
+        assert_eq!(lobby.controller.focus(), LobbyControl::Roster);
+
+        for modifiers in [ModifiersState::empty(), ModifiersState::SHIFT] {
+            app.network_lobby.as_mut().unwrap().chat_edit = LobbyChatEditView::default();
+            app.joined_lobby_layouts()
+                .expect("synchronize empty joined chat before Space");
+            app.keyboard_modifiers = modifiers;
+            // Dialog::CharIn refocuses the default edit for unprocessed
+            // characters EXCEPT space, which buttons consume on key-up
+            // (src/C4GuiDialogs.cpp:552-567); the focused listbox binds no
+            // confirm keys, so Space stays inert on the roster.
+            app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+                .expect("unbound roster Space is eaten without focus change");
+            app.handle_text_input(' ')
+                .expect("a space character never starts type-to-chat");
+            app.handle_key(VirtualKeyCode::Space, ElementState::Released)
+                .expect("release inert roster Space");
+            let lobby = app.network_lobby.as_ref().unwrap();
+            assert_eq!(lobby.controller.focus(), LobbyControl::Roster);
+            assert_eq!(lobby.chat_edit.text, "");
+            assert_eq!(
+                lobby.controller.selected_roster_id(),
+                Some(&LobbyRosterId::Player(50))
+            );
+        }
+        app.keyboard_modifiers = ModifiersState::empty();
+
+        app.network_lobby.as_mut().unwrap().chat_edit = LobbyChatEditView {
+            text: "draft".into(),
+            caret: 5,
+            cursor_visible: true,
+            ..LobbyChatEditView::default()
+        };
+        app.joined_lobby_layouts().expect("synchronize joined chat draft");
+        app.keyboard_modifiers = ModifiersState::CTRL;
+        app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect("unfocused Ctrl-C stays outside the joined chat edit");
+        app.handle_key(VirtualKeyCode::C, ElementState::Released)
+            .expect("release unfocused joined Ctrl-C");
+        assert_eq!(
+            app.network_lobby.as_ref().unwrap().controller.focus(),
+            LobbyControl::Roster
+        );
+        app.keyboard_modifiers = ModifiersState::empty();
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("Return with roster focus is eaten like C4GUI::Dialog");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release eaten roster Return");
+        assert!(commands.take_submitted_messages().is_empty());
+        assert_eq!(
+            app.network_lobby.as_ref().unwrap().controller.focus(),
+            LobbyControl::Roster
+        );
+
+        app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+            .expect("Left is an edit key only while the chat edit is focused");
+        app.handle_key(VirtualKeyCode::Left, ElementState::Released)
+            .expect("release unfocused Left");
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert_eq!(lobby.chat_edit.text, "draft");
+        assert_eq!(lobby.chat_edit.caret, 5);
+        assert_eq!(lobby.controller.focus(), LobbyControl::Roster);
+
+        app.network_lobby.as_mut().unwrap().chat_edit = LobbyChatEditView::default();
+        app.joined_lobby_layouts()
+            .expect("synchronize empty joined chat draft");
+        app.handle_text_input('x')
+            .expect("printable roster input refocuses and inserts into chat");
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert_eq!(lobby.controller.focus(), LobbyControl::ChatInput);
+        assert_eq!(lobby.chat_edit.text, "x");
+
+        assert!(
+            app.joined_lobby_layouts()
+                .expect("scrollable joined roster")
+                .1
+                .max_scroll
+                > 0
+        );
+
+        let selected_point = row_point(&mut app, LobbyRosterId::Player(50));
+        app.handle_network_lobby_pointer_move(selected_point)
+            .expect("restore joined roster focus before refresh");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press selected joined roster row before refresh");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("restore selected joined roster row before refresh");
+        let wheel_hover = row_point(
+            &mut app,
+            LobbyRosterId::Header(LobbyRosterHeader::UnassignedSavegamePlayers),
+        );
+        app.handle_network_lobby_pointer_move(wheel_hover)
+            .expect("reactivate joined roster hover before wheel");
+        assert!(app
+            .network_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+            .is_some());
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("scroll joined roster");
+        assert!(
+            app.network_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+                .is_none(),
+            "a joined ScrollWindow wheel releases tooltip hover ownership"
+        );
+        let retained_scroll = app
+            .network_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .roster_scroll();
+        assert!(retained_scroll > 0);
+        app.joined_lobby_layouts().expect("first retained frame");
+        app.joined_lobby_layouts().expect("second retained frame");
+        clients.push(message_client(40, b"Late filler"));
+        app.control_clients.replace_snapshot(clients);
+        app.sync_classic_lobby_roster();
+        app.joined_lobby_layouts().expect("refreshed joined roster");
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert_eq!(
+            lobby.controller.selected_roster_id(),
+            Some(&LobbyRosterId::Player(50)),
+            "row refresh retains semantic selection"
+        );
+        assert_eq!(lobby.controller.focus(), LobbyControl::Roster);
+        assert_eq!(lobby.controller.roster_scroll(), retained_scroll);
+
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 100.0), 1.0)
+            .expect("return joined roster to top");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .roster_scroll(),
+            0
+        );
+
+        let last_roster_id = app
+            .network_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .rows()
+            .last()
+            .expect("nonempty joined roster")
+            .id();
+        app.handle_key(VirtualKeyCode::End, ElementState::Pressed)
+            .expect("native joined ListBox End");
+        app.handle_key(VirtualKeyCode::End, ElementState::Released)
+            .expect("release joined ListBox End");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .selected_roster_id(),
+            Some(&last_roster_id)
+        );
+        assert!(app
+            .network_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .roster_scroll()
+            > 0);
+        app.handle_key(VirtualKeyCode::Home, ElementState::Pressed)
+            .expect("native joined ListBox Home");
+        app.handle_key(VirtualKeyCode::Home, ElementState::Released)
+            .expect("release joined ListBox Home");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .roster_scroll(),
+            0
+        );
+        app.handle_key(VirtualKeyCode::PageDown, ElementState::Pressed)
+            .expect("select the last fully visible joined roster row");
+        app.handle_key(VirtualKeyCode::PageDown, ElementState::Released)
+            .expect("release first joined roster PageDown");
+        let first_page_selection = app
+            .network_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .selected_roster_id()
+            .cloned();
+        app.handle_key(VirtualKeyCode::PageDown, ElementState::Pressed)
+            .expect("scroll a second joined roster page");
+        app.handle_key(VirtualKeyCode::PageDown, ElementState::Released)
+            .expect("release second joined roster PageDown");
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert_ne!(lobby.controller.selected_roster_id().cloned(), first_page_selection);
+        assert!(lobby.controller.roster_scroll() > 0);
+        app.handle_key(VirtualKeyCode::Home, ElementState::Pressed)
+            .expect("restore joined roster top after paging");
+        app.handle_key(VirtualKeyCode::Home, ElementState::Released)
+            .expect("release restored joined roster Home");
+
+        app.network_lobby.as_mut().unwrap().chat_edit = LobbyChatEditView {
+            text: "focus me".to_string(),
+            caret: 0,
+            cursor_visible: false,
+            ..LobbyChatEditView::default()
+        };
+        app.joined_lobby_layouts()
+            .expect("synchronize joined default-focus draft");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("a header row has no ListBox context, so Apps is eaten");
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert!(app.context_menu.is_none());
+        assert_eq!(lobby.controller.focus(), LobbyControl::Roster);
+        assert_eq!(lobby.chat_edit.text, "focus me");
+        assert_eq!(lobby.chat_edit.caret, 0);
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+            .expect("release eaten joined Apps");
+        app.handle_network_lobby_pointer_move(free_point).unwrap();
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .unwrap();
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .unwrap();
+
+        app.keyboard_modifiers = ModifiersState::SHIFT;
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Shift-Tab leaves the joined roster in dialog order");
+        assert_eq!(
+            app.network_lobby.as_ref().unwrap().controller.focus(),
+            LobbyControl::ScenarioTab
+        );
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release joined reverse traversal");
+        app.keyboard_modifiers = ModifiersState::empty();
+
+        let client_point = row_point(&mut app, LobbyRosterId::Client(7));
+        app.handle_network_lobby_pointer_move(client_point)
+            .expect("hover local client before cancellation checks");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press local client before cancellation checks");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("select local client before cancellation checks");
+        assert!(
+            app.handle_joined_lobby_roster_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("focus joined Add Player control")
+        );
+        assert_eq!(
+            app.network_lobby.as_ref().unwrap().controller.focus(),
+            LobbyControl::RosterAddPlayer
+        );
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Tab advances past the joined Add Player child");
+        assert_eq!(
+            app.network_lobby.as_ref().unwrap().controller.focus(),
+            LobbyControl::Exit
+        );
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release joined child forward traversal");
+        app.keyboard_modifiers = ModifiersState::SHIFT;
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("reverse traversal refocuses joined Add Player control");
+        assert_eq!(
+            app.network_lobby.as_ref().unwrap().controller.focus(),
+            LobbyControl::RosterAddPlayer
+        );
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release joined child reverse traversal");
+        app.keyboard_modifiers = ModifiersState::empty();
+        assert!(
+            app.handle_joined_lobby_roster_key(VirtualKeyCode::Space, ElementState::Pressed)
+                .expect("latch joined Add Player key")
+        );
+        assert!(app.definition_selector.is_none());
+        app.handle_focus_lost()
+            .expect("focus loss cancels retained joined key latch");
+        assert!(
+            app.handle_joined_lobby_roster_key(VirtualKeyCode::Space, ElementState::Released)
+                .expect("release canceled joined Add Player key")
+        );
+        assert!(app.definition_selector.is_none());
+        assert!(
+            app.handle_joined_lobby_roster_key(VirtualKeyCode::Space, ElementState::Pressed)
+                .expect("relatch joined Add Player key")
+        );
+        app.handle_gamepad_event(GamepadEvent::Clear {
+            slot: GamepadSlot::new(0),
+        })
+        .expect("controller clear cancels retained joined key latch");
+        assert!(
+            app.handle_joined_lobby_roster_key(VirtualKeyCode::Space, ElementState::Released)
+                .expect("release controller-canceled joined Add Player key")
+        );
+        assert!(app.definition_selector.is_none());
+
+        let chooser_point = row_point(&mut app, LobbyRosterId::Player(31));
+        app.handle_network_lobby_pointer_move(chooser_point)
+            .expect("hover local player");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press local player");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("select local player");
+        let (_, league_roster) = app
+            .joined_lobby_layouts()
+            .expect("expanded joined league player layout");
+        let chooser_index = app
+            .network_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .rows()
+            .iter()
+            .position(|row| matches!(row, LobbyRosterRow::Player(player) if player.id == 31))
+            .unwrap();
+        assert!(
+            league_roster
+                .rows
+                .iter()
+                .find(|row| row.index == chooser_index)
+                .and_then(|row| row.rank)
+                .is_some(),
+            "expanded joined league rows reserve the native rank-symbol cell"
+        );
+        assert!(
+            app.handle_joined_lobby_roster_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("focus local team control")
+        );
+        assert_eq!(
+            app.network_lobby.as_ref().unwrap().controller.focus(),
+            LobbyControl::RosterTeam
+        );
+        assert!(
+            !app.handle_joined_lobby_roster_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("release local team focus key")
+        );
+        assert!(
+            app.handle_joined_lobby_roster_key(VirtualKeyCode::Space, ElementState::Pressed)
+                .expect("open joined local team selector")
+        );
+        assert_eq!(app.context_menu.as_ref().unwrap().layout().panels[0].rows.len(), 2);
+        assert!(
+            app.handle_context_menu_key(VirtualKeyCode::Down, ElementState::Pressed)
+                .expect("select current joined team")
+        );
+        assert!(
+            app.handle_context_menu_key(VirtualKeyCode::Down, ElementState::Pressed)
+                .expect("select available joined team")
+        );
+        assert!(
+            app.handle_context_menu_key(VirtualKeyCode::Return, ElementState::Pressed)
+                .expect("activate joined team selection")
+        );
+        let mut team_selected = chooser.clone();
+        team_selected.team = 3;
+        assert_eq!(
+            commands.take_player_info_updates(),
+            vec![lc_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: packet_flags,
+                players: vec![team_selected, companion.clone(), script.clone()],
+            }],
+            "joined team combo submits one full packet without optimistic mutation"
+        );
+        app.keyboard_modifiers = ModifiersState::SHIFT;
+        assert!(
+            app.handle_joined_lobby_roster_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("reverse focus to roster")
+        );
+        assert_eq!(
+            app.network_lobby.as_ref().unwrap().controller.focus(),
+            LobbyControl::Roster
+        );
+        assert!(
+            !app.handle_joined_lobby_roster_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("release reverse roster focus key")
+        );
+        app.keyboard_modifiers = ModifiersState::empty();
+        app.pending_network_join_data
+            .as_mut()
+            .unwrap()
+            .parameters
+            .teams
+            .team_distribution = 1;
+        app.sync_classic_lobby_roster();
+        app.submit_classic_lobby_team_selection(31, 3);
+        app.move_local_classic_lobby_players_into_team(3);
+        assert!(
+            commands.take_player_info_updates().is_empty(),
+            "a joined client cannot choose teams under host-only distribution"
+        );
+        app.pending_network_join_data
+            .as_mut()
+            .unwrap()
+            .parameters
+            .teams
+            .team_distribution = 0;
+        app.sync_classic_lobby_roster();
+        let chooser_point = row_point(&mut app, LobbyRosterId::Player(31));
+        app.handle_network_lobby_pointer_move(chooser_point)
+            .expect("rehover local player after focus and permission checks");
+        app.handle_network_lobby_secondary_button(ElementState::Pressed)
+            .expect("open local player context");
+        assert!(
+            app.handle_context_menu_key(VirtualKeyCode::R, ElementState::Pressed)
+                .expect("activate joined local Remove")
+        );
+        assert_eq!(
+            commands.take_player_info_updates(),
+            vec![lc_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: packet_flags,
+                players: vec![script.clone(), companion.clone()],
+            }],
+            "joined Remove submits the remaining full owner packet"
+        );
+        let chooser_point = row_point(&mut app, LobbyRosterId::Player(31));
+        app.handle_network_lobby_pointer_move(chooser_point)
+            .expect("rehover local player for New Color");
+        app.handle_network_lobby_secondary_button(ElementState::Pressed)
+            .expect("reopen local player context");
+        assert!(
+            app.handle_context_menu_key(VirtualKeyCode::C, ElementState::Pressed)
+                .expect("activate New Color")
+        );
+        let mut recolored = chooser.clone();
+        recolored.color = recolored.original_color;
+        assert_eq!(
+            commands.take_player_info_updates(),
+            vec![lc_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: packet_flags,
+                players: vec![recolored, companion.clone(), script.clone()],
+            }]
+        );
+        assert!(
+            app.classic_lobby_player_context_entries(41)
+                .expect("foreign joined roster player")
+                .1
+                .is_empty(),
+            "joined clients cannot mutate a foreign player's context"
+        );
+
+        let free_point = row_point(&mut app, LobbyRosterId::Player(50));
+        app.handle_network_lobby_pointer_move(free_point)
+            .expect("rehover free savegame player");
+        app.handle_network_lobby_secondary_button(ElementState::Pressed)
+            .expect("open takeover context");
+        let root = app.context_menu.as_ref().unwrap().layout().panels[0].rows[0].rect;
+        app.handle_context_menu_pointer_move(GuiPoint::new(
+            (root.x + 1) as f32,
+            (root.y + 1) as f32,
+        ))
+        .expect("open takeover submenu");
+        assert_eq!(app.context_menu.as_ref().unwrap().layout().panels[1].rows.len(), 1);
+        let child = app.context_menu.as_ref().unwrap().layout().panels[1].rows[0].rect;
+        app.handle_context_menu_pointer_move(GuiPoint::new(
+            (child.x + 1) as f32,
+            (child.y + 1) as f32,
+        ))
+        .expect("select takeover player");
+        assert!(
+            app.handle_context_menu_pointer_button(
+                ElementState::Pressed,
+                ContextMenuPointerButton::Left,
+            )
+            .expect("activate takeover player")
+        );
+        let mut associated = chooser.clone();
+        associated.savegame_player = 50;
+        assert_eq!(
+            commands.take_player_info_updates(),
+            vec![lc_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: packet_flags,
+                players: vec![associated, companion.clone(), script.clone()],
+            }]
+        );
+        assert_eq!(
+            app.control_player_infos
+                .client_update_request(7)
+                .unwrap()
+                .players[0]
+                .savegame_player,
+            0,
+            "takeover waits for the authoritative echo"
+        );
+        assert!(
+            app.handle_context_menu_pointer_button(
+                ElementState::Released,
+                ContextMenuPointerButton::Left,
+            )
+            .expect("consume takeover activation release")
+        );
+
+        let teams_tab = tab_point(&mut app, LobbySheet::Teams);
+        app.handle_network_lobby_pointer_move(teams_tab)
+            .expect("hover Teams tab");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press Teams tab");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("activate Teams tab");
+        assert_eq!(
+            app.network_lobby.as_ref().unwrap().active_sheet,
+            LobbySheet::Teams
+        );
+        for click in 0..2 {
+            let team_point = row_point(
+                &mut app,
+                LobbyRosterId::Header(LobbyRosterHeader::Team(2)),
+            );
+            let (team_layout, team_roster) = app.joined_lobby_layouts().unwrap();
+            app.handle_network_lobby_pointer_move(team_point)
+                .expect("hover target team");
+            app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+                .expect("press target team");
+            assert_eq!(
+                app.network_lobby
+                    .as_ref()
+                    .unwrap()
+                    .controller
+                    .selected_roster_id(),
+                Some(&LobbyRosterId::Header(LobbyRosterHeader::Team(2)))
+            );
+            assert_eq!(
+                app.network_lobby
+                    .as_ref()
+                    .unwrap()
+                    .controller
+                    .accepted_roster_click_id(team_point, &team_layout, &team_roster),
+                Some(LobbyRosterId::Header(LobbyRosterHeader::Team(2)))
+            );
+            app.handle_network_lobby_pointer_button(ElementState::Released, false)
+                .expect("release target team");
+            assert_eq!(
+                app.network_lobby
+                    .as_ref()
+                    .unwrap()
+                    .last_roster_click
+                    .as_ref()
+                    .map(|(id, _)| id),
+                (click == 0)
+                    .then_some(&LobbyRosterId::Header(LobbyRosterHeader::Team(2)))
+            );
+        }
+        let mut moved_chooser = chooser.clone();
+        moved_chooser.team = 2;
+        let mut moved_companion = companion.clone();
+        moved_companion.team = 2;
+        assert_eq!(
+            commands.take_player_info_updates(),
+            vec![lc_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: packet_flags,
+                players: vec![moved_chooser, moved_companion, script.clone()],
+            }],
+            "joined team double-click mutates every local User exactly once"
+        );
+
+        let players_tab = tab_point(&mut app, LobbySheet::Players);
+        app.handle_network_lobby_pointer_move(players_tab)
+            .expect("hover Players tab");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press Players tab");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("activate Players tab");
+        let chooser_point = row_point(&mut app, LobbyRosterId::Player(31));
+        app.handle_network_lobby_pointer_move(chooser_point)
+            .expect("hover local player before authoritative reorder");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press local player before authoritative reorder");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("select local player before authoritative reorder");
+        let chooser_index_before = app
+            .network_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .rows()
+            .iter()
+            .position(|row| row.id() == LobbyRosterId::Player(31))
+            .unwrap();
+        app.control_player_infos.replace_snapshot(
+            50,
+            [
+                lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    flags: 0,
+                    players: vec![foreign.clone()],
+                    by_client: 0,
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    flags: packet_flags,
+                    players: vec![companion.clone(), chooser.clone(), script.clone()],
+                    by_client: 7,
+                },
+            ],
+        );
+        app.sync_classic_lobby_roster();
+        let lobby = app.network_lobby.as_ref().unwrap();
+        let chooser_index_after = lobby
+            .controller
+            .rows()
+            .iter()
+            .position(|row| row.id() == LobbyRosterId::Player(31))
+            .unwrap();
+        assert_ne!(chooser_index_after, chooser_index_before);
+        assert_eq!(
+            lobby.controller.selected_roster_id(),
+            Some(&LobbyRosterId::Player(31)),
+            "authoritative row reordering retains semantic joined selection"
+        );
+        assert_eq!(lobby.controller.focus(), LobbyControl::Roster);
+        app.control_player_infos.replace_snapshot(
+            50,
+            [
+                lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    flags: 0,
+                    players: vec![foreign],
+                    by_client: 0,
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    flags: packet_flags,
+                    players: vec![chooser, companion, script],
+                    by_client: 7,
+                },
+            ],
+        );
+        app.sync_classic_lobby_roster();
+        let (_, roster) = app.joined_lobby_layouts().expect("Players roster layout");
+        let lobby = app.network_lobby.as_ref().unwrap();
+        let add_player = roster
+            .rows
+            .iter()
+            .find(|layout_row| {
+                matches!(
+                    lobby.controller.rows().get(layout_row.index),
+                    Some(LobbyRosterRow::Client(client)) if client.id == 7
+                )
+            })
+            .and_then(|row| row.add_player)
+            .expect("local Add Player button");
+        let add_point = GuiPoint::new(
+            (add_player.x + add_player.w / 2) as f32,
+            (add_player.y + add_player.h / 2) as f32,
+        );
+        app.handle_network_lobby_pointer_move(add_point)
+            .expect("hover local Add Player");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press local Add Player");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("open local Add Player selector");
+        assert!(app.definition_selector.is_some());
+        assert_eq!(
+            app.pending_lobby_player_selection
+                .as_ref()
+                .expect("pending joined player selection")
+                .client_id,
+            7
+        );
+    }
+
+    #[test]
+    fn unstaged_host_retained_roster_routes_script_player_add() {
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), true));
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host")]);
+        app.control_player_infos.replace_snapshot(
+            0,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: Vec::new(),
+                by_client: 0,
+            }],
+        );
+        let mut metadata = set_control_test_metadata(false, Vec::new());
+        metadata.max_script_players = 1;
+        metadata.script_player_names =
+            LegacyCString::from_bytes(b"Bot".to_vec()).expect("valid script player name");
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            metadata,
+        ));
+        app.sync_classic_lobby_roster();
+
+        let (_, roster) = app
+            .joined_lobby_layouts()
+            .expect("unstaged host roster layout");
+        let lobby = app.network_lobby.as_ref().expect("unstaged host lobby");
+        let add = roster
+            .rows
+            .iter()
+            .find(|layout_row| {
+                matches!(
+                    lobby.controller.rows().get(layout_row.index),
+                    Some(LobbyRosterRow::Header(LobbyHeaderRow {
+                        kind: LobbyRosterHeader::ScriptPlayers,
+                        can_add_player: true,
+                        ..
+                    }))
+                )
+            })
+            .and_then(|row| row.add_player)
+            .expect("host Script Players Add button");
+        let point = GuiPoint::new(
+            (add.x + add.w / 2) as f32,
+            (add.y + add.h / 2) as f32,
+        );
+        app.handle_network_lobby_pointer_move(point)
+            .expect("hover retained Script Players Add button");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press retained Script Players Add button");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("activate retained Script Players Add button");
+
+        let requests = commands.take_player_info_updates();
+        let [request] = requests.as_slice() else {
+            panic!("expected one retained-host script request, got {requests:?}");
+        };
+        assert_eq!(request.client_id, 0);
+        assert_eq!(request.flags, lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS);
+        let [player] = request.players.as_slice() else {
+            panic!("expected one retained-host script player");
+        };
+        assert_eq!(player.name.as_bytes(), b"Bot");
+        assert_eq!(player.player_type, lc_engine::PLAYER_INFO_TYPE_SCRIPT);
+        assert_eq!(player.original_color, player.color);
+    }
+
+    #[test]
     fn l102_host_client_context_mutes_locally_and_submits_activation_without_optimism() {
         let mut app = new_menu_app(640, 480);
         install_test_classic_host_lobby(&mut app);
@@ -125357,13 +126794,29 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let local_entries = app
             .classic_lobby_client_context_entries(0)
-            .expect("local row retains unconditional Info");
+            .expect("local host row retains native host options");
         assert_eq!(
             local_entries
                 .iter()
                 .filter_map(|entry| entry.action.clone())
                 .collect::<Vec<_>>(),
-            vec![AppContextMenuCommand::LobbyClientInfo(0)]
+            vec![
+                AppContextMenuCommand::LobbyKick(0),
+                AppContextMenuCommand::LobbyClientToggleActivate(0),
+                AppContextMenuCommand::LobbyClientInfo(0),
+            ]
+        );
+        app.kick_classic_lobby_client(0);
+        assert!(commands.take_submitted_client_removes().is_empty());
+        app.toggle_classic_lobby_client_activation(0);
+        assert_eq!(
+            commands.take_submitted_client_updates(),
+            vec![lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                client_id: 0,
+                data: 0,
+                by_client: 0,
+            }]
         );
     }
 
@@ -126067,6 +127520,26 @@ public func Grant(password) { return GainMissionAccess(password); }
             player_name: "Host".to_string(),
             prepared: None,
         }));
+        {
+            let metadata = app
+                .network_team_assignment
+                .as_mut()
+                .expect("team assignment")
+                .teams_mut();
+            let target = metadata
+                .teams
+                .iter_mut()
+                .find(|team| team.id == 2)
+                .expect("target team");
+            target.player_ids = vec![99];
+            target.max_players = 1;
+            metadata
+                .teams
+                .iter_mut()
+                .find(|team| team.id == 4)
+                .expect("spare team")
+                .max_players = 0;
+        }
 
         assert!(app.select_classic_lobby_sheet(LobbySheet::Teams));
         let (_, roster) = app
@@ -126156,14 +127629,36 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.process_classic_lobby_actions(vec![
             ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: 2 },
         ])
-        .expect("long countdown request is inert");
-        assert!(commands.take_player_info_updates().is_empty());
+        .expect("long countdown still permits native lobby team selection");
+        assert_eq!(
+            commands.take_player_info_updates().len(),
+            1,
+            "only the final countdown phase locks team selection"
+        );
 
         app.classic_host_lobby
             .as_mut()
             .expect("test lobby")
             .controller
             .apply_countdown_packet(lc_frontend::game_lobby::LobbyCountdownPacket::Abort);
+        app.network_team_assignment
+            .as_mut()
+            .expect("team assignment")
+            .teams_mut()
+            .teams
+            .iter_mut()
+            .find(|team| team.id == 4)
+            .expect("spare team")
+            .max_players = -1;
+        app.process_classic_lobby_actions(vec![
+            ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { team_id: 2 },
+        ])
+        .expect("all-full team request is inert");
+        assert!(
+            commands.take_player_info_updates().is_empty(),
+            "bulk selection is unavailable when every team is full"
+        );
+
         app.network_team_assignment
             .as_mut()
             .expect("team assignment")
@@ -133452,6 +134947,42 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
         assert!(layout.start_button.is_none());
         assert!(frame.iter().any(|byte| *byte != 0x5a));
+        assert!(
+            app.menu_frame_cache.is_none(),
+            "live joined lobbies cannot cache away timers, held scroll, or tooltips"
+        );
+
+        let (classic_layout, roster) = app.joined_lobby_layouts().expect("joined layout");
+        let exit = GuiPoint::new(
+            (classic_layout.exit_button.x + 1) as f32,
+            (classic_layout.exit_button.y + 1) as f32,
+        );
+        app.network_lobby
+            .as_mut()
+            .unwrap()
+            .controller
+            .pointer_move(exit, &classic_layout, &roster);
+        assert!(app
+            .network_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+            .is_some());
+        let cached = vec![0x45; 640 * 480 * 4];
+        app.menu_frame_cache = Some(MenuFrameCache {
+            view: StartupView::NetworkLobby,
+            version: app.menu_render_version,
+            width: 640,
+            height: 480,
+            native_text_deferred: false,
+            frame: cached.clone(),
+        });
+        let mut refreshed = cached.clone();
+        assert!(app
+            .render(&mut refreshed)
+            .expect("joined lobby bypasses a matching startup frame cache"));
+        assert_ne!(refreshed, cached);
 
         // The classic renderer remains fail-closed when its required assets
         // are absent; NetworkLobby must not re-enable the old generic pane.
@@ -140500,7 +142031,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn network_lobby_empty_status_replays_matching_exact_cache() {
+    fn network_lobby_live_render_bypasses_matching_exact_cache() {
         let mut app = new_real_classic_menu_app(320, 200);
         app.startup_view = StartupView::NetworkLobby;
         app.network_lobby = Some(NetworkLobbyState::new(7, "Host".to_string(), true));
@@ -140517,12 +142048,15 @@ public func Grant(password) { return GainMissionAccess(password); }
         });
         let mut frame = vec![0x73; 320 * 200 * 4];
 
-        assert!(!app.render(&mut frame).expect("exact lobby cache replays"));
-        assert_eq!(frame, cached);
+        // A retained lobby advances tooltip clocks, held scrollbars and
+        // transient status icons without input, so a matching cache must
+        // neither replay nor be replaced by the live frame.
+        assert!(app.render(&mut frame).expect("live lobby renders"));
+        assert_ne!(frame, cached, "stale lobby pixels must not replay");
         assert_eq!(
             app.menu_frame_cache
                 .as_ref()
-                .expect("rejected cache remains available for diagnostics")
+                .expect("bypassed cache remains available for diagnostics")
                 .frame,
             cached
         );
@@ -166885,6 +168419,7 @@ VendorNestedField=discard me\n";
         // values through ten to the active countdown state
         // (src/C4GameLobby.cpp:392-418).
         let mut app = new_menu_app(320, 200);
+        app.startup_view = StartupView::NetworkLobby;
         let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
