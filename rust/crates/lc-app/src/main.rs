@@ -84662,15 +84662,24 @@ fn draw_scensel_map_dynamic(
     let hide_title = map.hide_title;
     let scenario_info_area = map.scenario_info_area;
 
-    lc_frontend::draw_image_bilinear(
-        surface,
-        &transform.background,
-        &map.background,
-        Some(gamma),
-    );
+    if map.fullscreen_background {
+        lc_frontend::draw_image_bilinear(
+            surface,
+            &transform.background,
+            &map.background,
+            Some(gamma),
+        );
+    } else {
+        lc_frontend::draw_image_x_float(
+            surface,
+            &transform.background,
+            &map.background,
+            Some(gamma),
+        );
+    }
     for overlay in &map.access_overlays {
         if let Some(image) = overlay.image.as_ref() {
-            lc_frontend::draw_image_bilinear(
+            lc_frontend::draw_image_x_float(
                 surface,
                 &transform.rect(overlay.area),
                 image,
@@ -84690,7 +84699,7 @@ fn draw_scensel_map_dynamic(
             button.base_image.as_ref()
         };
         if let Some(image) = image {
-            lc_frontend::draw_image_bilinear(surface, &rect, image, Some(gamma));
+            lc_frontend::draw_image_x_float(surface, &rect, image, Some(gamma));
         }
         if !button.title.is_empty() {
             let scaled_size = (button.title_font_size as f32 * transform.scale_y).round() as i32;

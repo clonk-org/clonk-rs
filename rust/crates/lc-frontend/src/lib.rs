@@ -2521,9 +2521,11 @@ fn lower_bounded_surface_clip(surface: &Surface, left: i32, top: i32) -> Surface
     SurfaceRect::new(left, top, width, height)
 }
 
-/// Floating-point source geometry used only by C4Object face blits. C++
-/// forwards `GetGraphics()->pDef->Scale` into `Blit` without quantizing the
-/// resulting source rectangle (C4Object.cpp:438-467,2639-2670).
+/// Floating-point source geometry used by C4Object face blits and
+/// `C4Facet::DrawXFloat`. C++ forwards `GetGraphics()->pDef->Scale` into
+/// `Blit` without quantizing object source rectangles
+/// (C4Object.cpp:438-467,2639-2670), while DrawXFloat proportionally crops its
+/// facet before the same float-source blit (C4Facet.cpp:306-319).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct FloatSourceRect {
     x: f32,
@@ -13769,44 +13771,64 @@ enum BilinearBlend {
     Additive,
 }
 
-/// Stretches `image` into `rect` like `CStdDDraw::Blit` (StdDDraw2.cpp:
-/// 637-786): one quad per power-of-two texture tile, GL_LINEAR sampling with
-/// GL_CLAMP_TO_EDGE per tile, the blit shader's gamma lookup on the fragment
-/// color, and float blending rounded once on store.
-fn draw_image_bilinear_impl<T: SurfaceDrawTarget + ?Sized>(
+/// Stretches a floating-point source window into `rect` like
+/// `CStdDDraw::Blit` (StdDDraw2.cpp:637-786): one quad per power-of-two texture
+/// tile, GL_LINEAR sampling with GL_CLAMP_TO_EDGE per tile, the blit shader's
+/// gamma lookup on the fragment color, and float blending rounded once on
+/// store.
+fn draw_image_bilinear_source_impl<T: SurfaceDrawTarget + ?Sized>(
     surface: &mut T,
     rect: &GuiRect,
     image: &ImageData,
+    source: FloatSourceRect,
     gamma: Option<&lc_graphics::GammaRamp>,
     blend_mode: BilinearBlend,
     modulation: Option<u32>,
 ) {
-    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || image.width() == 0 || image.height() == 0
+    if rect.size.width <= 0.0
+        || rect.size.height <= 0.0
+        || !source.is_valid()
+        || image.width() == 0
+        || image.height() == 0
     {
         return;
     }
     let (fw, fh) = (image.width() as f32, image.height() as f32);
     let (tx, ty) = (rect.origin.x, rect.origin.y);
-    let scale_x = rect.size.width / fw;
-    let scale_y = rect.size.height / fh;
+    let scale_x = rect.size.width / source.width;
+    let scale_y = rect.size.height / source.height;
+    let source_right = source.x + source.width;
+    let source_bottom = source.y + source.height;
     let ts = cpp_tex_size(image.width(), image.height()) as i32;
     let tiles_x = (image.width() as i32 - 1) / ts + 1;
     let tiles_y = (image.height() as i32 - 1) / ts + 1;
+    // CStdDDraw chooses the final involved texture with a cast of
+    // `source_end - 1` before integer division. A source window ending less
+    // than one texel into the next tile consequently does not emit that tile
+    // (StdDDraw2.cpp:695-696).
+    let first_tile_x = ((source.x / ts as f32) as i32).max(0);
+    let first_tile_y = ((source.y / ts as f32) as i32).max(0);
+    let final_tile_x = (((source_right - 1.0) as i32) / ts + 1).min(tiles_x);
+    let final_tile_y = (((source_bottom - 1.0) as i32) / ts + 1).min(tiles_y);
     let modulation = modulation.map(|color| split_c4_color(if color == 0 { 0xff } else { color }));
 
-    for tile_iy in 0..tiles_y {
-        for tile_ix in 0..tiles_x {
+    for tile_iy in first_tile_y..final_tile_y {
+        for tile_ix in first_tile_x..final_tile_x {
             let (blit_x, blit_y) = (tile_ix * ts, tile_iy * ts);
-            // Source range of this tile in image texels (fx = fy = 0 here).
-            let s_left = blit_x as f32;
-            let s_top = blit_y as f32;
-            let s_right = ((blit_x + ts) as f32).min(fw);
-            let s_bottom = ((blit_y + ts) as f32).min(fh);
+            // Intersect this texture tile with the requested source window
+            // (fTexBlt* in StdDDraw2.cpp:731-734).
+            let s_left = (blit_x as f32).max(source.x);
+            let s_top = (blit_y as f32).max(source.y);
+            let s_right = ((blit_x + ts) as f32).min(source_right).min(fw);
+            let s_bottom = ((blit_y + ts) as f32).min(source_bottom).min(fh);
+            if s_left >= s_right || s_top >= s_bottom {
+                continue;
+            }
             // Destination quad (tTexBlt* in StdDDraw2.cpp:738-741).
-            let t_left = s_left * scale_x + tx;
-            let t_top = s_top * scale_y + ty;
-            let t_right = s_right * scale_x + tx;
-            let t_bottom = s_bottom * scale_y + ty;
+            let t_left = (s_left - source.x) * scale_x + tx;
+            let t_top = (s_top - source.y) * scale_y + ty;
+            let t_right = (s_right - source.x) * scale_x + tx;
+            let t_bottom = (s_bottom - source.y) * scale_y + ty;
             // Pixels whose centers fall inside the quad.
             let px0 = (t_left - 0.5).ceil() as i32;
             let py0 = (t_top - 0.5).ceil() as i32;
@@ -13818,8 +13840,12 @@ fn draw_image_bilinear_impl<T: SurfaceDrawTarget + ?Sized>(
                     if (px as f32 + 0.5) >= t_right {
                         break;
                     }
-                    let u_rel = (px as f32 + 0.5 - tx) / scale_x - 0.5 - blit_x as f32;
-                    let v_rel = (py as f32 + 0.5 - ty) / scale_y - 0.5 - blit_y as f32;
+                    let u_rel = source.x + (px as f32 + 0.5 - tx) / scale_x
+                        - 0.5
+                        - blit_x as f32;
+                    let v_rel = source.y + (py as f32 + 0.5 - ty) / scale_y
+                        - 0.5
+                        - blit_y as f32;
                     let mut s = bilinear_sample_tile(image, blit_x, blit_y, ts, u_rel, v_rel);
                     if let Some([red, green, blue, transparency]) = modulation {
                         s[0] *= f32::from(red) / 255.0;
@@ -13866,6 +13892,93 @@ fn draw_image_bilinear_impl<T: SurfaceDrawTarget + ?Sized>(
             }
         }
     }
+}
+
+fn draw_image_bilinear_impl<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
+    rect: &GuiRect,
+    image: &ImageData,
+    gamma: Option<&lc_graphics::GammaRamp>,
+    blend_mode: BilinearBlend,
+    modulation: Option<u32>,
+) {
+    draw_image_bilinear_source_impl(
+        surface,
+        rect,
+        image,
+        FloatSourceRect {
+            x: 0.0,
+            y: 0.0,
+            width: image.width() as f32,
+            height: image.height() as f32,
+        },
+        gamma,
+        blend_mode,
+        modulation,
+    );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DrawXFloatCrop {
+    target_x: i32,
+    target_y: i32,
+    target_width: i32,
+    target_height: i32,
+    source: FloatSourceRect,
+}
+
+/// Computes `C4Facet::DrawXFloat`'s inward integer destination and matching
+/// proportional source crop (C4Facet.cpp:306-319).
+fn draw_x_float_crop(
+    rect: &GuiRect,
+    source_width: u32,
+    source_height: u32,
+) -> Option<DrawXFloatCrop> {
+    if source_width == 0
+        || source_height == 0
+        || !rect.origin.x.is_finite()
+        || !rect.origin.y.is_finite()
+        || !rect.size.width.is_finite()
+        || !rect.size.height.is_finite()
+        || rect.size.width <= 0.0
+        || rect.size.height <= 0.0
+    {
+        return None;
+    }
+
+    let right = rect.origin.x + rect.size.width;
+    let bottom = rect.origin.y + rect.size.height;
+    if !right.is_finite() || !bottom.is_finite() {
+        return None;
+    }
+    let target_x = rect.origin.x.ceil() as i32;
+    let target_y = rect.origin.y.ceil() as i32;
+    let target_right = right.floor() as i32;
+    let target_bottom = bottom.floor() as i32;
+    let target_width = target_right.checked_sub(target_x)?;
+    let target_height = target_bottom.checked_sub(target_y)?;
+    if target_width <= 0 || target_height <= 0 {
+        return None;
+    }
+
+    let zoom_x = rect.size.width / source_width as f32;
+    let zoom_y = rect.size.height / source_height as f32;
+    let offset_x = (-rect.origin.x + target_x as f32) / zoom_x;
+    let offset_y = (-rect.origin.y + target_y as f32) / zoom_y;
+    let trailing_x = (right - target_right as f32) / zoom_x;
+    let trailing_y = (bottom - target_bottom as f32) / zoom_y;
+    Some(DrawXFloatCrop {
+        target_x,
+        target_y,
+        target_width,
+        target_height,
+        source: FloatSourceRect {
+            x: offset_x,
+            y: offset_y,
+            width: source_width as f32 - offset_x - trailing_x,
+            height: source_height as f32 - offset_y - trailing_y,
+        },
+    })
 }
 
 /// Samples a filtered colour channel the way the C++ blit shader does. The
@@ -14148,6 +14261,35 @@ pub fn draw_image_bilinear(
         surface,
         rect,
         image,
+        gamma,
+        BilinearBlend::AlphaOver,
+        None,
+    );
+}
+
+/// Draws a complete image through `C4Facet::DrawXFloat`: fractional target
+/// edges are cropped inward to integer pixel boundaries and the same margins
+/// are removed proportionally from the source before the regular tiled
+/// bilinear blit.
+pub fn draw_image_x_float(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    image: &ImageData,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    let Some(crop) = draw_x_float_crop(rect, image.width(), image.height()) else {
+        return;
+    };
+    draw_image_bilinear_source_impl(
+        surface,
+        &GuiRect::new(
+            crop.target_x as f32,
+            crop.target_y as f32,
+            crop.target_width as f32,
+            crop.target_height as f32,
+        ),
+        image,
+        crop.source,
         gamma,
         BilinearBlend::AlphaOver,
         None,
@@ -16138,6 +16280,160 @@ mod tests {
         assert_eq!(surface.get_pixel(1, 0), Some(gray(64)));
         assert_eq!(surface.get_pixel(2, 0), Some(gray(191)));
         assert_eq!(surface.get_pixel(3, 0), Some(gray(255)));
+    }
+
+    #[test]
+    fn draw_x_float_crops_to_inward_integer_bounds() {
+        // 8x4 selects 4x4 native texture tiles, so the retained samples cross
+        // the same physical tile boundary as CStdDDraw's source-window blit.
+        let pixels = (0_u8..32)
+            .flat_map(|value| {
+                [
+                    value.wrapping_mul(13),
+                    value.wrapping_mul(7),
+                    value.wrapping_mul(3),
+                    255,
+                ]
+            })
+            .collect();
+        let image = ImageData::new(8, 4, pixels);
+        let sentinel = Color::opaque(1, 2, 3);
+        let render = |rect: GuiRect, inward: bool| {
+            let mut surface = Surface::new(8, 7, PixelFormat::Rgba8888);
+            surface.fill(sentinel);
+            if inward {
+                draw_image_x_float(&mut surface, &rect, &image, None);
+            } else {
+                draw_image_bilinear(&mut surface, &rect, &image, None);
+            }
+            surface
+        };
+
+        let positive = GuiRect::new(1.25, 1.25, 4.5, 3.5);
+        let positive_crop = draw_x_float_crop(&positive, 8, 4).unwrap();
+        assert_eq!(
+            (
+                positive_crop.target_x,
+                positive_crop.target_y,
+                positive_crop.target_width,
+                positive_crop.target_height,
+            ),
+            (2, 2, 3, 2)
+        );
+        assert!((positive_crop.source.x - 4.0 / 3.0).abs() < 1e-6);
+        assert!((positive_crop.source.y - 6.0 / 7.0).abs() < 1e-6);
+        assert!((positive_crop.source.width - 16.0 / 3.0).abs() < 1e-6);
+        assert!((positive_crop.source.height - 16.0 / 7.0).abs() < 1e-6);
+
+        let ordinary = render(positive, false);
+        let inward = render(positive, true);
+        for y in 0..inward.height() {
+            for x in 0..inward.width() {
+                let pixel = inward.get_pixel(x, y).unwrap();
+                if (2..5).contains(&(x as i32)) && (2..4).contains(&(y as i32)) {
+                    assert_eq!(pixel, ordinary.get_pixel(x, y).unwrap());
+                } else {
+                    assert_eq!(pixel, sentinel, "unexpected inward pixel at {x},{y}");
+                }
+            }
+        }
+        assert_ne!(ordinary.get_pixel(1, 2), Some(sentinel));
+        assert_ne!(ordinary.get_pixel(5, 2), Some(sentinel));
+        assert_ne!(ordinary.get_pixel(2, 1), Some(sentinel));
+        assert_ne!(ordinary.get_pixel(2, 4), Some(sentinel));
+
+        let negative = GuiRect::new(-1.25, 1.25, 4.0, 3.5);
+        let negative_crop = draw_x_float_crop(&negative, 8, 4).unwrap();
+        assert_eq!(
+            (
+                negative_crop.target_x,
+                negative_crop.target_y,
+                negative_crop.target_width,
+                negative_crop.target_height,
+            ),
+            (-1, 2, 3, 2)
+        );
+        assert!((negative_crop.source.x - 0.5).abs() < 1e-6);
+        assert!((negative_crop.source.width - 6.0).abs() < 1e-6);
+        let ordinary = render(negative, false);
+        let inward = render(negative, true);
+        for y in 2..4 {
+            for x in 0..2 {
+                assert_eq!(inward.get_pixel(x, y), ordinary.get_pixel(x, y));
+            }
+        }
+        assert_eq!(inward.get_pixel(2, 2), Some(sentinel));
+        assert_ne!(ordinary.get_pixel(2, 2), Some(sentinel));
+
+        let negative_y = GuiRect::new(1.25, -1.25, 4.5, 4.0);
+        let negative_y_crop = draw_x_float_crop(&negative_y, 8, 4).unwrap();
+        assert_eq!(
+            (
+                negative_y_crop.target_x,
+                negative_y_crop.target_y,
+                negative_y_crop.target_width,
+                negative_y_crop.target_height,
+            ),
+            (2, -1, 3, 3)
+        );
+        assert!((negative_y_crop.source.y - 0.25).abs() < 1e-6);
+        assert!((negative_y_crop.source.height - 3.0).abs() < 1e-6);
+        let ordinary = render(negative_y, false);
+        let inward = render(negative_y, true);
+        for y in 0..2 {
+            for x in 2..5 {
+                assert_eq!(inward.get_pixel(x, y), ordinary.get_pixel(x, y));
+            }
+        }
+        assert_eq!(inward.get_pixel(2, 2), Some(sentinel));
+        assert_ne!(ordinary.get_pixel(2, 2), Some(sentinel));
+
+        // Native tile selection casts `source_right - 1` before dividing by
+        // the 4px tile size. The 4.0..4.8 source tail therefore never emits
+        // tile 1, even though pixel x=4 lies within the inward destination.
+        let tile_edge_image = ImageData::new(
+            5,
+            4,
+            (0_u8..20)
+                .flat_map(|value| [value.wrapping_mul(11), value, value, 255])
+                .collect(),
+        );
+        let tile_edge_rect = GuiRect::new(0.2, 1.0, 5.0, 4.0);
+        let tile_edge_crop = draw_x_float_crop(&tile_edge_rect, 5, 4).unwrap();
+        assert_eq!(
+            (tile_edge_crop.target_x, tile_edge_crop.target_width),
+            (1, 4)
+        );
+        assert!((tile_edge_crop.source.x - 0.8).abs() < 1e-6);
+        assert!((tile_edge_crop.source.width - 4.0).abs() < 1e-6);
+        let mut ordinary = Surface::new(7, 7, PixelFormat::Rgba8888);
+        ordinary.fill(sentinel);
+        draw_image_bilinear(&mut ordinary, &tile_edge_rect, &tile_edge_image, None);
+        let mut inward = Surface::new(7, 7, PixelFormat::Rgba8888);
+        inward.fill(sentinel);
+        draw_image_x_float(&mut inward, &tile_edge_rect, &tile_edge_image, None);
+        assert_ne!(inward.get_pixel(3, 2), Some(sentinel));
+        assert_eq!(inward.get_pixel(4, 2), Some(sentinel));
+        assert_ne!(ordinary.get_pixel(4, 2), Some(sentinel));
+
+        for empty in [
+            GuiRect::new(2.2, 1.25, 0.6, 3.5),
+            GuiRect::new(1.25, 2.2, 3.5, 0.6),
+            GuiRect::new(1.25, 1.25, 0.0, 3.5),
+            GuiRect::new(1.25, 1.25, -1.0, 3.5),
+            GuiRect::new(1.25, 1.25, 3.5, 0.0),
+            GuiRect::new(1.25, 1.25, 3.5, -1.0),
+        ] {
+            assert!(draw_x_float_crop(&empty, 8, 4).is_none());
+            assert!(render(empty, true)
+                .pixels()
+                .chunks_exact(4)
+                .all(|pixel| pixel == [sentinel.r, sentinel.g, sentinel.b, sentinel.a]));
+        }
+        assert_ne!(
+            render(GuiRect::new(2.2, 1.25, 0.6, 3.5), false).get_pixel(2, 2),
+            Some(sentinel)
+        );
     }
 
     #[test]
