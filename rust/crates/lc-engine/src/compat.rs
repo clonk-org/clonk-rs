@@ -35664,25 +35664,28 @@ fn adjust_walk_rotation(args: &[Value]) -> Result<Value, RuntimeError> {
             RuntimeError::new("AdjustWalkRotation requires an active engine context")
         })?;
 
-        let Some(object) = context.object_context() else {
+        let target = target_id.or(context.script_object_context);
+        let Some(target) = target else {
             return Ok(Value::Bool(false));
         };
-        if let Some(target) = target_id {
-            if target != object.id() {
-                // Foreign dispatch is not modeled — the same documented
-                // gap as SetRDir's target parameter.
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
 
-        let seed = object.walk_rotation;
-        let rotation = object.rotation();
-        // The LIVE Shape.VtxX for the else-branch (C4Object.cpp:6072).
-        let live_vtx_x = usize::try_from(seed.attach.vtx)
-            .ok()
-            .and_then(|vtx| object.vertices().get(vtx))
-            .map(|vertex| vertex.x)
-            .unwrap_or(0);
+        let (seed, rotation, live_vtx_x) = {
+            let Some(object) = context.object_scope(target) else {
+                return Ok(Value::Bool(false));
+            };
+            let seed = object.walk_rotation;
+            let rotation = object.rotation();
+            // The LIVE Shape.VtxX for the else-branch (C4Object.cpp:6072).
+            let live_vtx_x = usize::try_from(seed.attach.vtx)
+                .ok()
+                .and_then(|vtx| object.vertices().get(vtx))
+                .map(|vertex| vertex.x)
+                .unwrap_or(0);
+            (seed, rotation, live_vtx_x)
+        };
 
         // Guard: Rotateable + bottom attach + attached material
         // (C4Script.cpp:5443-5446).
@@ -35704,7 +35707,7 @@ fn adjust_walk_rotation(args: &[Value]) -> Result<Value, RuntimeError> {
             )
         };
 
-        let Some(object) = context.object_context_mut() else {
+        let Some(object) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
         // Move to destination angle (C4Object.cpp:6089-6095). C++ writes
@@ -47038,7 +47041,16 @@ impl EffectHostContext {
         scope.current_contents_link_generation = state.contents_link_generation;
         scope.unsorted = object.unsorted;
         scope.staged_own_vertices = object.own_vertices;
-        scope.walk_rotation.t_attach = state.t_attach;
+        scope.walk_rotation = WalkRotationSeed {
+            rotateable: metadata.map_or(0, |metadata| metadata.rotateable),
+            t_attach: state.t_attach,
+            attach: state.shape_attach,
+            def_attach_vtx_x: usize::try_from(state.shape_attach.vtx)
+                .ok()
+                .and_then(|vtx| metadata.and_then(|metadata| metadata.vertices.get(vtx)))
+                .map(|vertex| vertex.x)
+                .unwrap_or(0),
+        };
         scope.definition_id = Some(object.definition_id().to_string());
         scope
             .live_commands

@@ -2,8 +2,8 @@ use lc_engine::landscape::PixelGrid;
 use lc_engine::{
     command::CommandId, math::itofix_prec, ActionSpec, ActionState, CommandDirection, Definition,
     DefinitionTargetRect, Direction, Engine, EngineError, JoinPlayerConfig, Landscape,
-    ObjectId, ObjectUpdate, ObjectVertex, PhysicsSettings, SpawnConfig, Vector2, CATEGORY_OBJECT,
-    CATEGORY_STATIC_BACK, CNAT_BOTTOM,
+    ObjectId, ObjectUpdate, ObjectVertex, PhysicsSettings, ShapeAttachRecord, SpawnConfig, Vector2,
+    CATEGORY_OBJECT, CATEGORY_STATIC_BACK, CNAT_BOTTOM,
 };
 use lc_resources::PhysicalInfo;
 use lc_script::Value;
@@ -138,6 +138,120 @@ protected func Probe(pTarget)
     let caller_state = snapshot.object(caller).expect("caller remains live");
     assert_eq!(caller_state.rotation, -29);
     assert_eq!(caller_state.rotation_velocity, Some(itofix_prec(91, 10)));
+}
+
+#[test]
+fn adjust_walk_rotation_targets_foreign_object_and_updates_only_that_rdir() {
+    // FnAdjustWalkRotation defaults nil to cthr->Obj but otherwise invokes
+    // C4Object::AdjustWalkRotation on the supplied live object directly
+    // (C4Script.cpp:5433-5442). Distinct initial rotation/rdir values prove
+    // that the foreign scope, definition shape and attachment record are used
+    // without leaking the write back into the callback object.
+    let script = r#"#strict
+protected func Probe(pTarget)
+{
+    return AdjustWalkRotation(20, 20, 100, pTarget);
+}
+"#;
+    let mut actions = HashMap::new();
+    actions.insert(
+        "Walk".to_string(),
+        ActionSpec::default()
+            .with_procedure("walk")
+            .with_attach(CNAT_BOTTOM),
+    );
+    let mut definition =
+        Definition::from_script("WROT", "Foreign walk rotation probe", script)
+            .expect("probe compiles");
+    definition.configure_actions(Some("Walk".to_string()), actions);
+    definition.set_rotateable(45);
+    definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
+
+    let mut engine = Engine::with_seed(17);
+    let mut surface = vec![25; 32];
+    surface.extend(vec![5; 32]);
+    engine.set_landscape(Landscape::new(64, surface).expect("slope landscape builds"));
+    engine
+        .register_definition(definition)
+        .expect("probe definition registers");
+
+    let attached = ShapeAttachRecord {
+        mat_valid: true,
+        mat_vehicle: false,
+        x: 30,
+        y: 15,
+        vtx: 0,
+    };
+    let mut caller_config = SpawnConfig::new("WROT")
+        .with_category(CATEGORY_OBJECT)
+        .with_action(ActionState::new("Walk"))
+        .with_rotation_velocity(itofix_prec(41, 100));
+    caller_config.shape_attach = Some(attached);
+    let caller = engine
+        .spawn_object(caller_config)
+        .expect("caller spawns");
+
+    let mut target_config = SpawnConfig::new("WROT")
+        .with_category(CATEGORY_OBJECT)
+        .with_action(ActionState::new("Walk"))
+        .with_rotation(6)
+        .with_rotation_velocity(itofix_prec(23, 100));
+    target_config.shape_attach = Some(attached);
+    let target = engine
+        .spawn_object(target_config)
+        .expect("target spawns");
+    for object in [caller, target] {
+        engine
+            .apply_object_update(
+                object,
+                ObjectUpdate {
+                    t_attach: Some(CNAT_BOTTOM),
+                    ..ObjectUpdate::new()
+                },
+            )
+            .expect("walk attachment latches for the probe frame");
+    }
+
+    let caller_index = engine.find_object_index(caller).expect("caller exists");
+    assert_eq!(
+        engine
+            .call_object_function(
+                caller_index,
+                "Probe",
+                vec![Value::Object(target.as_u64())],
+            )
+            .expect("foreign walk rotation call runs"),
+        Value::Bool(true)
+    );
+
+    let snapshot = engine.snapshot();
+    assert_eq!(
+        snapshot
+            .object(target)
+            .expect("target remains live")
+            .rotation_velocity,
+        Some(itofix_prec(-15, 100)),
+        "the target's rotation and sampled floor slope drive its rdir"
+    );
+    assert_eq!(
+        snapshot
+            .object(caller)
+            .expect("caller remains live")
+            .rotation_velocity,
+        Some(itofix_prec(41, 100)),
+        "the callback object's rdir is untouched"
+    );
+
+    assert_eq!(
+        engine
+            .call_object_function(
+                caller_index,
+                "Probe",
+                vec![Value::Object(u64::MAX)],
+            )
+            .expect("missing target is a normal false result"),
+        Value::Bool(false)
+    );
 }
 
 #[test]
