@@ -2,8 +2,8 @@
 xtask = "run --package xtask --bin xtask --"
 dev-check = "run --package xtask --bin xtask -- dev-check"
 
-# Rust ships an LLVM-matched Mach-O LLD next to rustc. Resolve that linker at
-# runtime through the checked-in wrapper so every rustup toolchain uses its own
-# compatible binary instead of a potentially mismatched system/Homebrew LLD.
+# Rust 1.97's bundled Mach-O LLD emits invalid unwind metadata for some large
+# test binaries on this workspace. Apple Clang's system linker preserves panic
+# unwinding and is also faster for the measured cold workspace test build.
 [target.aarch64-apple-darwin]
-linker = ".cargo/macos-lld-clang"
+linker = "/usr/bin/clang"

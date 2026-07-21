@@ -43,7 +43,7 @@ jobs:
             pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.87.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt
 
@@ -98,7 +98,7 @@ jobs:
             pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.87.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
 

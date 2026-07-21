@@ -477,6 +477,36 @@ control against second-run filesystem caching: `syn` fell from 10.9s to 2.1s,
 the test profile's level 3; only host build scripts, procedural macros, and
 their host-only dependencies regain Cargo's compilation-oriented settings.
 
+### Toolchain and Darwin-linker follow-up
+
+On 2026-07-21, commit `11f43e7eb` was compiled from empty target directories
+on the same AC-powered Apple M4 Max. Each `cargo test --workspace --no-run`
+sample used the locked, offline dependency graph and the checked-in test
+profile. These are sequential single samples; later runs had a warmer OS file
+cache, so the exact delta is not a portable regression threshold.
+
+| Rust and Darwin linker | Wall | User CPU | System CPU |
+| --- | ---: | ---: | ---: |
+| Rust 1.87.0 + bundled Mach-O LLD | 115.20s | 794.90s | 35.58s |
+| Rust 1.97.1 + bundled Mach-O LLD | 105.08s | 765.56s | 32.39s |
+| Rust 1.97.1 + Apple system linker | 90.67s | 749.43s | 29.79s |
+
+The adopted toolchain/linker pair reduced this same-source cold sample by
+24.53s (21.3%) and 45.47 user CPU-seconds (5.7%). Rust 1.97.1 also includes
+the upstream fix for an LLVM miscompilation present since at least Rust 1.87.
+The workspace pins the compiler so local workers and CI share the same cache
+fingerprint.
+
+The faster-looking LLD `-no_deduplicate` experiment was rejected despite a
+97.38s build: an isolated panic probe passed, but the fresh full-workspace
+binary aborted while unwinding the same `#[should_panic]` test. The unmodified
+1.97 LLD binary failed identically. Apple Clang's system linker passed the
+probe from the full-workspace target and avoids relying on layout-sensitive
+unwind behavior. After rebasing, the exact checked-in configuration passed all
+8,351 tests in 68.359s. Their 1,092.605 aggregate testcase-seconds imply a
+68.288s ideal 16-way floor, so the runner remained saturated rather than
+exposing a linker-related execution regression.
+
 The preceding rebased workspace gate's 127s compile, 176.742s nextest phase,
 and 310.20s command wall time are not a code-performance baseline. It ran with
 AC Low Power Mode active during a display-off dark wake and sustained elevated

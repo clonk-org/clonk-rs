@@ -8,8 +8,9 @@ scenario or replay checks:
 git submodule update --init --recursive
 ```
 
-CI uses Rust 1.87.0 and cargo-nextest 0.9.91. Using the same versions makes
-local and CI diagnostics comparable.
+The workspace and CI pin Rust 1.97.1; CI pins cargo-nextest 0.9.91. Rustup
+selects the checked-in toolchain automatically, which keeps local and CI
+diagnostics comparable.
 
 Tracker music and its executable IT/MOD/S3M/XM tests require the libxmp 4
 runtime (`libxmp4` on Debian/Ubuntu, `libxmp` in Homebrew). Set
@@ -76,9 +77,9 @@ whose level-1 runtime is too slow for representative gameplay:
 cargo run --profile play -p lc-app
 ```
 
-On Apple Silicon macOS, Cargo invokes the Rust toolchain's LLVM-matched
-`ld64.lld` through Apple Clang. The checked-in wrapper discovers it from the
-active `rustc` sysroot, so do not replace it with a separately installed LLD;
+On Apple Silicon macOS, Cargo invokes Apple Clang and the system linker. The
+Rust 1.97.1 toolchain's bundled Mach-O LLD does not preserve panic unwinding
+for every workspace test binary, so do not override the checked-in linker;
 other targets continue using their platform default linker.
 
 ## Artifacts and replay reproduction
