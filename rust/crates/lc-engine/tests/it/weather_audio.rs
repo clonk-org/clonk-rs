@@ -23,7 +23,9 @@ fn tutorial07_real_acid_rain_starts_on_each_cpp_phase_call() {
 
     let expected = [0, 3, 3, 6];
     for (tick, expected_count) in (1..=4).zip(expected) {
-        engine.tick_without_snapshot().expect("Tutorial07 weather tick succeeds");
+        engine
+            .tick_without_snapshot()
+            .expect("Tutorial07 weather tick succeeds");
         assert_eq!(
             acid_rain_count(&engine),
             expected_count,
@@ -69,6 +71,7 @@ fn tutorial07_tick10_starts_cpp_wind_loop_at_level_40() {
 fn is_wind_event(event: &AudioCommand) -> bool {
     match event {
         AudioCommand::PlaySound { name, .. }
+        | AudioCommand::PlaySpeech { name, .. }
         | AudioCommand::PlaySoundAt { name, .. }
         | AudioCommand::StopSound { name, .. }
         | AudioCommand::SetSoundVolume { name, .. } => name.eq_ignore_ascii_case("Wind"),

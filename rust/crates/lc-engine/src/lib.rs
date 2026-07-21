@@ -17543,6 +17543,36 @@ impl ScenarioScript {
     }
 }
 
+/// Local text work retained until the presentation layer knows whether a
+/// message-family speech instance was actually created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeechFallback {
+    id: u64,
+    message: MessageSpec,
+}
+
+impl SpeechFallback {
+    pub(crate) fn new(id: u64, message: MessageSpec) -> Self {
+        Self { id, message }
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub(crate) fn into_message(self) -> MessageSpec {
+        self.message
+    }
+}
+
+/// Frontend result for a message-family speech request whose text decision
+/// was deferred until the local sound system attempted `NewInstance`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpeechPlaybackOutcome {
+    Played(SpeechFallback),
+    Rejected(SpeechFallback),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioCommand {
     PlaySound {
@@ -17554,6 +17584,14 @@ pub enum AudioCommand {
         multiple: bool,
         #[serde(default)]
         custom_falloff: Option<i32>,
+    },
+    /// `Message`/`PlayerMessage`/`PlrMessage` speech. Unlike `Sound`, these
+    /// calls suppress text only if the frontend creates the logical instance.
+    PlaySpeech {
+        name: String,
+        target: Option<ObjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fallback: Option<SpeechFallback>,
     },
     DetachObjectSounds {
         target: ObjectId,
@@ -20755,6 +20793,27 @@ impl Engine {
         S: AsRef<str>,
     {
         self.audio_registry.set_available_samples(samples);
+    }
+
+    /// Resolve client-local message fallbacks after the frontend attempts
+    /// their corresponding speech instances. These messages are presentation
+    /// state just like the sample/channel decision that selected them.
+    #[doc(hidden)]
+    pub fn apply_speech_playback_outcomes(
+        &mut self,
+        outcomes: Vec<SpeechPlaybackOutcome>,
+    ) -> Vec<MessageSnapshot> {
+        for outcome in outcomes {
+            match outcome {
+                SpeechPlaybackOutcome::Played(fallback) => {
+                    self.messages.resolve_speech_fallback(fallback, false);
+                }
+                SpeechPlaybackOutcome::Rejected(fallback) => {
+                    self.messages.resolve_speech_fallback(fallback, true);
+                }
+            }
+        }
+        self.messages.snapshot()
     }
 
     /// Install the client-local filenames represented by the active music
@@ -33809,6 +33868,10 @@ impl Engine {
         for command in &self.pending_audio {
             match command {
                 AudioCommand::PlaySound {
+                    target: Some(target),
+                    ..
+                }
+                | AudioCommand::PlaySpeech {
                     target: Some(target),
                     ..
                 }
@@ -55366,6 +55429,10 @@ impl Engine {
             matches!(
                 command,
                 AudioCommand::PlaySound {
+                    target: Some(event_target),
+                    ..
+                }
+                | AudioCommand::PlaySpeech {
                     target: Some(event_target),
                     ..
                 }

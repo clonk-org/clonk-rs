@@ -108,7 +108,8 @@ use lc_engine::{
     MovementProfile, OWNER_NONE, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData,
     PlayerConfig, PlayerSelectControlData, RgbColor, Scenario, ScenarioError,
     MessageControlData, ScoreboardPresentationRequest, ScriptControlPolicy,
-    ShowCommandsRequestStore, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket,
+    ShowCommandsRequestStore, SimulationSnapshot, SkyConfig, SpawnConfig, SpeechPlaybackOutcome,
+    SyncCheckPacket,
     TeamConfiguration, Vector2, PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
     MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL, MESSAGE_TYPE_PRIVATE,
     MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM, MESSAGE_TYPE_TEAM,
@@ -9649,12 +9650,8 @@ impl AudioContext {
     }
 
     #[cfg(test)]
-    fn process_audio(
-        &mut self,
-        snapshot: &SimulationSnapshot,
-        runtime_music_enabled: &mut bool,
-    ) {
-        self.process_audio_with_viewports(snapshot, &[], runtime_music_enabled);
+    fn process_audio(&mut self, snapshot: &SimulationSnapshot, runtime_music_enabled: &mut bool) {
+        let _ = self.process_audio_with_viewports(snapshot, &[], runtime_music_enabled);
         self.update_channels(snapshot, &[], true);
     }
 
@@ -9663,17 +9660,13 @@ impl AudioContext {
         snapshot: &SimulationSnapshot,
         viewports: &[ActiveViewportProjection],
         runtime_music_enabled: &mut bool,
-    ) {
+    ) -> Vec<SpeechPlaybackOutcome> {
         self.pump_queued_music_starts();
         let events = &snapshot.audio;
         if !events.is_empty() {
-            self.handle_events(
-                events,
-                snapshot,
-                viewports,
-                runtime_music_enabled,
-            );
+            return self.handle_events(events, snapshot, viewports, runtime_music_enabled);
         }
+        Vec::new()
     }
 
     fn cache_rendered_object_audibility(
@@ -9922,7 +9915,8 @@ impl AudioContext {
         snapshot: &SimulationSnapshot,
         viewports: &[ActiveViewportProjection],
         runtime_music_enabled: &mut bool,
-    ) {
+    ) -> Vec<SpeechPlaybackOutcome> {
+        let mut speech_outcomes = Vec::new();
         for event in events {
             match event {
                 AudioCommand::PlaySound {
@@ -9944,6 +9938,39 @@ impl AudioContext {
                         viewports,
                     ) {
                         tracing::error!(sound = %name, error = %err, "failed to play sound");
+                    }
+                }
+                AudioCommand::PlaySpeech {
+                    name,
+                    target,
+                    fallback,
+                } => {
+                    let result = self.try_start_sound(
+                        name, *target, 100, false, true, None, snapshot, viewports,
+                    );
+                    if let Some(fallback) = fallback.clone() {
+                        match result {
+                            Ok(true) => {
+                                speech_outcomes.push(SpeechPlaybackOutcome::Played(fallback));
+                            }
+                            Ok(false) => {
+                                speech_outcomes.push(SpeechPlaybackOutcome::Rejected(fallback));
+                            }
+                            Err(err) => {
+                                tracing::error!(
+                                    sound = %name,
+                                    error = %err,
+                                    "failed to play message speech"
+                                );
+                                speech_outcomes.push(SpeechPlaybackOutcome::Rejected(fallback));
+                            }
+                        }
+                    } else if let Err(err) = result {
+                        tracing::error!(
+                            sound = %name,
+                            error = %err,
+                            "failed to play message speech"
+                        );
                     }
                 }
                 AudioCommand::DetachObjectSounds { target, position } => {
@@ -10049,6 +10076,7 @@ impl AudioContext {
                 }
             }
         }
+        speech_outcomes
     }
 
     fn start_sound(
@@ -72845,7 +72873,9 @@ impl GameApp {
                     false
                 };
                 if player_view_scrolled {
+                    let audio = std::mem::take(&mut self.snapshot.audio);
                     self.snapshot = self.engine.snapshot();
+                    self.snapshot.audio = audio;
                 }
                 if repeated_mouse_move {
                     if let Some(pointer) = self.ingame_pointer {
@@ -73235,20 +73265,30 @@ impl GameApp {
         // a SetPlayList restart sees the state at its exact event position.
         let mut runtime_music_enabled = self.runtime_music_enabled;
         let viewports = self.graphics.active_viewport_projections();
-        if let Some(audio) = self.audio.as_mut() {
+        let speech_outcomes = if let Some(audio) = self.audio.as_mut() {
             audio.process_audio_with_viewports(
                 &self.snapshot,
                 &viewports,
                 &mut runtime_music_enabled,
-            );
+            )
         } else {
+            let mut outcomes = Vec::new();
             for event in &self.snapshot.audio {
                 match event {
+                    AudioCommand::PlaySpeech {
+                        fallback: Some(fallback),
+                        ..
+                    } => outcomes.push(SpeechPlaybackOutcome::Rejected(fallback.clone())),
                     AudioCommand::PlayMusic { .. } => runtime_music_enabled = true,
                     AudioCommand::StopMusic => runtime_music_enabled = false,
                     _ => {}
                 }
             }
+            outcomes
+        };
+        if !speech_outcomes.is_empty() {
+            self.snapshot.hud.messages =
+                self.engine.apply_speech_playback_outcomes(speech_outcomes);
         }
         self.runtime_music_enabled = runtime_music_enabled;
         // C4MusicSystem::Execute chooses another enabled song whenever a
@@ -104642,6 +104682,188 @@ func Award()
             assert_eq!(messages[0].kind, expected_kind);
             assert_eq!(messages[0].lines, [expected]);
         }
+    }
+
+    fn message_speech_test_engine(samples: &[String]) -> Engine {
+        let mut engine = Engine::with_seed(1);
+        engine
+            .register_player(
+                PlayerConfig::new(0, "Player")
+                    .with_viewports([lc_engine::PlayerViewport::new(Vector2::ZERO)]),
+            )
+            .expect("speech fixture player");
+        engine.configure_sound_samples(samples);
+        engine
+    }
+
+    fn execute_message_speech_for_audio(
+        engine: &mut Engine,
+        audio: &mut AudioContext,
+        script: &str,
+        audio_snapshot: &SimulationSnapshot,
+    ) -> Vec<lc_engine::MessageSnapshot> {
+        let control = lc_engine::ScriptControlData {
+            script: LegacyCString::from_bytes(script.as_bytes().to_vec())
+                .expect("speech script has no NUL"),
+            by_client: 0,
+            ..lc_engine::ScriptControlData::default()
+        };
+        engine
+            .execute_script_control(&control, ScriptControlPolicy::live(false))
+            .expect("message script executes")
+            .expect("host script is accepted");
+
+        let mut snapshot = audio_snapshot.clone();
+        snapshot.audio = std::mem::take(&mut engine.pending_audio);
+        let mut runtime_music_enabled = false;
+        let outcomes =
+            audio.process_audio_with_viewports(&snapshot, &[], &mut runtime_music_enabled);
+        engine.apply_speech_playback_outcomes(outcomes)
+    }
+
+    #[test]
+    fn message_speech_falls_back_when_new_instance_is_rejected() {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Speech.c4s");
+        fs::create_dir_all(&scenario).expect("scenario sound group");
+        fs::write(scenario.join("Speech.wav"), silent_pcm_wav(10_000)).expect("speech sample");
+        fs::write(scenario.join("Blocker.wav"), silent_pcm_wav(10_000))
+            .expect("channel blocker sample");
+
+        let make_audio = |max_channels| {
+            let mut audio = AudioContext::try_new(AudioOptions {
+                max_channels,
+                ..AudioOptions::default()
+            })
+            .expect("audio context");
+            audio.configure_scenario(Some(&scenario));
+            audio
+        };
+        let empty_snapshot = make_snapshot(Vec::new(), Vec::new());
+
+        // StartSoundEffect calls NewInstance directly, so the second global
+        // request reaches resolved-sample near dedup even though its raw name
+        // and target match the first request.
+        let mut duplicate_audio = make_audio(2);
+        let samples = duplicate_audio.available_sound_samples();
+        let mut duplicate_engine = message_speech_test_engine(&samples);
+        let messages = execute_message_speech_for_audio(
+            &mut duplicate_engine,
+            &mut duplicate_audio,
+            r#"Message("hidden$Speech")"#,
+            &empty_snapshot,
+        );
+        assert!(messages.is_empty(), "a created instance suppresses text");
+        let messages = execute_message_speech_for_audio(
+            &mut duplicate_engine,
+            &mut duplicate_audio,
+            r#"Message("duplicate fallback$Speech")"#,
+            &empty_snapshot,
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MessageKind::Global);
+        assert_eq!(messages[0].lines, ["duplicate fallback"]);
+        assert_eq!(duplicate_audio.active_channels.len(), 1);
+
+        // Twenty spatially separated logical instances consume the native
+        // per-sample allowance even when they are inaudible and channel-less.
+        let mut capped_audio = make_audio(1);
+        let sources = (0..20)
+            .map(|index| {
+                make_object(
+                    index + 1,
+                    "SPCH",
+                    Vector2::new(i32::try_from(index).expect("index fits") * 51, 0),
+                )
+            })
+            .collect::<Vec<_>>();
+        let capped_snapshot = make_snapshot(sources.clone(), Vec::new());
+        for source in &sources {
+            assert!(capped_audio
+                .try_start_sound(
+                    "Speech",
+                    Some(source.id),
+                    100,
+                    false,
+                    true,
+                    None,
+                    &capped_snapshot,
+                    &[],
+                )
+                .expect("seed speech instance"));
+        }
+        let samples = capped_audio.available_sound_samples();
+        let mut capped_engine = message_speech_test_engine(&samples);
+        let messages = execute_message_speech_for_audio(
+            &mut capped_engine,
+            &mut capped_audio,
+            r#"PlayerMessage(0,"cap fallback$Speech")"#,
+            &capped_snapshot,
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MessageKind::GlobalPlayer);
+        assert_eq!(messages[0].lines, ["cap fallback"]);
+        assert_eq!(capped_audio.active_channels.len(), 20);
+
+        // A distinct sample occupying the only mixer slot makes the initial
+        // channel allocation fail; the rejected speech is never inserted.
+        let mut channel_audio = make_audio(1);
+        channel_audio
+            .start_sound(
+                "Blocker",
+                None,
+                100,
+                false,
+                true,
+                None,
+                &empty_snapshot,
+                &[],
+            )
+            .expect("blocker occupies the mixer");
+        let samples = channel_audio.available_sound_samples();
+        let mut channel_engine = message_speech_test_engine(&samples);
+        let messages = execute_message_speech_for_audio(
+            &mut channel_engine,
+            &mut channel_audio,
+            r#"PlrMessage("channel fallback$Speech",0)"#,
+            &empty_snapshot,
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MessageKind::GlobalPlayer);
+        assert_eq!(messages[0].lines, ["channel fallback"]);
+        assert!(channel_audio.active_channel_key("Speech", None).is_none());
+
+        // Muting skips physical allocation but still creates C++'s logical
+        // instance, so text remains suppressed.
+        let mut muted_audio = make_audio(1);
+        muted_audio.options.sound_enabled = false;
+        let samples = muted_audio.available_sound_samples();
+        let mut muted_engine = message_speech_test_engine(&samples);
+        let messages = execute_message_speech_for_audio(
+            &mut muted_engine,
+            &mut muted_audio,
+            r#"Message("muted$Speech")"#,
+            &empty_snapshot,
+        );
+        assert!(messages.is_empty());
+        let muted = muted_audio
+            .active_channels
+            .get(&SoundInstanceKey::new("Speech", None))
+            .expect("muted logical instance");
+        assert!(muted.channel.is_none());
+
+        // Filename inventory rejection remains synchronous and never emits a
+        // frontend command.
+        let mut missing_engine = message_speech_test_engine(&[]);
+        let mut missing_audio = make_audio(1);
+        let messages = execute_message_speech_for_audio(
+            &mut missing_engine,
+            &mut missing_audio,
+            r#"Message("missing fallback$Absent")"#,
+            &empty_snapshot,
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].lines, ["missing fallback"]);
     }
 
     #[test]

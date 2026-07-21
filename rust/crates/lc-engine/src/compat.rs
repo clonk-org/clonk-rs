@@ -42,7 +42,7 @@ use crate::{
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder,
     PathfinderDebugSnapshot, PauseGameRequest,
     PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState, QueuedCommand,
-    RgbColor, ScoreboardState, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig,
+    RgbColor, ScoreboardState, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig, SpeechFallback,
     TeamConfiguration, TeamInfo, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
     encode_bridge_action_data,
 };
@@ -16596,6 +16596,33 @@ fn extract_message_text(formatted: &str) -> String {
     formatted.split('$').next().unwrap_or("").to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
+fn message_fallback_spec(
+    context: &EffectHostContext,
+    function: &str,
+    raw_message: &str,
+    format_args: &[Value],
+    kind: MessageKind,
+    target: Option<ObjectId>,
+    player: Option<i32>,
+) -> Result<MessageSpec, RuntimeError> {
+    let formatted =
+        format_script_string_with_context(function, raw_message, format_args, Some(context))?;
+    Ok(MessageSpec {
+        kind,
+        text: extract_message_text(&formatted),
+        target,
+        player,
+        offset: Vector2::ZERO,
+        color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+        flags: 0,
+        width: None,
+        decoration: None,
+        frame_decoration: None,
+        portrait: None,
+    })
+}
+
 /// Convert the native `C4ID idDeco` parameter of `FnCustomMessage`
 /// (C4Script.cpp:5995). C++ accepts nil/falsy zero, direct C4ID values, and
 /// integer IDs in `0..=9999`; String -> C4ID is always invalid
@@ -17630,51 +17657,41 @@ fn message(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("Message requires an active engine context"))?;
 
+        let fallback = message_fallback_spec(
+            context,
+            "Message",
+            &raw_message,
+            format_args,
+            if target_raw.is_some() {
+                MessageKind::Target
+            } else {
+                MessageKind::Global
+            },
+            target_raw.map(ObjectId::new),
+            None,
+        );
+
         // FnMessage's pObj is only the text-message target. Speech is always
-        // anchored to cthr->Obj (C4Script.cpp:2415-2427). NewInstance's
-        // success decides whether text is suppressed; merely requesting a
-        // missing sample does not count as speech.
-        let played_speech = extract_speech_segment(&raw_message).is_some_and(|sound| {
-            let speech_target = context.object_context().map(|object| object.id());
-            context.audio_mut().try_play_sound(
+        // anchored to cthr->Obj (C4Script.cpp:2415-2427). The frontend must
+        // finish NewInstance before deciding whether this fallback survives.
+        if let Some(sound) = extract_speech_segment(&raw_message) {
+            let speech_target = context.script_object_context;
+            let (queued, pending_fallback) = context.audio_mut().try_play_speech(
                 &sound,
                 speech_target,
-                100,
-                false,
-                false,
-                None,
-            )
-        });
-
-        if !played_speech {
-            // C++ formats only the fallback path. A successful speech sound
-            // therefore also bypasses invalid or missing format arguments.
-            let formatted = format_script_string_with_context(
-                "Message",
-                &raw_message,
-                format_args,
-                Some(context),
-            )?;
-            let text = extract_message_text(&formatted);
-            let spec = MessageSpec {
-                kind: if target_raw.is_some() {
-                    MessageKind::Target
-                } else {
-                    MessageKind::Global
-                },
-                text,
-                target: target_raw.map(ObjectId::new),
-                player: None,
-                offset: Vector2::ZERO,
-                color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-                flags: 0,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            };
-            context.register_message(MessageCommand::Add(spec));
+                fallback.as_ref().ok().cloned(),
+            );
+            if queued {
+                if let Some(pending_fallback) = pending_fallback {
+                    context.register_message(MessageCommand::PendingSpeech(pending_fallback));
+                }
+                // Formatting is side-effect free. Keep its deferred error
+                // hidden exactly as C++ does when speech succeeds.
+                return Ok(Value::Bool(true));
+            }
         }
+
+        context.register_message(MessageCommand::Add(fallback?));
 
         Ok(Value::Bool(true))
     })
@@ -17813,52 +17830,40 @@ fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("PlayerMessage requires an active engine context"))?;
 
-        let played_speech = extract_speech_segment(&raw_message).is_some_and(|sound| {
+        let kind = if target_raw.is_some() {
+            MessageKind::TargetPlayer
+        } else {
+            MessageKind::GlobalPlayer
+        };
+        let fallback = message_fallback_spec(
+            context,
+            "PlayerMessage",
+            &raw_message,
+            format_args,
+            kind,
+            target_raw.map(ObjectId::new),
+            Some(player_id),
+        );
+        if let Some(sound) = extract_speech_segment(&raw_message) {
             let speech_target = target_raw
                 .map(ObjectId::new)
-                .or_else(|| context.object_context().map(|object| object.id()));
-            context.audio_mut().try_play_sound(
+                .or(context.script_object_context);
+            let (queued, pending_fallback) = context.audio_mut().try_play_speech(
                 &sound,
                 speech_target,
-                100,
-                false,
-                false,
-                None,
-            )
-        });
-
-        if !played_speech {
-            let formatted = format_script_string_with_context(
-                "PlayerMessage",
-                &raw_message,
-                format_args,
-                Some(context),
-            )?;
-            let text = extract_message_text(&formatted);
-            // FnPlayerMessage carries iPlayer into C4GM_*Player verbatim;
-            // unlike FnPlrMessage, it never gates the message through
-            // ValidPlr. An id with no matching viewport therefore displays
-            // nowhere.
-            let kind = if target_raw.is_some() {
-                MessageKind::TargetPlayer
-            } else {
-                MessageKind::GlobalPlayer
-            };
-            let spec = MessageSpec {
-                kind,
-                text,
-                target: target_raw.map(ObjectId::new),
-                player: Some(player_id),
-                offset: Vector2::ZERO,
-                color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-                flags: 0,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            };
-            context.register_message(MessageCommand::Add(spec));
+                fallback.as_ref().ok().cloned(),
+            );
+            if queued {
+                if let Some(pending_fallback) = pending_fallback {
+                    context.register_message(MessageCommand::PendingSpeech(pending_fallback));
+                }
+                return Ok(Value::Bool(true));
+            }
         }
+
+        // FnPlayerMessage carries iPlayer into C4GM_*Player verbatim;
+        // unlike FnPlrMessage, it never gates through ValidPlr.
+        context.register_message(MessageCommand::Add(fallback?));
 
         Ok(Value::Bool(true))
     })
@@ -17940,46 +17945,35 @@ fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let resolved_player = resolve_target_player(context, player_id);
 
-        let played_speech = extract_speech_segment(&raw_message).is_some_and(|sound| {
-            let speech_target = context.object_context().map(|object| object.id());
-            context.audio_mut().try_play_sound(
-                &sound,
-                speech_target,
-                100,
-                false,
-                false,
-                None,
-            )
-        });
-
-        if !played_speech {
-            let formatted = format_script_string_with_context(
-                "PlrMessage",
-                &raw_message,
-                format_args,
-                Some(context),
-            )?;
-            let text = extract_message_text(&formatted);
-            let kind = if resolved_player.is_some() {
+        let fallback = message_fallback_spec(
+            context,
+            "PlrMessage",
+            &raw_message,
+            format_args,
+            if resolved_player.is_some() {
                 MessageKind::GlobalPlayer
             } else {
                 MessageKind::Global
-            };
-            let spec = MessageSpec {
-                kind,
-                text,
-                target: None,
-                player: resolved_player,
-                offset: Vector2::ZERO,
-                color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
-                flags: 0,
-                width: None,
-                decoration: None,
-                frame_decoration: None,
-                portrait: None,
-            };
-            context.register_message(MessageCommand::Add(spec));
+            },
+            None,
+            resolved_player,
+        );
+        if let Some(sound) = extract_speech_segment(&raw_message) {
+            let speech_target = context.script_object_context;
+            let (queued, pending_fallback) = context.audio_mut().try_play_speech(
+                &sound,
+                speech_target,
+                fallback.as_ref().ok().cloned(),
+            );
+            if queued {
+                if let Some(pending_fallback) = pending_fallback {
+                    context.register_message(MessageCommand::PendingSpeech(pending_fallback));
+                }
+                return Ok(Value::Bool(true));
+            }
         }
+
+        context.register_message(MessageCommand::Add(fallback?));
 
         Ok(Value::Bool(true))
     })
@@ -45788,6 +45782,7 @@ pub struct AudioRegistry {
     /// deliberately coarse because sample resolution and lifetime are local to
     /// the frontend; a false positive only emits a harmless no-op detach.
     attached_targets: HashSet<ObjectId>,
+    next_speech_fallback_id: u64,
     events: Vec<AudioCommand>,
 }
 
@@ -45806,6 +45801,7 @@ impl Default for AudioRegistry {
             music_playlist: None,
             music_level: DEFAULT_MUSIC_LEVEL,
             attached_targets: HashSet::new(),
+            next_speech_fallback_id: 0,
             events: Vec::new(),
         }
     }
@@ -45878,24 +45874,32 @@ impl AudioRegistry {
         i32::try_from(count).unwrap_or(i32::MAX)
     }
 
-    /// StartSoundEffect/NewInstance's primary success gate for message
-    /// speech. Ordinary Sound/SoundLevel calls keep their existing deferred
-    /// behavior; only the message family needs the synchronous bool to decide
-    /// whether its text fallback runs.
-    fn try_play_sound(
+    /// Stage message-family speech after the synchronous sample-inventory
+    /// gate. The frontend completes `NewInstance` and returns its created or
+    /// rejected outcome; ordinary Sound/SoundLevel calls remain fire-and-forget.
+    fn try_play_speech(
         &mut self,
         name: &str,
         target: Option<ObjectId>,
-        volume: u8,
-        looped: bool,
-        multiple: bool,
-        custom_falloff: Option<i32>,
-    ) -> bool {
+        fallback: Option<MessageSpec>,
+    ) -> (bool, Option<SpeechFallback>) {
         if !sound_sample_available(&self.available_samples, name) {
-            return false;
+            return (false, None);
         }
-        self.play_sound(name, target, volume, looped, multiple, custom_falloff);
-        true
+        if let Some(target) = target {
+            self.attached_targets.insert(target);
+        }
+        let fallback = fallback.map(|message| {
+            let id = self.next_speech_fallback_id;
+            self.next_speech_fallback_id = self.next_speech_fallback_id.wrapping_add(1).max(1);
+            SpeechFallback::new(id, message)
+        });
+        self.events.push(AudioCommand::PlaySpeech {
+            name: name.to_string(),
+            target,
+            fallback: fallback.clone(),
+        });
+        (true, fallback)
     }
 
     pub fn play_sound(
@@ -58461,6 +58465,7 @@ func Announce()
                 assert!(spec.target.is_none());
                 assert!(spec.player.is_none());
             }
+            MessageCommand::PendingSpeech(_) => panic!("plain Message cannot defer speech"),
         }
     }
 
@@ -58597,6 +58602,9 @@ func Announce()
                     assert_eq!(spec.kind, expected_kind);
                     assert_eq!(spec.target, expected_target);
                     assert_eq!(spec.player, expected_player);
+                }
+                MessageCommand::PendingSpeech(_) => {
+                    panic!("CustomMessage cannot defer speech")
                 }
             }
         }
@@ -58781,6 +58789,7 @@ func Announce()
                     tutorial_facets.each_ref().map(|(_, facet)| Some(facet))
                 );
             }
+            MessageCommand::PendingSpeech(_) => panic!("CustomMessage cannot defer speech"),
         }
     }
 
@@ -58818,6 +58827,7 @@ func Announce()
                     FLAG_BOTTOM | FLAG_LEFT | FLAG_X_REL | FLAG_WIDTH_REL
                 );
             }
+            MessageCommand::PendingSpeech(_) => panic!("CustomMessage cannot defer speech"),
         }
     }
 
@@ -58842,6 +58852,7 @@ func Announce()
             assert_eq!(outcome.messages.len(), 1);
             match &outcome.messages[0] {
                 MessageCommand::Add(spec) => assert!(spec.portrait.is_none()),
+                MessageCommand::PendingSpeech(_) => panic!("CustomMessage cannot defer speech"),
             }
         }
     }
@@ -58900,11 +58911,7 @@ func Announce()
         // FnPlayerMessage prefers pObj; FnPlrMessage uses cthr->Obj
         // unconditionally (C4Script.cpp:2395-2463).
         let mut audio = AudioRegistry::new();
-        audio.set_available_samples([
-            "messagespeech.WAV",
-            "PlayerSpeech.wav",
-            "PlrSpeech.wav",
-        ]);
+        audio.set_available_samples(["messagespeech.WAV", "PlayerSpeech.wav", "PlrSpeech.wav"]);
         let audio_guard = enter_audio_context(audio);
         let caller = ObjectId::new(1);
         let target = ObjectId::new(2);
@@ -58920,10 +58927,8 @@ func Announce()
                 Value::String("Hello$PlayerSpeech".into()),
                 object_reference_value(target),
             ])?;
-            let plr_result = plr_message(&[
-                Value::String("Hello$PlrSpeech".into()),
-                Value::Int(0),
-            ])?;
+            let plr_result =
+                plr_message(&[Value::String("Hello$PlrSpeech".into()), Value::Int(0)])?;
             Ok::<_, RuntimeError>((message_result, player_result, plr_result))
         });
         let _ = audio_guard.finish();
@@ -58931,36 +58936,90 @@ func Announce()
             result.expect("message speech calls succeed"),
             (Value::Bool(true), Value::Bool(true), Value::Bool(true))
         );
-        assert!(outcome.messages.is_empty());
-        assert_eq!(
-            outcome.audio.events,
-            vec![
-                AudioCommand::PlaySound {
-                    name: "MessageSpeech".into(),
-                    target: Some(caller),
-                    volume: 100,
-                    looped: false,
-                    multiple: false,
-                    custom_falloff: None,
+        assert_eq!(outcome.messages.len(), 2);
+        assert!(matches!(
+            &outcome.messages[0],
+            MessageCommand::PendingSpeech(SpeechFallback { message, .. })
+                if message.kind == MessageKind::TargetPlayer
+                    && message.target == Some(target)
+                    && message.text == "Hello"
+        ));
+        assert!(matches!(
+            &outcome.messages[1],
+            MessageCommand::PendingSpeech(SpeechFallback { message, .. })
+                if message.kind == MessageKind::Global
+                    && message.target.is_none()
+                    && message.player.is_none()
+                    && message.text == "Hello"
+        ));
+        assert!(matches!(
+            outcome.audio.events.as_slice(),
+            [
+                AudioCommand::PlaySpeech {
+                    name: message_name,
+                    target: Some(message_target),
+                    fallback: None,
                 },
-                AudioCommand::PlaySound {
-                    name: "PlayerSpeech".into(),
-                    target: Some(target),
-                    volume: 100,
-                    looped: false,
-                    multiple: false,
-                    custom_falloff: None,
+                AudioCommand::PlaySpeech {
+                    name: player_name,
+                    target: Some(player_target),
+                    fallback: Some(_),
                 },
-                AudioCommand::PlaySound {
-                    name: "PlrSpeech".into(),
-                    target: Some(caller),
-                    volume: 100,
-                    looped: false,
-                    multiple: false,
-                    custom_falloff: None,
+                AudioCommand::PlaySpeech {
+                    name: plr_name,
+                    target: Some(plr_target),
+                    fallback: Some(_),
                 },
-            ]
+            ] if message_name == "MessageSpeech"
+                && *message_target == caller
+                && player_name == "PlayerSpeech"
+                && *player_target == target
+                && plr_name == "PlrSpeech"
+                && *plr_target == caller
+        ));
+    }
+
+    #[test]
+    fn message_family_speech_keeps_null_definition_caller_anchor() {
+        // Definition-commanded effects carry a mutable affected object while
+        // cthr->Obj remains null. Speech follows the latter, not the carrier.
+        let mut audio = AudioRegistry::new();
+        audio.set_available_samples(["MessageSpeech.wav", "PlayerSpeech.wav", "PlrSpeech.wav"]);
+        let audio_guard = enter_audio_context(audio);
+        let target = ObjectId::new(2);
+        let (result, outcome) = with_effect_context_with_state_and_definition(
+            Some(object_host_context_with_physical_energy(100, 100)),
+            Some(DefinitionId::from("CALL")),
+            None,
+            &[],
+            HostWorldContext::default(),
+            2,
+            false,
+            || {
+                Ok::<_, RuntimeError>((
+                    message(&[
+                        Value::String("Hello$MessageSpeech".into()),
+                        object_reference_value(target),
+                    ])?,
+                    player_message(&[Value::Int(0), Value::String("Hello$PlayerSpeech".into())])?,
+                    plr_message(&[Value::String("Hello$PlrSpeech".into()), Value::Int(0)])?,
+                ))
+            },
         );
+        let _ = audio_guard.finish();
+
+        assert_eq!(
+            result.expect("definition message speech calls succeed"),
+            (Value::Bool(true), Value::Bool(true), Value::Bool(true))
+        );
+        assert!(matches!(
+            outcome.audio.events.as_slice(),
+            [
+                AudioCommand::PlaySpeech { target: None, .. },
+                AudioCommand::PlaySpeech { target: None, .. },
+                AudioCommand::PlaySpeech { target: None, .. },
+            ]
+        ));
     }
 
     #[test]
@@ -59967,6 +60026,7 @@ public func CheckGoals()
                 assert_eq!(spec.player, Some(1));
                 assert_eq!(spec.text, "Hi there");
             }
+            MessageCommand::PendingSpeech(_) => panic!("plain PlayerMessage cannot defer speech"),
         }
     }
 
@@ -60006,7 +60066,9 @@ public func CheckGoals()
                 "Target secret",
             ),
         ] {
-            let MessageCommand::Add(spec) = command;
+            let MessageCommand::Add(spec) = command else {
+                panic!("plain PlayerMessage cannot defer speech");
+            };
             assert_eq!(spec.kind, expected_kind);
             assert_eq!(spec.target, expected_target);
             assert_eq!(spec.player, Some(42));
@@ -60025,6 +60087,7 @@ public func CheckGoals()
                 assert_eq!(spec.flags & FLAG_MULTIPLE, FLAG_MULTIPLE);
                 assert_eq!(spec.text, "Queued");
             }
+            MessageCommand::PendingSpeech(_) => panic!("AddMessage cannot defer speech"),
         }
     }
 
@@ -60040,6 +60103,7 @@ public func CheckGoals()
                 assert!(spec.player.is_none());
                 assert_eq!(spec.text, "Warning");
             }
+            MessageCommand::PendingSpeech(_) => panic!("plain PlrMessage cannot defer speech"),
         }
     }
 
