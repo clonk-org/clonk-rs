@@ -2160,7 +2160,7 @@ fn load_scripts<S: AsRef<str>>(
     })
 }
 
-fn ini_section_name(line: &str) -> Option<&str> {
+pub(crate) fn ini_section_name(line: &str) -> Option<&str> {
     let bytes = line.as_bytes();
     if bytes.first() != Some(&b'[') || !bytes.get(1).is_some_and(u8::is_ascii_alphabetic) {
         return None;
@@ -2178,7 +2178,7 @@ fn ini_section_name(line: &str) -> Option<&str> {
     (bytes.get(cursor) == Some(&b']')).then(|| &line[1..name_end])
 }
 
-fn ini_value(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn ini_value(line: &str) -> Option<(&str, &str)> {
     let bytes = line.as_bytes();
     if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
         return None;
@@ -3026,7 +3026,7 @@ fn parse_category(value: &str) -> i32 {
     parse_named_bitfield(value, CATEGORY_FLAGS)
 }
 
-fn parse_bool(value: &str) -> Option<bool> {
+pub(crate) fn parse_bool(value: &str) -> Option<bool> {
     let bytes = value.as_bytes();
     if bytes.first() == Some(&b'1') && !bytes.get(1).is_some_and(u8::is_ascii_digit) {
         return Some(true);
@@ -3106,7 +3106,7 @@ fn parse_action_attach(value: &str) -> i32 {
     flags
 }
 
-fn parse_action_i32_prefix(value: &[u8]) -> Option<(i32, usize)> {
+pub(crate) fn parse_action_i32_prefix(value: &[u8]) -> Option<(i32, usize)> {
     parse_action_i64_prefix(value).map(|(value, consumed)| (value as i32, consumed))
 }
 
@@ -3127,6 +3127,15 @@ fn parse_action_integer_prefix(value: &[u8]) -> Option<(u128, bool, usize)> {
         cursor += 2;
         16u32
     } else {
+        // ReadNum chooses the radix after its horizontal SkipWhitespace, then
+        // delegates to strtol/strtoul. Those C readers additionally consume
+        // the remaining ASCII whitespace (notably form-feed and vertical-tab).
+        while value
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r'))
+        {
+            cursor += 1;
+        }
         10u32
     };
     let negative = if radix == 10 {
@@ -3190,7 +3199,7 @@ fn parse_action_i64_prefix(value: &[u8]) -> Option<(i64, usize)> {
     Some((signed as i64, consumed))
 }
 
-fn parse_action_u64_prefix(value: &[u8]) -> Option<(u64, usize)> {
+pub(crate) fn parse_action_u64_prefix(value: &[u8]) -> Option<(u64, usize)> {
     let (magnitude, negative, consumed) = parse_action_integer_prefix(value)?;
     let long_bits = std::mem::size_of::<std::os::raw::c_ulong>() * 8;
     let long_max = (1u128 << long_bits) - 1;
@@ -3227,7 +3236,7 @@ fn fill_u32_array(value: &str, target: &mut [u32]) {
     }
 }
 
-fn parse_int_array(value: &str) -> impl Iterator<Item = i32> {
+pub(crate) fn parse_int_array(value: &str) -> impl Iterator<Item = i32> {
     let bytes = lc_script::c4_string_bytes(value);
     let mut values = Vec::new();
     let mut cursor = 0;

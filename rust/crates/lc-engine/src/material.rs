@@ -925,8 +925,10 @@ impl Material {
         let color = definition
             .int_list("colorx")
             .or_else(|| definition.int_list("color"))
-            .unwrap_or_default();
-        let alpha = definition.int_list("alpha").unwrap_or_default();
+            .unwrap_or_else(|| vec![0; 9]);
+        let alpha = definition
+            .int_list("alpha")
+            .unwrap_or_else(|| vec![0; 6]);
         let normalized_name = normalize_key(definition.name());
         Self {
             id,
@@ -1986,6 +1988,15 @@ mod tests {
             group.read_file("MatMap.txt").expect("MatMap reads"),
             b"[Enumeration]\r\nGranite\r\nEarth\r\nWater\r\n "
         );
+    }
+
+    #[test]
+    fn absent_material_arrays_use_native_fixed_defaults() {
+        let set = build_material_set("[Material]\nName=Defaults\n");
+        let material = set.get("Defaults").expect("default material exists");
+
+        assert_eq!(material.color(), &[0; 9]);
+        assert_eq!(material.alpha(), &[0; 6]);
     }
 
     #[test]

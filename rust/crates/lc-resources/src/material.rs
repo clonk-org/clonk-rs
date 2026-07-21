@@ -1,4 +1,10 @@
-use crate::{Group, GroupError};
+use crate::{
+    definition::{
+        ini_section_name, ini_value, parse_action_i32_prefix, parse_action_u64_prefix,
+        parse_bool, parse_int_array,
+    },
+    Group, GroupError,
+};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -278,11 +284,11 @@ impl MaterialDefinition {
     }
 
     pub fn int_list(&self, key: &str) -> Option<Vec<i32>> {
-        self.value(key).and_then(parse_int_list)
+        self.value(key).map(|value| parse_int_list(key, value))
     }
 
     pub fn bool_flag(&self, key: &str) -> Option<bool> {
-        self.value(key).and_then(parse_bool_flag)
+        self.int(key).map(|value| value != 0)
     }
 
     pub fn strings(&self, key: &str) -> &[String] {
@@ -314,11 +320,17 @@ impl MaterialReactionDefinition {
     }
 
     pub fn int(&self, key: &str) -> Option<i32> {
-        self.value(key).and_then(parse_i32)
+        self.value(key).and_then(|value| {
+            if normalize_key(key) == "execmask" {
+                parse_u32_bits(value)
+            } else {
+                parse_i32(value)
+            }
+        })
     }
 
     pub fn bool_flag(&self, key: &str) -> Option<bool> {
-        self.value(key).and_then(parse_bool_flag)
+        self.value(key).and_then(parse_bool)
     }
 
     pub fn raw_properties(&self) -> &HashMap<String, Vec<String>> {
@@ -418,70 +430,7 @@ impl<'a> MaterialParser<'a> {
     /// Later material namespaces are ignored, while every root `Reaction`
     /// namespace still belongs to that single core.
     fn parse_first(self) -> Result<MaterialDefinition, MaterialError> {
-        let mut first_material = None;
-        let mut in_first_material = false;
-        let mut reactions = Vec::new();
-        let mut current_reaction = None;
-
-        for raw_line in self.source.lines() {
-            let mut line = raw_line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            line = strip_comments(line);
-            if line.is_empty() {
-                continue;
-            }
-
-            if let Some(section) = parse_section_header(line) {
-                if let Some(reaction) = current_reaction.take() {
-                    reactions.push(reaction);
-                }
-                match section {
-                    SectionHeader::Material(name_hint) => {
-                        if first_material.is_none() {
-                            first_material = Some(MaterialRecord {
-                                name_hint,
-                                properties: HashMap::new(),
-                                reactions: Vec::new(),
-                            });
-                            in_first_material = true;
-                        } else {
-                            in_first_material = false;
-                        }
-                    }
-                    SectionHeader::Reaction => {
-                        current_reaction = Some(ReactionRecord::default());
-                        in_first_material = false;
-                    }
-                }
-                continue;
-            }
-
-            if let Some((key, value)) = parse_key_value(line) {
-                let target = if let Some(reaction) = current_reaction.as_mut() {
-                    Some(&mut reaction.properties)
-                } else if in_first_material {
-                    first_material
-                        .as_mut()
-                        .map(|material| &mut material.properties)
-                } else {
-                    None
-                };
-                if let Some(target) = target {
-                    target
-                        .entry(normalize_key(key))
-                        .or_insert_with(Vec::new)
-                        .push(value.trim().to_string());
-                }
-            }
-        }
-        if let Some(reaction) = current_reaction {
-            reactions.push(reaction);
-        }
-        let mut material = first_material.ok_or(MaterialError::NotFound)?;
-        material.reactions = reactions;
-        material_definition_from_record(material, 0)
+        Ok(parse_native_material(self.source))
     }
 
     fn finish_current(&mut self) -> Result<(), MaterialError> {
@@ -502,6 +451,406 @@ impl<'a> MaterialParser<'a> {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy)]
+struct NativeIniNode<'a> {
+    name: &'a str,
+    value: &'a str,
+    parent: usize,
+    indent: usize,
+    section: bool,
+}
+
+fn parse_native_material(source: &str) -> MaterialDefinition {
+    let nodes = native_ini_name_tree(source);
+    // StdCompilerINIRead::Name selects the first exact child without checking
+    // whether it is a section. A scalar `Material=...` can therefore shadow
+    // a later real section, and an absent namespace simply leaves defaults.
+    let properties = nodes
+        .iter()
+        .position(|node| node.parent == 0 && node.name == "Material")
+        .map(|index| native_properties(&nodes, index, is_material_compiler_key))
+        .unwrap_or_default();
+    let name = properties
+        .get("name")
+        .and_then(|values| values.first())
+        .map(|value| value.trim_start_matches([' ', '\t']).to_string())
+        .unwrap_or_default();
+
+    let mut reactions = Vec::new();
+    for (index, node) in nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.parent == 0 && node.name == "Reaction")
+    {
+        reactions.push(MaterialReactionDefinition {
+            properties: native_properties(&nodes, index, is_reaction_compiler_key),
+        });
+        // Repeated named-container lookup advances only from a section. A
+        // scalar Reaction node loses its value cursor while its first missing
+        // nested field unwinds, then blocks later root Reaction sections.
+        if !node.section {
+            break;
+        }
+    }
+
+    MaterialDefinition {
+        name,
+        properties,
+        reactions,
+    }
+}
+
+fn native_ini_name_tree(source: &str) -> Vec<NativeIniNode<'_>> {
+    let source = source.split_once('\0').map_or(source, |(head, _)| head);
+    let mut nodes = vec![NativeIniNode {
+        name: "",
+        value: "",
+        parent: 0,
+        indent: 0,
+        section: true,
+    }];
+    let mut current = 0;
+
+    for raw_line in source.split(['\r', '\n']) {
+        let indent = raw_line
+            .as_bytes()
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let line = &raw_line[indent..];
+        let section = line.as_bytes().first() == Some(&b'[')
+            && line
+                .as_bytes()
+                .get(1)
+                .is_some_and(u8::is_ascii_alphabetic);
+        let value = line
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic);
+        if !section && !value {
+            continue;
+        }
+        let node_indent = indent.saturating_add(usize::from(!section));
+        // CreateNameTree unwinds before validating the closing `]` or `=`.
+        // A malformed named line can therefore return later indented fields
+        // to an outer section even though no node is created for that line.
+        while current != 0 && nodes[current].indent >= node_indent {
+            current = nodes[current].parent;
+        }
+
+        let (name, value) = if section {
+            let Some(name) = ini_section_name(line) else {
+                continue;
+            };
+            let value = line
+                .find(']')
+                .map(|closing| &line[closing + 1..])
+                .unwrap_or_default();
+            (name, value)
+        } else {
+            let Some((name, value)) = ini_value(line) else {
+                continue;
+            };
+            (name, value)
+        };
+
+        let parent = current;
+        nodes.push(NativeIniNode {
+            name,
+            value,
+            parent,
+            indent: node_indent,
+            section,
+        });
+        if section {
+            current = nodes.len() - 1;
+        }
+    }
+    nodes
+}
+
+fn native_properties(
+    nodes: &[NativeIniNode<'_>],
+    parent: usize,
+    accepted: fn(&str) -> bool,
+) -> HashMap<String, Vec<String>> {
+    let mut properties = HashMap::new();
+    for node in nodes.iter().filter(|node| node.parent == parent) {
+        if !accepted(node.name) {
+            continue;
+        }
+        properties
+            .entry(normalize_key(node.name))
+            .or_insert_with(|| vec![native_compiled_string(node.name, node.value)]);
+    }
+    for (name, len, unsigned) in [
+        ("Color", 9, true),
+        ("ColorX", 9, true),
+        ("Alpha", 6, true),
+        ("PXSGfxRt", 6, false),
+    ] {
+        if !accepted(name) {
+            continue;
+        }
+        let Some(values) = native_fixed_array(nodes, parent, name, len, unsigned) else {
+            continue;
+        };
+        properties.insert(
+            normalize_key(name),
+            vec![values
+                .iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")],
+        );
+    }
+    properties
+}
+
+fn native_fixed_array(
+    nodes: &[NativeIniNode<'_>],
+    parent: usize,
+    name: &str,
+    len: usize,
+    unsigned: bool,
+) -> Option<Vec<i32>> {
+    let mut node_index = nodes
+        .iter()
+        .position(|node| node.parent == parent && node.name == name)?;
+    let mut bytes = lc_script::c4_string_bytes(nodes[node_index].value);
+    let mut cursor = 0;
+    let mut values = Vec::with_capacity(len);
+
+    while values.len() < len {
+        let parsed = if unsigned {
+            parse_action_u64_prefix(&bytes[cursor..]).map(|(value, consumed)| {
+                cursor += consumed;
+                value as u32 as i32
+            })
+        } else {
+            parse_action_i32_prefix(&bytes[cursor..]).map(|(value, consumed)| {
+                cursor += consumed;
+                value
+            })
+        };
+        values.push(parsed.unwrap_or(0));
+        if values.len() == len {
+            break;
+        }
+
+        if nodes[node_index].section {
+            let Some(next_index) = nodes
+                .iter()
+                .enumerate()
+                .skip(node_index + 1)
+                .find(|(_, node)| node.parent == parent && node.name == name)
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            node_index = next_index;
+            bytes = lc_script::c4_string_bytes(nodes[node_index].value);
+            cursor = 0;
+        } else {
+            while bytes
+                .get(cursor)
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                cursor += 1;
+            }
+            if bytes.get(cursor) != Some(&b',') {
+                break;
+            }
+            cursor += 1;
+        }
+    }
+    values.resize(len, 0);
+    Some(values)
+}
+
+fn native_compiled_string(name: &str, value: &str) -> String {
+    match name {
+        "Name" => value.trim_start_matches([' ', '\t']).to_string(),
+        "TextureOverlay"
+        | "PXSGfx"
+        | "BlastShiftTo"
+        | "InMatConvert"
+        | "InMatConvertTo"
+        | "AboveTempConvertTo"
+        | "BelowTempConvertTo" => native_identifier(value, usize::MAX),
+        "Blast2Object" | "Dig2Object" => {
+            let identifier = native_identifier(value, 4);
+            let bytes = lc_script::c4_string_bytes(&identifier);
+            (bytes.len() == 4 && bytes != b"NONE" && bytes != b"0000")
+                .then_some(identifier)
+                .unwrap_or_default()
+        }
+        "Type" | "TargetSpec" | "ScriptFunc" | "ConvertMat" => native_escaped_string(value),
+        _ => value.to_string(),
+    }
+}
+
+fn native_identifier(value: &str, max_len: usize) -> String {
+    let bytes = lc_script::c4_string_bytes(value.trim_start_matches([' ', '\t']));
+    let len = bytes
+        .iter()
+        .take(max_len)
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        .count();
+    lc_script::c4_string_from_bytes(&bytes[..len])
+}
+
+fn native_escaped_string(value: &str) -> String {
+    let bytes = lc_script::c4_string_bytes(value);
+    if bytes.first() != Some(&b'"') {
+        let start = bytes
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        return lc_script::c4_string_from_bytes(&bytes[start..]);
+    }
+
+    let mut cursor = 1;
+    let mut output = Vec::new();
+    while let Some(&byte) = bytes.get(cursor) {
+        if matches!(byte, b'"' | b'\0' | b'\r' | b'\n') {
+            break;
+        }
+        if byte != b'\\' {
+            output.push(byte);
+            cursor += 1;
+            continue;
+        }
+
+        cursor += 1;
+        let Some(&escaped) = bytes.get(cursor) else {
+            break;
+        };
+        cursor += 1;
+        match escaped {
+            b'a' => output.push(b'\x07'),
+            b'b' => output.push(b'\x08'),
+            b'f' => output.push(b'\x0c'),
+            b'n' => output.push(b'\n'),
+            b'r' => output.push(b'\r'),
+            b't' => output.push(b'\t'),
+            b'v' => output.push(b'\x0b'),
+            b'\'' => output.push(b'\''),
+            b'"' => output.push(b'"'),
+            b'\\' => output.push(b'\\'),
+            b'?' => output.push(b'?'),
+            b'x' => {
+                if !bytes.get(cursor).is_some_and(u8::is_ascii_hexdigit) {
+                    output.push(b'x');
+                    continue;
+                }
+                let mut code = 0i32;
+                while let Some(&digit) = bytes.get(cursor) {
+                    if !digit.is_ascii_hexdigit() {
+                        break;
+                    }
+                    let value = if digit.is_ascii_digit() {
+                        i32::from(digit - b'0')
+                    } else {
+                        // Match the native implementation literally: it
+                        // subtracts lowercase `a` even for uppercase hex.
+                        i32::from(digit) - i32::from(b'a') + 10
+                    };
+                    code = code.wrapping_mul(16).wrapping_add(value);
+                    cursor += 1;
+                }
+                output.push(code as u8);
+            }
+            first @ b'0'..=b'7' => {
+                let mut code = i32::from(first - b'0');
+                while let Some(&digit) = bytes.get(cursor) {
+                    if !matches!(digit, b'0'..=b'7') {
+                        break;
+                    }
+                    code = code
+                        .wrapping_mul(8)
+                        .wrapping_add(i32::from(digit - b'0'));
+                    cursor += 1;
+                }
+                output.push(code as u8);
+            }
+            b'\0' => break,
+            other => output.push(other),
+        }
+    }
+    if let Some(nul) = output.iter().position(|byte| *byte == 0) {
+        output.truncate(nul);
+    }
+    lc_script::c4_string_from_bytes(&output)
+}
+
+fn is_material_compiler_key(name: &str) -> bool {
+    matches!(
+        name,
+        "Name"
+            | "Color"
+            | "ColorX"
+            | "Alpha"
+            | "ColorAnimation"
+            | "Shape"
+            | "Density"
+            | "Friction"
+            | "DigFree"
+            | "BlastFree"
+            | "Blast2Object"
+            | "Dig2Object"
+            | "Dig2ObjectRatio"
+            | "Dig2ObjectRequest"
+            | "Blast2ObjectRatio"
+            | "Blast2PXSRatio"
+            | "Instable"
+            | "MaxAirSpeed"
+            | "MaxSlide"
+            | "WindDrift"
+            | "Inflammable"
+            | "Incindiary"
+            | "Corrode"
+            | "Corrosive"
+            | "Extinguisher"
+            | "Soil"
+            | "Placement"
+            | "TextureOverlay"
+            | "OverlayType"
+            | "PXSGfx"
+            | "PXSGfxRt"
+            | "PXSGfxSize"
+            | "TempConvStrength"
+            | "BlastShiftTo"
+            | "InMatConvert"
+            | "InMatConvertTo"
+            | "InMatConvertDepth"
+            | "AboveTempConvert"
+            | "AboveTempConvertDir"
+            | "AboveTempConvertTo"
+            | "BelowTempConvert"
+            | "BelowTempConvertDir"
+            | "BelowTempConvertTo"
+            | "MinHeightCount"
+            | "SplashRate"
+    )
+}
+
+fn is_reaction_compiler_key(name: &str) -> bool {
+    matches!(
+        name,
+        "Type"
+            | "TargetSpec"
+            | "ScriptFunc"
+            | "ExecMask"
+            | "Reverse"
+            | "InverseSpec"
+            | "CheckSlide"
+            | "Depth"
+            | "ConvertMat"
+            | "CorrosionRate"
+    )
 }
 
 fn material_definition_from_record(
@@ -608,43 +957,59 @@ fn normalize_key(key: &str) -> String {
 }
 
 fn parse_i32(value: &str) -> Option<i32> {
-    let trimmed = value.trim();
-    if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
-        i32::from_str_radix(
-            trimmed.trim_start_matches("0x").trim_start_matches("0X"),
-            16,
-        )
-        .ok()
+    parse_action_i32_prefix(&lc_script::c4_string_bytes(value)).map(|(value, _)| value)
+}
+
+fn parse_u32_bits(value: &str) -> Option<i32> {
+    parse_action_u64_prefix(&lc_script::c4_string_bytes(value))
+        .map(|(value, _)| value as u32 as i32)
+}
+
+fn parse_int_list(key: &str, value: &str) -> Vec<i32> {
+    let normalized = normalize_key(key);
+    let unsigned = matches!(normalized.as_str(), "color" | "colorx" | "alpha");
+    let mut result = if unsigned {
+        parse_u32_array(value)
     } else {
-        trimmed.parse::<i32>().ok()
+        parse_int_array(value).collect()
+    };
+    let fixed_len = match normalized.as_str() {
+        "color" | "colorx" => Some(9),
+        "alpha" | "pxsgfxrt" => Some(6),
+        _ => None,
+    };
+    if let Some(fixed_len) = fixed_len {
+        result.resize(fixed_len, 0);
+        result.truncate(fixed_len);
     }
+    result
 }
 
-fn parse_int_list(value: &str) -> Option<Vec<i32>> {
-    let mut result = Vec::new();
-    for segment in value.split([',', ';']) {
-        let trimmed = segment.trim();
-        if trimmed.is_empty() {
-            continue;
+fn parse_u32_array(value: &str) -> Vec<i32> {
+    let bytes = lc_script::c4_string_bytes(value);
+    let mut values = Vec::new();
+    let mut cursor = 0;
+    loop {
+        if !values.is_empty() {
+            while bytes
+                .get(cursor)
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                cursor += 1;
+            }
+            if bytes.get(cursor) != Some(&b',') {
+                break;
+            }
+            cursor += 1;
         }
-        let parsed = parse_i32(trimmed)?;
-        result.push(parsed);
+        if let Some((parsed, consumed)) = parse_action_u64_prefix(&bytes[cursor..]) {
+            values.push(parsed as u32 as i32);
+            cursor += consumed;
+        } else {
+            values.push(0);
+        }
     }
-    Some(result)
-}
-
-fn parse_bool_flag(value: &str) -> Option<bool> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed.eq_ignore_ascii_case("true") {
-        return Some(true);
-    }
-    if trimmed.eq_ignore_ascii_case("false") {
-        return Some(false);
-    }
-    parse_i32(trimmed).map(|num| num != 0)
+    values
 }
 
 #[cfg(test)]
@@ -790,6 +1155,163 @@ mod tests {
                 .and_then(|material| material.int("density")),
             Some(22),
             "lookup follows the lower duplicate after enumeration swaps"
+        );
+    }
+
+    #[test]
+    fn material_parser_matches_stdcompiler_section_key_and_value_grammar() {
+        let mut packed = crate::MutableGroup::new("Grammar.c4g");
+        packed
+            .add_file(
+                "Grammar.c4m",
+                br#"[Reaction] before material
+Type=Poof
+TargetSpec="Solid\x21"
+ScriptFunc="Raw\x80"
+Reverse=2
+InverseSpec=1x
+CheckSlide= true
+Depth=-7tail
+ExecMask=-1tail
+
+[material]
+Name=Wrong
+Density=999
+
+[Material] trailing section text
+Name= Native // kept
+Density=0x32junk
+Density=99
+density=77
+Density =88
+Shape =7
+MaxAirSpeed	=12junk
+soil=8
+  [Ignored]
+Bad!
+   Soil=9
+  [Friction]33
+Friction	=0x10zz
+Placement=077tail
+WindDrift=-0x10
+MaxSlide=0b11
+DigFree=true
+BlastFree=2tail
+Color=1,,3;4,5
+  [ColorX]4,5
+  [ColorX]6
+Alpha=-1,2
+PXSGfxRt=1,2
+Blast2Object=ABCDE
+Dig2Object=NONE
+TextureOverlay=Smooth junk
+
+[Reaction Foo]
+Type=Ignored
+
+[Reaction] trailing section text
+Type=Convert // note
+Reverse=truejunk
+InverseSpec=False
+CheckSlide=0x
+"#
+                .to_vec(),
+            )
+            .expect("add grammar material");
+        let group = Group::from_raw_memory(
+            std::path::PathBuf::from("Grammar.c4g"),
+            packed.pack_raw().expect("pack grammar material group"),
+        )
+        .expect("open grammar material group");
+
+        let library = MaterialLibrary::from_group(&group).expect("load grammar material group");
+        let material = library
+            .get("Native // kept")
+            .expect("exact Material section and unstripped Name load");
+        assert_eq!(library.iter().count(), 1);
+        assert_eq!(material.int("Density"), Some(50));
+        assert_eq!(material.int("Friction"), Some(33));
+        assert_eq!(material.int("Shape"), None);
+        assert_eq!(material.int("MaxAirSpeed"), Some(12));
+        assert_eq!(material.int("Placement"), Some(77));
+        assert_eq!(material.int("WindDrift"), Some(0));
+        assert_eq!(material.int("MaxSlide"), Some(0));
+        assert_eq!(material.int("Soil"), Some(9));
+        assert_eq!(material.bool_flag("DigFree"), None);
+        assert_eq!(material.bool_flag("BlastFree"), Some(true));
+        assert_eq!(
+            material.int_list("Color"),
+            Some(vec![1, 0, 3, 0, 0, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            material.int_list("ColorX"),
+            Some(vec![4, 6, 0, 0, 0, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            material.int_list("Alpha"),
+            Some(vec![-1, 2, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            material.int_list("PXSGfxRt"),
+            Some(vec![1, 2, 0, 0, 0, 0])
+        );
+        assert_eq!(material.value("Blast2Object"), Some("ABCD"));
+        assert_eq!(material.value("Dig2Object"), Some(""));
+        assert_eq!(material.value("TextureOverlay"), Some("Smooth"));
+
+        let reactions = material.reactions();
+        assert_eq!(reactions.len(), 2);
+        assert_eq!(reactions[0].value("Type"), Some("Poof"));
+        assert_eq!(reactions[0].value("TargetSpec"), Some("Solid!"));
+        assert_eq!(
+            lc_script::c4_string_bytes(
+                reactions[0]
+                    .value("ScriptFunc")
+                    .expect("escaped ScriptFunc compiles")
+            ),
+            b"Raw\x80"
+        );
+        assert_eq!(reactions[0].bool_flag("Reverse"), None);
+        assert_eq!(reactions[0].bool_flag("InverseSpec"), Some(true));
+        assert_eq!(reactions[0].bool_flag("CheckSlide"), None);
+        assert_eq!(reactions[0].int("Depth"), Some(-7));
+        assert_eq!(reactions[0].int("ExecMask"), Some(-1));
+        assert_eq!(reactions[1].value("Type"), Some("Convert // note"));
+        assert_eq!(reactions[1].bool_flag("Reverse"), Some(true));
+        assert_eq!(reactions[1].bool_flag("InverseSpec"), None);
+        assert_eq!(reactions[1].bool_flag("CheckSlide"), Some(false));
+
+        let shadowed = MaterialParser::new(
+            "Material=shadow\nReaction=,,\n[Material]\nName=Later\nDensity=9\n\
+             [Reaction]\nType=Poof\n",
+        )
+        .parse_first()
+        .expect("scalar namespaces compile");
+        assert_eq!(shadowed.name(), "");
+        assert_eq!(shadowed.int("Density"), None);
+        assert_eq!(shadowed.reactions().len(), 1);
+        assert!(shadowed.reactions()[0].raw_properties().is_empty());
+
+        let absent = MaterialParser::new(
+            "[material]\nName=Wrong\n[Material ]\nName=AlsoWrong\n",
+        )
+        .parse_first()
+        .expect("absent exact Material namespace compiles defaults");
+        assert_eq!(absent.name(), "");
+        assert!(absent.raw_properties().is_empty());
+
+        let numeric_whitespace = MaterialParser::new(
+            "[Material]\nName=Whitespace\nDensity=\u{000b}50tail\n\
+             Friction=\u{000c}7tail\nMaxSlide=0x 1\nPXSGfxRt=1,\u{000b}2\n",
+        )
+        .parse_first()
+        .expect("native numeric whitespace compiles");
+        assert_eq!(numeric_whitespace.int("Density"), Some(50));
+        assert_eq!(numeric_whitespace.int("Friction"), Some(7));
+        assert_eq!(numeric_whitespace.int("MaxSlide"), Some(0));
+        assert_eq!(
+            numeric_whitespace.int_list("PXSGfxRt"),
+            Some(vec![1, 2, 0, 0, 0, 0])
         );
     }
 
