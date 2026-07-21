@@ -38784,9 +38784,12 @@ public func ReadIDs(int first, int second)
             return 0;
         }
         "#;
+        let mut definition =
+            Definition::from_script("Static", "Static", script).expect("script compiles");
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
         let mut engine = Engine::with_seed(0);
         engine
-            .register_definition(Definition::from_script("Static", "Static", script).unwrap())
+            .register_definition(definition)
             .expect("definition registers");
         engine.set_landscape(Landscape::flat(16, 5));
 
@@ -58809,9 +58812,11 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
 
     #[test]
     fn landscape_collision_preserves_fixed_x_and_zeroes_contact_y() {
+        let mut definition = simple_definition("Crate");
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
         let mut engine = Engine::with_seed(19);
         engine
-            .register_definition(simple_definition("Crate"))
+            .register_definition(definition)
             .expect("definition registers");
         engine.set_landscape(Landscape::flat(20, 10));
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
@@ -58838,14 +58843,32 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
 
     #[test]
     fn per_pixel_horizontal_movement_stops_at_first_solid_column() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut definition = simple_definition("Crate");
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_RIGHT)]);
+        definition.set_contact_density(50);
         let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
         engine
-            .register_definition(simple_definition("Crate"))
+            .register_definition(definition)
             .expect("definition registers");
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
         let mut surface = vec![20; 12];
         surface[6] = 0;
-        engine.set_landscape(Landscape::new(12, surface).expect("landscape constructs"));
+        let mut landscape =
+            Landscape::new_with_material(12, surface, Some(earth)).expect("landscape constructs");
+        landscape.fill_solid_material(Some(earth));
+        engine.set_landscape(landscape);
 
         let id = engine
             .spawn_object(
@@ -58865,7 +58888,392 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         assert_eq!(object.position, Vector2::new(5, 10));
         let idx = engine.find_object_index(id).expect("object exists");
         assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
-        assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
+        assert_eq!(
+            engine.objects[idx].fixed_velocity.x,
+            itofix(4) - fixed100(50)
+        );
+        assert_eq!(engine.objects[idx].fixed_velocity.y, -fixed100(50));
+    }
+
+    #[test]
+    fn zero_vertex_objects_use_vertex_contact_and_border_bound_semantics() {
+        use std::sync::{Arc, Mutex};
+
+        fn zero_vertex_definition(
+            id: &str,
+            calls: Arc<Mutex<Vec<String>>>,
+        ) -> Definition {
+            let mut hooks = DebuggerHooks::new();
+            hooks.set_on_call(move |name, _args| {
+                if matches!(
+                    name,
+                    "ContactLeft"
+                        | "ContactRight"
+                        | "ContactTop"
+                        | "ContactBottom"
+                        | "Hit"
+                        | "Hit2"
+                        | "Hit3"
+                ) {
+                    calls.lock().unwrap().push(name.to_string());
+                }
+            });
+            let mut definition = Definition::from_script(
+                id,
+                id,
+                r#"
+                global func ContactLeft() { return 0; }
+                global func ContactRight() { return 0; }
+                global func ContactTop() { return 0; }
+                global func ContactBottom() { return 0; }
+                global func Hit() { return 0; }
+                global func Hit2() { return 0; }
+                global func Hit3() { return 0; }
+                "#,
+            )
+            .expect("zero-vertex movement script compiles");
+            definition.set_debugger_hooks(hooks);
+            definition.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
+            definition.set_shape_vertices(Vec::new());
+            definition.set_contact_density(50);
+            definition.set_contact_function_calls(true);
+            definition
+        }
+
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=100
+            "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let terrain_calls = Arc::new(Mutex::new(Vec::new()));
+        let world_bound_calls = Arc::new(Mutex::new(Vec::new()));
+        let layer_high_bound_calls = Arc::new(Mutex::new(Vec::new()));
+        let layer_low_bound_calls = Arc::new(Mutex::new(Vec::new()));
+        let terrain_definition =
+            zero_vertex_definition("ZeroPass", Arc::clone(&terrain_calls));
+        let mut world_bound_definition =
+            zero_vertex_definition("ZeroWorld", Arc::clone(&world_bound_calls));
+        world_bound_definition
+            .set_border_bound(C4D_BORDER_SIDES | C4D_BORDER_TOP | C4D_BORDER_BOTTOM);
+        let mut layer_definition = simple_definition("ZeroLayer");
+        layer_definition.set_shape_rect(Some(DefinitionRect::new(-1, -2, 10, 12)));
+        layer_definition.set_shape_vertices(Vec::new());
+        layer_definition.set_border_bound(C4D_BORDER_LAYER);
+        let layer_high_mover_definition =
+            zero_vertex_definition("ZeroLayerHigh", Arc::clone(&layer_high_bound_calls));
+        let layer_low_mover_definition =
+            zero_vertex_definition("ZeroLayerLow", Arc::clone(&layer_low_bound_calls));
+
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        let mut landscape = Landscape::flat_with_material(20, 10, Some(earth));
+        landscape.set_world_height(30);
+        engine.set_landscape(landscape);
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine
+            .register_definition(terrain_definition)
+            .expect("terrain passer registers");
+        engine
+            .register_definition(world_bound_definition)
+            .expect("world-bound mover registers");
+        engine
+            .register_definition(layer_definition)
+            .expect("layer registers");
+        engine
+            .register_definition(layer_high_mover_definition)
+            .expect("high layer-bound mover registers");
+        engine
+            .register_definition(layer_low_mover_definition)
+            .expect("low layer-bound mover registers");
+
+        let layer = engine
+            .spawn_object(
+                SpawnConfig::new("ZeroLayer")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("layer spawns");
+        let terrain = engine
+            .spawn_object(
+                SpawnConfig::new("ZeroPass")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 8))
+                    .with_velocity(Vector2::new(2, 4))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("terrain passer spawns");
+        let world_low = engine
+            .spawn_object(
+                SpawnConfig::new("ZeroWorld")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(3, 4))
+                    .with_velocity(Vector2::new(-6, -6))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("low world-bound mover spawns");
+        let world_high = engine
+            .spawn_object(
+                SpawnConfig::new("ZeroWorld")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(17, 26))
+                    .with_velocity(Vector2::new(6, 6))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("high world-bound mover spawns");
+        let layer_high_mover = engine
+            .spawn_object(
+                SpawnConfig::new("ZeroLayerHigh")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(16, 16))
+                    .with_velocity(Vector2::new(5, 5))
+                    .with_layer(layer)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("high layer-bound mover spawns");
+        let layer_low_mover = engine
+            .spawn_object(
+                SpawnConfig::new("ZeroLayerLow")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(12, 12))
+                    .with_velocity(Vector2::new(-5, -5))
+                    .with_layer(layer)
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("low layer-bound mover spawns");
+        let terrain_idx = engine
+            .find_object_index(terrain)
+            .expect("terrain passer exists");
+        engine.objects[terrain_idx].frame_t_contact = CNAT_LEFT;
+
+        let snapshot = engine.tick().expect("zero-vertex movement tick succeeds");
+
+        let terrain_snapshot = snapshot.object(terrain).expect("terrain passer remains");
+        assert!(terrain_snapshot.vertices.is_empty());
+        assert_eq!(terrain_snapshot.position, Vector2::new(7, 12));
+        assert_eq!(terrain_snapshot.velocity, Vector2::new(2, 4));
+        let terrain_idx = engine
+            .find_object_index(terrain)
+            .expect("terrain passer remains live");
+        assert_eq!(
+            engine.objects[terrain_idx].fixed_position,
+            FixedVec2::from_ints(7, 12)
+        );
+        assert_eq!(
+            engine.objects[terrain_idx].fixed_velocity,
+            FixedVec2::from_ints(2, 4),
+            "solid material friction must not be synthesized without vertices"
+        );
+        assert_eq!(engine.objects[terrain_idx].motion_x, 2);
+        assert_eq!(engine.objects[terrain_idx].motion_y, 4);
+        assert_eq!(engine.objects[terrain_idx].frame_t_contact, CNAT_NONE);
+        assert!(
+            terrain_calls.lock().unwrap().is_empty(),
+            "empty terrain probes must not synthesize Contact* or Hit calls"
+        );
+
+        let world_low_snapshot = snapshot.object(world_low).expect("low mover remains");
+        assert_eq!(world_low_snapshot.position, Vector2::new(2, 3));
+        assert_eq!(world_low_snapshot.velocity, Vector2::ZERO);
+        let world_low_idx = engine
+            .find_object_index(world_low)
+            .expect("low mover remains live");
+        assert_eq!(
+            engine.objects[world_low_idx].fixed_position,
+            FixedVec2::from_ints(-3, -2),
+            "TargetBounds clamps only the integer target"
+        );
+
+        let world_high_snapshot = snapshot.object(world_high).expect("high mover remains");
+        assert_eq!(world_high_snapshot.position, Vector2::new(18, 27));
+        assert_eq!(world_high_snapshot.velocity, Vector2::ZERO);
+        let world_high_idx = engine
+            .find_object_index(world_high)
+            .expect("high mover remains live");
+        assert_eq!(
+            engine.objects[world_high_idx].fixed_position,
+            FixedVec2::from_ints(23, 32)
+        );
+
+        let layer_high_snapshot = snapshot
+            .object(layer_high_mover)
+            .expect("high layer mover remains");
+        assert_eq!(layer_high_snapshot.position, Vector2::new(17, 17));
+        assert_eq!(layer_high_snapshot.velocity, Vector2::ZERO);
+        let layer_high_idx = engine
+            .find_object_index(layer_high_mover)
+            .expect("high layer mover remains live");
+        assert_eq!(
+            engine.objects[layer_high_idx].fixed_position,
+            FixedVec2::from_ints(21, 21)
+        );
+
+        let layer_low_snapshot = snapshot
+            .object(layer_low_mover)
+            .expect("low layer mover remains");
+        assert_eq!(layer_low_snapshot.position, Vector2::new(11, 11));
+        assert_eq!(layer_low_snapshot.velocity, Vector2::ZERO);
+        let layer_low_idx = engine
+            .find_object_index(layer_low_mover)
+            .expect("low layer mover remains live");
+        assert_eq!(
+            engine.objects[layer_low_idx].fixed_position,
+            FixedVec2::from_ints(7, 7)
+        );
+
+        assert_eq!(
+            *world_bound_calls.lock().unwrap(),
+            vec![
+                "ContactLeft".to_string(),
+                "ContactTop".to_string(),
+                "ContactRight".to_string(),
+                "ContactBottom".to_string(),
+            ],
+            "world bounds retain native movement and directional callback order"
+        );
+        assert_eq!(
+            *layer_high_bound_calls.lock().unwrap(),
+            vec!["ContactRight".to_string(), "ContactBottom".to_string()],
+            "high layer bounds retain their native directional callbacks"
+        );
+        assert_eq!(
+            *layer_low_bound_calls.lock().unwrap(),
+            vec!["ContactLeft".to_string(), "ContactTop".to_string()],
+            "low layer bounds retain their native directional callbacks"
+        );
+    }
+
+    #[test]
+    fn zero_vertex_attached_movement_runs_attachment_loss_action() {
+        use std::sync::{Arc, Mutex};
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            hooks.set_on_call(move |name, _args| {
+                if name == "OnJumpStart" || name == "OnSlideAbort" {
+                    calls.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+        let mut definition = Definition::from_script(
+            "ZeroAttach",
+            "ZeroAttach",
+            r#"
+            global func OnSlideAbort() { return 0; }
+            global func OnJumpStart() { return 0; }
+            "#,
+        )
+        .expect("attachment script compiles");
+        definition.set_debugger_hooks(hooks);
+        definition.set_shape_vertices(Vec::new());
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Slide".to_string(),
+                    ActionSpec::default()
+                        .with_attach(CNAT_BOTTOM)
+                        .with_abort_call("OnSlideAbort"),
+                ),
+                (
+                    "Jump".to_string(),
+                    ActionSpec::default().with_start_call("OnJumpStart"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(29);
+        engine.set_landscape(Landscape::flat(20, 20));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("zero-vertex attached definition registers");
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("ZeroAttach")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 5))
+                    .with_action(ActionState::new("Slide"))
+                    .with_mobile(true),
+            )
+            .expect("attached object spawns");
+        let index = engine.find_object_index(object).expect("object exists");
+        engine.objects[index].frame_t_contact = CNAT_LEFT;
+        engine.objects[index].state.shape_attach = ShapeAttachRecord {
+            mat_valid: true,
+            mat_vehicle: true,
+            x: 9,
+            y: 10,
+            vtx: 3,
+        };
+
+        let snapshot = engine.tick().expect("attachment-loss tick succeeds");
+        assert_eq!(
+            snapshot.object(object).expect("object remains").action.name,
+            "Jump"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["OnJumpStart".to_string(), "OnSlideAbort".to_string()]
+        );
+        let index = engine.find_object_index(object).expect("object remains");
+        assert_eq!(engine.objects[index].frame_t_contact, CNAT_NONE);
+        assert!(!engine.objects[index].state.shape_attach.mat_valid);
+        assert!(!engine.objects[index].state.shape_attach.mat_vehicle);
+        assert_eq!(engine.objects[index].state.shape_attach.x, 9);
+        assert_eq!(engine.objects[index].state.shape_attach.y, 10);
+        assert_eq!(engine.objects[index].state.shape_attach.vtx, 3);
+    }
+
+    #[test]
+    fn zero_vertex_rotation_uses_empty_contact_checks() {
+        let mut definition = simple_definition("ZeroTurn");
+        definition.set_shape_vertices(Vec::new());
+        definition.set_rotateable(360);
+
+        let mut engine = Engine::with_seed(31);
+        engine.set_landscape(Landscape::flat(20, 20));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("zero-vertex rotating definition registers");
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("ZeroTurn")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 5))
+                    .with_rotation_velocity(itofix(1))
+                    .with_mobile(true),
+            )
+            .expect("rotating object spawns");
+        let index = engine.find_object_index(object).expect("object exists");
+        engine.objects[index].frame_t_contact = CNAT_LEFT;
+
+        engine.tick_without_snapshot().expect("rotation tick succeeds");
+
+        let index = engine.find_object_index(object).expect("object remains");
+        assert_eq!(engine.objects[index].state.rotation, 5);
+        assert_eq!(engine.objects[index].fixed_rotation, itofix(5));
+        assert_eq!(engine.objects[index].frame_t_contact, CNAT_NONE);
     }
 
     #[test]

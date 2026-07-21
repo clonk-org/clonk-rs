@@ -7167,18 +7167,6 @@ impl Object {
             });
         };
 
-        if self.state.vertices.is_empty() {
-            let solid_mask_removed = self.advance_fixed_position_heightmap(
-                landscape,
-                materials,
-                &mut on_do_motion,
-            )?;
-            return Ok(MovementStepOutcome {
-                solid_mask_removed,
-                ..MovementStepOutcome::default()
-            });
-        }
-
         if movement.attach != 0 {
             return self.advance_attached_shape_position(
                 landscape,
@@ -7327,61 +7315,6 @@ impl Object {
         self.state.velocity = self.velocity_pixels();
         outcome.solid_mask_removed = solid_mask_removed;
         Ok(outcome)
-    }
-
-    fn advance_fixed_position_heightmap(
-        &mut self,
-        landscape: &mut Landscape,
-        materials: &MaterialSet,
-        on_do_motion: &mut impl FnMut(&mut Object, &mut Landscape) -> Result<(), EngineError>,
-    ) -> Result<bool, EngineError> {
-        let mut solid_mask_removed = false;
-        self.fixed_position.x += self.fixed_velocity.x;
-        let target_x = fixtoi(self.fixed_position.x);
-        while self.state.position.x != target_x {
-            let next_x = self.state.position.x + sign_i32(target_x - self.state.position.x);
-            let candidate = Vector2::new(next_x, self.state.position.y);
-            if landscape
-                .resolve_collision(candidate, self.state.velocity)
-                .collided
-            {
-                self.fixed_position.x = itofix(self.state.position.x);
-                self.fixed_velocity.x = C4Fixed::ZERO;
-                self.apply_landscape_contact_material(landscape, materials, candidate.x);
-                break;
-            }
-            if !solid_mask_removed {
-                on_do_motion(self, landscape)?;
-            }
-            self.motion_x = self.motion_x.saturating_add(next_x - self.state.position.x);
-            self.state.position.x = next_x;
-            solid_mask_removed = true;
-        }
-
-        self.fixed_position.y += self.fixed_velocity.y;
-        let target_y = fixtoi(self.fixed_position.y);
-        while self.state.position.y != target_y {
-            let next_y = self.state.position.y + sign_i32(target_y - self.state.position.y);
-            let candidate = Vector2::new(self.state.position.x, next_y);
-            if landscape
-                .resolve_collision(candidate, self.state.velocity)
-                .collided
-            {
-                self.fixed_position.y = itofix(self.state.position.y);
-                self.fixed_velocity.y = C4Fixed::ZERO;
-                self.apply_landscape_contact_material(landscape, materials, candidate.x);
-                break;
-            }
-            if !solid_mask_removed {
-                on_do_motion(self, landscape)?;
-            }
-            self.motion_y = self.motion_y.saturating_add(next_y - self.state.position.y);
-            self.state.position.y = next_y;
-            solid_mask_removed = true;
-        }
-
-        self.state.velocity = self.velocity_pixels();
-        Ok(solid_mask_removed)
     }
 
     fn advance_attached_shape_position(
@@ -7637,19 +7570,6 @@ impl Object {
         Ok(())
     }
 
-    fn apply_landscape_contact_material(
-        &mut self,
-        landscape: &Landscape,
-        materials: &MaterialSet,
-        x: i32,
-    ) {
-        if let Some(material_id) = landscape.solid_material_at(x) {
-            if let Some(material) = materials.get_by_id(material_id) {
-                self.apply_material_interaction(material);
-            }
-        }
-    }
-
     /// Accumulate angular velocity into the fixed rotation, mirroring the fixed
     /// state pieces of C++ `C4Movement.cpp:373-436`: the rotation block is
     /// gated by the cached OCF_Rotate bit. Otherwise it applies `fix_r +=
@@ -7688,24 +7608,16 @@ impl Object {
         let target_rotation = fixtoi(self.fixed_rotation);
         let mut contact_outcome = (false, 0);
         if let Some(landscape) = landscape {
-            if !self.state.vertices.is_empty() {
-                contact_outcome = self.advance_fixed_rotation_with_contact(
-                    target_rotation,
-                    landscape,
-                    materials,
-                    movement,
-                    no_attach,
-                    redirect_yr,
-                    solid_mask_removed,
-                    &mut on_contact,
-                )?;
-            } else {
-                let changed = self.state.rotation != target_rotation;
-                self.state.rotation = target_rotation;
-                if changed && self.shape_template.line == 0 {
-                    self.refresh_shape_geometry();
-                }
-            }
+            contact_outcome = self.advance_fixed_rotation_with_contact(
+                target_rotation,
+                landscape,
+                materials,
+                movement,
+                no_attach,
+                redirect_yr,
+                solid_mask_removed,
+                &mut on_contact,
+            )?;
         } else {
             let changed = self.state.rotation != target_rotation;
             self.state.rotation = target_rotation;
@@ -8317,14 +8229,16 @@ impl Object {
                     op.apply(landscape_ref);
                 }
             }
-            if let Some(landscape_ref) = &mut landscape {
-                let resolution =
-                    (**landscape_ref).resolve_collision(self.state.position, self.state.velocity);
-                if resolution.collided {
-                    self.apply_collision_resolution(&resolution);
-                    if let Some(material_id) = resolution.material {
-                        if let Some(material) = materials.get_by_id(material_id) {
-                            self.apply_material_interaction(material);
+            if !self.state.vertices.is_empty() {
+                if let Some(landscape_ref) = &mut landscape {
+                    let resolution = (**landscape_ref)
+                        .resolve_collision(self.state.position, self.state.velocity);
+                    if resolution.collided {
+                        self.apply_collision_resolution(&resolution);
+                        if let Some(material_id) = resolution.material {
+                            if let Some(material) = materials.get_by_id(material_id) {
+                                self.apply_material_interaction(material);
+                            }
                         }
                     }
                 }
@@ -33193,14 +33107,16 @@ impl Engine {
 
             object.clamp_velocity(&self.physics);
 
-            if let Some(landscape) = landscape.as_ref() {
-                let resolution =
-                    landscape.resolve_collision(object.state.position, object.state.velocity);
-                if resolution.collided {
-                    object.apply_collision_resolution(&resolution);
-                    if let Some(material_id) = resolution.material {
-                        if let Some(material) = self.materials.get_by_id(material_id) {
-                            object.apply_material_interaction(material);
+            if !object.state.vertices.is_empty() {
+                if let Some(landscape) = landscape.as_ref() {
+                    let resolution =
+                        landscape.resolve_collision(object.state.position, object.state.velocity);
+                    if resolution.collided {
+                        object.apply_collision_resolution(&resolution);
+                        if let Some(material_id) = resolution.material {
+                            if let Some(material) = self.materials.get_by_id(material_id) {
+                                object.apply_material_interaction(material);
+                            }
                         }
                     }
                 }
@@ -37084,21 +37000,6 @@ impl Engine {
         let mut physics = self.physics;
         delta.apply(&mut physics);
         self.set_physics(physics);
-    }
-
-    fn apply_landscape(&self, object: &mut Object) {
-        if let Some(landscape) = &self.landscape {
-            let resolution =
-                landscape.resolve_collision(object.state.position, object.state.velocity);
-            if resolution.collided {
-                object.apply_collision_resolution(&resolution);
-                if let Some(material_id) = resolution.material {
-                    if let Some(material) = self.materials.get_by_id(material_id) {
-                        object.apply_material_interaction(material);
-                    }
-                }
-            }
-        }
     }
 
     fn update_selection_for_state_change(
@@ -44291,7 +44192,7 @@ impl Engine {
 
     #[doc(hidden)]
     pub fn apply_landscape_at_index(&mut self, idx: usize) {
-        if idx >= self.objects.len() {
+        if idx >= self.objects.len() || self.objects[idx].state.vertices.is_empty() {
             return;
         }
 
