@@ -406,6 +406,18 @@ impl Group {
         Self::from_packed_bytes(path, data)
     }
 
+    /// Opens bytes with the same envelope requirement as a physical,
+    /// top-level C4Group file. This is used when a caller has extracted an
+    /// ordinary entry before applying `C4Group_IsGroup` classification.
+    pub(crate) fn from_top_level_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
+        if !data.starts_with(&C4GROUP_GZ_MAGIC) && !data.starts_with(&GZ_MAGIC) {
+            return Err(GroupError::InvalidGroup(
+                "invalid compressed group magic".into(),
+            ));
+        }
+        Self::from_packed_bytes(path, data)
+    }
+
     /// Opens an uncompressed nested-group image without accepting a gzip
     /// wrapper. C4Group::OpenAsChild reads the header in place and therefore
     /// skips child-marked payloads that are standalone compressed groups.
@@ -463,12 +475,14 @@ impl MutableGroup {
                 continue;
             }
 
-            // A packed C4Group file inside a folder group is a child too
-            // (C4Group_IsGroup/AddEntryOnDisk), but its already-uncompressed
-            // image is copied opaquely. Keep it lazy just like a child core in
-            // a packed parent; opening it eagerly would rewrite its own header.
+            // A top-level-openable C4Group file inside a folder group is a
+            // child too (C4Group_IsGroup/AddEntryOnDisk), but a raw unwrapped
+            // nested-group image remains an ordinary file. A recognized
+            // child's already-uncompressed image is copied opaquely; opening
+            // it eagerly would rewrite its own header.
             if group.is_directory() {
-                if let Ok(child) = group.open_child(&entry.relative_path) {
+                let path = group.root().join(&entry.relative_path);
+                if let Ok(child) = Group::open(path) {
                     let data = child
                         .raw_image()
                         .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;

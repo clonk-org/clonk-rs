@@ -313,6 +313,120 @@ fn cpp_retrieve_scenario_opens_standalone_material_files_without_child_cores() {
     assert_eq!(material.read_file("Earth.c4m").unwrap(), b"scenario-earth");
 }
 
+#[test]
+fn retrieve_scenario_classifies_extracted_group_files_like_top_level_cpp() {
+    let directory = tempfile::tempdir().unwrap();
+    let scenario_path = directory.path().join("FolderScenario.c4s");
+    std::fs::create_dir(&scenario_path).unwrap();
+
+    let mut raw_child = MutableGroup::new("Raw.c4g");
+    raw_child
+        .add_file("Inside.txt", b"raw child sentinel".to_vec())
+        .unwrap();
+    let raw_image = raw_child.pack_raw().unwrap();
+
+    let mut wrapped_child = MutableGroup::new("Wrapped.c4g");
+    wrapped_child
+        .add_file("Inside.txt", b"wrapped child sentinel".to_vec())
+        .unwrap();
+    let wrapped_image = wrapped_child.pack().unwrap();
+
+    std::fs::write(scenario_path.join("Raw.c4g"), &raw_image).unwrap();
+    std::fs::write(scenario_path.join("Wrapped.c4g"), &wrapped_image).unwrap();
+    let directory_scenario = Group::open(&scenario_path).unwrap();
+
+    let mut packed_source = MutableGroup::new("PackedScenario.c4s");
+    packed_source
+        .add_file("Raw.c4g", raw_image.clone())
+        .unwrap();
+    packed_source
+        .add_file("Wrapped.c4g", wrapped_image)
+        .unwrap();
+    let packed_scenario = Group::from_memory(
+        PathBuf::from("PackedScenario.c4s"),
+        packed_source.pack().unwrap(),
+    )
+    .unwrap();
+    let dynamic = Group::from_memory(
+        PathBuf::from("Dynamic.c4s"),
+        MutableGroup::new("Dynamic.c4s").pack().unwrap(),
+    )
+    .unwrap();
+
+    for (label, scenario) in [
+        ("directory", directory_scenario),
+        ("packed", packed_scenario),
+    ] {
+        let output_filename = format!("Combined-{label}.c4s");
+        let combined =
+            combine_network_scenario(&scenario, &dynamic, &output_filename, "Network Client")
+                .unwrap();
+        let combined = Group::from_memory(PathBuf::from(output_filename), combined).unwrap();
+
+        let raw_entry = exact_entry(&combined, b"Raw.c4g");
+        assert!(!raw_entry.is_directory, "{label} raw-image source");
+        assert_eq!(
+            combined.read_entry_bytes_exact(&raw_entry).unwrap(),
+            raw_image,
+            "{label} raw-image bytes"
+        );
+        combined
+            .open_child_entry_exact(&raw_entry)
+            .expect_err("raw image must retain its ordinary-file flag");
+
+        let wrapped_entry = exact_entry(&combined, b"Wrapped.c4g");
+        assert!(wrapped_entry.is_directory, "{label} wrapped source");
+        assert_eq!(
+            combined
+                .open_child_entry_exact(&wrapped_entry)
+                .unwrap()
+                .read_file("Inside.txt")
+                .unwrap(),
+            b"wrapped child sentinel",
+            "{label} wrapped child contents"
+        );
+    }
+}
+
+#[test]
+fn retrieve_scenario_rejects_raw_unwrapped_material_files() {
+    let mut raw_material = MutableGroup::new("Material.c4g");
+    raw_material
+        .add_file("Earth.c4m", b"raw material".to_vec())
+        .unwrap();
+    let raw_image = raw_material.pack_raw().unwrap();
+
+    let directory = tempfile::tempdir().unwrap();
+    let directory_scenario_path = directory.path().join("FolderScenario.c4s");
+    std::fs::create_dir(&directory_scenario_path).unwrap();
+    std::fs::write(directory_scenario_path.join("Material.c4g"), &raw_image).unwrap();
+    let directory_scenario = Group::open(directory_scenario_path).unwrap();
+
+    let mut packed_source = MutableGroup::new("PackedScenario.c4s");
+    packed_source
+        .add_file("Material.c4g", raw_image.clone())
+        .unwrap();
+    let packed_scenario = Group::from_memory(
+        PathBuf::from("PackedScenario.c4s"),
+        packed_source.pack().unwrap(),
+    )
+    .unwrap();
+
+    let mut dynamic = MutableGroup::new("Dynamic.c4s");
+    dynamic.add_file("Material.c4g", raw_image).unwrap();
+    let dynamic =
+        Group::from_memory(PathBuf::from("Dynamic.c4s"), dynamic.pack().unwrap()).unwrap();
+
+    for scenario in [directory_scenario, packed_scenario] {
+        let error = combine_network_scenario(&scenario, &dynamic, "Combined.c4s", "Network Client")
+            .expect_err("C4Group_UnpackDirectory rejects raw Material.c4g files");
+        assert_eq!(
+            error.to_string(),
+            "both network resources contain Material.c4g, but one is not a child group"
+        );
+    }
+}
+
 fn add_raw_child(
     parent: &mut MutableGroup,
     name: &[u8],

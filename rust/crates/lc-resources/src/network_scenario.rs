@@ -96,7 +96,8 @@ fn copy_entry(
     // files. Detect those exactly as C4Group_IsGroup does during the final
     // directory pack, then retain their uncompressed image opaquely.
     if source.is_directory() {
-        if let Ok(child) = source.open_child(&entry.relative_path) {
+        let path = source.root().join(&entry.relative_path);
+        if let Ok(child) = Group::open(path) {
             let data = child.raw_image()?;
             let contents_crc = child.contents_crc()?;
             target.add_packed_child_bytes_with_metadata(
@@ -121,7 +122,9 @@ fn copy_entry(
             entry.time,
             false,
         )?;
-    } else if let Ok(child) = Group::from_memory(entry.relative_path.clone(), data.clone()) {
+    } else if let Ok(child) =
+        Group::from_top_level_memory(entry.relative_path.clone(), data.clone())
+    {
         // Root extraction discards the original child-core flag. During the
         // final folder pack C4Group_IsGroup promotes any valid standalone
         // group file and stores its uncompressed image as an opaque child.
@@ -166,16 +169,17 @@ fn rebuild_material_entry(
 
 fn open_child_entry_exact(source: &Group, entry: &GroupEntry) -> Result<Group, GroupError> {
     if source.is_directory() {
-        source.open_child(&entry.relative_path)
+        Group::open(source.root().join(&entry.relative_path))
     } else {
         let data = source.read_entry_bytes_exact(entry)?;
         if entry.is_directory {
             Group::from_raw_memory(entry.relative_path.clone(), data)
         } else {
-            // RetrieveScenario extracts the entry before probing the native
-            // Material.c4g path. A valid standalone group therefore opens
-            // even if its outer core did not mark it as a child.
-            Group::from_memory(entry.relative_path.clone(), data)
+            // RetrieveScenario extracts the entry before opening the native
+            // Material.c4g path as a top-level group. A valid wrapped group
+            // therefore opens even if its outer core did not mark it as a
+            // child, while a raw unwrapped image does not.
+            Group::from_top_level_memory(entry.relative_path.clone(), data)
         }
     }
 }

@@ -847,6 +847,87 @@ fn mutable_group_child_mut_opens_imported_child_case_insensitively() {
 }
 
 #[test]
+fn mutable_group_from_directory_keeps_raw_unwrapped_group_image_as_file() {
+    let directory = tempdir().unwrap();
+    let scenario_path = directory.path().join("FolderScenario.c4s");
+    std::fs::create_dir(&scenario_path).unwrap();
+
+    let mut raw_child = MutableGroup::new("Raw.c4g");
+    raw_child
+        .add_file("Inside.txt", b"raw child sentinel".to_vec())
+        .unwrap();
+    let raw_image = raw_child.pack_raw().unwrap();
+    std::fs::write(scenario_path.join("Raw.c4g"), &raw_image).unwrap();
+
+    let mut wrapped_child = MutableGroup::new("Wrapped.c4g");
+    wrapped_child
+        .add_file("Inside.txt", b"wrapped child sentinel".to_vec())
+        .unwrap();
+    std::fs::write(
+        scenario_path.join("Wrapped.c4g"),
+        wrapped_child.pack().unwrap(),
+    )
+    .unwrap();
+
+    let source = Group::open(&scenario_path).unwrap();
+    assert_eq!(
+        source
+            .open_child("Raw.c4g")
+            .expect("direct child opens retain raw-image support")
+            .read_file("Inside.txt")
+            .unwrap(),
+        b"raw child sentinel"
+    );
+
+    let rewritten = MutableGroup::from_group(&source).unwrap();
+    let mut expected_file = MutableGroup::new("FolderScenario.c4s");
+    expected_file
+        .add_file("Raw.c4g", raw_image.clone())
+        .unwrap();
+    assert_eq!(
+        rewritten.entry_crc("Raw.c4g"),
+        expected_file.entry_crc("Raw.c4g"),
+        "ordinary-file CRC includes the outer entry name"
+    );
+
+    let reopened = Group::from_memory(
+        PathBuf::from("FolderScenario.c4s"),
+        rewritten.pack_raw().unwrap(),
+    )
+    .unwrap();
+    let raw_entry = reopened
+        .entries()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.name_bytes == b"Raw.c4g")
+        .unwrap();
+    assert!(!raw_entry.is_directory);
+    assert_eq!(
+        reopened.read_entry_bytes_exact(&raw_entry).unwrap(),
+        raw_image
+    );
+    reopened
+        .open_child("Raw.c4g")
+        .expect_err("the packed result must retain the ordinary-file flag");
+
+    let wrapped_entry = reopened
+        .entries()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.name_bytes == b"Wrapped.c4g")
+        .unwrap();
+    assert!(wrapped_entry.is_directory);
+    assert_eq!(
+        reopened
+            .open_child_entry_exact(&wrapped_entry)
+            .unwrap()
+            .read_file("Inside.txt")
+            .unwrap(),
+        b"wrapped child sentinel"
+    );
+}
+
+#[test]
 fn mutable_group_keeps_directory_packed_child_image_opaque_until_mutated() {
     let directory = tempdir().unwrap();
     let scenario_path = directory.path().join("FolderScenario.c4s");
