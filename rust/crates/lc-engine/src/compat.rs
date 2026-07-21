@@ -918,7 +918,7 @@ impl HostSolidMaskMetadata {
         match name.filter(|name| !name.is_empty()) {
             Some(name) => self
                 .named_images
-                .get(&name.to_ascii_lowercase())
+                .get(&lc_resources::material::c4_name_key(name))
                 .map(|image| image.check_mask_rect(mask)),
             None => Some(
                 self.default_image
@@ -939,7 +939,7 @@ impl HostSolidMaskMetadata {
         match name.filter(|name| !name.is_empty()) {
             Some(name) => self
                 .named_images
-                .get(&name.to_ascii_lowercase())?
+                .get(&lc_resources::material::c4_name_key(name))?
                 .pixels_for_checked_mask(mask)
                 .map(Some),
             None => match self.default_image.as_ref() {

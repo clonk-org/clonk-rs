@@ -1319,10 +1319,10 @@ impl ObjectGraphicsOverlay {
 }
 
 /// Whether two valid, resolved graphics references name the same native
-/// `C4DefGraphics` pointer. Rust's named-graphics resolver folds ASCII case;
-/// an absent/empty name denotes the definition's default graphics. An
-/// unresolved serialized name does not model a native pointer and is outside
-/// this comparison's input contract.
+/// `C4DefGraphics` pointer. Named graphics use C++ `SEqualNoCase` over their
+/// legacy bytes; an absent/empty name denotes the definition's default
+/// graphics. An unresolved serialized name does not model a native pointer and
+/// is outside this comparison's input contract.
 pub(crate) fn resolved_graphics_equal(
     left_definition: Option<&str>,
     left_name: Option<&str>,
@@ -1342,7 +1342,7 @@ pub(crate) fn resolved_graphics_equal(
         right_name.filter(|name| !name.is_empty()),
     ) {
         (None, None) => true,
-        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        (Some(left), Some(right)) => lc_resources::material::c4_names_equal(left, right),
         _ => false,
     }
 }
@@ -13447,7 +13447,7 @@ impl Definition {
     pub fn portrait_graphics(&self, name: &str) -> Option<&DefinitionPictureImage> {
         self.portrait_graphics
             .iter()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .find(|(candidate, _)| lc_resources::material::c4_names_equal(candidate, name))
             .map(|(_, image)| image)
     }
 
@@ -13594,7 +13594,7 @@ impl Definition {
         match graphics_name {
             None | Some("") => self.sprite_image.as_ref(),
             Some(name) => {
-                let key = name.to_ascii_lowercase();
+                let key = lc_resources::material::c4_name_key(name);
                 self.sprite_variants.get(&key)
             }
         }
@@ -13668,7 +13668,7 @@ impl Definition {
     ) -> SolidMaskPixels {
         let graphics_key = graphics_name
             .filter(|name| !name.is_empty())
-            .map(str::to_ascii_lowercase);
+            .map(lc_resources::material::c4_name_key);
         if graphics_key.is_none() && Some(mask) == self.solid_mask {
             return self.solid_mask_pixels.clone();
         }
@@ -26487,7 +26487,9 @@ impl Engine {
                         .filter_map(|name| {
                             definition
                                 .sprite_image_variant(Some(&name))
-                                .map(|sprite| (name.to_ascii_lowercase(), image(sprite)))
+                                .map(|sprite| {
+                                    (lc_resources::material::c4_name_key(&name), image(sprite))
+                                })
                         })
                         .collect();
                     (
@@ -65546,6 +65548,51 @@ mod material_colorization_regression {
         subscriber::with_default(subscriber, run);
         let captured = messages.lock().unwrap().clone();
         captured
+    }
+
+    #[test]
+    fn definition_graphics_lookups_use_legacy_byte_case_folding() {
+        let lowercase_name = lc_script::c4_string_from_bytes(b"\xfc");
+        let uppercase_name = lc_script::c4_string_from_bytes(b"\xdc");
+        let mut definition =
+            Definition::from_script("BYTE", "Byte graphics", "").expect("definition compiles");
+        definition.set_sprite_variants(HashMap::from([(
+            lc_resources::material::c4_name_key(&lowercase_name),
+            sprite(&[[1, 2, 3, 255]]),
+        )]));
+        definition.set_portrait_graphics(vec![(
+            lowercase_name.clone(),
+            picture(&[[4, 5, 6, 255]]),
+        )]);
+
+        assert_eq!(
+            definition
+                .sprite_image_variant(Some(&uppercase_name))
+                .expect("uppercase native query resolves the lowercase variant")
+                .pixels()
+                .as_ref(),
+            [1, 2, 3, 255]
+        );
+        assert_eq!(
+            definition
+                .portrait_graphics(&uppercase_name)
+                .expect("uppercase native query resolves the lowercase portrait")
+                .pixels()
+                .as_ref(),
+            [4, 5, 6, 255]
+        );
+        assert!(resolved_graphics_equal(
+            Some("BYTE"),
+            Some(&lowercase_name),
+            Some("BYTE"),
+            Some(&uppercase_name),
+        ));
+
+        let mask = definition.solid_mask_pixels_for_rect(
+            DefinitionTargetRect::new(0, 0, 1, 1, 0, 0),
+            Some(&uppercase_name),
+        );
+        assert!(matches!(mask, SolidMaskPixels::Alpha(_)));
     }
 
     #[test]

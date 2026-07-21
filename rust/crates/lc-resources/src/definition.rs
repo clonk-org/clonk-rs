@@ -1,7 +1,7 @@
 use crate::{
     bitmap::IndexedBitmap, decode_legacy_script_text,
     graphics::blacken_fully_transparent_rgba, language::component_language_string,
-    ComponentGroups, GraphicsImage, Group, GroupError, LoadedComponent,
+    ComponentGroups, GraphicsImage, Group, GroupEntry, GroupError, LoadedComponent,
 };
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -515,6 +515,21 @@ fn definition_image_format(path: &Path) -> Option<image::ImageFormat> {
         Some("jpg" | "jpeg") => Some(image::ImageFormat::Jpeg),
         Some("tga") => Some(image::ImageFormat::Tga),
         _ => None,
+    }
+}
+
+fn definition_image_format_bytes(filename: &[u8]) -> Option<image::ImageFormat> {
+    let (_, extension) = split_legacy_extension(filename)?;
+    if extension.eq_ignore_ascii_case(b"png") {
+        Some(image::ImageFormat::Png)
+    } else if extension.eq_ignore_ascii_case(b"bmp") {
+        Some(image::ImageFormat::Bmp)
+    } else if extension.eq_ignore_ascii_case(b"jpg") || extension.eq_ignore_ascii_case(b"jpeg") {
+        Some(image::ImageFormat::Jpeg)
+    } else if extension.eq_ignore_ascii_case(b"tga") {
+        Some(image::ImageFormat::Tga)
+    } else {
+        None
     }
 }
 
@@ -2538,7 +2553,8 @@ fn crop_definition_picture_mask(
         })
 }
 
-const BASE_GRAPHICS_FILES: [&str; 2] = ["graphics.png", "graphics.bmp"];
+const BASE_GRAPHICS_FILES: [&[u8]; 2] = [b"graphics.png", b"graphics.bmp"];
+const C4_MAX_NAME_BYTES: usize = 30;
 
 fn load_definition_graphics(
     group: &Group,
@@ -2551,49 +2567,64 @@ fn load_definition_graphics(
     ),
     DefinitionError,
 > {
-    let mut candidates = collect_graphics_entries(group).unwrap_or_default();
-    if candidates.is_empty() {
+    let entries = group.entries()?;
+    let (png_candidates, bmp_candidates) = collect_graphics_entries(&entries);
+    if png_candidates.is_empty() && bmp_candidates.is_empty() {
         return Ok((None, None, HashMap::new()));
     }
 
-    let base_path = select_base_graphics(&candidates);
+    let base_entry = select_base_graphics(&entries);
     let mut base_image = None;
     let mut base_mask = None;
     let mut additional = HashMap::new();
 
-    if let Some(base_path) = base_path.clone() {
-        if let Some((image, mask)) = load_graphics_entry(group, &base_path, color_by_owner)? {
-            base_image = Some(image);
-            base_mask = mask;
-        }
+    if let Some(base_entry) = base_entry {
+        let (image, mask) = load_graphics_group_entry(group, &entries, base_entry, color_by_owner)?;
+        base_image = Some(image);
+        base_mask = mask;
     }
 
-    // C4DefGraphics handles both bare base filenames exclusively in its base
-    // branch. If PNG wins, the losing BMP is not retried as named graphics.
-    candidates.retain(|path| {
-        !BASE_GRAPHICS_FILES
-            .iter()
-            .any(|name| is_direct_graphics_path(path, name))
-    });
+    // C4DefGraphics appends every PNG in native group order. A later PNG with
+    // the same clipped name is still decoded (and may reject the definition),
+    // while first-match lookup continues to expose the earlier node.
+    for entry in png_candidates {
+        if is_base_graphics_entry(entry) {
+            continue;
+        }
+        let Some(name) = derive_variant_name(&entry.name_bytes) else {
+            continue;
+        };
+        let key = normalize_variant_key(&name);
+        let (image, mask) = load_graphics_group_entry(group, &entries, entry, color_by_owner)?;
+        additional.entry(key).or_insert(DefinitionGraphicsVariant {
+            name,
+            image,
+            color_by_owner_mask: mask,
+        });
+    }
 
-    for path in candidates {
-        let Some(name) = derive_variant_name(&path).filter(|name| !name.is_empty()) else {
+    // The BMP pass asks Get(clipped_name) before loading. Therefore any PNG
+    // or earlier BMP with the same C4 name suppresses this entry completely.
+    for entry in bmp_candidates {
+        if is_base_graphics_entry(entry) {
+            continue;
+        }
+        let Some(name) = derive_variant_name(&entry.name_bytes) else {
             continue;
         };
         let key = normalize_variant_key(&name);
         if additional.contains_key(&key) {
             continue;
         }
-        if let Some((image, mask)) = load_graphics_entry(group, &path, color_by_owner)? {
-            additional.insert(
-                key,
-                DefinitionGraphicsVariant {
-                    name,
-                    image,
-                    color_by_owner_mask: mask,
-                },
-            );
-        }
+        let (image, mask) = load_graphics_group_entry(group, &entries, entry, color_by_owner)?;
+        additional.insert(
+            key,
+            DefinitionGraphicsVariant {
+                name,
+                image,
+                color_by_owner_mask: mask,
+            },
+        );
     }
 
     Ok((base_image, base_mask, additional))
@@ -2604,35 +2635,21 @@ fn load_portrait_graphics(
     color_by_owner: bool,
 ) -> Result<Vec<DefinitionGraphicsVariant>, DefinitionError> {
     let mut portraits = Vec::new();
-    for entry in group.entries().unwrap_or_default() {
-        if entry.is_directory {
+    let entries = group.entries()?;
+    for entry in &entries {
+        let Some((stem, extension)) = split_legacy_extension(&entry.name_bytes) else {
+            continue;
+        };
+        let Some(suffix) = strip_ascii_case_prefix_bytes(stem, b"Portrait") else {
+            continue;
+        };
+        if !extension.eq_ignore_ascii_case(b"png") && !extension.eq_ignore_ascii_case(b"bmp") {
             continue;
         }
-        let path = entry.relative_path;
-        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
-        let Some(name) = stem
-            .get(..8)
-            .filter(|prefix| prefix.eq_ignore_ascii_case("Portrait"))
-            .and_then(|_| stem.get(8..))
-        else {
-            continue;
-        };
-        let supported = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| {
-                extension.eq_ignore_ascii_case("png") || extension.eq_ignore_ascii_case("bmp")
-            });
-        if !supported {
-            continue;
-        }
-        let Some((image, mask)) = load_graphics_entry(group, &path, color_by_owner)? else {
-            continue;
-        };
+        let name = clipped_legacy_graphics_name(suffix);
+        let (image, mask) = load_graphics_group_entry(group, &entries, entry, color_by_owner)?;
         portraits.push(DefinitionGraphicsVariant {
-            name: name.to_string(),
+            name,
             image,
             color_by_owner_mask: mask,
         });
@@ -2640,64 +2657,39 @@ fn load_portrait_graphics(
     Ok(portraits)
 }
 
-fn collect_graphics_entries(group: &Group) -> Result<Vec<PathBuf>, GroupError> {
+fn collect_graphics_entries(entries: &[GroupEntry]) -> (Vec<&GroupEntry>, Vec<&GroupEntry>) {
     let mut png_entries = Vec::new();
     let mut bmp_entries = Vec::new();
-    for entry in group.entries()? {
-        if entry.is_directory || entry.relative_path.components().count() != 1 {
-            continue;
-        }
-        let Some(stem) = entry
-            .relative_path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-        else {
+    for entry in entries {
+        let Some((stem, extension)) = split_legacy_extension(&entry.name_bytes) else {
             continue;
         };
-        if !stem
-            .get(..8)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Graphics"))
-        {
+        if strip_ascii_case_prefix_bytes(stem, b"Graphics").is_none() {
             continue;
         }
-        match entry
-            .relative_path
-            .extension()
-            .and_then(|extension| extension.to_str())
-        {
-            Some(extension) if extension.eq_ignore_ascii_case("png") => {
-                png_entries.push(entry.relative_path);
-            }
-            Some(extension) if extension.eq_ignore_ascii_case("bmp") => {
-                bmp_entries.push(entry.relative_path);
-            }
-            _ => {}
+        if extension.eq_ignore_ascii_case(b"png") {
+            png_entries.push(entry);
+        } else if extension.eq_ignore_ascii_case(b"bmp") {
+            bmp_entries.push(entry);
         }
     }
-    // LoadAllGraphics walks the PNG wildcard before the BMP wildcard and
-    // keeps the PNG when both formats provide the same additional name.
-    png_entries.extend(bmp_entries);
-    Ok(png_entries)
+    (png_entries, bmp_entries)
 }
 
-fn select_base_graphics(paths: &[PathBuf]) -> Option<PathBuf> {
+fn select_base_graphics(entries: &[GroupEntry]) -> Option<&GroupEntry> {
     for name in BASE_GRAPHICS_FILES {
-        for path in paths {
-            if is_direct_graphics_path(path, name) {
-                return Some(path.clone());
-            }
+        if let Some(entry) = find_group_entry_by_name(entries, name) {
+            return Some(entry);
         }
     }
 
     None
 }
 
-fn is_direct_graphics_path(path: &Path, name: &str) -> bool {
-    path.components().count() == 1
-        && path
-            .file_name()
-            .and_then(|file| file.to_str())
-            .is_some_and(|file| file.eq_ignore_ascii_case(name))
+fn is_base_graphics_entry(entry: &GroupEntry) -> bool {
+    BASE_GRAPHICS_FILES
+        .iter()
+        .any(|name| entry.name_bytes.eq_ignore_ascii_case(name))
 }
 
 fn load_graphics_entry(
@@ -2705,30 +2697,43 @@ fn load_graphics_entry(
     path: &Path,
     color_by_owner: bool,
 ) -> Result<Option<(GraphicsImage, Option<ColorByOwnerMask>)>, DefinitionError> {
-    if !group.exists(path) {
+    let entries = group.entries()?;
+    let name = path.as_os_str().as_encoded_bytes();
+    let Some(entry) = find_group_entry_by_name(&entries, name) else {
         return Ok(None);
-    }
+    };
+    load_graphics_group_entry(group, &entries, entry, color_by_owner).map(Some)
+}
+
+fn load_graphics_group_entry(
+    group: &Group,
+    entries: &[GroupEntry],
+    entry: &GroupEntry,
+    color_by_owner: bool,
+) -> Result<(GraphicsImage, Option<ColorByOwnerMask>), DefinitionError> {
+    let path = entry.relative_path.clone();
     let data = group
-        .read_file(path)
+        .read_entry_bytes_exact(entry)
         .map_err(|error| DefinitionError::Graphics {
-            path: path.to_path_buf(),
+            path: path.clone(),
             reason: error.to_string(),
         })?;
-    let format =
-        definition_image_format(path).ok_or_else(|| DefinitionError::Graphics {
-            path: path.to_path_buf(),
+    let format = definition_image_format_bytes(&entry.name_bytes).ok_or_else(|| {
+        DefinitionError::Graphics {
+            path: path.clone(),
             reason: "unsupported image format".to_string(),
-        })?;
+        }
+    })?;
     let mut image = decode_definition_image_result(&data, format).map_err(|reason| {
         DefinitionError::Graphics {
-            path: path.to_path_buf(),
+            path: path.clone(),
             reason,
         }
     })?;
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
         return Err(DefinitionError::Graphics {
-            path: path.to_path_buf(),
+            path: path.clone(),
             reason: format!("invalid image dimensions {width}x{height}"),
         });
     }
@@ -2737,63 +2742,53 @@ fn load_graphics_entry(
     blacken_fully_transparent_rgba(image.as_mut());
 
     let mask = if color_by_owner {
-        load_or_generate_color_by_owner_mask(group, path, &mut image)?
+        load_or_generate_color_by_owner_mask(group, entries, entry, &mut image)?
     } else {
         None
     };
 
-    Ok(Some((
-        GraphicsImage::new(width, height, image.into_raw()),
-        mask,
-    )))
+    Ok((GraphicsImage::new(width, height, image.into_raw()), mask))
 }
 
-fn strip_graphics_prefix(name: &str) -> Option<&str> {
-    let lower = name.to_ascii_lowercase();
-    if let Some(stripped) = lower.strip_prefix("graphics") {
-        let prefix_len = name.len() - stripped.len();
-        return Some(&name[prefix_len..]);
-    }
-    if let Some(stripped) = lower.strip_prefix("gfx") {
-        let prefix_len = name.len() - stripped.len();
-        return Some(&name[prefix_len..]);
-    }
-    None
+fn split_legacy_extension(name: &[u8]) -> Option<(&[u8], &[u8])> {
+    let dot = name.iter().rposition(|byte| *byte == b'.')?;
+    Some((&name[..dot], &name[dot + 1..]))
 }
 
-fn derive_variant_name(path: &Path) -> Option<String> {
-    let file_stem = path.file_stem()?.to_string_lossy();
-    if let Some(stripped) = strip_graphics_prefix(&file_stem) {
-        if !stripped.is_empty() {
-            return Some(stripped.to_string());
-        }
-    }
+fn strip_ascii_case_prefix_bytes<'a>(value: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    value
+        .get(..prefix.len())
+        .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .and_then(|_| value.get(prefix.len()..))
+}
 
-    let mut current = path.parent();
-    while let Some(parent) = current {
-        if let Some(stem) = parent.file_stem().and_then(|s| s.to_str()) {
-            if !stem.is_empty()
-                && !stem.eq_ignore_ascii_case("graphics")
-                && !stem.eq_ignore_ascii_case("gfx")
-            {
-                return Some(stem.to_string());
-            }
-        }
-        current = parent.parent();
-    }
-    None
+fn clipped_legacy_graphics_name(suffix: &[u8]) -> String {
+    lc_script::c4_string_from_bytes(&suffix[..suffix.len().min(C4_MAX_NAME_BYTES)])
+}
+
+fn derive_variant_name(filename: &[u8]) -> Option<String> {
+    let (stem, _) = split_legacy_extension(filename)?;
+    let suffix = strip_ascii_case_prefix_bytes(stem, b"Graphics")?;
+    (!suffix.is_empty()).then(|| clipped_legacy_graphics_name(suffix))
 }
 
 fn normalize_variant_key(name: &str) -> String {
-    name.to_ascii_lowercase()
+    crate::material::c4_name_key(name)
+}
+
+fn find_group_entry_by_name<'a>(entries: &'a [GroupEntry], name: &[u8]) -> Option<&'a GroupEntry> {
+    entries
+        .iter()
+        .find(|entry| entry.name_bytes.eq_ignore_ascii_case(name))
 }
 
 fn load_or_generate_color_by_owner_mask(
     group: &Group,
-    graphics_path: &Path,
+    entries: &[GroupEntry],
+    graphics_entry: &GroupEntry,
     image: &mut image::RgbaImage,
 ) -> Result<Option<ColorByOwnerMask>, DefinitionError> {
-    if let Some((path, overlay)) = load_color_by_owner_overlay(group, graphics_path)? {
+    if let Some((path, overlay)) = load_color_by_owner_overlay(group, entries, graphics_entry)? {
         if overlay.dimensions() != image.dimensions() {
             let (image_width, image_height) = image.dimensions();
             let (overlay_width, overlay_height) = overlay.dimensions();
@@ -2811,18 +2806,23 @@ fn load_or_generate_color_by_owner_mask(
 
 fn load_color_by_owner_overlay(
     group: &Group,
-    graphics_path: &Path,
+    entries: &[GroupEntry],
+    graphics_entry: &GroupEntry,
 ) -> Result<Option<(PathBuf, image::RgbaImage)>, DefinitionError> {
-    let Some(candidate) = color_by_owner_overlay_path(graphics_path) else {
+    let Some(candidate_name) = color_by_owner_overlay_name(&graphics_entry.name_bytes) else {
         return Ok(None);
     };
-    let data = match group.read_file(&candidate) {
+    let Some(candidate) = find_group_entry_by_name(entries, &candidate_name) else {
+        return Ok(None);
+    };
+    let path = candidate.relative_path.clone();
+    let data = match group.read_entry_bytes_exact(candidate) {
         Ok(data) => data,
         Err(GroupError::EntryNotFound(_)) => return Ok(None),
         Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(DefinitionError::ColorByOwnerOverlay {
-                path: candidate,
+                path,
                 reason: error.to_string(),
             });
         }
@@ -2830,47 +2830,34 @@ fn load_color_by_owner_overlay(
     let overlay =
         image::load_from_memory_with_format(&data, image::ImageFormat::Png).map_err(|error| {
             DefinitionError::ColorByOwnerOverlay {
-                path: candidate.clone(),
+                path: path.clone(),
                 reason: error.to_string(),
             }
         })?;
     let mut overlay = overlay.into_rgba8();
     blacken_fully_transparent_rgba(overlay.as_mut());
-    Ok(Some((candidate, overlay)))
+    Ok(Some((path, overlay)))
 }
 
-/// Returns the single overlay name passed to C++ `LoadGraphics` for this
-/// definition entry. Named PNGs use only their suffix-matched overlay; named
-/// BMP variants and definition BMP portraits auto-generate from shades.
-fn color_by_owner_overlay_path(graphics_path: &Path) -> Option<PathBuf> {
-    let extension = graphics_path.extension()?.to_str()?;
-    let stem = graphics_path.file_stem()?.to_str()?;
-    let png = extension.eq_ignore_ascii_case("png");
-    let bmp = extension.eq_ignore_ascii_case("bmp");
-
-    let suffix = if png {
-        strip_ascii_case_prefix(stem, "Graphics")
-            .or_else(|| strip_ascii_case_prefix(stem, "Portrait"))?
-    } else if bmp && stem.eq_ignore_ascii_case("Graphics") {
-        ""
+/// Returns the exact legacy-byte overlay name passed to C++ `LoadGraphics`.
+/// The overlay suffix comes from the complete source filename; only the name
+/// stored in `C4AdditionalDefGraphics::Name` is clipped to `C4MaxName`.
+fn color_by_owner_overlay_name(graphics_name: &[u8]) -> Option<Vec<u8>> {
+    let (stem, extension) = split_legacy_extension(graphics_name)?;
+    let suffix = if extension.eq_ignore_ascii_case(b"png") {
+        strip_ascii_case_prefix_bytes(stem, b"Graphics")
+            .or_else(|| strip_ascii_case_prefix_bytes(stem, b"Portrait"))?
+    } else if extension.eq_ignore_ascii_case(b"bmp") && stem.eq_ignore_ascii_case(b"Graphics") {
+        &[]
     } else {
         return None;
     };
 
-    let overlay = format!("Overlay{suffix}.png");
-    Some(
-        graphics_path
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join(overlay),
-    )
-}
-
-fn strip_ascii_case_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    value
-        .get(..prefix.len())
-        .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
-        .and_then(|_| value.get(prefix.len()..))
+    let mut overlay = Vec::with_capacity(b"Overlay".len() + suffix.len() + b".png".len());
+    overlay.extend_from_slice(b"Overlay");
+    overlay.extend_from_slice(suffix);
+    overlay.extend_from_slice(b".png");
+    Some(overlay)
 }
 
 fn extract_mask_from_overlay(
@@ -3564,9 +3551,227 @@ Entrance=1,2,,4
     }
     use super::*;
     use std::fs;
+    use std::io::Cursor;
     use std::path::{Path, PathBuf};
     fn tempdir() -> std::io::Result<tempfile::TempDir> {
         tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
+
+    #[test]
+    fn definition_graphics_names_preserve_legacy_bytes_and_c4maxname() {
+        fn encoded_image(color: [u8; 4], format: image::ImageOutputFormat) -> Vec<u8> {
+            let image = image::RgbaImage::from_pixel(1, 1, image::Rgba(color));
+            let mut bytes = Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(&mut bytes, format)
+                .expect("encode graphics fixture");
+            bytes.into_inner()
+        }
+
+        const CLIPPED_SUFFIX: &[u8] = b"123456789012345678901234567890";
+        assert_eq!(CLIPPED_SUFFIX.len(), C4_MAX_NAME_BYTES);
+
+        let collision_bmp = [
+            b"Graphics".as_slice(),
+            CLIPPED_SUFFIX,
+            b"Bmp.bmp".as_slice(),
+        ]
+        .concat();
+        let first_png = [
+            b"Graphics".as_slice(),
+            CLIPPED_SUFFIX,
+            b"First.png".as_slice(),
+        ]
+        .concat();
+        let second_png = [
+            b"Graphics".as_slice(),
+            CLIPPED_SUFFIX,
+            b"Second.png".as_slice(),
+        ]
+        .concat();
+        let first_overlay = [
+            b"Overlay".as_slice(),
+            CLIPPED_SUFFIX,
+            b"First.png".as_slice(),
+        ]
+        .concat();
+
+        // A non-definition logical filename keeps the explicit insertion
+        // order instead of applying MutableGroup's stock .c4d sort list.
+        let mut packed = crate::MutableGroup::new("native-graphics.bin");
+        packed
+            .add_file_bytes_with_metadata(
+                collision_bmp,
+                b"suppressed invalid BMP".to_vec(),
+                1,
+                false,
+            )
+            .expect("add physically first BMP collision");
+        packed
+            .add_file_bytes_with_metadata(
+                first_png,
+                encoded_image([11, 22, 33, 255], image::ImageOutputFormat::Png),
+                1,
+                false,
+            )
+            .expect("add first PNG collision");
+        packed
+            .add_file_bytes_with_metadata(
+                second_png,
+                encoded_image([44, 55, 66, 255], image::ImageOutputFormat::Png),
+                1,
+                false,
+            )
+            .expect("add second PNG collision");
+        packed
+            .add_file_bytes_with_metadata(
+                first_overlay,
+                encoded_image([80, 90, 100, 255], image::ImageOutputFormat::Png),
+                1,
+                false,
+            )
+            .expect("add full-suffix owner overlay");
+        packed
+            .add_file_bytes_with_metadata(
+                b"Graphics\xfc.png".to_vec(),
+                encoded_image([77, 88, 99, 255], image::ImageOutputFormat::Png),
+                1,
+                false,
+            )
+            .expect("add native-byte named graphics");
+        packed
+            .add_file_bytes_with_metadata(
+                b"Portrait\xf6.bmp".to_vec(),
+                encoded_image([101, 102, 103, 255], image::ImageOutputFormat::Bmp),
+                1,
+                false,
+            )
+            .expect("add native-byte packed portrait");
+        let packed = Group::from_memory(
+            PathBuf::from("native-graphics.c4d"),
+            packed.pack().expect("pack native graphics group"),
+        )
+        .expect("open native graphics group");
+
+        let (_, _, additional) =
+            load_definition_graphics(&packed, true).expect("load exact packed graphics entries");
+        assert_eq!(additional.len(), 2);
+
+        let collision_name = lc_script::c4_string_from_bytes(CLIPPED_SUFFIX);
+        let collision = additional
+            .get(&normalize_variant_key(&collision_name))
+            .expect("truncated collision retained");
+        assert_eq!(
+            lc_script::c4_string_bytes(&collision.name),
+            CLIPPED_SUFFIX,
+            "the suffix is clipped to 30 native bytes before lookup"
+        );
+        assert_eq!(collision.image.pixels(), &[11, 22, 33, 255]);
+        assert_eq!(
+            collision
+                .color_by_owner_mask
+                .as_ref()
+                .map(|mask| mask.pixels.as_slice()),
+            Some([80, 90, 100, 255].as_slice()),
+            "the first PNG uses its untruncated suffix-matched overlay"
+        );
+
+        let legacy_name = lc_script::c4_string_from_bytes(b"\xfc");
+        let legacy = additional
+            .get(&normalize_variant_key(&legacy_name))
+            .expect("native-byte packed graphics retained");
+        assert_eq!(lc_script::c4_string_bytes(&legacy.name), b"\xfc");
+        assert_eq!(legacy.image.pixels(), &[77, 88, 99, 255]);
+        let uppercase_legacy_name = lc_script::c4_string_from_bytes(b"\xdc");
+        assert!(
+            additional
+                .get(&normalize_variant_key(&uppercase_legacy_name))
+                .is_some(),
+            "C4 SEqualNoCase folds native umlaut pairs"
+        );
+
+        let packed_portraits =
+            load_portrait_graphics(&packed, false).expect("load packed portraits");
+        let packed_portrait = packed_portraits
+            .iter()
+            .find(|portrait| lc_script::c4_string_bytes(&portrait.name) == b"\xf6")
+            .expect("native-byte packed portrait retained");
+        assert_eq!(packed_portrait.image.pixels(), &[101, 102, 103, 255]);
+
+        // A colliding PNG is loaded even though lookup keeps the first node.
+        // This preserves the native fatal error from a corrupt losing PNG.
+        let mut corrupt = crate::MutableGroup::new("corrupt-collision.bin");
+        corrupt
+            .add_file_bytes_with_metadata(
+                [
+                    b"Graphics".as_slice(),
+                    CLIPPED_SUFFIX,
+                    b"First.png".as_slice(),
+                ]
+                .concat(),
+                encoded_image([1, 2, 3, 255], image::ImageOutputFormat::Png),
+                1,
+                false,
+            )
+            .expect("add valid first PNG");
+        corrupt
+            .add_file_bytes_with_metadata(
+                [
+                    b"Graphics".as_slice(),
+                    CLIPPED_SUFFIX,
+                    b"Broken.png".as_slice(),
+                ]
+                .concat(),
+                b"invalid PNG".to_vec(),
+                1,
+                false,
+            )
+            .expect("add invalid colliding PNG");
+        let corrupt = Group::from_memory(
+            PathBuf::from("corrupt-collision.c4d"),
+            corrupt.pack().expect("pack corrupt collision group"),
+        )
+        .expect("open corrupt collision group");
+        assert!(matches!(
+            load_definition_graphics(&corrupt, false),
+            Err(DefinitionError::Graphics { .. })
+        ));
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt as _;
+
+            // Darwin rejects lone malformed UTF-8 path bytes. Other Unix
+            // hosts exercise the literal legacy filename; macOS still checks
+            // the same exact-entry directory path with a non-ASCII UTF-8 name.
+            #[cfg(target_os = "macos")]
+            const PORTRAIT_FILENAME: &[u8] = b"Portrait\xc3\xb6.bmp";
+            #[cfg(target_os = "macos")]
+            const PORTRAIT_SUFFIX: &[u8] = b"\xc3\xb6";
+            #[cfg(not(target_os = "macos"))]
+            const PORTRAIT_FILENAME: &[u8] = b"Portrait\xf6.bmp";
+            #[cfg(not(target_os = "macos"))]
+            const PORTRAIT_SUFFIX: &[u8] = b"\xf6";
+
+            let directory = tempdir().expect("physical portrait directory");
+            fs::write(
+                directory.path().join(OsStr::from_bytes(PORTRAIT_FILENAME)),
+                encoded_image([121, 122, 123, 255], image::ImageOutputFormat::Bmp),
+            )
+            .expect("write physical native-byte portrait");
+            let portraits = load_portrait_graphics(
+                &Group::open(directory.path()).expect("open physical portrait group"),
+                false,
+            )
+            .expect("load physical portrait");
+            assert_eq!(portraits.len(), 1);
+            assert_eq!(
+                lc_script::c4_string_bytes(&portraits[0].name),
+                PORTRAIT_SUFFIX
+            );
+            assert_eq!(portraits[0].image.pixels(), &[121, 122, 123, 255]);
+        }
     }
 
     #[test]
