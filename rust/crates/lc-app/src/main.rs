@@ -13121,8 +13121,8 @@ struct PendingStartupPlayerProperties {
     controller: lc_frontend::startup_plrproperties::PlayerPropertiesController,
 }
 
-fn startup_player_big_icon(portrait: &ImageData, color_dw: u32) -> ImageData {
-    let colored = lc_frontend::hud::colorize_by_owner(
+fn startup_player_big_icon(portrait: &ImageData, color_dw: u32) -> Option<ImageData> {
+    let colored = lc_frontend::hud::colorize_by_owner_software(
         portrait,
         Color::opaque(
             ((color_dw >> 16) & 0xff) as u8,
@@ -13130,20 +13130,26 @@ fn startup_player_big_icon(portrait: &ImageData, color_dw: u32) -> ImageData {
             (color_dw & 0xff) as u8,
         ),
     );
-    resize_startup_player_image(&colored, 64)
+    materialize_startup_player_image(&colored, 64)
 }
 
 fn resize_startup_player_image(image: &ImageData, maximum: u32) -> ImageData {
-    let width = image.width().max(1);
-    let height = image.height().max(1);
+    let width = image.width();
+    let height = image.height();
+    if width == 0 || height == 0 {
+        return ImageData::new(0, 0, Vec::new());
+    }
     let largest = width.max(height);
     if largest <= maximum {
         return image.clone();
     }
-    let resized_width = (u64::from(width) * u64::from(maximum) / u64::from(largest))
-        .max(1) as u32;
-    let resized_height = (u64::from(height) * u64::from(maximum) / u64::from(largest))
-        .max(1) as u32;
+    let resized_width = (u64::from(width) * u64::from(maximum) / u64::from(largest)) as u32;
+    let resized_height = (u64::from(height) * u64::from(maximum) / u64::from(largest)) as u32;
+    // C4FacetExSurface::CopyFromSfcMaxSize forwards a zero truncated extent
+    // to C4Surface::Create, ignores the failure and leaves a blank 0×0 Face.
+    if resized_width == 0 || resized_height == 0 {
+        return ImageData::new(0, 0, Vec::new());
+    }
     let mut pixels = vec![0; resized_width as usize * resized_height as usize * 4];
     for y in 0..resized_height {
         let source_y = (u64::from(y) * u64::from(height) / u64::from(resized_height)) as u32;
@@ -13158,12 +13164,32 @@ fn resize_startup_player_image(image: &ImageData, maximum: u32) -> ImageData {
     ImageData::new(resized_width, resized_height, pixels)
 }
 
+fn materialize_startup_player_image(image: &ImageData, maximum: u32) -> Option<ImageData> {
+    let image = resize_startup_player_image(image, maximum);
+    (image.width() != 0 && image.height() != 0).then_some(image)
+}
+
+fn startup_player_image_from_rgba(width: u32, height: u32, mut pixels: Vec<u8>) -> ImageData {
+    // C4Surface::ReadPNG canonicalizes fully transparent source texels before
+    // CreateColorByOwner or CopyFromSfcMaxSize can inspect them.
+    for pixel in pixels.chunks_exact_mut(4) {
+        if pixel[3] == 0 {
+            pixel[..3].fill(0);
+        }
+    }
+    ImageData::new(width, height, pixels)
+}
+
 fn load_startup_portrait_image(path: &Path) -> std::result::Result<ImageData, String> {
     let rgba = image::open(path)
         .map_err(|error| format!("failed to decode {}: {error}", path.display()))?
         .into_rgba8();
     let (width, height) = rgba.dimensions();
-    Ok(ImageData::new(width, height, rgba.into_raw()))
+    Ok(startup_player_image_from_rgba(
+        width,
+        height,
+        rgba.into_raw(),
+    ))
 }
 
 const DEFAULT_USER_PORTRAITS: [(&str, &str); 9] = [
@@ -61984,11 +62010,11 @@ impl GameApp {
             });
         let big_icon = portrait
             .as_ref()
-            .map(|portrait| startup_player_big_icon(portrait, player.pref_color_dw));
+            .and_then(|portrait| startup_player_big_icon(portrait, player.pref_color_dw));
         let mut controller = PlayerPropertiesController::new_player(
             player,
             comment,
-            portrait.map(|portrait| resize_startup_player_image(&portrait, 150)),
+            portrait.and_then(|portrait| materialize_startup_player_image(&portrait, 150)),
             big_icon,
         );
         controller.resize(
@@ -62192,10 +62218,12 @@ impl GameApp {
                     };
                     let portrait = commit
                         .set_picture
-                        .then(|| resize_startup_player_image(&image, 150));
+                        .then(|| materialize_startup_player_image(&image, 150))
+                        .flatten();
                     let big_icon = commit
                         .set_big_icon
-                        .then(|| startup_player_big_icon(&image, color));
+                        .then(|| startup_player_big_icon(&image, color))
+                        .flatten();
                     (portrait, big_icon)
                 }
             }
@@ -127300,6 +127328,69 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(app.message_dialogs.is_empty());
         assert_eq!(app.startup_player_models.len(), before_models);
         assert_eq!(app.startup_player_files.len(), before_files);
+    }
+
+    #[test]
+    fn startup_player_resize_matches_cpp_copyfrom_sfc_max_size() {
+        let source = ImageData::new(
+            4,
+            2,
+            [
+                [0, 0, 0, 255],
+                [64, 0, 0, 255],
+                [128, 0, 0, 255],
+                [255, 0, 0, 255],
+                [0, 64, 0, 255],
+                [0, 128, 0, 255],
+                [0, 192, 0, 255],
+                [0, 255, 0, 255],
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        );
+        // This offscreen helper intentionally has no display configuration:
+        // application scale and PointFiltering cannot affect Blit8 sampling.
+        let resized = resize_startup_player_image(&source, 2);
+        assert_eq!((resized.width(), resized.height()), (2, 1));
+        assert_eq!(
+            resized.pixels(),
+            &[0, 0, 0, 255, 128, 0, 0, 255],
+            "offscreen Blit8 samples source-pixel left edges"
+        );
+
+        let aspect = ImageData::new(5, 3, vec![255; 5 * 3 * 4]);
+        assert_eq!(
+            {
+                let resized = resize_startup_player_image(&aspect, 4);
+                (resized.width(), resized.height())
+            },
+            (4, 2),
+            "the minor axis uses truncating integer aspect math"
+        );
+        let no_scale = ImageData::new(2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(resize_startup_player_image(&no_scale, 2), no_scale);
+
+        let loaded = startup_player_image_from_rgba(2, 1, vec![90, 80, 70, 0, 10, 20, 30, 255]);
+        assert_eq!(
+            loaded.pixels(),
+            &[0, 0, 0, 0, 10, 20, 30, 255],
+            "C4Surface load blackens hidden RGB"
+        );
+        let owner_source = ImageData::new(2, 1, vec![0, 0, 255, 255, 200, 30, 30, 255]);
+        let icon = startup_player_big_icon(&owner_source, 0x00ff_ffff)
+            .expect("ordinary icon dimensions survive materialization");
+        assert_eq!(
+            icon.pixels(),
+            &[254, 254, 254, 255, 200, 30, 30, 255],
+            "software ModulateClr divides owner RGB by 256"
+        );
+
+        let extreme = ImageData::new(1, 151, vec![255; 151 * 4]);
+        let collapsed = resize_startup_player_image(&extreme, 150);
+        assert_eq!((collapsed.width(), collapsed.height()), (0, 0));
+        assert!(collapsed.pixels().is_empty());
+        assert_eq!(materialize_startup_player_image(&extreme, 150), None);
     }
 
     #[test]

@@ -596,21 +596,21 @@ fn clr_by_owner_gray(r: i32, g: i32, b: i32) -> Option<u8> {
     ((145..=175).contains(&hue) && s > 100).then_some(b as u8)
 }
 
-/// `C4FacetExSurface::CreateClrByOwner` + `DrawValue2Clr` combined
-/// (src/C4Surface.cpp:288-318, src/C4Facet.cpp:151-157): blue ClrByOwner
-/// pixels become the owner color modulated by their gray value.
-pub fn colorize_by_owner(image: &ImageData, owner: Color) -> ImageData {
+fn colorize_by_owner_with(
+    image: &ImageData,
+    owner: Color,
+    modulate: impl Fn(u8, u8) -> u8,
+) -> ImageData {
     let pixels = image.pixels();
     let mut out = Vec::with_capacity(pixels.len());
     for chunk in pixels.chunks_exact(4) {
         let (r, g, b, a) = (chunk[0], chunk[1], chunk[2], chunk[3]);
         match clr_by_owner_gray(r as i32, g as i32, b as i32) {
             Some(gray) => {
-                let modulate = |c: u8| ((c as u16 * gray as u16) / 255) as u8;
                 out.extend_from_slice(&[
-                    modulate(owner.r),
-                    modulate(owner.g),
-                    modulate(owner.b),
+                    modulate(owner.r, gray),
+                    modulate(owner.g, gray),
+                    modulate(owner.b, gray),
                     a,
                 ]);
             }
@@ -618,6 +618,26 @@ pub fn colorize_by_owner(image: &ImageData, owner: Color) -> ImageData {
         }
     }
     ImageData::new(image.width(), image.height(), out)
+}
+
+/// `C4FacetExSurface::CreateClrByOwner` followed by normalized texture
+/// modulation: blue ClrByOwner pixels become the owner color modulated by
+/// their gray value. This is the display/GPU form where full white remains
+/// 255 (`src/C4Surface.cpp:288-318`, `src/StdGL.cpp:488-503`).
+pub fn colorize_by_owner(image: &ImageData, owner: Color) -> ImageData {
+    colorize_by_owner_with(image, owner, |channel, gray| {
+        (u16::from(channel) * u16::from(gray) / 255) as u8
+    })
+}
+
+/// Software `C4Surface::GetPixDw(..., true)` owner modulation used when an
+/// offscreen target sends `CStdDDraw::Blit` through `Blit8`. Legacy
+/// `ModulateClr` divides RGB by 256, so even 255×255 becomes 254
+/// (`src/C4Surface.cpp:673-700`, `src/StdColors.h:159-169`).
+pub fn colorize_by_owner_software(image: &ImageData, owner: Color) -> ImageData {
+    colorize_by_owner_with(image, owner, |channel, gray| {
+        ((u16::from(channel) * u16::from(gray)) >> 8) as u8
+    })
 }
 
 /// Width reserved at the right edge of the message board by Mini mode.
