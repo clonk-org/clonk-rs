@@ -65,8 +65,18 @@ impl FontDefinition {
 
 #[derive(Debug, Clone)]
 struct CatalogVectorFont {
-    face: String,
+    face: Vec<u8>,
     resource: FontResource,
+}
+
+const VECTOR_FONT_EXTENSIONS: [&[u8]; 6] = [b"fon", b"fnt", b"ttf", b"ttc", b"fot", b"otf"];
+
+fn vector_font_face_bytes<'a>(filename: &'a [u8], extension: &[u8]) -> Option<&'a [u8]> {
+    let suffix_length = extension.len().checked_add(1)?;
+    let suffix_start = filename.len().checked_sub(suffix_length)?;
+    let suffix = &filename[suffix_start..];
+    (suffix.first() == Some(&b'.') && suffix[1..].eq_ignore_ascii_case(extension))
+        .then_some(&filename[..suffix_start])
 }
 
 #[derive(Debug, Clone, Default)]
@@ -184,28 +194,21 @@ impl FontCatalog {
     /// prepended `C4VectorFont` chain.
     pub fn load_group(&mut self, group: &Group) -> Result<(), FontResourceError> {
         let entries = group.entries()?;
-        for extension in ["fon", "fnt", "ttf", "ttc", "fot", "otf"] {
+        for extension in VECTOR_FONT_EXTENSIONS {
             for entry in &entries {
-                if entry.relative_path.components().count() != 1
-                    || !entry
-                        .relative_path
-                        .extension()
-                        .and_then(|value| value.to_str())
-                        .is_some_and(|value| value.eq_ignore_ascii_case(extension))
-                {
+                if entry.relative_path.components().count() != 1 {
                     continue;
                 }
-                let Some(face) = entry
-                    .relative_path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                else {
+                let Some(face) = vector_font_face_bytes(&entry.name_bytes, extension) else {
                     continue;
                 };
-                let bytes = group.read_file(&entry.relative_path)?;
+                let bytes = group.read_entry_bytes_exact(entry)?;
                 self.vector_fonts.push(CatalogVectorFont {
-                    face: face.to_string(),
-                    resource: FontResource::new(entry.relative_path.to_string_lossy(), bytes),
+                    face: face.to_vec(),
+                    resource: FontResource::new(
+                        lc_script::c4_string_from_bytes(&entry.name_bytes),
+                        bytes,
+                    ),
                 });
             }
         }
@@ -256,11 +259,12 @@ impl FontCatalog {
             .and_then(parse_i32_prefix)
             .map(|value| value as u32)
             .unwrap_or(400);
+        let face_bytes = lc_script::c4_string_bytes(face);
         let bytes = self
             .vector_fonts
             .iter()
             .rev()
-            .find(|font| font.face == face)
+            .find(|font| font.face.as_slice() == face_bytes.as_slice())
             .map(|font| font.resource.clone_bytes());
         Some(ResolvedFontSpec::Vector {
             face: face.to_string(),
@@ -377,6 +381,7 @@ fn stdcompiler_ini_value(line: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MutableGroup;
     use std::fs;
     fn tempdir() -> std::io::Result<tempfile::TempDir> {
         tempfile::Builder::new().prefix("lc-test-").tempdir()
@@ -488,6 +493,160 @@ TitleFont=LaterTitle
             assert_eq!(size, expected_size);
             assert_eq!(weight, 400);
         }
+    }
+
+    #[test]
+    fn font_catalog_preserves_native_byte_vector_filenames_in_directory_and_packed_groups() {
+        const PACKED_U_FACE: &[u8] = b"Gr\xfcn";
+        const PACKED_O_FACE: &[u8] = b"Gr\xf6n";
+        const PACKED_U_TTF: &[u8] = b"Gr\xfcn.TTF";
+        const PACKED_O_TTF: &[u8] = b"Gr\xf6n.ttf";
+
+        assert_eq!(
+            vector_font_face_bytes(b".ttf", b"ttf"),
+            Some(b"".as_slice())
+        );
+        assert_eq!(
+            vector_font_face_bytes(b"A.B.TtF", b"ttf"),
+            Some(b"A.B".as_slice())
+        );
+        assert_eq!(vector_font_face_bytes(b"A.ttf.bak", b"ttf"), None);
+        assert_eq!(vector_font_face_bytes(b"A.t\x80f", b"ttf"), None);
+
+        assert_eq!(
+            String::from_utf8_lossy(PACKED_U_FACE),
+            String::from_utf8_lossy(PACKED_O_FACE),
+            "the fixture must collide under lossy UTF-8"
+        );
+        assert_ne!(
+            lc_script::c4_string_from_bytes(PACKED_U_FACE),
+            lc_script::c4_string_from_bytes(PACKED_O_FACE),
+            "the native byte projection must retain distinct faces"
+        );
+
+        let mut catalog = FontCatalog::default();
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt as _;
+
+            // Linux can create the legacy single-byte names directly. macOS
+            // rejects malformed UTF-8 at the filesystem boundary, so use two
+            // non-ASCII UTF-8 names there; the packed half below still pins
+            // the lossy-collision case on every platform.
+            #[cfg(target_os = "linux")]
+            const DIRECTORY_U_FACE: &[u8] = PACKED_U_FACE;
+            #[cfg(target_os = "linux")]
+            const DIRECTORY_O_FACE: &[u8] = PACKED_O_FACE;
+            #[cfg(target_os = "linux")]
+            const DIRECTORY_U_TTF: &[u8] = PACKED_U_TTF;
+            #[cfg(target_os = "linux")]
+            const DIRECTORY_O_TTF: &[u8] = PACKED_O_TTF;
+            #[cfg(not(target_os = "linux"))]
+            const DIRECTORY_U_FACE: &[u8] = b"Gr\xc3\xb8n";
+            #[cfg(not(target_os = "linux"))]
+            const DIRECTORY_O_FACE: &[u8] = b"Gr\xc3\x9fn";
+            #[cfg(not(target_os = "linux"))]
+            const DIRECTORY_U_TTF: &[u8] = b"Gr\xc3\xb8n.TTF";
+            #[cfg(not(target_os = "linux"))]
+            const DIRECTORY_O_TTF: &[u8] = b"Gr\xc3\x9fn.ttf";
+
+            let directory = tempdir().expect("directory font group");
+            fs::write(
+                directory.path().join(OsStr::from_bytes(DIRECTORY_U_TTF)),
+                b"directory-u",
+            )
+            .expect("write native-byte directory font");
+            fs::write(
+                directory.path().join(OsStr::from_bytes(DIRECTORY_O_TTF)),
+                b"directory-o",
+            )
+            .expect("write second native-byte directory font");
+            catalog
+                .load_group(&Group::open(directory.path()).expect("open directory font group"))
+                .expect("load directory font catalog");
+
+            for (face, expected) in [
+                (DIRECTORY_U_FACE, b"directory-u".as_slice()),
+                (DIRECTORY_O_FACE, b"directory-o".as_slice()),
+            ] {
+                let request = lc_script::c4_string_from_bytes(face);
+                let ResolvedFontSpec::Vector {
+                    face,
+                    bytes: Some(bytes),
+                    ..
+                } = catalog
+                    .resolve(&request, 14, FontRole::Main, true)
+                    .expect("directory face resolves")
+                else {
+                    panic!("expected catalog vector font")
+                };
+                assert_eq!(face, request);
+                assert_eq!(bytes.as_ref(), expected);
+            }
+        }
+
+        let mut packed = MutableGroup::new("native-fonts.c4g");
+        packed
+            .add_file_bytes_with_metadata(
+                b"Gr\xfcn.fon".to_vec(),
+                b"packed-u-fon".to_vec(),
+                1,
+                false,
+            )
+            .expect("add older extension candidate");
+        packed
+            .add_file_bytes_with_metadata(PACKED_U_TTF.to_vec(), b"packed-u-ttf".to_vec(), 1, false)
+            .expect("add newest extension candidate");
+        packed
+            .add_file_bytes_with_metadata(PACKED_O_TTF.to_vec(), b"packed-o-ttf".to_vec(), 1, false)
+            .expect("add distinct packed candidate");
+        packed
+            .add_file_bytes_with_metadata(b"Same.ttf".to_vec(), b"same-ttf".to_vec(), 1, false)
+            .expect("add earlier extension-priority candidate");
+        packed
+            .add_file_bytes_with_metadata(b"Same.otf".to_vec(), b"same-otf".to_vec(), 1, false)
+            .expect("add later extension-priority candidate");
+        let packed = Group::from_memory(
+            std::path::PathBuf::from("native-fonts.c4g"),
+            packed.pack().expect("pack native-byte font group"),
+        )
+        .expect("open packed font group");
+        catalog
+            .load_group(&packed)
+            .expect("load packed font catalog");
+
+        for (face_bytes, expected) in [
+            (PACKED_U_FACE, b"packed-u-ttf".as_slice()),
+            (PACKED_O_FACE, b"packed-o-ttf".as_slice()),
+        ] {
+            let request = lc_script::c4_string_from_bytes(face_bytes);
+            let ResolvedFontSpec::Vector {
+                face,
+                bytes: Some(bytes),
+                ..
+            } = catalog
+                .resolve(&request, 14, FontRole::Main, true)
+                .expect("packed face resolves")
+            else {
+                panic!("expected catalog vector font")
+            };
+            assert_eq!(face, request);
+            assert_eq!(bytes.as_ref(), expected);
+        }
+        assert!(catalog
+            .vector_fonts
+            .iter()
+            .any(|font| { lc_script::c4_string_bytes(font.resource.name()) == PACKED_U_TTF }));
+        let ResolvedFontSpec::Vector {
+            bytes: Some(bytes), ..
+        } = catalog
+            .resolve("Same", 14, FontRole::Main, true)
+            .expect("same-face extension priority resolves")
+        else {
+            panic!("expected catalog vector font")
+        };
+        assert_eq!(bytes.as_ref(), b"same-otf");
     }
 
     #[test]
