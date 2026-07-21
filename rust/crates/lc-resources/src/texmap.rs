@@ -261,6 +261,49 @@ mod tests {
     }
 
     #[test]
+    fn texmap_load_map_truncates_each_line_to_100_bytes_like_cpp() {
+        let mut source = Vec::new();
+
+        // The equals sign is the 101st byte and therefore invisible.
+        source.extend_from_slice(&[b' '; 98]);
+        source.extend_from_slice(b"20=Earth-Smooth\n");
+
+        // The first 100 bytes form a complete entry; its physical-line suffix
+        // neither extends the texture name nor becomes another segment.
+        source.extend_from_slice(b"21=Earth-");
+        source.extend(vec![b'R'; 91]);
+        source.extend_from_slice(b"ignored suffix\n");
+
+        // The second equals is likewise invisible, so this remains the
+        // one-equals entry branch rather than completing an overload flag.
+        source.extend_from_slice(b"OverloadTextures=");
+        source.extend(vec![b' '; 83]);
+        source.extend_from_slice(b"=\n");
+
+        // Conversely, an equals beyond the cap cannot suppress a flag that
+        // has no equals in its visible prefix.
+        source.extend_from_slice(b"OverloadMaterials");
+        source.extend(vec![b' '; 83]);
+        source.extend_from_slice(b"=1\n");
+
+        // The cap resets at the real LF, not after each 100-byte chunk.
+        source.extend_from_slice(b"22=Water-Liquid\n");
+
+        let map = TextureMap::parse_bytes(&source);
+        assert!(map.entry(20).is_none());
+        assert_eq!(
+            map.entry(21),
+            Some(&TexMapEntry {
+                material: "Earth".into(),
+                texture: "R".repeat(91),
+            })
+        );
+        assert!(map.overload_materials);
+        assert!(!map.overload_textures);
+        assert_eq!(map.material_for_pixel(22), Some("Water"));
+    }
+
+    #[test]
     fn later_group_load_flags_keeps_raw_prefix_semantics() {
         let map = TextureMap::parse_flags(
             "OverloadMaterials=1\nOverloadTextures suffix\n30=Earth-Smooth\n",
