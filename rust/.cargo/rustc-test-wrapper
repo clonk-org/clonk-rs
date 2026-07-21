@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+# Cargo passes the real compiler first. Only Darwin test harness roots prefer
+# the toolchain's libstd dylib; every library, normal binary, non-test
+# play/release build, and non-Darwin target retains rustc's static preference.
+rustc=$1
+shift
+
+is_test=false
+target=
+expect_target=false
+for argument do
+    if [ "$expect_target" = true ]; then
+        target=$argument
+        expect_target=false
+        continue
+    fi
+    case "$argument" in
+        --test)
+            is_test=true
+            ;;
+        --target)
+            expect_target=true
+            ;;
+        --target=*)
+            target=${argument#--target=}
+            ;;
+    esac
+done
+
+if [ "$is_test" = true ]; then
+    is_darwin=false
+    if [ -n "$target" ]; then
+        case "$target" in
+            *-apple-darwin)
+                is_darwin=true
+                ;;
+        esac
+    elif [ "$(uname -s)" = Darwin ]; then
+        is_darwin=true
+    fi
+    if [ "$is_darwin" = true ]; then
+        exec "$rustc" "$@" -Cprefer-dynamic -Crpath
+    fi
+fi
+exec "$rustc" "$@"

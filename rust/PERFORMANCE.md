@@ -510,6 +510,54 @@ skipped, in a 57.486s nextest phase. Apple documents `-O0` as disabling linker
 optimizations and layout algorithms specifically to speed debug incremental
 development; it does not change Rust or LLVM optimization levels.
 
+### Dynamic Darwin test-root follow-up
+
+Rust's standard library is also available as a toolchain dylib. On Darwin,
+test commands opt into `.cargo/rustc-test-wrapper` through the
+`RUSTC_WORKSPACE_WRAPPER` environment variable. It selects
+`-Cprefer-dynamic -Crpath` solely for `--test` roots. Workspace libraries,
+ordinary binaries, non-test `play`/`release` builds, and non-Darwin targets
+retain static linkage. Keeping this out of global Cargo configuration also
+prevents native Windows Cargo from trying to execute a POSIX script. From the
+`rust/` directory, the opt-in is:
+
+```bash
+RUSTC_WORKSPACE_WRAPPER="$PWD/.cargo/rustc-test-wrapper" cargo nextest run ...
+```
+
+Cargo includes the wrapper in artifact identity, so use the same absolute
+wrapper path on every Darwin Cargo command instead of alternating wrapped and
+unwrapped commands into parallel caches. The worker protocol does this.
+
+The output-relative Mach-O rpath keeps direct test-binary execution working
+from its original target directory without modifying `DYLD_LIBRARY_PATH`.
+These are local artifacts, not portable binaries: moving them or removing
+their exact Rust toolchain requires rebuilding them.
+
+On the same M4 Max and source, empty-target locked/offline builds and two
+counterbalanced cached-suite pairs produced these single-sample results:
+
+| Workload | Static std | Dynamic std | Delta |
+| --- | ---: | ---: | ---: |
+| Cold workspace test build | 92.15s | 93.35s | +1.20s |
+| Full suite, pair 1 (8,375 passed) | 60.189s | 56.300s | -3.889s |
+| Full suite, reversed pair 2 (8,375 passed) | 58.516s | 54.564s | -3.952s |
+| Same-line app code edit/relink | 26.34s | 25.91s | -0.43s |
+| Same-line no-code-change relink | 7.97s | 6.31s | -1.66s |
+
+Using the reversed suite pair, the representative code-edit plus full-test
+loop fell from 84.856s to 80.474s, a 4.382s (5.2%) reduction. Dynamic linkage
+also reduced aggregate testcase time from 912.797s to 859.994s in that pair;
+the app harness accounted for most of the reduction. The cold build alone was
+1.3% slower, but cold build plus the first suite still fell by 2.689s.
+
+A deliberately pathological edit that inserted a line near the top of the
+200k-line app harness rebuilt in 40.97s dynamically versus 33.47s statically;
+changing an existing code line instead produced the representative result
+above. Keep both tradeoffs visible when comparing future compiler behavior.
+All dynamic samples retained normal panic unwinding, ad-hoc Mach-O signatures,
+and direct execution; both complete nextest runs passed the full inventory.
+
 The faster-looking LLD `-no_deduplicate` experiment was rejected despite a
 97.38s build: an isolated panic probe passed, but the fresh full-workspace
 binary aborted while unwinding the same `#[should_panic]` test. The unmodified
