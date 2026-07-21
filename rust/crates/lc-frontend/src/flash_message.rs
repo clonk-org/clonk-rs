@@ -5,7 +5,7 @@
 //! the caller. This module implements only the final `FontRegular::TextOut`:
 //! one markup-aware, white, centered draw over the existing fullscreen image.
 
-use lc_graphics::clonk_font::{ClonkFont, TextAlign};
+use lc_graphics::clonk_font::{ClonkFont, FontImageProvider, TextAlign};
 use lc_graphics::{GammaRamp, Point, Surface};
 
 /// `CStdDDraw::DEFAULT_MESSAGE_COLOR` (`src/StdDDraw2.h:361`).
@@ -34,9 +34,10 @@ pub fn render_flash_message(
     display_text: &str,
     y: i32,
     gamma: Option<&GammaRamp>,
+    images: &dyn FontImageProvider,
 ) {
     let anchor = flash_message_anchor(surface.width(), y);
-    font_regular.draw_with_gamma(
+    font_regular.draw_with_gamma_and_images(
         surface,
         anchor.x,
         anchor.y,
@@ -45,13 +46,14 @@ pub fn render_flash_message(
         TextAlign::Center,
         true,
         gamma,
+        images,
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_graphics::clonk_font::GlyphCell;
+    use lc_graphics::clonk_font::{FontImageRef, GlyphCell};
     use lc_graphics::{Color, PixelFormat};
 
     fn test_font() -> ClonkFont {
@@ -86,6 +88,14 @@ mod tests {
         changed.first().copied().zip(changed.last().copied())
     }
 
+    struct NoImages;
+
+    impl FontImageProvider for NoImages {
+        fn font_image(&self, _tag: &str) -> Option<FontImageRef<'_>> {
+            None
+        }
+    }
+
     #[test]
     fn render_centers_on_the_whole_surface_with_integer_division() {
         let font = test_font();
@@ -93,7 +103,7 @@ mod tests {
         let mut surface = Surface::new(11, 12, PixelFormat::Rgba8888);
         surface.fill(background);
 
-        render_flash_message(&mut surface, &font, "A", 2, None);
+        render_flash_message(&mut surface, &font, "A", 2, None, &NoImages);
 
         assert_eq!(flash_message_anchor(11, 2), Point::new(5, 2));
         assert_eq!(changed_span(&surface, 2, background), Some((4, 6)));
@@ -106,7 +116,7 @@ mod tests {
         let mut surface = Surface::new(11, 14, PixelFormat::Rgba8888);
         surface.fill(background);
 
-        render_flash_message(&mut surface, &font, "A\nBB|A", 1, None);
+        render_flash_message(&mut surface, &font, "A\nBB|A", 1, None, &NoImages);
 
         assert_eq!(changed_span(&surface, 1, background), Some((4, 6)));
         assert_eq!(changed_span(&surface, 4, background), Some((1, 9)));
@@ -118,11 +128,18 @@ mod tests {
         let font = test_font();
         let mut surface = Surface::new(11, 10, PixelFormat::Rgba8888);
 
-        render_flash_message(&mut surface, &font, "A", 1, None);
+        render_flash_message(&mut surface, &font, "A", 1, None, &NoImages);
         assert_eq!(pixel(&surface, 5, 1), Color::opaque(255, 255, 255));
 
         let mut marked_up = Surface::new(11, 10, PixelFormat::Rgba8888);
-        render_flash_message(&mut marked_up, &font, "<c ffff00>A</c>", 1, None);
+        render_flash_message(
+            &mut marked_up,
+            &font,
+            "<c ffff00>A</c>",
+            1,
+            None,
+            &NoImages,
+        );
         assert_eq!(pixel(&marked_up, 5, 1), Color::opaque(254, 254, 0));
     }
 
@@ -138,6 +155,7 @@ mod tests {
             "<c 000000>A</c>",
             1,
             Some(&gamma),
+            &NoImages,
         );
 
         assert_eq!(pixel(&surface, 5, 1), Color::opaque(17, 33, 49));
@@ -150,7 +168,7 @@ mod tests {
         let mut surface = Surface::new(11, 10, PixelFormat::Rgba8888);
         surface.fill(background);
 
-        render_flash_message(&mut surface, &font, "A", 3, None);
+        render_flash_message(&mut surface, &font, "A", 3, None, &NoImages);
 
         assert_eq!(pixel(&surface, 0, 0), background);
         assert_eq!(pixel(&surface, 10, 9), background);

@@ -821,11 +821,7 @@ impl LoaderScreen {
     }
 
     fn validate_render_text(&self) -> Result<()> {
-        validate_supported_markup("title", &self.state.title)?;
         if let LoaderLog::Visible(lines) = &self.state.log {
-            for line in lines {
-                validate_supported_markup("log line", line)?;
-            }
             if self.state.process.is_some()
                 && !visible_log_has_nonempty_line(lines, self.resources.fonts.mini.line_height)
             {
@@ -904,31 +900,6 @@ fn visible_log_has_nonempty_line(lines: &[String], line_height: i32) -> bool {
         .len()
         .saturating_sub(usize::try_from(visible).unwrap_or_default());
     lines[start..].iter().any(|line| !line.is_empty())
-}
-
-/// Reject only C++ sequences that the shared ClonkFont renderer would
-/// otherwise silently misrender. Invalid/unknown markup remains literal in
-/// both engines. Color tags are supported; italic's shear and definition
-/// inline images are not.
-fn validate_supported_markup(role: &str, text: &str) -> Result<()> {
-    if text.as_bytes().windows(3).any(|window| window == b"<i>") {
-        anyhow::bail!("classic loader {role} contains unsupported valid italic markup '<i>'");
-    }
-
-    let bytes = text.as_bytes();
-    let mut index = 0;
-    while index + 3 < bytes.len() {
-        if bytes[index] == b'{' && bytes[index + 1] == b'{' && bytes[index + 2] != b'{' {
-            if let Some(close_offset) = bytes[index + 2..].iter().position(|byte| *byte == b'}') {
-                let first_close = index + 2 + close_offset;
-                if first_close > index + 2 && bytes.get(first_close + 1).copied() == Some(b'}') {
-                    anyhow::bail!("classic loader {role} contains unsupported inline image markup");
-                }
-            }
-        }
-        index += 1;
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2147,33 +2118,66 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_valid_markup_fails_instead_of_silently_misrendering() {
-        let italic = synthetic_screen(LoaderState::initial("<i>Loading</i>"), [10, 20, 30, 255]);
-        let mut frame = Surface::new(320, 240, PixelFormat::Rgba8888);
+    fn loader_renders_italics_and_consumes_providerless_inline_images_like_cpp() {
+        // Keep the tag open so right alignment cannot differ solely because
+        // of C++'s trailing-close-tag h-space quirk.
+        let italic = synthetic_screen(LoaderState::initial("<i>Loading"), [10, 20, 30, 255]);
+        let plain = synthetic_screen(LoaderState::initial("Loading"), [10, 20, 30, 255]);
+        let mut italic_frame = Surface::new(320, 240, PixelFormat::Rgba8888);
+        let mut plain_frame = Surface::new(320, 240, PixelFormat::Rgba8888);
         italic
-            .render_chrome(&mut frame, LoaderRenderConfig::default(), None)
-            .expect("text-free chrome does not interpret markup");
-        assert_eq!(
-            italic.render(&mut frame, None).unwrap_err().to_string(),
-            "classic loader title contains unsupported valid italic markup '<i>'"
-        );
+            .render(&mut italic_frame, None)
+            .expect("valid italic loader title renders");
+        plain
+            .render(&mut plain_frame, None)
+            .expect("plain title renders");
+        assert_ne!(italic_frame.pixels(), plain_frame.pixels());
+
         // Invalid italic syntax is literal in C++ and remains renderable.
         let invalid = synthetic_screen(LoaderState::initial("<i bad>"), [10, 20, 30, 255]);
-        invalid.render(&mut frame, None).unwrap();
+        invalid.render(&mut italic_frame, None).unwrap();
 
-        let mut image = LoaderState::initial("Loading");
-        image.log = LoaderLog::Visible(vec!["Loading {{CLNK}}".into()]);
-        let image = synthetic_screen(image, [10, 20, 30, 255]);
-        assert_eq!(
-            image.render(&mut frame, None).unwrap_err().to_string(),
-            "classic loader log line contains unsupported inline image markup"
-        );
+        let mut image_state = LoaderState::initial("Loading");
+        image_state.log = LoaderLog::Visible(vec!["Loading {{CLNK}}".into()]);
+        let image = synthetic_screen(image_state, [10, 20, 30, 255]);
+        let mut omitted_state = LoaderState::initial("Loading");
+        omitted_state.log = LoaderLog::Visible(vec!["Loading ".into()]);
+        let omitted = synthetic_screen(omitted_state, [10, 20, 30, 255]);
+        let mut image_frame = Surface::new(320, 240, PixelFormat::Rgba8888);
+        let mut omitted_frame = Surface::new(320, 240, PixelFormat::Rgba8888);
+        image
+            .render(&mut image_frame, None)
+            .expect("FontTiny consumes unresolved image markup");
+        omitted.render(&mut omitted_frame, None).unwrap();
+        assert_eq!(image_frame.pixels(), omitted_frame.pixels());
+
+        let native = build_native_font_set(&endeavour_bytes(), 1.5)
+            .expect("fractional scale-native loader fonts");
+        let mut native_italic = Surface::new(480, 360, PixelFormat::Rgba8888);
+        let mut native_plain = Surface::new(480, 360, PixelFormat::Rgba8888);
+        italic
+            .render_native_text(&mut native_italic, &native, 320, 240, None)
+            .expect("scale-native italic loader title renders");
+        plain
+            .render_native_text(&mut native_plain, &native, 320, 240, None)
+            .expect("scale-native plain loader title renders");
+        assert_ne!(native_italic.pixels(), native_plain.pixels());
+
+        let mut native_image = Surface::new(480, 360, PixelFormat::Rgba8888);
+        let mut native_omitted = Surface::new(480, 360, PixelFormat::Rgba8888);
+        image
+            .render_native_text(&mut native_image, &native, 320, 240, None)
+            .expect("scale-native FontTiny consumes unresolved image markup");
+        omitted
+            .render_native_text(&mut native_omitted, &native, 320, 240, None)
+            .expect("scale-native omitted image control renders");
+        assert_eq!(native_image.pixels(), native_omitted.pixels());
 
         let color = synthetic_screen(
             LoaderState::initial("<c ff0000>Loading</c>"),
             [10, 20, 30, 255],
         );
-        color.render(&mut frame, None).unwrap();
+        color.render(&mut italic_frame, None).unwrap();
     }
 
     #[test]
@@ -2346,7 +2350,9 @@ mod tests {
             .expect("render real loader frame");
 
         // Snapshot over LoaderSky1.jpg, GUIProgress.png and Endeavour.ttf.
-        assert_eq!(fnv1a64(surface.pixels()), 926_291_329_065_383_896);
+        // The title's 0xdd alpha uses C++ inverted-alpha blit addition rather
+        // than multiplicative modulation, including on filtered edge texels.
+        assert_eq!(fnv1a64(surface.pixels()), 10_266_812_897_804_380_960);
     }
 
     #[test]

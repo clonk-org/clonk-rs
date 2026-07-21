@@ -4,7 +4,7 @@
 //! draws. This module therefore accepts the two fully formatted column
 //! strings, including their blank lines and balanced `<c ...>` markup.
 
-use lc_graphics::clonk_font::{ClonkFont, TextAlign};
+use lc_graphics::clonk_font::{ClonkFont, FontImageProvider, TextAlign};
 use lc_graphics::{GammaRamp, Point, Rect, Surface};
 
 /// `CStdDDraw::DEFAULT_MESSAGE_COLOR` (`src/StdDDraw2.h:361`).
@@ -47,9 +47,10 @@ pub fn render_runtime_help(
     left_display_lines: &str,
     right_display_lines: &str,
     gamma: Option<&GammaRamp>,
+    images: &dyn FontImageProvider,
 ) {
     let layout = runtime_help_layout(viewport_area);
-    font_regular.draw_with_gamma(
+    font_regular.draw_with_gamma_and_images(
         surface,
         layout.left_anchor.x,
         layout.left_anchor.y,
@@ -58,8 +59,9 @@ pub fn render_runtime_help(
         TextAlign::Left,
         true,
         gamma,
+        images,
     );
-    font_regular.draw_with_gamma(
+    font_regular.draw_with_gamma_and_images(
         surface,
         layout.right_anchor.x,
         layout.right_anchor.y,
@@ -68,13 +70,14 @@ pub fn render_runtime_help(
         TextAlign::Left,
         true,
         gamma,
+        images,
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_graphics::clonk_font::GlyphCell;
+    use lc_graphics::clonk_font::{FontImageRef, GlyphCell};
     use lc_graphics::{Color, PixelFormat};
 
     fn test_font(line_height: i32) -> ClonkFont {
@@ -100,6 +103,14 @@ mod tests {
             .expect("test coordinate is on the surface")
     }
 
+    struct NoImages;
+
+    impl FontImageProvider for NoImages {
+        fn font_image(&self, _tag: &str) -> Option<FontImageRef<'_>> {
+            None
+        }
+    }
+
     #[test]
     fn layout_uses_viewport_origin_and_truncating_half_width() {
         let layout = runtime_help_layout(Rect::new(-10, 7, 641, 333));
@@ -117,7 +128,15 @@ mod tests {
         let mut surface = Surface::new(500, 160, PixelFormat::Rgba8888);
         surface.fill(background);
 
-        render_runtime_help(&mut surface, &font, area, "A\n\nA", "B\nB", None);
+        render_runtime_help(
+            &mut surface,
+            &font,
+            area,
+            "A\n\nA",
+            "B\nB",
+            None,
+            &NoImages,
+        );
 
         assert_eq!(
             pixel(&surface, layout.left_anchor.x, layout.left_anchor.y),
@@ -151,7 +170,15 @@ mod tests {
         let layout = runtime_help_layout(area);
         let mut surface = Surface::new(400, 100, PixelFormat::Rgba8888);
 
-        render_runtime_help(&mut surface, &font, area, "<c ffff00>A</c>", "B", None);
+        render_runtime_help(
+            &mut surface,
+            &font,
+            area,
+            "<c ffff00>A</c>",
+            "B",
+            None,
+            &NoImages,
+        );
 
         assert_eq!(
             pixel(&surface, layout.left_anchor.x, layout.left_anchor.y),
@@ -178,6 +205,7 @@ mod tests {
             "<c 000000>A</c>",
             "",
             Some(&gamma),
+            &NoImages,
         );
 
         assert_eq!(

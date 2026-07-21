@@ -11,9 +11,6 @@
 //! conversions are performed exactly where the C++ does them.
 //!
 //! Out of scope (documented deviations):
-//! - `<i>`/`</i>` italics: the C++ applies a shear transform
-//!   (`src/StdMarkup.cpp:24-28`); we track the tag for nesting/closing
-//!   semantics but render unsheared (no transform support).
 //! - FreeType rasterization: callers supply the 8-bit coverage bitmap.
 
 use crate::{Color, GammaRamp, Rect, Surface, SurfaceDrawTarget};
@@ -450,9 +447,11 @@ impl ClonkFont {
     /// Markup: `<c hex>` modulates glyph RGB by [`markup_blit_color`] of the
     /// tag RGB — but only when the tag color differs from the base color
     /// (`if (dwBlitClr != dwColor)`, `src/StdFont.cpp:910-915`); the glyph
-    /// alpha stays modulated by `color`'s alpha only (tag alpha is ignored).
-    /// `</c>` reverts. `<i>`/`</i>` are consumed but render unsheared. Invalid
-    /// or unknown tags render literally (`src/StdFont.cpp:864-866`).
+    /// alpha uses `color`'s inverted-alpha blit addition only (tag alpha is
+    /// ignored).
+    /// `</c>` reverts. Each open `<i>` contributes the native centered `-0.3`
+    /// horizontal shear. Invalid or unknown tags render literally
+    /// (`src/StdFont.cpp:864-866`).
     #[allow(clippy::too_many_arguments)] // signature mirrors CStdFont::DrawText
     pub fn draw(
         &self,
@@ -779,6 +778,9 @@ impl ClonkFont {
             TextAlign::Right => sx,      // src/StdFont.cpp:838
         };
         let mut rest = line;
+        // DrawText keeps its transform pointer once markup was already open or
+        // any valid tag was read, even if a later close empties the stack.
+        let mut transform_active = !stack.is_empty();
         while let Some(c) = rest.chars().next() {
             let after = &rest[c.len_utf8()..];
             // Ignore system characters (src/StdFont.cpp:851).
@@ -789,6 +791,7 @@ impl ClonkFont {
             // Markup tag (src/StdFont.cpp:853-866).
             if markup && c == '<' {
                 if let Some(advance) = read_tag(rest, Some(stack)) {
+                    transform_active = true;
                     rest = &rest[advance..];
                     continue;
                 }
@@ -817,9 +820,10 @@ impl ClonkFont {
                         self.cell_height,
                         pen_x,
                         y,
-                        image_modulation_rgb(stack, color),
+                        image_modulation_rgb(stack, color, transform_active),
                         color[3],
                         gamma,
+                        markup_shear(stack),
                     );
                     pen_x = pen_x
                         .saturating_add(image_width)
@@ -839,6 +843,7 @@ impl ClonkFont {
                     modulation_rgb(stack, color),
                     color[3],
                     gamma,
+                    markup_shear(stack),
                 );
             }
             // x += w2 + iHSpace (src/StdFont.cpp:927); empty facet → width 0.
@@ -852,7 +857,7 @@ impl ClonkFont {
 /// An open markup tag (`CMarkupTag`, `src/StdMarkup.h:30-66`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MarkupTag {
-    /// `<i>` — tracked for close-tag matching only (shear unsupported).
+    /// `<i>` — contributes one native `-0.3` horizontal shear.
     Italic,
     /// `<c ...>` — color in inverted-alpha ARGB, as stored by
     /// `CMarkupTagColor` after `InvertRGBAAlpha` (`src/StdMarkup.cpp:94-96`).
@@ -896,6 +901,15 @@ fn modulation_rgb(stack: &[MarkupTag], color: [u8; 4]) -> [u8; 3] {
         .filter(|&clr| clr != base) // src/StdFont.cpp:914
         .map(|clr| markup_blit_color([(clr >> 16) as u8, (clr >> 8) as u8, clr as u8]))
         .unwrap_or([color[0], color[1], color[2]])
+}
+
+/// `CMarkup::Apply` visits every open tag and each italic tag subtracts 0.3
+/// from `CBltTransform::mat[1]` (`src/StdMarkup.cpp:24-28`).
+fn markup_shear(stack: &[MarkupTag]) -> f32 {
+    stack
+        .iter()
+        .filter(|tag| matches!(tag, MarkupTag::Italic))
+        .fold(0.0_f32, |shear, _| shear - 0.3)
 }
 
 /// `CMarkup::SkipTags` (`src/StdMarkup.cpp:109-115`): consume consecutive
@@ -1055,12 +1069,16 @@ pub fn scaled_font_image_width(cell_height: i32, image: FontImageRef<'_>) -> i32
         .unwrap_or(i32::MAX)
 }
 
-fn image_modulation_rgb(stack: &[MarkupTag], color: [u8; 4]) -> [u8; 3] {
+fn image_modulation_rgb(stack: &[MarkupTag], color: [u8; 4], transform_active: bool) -> [u8; 3] {
     if stack
         .iter()
         .any(|tag| matches!(tag, MarkupTag::TextColor(_)))
     {
         modulation_rgb(stack, color)
+    } else if transform_active {
+        // Once DrawText has a transform pointer, its shared markup branch
+        // restarts custom-image modulation from the base text color too.
+        [color[0], color[1], color[2]]
     } else {
         // CStdFont disables ordinary text-color modulation for custom images;
         // only active markup or alpha fadeout affects them (StdFont.cpp:893-915).
@@ -1079,53 +1097,120 @@ fn blit_font_image<T: SurfaceDrawTarget + ?Sized>(
     mod_rgb: [u8; 3],
     color_alpha: u8,
     gamma: Option<&crate::GammaRamp>,
+    shear: f32,
 ) {
     if width <= 0 || height <= 0 || image.width == 0 || image.height == 0 {
+        return;
+    }
+    if shear != 0.0 {
+        let Some((x0, y0, x1, y1)) = sheared_raster_bounds(
+            surface,
+            x as f32,
+            y as f32,
+            width as f32,
+            height as f32,
+            shear,
+        ) else {
+            return;
+        };
+        for target_y in y0..y1 {
+            for target_x in x0..x1 {
+                let Some((sample_x, sample_y)) = inverse_sheared_sample(
+                    target_x,
+                    target_y,
+                    x as f32,
+                    y as f32,
+                    width as f32,
+                    height as f32,
+                    image.width as f32,
+                    image.height as f32,
+                    shear,
+                ) else {
+                    continue;
+                };
+                blend_font_sample(
+                    surface,
+                    target_x as u32,
+                    target_y as u32,
+                    bilinear_font_image_sample(image, sample_x, sample_y),
+                    mod_rgb,
+                    color_alpha,
+                    gamma,
+                );
+            }
+        }
         return;
     }
     for row in 0..height as usize {
         for col in 0..width as usize {
             let sample_x = (col as f32 + 0.5) * image.width as f32 / width as f32 - 0.5;
             let sample_y = (row as f32 + 0.5) * image.height as f32 / height as f32 - 0.5;
-            let sample = bilinear_font_image_sample(image, sample_x, sample_y);
-            let out_a = sample[3] * f32::from(color_alpha) / 255.0;
-            if out_a <= 0.0 {
-                continue;
-            }
             let (Some(dx), Some(dy)) = (offset_coord(x, col), offset_coord(y, row)) else {
                 continue;
             };
-            let Some(dst) = surface.get_pixel(dx, dy) else {
-                continue;
-            };
-            let alpha = out_a / 255.0;
-            let source = |channel: crate::gamma::GammaChannel, value: f32, modulation: u8| {
-                let value = value * f32::from(modulation) / 255.0;
-                gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value))
-            };
-            let blend = |source: f32, destination: u8| {
-                (source * alpha + f32::from(destination) * (1.0 - alpha))
-                    .round()
-                    .clamp(0.0, 255.0) as u8
-            };
-            let blended = Color::new(
-                blend(
-                    source(crate::gamma::GammaChannel::Red, sample[0], mod_rgb[0]),
-                    dst.r,
-                ),
-                blend(
-                    source(crate::gamma::GammaChannel::Green, sample[1], mod_rgb[1]),
-                    dst.g,
-                ),
-                blend(
-                    source(crate::gamma::GammaChannel::Blue, sample[2], mod_rgb[2]),
-                    dst.b,
-                ),
-                blend(out_a, dst.a),
+            blend_font_sample(
+                surface,
+                dx,
+                dy,
+                bilinear_font_image_sample(image, sample_x, sample_y),
+                mod_rgb,
+                color_alpha,
+                gamma,
             );
-            let _ = surface.set_pixel(dx, dy, blended);
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blend_font_sample<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
+    x: u32,
+    y: u32,
+    sample: [f32; 4],
+    mod_rgb: [u8; 3],
+    color_alpha: u8,
+    gamma: Option<&crate::GammaRamp>,
+) {
+    let out_a = font_sample_alpha(sample[3], color_alpha);
+    if out_a <= 0.0 {
+        return;
+    }
+    let Some(dst) = surface.get_pixel(x, y) else {
+        return;
+    };
+    let alpha = out_a / 255.0;
+    let source = |channel: crate::gamma::GammaChannel, value: f32, modulation: u8| {
+        let value = value * f32::from(modulation) / 255.0;
+        gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value))
+    };
+    let blend = |source: f32, destination: u8| {
+        (source * alpha + f32::from(destination) * (1.0 - alpha))
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    let blended = Color::new(
+        blend(
+            source(crate::gamma::GammaChannel::Red, sample[0], mod_rgb[0]),
+            dst.r,
+        ),
+        blend(
+            source(crate::gamma::GammaChannel::Green, sample[1], mod_rgb[1]),
+            dst.g,
+        ),
+        blend(
+            source(crate::gamma::GammaChannel::Blue, sample[2], mod_rgb[2]),
+            dst.b,
+        ),
+        blend(out_a, dst.a),
+    );
+    let _ = surface.set_pixel(x, y, blended);
+}
+
+fn font_sample_alpha(sample_alpha: f32, color_alpha: u8) -> f32 {
+    // The font texture's inverted alpha and the primary modulation's
+    // inverted alpha are added in the C++ shader. In normal-alpha form this
+    // subtracts the modulation transparency instead of multiplying opacity.
+    (sample_alpha - f32::from(255 - color_alpha)).max(0.0)
 }
 
 fn bilinear_font_image_sample(image: FontImageRef<'_>, sample_x: f32, sample_y: f32) -> [f32; 4] {
@@ -1166,6 +1251,113 @@ fn bilinear_font_image_sample(image: FontImageRef<'_>, sample_x: f32, sample_y: 
     })
 }
 
+fn bilinear_glyph_sample(
+    cell: &GlyphCell,
+    cell_height: i32,
+    sample_x: f32,
+    sample_y: f32,
+) -> [f32; 4] {
+    let texel = |x: i32, y: i32| {
+        if x < 0 || y < 0 || x >= cell.width || y >= cell_height {
+            return [0.0; 4];
+        }
+        cell.pixels
+            .get(y as usize * cell.width as usize + x as usize)
+            .map(|pixel| {
+                [
+                    f32::from(pixel.r),
+                    f32::from(pixel.g),
+                    f32::from(pixel.b),
+                    f32::from(pixel.a),
+                ]
+            })
+            .unwrap_or([0.0; 4])
+    };
+    let x0 = sample_x.floor() as i32;
+    let y0 = sample_y.floor() as i32;
+    let fraction_x = sample_x - x0 as f32;
+    let fraction_y = sample_y - y0 as f32;
+    let top_left = texel(x0, y0);
+    let top_right = texel(x0 + 1, y0);
+    let bottom_left = texel(x0, y0 + 1);
+    let bottom_right = texel(x0 + 1, y0 + 1);
+    std::array::from_fn(|channel| {
+        let top = top_left[channel] * (1.0 - fraction_x) + top_right[channel] * fraction_x;
+        let bottom = bottom_left[channel] * (1.0 - fraction_x) + bottom_right[channel] * fraction_x;
+        top * (1.0 - fraction_y) + bottom * fraction_y
+    })
+}
+
+fn sheared_raster_bounds<T: SurfaceDrawTarget + ?Sized>(
+    surface: &T,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    shear: f32,
+) -> Option<(i32, i32, i32, i32)> {
+    if width <= 0.0
+        || height <= 0.0
+        || !x.is_finite()
+        || !y.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || !shear.is_finite()
+        || surface.width() == 0
+        || surface.height() == 0
+    {
+        return None;
+    }
+    let half_height = height / 2.0;
+    let top_shift = shear * -half_height;
+    let bottom_shift = shear * half_height;
+    let surface_width = i32::try_from(surface.width()).unwrap_or(i32::MAX);
+    let surface_height = i32::try_from(surface.height()).unwrap_or(i32::MAX);
+    let x0 = ((x + top_shift.min(bottom_shift) - 0.5).ceil() as i32).max(0);
+    let x1 = ((x + width + top_shift.max(bottom_shift) - 0.5).ceil() as i32).min(surface_width);
+    let y0 = ((y - 0.5).ceil() as i32).max(0);
+    let y1 = ((y + height - 0.5).ceil() as i32).min(surface_height);
+    (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inverse_sheared_sample(
+    target_x: i32,
+    target_y: i32,
+    x: f32,
+    y: f32,
+    destination_width: f32,
+    destination_height: f32,
+    source_width: f32,
+    source_height: f32,
+    shear: f32,
+) -> Option<(f32, f32)> {
+    if destination_width <= 0.0
+        || destination_height <= 0.0
+        || source_width <= 0.0
+        || source_height <= 0.0
+    {
+        return None;
+    }
+    let pixel_x = target_x as f32 + 0.5;
+    let pixel_y = target_y as f32 + 0.5;
+    let center_y = y + destination_height / 2.0;
+    let unsheared_x = pixel_x - shear * (pixel_y - center_y);
+    let local_x = unsheared_x - x;
+    let local_y = pixel_y - y;
+    if local_x < 0.0
+        || local_y < 0.0
+        || local_x >= destination_width
+        || local_y >= destination_height
+    {
+        return None;
+    }
+    Some((
+        local_x * source_width / destination_width - 0.5,
+        local_y * source_height / destination_height - 0.5,
+    ))
+}
+
 /// Blit one glyph cell at `(x, y)`, mirroring the GL character blit
 /// (`src/StdFont.cpp:922-925`): texture RGBA modulated by the blit color
 /// (`glColor` modulate, f32 round-to-nearest), then composited with
@@ -1181,7 +1373,47 @@ fn blit_cell<T: SurfaceDrawTarget + ?Sized>(
     mod_rgb: [u8; 3],
     color_alpha: u8,
     gamma: Option<&crate::GammaRamp>,
+    shear: f32,
 ) {
+    if shear != 0.0 {
+        let Some((x0, y0, x1, y1)) = sheared_raster_bounds(
+            surface,
+            x as f32,
+            y as f32,
+            cell.width as f32,
+            cell_height as f32,
+            shear,
+        ) else {
+            return;
+        };
+        for target_y in y0..y1 {
+            for target_x in x0..x1 {
+                let Some((sample_x, sample_y)) = inverse_sheared_sample(
+                    target_x,
+                    target_y,
+                    x as f32,
+                    y as f32,
+                    cell.width as f32,
+                    cell_height as f32,
+                    cell.width as f32,
+                    cell_height as f32,
+                    shear,
+                ) else {
+                    continue;
+                };
+                blend_font_sample(
+                    surface,
+                    target_x as u32,
+                    target_y as u32,
+                    bilinear_glyph_sample(cell, cell_height, sample_x, sample_y),
+                    mod_rgb,
+                    color_alpha,
+                    gamma,
+                );
+            }
+        }
+        return;
+    }
     let width = usize::try_from(cell.width).unwrap_or(0);
     let height = usize::try_from(cell_height).unwrap_or(0);
     for row in 0..height {
@@ -1194,7 +1426,7 @@ fn blit_cell<T: SurfaceDrawTarget + ?Sized>(
                 continue;
             };
             // Glyph alpha modulated by the draw color's alpha only.
-            let out_a = (px.a as f32 * color_alpha as f32 / 255.0).round();
+            let out_a = font_sample_alpha(f32::from(px.a), color_alpha);
             if out_a <= 0.0 {
                 continue; // fully transparent source leaves the surface unchanged
             }
@@ -1715,6 +1947,140 @@ mod tests {
     }
 
     #[test]
+    fn italic_clonk_font_shears_glyphs_and_images_like_cpp() {
+        fn changed_span(surface: &Surface, y: u32, background: Color) -> Option<(u32, u32)> {
+            let changed = (0..surface.width())
+                .filter(|x| surface.get_pixel(*x, y) != Some(background))
+                .collect::<Vec<_>>();
+            changed.first().copied().zip(changed.last().copied())
+        }
+
+        let mut font = ClonkFont::new(9);
+        font.add_glyph(
+            'X',
+            GlyphCell {
+                width: 6,
+                pixels: vec![Color::opaque(255, 255, 255); 6 * 10],
+            },
+        );
+        let images = TestImages {
+            tag: "TEST",
+            width: 6,
+            height: 10,
+            rgba: vec![255; 6 * 10 * 4],
+        };
+        let background = Color::opaque(3, 5, 7);
+        let mut plain = Surface::new(48, 20, PixelFormat::Rgba8888);
+        let mut italic = Surface::new(48, 20, PixelFormat::Rgba8888);
+        let mut nested = Surface::new(48, 20, PixelFormat::Rgba8888);
+        let mut image = Surface::new(48, 20, PixelFormat::Rgba8888);
+        for surface in [&mut plain, &mut italic, &mut nested, &mut image] {
+            surface.fill(background);
+        }
+
+        font.draw(&mut plain, 20, 4, "X", WHITE, TextAlign::Left, true);
+        font.draw(&mut italic, 20, 4, "<i>X</i>", WHITE, TextAlign::Left, true);
+        font.draw(
+            &mut nested,
+            20,
+            4,
+            "<i><i>X</i></i>",
+            WHITE,
+            TextAlign::Left,
+            true,
+        );
+        font.draw_with_images(
+            &mut image,
+            20,
+            4,
+            "<i>{{TEST}}</i>",
+            [100, 150, 200, 255],
+            TextAlign::Left,
+            true,
+            &images,
+        );
+
+        // Keep the tag open so this isolates italic metrics from the native
+        // trailing-close-tag h-space quirk pinned by the extent tests below.
+        assert_eq!(font.measure("X", true), font.measure("<i>X", true));
+        assert_eq!(
+            font.measure_with_images("{{TEST}}", true, &images),
+            font.measure_with_images("<i>{{TEST}}", true, &images),
+        );
+        let plain_top = changed_span(&plain, 4, background).expect("plain top row");
+        let plain_bottom = changed_span(&plain, 13, background).expect("plain bottom row");
+        let italic_top = changed_span(&italic, 4, background).expect("italic top row");
+        let italic_bottom = changed_span(&italic, 13, background).expect("italic bottom row");
+        let nested_top = changed_span(&nested, 4, background).expect("nested italic top row");
+        let image_top = changed_span(&image, 4, background).expect("italic image top row");
+        let image_bottom = changed_span(&image, 13, background).expect("italic image bottom row");
+        assert!(italic_top.0 > plain_top.0, "top edge shears right");
+        assert!(italic_bottom.0 < plain_bottom.0, "bottom edge shears left");
+        assert!(nested_top.0 > italic_top.0, "nested italics accumulate");
+        assert_eq!(image_top, italic_top);
+        assert_eq!(image_bottom, italic_bottom);
+        assert_eq!(image.get_pixel(22, 9), Some(Color::opaque(100, 150, 200)));
+        assert_eq!(markup_shear(&[MarkupTag::Italic]), -0.3_f32);
+        assert_eq!(
+            markup_shear(&[MarkupTag::Italic, MarkupTag::Italic, MarkupTag::Italic,]),
+            ((0.0_f32 - 0.3) - 0.3) - 0.3,
+        );
+
+        let mut plain_sequence = Surface::new(48, 20, PixelFormat::Rgba8888);
+        let mut italic_sequence = Surface::new(48, 20, PixelFormat::Rgba8888);
+        plain_sequence.fill(background);
+        italic_sequence.fill(background);
+        font.draw(
+            &mut plain_sequence,
+            20,
+            4,
+            "X<c ff0000>X</c>",
+            WHITE,
+            TextAlign::Left,
+            true,
+        );
+        font.draw(
+            &mut italic_sequence,
+            20,
+            4,
+            "<i>X</i><c ff0000>X</c>",
+            WHITE,
+            TextAlign::Left,
+            true,
+        );
+        let red_span = |surface: &Surface| {
+            let pixels = (0..surface.width())
+                .filter(|x| {
+                    surface
+                        .get_pixel(*x, 9)
+                        .is_some_and(|pixel| pixel.r > pixel.g && pixel.r > pixel.b)
+                })
+                .collect::<Vec<_>>();
+            pixels.first().copied().zip(pixels.last().copied())
+        };
+        assert_eq!(red_span(&italic_sequence), red_span(&plain_sequence));
+
+        let mut clipped = Surface::new(48, 20, PixelFormat::Rgba8888);
+        clipped.fill(background);
+        clipped.set_clip(Rect::new(21, 4, 4, 10));
+        font.draw(
+            &mut clipped,
+            20,
+            4,
+            "<i>X</i>",
+            WHITE,
+            TextAlign::Left,
+            true,
+        );
+        assert_ne!(italic.get_pixel(25, 4), Some(background));
+        assert_ne!(italic.get_pixel(20, 13), Some(background));
+        assert_ne!(clipped.get_pixel(21, 4), Some(background));
+        assert_eq!(clipped.get_pixel(25, 4), Some(background));
+        assert_eq!(clipped.get_pixel(20, 13), Some(background));
+        assert_eq!(clipped.get_pixel(25, 13), Some(background));
+    }
+
+    #[test]
     fn draw_zero_height_inline_image_is_unresolved_without_advance() {
         let font = test_font();
         let images = TestImages {
@@ -1875,10 +2241,47 @@ mod tests {
     fn draw_modulates_alpha_by_color_alpha() {
         let font = test_font();
         let mut sfc = surface();
-        // Half-transparent red: out = (255,0,0) with alpha round(255*128/255)
-        // = 128; over transparent black: rgb 128/0/0, alpha round(128²/255) = 64.
-        font.draw(&mut sfc, 0, 0, "A", [255, 0, 0, 128], TextAlign::Left, false);
+        // Half-transparent red: native inverted-alpha addition produces
+        // 255-(255-128)=128; framebuffer blending then yields rgb 128/0/0
+        // and alpha round(128²/255)=64 over transparent black.
+        font.draw(
+            &mut sfc,
+            0,
+            0,
+            "A",
+            [255, 0, 0, 128],
+            TextAlign::Left,
+            false,
+        );
         assert_eq!(px(&sfc, 0, 0), Color::new(128, 0, 0, 64));
+    }
+
+    #[test]
+    fn draw_adds_inverted_modulation_alpha_instead_of_multiplying() {
+        let mut font = test_font();
+        let cell_height = font.cell_height as usize;
+        font.add_glyph(
+            'X',
+            GlyphCell {
+                width: 1,
+                pixels: vec![Color::new(255, 0, 0, 200); cell_height],
+            },
+        );
+        let mut sfc = surface();
+
+        font.draw(
+            &mut sfc,
+            0,
+            0,
+            "X",
+            [255, 255, 255, 128],
+            TextAlign::Left,
+            false,
+        );
+
+        // Filtered alpha 200 with opacity 128 becomes 200-(255-128)=73.
+        // GL_SRC_ALPHA blending stores red 73 and alpha round(73²/255)=21.
+        assert_eq!(px(&sfc, 0, 0), Color::new(73, 0, 0, 21));
     }
 
     #[test]

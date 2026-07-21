@@ -4358,28 +4358,6 @@ fn runtime_help_default_key_name(name: &str, index: usize) -> &'static str {
     }
 }
 
-fn validate_runtime_font_regular_markup(context: &str, text: &str) -> Result<()> {
-    if text.as_bytes().windows(3).any(|window| window == b"<i>") {
-        anyhow::bail!("{context} contains unsupported valid italic markup '<i>'");
-    }
-    let bytes = text.as_bytes();
-    for index in 0..bytes.len().saturating_sub(3) {
-        if bytes[index] == b'{' && bytes[index + 1] == b'{' && bytes[index + 2] != b'{' {
-            if let Some(close_offset) = bytes[index + 2..].iter().position(|byte| *byte == b'}') {
-                let first_close = index + 2 + close_offset;
-                if first_close > index + 2 && bytes.get(first_close + 1) == Some(&b'}') {
-                    anyhow::bail!("{context} contains unsupported inline image markup");
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_runtime_help_label_markup(key: &str, text: &str) -> Result<()> {
-    validate_runtime_font_regular_markup(&format!("classic runtime-help label {key}"), text)
-}
-
 fn validate_runtime_help_line_buffers(left: &str, right: &str) -> Result<()> {
     const CPP_LINE_BUFFER_BYTES: usize = 2500;
     for (column, text) in [("left", left), ("right", right)] {
@@ -4394,50 +4372,48 @@ fn validate_runtime_help_line_buffers(left: &str, right: &str) -> Result<()> {
 }
 
 fn build_runtime_help_columns(table: &HashMap<String, String>) -> Result<RuntimeHelpColumns> {
-    let text = |key: &str| -> Result<String> {
-        let value = table
+    let text = |key: &str| {
+        table
             .get(key)
             .cloned()
-            .unwrap_or_else(|| format!("[Undefined: {key}]"));
-        validate_runtime_help_label_markup(key, &value)?;
-        Ok(value)
+            .unwrap_or_else(|| format!("[Undefined: {key}]"))
     };
     let key = runtime_help_default_key_name;
     let left = format!(
         "[{}]\n\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}/{}</c> - {}\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n",
-        text("IDS_CTL_GAMEFUNCTIONS")?,
+        text("IDS_CTL_GAMEFUNCTIONS"),
         key("ToggleShowHelp", 0),
-        text("IDS_CON_HELP")?,
+        text("IDS_CON_HELP"),
         key("MusicToggle", 0),
-        text("IDS_CTL_MUSIC")?,
+        text("IDS_CTL_MUSIC"),
         key("SoundToggle", 0),
-        text("IDS_CTL_SOUND")?,
+        text("IDS_CTL_SOUND"),
         key("NetClientListDlgToggle", 0),
-        text("IDS_DLG_NETWORK")?,
+        text("IDS_DLG_NETWORK"),
         key("ChatOpen", 1),
         key("ChatOpen", 0),
-        text("IDS_CTL_SENDMESSAGE")?,
+        text("IDS_CTL_SENDMESSAGE"),
         key("MsgBoardScrollUp", 0),
-        text("IDS_CTL_MESSAGEBOARDBACK")?,
+        text("IDS_CTL_MESSAGEBOARDBACK"),
         key("MsgBoardScrollDown", 0),
-        text("IDS_CTL_MESSAGEBOARDFORWARD")?,
+        text("IDS_CTL_MESSAGEBOARDFORWARD"),
         key("ToggleChat", 0),
-        text("IDS_CTL_IRCCHAT")?,
+        text("IDS_CTL_IRCCHAT"),
         key("ScoreboardToggle", 0),
-        text("IDS_CTL_SCOREBOARD")?,
+        text("IDS_CTL_SCOREBOARD"),
         key("Screenshot", 0),
-        text("IDS_CTL_SCREENSHOT")?,
+        text("IDS_CTL_SCREENSHOT"),
         key("ScreenshotEx", 0),
-        text("IDS_CTL_SCREENSHOTEX")?,
+        text("IDS_CTL_SCREENSHOTEX"),
     );
     let right = format!(
         "\n\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n\n\n[Debug]\n\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - Entrance+Vertices\n<c ffff00>{}</c> - Actions/Commands/Pathfinder\n<c ffff00>{}</c> - SolidMasks\n",
         key("GameSpeedUp", 0),
-        text("IDS_CTL_GAMESPEEDUP")?,
+        text("IDS_CTL_GAMESPEEDUP"),
         key("GameSpeedDown", 0),
-        text("IDS_CTL_GAMESPEEDDOWN")?,
+        text("IDS_CTL_GAMESPEEDDOWN"),
         key("DbgModeToggle", 0),
-        text("IDS_CTL_DEBUGMODE")?,
+        text("IDS_CTL_DEBUGMODE"),
         key("DbgShowVtxToggle", 0),
         key("DbgShowActionToggle", 0),
         key("DbgShowSolidMaskToggle", 0),
@@ -33949,7 +33925,6 @@ impl GameApp {
             return Ok(None);
         }
         let text = decode_runtime_flash_bytes(&bytes, charset)?;
-        validate_runtime_font_regular_markup("classic timed flash message", &text)?;
         let remaining_draws = u16::try_from(bytes.len() * 2)
             .context("classic timed flash duration exceeds its 1024-draw bound")?;
         Ok(Some(RuntimeFlashMessage {
@@ -34033,15 +34008,6 @@ impl GameApp {
         else {
             return Ok(None);
         };
-        validate_runtime_font_regular_markup("classic timed flash message", &message.text)
-            .map_err(|error| {
-                tracing::error!(%error, "classic timed flash-message preflight failed");
-                anyhow::Error::new(report_classic_parity_boundary(
-                    ClassicParityBoundary::RuntimeFlashResources {
-                        detail: error.to_string(),
-                    },
-                ))
-            })?;
         Ok(Some(message.clone()))
     }
 
@@ -78476,6 +78442,21 @@ impl GameApp {
         let runtime_help_columns = self.preflight_visible_runtime_help()?;
         let runtime_hold_message_visible = self.runtime_halt_active();
         let runtime_flash_message = self.preflight_visible_runtime_flash()?;
+        let runtime_font_images = {
+            let mut texts = Vec::new();
+            if let Some(columns) = runtime_help_columns.as_ref() {
+                texts.push(columns.left.as_str());
+                texts.push(columns.right.as_str());
+            }
+            if let Some(message) = runtime_flash_message.as_ref() {
+                texts.push(message.text.as_str());
+            }
+            resolve_font_images_in_texts(
+                &self.engine,
+                texts,
+                self.script_text_spec_resources(),
+            )
+        };
         // Scoreboard reconciliation mutates presentation/refcount state. All
         // already-visible running layers must prove their exact resources or
         // typed refusal before that mutation can occur.
@@ -79468,6 +79449,7 @@ impl GameApp {
                 &columns.left,
                 &columns.right,
                 Some(&frame_gamma),
+                &runtime_font_images,
             );
             if ordered_native {
                 self.next_pending_native_overlay();
@@ -79492,6 +79474,7 @@ impl GameApp {
                 "Pause",
                 y,
                 Some(&frame_gamma),
+                &runtime_font_images,
             );
             if ordered_native {
                 self.next_pending_native_overlay();
@@ -79510,6 +79493,7 @@ impl GameApp {
                 &message.text,
                 message.y,
                 Some(&frame_gamma),
+                &runtime_font_images,
             );
             if ordered_native {
                 self.next_pending_native_overlay();
@@ -86294,14 +86278,13 @@ impl FontImageProvider for MessageFontImages {
     }
 }
 
-fn resolve_message_font_images(
+fn resolve_font_images_in_texts<'a>(
     engine: &Engine,
-    message: &lc_engine::MessageSnapshot,
+    texts: impl IntoIterator<Item = &'a str>,
     resources: ScriptTextSpecResources<'_>,
 ) -> MessageFontImages {
     let mut images = HashMap::new();
-    for line in &message.lines {
-        let mut text = line.as_str();
+    for mut text in texts {
         while !text.is_empty() {
             if let Some((spec, advance)) = inline_image_token(text) {
                 let tag = font_image_lookup_tag(spec);
@@ -86315,12 +86298,20 @@ fn resolve_message_font_images(
                 let character = text
                     .chars()
                     .next()
-                    .expect("nonempty message font image scan");
+                    .expect("nonempty FontRegular image scan");
                 text = &text[character.len_utf8()..];
             }
         }
     }
     MessageFontImages(images)
+}
+
+fn resolve_message_font_images(
+    engine: &Engine,
+    message: &lc_engine::MessageSnapshot,
+    resources: ScriptTextSpecResources<'_>,
+) -> MessageFontImages {
+    resolve_font_images_in_texts(engine, message.lines.iter().map(String::as_str), resources)
 }
 
 fn resolve_script_menu_font_images(
@@ -183803,25 +183794,55 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn runtime_flash_preflight_fails_before_pixels_or_countdown_mutation() {
-        let mut app = new_running_sandbox_app();
-        app.runtime_flash_message = Some(RuntimeFlashMessage {
-            text: "<i>A</i>".to_string(),
-            remaining_draws: 4,
-            y: 60,
-        });
-        let before = app.runtime_flash_message.clone();
-        let before_surface = app.graphics.surface().pixels().to_vec();
-        let mut frame = vec![0x6d; 320 * 200 * 4];
-        let sentinel = frame.clone();
+    fn runtime_help_and_flash_resolve_fontregular_images() {
+        let mut app = new_classic_running_sandbox_app();
+        let resolved = resolve_font_images_in_texts(
+            &app.engine,
+            ["{{CLNK}}"],
+            app.script_text_spec_resources(),
+        );
+        assert!(
+            resolved.font_image("CLNK").is_some(),
+            "the live FontRegular provider resolves installed definitions"
+        );
+        app.status_text.clear();
+        app.snapshot.hud.messages.clear();
+        hold_message_board_for_frame_comparison(&mut app);
+        app.runtime_help_text_cache = OnceLock::new();
+        app.runtime_help_text_cache
+            .set(Ok(RuntimeHelpColumns {
+                left: "<i>{{CLNK}}</i>".to_string(),
+                right: String::new(),
+            }))
+            .expect("install image-bearing help columns");
+        app.runtime_help_visible = true;
 
-        let error = app
-            .render(&mut frame)
-            .expect_err("unsupported italic flash must fail typed");
-        assert!(error.to_string().contains("timed flash-message resources"));
-        assert_eq!(app.runtime_flash_message, before);
-        assert_eq!(frame, sentinel);
-        assert_eq!(app.graphics.surface().pixels(), before_surface.as_slice());
+        let mut help = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut help)
+            .expect("italic FontRegular help image renders");
+        app.runtime_help_visible = false;
+        let mut baseline = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut baseline).expect("render overlay-free baseline");
+        assert_ne!(help, baseline, "resolved help image contributes pixels");
+
+        app.set_runtime_flash_message("<i>{{CLNK}}</i>", RuntimeHelpCharset::Windows1252)
+            .expect("valid italic/image flash installs");
+        let before = app
+            .runtime_flash_message
+            .as_ref()
+            .expect("flash state")
+            .remaining_draws;
+        let mut flash = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut flash)
+            .expect("italic FontRegular flash image renders");
+        assert_ne!(flash, baseline, "resolved flash image contributes pixels");
+        assert_eq!(
+            app.runtime_flash_message
+                .as_ref()
+                .expect("more image flash passes remain")
+                .remaining_draws,
+            before - 1,
+        );
     }
 
     #[test]
@@ -186833,6 +186854,7 @@ func ControlDig() { dig_count = 1; return(1); }
             &flash.text,
             flash.y,
             Some(&gamma),
+            &MessageFontImages::default(),
         );
         help.runtime_flash_message = Some(flash);
         let mut actual = vec![0_u8; 320 * 200 * 4];
@@ -187021,16 +187043,14 @@ func ControlDig() { dig_count = 1; return(1); }
             Some("Hilfe ä")
         );
 
-        for unsupported in ["<i>Help</i>", "{{CLNK}}"] {
+        for supported in ["<i>Help</i>", "{{CLNK}}"] {
             let mut table = HashMap::new();
-            table.insert("IDS_CON_HELP".to_string(), unsupported.to_string());
-            let error = build_runtime_help_columns(&table)
-                .expect_err("unsupported FontRegular feature must fail closed");
+            table.insert("IDS_CON_HELP".to_string(), supported.to_string());
+            let columns = build_runtime_help_columns(&table)
+                .expect("valid FontRegular markup reaches the renderer");
             assert!(
-                error
-                    .to_string()
-                    .contains("runtime-help label IDS_CON_HELP"),
-                "unexpected validation error: {error:#}"
+                columns.left.contains(supported),
+                "help column must preserve {supported:?}"
             );
         }
         let mut unicode = HashMap::new();

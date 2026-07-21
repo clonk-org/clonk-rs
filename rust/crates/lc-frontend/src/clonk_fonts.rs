@@ -735,6 +735,7 @@ impl NativeClonkFont {
         let mut pen_x = x;
         let pen_y = y;
         let mut rest = line;
+        let mut transform_active = !stack.is_empty();
 
         while let Some(character) = rest.chars().next() {
             let after = &rest[character.len_utf8()..];
@@ -744,6 +745,7 @@ impl NativeClonkFont {
             }
             if markup && character == '<' {
                 if let Some(advance) = read_native_markup_tag(rest, stack) {
+                    transform_active = true;
                     rest = &rest[advance..];
                     continue;
                 }
@@ -770,9 +772,10 @@ impl NativeClonkFont {
                             pen_y,
                             raw_width * quad_scale_x,
                             f64::from(raw_height) * quad_scale_y,
-                            native_image_modulation_rgb(stack, color),
+                            native_image_modulation_rgb(stack, color, transform_active),
                             color[3],
                             gamma,
+                            native_physical_shear(stack, projection),
                         );
                     }
                     pen_x += raw_width * quad_scale_x + physical_spacing;
@@ -796,6 +799,7 @@ impl NativeClonkFont {
                     native_modulation_rgb(stack, color),
                     color[3],
                     gamma,
+                    native_physical_shear(stack, projection),
                 );
             }
             pen_x += f64::from(raw_width) * quad_scale_x + physical_spacing;
@@ -912,12 +916,30 @@ fn native_modulation_rgb(stack: &[NativeMarkupTag], color: [u8; 4]) -> [u8; 3] {
         .unwrap_or([color[0], color[1], color[2]])
 }
 
-fn native_image_modulation_rgb(stack: &[NativeMarkupTag], color: [u8; 4]) -> [u8; 3] {
+fn native_physical_shear(stack: &[NativeMarkupTag], projection: NativeDrawProjection) -> f64 {
+    let logical_shear = stack
+        .iter()
+        .filter(|tag| matches!(tag, NativeMarkupTag::Italic))
+        .fold(0.0_f32, |shear, _| shear - 0.3);
+    if projection.scale_y == 0.0 {
+        0.0
+    } else {
+        f64::from(logical_shear) * projection.scale_x / projection.scale_y
+    }
+}
+
+fn native_image_modulation_rgb(
+    stack: &[NativeMarkupTag],
+    color: [u8; 4],
+    transform_active: bool,
+) -> [u8; 3] {
     if stack
         .iter()
         .any(|tag| matches!(tag, NativeMarkupTag::TextColor(_)))
     {
         native_modulation_rgb(stack, color)
+    } else if transform_active {
+        [color[0], color[1], color[2]]
     } else {
         [255, 255, 255]
     }
@@ -935,19 +957,14 @@ fn blit_scaled_native_glyph<T: SurfaceDrawTarget + ?Sized>(
     modulation: [u8; 3],
     color_alpha: u8,
     gamma: Option<&GammaRamp>,
+    shear: f64,
 ) {
     let source_width = cell.width.max(0) as u32;
     let source_height = source_height.max(0) as u32;
     let pixels = cell
         .pixels
         .iter()
-        .flat_map(|pixel| {
-            modulated_native_pixel(
-                [pixel.r, pixel.g, pixel.b, pixel.a],
-                modulation,
-                color_alpha,
-            )
-        })
+        .flat_map(|pixel| [pixel.r, pixel.g, pixel.b, pixel.a])
         .collect();
     draw_scaled_native_image(
         surface,
@@ -957,6 +974,9 @@ fn blit_scaled_native_glyph<T: SurfaceDrawTarget + ?Sized>(
         width,
         height,
         gamma,
+        shear,
+        modulation,
+        color_alpha,
     );
 }
 
@@ -971,18 +991,9 @@ fn blit_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
     modulation: [u8; 3],
     color_alpha: u8,
     gamma: Option<&GammaRamp>,
+    shear: f64,
 ) {
-    let pixels = image
-        .rgba
-        .chunks_exact(4)
-        .flat_map(|pixel| {
-            modulated_native_pixel(
-                [pixel[0], pixel[1], pixel[2], pixel[3]],
-                modulation,
-                color_alpha,
-            )
-        })
-        .collect();
+    let pixels = image.rgba.chunks_exact(4).flatten().copied().collect();
     draw_scaled_native_image(
         surface,
         ImageData::new(image.width, image.height, pixels),
@@ -991,19 +1002,10 @@ fn blit_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
         width,
         height,
         gamma,
+        shear,
+        modulation,
+        color_alpha,
     );
-}
-
-fn modulated_native_pixel(pixel: [u8; 4], modulation: [u8; 3], color_alpha: u8) -> [u8; 4] {
-    let modulate = |value: u8, modulation: u8| {
-        (f32::from(value) * f32::from(modulation) / 255.0).round() as u8
-    };
-    [
-        modulate(pixel[0], modulation[0]),
-        modulate(pixel[1], modulation[1]),
-        modulate(pixel[2], modulation[2]),
-        modulate(pixel[3], color_alpha),
-    ]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1015,12 +1017,18 @@ fn draw_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
     width: f64,
     height: f64,
     gamma: Option<&GammaRamp>,
+    shear: f64,
+    modulation: [u8; 3],
+    color_alpha: u8,
 ) {
-    crate::draw_image_bilinear_target(
+    crate::draw_image_bilinear_sheared_target(
         surface,
         &GuiRect::new(x as f32, y as f32, width as f32, height as f32),
         &image,
         gamma,
+        shear as f32,
+        modulation,
+        color_alpha,
     );
 }
 
@@ -1942,6 +1950,194 @@ mod tests {
             .pixels()
             .chunks_exact(4)
             .any(|pixel| pixel[1] > pixel[0] && pixel[1] > pixel[2]));
+    }
+
+    #[test]
+    fn fractional_native_italics_shear_glyphs_and_images_without_changing_metrics() {
+        struct SolidImage(Vec<u8>);
+
+        impl FontImageProvider for SolidImage {
+            fn font_image(&self, tag: &str) -> Option<FontImageRef<'_>> {
+                (tag == "icon").then_some(FontImageRef {
+                    width: 19,
+                    height: 19,
+                    rgba: &self.0,
+                })
+            }
+        }
+
+        fn row_span(surface: &Surface, y: u32) -> Option<(u32, u32)> {
+            let changed = (0..surface.width())
+                .filter(|x| surface.get_pixel(*x, y).is_some_and(|pixel| pixel.a != 0))
+                .collect::<Vec<_>>();
+            changed.first().copied().zip(changed.last().copied())
+        }
+
+        let mut raster = ClonkFont::new(19);
+        raster.cell_height = 19;
+        raster.h_space = -2;
+        raster.add_glyph(
+            'A',
+            GlyphCell {
+                width: 19,
+                pixels: vec![Color::opaque(255, 255, 255); 19 * 19],
+            },
+        );
+        let font = NativeClonkFont {
+            raster,
+            application_scale: 1.5,
+            effective_scale: 19.0 / 13.0,
+            logical_height: 13,
+            raster_height: 19,
+            logical_h_space: -1,
+        };
+        let images = SolidImage(vec![255; 19 * 19 * 4]);
+        let projection =
+            ClipperProjection::new(1.5, (63, 39), 59, lc_graphics::Rect::new(0, 0, 63, 39));
+        let (scale_x, scale_y) = projection.scale();
+        assert_ne!(
+            scale_x, scale_y,
+            "rounded clipper projection is anisotropic"
+        );
+        let mut plain = Surface::new(95, 59, lc_graphics::PixelFormat::Rgba8888);
+        let mut italic = Surface::new(95, 59, lc_graphics::PixelFormat::Rgba8888);
+        let mut nested = Surface::new(95, 59, lc_graphics::PixelFormat::Rgba8888);
+        let mut image = Surface::new(95, 59, lc_graphics::PixelFormat::Rgba8888);
+        for (surface, text) in [
+            (&mut plain, "A"),
+            (&mut italic, "<i>A</i>"),
+            (&mut nested, "<i><i>A</i></i>"),
+            (&mut image, "<i>{{icon}}</i>"),
+        ] {
+            font.draw_to_physical_surface_with_clipper_and_images(
+                surface,
+                20,
+                2,
+                text,
+                [255, 255, 255, 255],
+                TextAlign::Left,
+                true,
+                projection,
+                None,
+                &images,
+            );
+        }
+
+        // Keep the tag open so this isolates italic metrics from the native
+        // trailing-close-tag h-space quirk.
+        assert_eq!(font.measure("A", true), font.measure("<i>A", true));
+        assert_eq!(
+            font.measure_with_images("{{icon}}", true, &images),
+            font.measure_with_images("<i>{{icon}}", true, &images),
+        );
+        let (_, physical_y) = projection.logical_to_physical(20.0, 2.0);
+        let physical_height = 19.0 / f64::from(font.effective_scale()) * scale_y;
+        let top_y = (physical_y - 0.5).ceil() as u32;
+        let bottom_y = (physical_y + physical_height - 0.5).ceil() as u32 - 1;
+        let plain_top = row_span(&plain, top_y).expect("plain top row");
+        let plain_bottom = row_span(&plain, bottom_y).expect("plain bottom row");
+        let italic_top = row_span(&italic, top_y).expect("italic top row");
+        let italic_bottom = row_span(&italic, bottom_y).expect("italic bottom row");
+        assert!(italic_top.0 > plain_top.0);
+        assert!(italic_bottom.0 < plain_bottom.0);
+        assert!(row_span(&nested, top_y).expect("nested top row").0 > italic_top.0);
+        assert_eq!(row_span(&image, top_y), Some(italic_top));
+        assert_eq!(row_span(&image, bottom_y), Some(italic_bottom));
+
+        let triple = [
+            NativeMarkupTag::Italic,
+            NativeMarkupTag::Italic,
+            NativeMarkupTag::Italic,
+        ];
+        assert_eq!(
+            native_physical_shear(&triple, NativeDrawProjection::clipper(projection)),
+            f64::from(((0.0_f32 - 0.3) - 0.3) - 0.3) * scale_x / scale_y,
+        );
+
+        let mut clipped = Surface::new(95, 59, lc_graphics::PixelFormat::Rgba8888);
+        clipped.set_clip(lc_graphics::Rect::new(
+            italic_top.0 as i32 + 1,
+            top_y as i32,
+            3,
+            bottom_y - top_y + 1,
+        ));
+        font.draw_to_physical_surface_with_clipper_and_images(
+            &mut clipped,
+            20,
+            2,
+            "<i>A</i>",
+            [255, 255, 255, 255],
+            TextAlign::Left,
+            true,
+            projection,
+            None,
+            &images,
+        );
+        assert_ne!(
+            italic.get_pixel(italic_top.0, top_y),
+            Some(Color::transparent())
+        );
+        assert_eq!(
+            clipped.get_pixel(italic_top.0, top_y),
+            Some(Color::transparent())
+        );
+        assert_ne!(
+            clipped.get_pixel(italic_top.0 + 1, top_y),
+            Some(Color::transparent())
+        );
+    }
+
+    #[test]
+    fn fractional_native_italic_modulation_happens_after_linear_filtering() {
+        let rgba = (0..20)
+            .flat_map(|_| [[1_u8, 0, 0, 255], [2_u8, 0, 0, 255]])
+            .flatten()
+            .collect::<Vec<_>>();
+        let image = FontImageRef {
+            width: 2,
+            height: 20,
+            rgba: &rgba,
+        };
+        let mut surface = Surface::new(10, 10, lc_graphics::PixelFormat::Rgba8888);
+
+        blit_scaled_native_image(
+            &mut surface,
+            image,
+            4.0,
+            0.0,
+            1.0,
+            10.0,
+            [126, 0, 0],
+            255,
+            None,
+            -0.3,
+        );
+
+        assert_eq!(surface.get_pixel(4, 4), Some(Color::opaque(1, 0, 0)));
+
+        let translucent = [255_u8, 0, 0, 200].repeat(20);
+        let translucent = FontImageRef {
+            width: 1,
+            height: 20,
+            rgba: &translucent,
+        };
+        let mut alpha_surface = Surface::new(10, 10, lc_graphics::PixelFormat::Rgba8888);
+        blit_scaled_native_image(
+            &mut alpha_surface,
+            translucent,
+            4.0,
+            0.0,
+            1.0,
+            10.0,
+            [255, 255, 255],
+            128,
+            None,
+            -0.3,
+        );
+        assert_eq!(
+            alpha_surface.get_pixel(4, 4),
+            Some(Color::new(73, 0, 0, 21))
+        );
     }
 
     fn solid_fractional_native_font() -> NativeClonkFont {

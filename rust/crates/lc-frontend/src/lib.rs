@@ -14170,6 +14170,127 @@ pub(crate) fn draw_image_bilinear_target<T: SurfaceDrawTarget + ?Sized>(
     );
 }
 
+/// Scale-native font counterpart of [`draw_image_bilinear_target`] with the
+/// centered horizontal shear installed by `CStdFont::DrawText` markup. The
+/// coefficient is already projected into destination coordinates. Texture
+/// filtering precedes font RGB/alpha modulation, matching the blit shader.
+pub(crate) fn draw_image_bilinear_sheared_target<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
+    rect: &GuiRect,
+    image: &ImageData,
+    gamma: Option<&lc_graphics::GammaRamp>,
+    shear: f32,
+    modulation: [u8; 3],
+    color_alpha: u8,
+) {
+    if shear == 0.0 && modulation == [255, 255, 255] && color_alpha == 255 {
+        draw_image_bilinear_target(surface, rect, image, gamma);
+        return;
+    }
+    if rect.size.width <= 0.0
+        || rect.size.height <= 0.0
+        || image.width() == 0
+        || image.height() == 0
+        || !rect.origin.x.is_finite()
+        || !rect.origin.y.is_finite()
+        || !rect.size.width.is_finite()
+        || !rect.size.height.is_finite()
+        || !shear.is_finite()
+    {
+        return;
+    }
+
+    let (tx, ty) = (rect.origin.x, rect.origin.y);
+    let (width, height) = (rect.size.width, rect.size.height);
+    let center_y = ty + height / 2.0;
+    let top_shift = shear * -height / 2.0;
+    let bottom_shift = shear * height / 2.0;
+    let surface_width = i32::try_from(surface.width()).unwrap_or(i32::MAX);
+    let surface_height = i32::try_from(surface.height()).unwrap_or(i32::MAX);
+    let x0 = ((tx + top_shift.min(bottom_shift) - 0.5).ceil() as i32).max(0);
+    let x1 = ((tx + width + top_shift.max(bottom_shift) - 0.5).ceil() as i32).min(surface_width);
+    let y0 = ((ty - 0.5).ceil() as i32).max(0);
+    let y1 = ((ty + height - 0.5).ceil() as i32).min(surface_height);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+
+    let scale_x = width / image.width() as f32;
+    let scale_y = height / image.height() as f32;
+    let tile_size = cpp_tex_size(image.width(), image.height()) as i32;
+    let tiles_x = (image.width() as i32 - 1) / tile_size + 1;
+    let tiles_y = (image.height() as i32 - 1) / tile_size + 1;
+    for target_y in y0..y1 {
+        let pixel_y = target_y as f32 + 0.5;
+        let local_y = pixel_y - ty;
+        if local_y < 0.0 || local_y >= height {
+            continue;
+        }
+        for target_x in x0..x1 {
+            let pixel_x = target_x as f32 + 0.5;
+            let unsheared_x = pixel_x - shear * (pixel_y - center_y);
+            let local_x = unsheared_x - tx;
+            if local_x < 0.0 || local_x >= width {
+                continue;
+            }
+
+            let source_x = local_x / scale_x;
+            let source_y = local_y / scale_y;
+            let tile_x =
+                ((source_x / tile_size as f32).floor() as i32).clamp(0, tiles_x - 1) * tile_size;
+            let tile_y =
+                ((source_y / tile_size as f32).floor() as i32).clamp(0, tiles_y - 1) * tile_size;
+            let sample = bilinear_sample_tile(
+                image,
+                tile_x,
+                tile_y,
+                tile_size,
+                source_x - 0.5 - tile_x as f32,
+                source_y - 0.5 - tile_y as f32,
+            );
+            // The C++ blit shader adds inverted texture/modulation alpha.
+            // Converted back to normal opacity, this subtracts modulation
+            // transparency after filtering rather than multiplying alpha.
+            let source_alpha = (sample[3] - f32::from(255 - color_alpha)).max(0.0);
+            if source_alpha <= 0.0 {
+                continue;
+            }
+            let alpha = (source_alpha / 255.0).clamp(0.0, 1.0);
+            let destination = surface
+                .get_pixel(target_x as u32, target_y as u32)
+                .unwrap_or_default();
+            let blend = |channel, source: f32, tint: u8, destination: u8| {
+                store_channel(
+                    sample_channel(gamma, channel, source * f32::from(tint) / 255.0) * alpha
+                        + f32::from(destination) * (1.0 - alpha),
+                )
+            };
+            let output = Color::new(
+                blend(
+                    lc_graphics::gamma::GammaChannel::Red,
+                    sample[0],
+                    modulation[0],
+                    destination.r,
+                ),
+                blend(
+                    lc_graphics::gamma::GammaChannel::Green,
+                    sample[1],
+                    modulation[1],
+                    destination.g,
+                ),
+                blend(
+                    lc_graphics::gamma::GammaChannel::Blue,
+                    sample[2],
+                    modulation[2],
+                    destination.b,
+                ),
+                store_channel(source_alpha * alpha + f32::from(destination.a) * (1.0 - alpha)),
+            );
+            let _ = surface.set_pixel(target_x as u32, target_y as u32, output);
+        }
+    }
+}
+
 /// Owner-color surface counterpart of [`draw_image_bilinear`]. Filtering
 /// precedes packed C4 `ColorDw` modulation, matching the DrawClr shader.
 pub(crate) fn draw_image_bilinear_owner(
