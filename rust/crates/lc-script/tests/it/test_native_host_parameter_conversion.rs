@@ -196,6 +196,7 @@ fn native_int_to_id_conversion_mutates_valid_bounds_and_rejects_outside_them() {
     let mut engine = Engine::new();
     engine.register_host_function("ToId", move |args| {
         observed_body_calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(args[0].c4v_type(), C4VType::C4Id);
         Ok(args[0].clone())
     });
     assert!(engine.set_host_function_parameter_types("ToId", [C4VType::C4Id]));
@@ -204,6 +205,9 @@ fn native_int_to_id_conversion_mutates_valid_bounds_and_rejects_outside_them() {
         .expect("strict conversion wrapper compiles");
 
     for (input, expected) in [
+        // AB_FUNC reuses parameter slot zero as its return slot. Conversion
+        // already changed that slot to C4ID(0), so C4Value::Set's identical
+        // data/type early return preserves the exceptional tag.
         (0, Value::C4Id("NONE".into())),
         (1, Value::C4Id("0001".into())),
         (9999, Value::C4Id("9999".into())),

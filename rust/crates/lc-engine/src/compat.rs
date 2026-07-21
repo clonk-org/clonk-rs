@@ -51147,8 +51147,22 @@ mod tests {
             Value::Nil,
         ];
 
+        // C4AulParSet copies host-supplied values through C4Value::Set before
+        // the script frame is entered, so a manually supplied C4ID(0) reaches
+        // Run (and then Probe) as canonical nil.
+        let script_prepared = vec![
+            Value::Nil,
+            Value::from_c4_bool_raw(2),
+            high_word_bool.clone(),
+            Value::Nil,
+            Value::Object(0),
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+        ];
+
         let (wrapped_result, wrapped_debugger_args) = run_probe(true, &vm_prepared);
-        assert_eq!(wrapped_debugger_args, vm_prepared);
+        assert_eq!(wrapped_debugger_args, script_prepared);
         assert_eq!(
             wrapped_result,
             Value::Array(vec![
@@ -51164,8 +51178,8 @@ mod tests {
         );
 
         let (generic_result, generic_debugger_args) = run_probe(false, &vm_prepared);
-        assert_eq!(generic_debugger_args, vm_prepared);
-        assert_eq!(generic_result, Value::Array(vm_prepared));
+        assert_eq!(generic_debugger_args, script_prepared);
+        assert_eq!(generic_result, Value::Array(script_prepared));
     }
 
     #[test]
@@ -58721,6 +58735,9 @@ public func RejectConstruction(x, y, builder)
     fn get_index_of_strict3_checks_outer_type_only() {
         let mut script = ScriptEngine::new();
         register_host_functions(&mut script);
+        script.register_host_function("RetainedZeroIdArray", |_| {
+            Ok(Value::Array(vec![Value::C4Id("NONE".into())]))
+        });
         script
             .load_script(
                 r#"
@@ -58747,6 +58764,9 @@ public func RejectConstruction(x, y, builder)
                 }
                 func ManualZeroId(value) { return GetIndexOf(value, [nil]); }
                 func ManualZeroEntry(value) { return GetIndexOf(false, [value]); }
+                func RetainedZeroIdEntry() {
+                    return GetIndexOf(nil, RetainedZeroIdArray());
+                }
                 "#,
             )
             .expect("strict3 GetIndexOf probe loads");
@@ -58777,13 +58797,19 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(
             script
                 .call("ManualZeroId", &[Value::C4Id("NONE".into())])
-                .expect("zero-payload ID is canonical nil"),
+                .expect("external scalar copy canonicalizes zero-payload ID"),
             Value::Int(0)
         );
         assert_eq!(
             script
                 .call("ManualZeroEntry", &[Value::C4Id("NONE".into())])
                 .expect("strict3 keeps false distinct from canonical nil"),
+            Value::Int(-1)
+        );
+        assert_eq!(
+            script
+                .call("RetainedZeroIdEntry", &[])
+                .expect("container entry retains its zero C4ID tag"),
             Value::Int(-1)
         );
     }
@@ -58963,12 +58989,11 @@ public func RejectConstruction(x, y, builder)
                 .to_string()
                 .contains("expected \"array\"")
         );
-        assert!(
+        assert_eq!(
             strict3
                 .call("Passed", &[Value::C4Id("0000".into())])
-                .expect_err("strict3 retains the zero-payload ID tag")
-                .to_string()
-                .contains("expected \"array\"")
+                .expect("engine-entry Set copy canonicalizes the zero ID"),
+            Value::Int(-1)
         );
     }
 

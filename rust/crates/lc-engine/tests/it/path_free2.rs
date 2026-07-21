@@ -168,8 +168,11 @@ global func Probe()
     return PathFree2(x, y, ZeroId(), ZeroId());
 }
 "#;
-    let error = script_engine(strict_three)
-        .call("Probe", &[])
-        .expect_err("strict-three retains the transient C4ID tag");
-    assert!(error.to_string().contains("expected \"int\""), "{error}");
+    assert_eq!(
+        script_engine(strict_three)
+            .call("Probe", &[])
+            .expect("zero-argument AB_FUNC materializes each result"),
+        Value::Bool(true),
+        "AB_FUNC pushes a zero-argument native return through C4Value::Set into a fresh stack slot, so C4ID(0) is already canonical nil before PathFree2 converts its integer parameters"
+    );
 }

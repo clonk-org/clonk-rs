@@ -807,17 +807,13 @@ impl TrackedValue {
         let mut values = ValueMap::with_capacity(entries.len());
         let mut identities = HashMap::with_capacity(entries.len());
         for (key, entry) in entries {
-            if matches!(&entry.value, Value::Nil)
-                && values
-                    .get_key(&key)
-                    .is_some_and(|value| !matches!(value, Value::Nil))
-            {
-                values.shift_remove_key(&key);
+            let TrackedValue { value, identity } = entry;
+            c4_map_assign_set(&mut values, key.clone(), value);
+            if values.contains_value_key(&key) {
+                identities.insert(key, identity);
+            } else {
                 identities.remove(&key);
-                continue;
             }
-            identities.insert(key.clone(), entry.identity);
-            values.insert_key(key, entry.value);
         }
         Self {
             value: Value::Proplist(values),
@@ -831,6 +827,65 @@ impl TrackedValue {
         self.identity
             .as_ref()
             .and_then(|identity| identity.identity_at(segment))
+    }
+
+    /// Apply the zero-C4ID part of C++ `C4Value::Set`
+    /// (C4Value.cpp:121-140). A retained zero-payload ID tag can exist in a
+    /// parameter or container slot, but an ordinary value-stack copy
+    /// canonicalizes it to `C4V_Any`.
+    fn set_copy(self) -> Self {
+        if c4_set_copy_is_zero_id(&self.value) {
+            Self::runtime(Value::Nil)
+        } else {
+            self
+        }
+    }
+
+    /// Assign through `C4Value::Set`, including its same-data/type early
+    /// return. That early return is observable for the exceptional retained
+    /// `C4V_C4ID(0)` value: writing it over itself keeps the tag.
+    fn set_copy_into(self, destination_is_same_zero_id: bool) -> Self {
+        if destination_is_same_zero_id {
+            self
+        } else {
+            self.set_copy()
+        }
+    }
+}
+
+fn c4_set_copy_is_zero_id(value: &Value) -> bool {
+    matches!(value, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
+}
+
+fn c4_set_copy_value(value: Value) -> Value {
+    if c4_set_copy_is_zero_id(&value) {
+        Value::Nil
+    } else {
+        value
+    }
+}
+
+fn c4_set_copy_value_into(value: Value, destination_is_same_zero_id: bool) -> Value {
+    if destination_is_same_zero_id {
+        value
+    } else {
+        c4_set_copy_value(value)
+    }
+}
+
+fn c4_map_assign_set(map: &mut ValueMap, key: Value, value: Value) {
+    if c4_set_copy_is_zero_id(&value) {
+        map.assign_key_zero_c4id(key);
+    } else {
+        map.assign_key(key, value);
+    }
+}
+
+fn c4_map_assign_property_set(map: &mut ValueMap, key: String, value: Value) {
+    if c4_set_copy_is_zero_id(&value) {
+        map.assign_zero_c4id(key);
+    } else {
+        map.assign(key, value);
     }
 }
 
@@ -878,6 +933,12 @@ impl Binding {
     fn write_tracked(&self, tracked: TrackedValue) -> Result<(), RuntimeError> {
         match self {
             Binding::Direct { value, identity } => {
+                if c4_set_copy_is_zero_id(&tracked.value)
+                    && c4_set_copy_is_zero_id(&value.borrow())
+                {
+                    return Ok(());
+                }
+                let tracked = tracked.set_copy();
                 let preserves_container = identity
                     .borrow()
                     .as_ref()
@@ -903,6 +964,11 @@ impl Binding {
             }
             Binding::Reference(reference) => reference.clone(),
         }
+    }
+
+    fn value_slot_is_same_zero_id(&self, value: &Value) -> bool {
+        c4_set_copy_is_zero_id(value)
+            && matches!(self, Binding::Direct { value, .. } if c4_set_copy_is_zero_id(&value.borrow()))
     }
 }
 
@@ -1169,6 +1235,12 @@ impl LValueRef {
     fn write_tracked(&self, tracked: TrackedValue) -> Result<(), RuntimeError> {
         match self {
             LValueRef::Cell { value, identity } => {
+                if c4_set_copy_is_zero_id(&tracked.value)
+                    && c4_set_copy_is_zero_id(&value.borrow())
+                {
+                    return Ok(());
+                }
+                let tracked = tracked.set_copy();
                 let preserves_container = identity
                     .as_ref()
                     .and_then(|identity| {
@@ -1201,6 +1273,11 @@ impl LValueRef {
                         "resolved container reference is a {}, not an lvalue",
                         resolved.value.type_name()
                     )));
+                }
+                if c4_set_copy_is_zero_id(&tracked.value)
+                    && c4_set_copy_is_zero_id(&self.read()?)
+                {
+                    return Ok(());
                 }
                 let TrackedValue {
                     value,
@@ -1247,11 +1324,16 @@ impl LValueRef {
                         resolved.value.type_name()
                     )));
                 }
+                if c4_set_copy_is_zero_id(&tracked.value)
+                    && c4_set_copy_is_zero_id(&self.read()?)
+                {
+                    return Ok(());
+                }
                 let _context =
                     GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
                 let _guard = CallerContextGuard::enter(Some(caller.clone()));
                 let replacement = if segments.is_empty() {
-                    tracked.value
+                    tracked.set_copy().value
                 } else {
                     let mut root = if let Some(legacy_pin) = legacy_pin {
                         legacy_pin.borrow().root.value.clone()
@@ -1977,14 +2059,15 @@ fn write_path(
     new_value: Value,
 ) -> Result<(), RuntimeError> {
     let Some((segment, rest)) = segments.split_first() else {
-        *value = new_value;
+        let same_destination = c4_set_copy_is_zero_id(&new_value) && c4_set_copy_is_zero_id(value);
+        *value = c4_set_copy_value_into(new_value, same_destination);
         return Ok(());
     };
 
     match (value, segment) {
         (Value::Proplist(entries), PathSegment::Property(property)) => {
             if rest.is_empty() {
-                entries.assign(property.clone(), new_value);
+                c4_map_assign_property_set(entries, property.clone(), new_value);
                 Ok(())
             } else {
                 let Some(next) = entries.get_mut(property) else {
@@ -2008,7 +2091,9 @@ fn write_path(
                 elements.resize(index + 1, Value::Nil);
             }
             if rest.is_empty() {
-                elements[index] = new_value;
+                let same_destination =
+                    c4_set_copy_is_zero_id(&new_value) && c4_set_copy_is_zero_id(&elements[index]);
+                elements[index] = c4_set_copy_value_into(new_value, same_destination);
                 Ok(())
             } else {
                 write_path(&mut elements[index], rest, new_value)
@@ -2016,7 +2101,7 @@ fn write_path(
         }
         (Value::Proplist(entries), PathSegment::Index(key)) => {
             if rest.is_empty() {
-                entries.assign_key(key.clone(), new_value);
+                c4_map_assign_set(entries, key.clone(), new_value);
                 Ok(())
             } else {
                 let Some(next) = entries.get_key_mut(key) else {
@@ -2043,6 +2128,12 @@ impl CallArg {
         CallArg::Value(TrackedValue::runtime(value))
     }
 
+    fn external(value: Value) -> Self {
+        // `C4AulParSet(par0, ...)` initializes each fresh slot with
+        // `C4Value::Set` before C4AulFunc::Exec performs type conversion.
+        CallArg::runtime(c4_set_copy_value(value))
+    }
+
     fn read_tracked(&self) -> Result<TrackedValue, RuntimeError> {
         match self {
             CallArg::Value(tracked) => Ok(tracked.clone()),
@@ -2052,6 +2143,28 @@ impl CallArg {
 
     fn read(&self) -> Result<Value, RuntimeError> {
         self.read_tracked().map(|tracked| tracked.value)
+    }
+
+    fn value_slot_is_same_zero_id(&self, value: &Value) -> bool {
+        c4_set_copy_is_zero_id(value)
+            && matches!(self, CallArg::Value(tracked) if c4_set_copy_is_zero_id(&tracked.value))
+    }
+}
+
+fn materialize_internal_native_call_result(result: Value, args: &[CallArg]) -> Value {
+    if matches!(caller_origin_strictness(), HostCallerStrictness::NoCaller) {
+        return result;
+    }
+    let same_destination = args
+        .first()
+        .is_some_and(|destination| destination.value_slot_is_same_zero_id(&result));
+    c4_set_copy_value_into(result, same_destination)
+}
+
+fn materialize_target_call_result(result: ReturnValue) -> ReturnValue {
+    match result {
+        ReturnValue::Value(tracked) => ReturnValue::Value(tracked.set_copy()),
+        ReturnValue::Reference(reference) => ReturnValue::Reference(reference),
     }
 }
 
@@ -2192,12 +2305,14 @@ fn c4_scalar_payload(value: &Value) -> Option<u64> {
 
 fn c4_effective_nil(value: &Value) -> bool {
     matches!(value, Value::Nil | Value::Object(0))
-        || matches!(value, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
 }
 
 fn c4_operator_equal(left: &Value, right: &Value) -> bool {
     if c4_effective_nil(left) {
-        // Zero C4ID/object constructors collapse to C4V_Any in C++.
+        // Null object constructors collapse to C4V_Any in C++. A C4ID zero
+        // that reaches this comparator retained its C4V_C4ID tag and must use
+        // the asymmetric type table below (notably, neither operand order
+        // compares equal to C4V_Bool(false)).
         return c4_scalar_payload(right) == Some(0);
     }
     if c4_effective_nil(right) {
@@ -2225,8 +2340,14 @@ fn c4_operator_equal(left: &Value, right: &Value) -> bool {
 }
 
 fn c4_typed_equal(left: &Value, right: &Value) -> bool {
-    let left_nil = c4_effective_nil(left);
-    let right_nil = c4_effective_nil(right);
+    // Ordinary zero C4ID constructors/literals are canonicalized to Nil
+    // before reaching this comparator. A zero C4Id variant that survives is
+    // the retained C4V_C4ID tag produced by FnCnvInt2Id (which writes Type
+    // directly even for zero), so STRICT3 must not fold it back to Any here.
+    // Null object constructors still canonicalize to C4V_Any in C++ and keep
+    // using Rust's Object(0) compatibility representation.
+    let left_nil = matches!(left, Value::Nil | Value::Object(0));
+    let right_nil = matches!(right, Value::Nil | Value::Object(0));
     if left_nil || right_nil {
         return left_nil && right_nil;
     }
@@ -2746,7 +2867,7 @@ impl<'a> Vm<'a> {
     }
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
-        let args = args.iter().cloned().map(CallArg::runtime).collect();
+        let args = args.iter().cloned().map(CallArg::external).collect();
         self.invoke_value(name, args, 0, ObjectState::default(), None)
     }
 
@@ -2803,7 +2924,7 @@ impl<'a> Vm<'a> {
         args: &[Value],
         cells: &LocalCells,
     ) -> Result<Value, RuntimeError> {
-        let args = args.iter().cloned().map(CallArg::runtime).collect();
+        let args = args.iter().cloned().map(CallArg::external).collect();
         let depth = 0usize;
         if depth >= MAX_CALL_DEPTH {
             return Err(RuntimeError::new("maximum call depth exceeded"));
@@ -2829,7 +2950,7 @@ impl<'a> Vm<'a> {
         args: &[Value],
         cells: &LocalCells,
     ) -> Result<Value, RuntimeError> {
-        let args = args.iter().cloned().map(CallArg::runtime).collect();
+        let args = args.iter().cloned().map(CallArg::external).collect();
         self.invoke_value(name, args, 0, cells.state.clone(), None)
     }
 
@@ -2856,7 +2977,7 @@ impl<'a> Vm<'a> {
         args: &[Value],
         cells: &LocalCells,
     ) -> Result<ValueReference, RuntimeError> {
-        let args = args.iter().cloned().map(CallArg::runtime).collect();
+        let args = args.iter().cloned().map(CallArg::external).collect();
         self.invoke_reference(name, args, 0, cells.state.clone(), None)
             .map(ValueReference)
     }
@@ -2883,7 +3004,7 @@ impl<'a> Vm<'a> {
         local_vars: &HashMap<String, Value>,
     ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
         let object_state = ObjectState::from_local_vars(local_vars);
-        let args = args.iter().cloned().map(CallArg::runtime).collect();
+        let args = args.iter().cloned().map(CallArg::external).collect();
         let value = self.invoke_value(name, args, 0, object_state.clone(), None)?;
         Ok((value, object_state.to_local_vars(self.var_decls)))
     }
@@ -3265,6 +3386,19 @@ impl<'a> Vm<'a> {
         }
         Self::check_convert_function_parameters(name, function, &mut args, caller.as_ref())?;
 
+        // The external C4AulScriptFunc::Exec overload converts its temporary
+        // C4AulParSet first, then C4AulExec::Exec pushes every slot with
+        // C4Value::Set (C4AulExec.cpp:1638-1649,330-337). Script-to-script
+        // Call uses the already-resident stack slots directly and therefore
+        // deliberately skips this second copy.
+        if caller.is_none() {
+            for arg in &mut args {
+                if let CallArg::Value(tracked) = arg {
+                    *tracked = tracked.clone().set_copy();
+                }
+            }
+        }
+
         let debug_args = self.call_args_to_values(&args)?;
         let profile_host_identity =
             (function.access != AccessLevel::Global).then_some(self.host_identity);
@@ -3344,7 +3478,19 @@ impl<'a> Vm<'a> {
             }
         }
 
-        Ok(value)
+        if caller.is_some() {
+            Ok(match value {
+                ReturnValue::Value(tracked) => {
+                    let same_destination = env.call_args.first().is_some_and(|destination| {
+                        destination.value_slot_is_same_zero_id(&tracked.value)
+                    });
+                    ReturnValue::Value(tracked.set_copy_into(same_destination))
+                }
+                ReturnValue::Reference(reference) => ReturnValue::Reference(reference),
+            })
+        } else {
+            Ok(value)
+        }
     }
 
     /// C++ `CheckConvertFunctionParameters` (C4AulExec.cpp:1364-1397).
@@ -3388,6 +3534,11 @@ impl<'a> Vm<'a> {
             // Non-reference parameters receive a dereferenced copy even when
             // an engine caller supplied C4Value refs.
             let mut tracked = arg.read_tracked()?;
+            if matches!(arg, CallArg::Reference(_)) {
+                // FnCnvDeref calls C4Value::Deref, which copies the referent
+                // through Set before retrying the requested conversion.
+                tracked = tracked.set_copy();
+            }
             if convert_to_any_eagerly && !tracked.value.as_bool() {
                 tracked = TrackedValue::runtime(Value::Nil);
             }
@@ -3505,6 +3656,9 @@ impl<'a> Vm<'a> {
             // A native's non-reference C++ parameter receives a dereferenced
             // copy. Conversions therefore never mutate the caller's lvalue.
             let mut tracked = arg.read_tracked()?;
+            if matches!(arg, CallArg::Reference(_)) {
+                tracked = tracked.set_copy();
+            }
             if convert_to_any_eagerly && !tracked.value.as_bool() {
                 tracked = TrackedValue::runtime(Value::Nil);
             }
@@ -3587,7 +3741,8 @@ impl<'a> Vm<'a> {
     ) -> Result<Value, RuntimeError> {
         let args = self.prepare_registered_host_call_args(name, function, args)?;
         let values = self.call_args_to_values(&args)?;
-        self.invoke_host_function_raw(name, function, &values)
+        let result = self.invoke_host_function_raw(name, function, &values)?;
+        Ok(materialize_internal_native_call_result(result, &args))
     }
 
     /// Invoke the callback without applying its public script signature.
@@ -3654,7 +3809,8 @@ impl<'a> Vm<'a> {
                 callback(name, &result);
             }
         }
-        Ok(result)
+        let call_args = args.into_iter().map(|arg| arg.0).collect::<Vec<_>>();
+        Ok(materialize_internal_native_call_result(result, &call_args))
     }
 
     fn normalize_host_values(args: &[Value], parameter_count: usize) -> Vec<Value> {
@@ -3972,6 +4128,132 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// AB_FUNC writes an ordinary direct-call result into its first parameter
+    /// slot (or a fresh slot for zero arguments). `Call` has therefore already
+    /// applied C4Value::Set, including its identical-value early return. Other
+    /// expression forms still need their ordinary SetNoRef/value-stack copy.
+    fn direct_value_call_has_materialized_result(&self, expr: &Expr, env: &Environment) -> bool {
+        let Expr::Call { callee, .. } = expr else {
+            return false;
+        };
+        let Expr::Variable(name) = callee.as_ref() else {
+            return false;
+        };
+        if matches!(name.as_str(), "inherited" | "_inherited") {
+            if let Some(function) = env.inherited_target.as_ref() {
+                return !function.returns_reference;
+            }
+            return self.has_host_function(&env.function_name);
+        }
+        if self.call_expression_returns_reference(expr, env) {
+            return false;
+        }
+        let function = if env.engine_scope && !env.linked_host_lookup {
+            self.engine_script_function(name)
+        } else {
+            self.own_or_global_script_function(name)
+        };
+        function.is_some() || self.has_host_function(name)
+    }
+
+    /// `??` and strict-2+ `&&`/`||` are jump regions rather than ordinary
+    /// result-producing opcodes. The selected operand remains in its existing
+    /// stack slot, so there is no additional C4Value::Set at the outer binary
+    /// expression boundary.
+    fn is_transparent_short_circuit(&self, expr: &Expr, env: &Environment) -> bool {
+        matches!(expr, Expr::Binary(_, BinaryOp::NilCoalescing, _))
+            || env.strict_level.unwrap_or(0) >= 2
+                && matches!(expr, Expr::Binary(_, BinaryOp::And | BinaryOp::Or, _))
+    }
+
+    fn expression_result_skips_set_copy(&self, expr: &Expr, env: &Environment) -> bool {
+        self.direct_value_call_has_materialized_result(expr, env)
+            || self.is_transparent_short_circuit(expr, env)
+    }
+
+    /// SetNoRef rewrites ordinary lvalues to value reads, but it cannot rewrite
+    /// the result opcode of a reference-returning call, AB_ARRAY_APPEND, or an
+    /// assignment opcode. AB_MAP keys then use GetRefVal plus C4Value's copy
+    /// constructor, retaining an exceptional zero-ID tag.
+    fn set_no_ref_keeps_reference(&self, expr: &Expr, env: &Environment) -> bool {
+        self.is_transparent_short_circuit(expr, env)
+            || self.call_expression_returns_reference(expr, env)
+            || matches!(expr, Expr::GlobalCall { name, .. } if self.global_call_may_return_reference(name))
+            || matches!(
+                expr,
+                Expr::ArrayAppend(_)
+                    | Expr::PreIncrement(_)
+                    | Expr::PreDecrement(_)
+                    | Expr::Assignment(_, _)
+                    | Expr::ArrayAppendAssignment { .. }
+                    | Expr::CompoundAssignment { .. }
+            )
+    }
+
+    fn evaluate_set_no_ref_result(
+        &self,
+        expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<ReturnValue, RuntimeError> {
+        if let Expr::Binary(left, operation, right) = expr {
+            if self.is_transparent_short_circuit(expr, env) {
+                return self.evaluate_short_circuit_raw(left, operation, right, env, depth, false);
+            }
+        }
+        if self.set_no_ref_keeps_reference(expr, env) {
+            self.evaluate_reference_or_value(expr, env, depth)
+        } else {
+            self.evaluate_tracked(expr, env, depth)
+                .map(ReturnValue::Value)
+        }
+    }
+
+    fn evaluate_short_circuit_raw(
+        &self,
+        left: &Expr,
+        operation: &BinaryOp,
+        right: &Expr,
+        env: &mut Environment,
+        depth: usize,
+        preserve_rhs_reference: bool,
+    ) -> Result<ReturnValue, RuntimeError> {
+        let left = self.evaluate_set_no_ref_result(left, env, depth)?;
+        let left_value = left.as_value()?;
+        let keep_left = match operation {
+            BinaryOp::NilCoalescing => !matches!(left_value, Value::Nil),
+            BinaryOp::And => !left_value.as_bool(),
+            BinaryOp::Or => left_value.as_bool(),
+            _ => unreachable!("only transparent short-circuit operators reach this helper"),
+        };
+        if keep_left {
+            Ok(left)
+        } else if preserve_rhs_reference {
+            self.evaluate_reference_or_value(right, env, depth)
+        } else {
+            self.evaluate_set_no_ref_result(right, env, depth)
+        }
+    }
+
+    fn materialize_set_no_ref_result(result: ReturnValue) -> Result<TrackedValue, RuntimeError> {
+        match result {
+            ReturnValue::Value(value) => Ok(value),
+            ReturnValue::Reference(reference) => {
+                reference.read_tracked().map(TrackedValue::set_copy)
+            }
+        }
+    }
+
+    fn evaluate_map_key(
+        &self,
+        expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        self.evaluate_set_no_ref_result(expr, env, depth)?
+            .into_value()
+    }
+
     fn evaluate(
         &self,
         expr: &Expr,
@@ -3979,7 +4261,13 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<Value, RuntimeError> {
         let _pin_creation = LegacyPathPinCreationGuard::suspend();
+        let materialized_call = self.expression_result_skips_set_copy(expr, env);
         let value = self.evaluate_inner(expr, env, depth)?;
+        let value = if materialized_call {
+            value
+        } else {
+            c4_set_copy_value(value)
+        };
         self.register_runtime_value(&value);
         Ok(value)
     }
@@ -4080,6 +4368,15 @@ impl<'a> Vm<'a> {
                 self.eval_unary(op, value)
             }
             Expr::Binary(lhs, op, rhs) => {
+                let transparent = matches!(op, BinaryOp::NilCoalescing)
+                    || env.strict_level.unwrap_or(0) >= 2
+                        && matches!(op, BinaryOp::And | BinaryOp::Or);
+                if transparent {
+                    return Self::materialize_set_no_ref_result(
+                        self.evaluate_short_circuit_raw(lhs, op, rhs, env, depth, false)?,
+                    )
+                    .map(|tracked| tracked.value);
+                }
                 if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
                     let left = self.evaluate_tracked(lhs, env, depth)?;
                     let right = self.evaluate_tracked(rhs, env, depth)?;
@@ -4125,15 +4422,6 @@ impl<'a> Vm<'a> {
                     }
                     let right = self.evaluate(rhs, env, depth)?;
                     return Ok(Value::Bool(left.as_bool() || right.as_bool()));
-                }
-                // `??` coalesces on NIL only (0 and false are kept), with
-                // the right side skipped for non-nil left operands
-                // (AB_JUMPNOTNIL, C4AulParse.cpp:1050-1056).
-                if matches!(op, BinaryOp::NilCoalescing) {
-                    if !matches!(left, Value::Nil) {
-                        return Ok(left);
-                    }
-                    return self.evaluate(rhs, env, depth);
                 }
                 let right = self.evaluate(rhs, env, depth)?;
                 self.eval_binary(left, op, right, env.strict_level, None)
@@ -4637,16 +4925,18 @@ impl<'a> Vm<'a> {
             Expr::Array(elements) => {
                 let mut values = Vec::with_capacity(elements.len());
                 for element in elements {
-                    values.push(self.evaluate(element, env, depth)?);
+                    values.push(c4_set_copy_value(self.evaluate(element, env, depth)?));
                 }
                 Ok(Value::Array(values))
             }
             Expr::Proplist(entries) => {
                 let mut map = ValueMap::with_capacity(entries.len());
                 for (key_expr, value_expr) in entries {
-                    let key = self.evaluate(key_expr, env, depth)?;
-                    let value = self.evaluate(value_expr, env, depth)?;
-                    map.assign_key(key, value);
+                    let key = self.evaluate_map_key(key_expr, env, depth)?;
+                    let value = self
+                        .evaluate_set_no_ref_result(value_expr, env, depth)?
+                        .into_value()?;
+                    c4_map_assign_set(&mut map, key, value);
                 }
                 Ok(Value::Proplist(map))
             }
@@ -4720,7 +5010,13 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<TrackedValue, RuntimeError> {
         let _pin_creation = LegacyPathPinCreationGuard::suspend();
+        let materialized_call = self.expression_result_skips_set_copy(expr, env);
         let tracked = self.evaluate_tracked_inner(expr, env, depth)?;
+        let tracked = if materialized_call {
+            tracked
+        } else {
+            tracked.set_copy()
+        };
         self.register_runtime_value(&tracked.value);
         Ok(tracked)
     }
@@ -4767,15 +5063,17 @@ impl<'a> Vm<'a> {
             Expr::Array(elements) => {
                 let mut tracked = Vec::with_capacity(elements.len());
                 for element in elements {
-                    tracked.push(self.evaluate_tracked(element, env, depth)?);
+                    tracked.push(self.evaluate_tracked(element, env, depth)?.set_copy());
                 }
                 Ok(TrackedValue::array(tracked))
             }
             Expr::Proplist(entries) => {
                 let mut tracked = Vec::with_capacity(entries.len());
                 for (key_expr, value_expr) in entries {
-                    let key = self.evaluate(key_expr, env, depth)?;
-                    let value = self.evaluate_tracked(value_expr, env, depth)?;
+                    let key = self.evaluate_map_key(key_expr, env, depth)?;
+                    let value = self
+                        .evaluate_set_no_ref_result(value_expr, env, depth)?
+                        .into_tracked()?;
                     tracked.push((key, value));
                 }
                 Ok(TrackedValue::proplist(tracked))
@@ -4828,28 +5126,34 @@ impl<'a> Vm<'a> {
                 self.eval_concat_tracked(left, right, env.strict_level, "..")
             }
             Expr::Binary(left, BinaryOp::NilCoalescing, right) => {
-                let left = self.evaluate_tracked(left, env, depth)?;
-                if !matches!(left.value, Value::Nil) {
-                    Ok(left)
-                } else {
-                    self.evaluate_tracked(right, env, depth)
-                }
+                Self::materialize_set_no_ref_result(self.evaluate_short_circuit_raw(
+                    left,
+                    &BinaryOp::NilCoalescing,
+                    right,
+                    env,
+                    depth,
+                    false,
+                )?)
             }
             Expr::Binary(left, BinaryOp::And, right) if env.strict_level.unwrap_or(0) >= 2 => {
-                let left = self.evaluate_tracked(left, env, depth)?;
-                if left.value.as_bool() {
-                    self.evaluate_tracked(right, env, depth)
-                } else {
-                    Ok(left)
-                }
+                Self::materialize_set_no_ref_result(self.evaluate_short_circuit_raw(
+                    left,
+                    &BinaryOp::And,
+                    right,
+                    env,
+                    depth,
+                    false,
+                )?)
             }
             Expr::Binary(left, BinaryOp::Or, right) if env.strict_level.unwrap_or(0) >= 2 => {
-                let left = self.evaluate_tracked(left, env, depth)?;
-                if left.value.as_bool() {
-                    Ok(left)
-                } else {
-                    self.evaluate_tracked(right, env, depth)
-                }
+                Self::materialize_set_no_ref_result(self.evaluate_short_circuit_raw(
+                    left,
+                    &BinaryOp::Or,
+                    right,
+                    env,
+                    depth,
+                    false,
+                )?)
             }
             Expr::GlobalCall {
                 name,
@@ -5012,7 +5316,9 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<TrackedValue, RuntimeError> {
-        let mut current = self.evaluate_tracked(receiver, env, depth)?;
+        let mut current = self
+            .evaluate_set_no_ref_result(receiver, env, depth)?
+            .into_tracked()?;
 
         for step in steps {
             if step.nil_guard && matches!(current.value, Value::Nil) {
@@ -5022,7 +5328,7 @@ impl<'a> Vm<'a> {
             current = match &step.operation {
                 NavigationOperation::Index(index_expr) => {
                     let index = self.evaluate(index_expr, env, depth)?;
-                    self.eval_index_tracked(current, index, env)?
+                    self.eval_index_tracked(current, index, env)?.set_copy()
                 }
                 // SetNoRef before AB_JUMPNIL makes the guarded base a value.
                 // AB_ARRAY_APPEND therefore operates on that detached value:
@@ -5045,7 +5351,7 @@ impl<'a> Vm<'a> {
                     }
                 },
                 NavigationOperation::Property(name) => {
-                    self.eval_property_tracked(current, name, env)?
+                    self.eval_property_tracked(current, name, env)?.set_copy()
                 }
                 NavigationOperation::MethodCall {
                     name,
@@ -5543,21 +5849,35 @@ impl<'a> Vm<'a> {
                         _ => unreachable!(),
                     },
                 };
-                for (key, value) in right_entries {
-                    if matches!(value, Value::Nil)
-                        && left_entries
-                            .get_key(key)
-                            .is_some_and(|current| !matches!(current, Value::Nil))
-                    {
-                        identities.remove(key);
-                    } else {
-                        identities.insert(
+                let right_identity_updates = right_entries
+                    .iter()
+                    .map(|(key, value)| {
+                        let preserve_left = operator == "..="
+                            && c4_set_copy_is_zero_id(value)
+                            && left_entries
+                                .get_key(key)
+                                .is_some_and(c4_set_copy_is_zero_id);
+                        (
                             key.clone(),
+                            preserve_left,
                             right_identities.get(key).cloned().unwrap_or(None),
-                        );
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let value = self.eval_concat(left.value, right.value, strict, operator)?;
+                let Value::Proplist(result_entries) = &value else {
+                    unreachable!();
+                };
+                identities.retain(|key, _| result_entries.contains_value_key(key));
+                for (key, preserve_left, right_identity) in right_identity_updates {
+                    if result_entries.contains_value_key(&key) {
+                        if !preserve_left {
+                            identities.insert(key, right_identity);
+                        }
+                    } else {
+                        identities.remove(&key);
                     }
                 }
-                let value = self.eval_concat(left.value, right.value, strict, operator)?;
                 Ok(TrackedValue {
                     value,
                     identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Proplist(
@@ -5611,7 +5931,9 @@ impl<'a> Vm<'a> {
             Value::Array(mut a) => match right {
                 Value::Array(b) => {
                     ensure_array_concat_size(a.len(), b.len())?;
-                    a.extend(b);
+                    // AB_Concat/AB_ConcatIt assign every appended element with
+                    // C4Value::operator=, which routes through Set.
+                    a.extend(b.into_iter().map(c4_set_copy_value));
                     Ok(Value::Array(a))
                 }
                 other => Err(RuntimeError::new(format!(
@@ -5619,12 +5941,24 @@ impl<'a> Vm<'a> {
                     concat_type_name(&other)
                 ))),
             },
-            Value::Proplist(mut a) => match right {
+            Value::Proplist(a) => match right {
                 Value::Proplist(b) => {
+                    let mut result = if operator == "..=" {
+                        a
+                    } else {
+                        // AB_Concat forces a C4ValueHash copy before applying
+                        // the RHS. Mapped values enter fresh Any slots through
+                        // Set, unlike AB_ConcatIt's in-place destinations.
+                        let mut copy = ValueMap::with_capacity(a.len());
+                        for (key, value) in a {
+                            c4_map_assign_set(&mut copy, key, value);
+                        }
+                        copy
+                    };
                     for (key, value) in b {
-                        a.assign_key(key, value);
+                        c4_map_assign_set(&mut result, key, value);
                     }
-                    Ok(Value::Proplist(a))
+                    Ok(Value::Proplist(result))
                 }
                 other => Err(RuntimeError::new(format!(
                     "operator \"{operator}\" right side: got \"{}\", but expected \"map\"!",
@@ -6150,7 +6484,9 @@ impl<'a> Vm<'a> {
         let _context = GlobalCallContextGuard::enter(self.global_call_context_hook);
         let global_vm = self.engine_global_vm();
         if vm_builtin {
-            return global_vm.invoke_global_builtin_raw(name, &evaluated_args, env, depth + 1);
+            return global_vm
+                .invoke_global_builtin_raw(name, &evaluated_args, env, depth + 1)
+                .map(materialize_target_call_result);
         }
         if function.is_none() && name == "EffectVar" {
             if let Some(host) = global_vm.host_functions.get(name) {
@@ -6172,12 +6508,9 @@ impl<'a> Vm<'a> {
                 }));
             }
         }
-        global_vm.invoke_engine_global_raw(
-            name,
-            evaluated_args,
-            depth + 1,
-            Some(env.caller_context()),
-        )
+        global_vm
+            .invoke_engine_global_raw(name, evaluated_args, depth + 1, Some(env.caller_context()))
+            .map(materialize_target_call_result)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6226,6 +6559,32 @@ impl<'a> Vm<'a> {
 
     #[allow(clippy::too_many_arguments)]
     fn invoke_property_call_with_target(
+        &self,
+        target: Value,
+        name: &str,
+        args: &[Expr],
+        failsafe: bool,
+        forward_rest: bool,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        self.invoke_property_call_with_target_raw(
+            target,
+            name,
+            args,
+            failsafe,
+            forward_rest,
+            env,
+            depth,
+        )
+        .map(c4_set_copy_value)
+    }
+
+    /// AB_CALL stores a value result in the former target slot through
+    /// C4Value::Set. Keep the raw implementation separate so reference-call
+    /// routing can continue to use its dedicated lvalue path.
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_property_call_with_target_raw(
         &self,
         mut target: Value,
         name: &str,
@@ -6438,6 +6797,7 @@ impl<'a> Vm<'a> {
             };
             if (script_wants_reference || host_wants_reference)
                 && (Self::expression_contains_array_append(arg)
+                    || self.set_no_ref_keeps_reference(arg, env)
                     || matches!(arg, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::Variable(_)))
                     || matches!(arg, Expr::GlobalCall { .. })
                     || matches!(arg, Expr::PreIncrement(_) | Expr::PreDecrement(_))
@@ -6489,18 +6849,20 @@ impl<'a> Vm<'a> {
     ) -> Result<(), RuntimeError> {
         let mut index = env.named_param_count;
         while evaluated_args.len() < parameter_limit && index < MAX_CALL_PARAMETERS {
-            let tracked = env
+            let forwarded = env
                 .call_args
                 .get(index)
-                .map(Binding::read_tracked)
-                .transpose()?
-                .unwrap_or_else(|| TrackedValue::runtime(Value::Nil));
-            evaluated_args.push(CallArg::Value(tracked));
+                // Parse_Params emits AB_PARN_R for `...`. A reference-typed
+                // destination keeps the alias; non-reference conversion later
+                // dereferences through C4Value::Set/FnCnvDeref.
+                .map(|binding| CallArg::Reference(binding.lvalue()))
+                .unwrap_or_else(|| CallArg::runtime(Value::Nil));
+            evaluated_args.push(forwarded);
             index += 1;
         }
-        // C++ callees always see 10 slots and cannot tell a missing argument
-        // from an explicit nil, so dropping the nil tail is observationally
-        // identical — and keeps host functions that count arguments honest.
+        // Fresh value-nil tails are indistinguishable from missing C++ slots
+        // and may be dropped for host arity. A forwarded reference whose
+        // current value is nil must remain: a `&` callee can write through it.
         while matches!(
             evaluated_args.last(),
             Some(CallArg::Value(TrackedValue {
@@ -6654,7 +7016,13 @@ impl<'a> Vm<'a> {
                 )));
             }
         };
-        let tracked = self.evaluate_tracked(value_expr, env, depth)?;
+        let tracked = match self.evaluate_set_no_ref_result(value_expr, env, depth)? {
+            // SetNoRef cannot rewrite a reference-returning call opcode, so
+            // AB_Set's CheckOpPar<Any> reaches FnCnvDeref. Deref copies the
+            // referent through Set before the destination assignment.
+            ReturnValue::Reference(reference) => reference.read_tracked()?.set_copy(),
+            ReturnValue::Value(tracked) => tracked,
+        };
         if let Some(left) = reference.resolved_legacy_value() {
             return Err(RuntimeError::new(format!(
                 "operator \"=\" left side: got \"{}\", but expected \"&\"!",
@@ -7473,6 +7841,13 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<ReturnValue, RuntimeError> {
         match expr {
+            Expr::Binary(left, operation, right)
+                if matches!(operation, BinaryOp::NilCoalescing)
+                    || env.strict_level.unwrap_or(0) >= 2
+                        && matches!(operation, BinaryOp::And | BinaryOp::Or) =>
+            {
+                self.evaluate_short_circuit_raw(left, operation, right, env, depth, true)
+            }
             Expr::Variable(name) => {
                 if let Some(reference) = env.lvalue(name).or_else(|| {
                     self.global_variable_cell(name)

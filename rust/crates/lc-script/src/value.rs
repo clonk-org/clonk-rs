@@ -803,6 +803,53 @@ impl ValueMap {
         }
     }
 
+    /// Assign a retained `C4V_C4ID(0)` mapped value through C4Value::Set.
+    /// Unlike assigning canonical nil, the source type differs from a fresh
+    /// `C4V_Any(0)` slot: Set canonicalizes it and CheckRemoveFromMap erases
+    /// the entry. The only surviving case is Set's exact data/type early
+    /// return when the destination slot already contains a retained zero ID.
+    pub(crate) fn assign_key_zero_c4id(&mut self, key: Value) {
+        if self
+            .0
+            .get(&key)
+            .is_some_and(|current| matches!(current, Value::C4Id(id) if c4_id_raw(id) == 0))
+        {
+            return;
+        }
+
+        if self.0.shift_remove(&key).is_some() {
+            self.1.push(Value::Nil);
+            return;
+        }
+
+        if let Some(recycled) = self.1.pop() {
+            if matches!(&recycled, Value::C4Id(id) if c4_id_raw(id) == 0) {
+                self.0.insert(key, recycled);
+            } else {
+                self.1.push(Value::Nil);
+            }
+        } else {
+            self.1.push(Value::Nil);
+        }
+    }
+
+    /// String-key counterpart used by `map.property = retained_id_zero`.
+    /// Preserve the native literal-string lookup fallback before delegating
+    /// the missing-slot case to the arbitrary-key implementation.
+    pub(crate) fn assign_zero_c4id(&mut self, key: String) {
+        if self
+            .get(&key)
+            .is_some_and(|current| matches!(current, Value::C4Id(id) if c4_id_raw(id) == 0))
+        {
+            return;
+        }
+        if self.shift_remove(&key).is_some() {
+            self.1.push(Value::Nil);
+            return;
+        }
+        self.assign_key_zero_c4id(Value::from(key));
+    }
+
     pub fn shift_remove_key(&mut self, key: &Value) -> Option<Value> {
         self.0.shift_remove(key)
     }
