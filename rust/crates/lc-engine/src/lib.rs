@@ -37445,10 +37445,17 @@ impl Engine {
             .keys()
             .map(String::as_str)
             .collect::<HashSet<_>>();
+        let retained_object_numbers = self
+            .objects
+            .iter()
+            .filter(|object| object.state.status != ObjectStatus::Deleted)
+            .map(|object| object.id.as_u64())
+            .collect::<HashSet<_>>();
         scenario::collect_legacy_objects_with_definition_ids(
             &group,
             &definition_ids,
             &self.legacy_string_table,
+            &retained_object_numbers,
         )
         .map_err(|error| EngineError::ScenarioSectionObjects {
             section: section.name.clone(),

@@ -15690,14 +15690,14 @@ mod tests {
                 finished: false,
             },
             update_interval: -4,
-            evaluated: true,
-            path_checked: true,
-            finished: false,
+            evaluated: -2,
+            path_checked: 7,
+            finished: 0,
             failures: 0,
             retries: 3,
-            permit: 0,
-            base_mode: CommandMode::Sub.to_i32(),
-            text: String::new(),
+            permit: -4,
+            base_mode: 99,
+            text: "unused-but-persisted".into(),
         };
         let snapshot = CommandStackSnapshot::from_legacy_save_commands(vec![saved.clone()])
             .expect("legacy command compiles");
@@ -15724,6 +15724,7 @@ pub enum CommandMode {
     Base,
     SilentBase,
     Sub,
+    Unknown(i32),
 }
 
 impl CommandMode {
@@ -15733,7 +15734,7 @@ impl CommandMode {
             1 => Some(Self::Base),
             2 => Some(Self::SilentBase),
             3 => Some(Self::Sub),
-            _ => None,
+            value => Some(Self::Unknown(value)),
         }
     }
 
@@ -15743,6 +15744,7 @@ impl CommandMode {
             Self::Base => 1,
             Self::SilentBase => 2,
             Self::Sub => 3,
+            Self::Unknown(value) => value,
         }
     }
 }
@@ -16446,6 +16448,27 @@ pub struct CommandSnapshot {
     /// ordinary command after its first Execute.
     #[serde(default)]
     evaluated: bool,
+    /// Generic C4Command::PathChecked flag for command kinds that do not
+    /// otherwise retain the pathfinder latch in their typed state.
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    path_checked: bool,
+    /// C4Command::Permit is normally zero, but compiled saves accept and
+    /// re-emit arbitrary signed values.
+    #[serde(default, skip_serializing_if = "crate::i32_is_zero")]
+    permit: i32,
+    /// Raw compiled boolean words. Native treats these as booleans at
+    /// runtime but writes the original signed integer until the semantic
+    /// value changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_evaluated_word: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_path_checked_word: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_finished_word: Option<i32>,
+    /// Exact C4Command::Text from a compiled save. Non-Call commands may
+    /// carry otherwise-unused text which still needs to survive a resave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_text: Option<String>,
     /// C4Command::UpdateInterval after the most recent Execute. Kept on
     /// the stack entry because it is shared by every command kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -16468,6 +16491,12 @@ impl PartialEq for CommandSnapshot {
             && self.retries == other.retries
             && self.failures == other.failures
             && self.evaluated == other.evaluated
+            && self.path_checked == other.path_checked
+            && self.permit == other.permit
+            && self.legacy_evaluated_word == other.legacy_evaluated_word
+            && self.legacy_path_checked_word == other.legacy_path_checked_word
+            && self.legacy_finished_word == other.legacy_finished_word
+            && self.legacy_text == other.legacy_text
             && self.update_interval == other.update_interval
             && self.request == other.request
             && self.finished == other.finished
@@ -16483,6 +16512,12 @@ impl CommandSnapshot {
             retries: entry.retries,
             failures: entry.failures,
             evaluated: entry.evaluated,
+            path_checked: entry.path_checked,
+            permit: entry.permit,
+            legacy_evaluated_word: entry.legacy_evaluated_word,
+            legacy_path_checked_word: entry.legacy_path_checked_word,
+            legacy_finished_word: entry.legacy_finished_word,
+            legacy_text: entry.legacy_text.clone(),
             update_interval: Some(entry.update_interval),
             request: entry.request.clone(),
             finished: entry.finished,
@@ -16525,9 +16560,9 @@ pub struct CommandView {
 pub(crate) struct LegacyCommandSave {
     pub(crate) view: CommandView,
     pub(crate) update_interval: i32,
-    pub(crate) evaluated: bool,
-    pub(crate) path_checked: bool,
-    pub(crate) finished: bool,
+    pub(crate) evaluated: i32,
+    pub(crate) path_checked: i32,
+    pub(crate) finished: i32,
     pub(crate) failures: i32,
     pub(crate) retries: i32,
     pub(crate) permit: i32,
@@ -16587,35 +16622,48 @@ fn legacy_command_save(
     state: &CommandState,
     update_interval: i32,
     evaluated: bool,
+    path_checked: bool,
     finished: bool,
     failures: i32,
     retries: i32,
+    permit: i32,
     mode: CommandMode,
+    legacy_evaluated_word: Option<i32>,
+    legacy_path_checked_word: Option<i32>,
+    legacy_finished_word: Option<i32>,
+    legacy_text: Option<&str>,
 ) -> LegacyCommandSave {
     let text = match (&view.data, state.id()) {
         (CommandData::Text(text), Some(CommandId::Call)) => text.clone(),
         _ => String::new(),
     };
+    let evaluated = state.legacy_evaluated(evaluated);
+    let path_checked = state.legacy_path_checked(path_checked);
     LegacyCommandSave {
         view,
         update_interval,
-        evaluated: state.legacy_evaluated(evaluated),
-        path_checked: state.legacy_path_checked(),
-        finished,
+        evaluated: legacy_bool_word(legacy_evaluated_word, evaluated),
+        path_checked: legacy_bool_word(legacy_path_checked_word, path_checked),
+        finished: legacy_bool_word(legacy_finished_word, finished),
         failures,
         retries,
-        // Permit is initialized to zero and has no writer anywhere in the
-        // classic engine. Keep the explicit slot in the save projection.
-        permit: 0,
+        permit,
         base_mode: mode.to_i32(),
-        text: request
-            .filter(|request| request.id == CommandId::Call)
-            .and_then(|request| match &request.data {
-                CommandData::Text(text) => Some(text.clone()),
-                _ => None,
-            })
-            .unwrap_or(text),
+        text: legacy_text.map(str::to_owned).unwrap_or_else(|| {
+            request
+                .filter(|request| request.id == CommandId::Call)
+                .and_then(|request| match &request.data {
+                    CommandData::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .unwrap_or(text)
+        }),
     }
+}
+
+fn legacy_bool_word(raw: Option<i32>, semantic: bool) -> i32 {
+    raw.filter(|raw| (*raw != 0) == semantic)
+        .unwrap_or(i32::from(semantic))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -16707,10 +16755,16 @@ impl CommandStackSnapshot {
                         )
                     }),
                     command.evaluated,
+                    command.path_checked,
                     command.finished.is_some(),
                     command.failures,
                     command.retries,
+                    command.permit,
                     command.mode,
+                    command.legacy_evaluated_word,
+                    command.legacy_path_checked_word,
+                    command.legacy_finished_word,
+                    command.legacy_text.as_deref(),
                 )
             })
             .collect()
@@ -16756,7 +16810,7 @@ impl CommandStackSnapshot {
                 ty: command.view.ty,
                 data,
                 update_interval: command.update_interval,
-                evaluated: command.evaluated,
+                evaluated: command.evaluated != 0,
                 retries: command.retries,
                 mode,
             };
@@ -16771,12 +16825,24 @@ impl CommandStackSnapshot {
             }
             active.retries = command.retries;
             active.failures = command.failures;
-            active.evaluated = command.evaluated;
+            active.evaluated = command.evaluated != 0;
+            active.path_checked = !matches!(active.state, CommandState::MoveTo(_))
+                && command.path_checked != 0;
+            active.permit = command.permit;
+            active.legacy_evaluated_word =
+                (!matches!(command.evaluated, 0 | 1)).then_some(command.evaluated);
+            active.legacy_path_checked_word =
+                (!matches!(command.path_checked, 0 | 1)).then_some(command.path_checked);
+            active.legacy_finished_word =
+                (!matches!(command.finished, 0 | 1)).then_some(command.finished);
+            active.legacy_text = (id != CommandId::Call && !command.text.is_empty())
+                .then_some(command.text);
             active.update_interval = command.update_interval;
-            active.finished = command.finished.then_some(CommandStatus::Completed);
-            active
-                .state
-                .restore_legacy_evaluation(command.evaluated, command.path_checked);
+            active.finished = (command.finished != 0).then_some(CommandStatus::Completed);
+            active.state.restore_legacy_evaluation(
+                command.evaluated != 0,
+                command.path_checked != 0,
+            );
             snapshots.push(CommandSnapshot::new(&active));
         }
         Ok(Self {
@@ -17051,10 +17117,16 @@ impl CommandStack {
                     &entry.state,
                     entry.update_interval,
                     entry.evaluated,
+                    entry.path_checked,
                     entry.finished.is_some(),
                     entry.failures,
                     entry.retries,
+                    entry.permit,
                     entry.mode,
+                    entry.legacy_evaluated_word,
+                    entry.legacy_path_checked_word,
+                    entry.legacy_finished_word,
+                    entry.legacy_text.as_deref(),
                 )
             })
             .collect()
@@ -18288,7 +18360,7 @@ impl CommandStack {
             CommandMode::SilentSub => base.is_none(),
             CommandMode::Sub => base.is_none_or(|entry| entry.retries == 0),
             CommandMode::Base => true,
-            CommandMode::SilentBase => false,
+            CommandMode::SilentBase | CommandMode::Unknown(_) => false,
         };
         execute_feedback.then(|| {
             let entry = &self.entries[index];
@@ -18473,7 +18545,7 @@ impl CommandStack {
                 }
             }
             CommandMode::Base => true,
-            CommandMode::SilentBase => false,
+            CommandMode::SilentBase | CommandMode::Unknown(_) => false,
         };
 
         execute_feedback.then(|| {
@@ -18560,7 +18632,7 @@ impl CommandStack {
                 .increment_detached_base_failure(base_chain)
                 .unwrap_or(true),
             CommandMode::Base => true,
-            CommandMode::SilentBase => false,
+            CommandMode::SilentBase | CommandMode::Unknown(_) => false,
         };
         execute_feedback.then(|| CommandFailureFeedback {
             command: CommandView::from_entry(
@@ -24093,8 +24165,11 @@ impl CommandState {
         }
     }
 
-    fn legacy_path_checked(&self) -> bool {
-        matches!(self, CommandState::MoveTo(state) if state.path_checked)
+    fn legacy_path_checked(&self, generic: bool) -> bool {
+        match self {
+            CommandState::MoveTo(state) => state.path_checked,
+            _ => generic,
+        }
     }
 
     fn restore_legacy_evaluation(&mut self, evaluated: bool, path_checked: bool) {
@@ -24406,6 +24481,21 @@ struct ActiveCommand {
     /// Generic C4Command::Evaluated flag for commands whose typed state does
     /// not otherwise need to retain the InitEvaluation latch.
     evaluated: bool,
+    /// Generic C4Command::PathChecked flag for command kinds without a
+    /// typed pathfinder state.
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    path_checked: bool,
+    /// Exact persisted C4Command::Permit word.
+    #[serde(default, skip_serializing_if = "crate::i32_is_zero")]
+    permit: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_evaluated_word: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_path_checked_word: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_finished_word: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_text: Option<String>,
     /// C4Command::UpdateInterval: a per-front-execution lifetime, not a
     /// wall-clock polling cadence (C4Command.cpp:1545-1552).
     update_interval: i32,
@@ -24481,6 +24571,12 @@ impl ActiveCommand {
             retries: request.retries.max(0),
             failures: 0,
             evaluated: request.evaluated,
+            path_checked: false,
+            permit: 0,
+            legacy_evaluated_word: None,
+            legacy_path_checked_word: None,
+            legacy_finished_word: None,
+            legacy_text: None,
             update_interval,
             request: Some(request),
             finished: None,
@@ -24495,6 +24591,12 @@ impl ActiveCommand {
             retries,
             failures,
             evaluated,
+            path_checked,
+            permit,
+            legacy_evaluated_word,
+            legacy_path_checked_word,
+            legacy_finished_word,
+            legacy_text,
             update_interval,
             request,
             finished,
@@ -24519,6 +24621,12 @@ impl ActiveCommand {
             retries,
             failures,
             evaluated,
+            path_checked,
+            permit,
+            legacy_evaluated_word,
+            legacy_path_checked_word,
+            legacy_finished_word,
+            legacy_text,
             update_interval: remaining,
             request,
             finished,

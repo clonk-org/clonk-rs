@@ -11574,7 +11574,12 @@ fn collect_legacy_objects(
         .iter()
         .map(|definition| definition.id.as_str())
         .collect::<HashSet<_>>();
-    collect_legacy_objects_with_definition_ids(group, &definition_ids, string_registrations)
+    collect_legacy_objects_with_definition_ids(
+        group,
+        &definition_ids,
+        string_registrations,
+        &HashSet::new(),
+    )
 }
 
 /// Compile one section's Objects.txt at its C4GameObjects::Load boundary.
@@ -11584,6 +11589,7 @@ pub(crate) fn collect_legacy_objects_with_definition_ids(
     group: &Group,
     definition_ids: &HashSet<&str>,
     string_registrations: &lc_script::StringRegistrations,
+    retained_object_numbers: &HashSet<u64>,
 ) -> Result<Vec<ScenarioSpawn>, ScenarioError> {
     let bytes = match group.read_file("Objects.txt") {
         Ok(bytes) => bytes,
@@ -11635,17 +11641,22 @@ pub(crate) fn collect_legacy_objects_with_definition_ids(
         }
     }
 
-    let object_numbers: HashSet<u64> = records
-        .iter()
-        .filter(|record| !matches!(record.status, Some(ObjectStatus::Deleted)))
-        .filter(|record| {
-            record
-                .id
-                .as_deref()
-                .is_some_and(|id| definition_ids.contains(id))
-        })
-        .filter_map(|record| record.number)
-        .collect();
+    // C4GameObjects::ObjectPointer searches both the newly compiled main
+    // list and the retained inactive list. Section loads therefore resolve
+    // saved command pointers to preserved objects as well as sibling rows.
+    let mut object_numbers = retained_object_numbers.clone();
+    object_numbers.extend(
+        records
+            .iter()
+            .filter(|record| !matches!(record.status, Some(ObjectStatus::Deleted)))
+            .filter(|record| {
+                record
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| definition_ids.contains(id))
+            })
+            .filter_map(|record| record.number),
+    );
     let value_resolution = SerializedC4ValueResolution {
         object_numbers: &object_numbers,
         string_registrations,
@@ -11953,9 +11964,9 @@ impl SerializedLegacyCommand {
                 finished: self.finished != 0,
             },
             update_interval: self.update_interval,
-            evaluated: self.evaluated != 0,
-            path_checked: self.path_checked != 0,
-            finished: self.finished != 0,
+            evaluated: self.evaluated,
+            path_checked: self.path_checked,
+            finished: self.finished,
             failures: self.failures,
             retries: self.retries,
             permit: self.permit,
@@ -27815,6 +27826,191 @@ public func ActualizePhase(pClonk)
         assert_eq!(defaulted.breath, None);
         assert_eq!(defaulted.category, None);
         assert_eq!(defaulted.compiled_mass, None);
+    }
+
+    #[test]
+    fn legacy_objects_restore_ordered_command_stack() {
+        let dir = tempdir().expect("tempdir");
+        let definition = dir.path().join("Defs.c4d/Command.c4d");
+        std::fs::create_dir_all(&definition).expect("definition directory");
+        std::fs::write(
+            definition.join("DefCore.txt"),
+            "[DefCore]\nid=CMND\nName=Command object\nCategory=17\n",
+        )
+        .expect("definition core");
+        std::fs::write(definition.join("Script.c"), "#strict\n")
+            .expect("definition script");
+        write_test_definition_graphics(&definition);
+
+        let scenario_dir = dir.path().join("Commands.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario directory");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            concat!(
+                "[Head]\nTitle=Commands\nSaveGame=1\nNoInitialize=1\n\n",
+                "[Definitions]\nDefinition1=Defs.c4d\n",
+            ),
+        )
+        .expect("scenario core");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            concat!(
+                "[Object]\n",
+                "id=CMND\nNumber=100\nStatus=1\nCategory=17\n",
+                "[Commands]\n",
+                "Command1=$2,Call,a[5;i7,O101,O102,O999,I0],-3,101,102,23,-4,-2,3,0,-5,-6,-7,9,raw,text // exact  \n",
+                "Command2=$2,MoveTo,O102,44,999,101,-55,-66,0,-9,2,7,8,9,3,move,text  \n",
+                // Native stops at the first missing number, even if a later
+                // naming exists in the same [Commands] section.
+                "Command4=$2,Wait,i0,0,0,0,0,0,0,0,0,0,0,0,0,ignored\n",
+                "\n[Object]\n",
+                "id=CMND\nNumber=101\nStatus=1\nCategory=17\n",
+                "\n[Object]\n",
+                "id=CMND\nNumber=102\nStatus=2\nCategory=17\n",
+            ),
+        )
+        .expect("Objects.txt");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
+            .expect("command scenario loads");
+        let mut engine = Engine::with_seed(221);
+        scenario.apply(&mut engine).expect("command scenario applies");
+
+        let assert_stack = |engine: &Engine| {
+            let actor_index = engine
+                .find_object_index(ObjectId::new(100))
+                .expect("command actor remains loaded");
+            let saved = engine.objects[actor_index].commands.legacy_save_commands();
+            assert_eq!(
+                saved.len(),
+                2,
+                "Command4 after the numbering gap is ignored"
+            );
+            assert_eq!(
+                saved
+                    .iter()
+                    .map(|command| command.view.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["Call", "MoveTo"],
+                "Command1 is the executable head and Command2 its tail",
+            );
+
+            let call = &saved[0];
+            assert_eq!(call.view.target, Some(ObjectId::new(101)));
+            assert_eq!(
+                call.view.target2,
+                Some(ObjectId::new(102)),
+                "inactive objects remain valid command targets",
+            );
+            assert_eq!(
+                call.view.tx_value,
+                Some(lc_script::Value::Array(vec![
+                    lc_script::Value::Int(7),
+                    lc_script::Value::Object(101),
+                    lc_script::Value::Object(102),
+                    lc_script::Value::Nil,
+                    lc_script::Value::C4Id(lc_script::c4_id_from_raw(0)),
+                ])),
+                "tagged Tx recursively denumerates active, inactive, and missing objects",
+            );
+            assert_eq!(call.view.ty, Some(-3));
+            assert_eq!(call.view.legacy_data, Some(23));
+            assert_eq!(call.update_interval, -4);
+            assert_eq!(
+                (call.evaluated, call.path_checked, call.finished),
+                (-2, 3, 0)
+            );
+            assert_eq!(
+                (call.failures, call.retries, call.permit),
+                (-5, -6, -7)
+            );
+            assert_eq!(call.base_mode, 9, "unknown int32 BaseMode is retained");
+            assert_eq!(call.text, "raw,text // exact  ");
+
+            let move_to = &saved[1];
+            assert_eq!(
+                move_to.view.target,
+                None,
+                "missing Target denumerates to null"
+            );
+            assert_eq!(move_to.view.target2, Some(ObjectId::new(101)));
+            assert_eq!(
+                move_to.view.tx_value,
+                Some(lc_script::Value::Object(102)),
+            );
+            assert_eq!(move_to.view.ty, Some(44));
+            assert_eq!(
+                move_to.view.data,
+                crate::command::CommandData::Integer(-55)
+            );
+            assert_eq!(move_to.update_interval, -66);
+            assert_eq!(
+                (move_to.evaluated, move_to.path_checked, move_to.finished),
+                (0, -9, 2),
+            );
+            assert_eq!(
+                (move_to.failures, move_to.retries, move_to.permit),
+                (7, 8, 9)
+            );
+            assert_eq!(move_to.base_mode, 3);
+            assert_eq!(
+                move_to.text, "move,text  ",
+                "non-Call Text is not discarded"
+            );
+        };
+
+        assert_eq!(
+            engine
+                .object_snapshot(ObjectId::new(102))
+                .expect("inactive target remains addressable")
+                .status,
+            ObjectStatus::Inactive,
+        );
+        assert_stack(&engine);
+
+        let encoded = serde_json::to_string(&engine.capture_state())
+            .expect("command-bearing engine state serializes");
+        let restored = serde_json::from_str(&encoded).expect("engine state deserializes");
+        engine.restore_state(&restored).expect("engine state restores");
+        assert_stack(&engine);
+
+        // A section's Objects.Load resolves against objects retained from the
+        // previous section too, including inactive objects outside this file.
+        let section_dir = dir.path().join("Retained.c4g");
+        std::fs::create_dir_all(&section_dir).expect("section directory");
+        std::fs::write(
+            section_dir.join("Objects.txt"),
+            concat!(
+                "[Object]\n",
+                "id=CMND\nNumber=200\nStatus=1\nCategory=17\n",
+                "[Commands]\n",
+                "Command1=$2,Call,O102,0,102,999,0,0,0,0,0,0,0,0,0,Retained\n",
+            ),
+        )
+        .expect("section Objects.txt");
+        let group = Group::open(&section_dir).expect("section group opens");
+        let spawns = collect_legacy_objects_with_definition_ids(
+            &group,
+            &HashSet::from(["CMND"]),
+            &lc_script::new_string_registrations(),
+            &HashSet::from([102]),
+        )
+        .expect("section objects compile");
+        let retained = spawns[0]
+            .config
+            .command_stack
+            .as_ref()
+            .expect("section command stack")
+            .legacy_save_commands();
+        assert_eq!(retained[0].view.target, Some(ObjectId::new(102)));
+        assert_eq!(retained[0].view.target2, None);
+        assert_eq!(
+            retained[0].view.tx_value,
+            Some(lc_script::Value::Object(102)),
+        );
     }
 
     #[test]

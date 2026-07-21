@@ -2135,9 +2135,9 @@ fn serialize_command(command: &LegacyCommandSave, strings: &mut LegacyStringTabl
         object_number(command.view.target2),
         data,
         command.update_interval,
-        i32::from(command.evaluated),
-        i32::from(command.path_checked),
-        i32::from(command.finished),
+        command.evaluated,
+        command.path_checked,
+        command.finished,
         command.failures,
         command.retries,
         command.permit,
@@ -3526,9 +3526,9 @@ mod tests {
                 finished: true,
             },
             update_interval: 5,
-            evaluated: true,
-            path_checked: false,
-            finished: true,
+            evaluated: -2,
+            path_checked: 0,
+            finished: 7,
             failures: 2,
             retries: 3,
             permit: 0,
@@ -3538,7 +3538,7 @@ mod tests {
         let mut strings = LegacyStringTable::default();
         assert_eq!(
             serialize_command(&command, &mut strings),
-            "$2,MoveTo,i12,-3,41,42,7,5,1,0,1,2,3,0,1,raw,text"
+            "$2,MoveTo,i12,-3,41,42,7,5,-2,0,7,2,3,0,1,raw,text"
         );
     }
 
@@ -3562,9 +3562,9 @@ mod tests {
                 finished: false,
             },
             update_interval: 5,
-            evaluated: true,
-            path_checked: false,
-            finished: false,
+            evaluated: 1,
+            path_checked: 0,
+            finished: 0,
             failures: 0,
             retries: 3,
             permit: 0,
