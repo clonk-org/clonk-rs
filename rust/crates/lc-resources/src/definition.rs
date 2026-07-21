@@ -3,9 +3,11 @@ use crate::{
     graphics::blacken_fully_transparent_rgba, language::component_language_string,
     ComponentGroups, GraphicsImage, Group, GroupEntry, GroupError, LoadedComponent,
 };
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -59,13 +61,15 @@ pub struct Definition {
     /// localized `Rank*.txt` (`C4Def::iNumRankSymbols`,
     /// src/C4Def.cpp:694-706). `None` means no valid custom rank strip.
     pub rank_symbol_count: Option<u32>,
-    /// Fully resolved custom rank names from the first localized
+    /// Custom rank names from the first localized
     /// `Rank{language}.txt|Rank.txt` component. `C4RankSystem` exposes base
     /// names first, followed by every leading-`*` extension format applied to
-    /// every base name in order (src/C4RankSystem.cpp:96-180,184-211).
+    /// every base name in order. Extension formatting remains lazy so an
+    /// invalid format fails only when its rank is requested, as in native
+    /// `GetRankName` (src/C4RankSystem.cpp:96-180,184-211).
     /// `None` means that no component was present or that C++ would reject it
     /// for containing no ordinary rank name.
-    pub rank_names: Option<Vec<String>>,
+    pub rank_names: Option<RankNameTable>,
     /// Experience curve base from the selected definition rank component's
     /// exact, case-sensitive `Base=` setting. Valid custom rank components
     /// default to 1000, matching `C4RankSystem`; invalid or absent components
@@ -360,25 +364,149 @@ fn load_optional_entry_string<P: AsRef<Path>>(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RankNameTable {
-    names: Vec<String>,
+struct LoadedRankNameTable {
+    names: RankNameTable,
     extension_count: u32,
     base: i32,
 }
 
-/// Loads and resolves the selected definition rank component exactly in the
-/// order exposed by `C4RankSystem::GetRankName`: ordinary names first, then
-/// each leading-`*` extension applied across all ordinary names. Comments and
-/// settings are retained by neither list, and a component without an ordinary
-/// name is rejected (src/C4RankSystem.cpp:96-211).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RankBaseName {
+    bytes: Vec<u8>,
+    decoded: String,
+}
+
+/// A definition-local `C4RankSystem` name table.
+///
+/// Native retains extension format strings and invokes `fmt::sprintf` from
+/// `GetRankName`. Keeping the same split here is observable for malformed
+/// formats: loading the definition and requesting any base rank still work;
+/// requesting an affected extended rank raises an uncaught Rust panic at the
+/// corresponding native uncaught `fmt::format_error` boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankNameTable {
+    inner: Arc<RankNameTableData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("rank extension format `{format}` could not be applied: {reason}")]
+pub struct RankExtensionFormatError {
+    pub format: String,
+    pub reason: &'static str,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RankNameTableData {
+    ordinary_names: Vec<RankBaseName>,
+    extensions: Vec<Vec<u8>>,
+}
+
+impl RankNameTable {
+    /// Construct a table whose names are already resolved. Engine-side test
+    /// and embedding APIs use this for custom tables without extensions.
+    pub fn from_resolved_names(names: Vec<String>) -> Self {
+        Self {
+            inner: Arc::new(RankNameTableData {
+                ordinary_names: names
+                    .into_iter()
+                    .map(|decoded| RankBaseName {
+                        bytes: decoded.as_bytes().to_vec(),
+                        decoded,
+                    })
+                    .collect(),
+                extensions: Vec::new(),
+            }),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner
+            .ordinary_names
+            .len()
+            .saturating_mul(self.inner.extensions.len().saturating_add(1))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.ordinary_names.is_empty()
+    }
+
+    /// Resolve one rank exactly when it is requested, optionally clamping an
+    /// over-range rank to the final table entry like native's
+    /// `fReturnLastIfOver` path.
+    pub fn try_rank_name(
+        &self,
+        rank: usize,
+        return_last_if_over: bool,
+    ) -> Result<Option<Cow<'_, str>>, RankExtensionFormatError> {
+        let table_len = self.len();
+        if table_len == 0 {
+            return Ok(None);
+        }
+        let rank = if rank < table_len {
+            rank
+        } else if return_last_if_over {
+            table_len - 1
+        } else {
+            return Ok(None);
+        };
+        let ordinary_count = self.inner.ordinary_names.len();
+        if rank < ordinary_count {
+            return Ok(Some(Cow::Borrowed(
+                &self.inner.ordinary_names[rank].decoded,
+            )));
+        }
+        let extended_rank = rank - ordinary_count;
+        let extension = self
+            .inner
+            .extensions
+            .get(extended_rank / ordinary_count)
+            .expect("bounded rank references a defined extension");
+        let ordinary = &self.inner.ordinary_names[extended_rank % ordinary_count];
+        let formatted = format_rank_extension(extension, &ordinary.bytes).map_err(|reason| {
+            RankExtensionFormatError {
+                format: decode_legacy_script_text(extension),
+                reason,
+            }
+        })?;
+        Ok(Some(Cow::Owned(decode_legacy_script_text(&formatted))))
+    }
+
+    /// Resolve a rank through the normal non-fallback `GetRankName` path.
+    /// Invalid formats deliberately panic here: native lets the corresponding
+    /// `fmt::format_error` escape `GetRankName` uncaught.
+    pub fn get(&self, rank: usize) -> Option<Cow<'_, str>> {
+        self.try_rank_name(rank, false)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn get_or_last(&self, rank: usize) -> Option<Cow<'_, str>> {
+        self.try_rank_name(rank, true)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn resolved_names(&self) -> Vec<String> {
+        (0..self.len())
+            .map(|rank| {
+                self.get(rank)
+                    .expect("rank table length only covers defined ranks")
+                    .into_owned()
+            })
+            .collect()
+    }
+}
+
+/// Loads the selected definition rank component in the order exposed by
+/// `C4RankSystem::GetRankName`: ordinary names first, then each leading-`*`
+/// extension across all ordinary names. Extension application stays deferred
+/// to lookup. Comments and settings are retained by neither list, and a
+/// component without an ordinary name is rejected (src/C4RankSystem.cpp:96-211).
 fn load_rank_name_table<S: AsRef<str>>(
     components: &ComponentGroups,
     languages: &[S],
-) -> Result<Option<RankNameTable>, DefinitionError> {
+) -> Result<Option<LoadedRankNameTable>, DefinitionError> {
     let Some(component) = first_localized_component(components, "Rank", languages)? else {
         return Ok(None);
     };
-    let text = decode_legacy_script_text(&component.bytes);
     let mut ordinary_names = Vec::new();
     let mut extensions = Vec::new();
     let mut base = 1000;
@@ -386,20 +514,22 @@ fn load_rank_name_table<S: AsRef<str>>(
     // the component data; its appended trailing NUL lies outside that loop.
     // Consequently an unterminated final line is intentionally ignored.
     // Embedded NUL bytes are terminators too because C++ tests `!*pPos`.
-    for terminated_line in text.split_inclusive(['\0', '\r', '\n']) {
-        let line = terminated_line
-            .strip_suffix('\0')
-            .or_else(|| terminated_line.strip_suffix('\r'))
-            .or_else(|| terminated_line.strip_suffix('\n'));
-        let Some(line) = line.filter(|line| !line.is_empty()) else {
+    for terminated_line in component
+        .bytes
+        .split_inclusive(|byte| matches!(*byte, 0 | b'\r' | b'\n'))
+    {
+        let Some((terminator, line)) = terminated_line.split_last() else {
             continue;
         };
-        if let Some(extension) = line.strip_prefix('*') {
-            extensions.push(extension.to_string());
+        if !matches!(*terminator, 0 | b'\r' | b'\n') || line.is_empty() {
+            continue;
+        }
+        if let Some(extension) = line.strip_prefix(b"*") {
+            extensions.push(extension.to_vec());
         } else if let Some(parsed_base) = parse_rank_base(line) {
             base = parsed_base;
-        } else if !line.starts_with('#') && !line.contains('=') {
-            ordinary_names.push(line.to_string());
+        } else if !line.starts_with(b"#") && !line.contains(&b'=') {
+            ordinary_names.push(line.to_vec());
         }
     }
     if ordinary_names.is_empty() {
@@ -407,20 +537,19 @@ fn load_rank_name_table<S: AsRef<str>>(
     }
 
     let extension_count = u32::try_from(extensions.len()).unwrap_or(u32::MAX);
-    let mut names = Vec::with_capacity(
-        ordinary_names
-            .len()
-            .saturating_mul(extensions.len().saturating_add(1)),
-    );
-    names.extend(ordinary_names.iter().cloned());
-    for extension in extensions {
-        names.extend(
-            ordinary_names
-                .iter()
-                .map(|name| format_rank_extension(&extension, name)),
-        );
-    }
-    Ok(Some(RankNameTable {
+    let names = RankNameTable {
+        inner: Arc::new(RankNameTableData {
+            ordinary_names: ordinary_names
+                .into_iter()
+                .map(|bytes| RankBaseName {
+                    decoded: decode_legacy_script_text(&bytes),
+                    bytes,
+                })
+                .collect(),
+            extensions,
+        }),
+    };
+    Ok(Some(LoadedRankNameTable {
         names,
         extension_count,
         base: if base == 0 { 1000 } else { base },
@@ -430,45 +559,265 @@ fn load_rank_name_table<S: AsRef<str>>(
 /// Parse the `%d` prefix accepted by C++ for an exact `Base=` rank setting.
 /// Leading ASCII whitespace and a sign are accepted; trailing bytes are
 /// ignored. A malformed value leaves the previously parsed base unchanged.
-fn parse_rank_base(line: &str) -> Option<i32> {
-    let value = line
-        .strip_prefix("Base=")?
-        .trim_start_matches(|character: char| character.is_ascii_whitespace());
-    let digits_start = usize::from(value.starts_with('+') || value.starts_with('-'));
+fn parse_rank_base(line: &[u8]) -> Option<i32> {
+    let value = line.strip_prefix(b"Base=")?;
+    let value = &value[value
+        .iter()
+        .take_while(|byte| byte.is_ascii_whitespace())
+        .count()..];
+    let digits_start = usize::from(value.starts_with(b"+") || value.starts_with(b"-"));
     let digit_count = value[digits_start..]
-        .bytes()
+        .iter()
+        .copied()
         .take_while(u8::is_ascii_digit)
         .count();
     if digit_count == 0 {
         return None;
     }
-    value[..digits_start + digit_count].parse().ok()
+    std::str::from_utf8(&value[..digits_start + digit_count])
+        .ok()?
+        .parse()
+        .ok()
 }
 
-/// The shipped rank extensions use the `fmt::sprintf(format, base_name)`
-/// `%s`/`%%` surface. Parse those tokens instead of a blanket replacement so
-/// escaped percent signs cannot accidentally become placeholders.
-fn format_rank_extension(format: &str, base_name: &str) -> String {
-    let mut output = String::with_capacity(format.len().saturating_add(base_name.len()));
-    let mut chars = format.chars().peekable();
-    while let Some(current) = chars.next() {
-        if current != '%' {
-            output.push(current);
-            continue;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RankPrintfArgumentMode {
+    Unset,
+    Automatic,
+    Positional,
+}
+
+fn use_rank_printf_argument(
+    mode: &mut RankPrintfArgumentMode,
+    automatic_arguments: &mut usize,
+    positional: Option<usize>,
+) -> Result<(), &'static str> {
+    if let Some(index) = positional {
+        if *mode == RankPrintfArgumentMode::Automatic {
+            return Err("cannot switch from automatic to manual argument indexing");
         }
-        match chars.peek().copied() {
-            Some('%') => {
-                chars.next();
-                output.push('%');
+        *mode = RankPrintfArgumentMode::Positional;
+        return (index == 1).then_some(()).ok_or("argument not found");
+    }
+    if *mode == RankPrintfArgumentMode::Positional {
+        return Err("cannot switch from manual to automatic argument indexing");
+    }
+    *mode = RankPrintfArgumentMode::Automatic;
+    if *automatic_arguments != 0 {
+        return Err("argument not found");
+    }
+    *automatic_arguments += 1;
+    Ok(())
+}
+
+fn parse_rank_printf_number(format: &[u8], cursor: &mut usize) -> (usize, bool) {
+    let start = *cursor;
+    let mut value = 0u64;
+    while let Some(digit) = format
+        .get(*cursor)
+        .filter(|byte| byte.is_ascii_digit())
+        .map(|byte| u64::from(*byte - b'0'))
+    {
+        value = value.wrapping_mul(10).wrapping_add(digit);
+        *cursor += 1;
+    }
+    // fmt 11.2 accepts at most nine decimal digits unconditionally, or ten
+    // whose value fits INT_MAX. More digits overflow even when they are only
+    // leading zeroes (base.h::parse_nonnegative_int).
+    let digit_count = *cursor - start;
+    let too_big = digit_count > 10 || (digit_count == 10 && value > i32::MAX as u64);
+    (value as usize, too_big)
+}
+
+fn fmt_code_point_width(character: char) -> usize {
+    let code = u32::from(character);
+    1 + usize::from(
+        code >= 0x1100
+            && (code <= 0x115f
+                || code == 0x2329
+                || code == 0x232a
+                || (0x2e80..=0xa4cf).contains(&code) && code != 0x303f
+                || (0xac00..=0xd7a3).contains(&code)
+                || (0xf900..=0xfaff).contains(&code)
+                || (0xfe10..=0xfe19).contains(&code)
+                || (0xfe30..=0xfe6f).contains(&code)
+                || (0xff00..=0xff60).contains(&code)
+                || (0xffe0..=0xffe6).contains(&code)
+                || (0x20000..=0x2fffd).contains(&code)
+                || (0x30000..=0x3fffd).contains(&code)
+                || (0x1f300..=0x1f64f).contains(&code)
+                || (0x1f900..=0x1f9ff).contains(&code)),
+    )
+}
+
+fn fmt_utf8_display_width(bytes: &[u8]) -> usize {
+    let mut width = 0usize;
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match std::str::from_utf8(&bytes[cursor..]) {
+            Ok(text) => {
+                width = width.saturating_add(text.chars().map(fmt_code_point_width).sum());
+                break;
             }
-            Some('s') => {
-                chars.next();
-                output.push_str(base_name);
+            Err(error) => {
+                let valid_end = cursor + error.valid_up_to();
+                let valid = std::str::from_utf8(&bytes[cursor..valid_end])
+                    .expect("from_utf8 valid prefix is UTF-8");
+                width = width.saturating_add(valid.chars().map(fmt_code_point_width).sum());
+                cursor = valid_end;
+                if cursor < bytes.len() {
+                    // fmt advances one byte and counts one column for every
+                    // malformed UTF-8 code unit.
+                    width = width.saturating_add(1);
+                    cursor += 1;
+                }
             }
-            _ => output.push('%'),
         }
     }
-    output
+    width
+}
+
+/// Apply the static one-`char *` surface of fmt 11.2 `sprintf` when the
+/// corresponding extended rank is requested.
+fn format_rank_extension(format: &[u8], base_name: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let mut output = Vec::with_capacity(format.len().saturating_add(base_name.len()));
+    let mut cursor = 0usize;
+    let mut argument_mode = RankPrintfArgumentMode::Unset;
+    let mut automatic_arguments = 0usize;
+    while cursor < format.len() {
+        if format[cursor] != b'%' {
+            output.push(format[cursor]);
+            cursor += 1;
+            continue;
+        }
+        cursor += 1;
+        if format.get(cursor) == Some(&b'%') {
+            output.push(b'%');
+            cursor += 1;
+            continue;
+        }
+
+        let mut positional = None;
+        let mut left_aligned = false;
+        let mut width = 0usize;
+        let mut parse_flags_and_width = true;
+        if format.get(cursor).is_some_and(u8::is_ascii_digit) {
+            let (number, too_big) = parse_rank_printf_number(format, &mut cursor);
+            if format.get(cursor) == Some(&b'$') {
+                positional = Some(if too_big { usize::MAX } else { number });
+                cursor += 1;
+            } else if number != 0 || too_big {
+                if too_big {
+                    return Err("number is too big");
+                }
+                width = number;
+                parse_flags_and_width = false;
+            }
+        }
+        if parse_flags_and_width {
+            while let Some(flag) = format.get(cursor) {
+                match flag {
+                    b'-' => left_aligned = true,
+                    b'+' | b'0' | b' ' | b'#' => {}
+                    _ => break,
+                }
+                cursor += 1;
+            }
+            if format.get(cursor).is_some_and(u8::is_ascii_digit) {
+                let (number, too_big) = parse_rank_printf_number(format, &mut cursor);
+                if too_big {
+                    return Err("number is too big");
+                }
+                width = number;
+            } else if format.get(cursor) == Some(&b'*') {
+                use_rank_printf_argument(&mut argument_mode, &mut automatic_arguments, None)?;
+                return Err("width is not integer");
+            }
+        }
+
+        // fmt rejects argument zero after parsing the header (including a
+        // dynamic width) but before parsing precision. Preserve that error
+        // precedence for formats such as `%0$.*s`.
+        if positional == Some(0) {
+            return Err("argument not found");
+        }
+
+        let mut precision = None;
+        if format.get(cursor) == Some(&b'.') {
+            cursor += 1;
+            if format.get(cursor).is_some_and(u8::is_ascii_digit) {
+                let (number, too_big) = parse_rank_printf_number(format, &mut cursor);
+                // fmt 11.2 passes zero as parse_nonnegative_int's overflow
+                // sentinel for printf precision.
+                precision = Some(if too_big { 0 } else { number });
+            } else if format.get(cursor) == Some(&b'*') {
+                use_rank_printf_argument(&mut argument_mode, &mut automatic_arguments, None)?;
+                return Err("precision is not integer");
+            } else {
+                precision = Some(0);
+            }
+        }
+
+        use_rank_printf_argument(&mut argument_mode, &mut automatic_arguments, positional)?;
+
+        let mut had_length = false;
+        match format.get(cursor).copied() {
+            Some(b'h' | b'l') => {
+                had_length = true;
+                let length = format[cursor];
+                cursor += 1;
+                if format.get(cursor) == Some(&length) {
+                    cursor += 1;
+                }
+            }
+            Some(b'j' | b'z' | b't' | b'L') => {
+                had_length = true;
+                cursor += 1;
+            }
+            _ => {}
+        }
+        let Some(conversion) = format.get(cursor).copied() else {
+            return Err(if had_length {
+                "invalid format string"
+            } else {
+                "invalid format specifier"
+            });
+        };
+        cursor += 1;
+
+        let value = match conversion {
+            b's' => &base_name[..precision.unwrap_or(base_name.len()).min(base_name.len())],
+            b'p' if precision.is_none() => {
+                let pointer = format!("0x{:x}", base_name.as_ptr() as usize).into_bytes();
+                let display_width = pointer.len();
+                let padding = width.saturating_sub(display_width);
+                output
+                    .try_reserve(pointer.len().saturating_add(padding))
+                    .map_err(|_| "formatted rank is too large")?;
+                if left_aligned {
+                    output.extend_from_slice(&pointer);
+                    output.resize(output.len() + padding, b' ');
+                } else {
+                    output.resize(output.len() + padding, b' ');
+                    output.extend_from_slice(&pointer);
+                }
+                continue;
+            }
+            _ => return Err("invalid format specifier"),
+        };
+        let padding = width.saturating_sub(fmt_utf8_display_width(value));
+        output
+            .try_reserve(value.len().saturating_add(padding))
+            .map_err(|_| "formatted rank is too large")?;
+        if left_aligned {
+            output.extend_from_slice(value);
+            output.resize(output.len() + padding, b' ');
+        } else {
+            output.resize(output.len() + padding, b' ');
+            output.extend_from_slice(value);
+        }
+    }
+    Ok(output)
 }
 
 /// Decodes a single named image from the def group, `None` when absent.
@@ -4618,7 +4967,7 @@ Entrance=1,2,,4
             .expect("load US-priority definition");
         assert_eq!(us.rank_symbol_count, Some(4));
         assert_eq!(
-            us.rank_names,
+            us.rank_names.as_ref().map(RankNameTable::resolved_names),
             Some(vec!["Recruit".to_string(), "First Recruit".to_string()])
         );
 
@@ -4626,7 +4975,7 @@ Entrance=1,2,,4
             .expect("load DE-priority definition");
         assert_eq!(de.rank_symbol_count, Some(3));
         assert_eq!(
-            de.rank_names,
+            de.rank_names.as_ref().map(RankNameTable::resolved_names),
             Some(vec![
                 "Rekrut".to_string(),
                 "Erster Rekrut".to_string(),
@@ -4638,7 +4987,10 @@ Entrance=1,2,,4
             Definition::load_with_languages(&group, &["FR"]).expect("load fallback definition");
         assert_eq!(fallback.rank_symbol_count, Some(2));
         assert_eq!(
-            fallback.rank_names,
+            fallback
+                .rank_names
+                .as_ref()
+                .map(RankNameTable::resolved_names),
             Some(vec![
                 "Fallback".to_string(),
                 "One Fallback".to_string(),
@@ -4689,7 +5041,10 @@ Entrance=1,2,,4
         )
         .expect("load definition with local marker");
         assert_eq!(
-            with_marker.rank_names,
+            with_marker
+                .rank_names
+                .as_ref()
+                .map(RankNameTable::resolved_names),
             Some(vec!["Packed recruit".to_string()])
         );
     }
@@ -4712,7 +5067,10 @@ Entrance=1,2,,4
         )
         .expect("load definition");
         assert_eq!(
-            definition.rank_names,
+            definition
+                .rank_names
+                .as_ref()
+                .map(RankNameTable::resolved_names),
             Some(vec![
                 "Recruit".to_string(),
                 "Veteran".to_string(),
@@ -4723,6 +5081,160 @@ Entrance=1,2,,4
             ])
         );
         assert_eq!(definition.rank_base, Some(500));
+    }
+
+    #[test]
+    fn custom_rank_extensions_apply_printf_width_and_precision_like_cpp() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("FormattedRanks.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=FMTR\n").expect("DefCore");
+        fs::write(
+            def_dir.join("RankUS.txt"),
+            b"Recruit\r\n\
+*Right|%10s|\r\n\
+*Left|%-10s|\r\n\
+*Precision|%.4s|\r\n\
+*Combined|%8.4s|\r\n\
+*LeftCombined|%-8.4s|\r\n\
+*Flags|%+ #010.4s|\r\n\
+*Escaped|100%% %s|\r\n\
+*Empty|%.s|\r\n\
+*Position|%1$8.4s/%1$s|\r\n\
+*Length|%1$hhs/%1$Ls|\r\n\
+*Literal|plain%%|\r\n",
+        )
+        .expect("formatted rank names");
+
+        let definition = Definition::load_with_languages(
+            &Group::open(&def_dir).expect("open definition"),
+            &["US"],
+        )
+        .expect("load formatted ranks");
+        assert_eq!(
+            definition
+                .rank_names
+                .as_ref()
+                .map(RankNameTable::resolved_names),
+            Some(vec![
+                "Recruit".to_string(),
+                "Right|   Recruit|".to_string(),
+                "Left|Recruit   |".to_string(),
+                "Precision|Recr|".to_string(),
+                "Combined|    Recr|".to_string(),
+                "LeftCombined|Recr    |".to_string(),
+                "Flags|      Recr|".to_string(),
+                "Escaped|100% Recruit|".to_string(),
+                "Empty||".to_string(),
+                "Position|    Recr/Recruit|".to_string(),
+                "Length|Recruit/Recruit|".to_string(),
+                "Literal|plain%|".to_string(),
+            ])
+        );
+
+        assert_eq!(
+            format_rank_extension(b"%.2s", "éclair".as_bytes()).expect("UTF-8 precision"),
+            "é".as_bytes()
+        );
+        assert_eq!(
+            format_rank_extension(b"%4s", "界".as_bytes()).expect("wide UTF-8 padding"),
+            "  界".as_bytes()
+        );
+        assert_eq!(
+            format_rank_extension(b"%3s", b"\xfc").expect("legacy-byte padding"),
+            b"  \xfc"
+        );
+
+        let pointer = format_rank_extension(b"%p", b"Recruit").expect("C-string pointer format");
+        assert!(pointer.starts_with(b"0x"));
+        assert!(pointer[2..].iter().all(u8::is_ascii_hexdigit));
+
+        for (format, expected_reason) in [
+            (b"%".as_slice(), "invalid format specifier"),
+            (b"%d".as_slice(), "invalid format specifier"),
+            (b"%s/%s".as_slice(), "argument not found"),
+            (b"%2$s".as_slice(), "argument not found"),
+            (
+                b"%1$s/%s".as_slice(),
+                "cannot switch from manual to automatic argument indexing",
+            ),
+            (b"%*s".as_slice(), "width is not integer"),
+            (b"%.*s".as_slice(), "precision is not integer"),
+            (b"%00000000001s".as_slice(), "number is too big"),
+            (b"%00000000001$s".as_slice(), "argument not found"),
+            (b"%0$.*s".as_slice(), "argument not found"),
+        ] {
+            assert_eq!(
+                format_rank_extension(format, b"Recruit"),
+                Err(expected_reason),
+                "format {}",
+                String::from_utf8_lossy(format)
+            );
+        }
+        assert_eq!(
+            format_rank_extension(b"%.00000000001s", b"Recruit"),
+            Ok(Vec::new()),
+            "fmt maps an oversized literal precision to its zero sentinel"
+        );
+
+        fs::write(
+            def_dir.join("RankUS.txt"),
+            b"Recruit\r\n*Valid %4.2s\r\n*Wrong %d\r\n",
+        )
+        .expect("invalid rank format");
+        let invalid_definition = Definition::load_with_languages(
+            &Group::open(&def_dir).expect("reopen definition"),
+            &["US"],
+        )
+        .expect("native stores malformed extensions without validating them");
+        let invalid_table = invalid_definition
+            .rank_names
+            .as_ref()
+            .expect("rank table remains installed");
+        assert_eq!(invalid_table.get(0).as_deref(), Some("Recruit"));
+        assert_eq!(invalid_table.get(1).as_deref(), Some("Valid   Re"));
+        assert_eq!(
+            invalid_table
+                .try_rank_name(usize::MAX, false)
+                .expect("an undefined non-fallback rank does not parse extensions"),
+            None
+        );
+        let expected_error = RankExtensionFormatError {
+            format: "Wrong %d".to_string(),
+            reason: "invalid format specifier",
+        };
+        assert_eq!(
+            invalid_table
+                .try_rank_name(2, false)
+                .expect_err("requesting the malformed extension must fail"),
+            expected_error
+        );
+        assert_eq!(
+            invalid_table
+                .try_rank_name(usize::MAX, true)
+                .expect_err("fallback clamps to and evaluates the malformed final extension"),
+            expected_error
+        );
+        assert!(
+            std::panic::catch_unwind(|| invalid_table.get(2)).is_err(),
+            "the normal rank lookup preserves native's uncaught error boundary"
+        );
+
+        fs::write(def_dir.join("RankUS.txt"), b"Recruit\r\n*%p\r\n").expect("pointer rank format");
+        let pointer_definition = Definition::load_with_languages(
+            &Group::open(&def_dir).expect("reopen pointer definition"),
+            &["US"],
+        )
+        .expect("load pointer ranks");
+        let pointer_table = pointer_definition.rank_names.expect("pointer rank table");
+        let pointer_clone = pointer_table.clone();
+        let pointer_name = pointer_table.get(1).expect("pointer rank").into_owned();
+        assert!(pointer_name.starts_with("0x"));
+        assert_eq!(
+            pointer_clone.get(1).as_deref(),
+            Some(pointer_name.as_str()),
+            "Arc-backed rank bytes keep `%p` stable across engine table clones"
+        );
     }
 
     #[test]
@@ -4831,7 +5343,10 @@ Entrance=1,2,,4
             "C++ clamps the base rank symbol count to at least one"
         );
         assert_eq!(
-            saturated.rank_names,
+            saturated
+                .rank_names
+                .as_ref()
+                .map(RankNameTable::resolved_names),
             Some(vec![
                 "Recruit".to_string(),
                 "One Recruit".to_string(),
@@ -4855,7 +5370,13 @@ Entrance=1,2,,4
             Some(2),
             "C++ ignores the final rank line when it has no CR or LF terminator"
         );
-        assert_eq!(unterminated.rank_names, Some(vec!["Recruit".to_string()]));
+        assert_eq!(
+            unterminated
+                .rank_names
+                .as_ref()
+                .map(RankNameTable::resolved_names),
+            Some(vec!["Recruit".to_string()])
+        );
     }
 
     #[test]

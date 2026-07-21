@@ -49,7 +49,7 @@ use crate::{
 #[cfg(test)]
 use crate::{LiquidSegment, PlayerViewport};
 use chrono::{Datelike, Local, Timelike};
-use lc_resources::PhysicalInfo;
+use lc_resources::{PhysicalInfo, RankNameTable};
 use lc_script::{
     C4VType, Engine as ScriptEngine, HostCallArg, HostRegistrationSnapshot, RuntimeError, Value,
     ValueMap,
@@ -1787,7 +1787,7 @@ pub(crate) struct HostDefinitionTables {
     rebuyable: Rc<HashSet<DefinitionId>>,
     no_sell: Rc<HashSet<DefinitionId>>,
     descriptions: Rc<HashMap<DefinitionId, String>>,
-    rank_names: Rc<HashMap<DefinitionId, Vec<String>>>,
+    rank_names: Rc<HashMap<DefinitionId, RankNameTable>>,
     rank_bases: Rc<HashMap<DefinitionId, i32>>,
     scripts: Rc<HashMap<DefinitionId, Arc<ScriptEngine>>>,
     linked_script_hosts: Rc<Vec<(String, Arc<ScriptEngine>)>>,
@@ -1803,7 +1803,7 @@ impl HostDefinitionTables {
         rebuyable: HashSet<DefinitionId>,
         no_sell: HashSet<DefinitionId>,
         descriptions: HashMap<DefinitionId, String>,
-        rank_names: HashMap<DefinitionId, Vec<String>>,
+        rank_names: HashMap<DefinitionId, RankNameTable>,
         rank_bases: HashMap<DefinitionId, i32>,
         scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
         linked_script_hosts: Vec<(String, Arc<ScriptEngine>)>,
@@ -1960,7 +1960,7 @@ pub struct HostWorldContext {
     /// Finite localized `C4Def::pRankNames` lookup tables. Absence is
     /// distinct from an empty custom table: absent definitions fall back to
     /// the game-global rank system during `C4Object::Promote`.
-    definition_rank_names: Rc<HashMap<DefinitionId, Vec<String>>>,
+    definition_rank_names: Rc<HashMap<DefinitionId, RankNameTable>>,
     /// Process-local `Game.Rank` names frozen from IDS_GAME_DEFRANKS when
     /// this game initialized.
     default_rank_names: Rc<Vec<String>>,
@@ -6717,7 +6717,7 @@ fn apply_host_crew_experience(
             Some(names) => usize::try_from(info.rank)
                 .ok()
                 .and_then(|rank| names.get(rank))
-                .cloned(),
+                .map(|name| name.into_owned()),
             None => default_rank_name(&context.world.default_rank_names, info.rank)
                 .map(str::to_owned),
         }
@@ -22197,50 +22197,36 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                     scope.info_core().cloned().or_else(|| {
                         let rank = scope.info_rank()?;
                         let definition = scope.definition_id.as_deref()?;
+                        let definition_id = DefinitionId::from(definition);
+                        let rank_names = context.world.definition_rank_names.get(&definition_id);
+                        let mut rank_name =
+                            default_rank_name(&context.world.default_rank_names, rank)
+                                .unwrap_or("Clonk")
+                                .to_string();
+                        let mut core = CrewInfoCoreFields {
+                            type_name: context
+                                .definition_metadata(definition)
+                                .map(|metadata| crate::bounded_crew_type_name(&metadata.name))
+                                .unwrap_or_else(|| "Clonk".to_string()),
+                            ..CrewInfoCoreFields::default()
+                        };
+                        crate::update_custom_rank_fields(
+                            &mut rank_name,
+                            &mut core,
+                            rank,
+                            rank_names,
+                            context.world.definition_rank_base(definition),
+                        );
                         Some(CrewObjectInfo {
-                            definition_id: DefinitionId::from(definition),
+                            definition_id,
                             name: context
                                 .definition_metadata(definition)
                                 .map(|metadata| metadata.name.clone())
                                 .unwrap_or_else(|| "Clonk".to_string()),
                             death_message: String::new(),
-                            core: {
-                                let definition_id = DefinitionId::from(definition);
-                                let (next_rank_name, next_rank_exp) =
-                                    crate::custom_next_rank_info(
-                                        context
-                                            .world
-                                            .definition_rank_names
-                                            .get(&definition_id)
-                                            .map(Vec::as_slice),
-                                        context.world.definition_rank_base(definition),
-                                        rank,
-                                    );
-                                CrewInfoCoreFields {
-                                    next_rank_name,
-                                    next_rank_exp,
-                                    type_name: context
-                                        .definition_metadata(definition)
-                                        .map(|metadata| crate::bounded_crew_type_name(&metadata.name))
-                                        .unwrap_or_else(|| "Clonk".to_string()),
-                                    ..CrewInfoCoreFields::default()
-                                }
-                            },
+                            core,
                             rank,
-                            rank_name: context
-                                .world
-                                .definition_rank_names
-                                .get(&DefinitionId::from(definition))
-                                .and_then(|names| {
-                                    usize::try_from(rank).ok().and_then(|rank| names.get(rank))
-                                })
-                                .filter(|name| !name.is_empty())
-                                .cloned()
-                                .or_else(|| {
-                                    default_rank_name(&context.world.default_rank_names, rank)
-                                        .map(str::to_owned)
-                                })
-                                .unwrap_or_else(|| "Clonk".to_string()),
+                            rank_name,
                             experience: 0,
                             participation: 1,
                             rounds: 0,
@@ -22471,7 +22457,8 @@ fn recruited_rank_name(
         .and_then(|names| {
             usize::try_from(rank)
                 .ok()
-                .map(|rank| names[rank.min(names.len() - 1)].clone())
+                .and_then(|rank| names.get_or_last(rank))
+                .map(|name| name.into_owned())
         })
         .unwrap_or_else(|| stored_rank_name.to_string())
 }
@@ -22586,10 +22573,7 @@ fn recruit_or_create_crew_info(
         .map(|metadata| crate::crew_info_physical(metadata.physical, 0))
         .unwrap_or_default();
     let definition_id_key = DefinitionId::from(definition_id);
-    let rank_names = context
-        .world
-        .definition_rank_names
-        .get(&definition_id_key);
+    let rank_names = context.world.definition_rank_names.get(&definition_id_key);
     let mut rank_name = "Clonk".to_string();
     let mut core = CrewInfoCoreFields {
         type_name: context
@@ -22598,19 +22582,13 @@ fn recruit_or_create_crew_info(
             .unwrap_or_else(|| "Clonk".to_string()),
         ..CrewInfoCoreFields::default()
     };
-    let (next_rank_name, next_rank_exp) = crate::custom_next_rank_info(
-        rank_names.map(Vec::as_slice),
-        context.world.definition_rank_base(definition_id),
+    crate::update_custom_rank_fields(
+        &mut rank_name,
+        &mut core,
         0,
+        rank_names,
+        context.world.definition_rank_base(definition_id),
     );
-    core.next_rank_name = next_rank_name;
-    core.next_rank_exp = next_rank_exp;
-    if let Some(current_name) = rank_names
-        .and_then(|names| names.first())
-        .filter(|name| !name.is_empty())
-    {
-        rank_name.clone_from(current_name);
-    }
     let (link, entry) = {
         let mut state = context.world.crew_info_state.borrow_mut();
         {

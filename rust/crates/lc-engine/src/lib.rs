@@ -777,7 +777,7 @@ use lc_resources::definition::{
 pub use lc_resources::definition::{APS_COLOR, APS_GRAPHICS, APS_NAME, APS_OVERLAY};
 use lc_resources::{
     ActionDefinition as ResourceActionDefinition, PictureRect as ResourcePictureRect,
-    ResourceDefinition as ResourceDefinitionData, C4_MAX_PHYSICAL,
+    RankNameTable, ResourceDefinition as ResourceDefinitionData, C4_MAX_PHYSICAL,
 };
 pub use lc_resources::PhysicalInfo;
 pub use lc_script::ScriptError;
@@ -8358,14 +8358,17 @@ pub(crate) fn crew_rank_experience(rank: i32) -> i32 {
 /// means the definition has no custom rank system and therefore stores the
 /// zero tag; an exhausted custom table stores `EXP_NoPromotion` (-1).
 pub(crate) fn custom_next_rank_info(
-    rank_names: Option<&[String]>,
+    rank_names: Option<&RankNameTable>,
     rank_base: Option<i32>,
     rank: i32,
 ) -> (String, i32) {
     let Some(rank_names) = rank_names else {
         return (String::new(), 0);
     };
-    let Some(next_rank) = rank.checked_add(1).and_then(|rank| usize::try_from(rank).ok()) else {
+    let Some(next_rank) = rank
+        .checked_add(1)
+        .and_then(|rank| usize::try_from(rank).ok())
+    else {
         return (String::new(), -1);
     };
     let Some(next_name) = rank_names.get(next_rank).filter(|name| !name.is_empty()) else {
@@ -8373,7 +8376,7 @@ pub(crate) fn custom_next_rank_info(
     };
     let rank_base = rank_base.filter(|base| *base != 0).unwrap_or(1_000);
     let experience = ((next_rank as f64).powf(1.5) * f64::from(rank_base)) as i32;
-    (next_name.clone(), experience)
+    (next_name.into_owned(), experience)
 }
 
 /// Refresh the current custom rank name and stored next-rank fields. Callers
@@ -8383,17 +8386,17 @@ fn update_custom_rank_fields(
     rank_name: &mut String,
     core: &mut CrewInfoCoreFields,
     rank: i32,
-    rank_names: Option<&[String]>,
+    rank_names: Option<&RankNameTable>,
     rank_base: Option<i32>,
 ) {
     if let Some(current_name) = rank_names
         .and_then(|names| usize::try_from(rank).ok().and_then(|rank| names.get(rank)))
         .filter(|name| !name.is_empty())
     {
-        rank_name.clone_from(current_name);
+        rank_name.clear();
+        rank_name.push_str(&current_name);
     }
-    (core.next_rank_name, core.next_rank_exp) =
-        custom_next_rank_info(rank_names, rank_base, rank);
+    (core.next_rank_name, core.next_rank_exp) = custom_next_rank_info(rank_names, rank_base, rank);
 }
 
 /// The state-changing half of `C4Object::DoExperience`
@@ -12073,7 +12076,7 @@ pub struct Definition {
     rank_symbols_image: Option<DefinitionPictureImage>,
     /// Finite localized `C4Def::pRankNames` table used by Promote. This is
     /// independent of the rank-symbol strip and may be inherited.
-    rank_names: Option<Vec<String>>,
+    rank_names: Option<RankNameTable>,
     /// `C4RankSystem::Base` paired with `rank_names`. Like the native
     /// `pRankNames` pointer, an inherited rank table carries its curve.
     rank_base: Option<i32>,
@@ -12810,7 +12813,7 @@ impl Definition {
             definition
                 .set_rank_symbols_image(Some(DefinitionPictureImage::from_resource(image, None)));
         }
-        definition.set_rank_system(resource.rank_names.clone(), resource.rank_base);
+        definition.set_rank_name_table(resource.rank_names.clone(), resource.rank_base);
         definition.set_rank_symbol_count(resource.rank_symbol_count);
         if let Some(image) = resource.graphics_image.as_ref() {
             let mask = resource.color_by_owner_mask.as_ref();
@@ -13519,8 +13522,8 @@ impl Definition {
         self.rank_symbols_image = image;
     }
 
-    pub fn rank_names(&self) -> Option<&[String]> {
-        self.rank_names.as_deref()
+    pub fn rank_names(&self) -> Option<&RankNameTable> {
+        self.rank_names.as_ref()
     }
 
     pub fn set_rank_names(&mut self, names: Option<Vec<String>>) {
@@ -13533,6 +13536,10 @@ impl Definition {
     }
 
     pub fn set_rank_system(&mut self, names: Option<Vec<String>>, rank_base: Option<i32>) {
+        self.set_rank_name_table(names.map(RankNameTable::from_resolved_names), rank_base);
+    }
+
+    fn set_rank_name_table(&mut self, names: Option<RankNameTable>, rank_base: Option<i32>) {
         self.rank_names_owned = names.is_some();
         self.rank_names = names;
         self.rank_base = self.rank_names.as_ref().map(|_| match rank_base {
@@ -22791,7 +22798,8 @@ impl Engine {
             .and_then(|names| {
                 usize::try_from(rank)
                     .ok()
-                    .map(|rank| names[rank.min(names.len() - 1)].clone())
+                    .and_then(|rank| names.get_or_last(rank))
+                    .map(|name| name.into_owned())
             })
             .unwrap_or_else(|| stored_rank_name.to_string())
     }
@@ -26504,7 +26512,7 @@ impl Engine {
                 .filter_map(|(id, definition)| {
                     definition
                         .rank_names()
-                        .map(|names| (id.clone(), names.to_vec()))
+                        .map(|names| (id.clone(), names.clone()))
                 })
                 .collect(),
             self.definitions
@@ -39069,9 +39077,10 @@ impl Engine {
             Some(names) => usize::try_from(info.rank)
                 .ok()
                 .and_then(|rank| names.get(rank))
-                .cloned(),
-            None => compat::default_rank_name(&self.default_rank_names, info.rank)
-                .map(str::to_owned),
+                .map(|name| name.into_owned()),
+            None => {
+                compat::default_rank_name(&self.default_rank_names, info.rank).map(str::to_owned)
+            }
         }
     }
 
@@ -73923,6 +73932,48 @@ mod audio_detach_regression {
                     level: DEFAULT_MUSIC_LEVEL,
                 },
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod deferred_rank_extension_regression {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resource_rank_extension_errors_remain_deferred_through_engine_definition() {
+        let mut packed = lc_resources::MutableGroup::new("DeferredRank.c4d");
+        packed
+            .add_file("DefCore.txt", b"[DefCore]\nid=DRNK\n".to_vec())
+            .expect("add DefCore");
+        packed
+            .add_file("RankUS.txt", b"Recruit\r\n*Wrong %d\r\n".to_vec())
+            .expect("add rank table");
+        let group = lc_resources::Group::from_memory(
+            PathBuf::from("DeferredRank.c4d"),
+            packed.pack().expect("pack definition"),
+        )
+        .expect("open packed definition");
+        let resource = ResourceDefinitionData::load_with_languages(&group, &["US"])
+            .expect("resource loading must not validate unused extensions");
+        let compiled = Definition::from_resource(&resource)
+            .expect("engine definition construction must preserve the lazy table");
+        let mut engine = Engine::new();
+        engine
+            .register_definition(compiled)
+            .expect("definition with dormant invalid extension registers");
+        let _ = engine.host_definition_tables();
+
+        let names = engine
+            .definitions
+            .get("DRNK")
+            .and_then(Definition::rank_names)
+            .expect("registered rank table");
+        assert_eq!(names.get(0).as_deref(), Some("Recruit"));
+        assert!(
+            std::panic::catch_unwind(|| names.get(1)).is_err(),
+            "requesting the malformed extended rank preserves native's uncaught boundary"
         );
     }
 }

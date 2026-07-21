@@ -14,7 +14,8 @@ use lc_resources::definition::{
 use lc_resources::{
     ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap, ColorByOwnerMask,
     ComponentGroups, DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
-    LanguagePacks, ResourceDefinition as ResourceDefinitionData, decode_legacy_script_text,
+    LanguagePacks, RankNameTable, ResourceDefinition as ResourceDefinitionData,
+    decode_legacy_script_text,
     localize_script_source_with_components,
 };
 use serde::de::Error as _;
@@ -194,7 +195,7 @@ struct ScenarioDefinition {
     portrait_graphics: Vec<ResourceGraphicsVariant>,
     /// Def rank symbols (C4Def::pRankSymbols, src/C4Def.cpp:684-691).
     rank_symbols_image: Option<GraphicsImage>,
-    rank_names: Option<Vec<String>>,
+    rank_names: Option<RankNameTable>,
     rank_base: Option<i32>,
     rank_symbol_count: Option<u32>,
     resource_group: Option<Group>,
@@ -3769,7 +3770,7 @@ impl Scenario {
                     .as_ref()
                     .map(|image| DefinitionPictureImage::from_resource(image, None)),
             );
-            compiled.set_rank_system(definition.rank_names.clone(), definition.rank_base);
+            compiled.set_rank_name_table(definition.rank_names.clone(), definition.rank_base);
             compiled.set_rank_symbol_count(definition.rank_symbol_count);
             let sprite_image = definition.graphics_image.as_ref().map(|image| {
                 DefinitionSpriteImage::from_resource(image, definition.color_by_owner_mask.as_ref())

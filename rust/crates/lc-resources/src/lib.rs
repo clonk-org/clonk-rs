@@ -17,7 +17,7 @@ pub mod texmap;
 pub use definition::{
     ActionDefinition, ActionMap, ColorByOwnerMask, DefComponent, DefCore,
     Definition as ResourceDefinition, DefinitionError, DefinitionScript, DefinitionScriptFile,
-    PhysicalInfo, PictureRect, C4_MAX_PHYSICAL,
+    PhysicalInfo, PictureRect, RankExtensionFormatError, RankNameTable, C4_MAX_PHYSICAL,
 };
 pub use font::{
     load_endeavour_font, load_font_definitions, load_ttf, select_font_definition, FontCatalog,
