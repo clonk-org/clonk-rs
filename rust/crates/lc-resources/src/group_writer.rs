@@ -860,8 +860,7 @@ impl MutableGroupEntry {
 
     fn contents_crc(&self) -> u32 {
         match &self.data {
-            MutableGroupEntryData::File(data) if data.is_empty() => 0,
-            MutableGroupEntryData::File(data) => crc32(crc32(0, data), &self.name_bytes),
+            MutableGroupEntryData::File(data) => c4group_entry_crc(data, &self.name_bytes),
             MutableGroupEntryData::ExistingFile { contents_crc, .. } => *contents_crc,
             MutableGroupEntryData::Child(child) => child.contents_crc(),
             MutableGroupEntryData::PackedChild { contents_crc, .. } => *contents_crc,
@@ -882,6 +881,17 @@ fn validate_entry_name(name: &[u8]) -> Result<(), MutableGroupError> {
 /// zlib-compatible CRC-32 update, including support for chained calls.
 pub fn c4group_file_crc(data: &[u8]) -> u32 {
     crc32(0, data)
+}
+
+/// Computes the CRC C4Group writes for a regular entry after reading it back
+/// from disk. Empty files are the one exception: their entry CRC is always
+/// zero and does not include the filename.
+pub(crate) fn c4group_entry_crc(data: &[u8], name: &[u8]) -> u32 {
+    if data.is_empty() {
+        0
+    } else {
+        crc32(crc32(0, data), name)
+    }
 }
 
 fn crc32(initial: u32, data: &[u8]) -> u32 {
