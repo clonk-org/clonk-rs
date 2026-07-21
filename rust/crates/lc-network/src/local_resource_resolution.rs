@@ -141,10 +141,7 @@ where
         let metadata = fs::metadata(path).ok();
         let opened_group = open_group_candidate(path);
         let contents_crc = if let Some(group) = opened_group.as_ref() {
-            let Ok(contents_crc) = group.contents_crc() else {
-                continue;
-            };
-            contents_crc
+            group.contents_crc_or_zero()
         } else if metadata.as_ref().is_some_and(fs::Metadata::is_file) {
             let Ok(contents_crc) = file_crc(path) else {
                 continue;

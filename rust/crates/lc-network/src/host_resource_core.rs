@@ -169,11 +169,7 @@ pub fn build_host_resource_core(
             };
             let author = LegacyCString::from_bytes(maker.to_vec())
                 .ok_or(HostResourceCoreError::InvalidGroupMaker)?;
-            let contents_crc = if spec.resource_type == HostResourceType::Player {
-                group.contents_crc_or_zero()
-            } else {
-                group.contents_crc()?
-            };
+            let contents_crc = group.contents_crc_or_zero();
             (contents_crc, author)
         }
         None => (file_crc(&source_path)?, LegacyCString::default()),

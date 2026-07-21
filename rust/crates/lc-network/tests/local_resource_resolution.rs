@@ -10,7 +10,7 @@ use lc_network::{
     LocalResourceResolution, ResourceCatalogAction, ResourceDiscoverPacket, ResourceFileOwnership,
     ResourcePacket, ResourceTransferBackend, ResourceTransferEvent, PID_NET_RES_STATUS,
 };
-use lc_resources::{c4group_file_crc, Group, MutableGroup};
+use lc_resources::{c4group_file_crc, compress_c4group_image, Group, MutableGroup};
 
 #[test]
 fn cpp_set_by_core_accepts_an_exact_plain_file() {
@@ -61,6 +61,140 @@ fn cpp_set_by_core_separates_group_contents_crc_from_physical_crc_and_ignores_sh
         panic!("logically and physically exact C4Group should be selected");
     };
     assert_eq!(local.path(), candidate);
+}
+
+#[test]
+fn nonplayer_group_crc_failure_publishes_and_matches_zero_like_cpp() {
+    fn require_crc_recalculation(image: &mut [u8], entry_count: usize, entry_name: &[u8]) {
+        const HEADER_SIZE: usize = 204;
+        const ENTRY_SIZE: usize = 316;
+        const NAME_SIZE: usize = 260;
+        const CRC_STATE_OFFSET: usize = 284;
+
+        for index in 0..entry_count {
+            let start = HEADER_SIZE + index * ENTRY_SIZE;
+            let name_end = image[start..start + NAME_SIZE]
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap();
+            if &image[start..start + name_end] == entry_name {
+                assert_eq!(image[start + CRC_STATE_OFFSET], 2);
+                image[start + CRC_STATE_OFFSET] = 1;
+                return;
+            }
+        }
+        panic!("missing packed entry core for {entry_name:?}");
+    }
+
+    let directory = TestDirectory::new();
+
+    // OpenAsChild reads an in-group child as a raw image, so a gzip-wrapped
+    // payload cannot be opened. With an old CRC state, CalcCRC32 must try that
+    // open and EntryCRC32 exposes the direct failure as unsigned zero.
+    let mut broken_child = MutableGroup::new("Broken.c4d");
+    broken_child
+        .add_file("DefCore.txt", b"[DefCore]\n".to_vec())
+        .unwrap();
+    let mut system = MutableGroup::new("System.c4g");
+    system
+        .add_file(
+            "Readable.txt",
+            b"must be discarded on direct failure".to_vec(),
+        )
+        .unwrap();
+    assert_ne!(system.entry_crc("Readable.txt").unwrap(), 0);
+    system
+        .add_packed_child_with_metadata(
+            "Broken.c4d",
+            broken_child.pack().unwrap(),
+            broken_child.contents_crc(),
+            1,
+            false,
+        )
+        .unwrap();
+    let mut system_raw = system.pack_raw().unwrap();
+    require_crc_recalculation(&mut system_raw, 2, b"Broken.c4d");
+    let system_path = directory.path().join("System.c4g");
+    fs::write(&system_path, compress_c4group_image(&system_raw).unwrap()).unwrap();
+
+    let opened_system = Group::open(&system_path).unwrap();
+    assert!(opened_system.contents_crc().is_err());
+    assert_eq!(opened_system.contents_crc_or_zero(), 0);
+
+    let system_publication = build_host_resource_core(
+        &system_path,
+        directory.path().join("HostSystem"),
+        HostResourceCoreSpec::new(
+            HostResourceType::System,
+            31,
+            LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+            "Host",
+        ),
+    )
+    .expect("SetByGroup publishes the failed unsigned CRC as zero");
+    assert_eq!(system_publication.core.contents_crc, 0);
+    assert!(!system_publication.core.loadable);
+
+    let system_resolution = resolve_local_resource(
+        &system_publication.core,
+        [&system_path],
+        directory.path().join("LocalSystem"),
+    )
+    .unwrap();
+    let LocalResourceResolution::Local(system_local) = system_resolution else {
+        panic!("SetByCore must match the same local zero CRC");
+    };
+    assert_eq!(system_local.source_path(), system_path);
+    assert!(!system_local.binary_compatible());
+
+    // If that failing group opens successfully as a child, its zero result is
+    // the child's CRC; the outer group continues XORing its readable sibling.
+    let mut scenario = MutableGroup::new("Nested.c4s");
+    scenario
+        .add_file("Scenario.txt", b"[Head]\nTitle=Nested\n".to_vec())
+        .unwrap();
+    let sibling_crc = scenario.entry_crc("Scenario.txt").unwrap();
+    scenario
+        .add_packed_child_with_metadata("Inner.c4g", system_raw, 0, 1, false)
+        .unwrap();
+    let mut scenario_raw = scenario.pack_raw().unwrap();
+    require_crc_recalculation(&mut scenario_raw, 2, b"Inner.c4g");
+    let scenario_path = directory.path().join("Nested.c4s");
+    fs::write(
+        &scenario_path,
+        compress_c4group_image(&scenario_raw).unwrap(),
+    )
+    .unwrap();
+
+    let opened_scenario = Group::open(&scenario_path).unwrap();
+    assert!(opened_scenario.contents_crc().is_err());
+    assert_eq!(opened_scenario.contents_crc_or_zero(), sibling_crc);
+
+    let scenario_publication = build_host_resource_core(
+        &scenario_path,
+        directory.path().join("HostScenario"),
+        HostResourceCoreSpec::new(
+            HostResourceType::Scenario,
+            32,
+            LegacyCString::from_bytes(b"Nested.c4s".to_vec()).unwrap(),
+            "Host",
+        ),
+    )
+    .expect("a nested zero CRC does not abort scenario publication");
+    assert_eq!(scenario_publication.core.contents_crc, sibling_crc);
+    assert!(scenario_publication.core.loadable);
+
+    let scenario_resolution = resolve_local_resource(
+        &scenario_publication.core,
+        [&scenario_path],
+        directory.path().join("LocalScenario"),
+    )
+    .unwrap();
+    let LocalResourceResolution::Local(scenario_local) = scenario_resolution else {
+        panic!("the nested-zero scenario must match locally");
+    };
+    assert_eq!(scenario_local.source_path(), scenario_path);
+    assert!(scenario_local.binary_compatible());
 }
 
 #[test]
