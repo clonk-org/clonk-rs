@@ -1,5 +1,6 @@
 use crate::{
-    language::component_language_string, ComponentGroups, Group, GroupError, LanguagePacks,
+    language::component_language_string, ComponentGroups, Group, GroupEntry, GroupError,
+    LanguagePacks,
 };
 use image::{load_from_memory, ImageError};
 use serde::Deserialize;
@@ -366,9 +367,9 @@ fn collect_from_directory(
         })?;
 
     entries.sort_by(|a, b| {
-        compare_case_insensitive(
-            a.file_name().to_string_lossy().as_ref(),
-            b.file_name().to_string_lossy().as_ref(),
+        compare_case_insensitive_bytes(
+            a.file_name().as_encoded_bytes(),
+            b.file_name().as_encoded_bytes(),
         )
     });
     context.add_work(entries.len())?;
@@ -384,24 +385,21 @@ fn collect_from_directory(
             })?;
 
         let name_os = entry.file_name();
-        let name = match name_os.to_str() {
-            Some(name) => name,
-            None => return Err(ScenarioDiscoveryError::NonUtf8Path { path: entry.path() }),
-        };
+        let name = name_os.as_encoded_bytes();
 
-        if should_ignore_name(name) {
+        if should_ignore_name_bytes(name) {
             context.complete_work()?;
             continue;
         }
 
-        let identifier = join_identifier(parent_identifier, name);
+        let identifier = join_identifier_bytes(parent_identifier, name);
         // Entry types are decided by filename, mirroring
         // C4ScenarioListLoader::Entry::CreateEntryForFile
         // (C4StartupScenSelDlg.cpp:581-598): "*.c4s" -> Scenario, "*.c4f" ->
         // SubFolder, extension-less directories -> RegularFolder only when
         // they (recursively) contain scenarios. Anything else — including
         // .c4d/.c4g packs — is not listed.
-        if is_scenario_filename(name) {
+        if is_scenario_filename_bytes(name) {
             let group = Group::open(entry.path()).map_err(|err| ScenarioDiscoveryError::Group {
                 path: entry.path(),
                 source: err,
@@ -409,10 +407,11 @@ fn collect_from_directory(
             result.push(build_scenario_entry(
                 &group,
                 identifier,
+                name,
                 languages,
                 language_packs,
             )?);
-        } else if is_folder_filename(name) {
+        } else if is_folder_filename_bytes(name) {
             let group = Group::open(entry.path()).map_err(|err| ScenarioDiscoveryError::Group {
                 path: entry.path(),
                 source: err,
@@ -420,11 +419,12 @@ fn collect_from_directory(
             result.push(build_folder_entry(
                 &group,
                 identifier,
+                name,
                 languages,
                 language_packs,
                 context,
             )?);
-        } else if file_type.is_dir() && Path::new(name).extension().is_none() {
+        } else if file_type.is_dir() && Path::new(name_os.as_os_str()).extension().is_none() {
             if !dir_contains_scenarios(&entry.path(), context)? {
                 context.complete_work()?;
                 continue;
@@ -436,6 +436,7 @@ fn collect_from_directory(
             result.push(build_folder_entry(
                 &group,
                 identifier,
+                name,
                 languages,
                 language_packs,
                 context,
@@ -460,19 +461,14 @@ fn dir_contains_scenarios(
     for entry in read_dir.flatten() {
         context.report()?;
         let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if should_ignore_name(name) {
+        let name = name.as_encoded_bytes();
+        if should_ignore_name_bytes(name) {
             continue;
         }
-        if is_scenario_filename(name) || is_folder_filename(name) {
+        if is_scenario_filename_bytes(name) || is_folder_filename_bytes(name) {
             return Ok(true);
         }
-        let contains_scenarios = entry
-            .file_type()
-            .map(|kind| kind.is_dir())
-            .unwrap_or(false)
+        let contains_scenarios = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
             && dir_contains_scenarios(&entry.path(), context)?;
         if contains_scenarios {
             return Ok(true);
@@ -490,16 +486,15 @@ fn collect_from_path(
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
     context.report()?;
     if path.is_dir() {
-        return collect_from_directory(
-            path,
-            parent_identifier,
-            languages,
-            language_packs,
-            context,
-        );
+        return collect_from_directory(path, parent_identifier, languages, language_packs, context);
     }
     if path.is_file() {
-        if !is_scenario_filename_os(path) && !is_folder_filename_os(path) {
+        let Some(name) = path.file_name() else {
+            return Ok(Vec::new());
+        };
+        if !is_scenario_filename_bytes(name.as_encoded_bytes())
+            && !is_folder_filename_bytes(name.as_encoded_bytes())
+        {
             return Ok(Vec::new());
         }
         return collect_from_group_file(
@@ -526,56 +521,39 @@ fn collect_children_from_group(
         .into_iter()
         .filter(|entry| entry.relative_path.components().count() == 1)
         .collect::<Vec<_>>();
-    entries.sort_by(|a, b| {
-        compare_case_insensitive(
-            os_str_from_path(&a.relative_path)
-                .to_string_lossy()
-                .as_ref(),
-            os_str_from_path(&b.relative_path)
-                .to_string_lossy()
-                .as_ref(),
-        )
-    });
+    entries.sort_by(|a, b| compare_case_insensitive_bytes(&a.name_bytes, &b.name_bytes));
     context.add_work(entries.len())?;
 
     let mut result = Vec::new();
     for entry in entries {
         context.report()?;
-        let name_os = os_str_from_path(&entry.relative_path);
-        let name = match name_os.to_str() {
-            Some(name) => name,
-            None => {
-                return Err(ScenarioDiscoveryError::NonUtf8Path {
-                    path: group.root().join(&entry.relative_path),
-                })
-            }
-        };
-        if should_ignore_name(name) {
+        let name = entry.name_bytes.as_slice();
+        if should_ignore_name_bytes(name) {
             context.complete_work()?;
             continue;
         }
-        let identifier = join_identifier(parent_identifier, name);
+        let identifier = join_identifier_bytes(parent_identifier, name);
         // Folder children are matched by the "*.c4s"/"*.c4f" search masks
         // only (C4ScenarioListLoader::SubFolder::DoLoadContents,
         // C4StartupScenSelDlg.cpp:973-1014); extension-less subdirectories
         // inside groups are not regarded (:588).
-        if is_scenario_filename(name) {
-            let child_group = group
-                .open_child(&entry.relative_path)
+        if is_scenario_filename_bytes(name) {
+            let child_group = open_group_child_entry_exact(group, &entry)
                 .map_err(|err| group_error(&group.root().join(&entry.relative_path), err))?;
             result.push(build_scenario_entry(
                 &child_group,
                 identifier,
+                name,
                 languages,
                 language_packs,
             )?);
-        } else if is_folder_filename(name) {
-            let child_group = group
-                .open_child(&entry.relative_path)
+        } else if is_folder_filename_bytes(name) {
+            let child_group = open_group_child_entry_exact(group, &entry)
                 .map_err(|err| group_error(&group.root().join(&entry.relative_path), err))?;
             result.push(build_folder_entry(
                 &child_group,
                 identifier,
+                name,
                 languages,
                 language_packs,
                 context,
@@ -599,23 +577,16 @@ fn collect_from_group_file(
         Some(name) => name,
         None => return Ok(Vec::new()),
     };
-    let name = match name_os.to_str() {
-        Some(name) => name,
-        None => {
-            return Err(ScenarioDiscoveryError::NonUtf8Path {
-                path: path.to_path_buf(),
-            })
-        }
-    };
+    let name = name_os.as_encoded_bytes();
     let group = Group::open(path).map_err(|source| ScenarioDiscoveryError::Group {
         path: path.to_path_buf(),
         source,
     })?;
-    let identifier = join_identifier(parent_identifier, name);
-    let entry = if is_scenario_filename(name) {
-        build_scenario_entry(&group, identifier, languages, language_packs)?
+    let identifier = join_identifier_bytes(parent_identifier, name);
+    let entry = if is_scenario_filename_bytes(name) {
+        build_scenario_entry(&group, identifier, name, languages, language_packs)?
     } else {
-        build_folder_entry(&group, identifier, languages, language_packs, context)?
+        build_folder_entry(&group, identifier, name, languages, language_packs, context)?
     };
     Ok(vec![entry])
 }
@@ -1013,10 +984,11 @@ fn parse_bool_flag(value: &str) -> Option<bool> {
 fn build_scenario_entry(
     group: &Group,
     identifier: String,
+    filename: &[u8],
     languages: &[String],
     language_packs: &LanguagePacks,
 ) -> Result<ScenarioEntry, ScenarioDiscoveryError> {
-    let fallback = fallback_title_for_path(group.root());
+    let fallback = fallback_title_for_name_bytes(filename);
     let manifest = scenario_manifest_info(group)?;
     let legacy = legacy_core_info(group)?;
     // Startup-list entries keep their parsed C4Scenario separate from the
@@ -1107,11 +1079,12 @@ fn build_scenario_entry(
 fn build_folder_entry(
     group: &Group,
     identifier: String,
+    filename: &[u8],
     languages: &[String],
     language_packs: &LanguagePacks,
     context: &mut DiscoveryContext<'_>,
 ) -> Result<ScenarioEntry, ScenarioDiscoveryError> {
-    let fallback = fallback_title_for_path(group.root());
+    let fallback = fallback_title_for_name_bytes(filename);
     let components = language_packs.component_groups(group, None, None);
     let mut title = title_from_title_files(group, &components, languages)?;
     let folder_info = folder_core_info(group)?;
@@ -1476,56 +1449,69 @@ fn parse_legacy_folder_core(text: &str) -> LegacyFolderInfo {
     info
 }
 
-fn fallback_title_for_path(path: &Path) -> String {
-    if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-        if !stem.is_empty() {
-            return stem.replace('_', " ");
-        }
-    }
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_string()
+fn fallback_title_for_name_bytes(name: &[u8]) -> String {
+    let stem = name
+        .iter()
+        .rposition(|byte| *byte == b'.')
+        .filter(|index| *index > 0)
+        .map_or(name, |index| &name[..index]);
+    let stem = if stem.is_empty() { name } else { stem };
+    decode_legacy_text(stem).replace('_', " ")
 }
 
-fn join_identifier(parent: &str, child: &str) -> String {
+fn join_identifier_bytes(parent: &str, child: &[u8]) -> String {
+    let child = lc_script::c4_string_from_bytes(child);
     if parent.is_empty() {
-        child.to_string()
+        child
     } else {
         format!("{parent}/{child}")
     }
 }
 
-fn should_ignore_name(name: &str) -> bool {
-    name.starts_with('.')
-        || name.eq_ignore_ascii_case("CVS")
-        || name.eq_ignore_ascii_case("Thumbs.db")
+fn should_ignore_name_bytes(name: &[u8]) -> bool {
+    name.starts_with(b".")
+        || name.eq_ignore_ascii_case(b"CVS")
+        || name.eq_ignore_ascii_case(b"Thumbs.db")
 }
 
-fn is_scenario_filename(name: &str) -> bool {
-    name.rsplit_once('.')
-        .map(|(_, ext)| ext.eq_ignore_ascii_case("c4s"))
-        .unwrap_or(false)
+fn is_scenario_filename_bytes(name: &[u8]) -> bool {
+    has_extension_bytes(name, b"c4s")
 }
 
-fn is_folder_filename(name: &str) -> bool {
-    name.rsplit_once('.')
-        .map(|(_, ext)| ext.eq_ignore_ascii_case("c4f"))
-        .unwrap_or(false)
+fn is_folder_filename_bytes(name: &[u8]) -> bool {
+    has_extension_bytes(name, b"c4f")
 }
 
-fn is_scenario_filename_os(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("c4s"))
-        .unwrap_or(false)
+fn has_extension_bytes(name: &[u8], extension: &[u8]) -> bool {
+    name.iter()
+        .rposition(|byte| *byte == b'.')
+        .is_some_and(|dot| name[dot + 1..].eq_ignore_ascii_case(extension))
 }
 
-fn is_folder_filename_os(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("c4f"))
-        .unwrap_or(false)
+fn open_group_child_entry_exact(group: &Group, entry: &GroupEntry) -> Result<Group, GroupError> {
+    if group.is_directory() || !entry.is_directory {
+        return group.open_child(&entry.relative_path);
+    }
+
+    let data = group.read_entry_bytes_exact(entry)?;
+    Group::from_raw_memory(
+        group
+            .root()
+            .join(path_component_from_name_bytes(&entry.name_bytes)),
+        data,
+    )
+}
+
+#[cfg(unix)]
+fn path_component_from_name_bytes(name: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    PathBuf::from(std::ffi::OsStr::from_bytes(name))
+}
+
+#[cfg(not(unix))]
+fn path_component_from_name_bytes(name: &[u8]) -> PathBuf {
+    PathBuf::from(lc_script::c4_string_from_bytes(name))
 }
 
 fn sort_entries(entries: &mut [ScenarioEntry]) {
@@ -1591,15 +1577,20 @@ fn compare_entries(a: &ScenarioEntry, b: &ScenarioEntry) -> Ordering {
         return name_order;
     }
 
-    compare_case_insensitive(&a.identifier, &b.identifier)
+    compare_case_insensitive_bytes(
+        &lc_script::c4_string_bytes(&a.identifier),
+        &lc_script::c4_string_bytes(&b.identifier),
+    )
 }
 
 fn compare_case_insensitive(a: &str, b: &str) -> Ordering {
     a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase())
 }
 
-fn os_str_from_path(path: &Path) -> &std::ffi::OsStr {
-    path.file_name().unwrap_or(path.as_os_str())
+fn compare_case_insensitive_bytes(a: &[u8], b: &[u8]) -> Ordering {
+    a.iter()
+        .map(u8::to_ascii_lowercase)
+        .cmp(b.iter().map(u8::to_ascii_lowercase))
 }
 
 fn group_error(path: &Path, err: GroupError) -> ScenarioDiscoveryError {
@@ -1819,6 +1810,105 @@ mod tests {
         assert_eq!(folder_entry.kind, ScenarioEntryKind::Folder);
         assert_eq!(folder_entry.children.len(), 1);
         assert_eq!(folder_entry.children[0].title, "Packed Child");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_discovery_preserves_native_byte_names_for_directory_and_packed_children() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = tempdir().unwrap();
+        let sibling = dir.path().join("Sibling.c4s");
+        fs::create_dir(&sibling).unwrap();
+        fs::write(
+            sibling.join("Scenario.json"),
+            br#"{"name":"ASCII sibling"}"#,
+        )
+        .unwrap();
+
+        // Packed C4Group names are legacy byte strings on every host. Include
+        // an unrelated invalid-byte file and two scenario names that both
+        // collapse to the same lossy Unicode path; each child has a distinct
+        // payload so reopening either one through that lossy path cannot pass.
+        let packed_u = build_group(&[("Scenario.txt", b"[Head]\nTitle=Packed U child\n".to_vec())]);
+        let packed_o = build_group(&[("Scenario.txt", b"[Head]\nTitle=Packed O child\n".to_vec())]);
+        let mut campaign = build_group(&[
+            ("Folder.txt", b"Title=Campaign".to_vec()),
+            ("ignored.bin", b"not a scenario".to_vec()),
+            ("U.c4s", packed_u),
+            ("O.c4s", packed_o),
+        ]);
+        set_group_entry_name(&mut campaign, 1, b"\xff.bin");
+        set_group_entry_name(&mut campaign, 2, b"\xfc.c4s");
+        set_group_entry_name(&mut campaign, 3, b"\xf6.c4s");
+        mark_group_entry_child(&mut campaign, 2);
+        mark_group_entry_child(&mut campaign, 3);
+        fs::write(dir.path().join("Campaign.c4f"), gzip_group_image(&campaign)).unwrap();
+
+        // Darwin filesystems reject these physical basenames, but the same
+        // discovery path is exercised on Unix hosts that admit arbitrary
+        // bytes. The packed assertions above remain active on macOS.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let native_folder_name = std::ffi::OsStr::from_bytes(b"\xe4.c4f");
+            let native_folder = dir.path().join(native_folder_name);
+            fs::create_dir(&native_folder).unwrap();
+            let nested = native_folder.join("Nested.c4s");
+            fs::create_dir(&nested).unwrap();
+            fs::write(
+                nested.join("Scenario.json"),
+                br#"{"name":"Native folder child"}"#,
+            )
+            .unwrap();
+            fs::write(
+                dir.path().join(std::ffi::OsStr::from_bytes(b"0-\xff.bin")),
+                b"unrelated",
+            )
+            .unwrap();
+        }
+
+        let entries = discover(dir.path()).expect("discover native-byte entries");
+        assert!(entries.iter().any(|entry| entry.title == "ASCII sibling"));
+
+        let campaign = entries
+            .iter()
+            .find(|entry| entry.title == "Campaign")
+            .expect("packed campaign remains discoverable");
+        assert_eq!(campaign.children.len(), 2);
+        for (title, raw_name) in [
+            ("Packed U child", b"\xfc.c4s".as_slice()),
+            ("Packed O child", b"\xf6.c4s".as_slice()),
+        ] {
+            let child = campaign
+                .children
+                .iter()
+                .find(|child| child.title == title)
+                .expect("exact packed child payload is opened");
+            assert_eq!(
+                child.path.file_name().unwrap().as_bytes(),
+                raw_name,
+                "logical child path retains the exact packed entry bytes"
+            );
+            let mut expected_identifier = b"Campaign.c4f/".to_vec();
+            expected_identifier.extend_from_slice(raw_name);
+            assert_eq!(
+                lc_script::c4_string_bytes(&child.identifier),
+                expected_identifier,
+                "menu identity retains the exact packed entry bytes"
+            );
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let folder = entries
+                .iter()
+                .find(|entry| entry.title == "ä")
+                .expect("native-byte directory folder is discovered");
+            assert_eq!(folder.path.file_name().unwrap().as_bytes(), b"\xe4.c4f");
+            assert_eq!(lc_script::c4_string_bytes(&folder.identifier), b"\xe4.c4f");
+            assert_eq!(folder.children.len(), 1);
+            assert_eq!(folder.children[0].title, "Native folder child");
+        }
     }
 
     #[test]
@@ -2602,6 +2692,14 @@ mod tests {
     fn mark_group_entry_child(group: &mut [u8], entry_index: usize) {
         let child_flag = GROUP_HEADER_SIZE + entry_index * GROUP_ENTRY_SIZE + 260 + 4;
         group[child_flag..child_flag + 4].copy_from_slice(&1_i32.to_le_bytes());
+    }
+
+    fn set_group_entry_name(group: &mut [u8], entry_index: usize, name: &[u8]) {
+        assert!(name.len() < 260);
+        assert!(!name.contains(&0));
+        let start = GROUP_HEADER_SIZE + entry_index * GROUP_ENTRY_SIZE;
+        group[start..start + 260].fill(0);
+        group[start..start + name.len()].copy_from_slice(name);
     }
 
     fn make_group_entry_unreadable(group: &mut [u8], entry_index: usize) {
