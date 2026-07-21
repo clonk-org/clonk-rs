@@ -132067,9 +132067,10 @@ ScenInfoArea=70,5,25,90
         assert_eq!(registrations.len(), 3);
         assert_eq!(registrations[1].group.root(), outer_path.as_path());
         assert_eq!(registrations[1].priority, 100);
+        // Packed C4Group traversal propagates the selected entry's stored spelling.
         assert_eq!(
             registrations[2].group.root(),
-            outer_path.join("inner.c4f").as_path()
+            outer_path.join("INNER.C4F").as_path()
         );
         assert_eq!(registrations[2].priority, 101);
     }

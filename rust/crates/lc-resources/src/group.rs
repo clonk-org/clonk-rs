@@ -336,7 +336,7 @@ impl Group {
     fn open_direct_child(&self, relative: &Path) -> Result<Self, GroupError> {
         match &self.kind {
             GroupKind::Directory(root) => {
-                let path = resolve_directory_entry(root, &relative)?;
+                let path = resolve_directory_child_entry(root, relative)?;
                 if path.is_dir() {
                     Self::open(path)
                 } else {
@@ -822,20 +822,15 @@ impl PackedGroup {
     }
 
     fn open_child(&self, relative: &Path) -> Result<Group, GroupError> {
-        let entry_index = self
-            .index
-            .get(&case_fold_group_path(relative))
-            .copied()
+        let pattern = relative.as_os_str().as_encoded_bytes();
+        // C4Group::GetEntry applies WildcardMatch while walking stored order,
+        // then validates only that selected entry as a child.
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| group_name_wildcard_match(pattern, &entry.name_bytes))
             .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))?;
-        let entry = &self.entries[entry_index];
-        if !entry.is_directory {
-            return Err(GroupError::InvalidGroup(format!(
-                "entry '{}' is not a child group",
-                entry.relative_path.display()
-            )));
-        }
-        let data = self.read_entry_bytes(entry)?;
-        Group::from_raw_memory(self.path.join(relative), data)
+        self.open_child_entry(entry)
     }
 
     fn open_child_by_name(&self, name: &[u8]) -> Result<Group, GroupError> {
@@ -946,6 +941,33 @@ fn resolve_directory_entry(root: &Path, relative: &Path) -> Result<PathBuf, Grou
     }
 
     resolved_any.then_some(current).ok_or_else(missing)
+}
+
+/// Resolves one `OpenAsChild` component. Unlike the generic concrete-path
+/// resolver, classic child opening admits `?` as exactly one native byte and
+/// selects the first matching directory entry without sorting.
+fn resolve_directory_child_entry(root: &Path, relative: &Path) -> Result<PathBuf, GroupError> {
+    let missing = || GroupError::EntryNotFound(relative.to_path_buf());
+    let pattern = relative.as_os_str().as_encoded_bytes();
+    let entries = fs::read_dir(root).map_err(|error| {
+        if matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        ) {
+            missing()
+        } else {
+            GroupError::Io(error)
+        }
+    })?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.as_encoded_bytes();
+        if group_name_wildcard_match(pattern, name) && !ignored_group_entry_bytes(name) {
+            return Ok(entry.path());
+        }
+    }
+    Err(missing())
 }
 
 fn ignored_group_entry_bytes(name: &[u8]) -> bool {
@@ -1253,6 +1275,14 @@ fn case_fold_group_name(name: &[u8]) -> Vec<u8> {
 
 fn group_name_eq(left: &[u8], right: &[u8]) -> bool {
     left.eq_ignore_ascii_case(right)
+}
+
+fn group_name_wildcard_match(pattern: &[u8], name: &[u8]) -> bool {
+    pattern.len() == name.len()
+        && pattern
+            .iter()
+            .zip(name)
+            .all(|(pattern, name)| *pattern == b'?' || pattern.eq_ignore_ascii_case(name))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1951,7 +1981,131 @@ mod tests {
     }
 
     #[test]
-    fn open_child_rejects_wildcards_before_lookup() {
+    fn open_child_question_mark_selects_first_child_like_cpp() {
+        let first = packed_group_image_with_entry("marker.txt", false, b"packed-first");
+        let second = packed_group_image_with_entry("marker.txt", false, b"packed-second");
+        let short = packed_group_image_with_entry("marker.txt", false, b"short");
+        let long = packed_group_image_with_entry("marker.txt", false, b"long");
+        let packed_root = PathBuf::from("question-mother.c4g");
+        let packed = Group::from_memory(
+            packed_root.clone(),
+            packed_group_image_with_entries(&[
+                ("Choice.c4g", true, &short),
+                ("ChoiceAA.c4g", true, &long),
+                ("ChoiceB.c4g", true, &first),
+                ("ChoiceA.c4g", true, &second),
+            ]),
+        )
+        .expect("valid packed mother");
+
+        let selected = packed
+            .open_child("cHOICE?.C4G")
+            .expect("question wildcard opens first stored match");
+        assert_eq!(selected.read_file("marker.txt").unwrap(), b"packed-first");
+        assert_eq!(selected.root(), packed_root.join("ChoiceB.c4g"));
+
+        // Nested entry tables bypass root filename validation. The original
+        // request contains no `*`, so C++ does not reject a selected actual
+        // name that contains one before its internal exact open.
+        let wildcard_named = packed_group_image_with_entry("Wild*.c4d", true, &first);
+        let nested_root = PathBuf::from("question-nested-name.c4f");
+        let nested = Group::from_memory(
+            nested_root.clone(),
+            packed_group_image_with_entry("Nested.c4f", true, &wildcard_named),
+        )
+        .expect("valid nested packed mother")
+        .open_child("Nested.c4f")
+        .expect("nested mother opens");
+        let selected = nested
+            .open_child("Wild?.c4d")
+            .expect("matched actual asterisk is not re-rejected");
+        assert_eq!(selected.read_file("marker.txt").unwrap(), b"packed-first");
+        assert_eq!(
+            selected.root(),
+            nested_root.join("Nested.c4f").join("Wild*.c4d")
+        );
+
+        let directory_root = tempdir().unwrap();
+        fs::write(directory_root.path().join("Choice.c4g"), &short).unwrap();
+        fs::write(directory_root.path().join("ChoiceAA.c4g"), &long).unwrap();
+        fs::write(directory_root.path().join("ChoiceA.c4g"), &first).unwrap();
+        fs::write(directory_root.path().join("ChoiceB.c4g"), &second).unwrap();
+        let expected = fs::read_dir(directory_root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .find(|entry| {
+                let name = entry.file_name();
+                name.as_encoded_bytes() == b"ChoiceA.c4g"
+                    || name.as_encoded_bytes() == b"ChoiceB.c4g"
+            })
+            .expect("one matching physical child");
+        let expected_name = expected.file_name();
+        let expected_marker = if expected_name.as_encoded_bytes() == b"ChoiceA.c4g" {
+            &b"packed-first"[..]
+        } else {
+            &b"packed-second"[..]
+        };
+        let directory = Group::open(directory_root.path()).expect("open directory mother");
+
+        let selected = directory
+            .open_child("cHOICE?.C4G")
+            .expect("question wildcard opens first native directory match");
+        assert_eq!(selected.read_file("marker.txt").unwrap(), expected_marker);
+        assert_eq!(selected.root(), directory_root.path().join(expected_name));
+    }
+
+    #[test]
+    fn open_child_question_mark_does_not_skip_first_plain_match() {
+        let child = packed_group_image_with_entry("marker.txt", false, b"child");
+        let packed = Group::from_memory(
+            PathBuf::from("question-plain-first.c4g"),
+            packed_group_image_with_entries(&[
+                ("ChoiceA.c4g", false, b"plain"),
+                ("ChoiceB.c4g", true, &child),
+            ]),
+        )
+        .expect("valid packed mother");
+
+        let error = packed
+            .open_child("Choice?.c4g")
+            .expect_err("the first name match is terminal");
+        assert!(matches!(
+            error,
+            GroupError::InvalidGroup(message)
+                if message.contains("ChoiceA.c4g") && message.contains("not a child group")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_child_question_mark_matches_one_native_byte_not_one_unicode_scalar() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let utf8 = packed_group_image_with_entry("marker.txt", false, b"utf8");
+        let legacy = packed_group_image_with_entry("marker.txt", false, b"legacy");
+        let root = PathBuf::from("question-native-byte.c4g");
+        let packed = Group::from_memory(
+            root.clone(),
+            packed_group_image_with_byte_entries(&[
+                (b"Gr\xc3\xbcn.c4g", true, &utf8),
+                (b"Gr\xfcn.c4g", true, &legacy),
+            ]),
+        )
+        .expect("valid packed mother");
+
+        let selected = packed
+            .open_child(Path::new(OsStr::from_bytes(b"Gr?n.c4g")))
+            .expect("one native byte matches");
+        assert_eq!(selected.read_file("marker.txt").unwrap(), b"legacy");
+        assert_eq!(
+            selected.root(),
+            root.join(path_component_from_name_bytes(b"Gr\xfcn.c4g"))
+        );
+    }
+
+    #[test]
+    fn open_child_rejects_asterisk_before_lookup() {
         let dir = tempdir().unwrap();
         let directory = Group::open(dir.path()).unwrap();
         let packed = Group::from_memory(PathBuf::from("empty.c4g"), packed_group_image())
