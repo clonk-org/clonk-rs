@@ -27820,6 +27820,182 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn legacy_objects_restore_remaining_runtime_fields_and_info_links() {
+        let dir = tempdir().expect("tempdir");
+        let defs_root = dir.path().join("Defs.c4d");
+        for (folder, id, crew_member, category) in [
+            ("Clonk.c4d", "CLNK", 1, 17),
+            ("Thing.c4d", "THNG", 0, 17),
+        ] {
+            let definition = defs_root.join(folder);
+            std::fs::create_dir_all(&definition).expect("definition directory");
+            std::fs::write(
+                definition.join("DefCore.txt"),
+                format!(
+                    "[DefCore]\nid={id}\nName={id}\nCategory={category}\nCrewMember={crew_member}\nMass=50\n"
+                ),
+            )
+            .expect("definition core");
+            std::fs::write(definition.join("Script.c"), "#strict\n")
+                .expect("definition script");
+            write_test_definition_graphics(&definition);
+        }
+
+        let scenario_dir = dir.path().join("RuntimeFields.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario directory");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Runtime Fields\nSaveGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("scenario core");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            concat!(
+                "[Object]\n",
+                "id=CLNK\nNumber=100\nStatus=1\nOwner=0\nController=9\n",
+                "Category=17\nSize=100000\nAlive=true\nInfo=Captain\n",
+                "LastEngLossPlr=-7\nMotionX=-13\nMotionY=17\n",
+                "LastSolidAtchFrame=-23\nNoCollectDelay=-29\nBase=0\n",
+                "OwnMass=-31\nMass=37\nDamage=41\nEnergy=47\nBreath=43\n",
+                "FirePhase=5\nOnFire=true\nPlrViewRange=444\nCrewDisabled=true\n",
+                "\n[Object]\n",
+                "id=THNG\nNumber=101\nStatus=1\nOwner=0\nCategory=17\n",
+                "Size=100000\nDamage=53\nEnergy=59\nPlrViewRange=222\n",
+            ),
+        )
+        .expect("Objects.txt");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
+            .expect("savegame scenario loads");
+        let mut engine = Engine::with_seed(73);
+        scenario
+            .apply_before_players(&mut engine)
+            .expect("objects load before restored players");
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Restored"))
+            .expect("restored player registers");
+
+        let selected_physical = crate::PhysicalInfo {
+            energy: 77_000,
+            breath: 66_000,
+            walk: 55_000,
+            can_scale: 1,
+            ..crate::PhysicalInfo::default()
+        };
+        let crew_info = |name: &str, experience: i32, physical: crate::PhysicalInfo| {
+            crate::player_file::CrewInfo {
+                id: "CLNK".to_string(),
+                name: name.to_string(),
+                death_message: String::new(),
+                core: Default::default(),
+                rank: 0,
+                rank_name: "Clonk".to_string(),
+                experience,
+                rounds: 0,
+                physical,
+                death_count: 0,
+                total_playing_time: 0,
+                birthday: 0,
+                age: 0,
+                participation: 1,
+                in_action: false,
+                was_in_action: false,
+                in_action_time: 0,
+                has_died: false,
+                extra_data: Vec::new(),
+                portraits: Default::default(),
+            }
+        };
+        engine.crew_rosters.insert(
+            0,
+            vec![
+                crew_info("Higher experience fallback", 999, Default::default()),
+                crew_info("Captain", 1, selected_physical),
+            ],
+        );
+        engine.crew_info_order.insert(0, vec![0, 1]);
+        engine
+            .finalize_restored_players()
+            .expect("saved Info links after player restoration");
+
+        let crew_id = ObjectId::new(100);
+        let crew_index = engine.find_object_index(crew_id).expect("loaded crew");
+        let crew = &engine.objects[crew_index];
+        assert_eq!(crew.compiler_cache.info, "Captain");
+        assert_eq!((crew.motion_x, crew.motion_y), (-13, 17));
+        assert_eq!(crew.last_attach_movement_frame, -23);
+        assert_eq!(crew.last_energy_loss_cause, -7);
+        assert_eq!(crew.state.no_collect_delay, -29);
+        assert_eq!(crew.state.base, 0);
+        assert_eq!(crew.state.own_mass, -31);
+        assert_eq!(crew.compiled_mass, Some(37));
+        assert_eq!(crew.state.damage, 41);
+        assert_eq!(crew.state.energy, 47);
+        assert_eq!(crew.state.breath, 43);
+        assert_eq!(crew.state.fire_phase, 5);
+        assert!(crew.state.on_fire);
+        assert_eq!(crew.state.plr_view_range, 444);
+        assert!(crew.state.crew_disabled);
+        assert_eq!(crew.state.controller, 0, "AssignInfo controls the crew");
+        assert_eq!(crew.state.info_physical, Some(selected_physical));
+        assert_ne!(crew.state.ocf & crate::ocf::ON_FIRE, 0);
+        assert_eq!(crew.state.effects.len(), 1, "bare OnFire gets Fire");
+        assert_eq!(crew.state.effects[0].name, crate::C4FX_FIRE);
+        assert_eq!(crew.state.effects[0].number, 1);
+        assert_eq!(
+            crew.state.effects[0].priority, 0,
+            "fDoCalls=false leaves the compatibility node dead"
+        );
+        assert_eq!(crew.state.effects[0].interval, crate::C4FX_FIRE_TIMER_INTERVAL);
+        assert_eq!(crew.state.effects[0].timer, 0);
+        assert!(crew.state.effects[0].start_dispatched);
+
+        let info = engine.crew_object_info(crew_id).expect("live crew info");
+        assert_eq!(info.name, "Captain");
+        let link = engine.crew_info_links[&crew_id];
+        assert_eq!((link.player_id, link.roster_index), (0, 1));
+        assert!(!engine.crew_rosters[&0][0].in_action);
+        assert!(engine.crew_rosters[&0][1].in_action);
+        assert_eq!(engine.player(0).expect("player").crew(), [crew_id]);
+
+        let non_info_id = ObjectId::new(101);
+        let view_objects = engine.player(0).expect("player").fow_view_objects();
+        assert!(view_objects.contains(&crew_id), "Info object restores FoW");
+        assert!(
+            view_objects.contains(&non_info_id),
+            "non-Info object restores FoW"
+        );
+        let before = (
+            engine.objects[crew_index].state.on_fire,
+            engine.objects[crew_index].state.fire_phase,
+            engine.objects[crew_index].state.construction,
+            engine.objects[crew_index].state.damage,
+            engine.objects[crew_index].state.energy,
+        );
+        let rng_before = engine.rng.clone();
+
+        engine.tick_without_snapshot().expect("first tick succeeds");
+
+        let crew = &engine.objects[crew_index];
+        assert!(crew.state.effects.is_empty(), "dead fallback is unlinked");
+        assert_eq!(
+            (
+                crew.state.on_fire,
+                crew.state.fire_phase,
+                crew.state.construction,
+                crew.state.damage,
+                crew.state.energy,
+            ),
+            before,
+            "a priority-zero Fire node performs no fire execution"
+        );
+        assert_eq!(engine.rng, rng_before, "dead Fire consumes no random draw");
+    }
+
+    #[test]
     fn legacy_object_name_decodes_cpp_escaped_strings() {
         // StdCompilerINIRead::ReadEscapedChar (StdCompiler.cpp:1006-1062).
         assert_eq!(

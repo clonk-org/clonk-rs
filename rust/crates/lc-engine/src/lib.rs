@@ -21501,7 +21501,7 @@ impl Engine {
     /// C4Game::InitGameFinal savegame phase: after every recreated player has
     /// rerun InitControl, FinalInit(false) executes in `C4PlayerList` order.
     pub fn finalize_restored_players(&mut self) -> Result<(), EngineError> {
-        self.assign_legacy_object_infos()?;
+        self.finalize_legacy_object_links()?;
         let players = self.player_ids_in_order();
         for player in players {
             self.finalize_joining_player(player, false, true)?;
@@ -22912,11 +22912,10 @@ impl Engine {
     /// or after a named miss, MakeCrewMember falls back to the highest-
     /// experience idle entry for the object's current definition.
     fn assign_legacy_object_infos(&mut self) -> Result<(), EngineError> {
-        if self.pending_legacy_object_infos.is_empty() || self.players.is_empty() {
+        if self.pending_legacy_object_infos.is_empty() {
             return Ok(());
         }
 
-        self.validate_object_player_references();
         let mut order = self.exec_list.clone();
         order.extend(self.inactive_exec_list.iter().copied());
         let mut seen = HashSet::new();
@@ -23095,6 +23094,21 @@ impl Engine {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// The object half of `C4Game::InitGameFinal`: owner validation precedes
+    /// `AssignInfo`, then `AssignPlrViewRange` rebuilds transient FoW links
+    /// across the complete active object list (C4Game.cpp:2719-2722).
+    fn finalize_legacy_object_links(&mut self) -> Result<(), EngineError> {
+        // Fresh offline startup runs Script.Initialize before queued player
+        // joins. Keep the deferred Info names intact until players exist.
+        if self.players.is_empty() {
+            return Ok(());
+        }
+        self.validate_object_player_references();
+        self.assign_legacy_object_infos()?;
+        self.rebuild_fow_view_objects();
         Ok(())
     }
 
@@ -26503,7 +26517,7 @@ impl Engine {
     }
 
     pub fn initialize_scenario_script(&mut self) -> Result<Vec<ObjectId>, EngineError> {
-        self.assign_legacy_object_infos()?;
+        self.finalize_legacy_object_links()?;
         let Some(c4_args) = self.scenario_script.as_ref().map(|script| script.c4_args) else {
             return Ok(Vec::new());
         };
@@ -57018,7 +57032,10 @@ impl Engine {
             // (C4Object.cpp:2878-2881).
             if object.state.on_fire && object.state.effects.is_empty() {
                 let mut fire = EffectState::new(C4FX_FIRE)
-                    .with_priority(C4FX_FIRE_PRIORITY)
+                    // With fDoCalls=false the native constructor returns
+                    // before assigning its requested priority. The linked
+                    // compatibility node remains dead until the first walk.
+                    .with_priority(0)
                     .with_interval(C4FX_FIRE_TIMER_INTERVAL);
                 fire.number = 1;
                 fire.start_dispatched = true;
