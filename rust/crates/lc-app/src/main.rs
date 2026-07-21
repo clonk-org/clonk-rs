@@ -236,7 +236,8 @@ use startup_player_files::{
     delete_crew_file, delete_player_file, discover_crew_files, discover_player_files,
     discover_player_files_in, load_local_player_big_icon, load_network_player_big_icon,
     load_packed_network_player_big_icon, load_player_big_icon_from_group, persist_activations,
-    rename_crew, save_player_properties, set_crew_death_message, set_crew_participation,
+    player_group_filename, rename_crew, save_player_properties, set_crew_death_message,
+    set_crew_participation,
 };
 use time::{OffsetDateTime, macros::format_description};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -64879,7 +64880,11 @@ impl GameApp {
         let Some(paths) = self.app_paths.as_ref() else {
             let error = "application paths are unavailable".to_string();
             tracing::error!(%error, "failed to save startup player properties");
-            self.record_startup_player_properties_save_failure(error);
+            self.finish_startup_player_properties_save_failure(
+                error,
+                &origin,
+                &player.name,
+            );
             return;
         };
         let result = save_player_properties(
@@ -64928,9 +64933,188 @@ impl GameApp {
             }
             Err(error) => {
                 tracing::error!(%error, "failed to save startup player properties");
-                self.record_startup_player_properties_save_failure(error.to_string());
+                self.finish_startup_player_properties_save_failure(
+                    error.to_string(),
+                    &origin,
+                    &player.name,
+                );
             }
         }
+    }
+
+    fn finish_startup_player_properties_save_failure(
+        &mut self,
+        error: String,
+        origin: &StartupPlayerPropertiesOrigin,
+        submitted_name: &str,
+    ) {
+        // C4GUI removes C4StartupPlrPropertiesDlg before OnClosed performs
+        // persistence. The error dialog therefore belongs to the screen and
+        // never leaves the properties form alive underneath it.
+        self.startup_tooltip.pointer_left();
+        self.startup_player_properties_dialog = None;
+        self.reconcile_startup_player_list_after_properties_failure(origin, submitted_name);
+        self.status_text.clear();
+
+        let caption = self.runtime_resource_text("IDS_DLG_ERROR", "Error");
+        if let Err(dialog_error) = self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                error.clone(),
+                caption,
+                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        ) {
+            tracing::error!(%dialog_error, "failed to show player-properties save error dialog");
+            self.record_startup_player_properties_save_failure(error);
+        }
+    }
+
+    fn reconcile_startup_player_list_after_properties_failure(
+        &mut self,
+        origin: &StartupPlayerPropertiesOrigin,
+        submitted_name: &str,
+    ) {
+        let previous_players = self
+            .startup_player_files
+            .iter()
+            .map(|player| {
+                (
+                    player.path.clone(),
+                    player.file_name.clone(),
+                    player.render_model.activated,
+                )
+            })
+            .collect::<Vec<_>>();
+        let previous_selected = self
+            .startup_player_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.selected_index())
+            .and_then(|index| self.startup_player_files.get(index))
+            .map(|player| (player.path.clone(), player.file_name.clone()));
+        let submitted_filename = player_group_filename(submitted_name).ok();
+        let edit_paths = match (origin, submitted_filename.as_deref()) {
+            (
+                StartupPlayerPropertiesOrigin::SelectionEdit { path, .. },
+                Some(filename),
+            ) => Some((path.clone(), path.with_file_name(filename))),
+            _ => None,
+        };
+
+        let Some(paths) = self.app_paths.as_ref() else {
+            self.mark_menu_dirty();
+            return;
+        };
+        let config_file = paths.config_file().to_path_buf();
+        let mut players = match discover_player_files(paths) {
+            Ok(players) => players,
+            Err(error) => {
+                tracing::error!(%error, "failed to reconcile startup players after properties save failure");
+                self.mark_menu_dirty();
+                return;
+            }
+        };
+
+        let submitted_index = match (&edit_paths, submitted_filename.as_deref()) {
+            (Some((old_path, target_path)), _) => players
+                .iter()
+                .position(|player| player.path == *old_path)
+                .or_else(|| players.iter().position(|player| player.path == *target_path)),
+            (None, Some(filename)) => players.iter().position(|player| {
+                player
+                    .path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(filename))
+            }),
+            (None, None) => None,
+        };
+
+        for (index, player) in players.iter_mut().enumerate() {
+            // A file first seen by this reconciliation keeps its discover-time
+            // activation, which C4StartupPlrSelDlg::UpdatePlayerList reads
+            // from Config.General.Participants.
+            let previous_activation = previous_players
+                .iter()
+                .find(|(path, file_name, _)| {
+                    player.path == *path || player.file_name.eq_ignore_ascii_case(file_name)
+                })
+                .map(|(_, _, activated)| *activated)
+                .unwrap_or(player.render_model.activated);
+            let activated = if Some(index) == submitted_index {
+                match origin {
+                    StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
+                    | StartupPlayerPropertiesOrigin::SelectionNew => true,
+                    StartupPlayerPropertiesOrigin::SelectionEdit { was_activated, .. } => {
+                        *was_activated
+                    }
+                }
+            } else {
+                previous_activation
+            };
+            player.set_activated(activated);
+        }
+
+        let activation_refusals = match persist_activations(&config_file, &mut players) {
+            Ok(refusals) => refusals,
+            Err(error) => {
+                tracing::warn!(%error, "failed to reconcile participants after properties save failure");
+                Vec::new()
+            }
+        };
+        // A failed edit leaves C++'s untouched list widget selected where it
+        // was (following the item across a completed rename), while a failed
+        // NewPlayer save rebuilds the list and reselects like
+        // UpdatePlayerList: the saved file, else the first activated entry,
+        // else the first entry.
+        let previous_selected_index = previous_selected.as_ref().and_then(|(path, file_name)| {
+            players.iter().position(|player| {
+                player.path == *path || player.file_name.eq_ignore_ascii_case(file_name)
+            })
+        });
+        let selected_index = match origin {
+            StartupPlayerPropertiesOrigin::SelectionEdit { .. } => {
+                previous_selected_index.or(submitted_index)
+            }
+            StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
+            | StartupPlayerPropertiesOrigin::SelectionNew => submitted_index,
+        }
+        .or_else(|| {
+            players
+                .iter()
+                .position(|player| player.render_model.activated)
+        })
+        .or_else(|| (!players.is_empty()).then_some(0));
+        self.startup_player_models = players
+            .iter()
+            .map(|player| player.render_model.clone())
+            .collect();
+        self.startup_player_files = players;
+        self.selected_player_file = selected_index
+            .and_then(|index| self.startup_player_files.get(index))
+            .filter(|player| player.render_model.activated)
+            .or_else(|| {
+                self.startup_player_files
+                    .iter()
+                    .find(|player| player.render_model.activated)
+            })
+            .map(|player| player.player_file.clone());
+        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+            dialog.set_player_count(self.startup_player_models.len());
+            dialog.set_player_activations(
+                self.startup_player_models
+                    .iter()
+                    .map(|player| player.activated)
+                    .collect(),
+            );
+            dialog.set_selected_index(selected_index);
+        }
+        self.plrsel_last_click = None;
+        self.menu_frame_cache = None;
+        self.refresh_participants_label();
+        if let Err(error) = self.show_startup_player_activation_refusals(&activation_refusals) {
+            tracing::error!(%error, "failed to show participant overflow after properties save failure");
+        }
+        self.mark_menu_dirty();
     }
 
     fn record_startup_player_properties_save_failure(&mut self, error: String) {
@@ -137806,6 +137990,207 @@ public func Grant(password) { return GainMissionAccess(password); }
         let form = app.startup_player_properties_dialog.as_ref().unwrap();
         assert_eq!(form.controller.player(), &expected_player);
         assert_eq!(form.controller.comment(), expected_comment);
+    }
+
+    #[test]
+    fn startup_player_properties_post_validation_save_failure_opens_classic_error_dialog() {
+        use lc_frontend::message_dialog::{
+            MessageDialogButtons, MessageDialogIcon, MessageDialogResult, MessageDialogSize,
+        };
+
+        let user_data = tempdir().expect("save-failure user data");
+        let (_guard, paths, player_root, mut app) =
+            startup_player_properties_validation_app(user_data.path());
+        app.startup_player_properties_dialog = None;
+
+        let old = player_root.join("Old.c4p");
+        fs::create_dir(&old).expect("create selected player group");
+        fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n")
+            .expect("write selected player core");
+        persist_config_value(
+            &paths,
+            "General",
+            "Participants",
+            old.to_string_lossy(),
+        )
+        .expect("activate selected player");
+        app.refresh_startup_player_list();
+        assert_eq!(app.startup_player_files.len(), 1);
+        assert!(app.startup_player_files[0].render_model.activated);
+
+        app.open_existing_startup_player_properties(0);
+        app.startup_player_properties_dialog
+            .as_mut()
+            .expect("open player-properties form")
+            .controller
+            .set_name("Renamed");
+
+        // Cross the same partial-save boundary as a native group-open or
+        // close failure: the filesystem rename succeeds, then opening the
+        // destination as a player group fails.
+        fs::remove_dir_all(&old).expect("remove valid group behind open form");
+        fs::write(&old, b"not a C4Group").expect("replace source with corrupt packed group");
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
+        ]);
+
+        let renamed = player_root.join("Renamed.c4p");
+        assert!(!old.exists());
+        assert!(renamed.is_file(), "rename completed before group-open failed");
+        assert!(
+            app.startup_player_properties_dialog.is_none(),
+            "the properties form closes before the screen-owned error dialog"
+        );
+        assert!(app.startup_player_files.is_empty());
+        assert!(app.startup_player_models.is_empty());
+        let selector = app.startup_player_dialog.as_ref().expect("player selector");
+        assert!(selector.player_activations().is_empty());
+        assert_eq!(selector.selected_index(), None);
+        assert!(app.selected_player_file.is_none());
+        assert!(app.status_text.is_empty());
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload reconciled config")
+                .get_in(Some("General"), "Participants"),
+            Some("")
+        );
+
+        let modal = app.message_dialogs.last().expect("classic save-error dialog");
+        assert_eq!(modal.state.caption(), "Error");
+        assert!(modal.state.message().contains("failed to rewrite player group"));
+        assert!(modal.state.message().contains(&renamed.display().to_string()));
+        assert_eq!(modal.state.buttons(), MessageDialogButtons::OK);
+        assert_eq!(modal.state.icon(), MessageDialogIcon::ERROR);
+        assert_eq!(modal.state.size(), MessageDialogSize::Regular);
+        assert!(matches!(modal.continuation, MessageDialogContinuation::None));
+
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("dismiss save-error dialog");
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.startup_player_properties_dialog.is_none());
+        assert!(app.startup_player_files.is_empty());
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.selected_index()),
+            None
+        );
+    }
+
+    #[test]
+    fn startup_player_properties_rename_step_failure_opens_classic_error_dialog() {
+        use lc_frontend::message_dialog::{
+            MessageDialogButtons, MessageDialogIcon, MessageDialogResult, MessageDialogSize,
+        };
+
+        let user_data = tempdir().expect("rename-failure user data");
+        let (_guard, paths, player_root, mut app) =
+            startup_player_properties_validation_app(user_data.path());
+        app.startup_player_properties_dialog = None;
+
+        let old = player_root.join("Old.c4p");
+        fs::create_dir(&old).expect("create selected player group");
+        fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n")
+            .expect("write selected player core");
+        persist_config_value(
+            &paths,
+            "General",
+            "Participants",
+            old.to_string_lossy(),
+        )
+        .expect("activate selected player");
+        app.refresh_startup_player_list();
+        assert_eq!(app.startup_player_files.len(), 1);
+
+        app.open_existing_startup_player_properties(0);
+        app.startup_player_properties_dialog
+            .as_mut()
+            .expect("open player-properties form")
+            .controller
+            .set_name("Renamed");
+
+        // Fail the rename step itself: the source group vanishes behind the
+        // open form, so the move onto the new filename has nothing to rename.
+        fs::remove_dir_all(&old).expect("remove source group behind open form");
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
+        ]);
+
+        assert!(!old.exists());
+        assert!(!player_root.join("Renamed.c4p").exists());
+        assert!(
+            app.startup_player_properties_dialog.is_none(),
+            "the properties form closes before the screen-owned error dialog"
+        );
+        assert!(app.startup_player_files.is_empty());
+        assert!(app.status_text.is_empty());
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload reconciled config")
+                .get_in(Some("General"), "Participants"),
+            Some("")
+        );
+
+        let modal = app.message_dialogs.last().expect("classic rename-error dialog");
+        assert_eq!(modal.state.caption(), "Error");
+        assert!(!modal.state.message().is_empty());
+        assert_eq!(modal.state.buttons(), MessageDialogButtons::OK);
+        assert_eq!(modal.state.icon(), MessageDialogIcon::ERROR);
+        assert_eq!(modal.state.size(), MessageDialogSize::Regular);
+        assert!(matches!(modal.continuation, MessageDialogContinuation::None));
+
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("dismiss rename-error dialog");
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.selected_index()),
+            None
+        );
+    }
+
+    #[test]
+    fn startup_player_properties_new_player_create_failure_opens_classic_error_dialog() {
+        use lc_frontend::message_dialog::{
+            MessageDialogButtons, MessageDialogIcon, MessageDialogResult, MessageDialogSize,
+        };
+
+        let user_data = tempdir().expect("create-failure user data");
+        let (_guard, _paths, player_root, mut app) =
+            startup_player_properties_validation_app(user_data.path());
+        app.startup_player_properties_dialog
+            .as_mut()
+            .expect("open new-player form")
+            .controller
+            .set_name("Fresh");
+
+        // Break the configured player root under the open creation form: the
+        // occupancy scan and the new group write both need a directory there.
+        fs::remove_dir_all(&player_root).expect("remove player root");
+        fs::write(&player_root, b"not a directory").expect("occupy player root path");
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
+        ]);
+
+        assert!(
+            app.startup_player_properties_dialog.is_none(),
+            "the creation form closes before the screen-owned error dialog"
+        );
+        assert!(app.startup_player_files.is_empty());
+        assert!(app.status_text.is_empty());
+
+        let modal = app.message_dialogs.last().expect("classic create-error dialog");
+        assert_eq!(modal.state.caption(), "Error");
+        assert!(!modal.state.message().is_empty());
+        assert_eq!(modal.state.buttons(), MessageDialogButtons::OK);
+        assert_eq!(modal.state.icon(), MessageDialogIcon::ERROR);
+        assert_eq!(modal.state.size(), MessageDialogSize::Regular);
+        assert!(matches!(modal.continuation, MessageDialogContinuation::None));
+
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("dismiss create-error dialog");
+        assert!(app.message_dialogs.is_empty());
     }
 
     #[test]
