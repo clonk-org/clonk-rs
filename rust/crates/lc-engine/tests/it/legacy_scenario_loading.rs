@@ -7,6 +7,7 @@ use lc_engine::{
     Engine, Landscape, ObjectId, ObjectStatus, Scenario, ScenarioError, SpawnConfig, Vector2,
 };
 use lc_resources::Group;
+use lc_script::Value;
 
 fn tempdir() -> std::io::Result<tempfile::TempDir> {
     tempfile::Builder::new().prefix("lc-test-").tempdir()
@@ -48,6 +49,69 @@ fn defcore_rct_all_timer_call_trailing_space_misses_exact_runtime_lookup(
         .expect("timer object survives");
     assert_eq!(snapshot.timer, 0, "Timer=1 reached the callback gate");
     assert_eq!(snapshot.local_vars.get("iFired"), None);
+    Ok(())
+}
+
+#[test]
+fn empty_def_core_name_survives_both_engine_load_paths() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempdir()?;
+    let scenario_dir = temp.path();
+
+    for (directory, id, name_field) in [
+        ("Empty.ocd", "EMTY", "Name=\n"),
+        ("Missing.ocd", "MISS", ""),
+    ] {
+        let definition_dir = scenario_dir.join(directory);
+        fs::create_dir(&definition_dir)?;
+        fs::write(
+            definition_dir.join("DefCore.txt"),
+            format!("[DefCore]\nid={id}\n{name_field}Category=C4D_Object\n"),
+        )?;
+        fs::write(
+            definition_dir.join("Script.c"),
+            format!(
+                "#strict\npublic func ProbeName() {{ return [GetName(), GetName(0, {id}), GetDefCoreVal(\"Name\", \"DefCore\", {id})]; }}\n"
+            ),
+        )?;
+        write_definition_graphics(&definition_dir)?;
+    }
+
+    let empty_group = Group::open(&scenario_dir.join("Empty.ocd"))?;
+    let empty_resource = lc_resources::definition::Definition::load(&empty_group)?;
+    let missing_group = Group::open(&scenario_dir.join("Missing.ocd"))?;
+    let missing_resource = lc_resources::definition::Definition::load(&missing_group)?;
+    assert_eq!(empty_resource.core.name.as_deref(), Some(""));
+    assert_eq!(missing_resource.core.name, None);
+
+    let mut direct = Engine::new();
+    direct.register_definition(lc_engine::Definition::from_resource(&empty_resource)?)?;
+    direct.register_definition(lc_engine::Definition::from_resource(&missing_resource)?)?;
+
+    let assert_names =
+        |engine: &mut Engine, id: &str, expected: &str| -> Result<(), Box<dyn std::error::Error>> {
+            assert_eq!(engine.definition_name(id), Some(expected));
+            let object = engine.spawn_object(SpawnConfig::new(id))?;
+            let index = engine.find_object_index(object).expect("name probe exists");
+            let expected = Value::String(expected.to_string().into());
+            assert_eq!(
+                engine.call_object_function(index, "ProbeName", Vec::new())?,
+                Value::Array(vec![expected.clone(), expected.clone(), expected])
+            );
+            Ok(())
+        };
+    assert_names(&mut direct, "EMTY", "")?;
+    assert_names(&mut direct, "MISS", "Undefined")?;
+
+    fs::write(
+        scenario_dir.join("Scenario.txt"),
+        "[Head]\nTitle=Definition name defaults\n\n[Definitions]\nDefinition1=Empty.ocd\nDefinition2=Missing.ocd\n",
+    )?;
+    let scenario = Scenario::load_from_path_with(scenario_dir, &LocalDefinitionResolver)?;
+    let mut legacy = Engine::new();
+    scenario.apply(&mut legacy)?;
+    assert_names(&mut legacy, "EMTY", "")?;
+    assert_names(&mut legacy, "MISS", "Undefined")?;
+
     Ok(())
 }
 

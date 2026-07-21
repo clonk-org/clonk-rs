@@ -669,6 +669,8 @@ pub struct DefCore {
     /// Five-component `rC4XVer` loaded from DefCore `Version=`
     /// (src/C4Def.cpp:124,254).
     pub version: [i32; 5],
+    /// `None` means the key was absent; `Some("")` preserves an explicit
+    /// empty `Name=` instead of applying C++'s missing-value default.
     pub name: Option<String>,
     /// DefCore `RequireDef` C4IDList. Unlike Components, this list carries
     /// IDs only (`mkParAdapt(RequireDef, false)`).
@@ -1483,9 +1485,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 fill_i32_array(value, &mut version);
             }
             "Name" => {
-                if !rct_all_value.is_empty() {
-                    name = Some(rct_all_value.to_string());
-                }
+                name = Some(rct_all_value.to_string());
             }
             "RequireDef" => {
                 require_defs = parse_id_list(raw_value);
@@ -5030,6 +5030,21 @@ Entrance=1,2,,4
         assert_eq!(parsed.color_by_material, "Granite \t");
         assert_eq!(parsed.burn_turn_to.as_deref(), Some("BURN"));
         assert_eq!(parsed.build_turn_to.as_deref(), Some("DONE"));
+    }
+
+    #[test]
+    fn def_core_empty_name_overrides_undefined_default() {
+        for (source, expected) in [
+            ("Name=", Some("")),
+            ("Name= \t", Some("")),
+            ("Name=\nName=Later", Some("")),
+            ("name=wrong case", None),
+            ("", None),
+        ] {
+            let parsed = parse_def_core(format!("[DefCore]\nid=EMTY\n{source}\n").as_bytes())
+                .expect("DefCore name fixture parses");
+            assert_eq!(parsed.name.as_deref(), expected, "source {source:?}");
+        }
     }
 
     #[test]
