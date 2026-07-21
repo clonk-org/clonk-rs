@@ -46208,7 +46208,7 @@ impl EffectHostContext {
             .solid_mask_metadata
             .get(graphics_definition)?
             .pixels_for_checked_mask(mask, graphics_name)?;
-        let shape = definition.shape?;
+        let shape = definition.shape.unwrap_or_default();
         Some(crate::SolidMaskSpec {
             mask,
             pixels,
@@ -46369,7 +46369,7 @@ impl EffectHostContext {
             .solid_mask_metadata
             .get(graphics_definition)?
             .pixels_for_checked_mask(mask, graphics_name)?;
-        let shape = definition.shape?;
+        let shape = definition.shape.unwrap_or_default();
         let position = scope.effective_position();
         Some(crate::SolidMaskRect {
             object_id: id,

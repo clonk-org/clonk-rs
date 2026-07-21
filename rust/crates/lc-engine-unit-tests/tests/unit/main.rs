@@ -62129,6 +62129,106 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
     }
 
     #[test]
+    fn solid_mask_without_shape_uses_zero_shape_offset_like_cpp() -> Result<(), EngineError> {
+        // C4DefCore::Default and C4Shape::CompileFunc leave every omitted
+        // Shape member at zero. C4Def::Load still validates SolidMask against
+        // Graphics.png, and C4SolidMask::Put adds the zero shape x/y to the
+        // target offset (C4Def.cpp:117-133,206-243,727-733;
+        // C4Shape.cpp:496-508; C4SolidMask.cpp:63-76).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("ShapelessMask.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=ZMSK\nName=Shapeless mask\nCategory=C4D_Object\nSolidMask=1,0,2,1,-2,3\n",
+        )
+        .expect("write DefCore");
+        std::fs::write(
+            def_dir.join("Script.c"),
+            b"#strict 2\npublic func Reput() { SetSolidMask(1, 0, 2, 1, -2, 3); return GBackSolid(-2, 3); }\n",
+        )
+        .expect("write script");
+        image::RgbaImage::from_pixel(3, 1, image::Rgba([255, 255, 255, 255]))
+            .save(def_dir.join("Graphics.png"))
+            .expect("write graphics");
+
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let definition = Definition::from_resource(&resource)?;
+        assert_eq!(definition.shape_rect(), None, "Shape must remain omitted");
+        assert_eq!(
+            definition.solid_mask(),
+            Some(DefinitionTargetRect::new(1, 0, 2, 1, -2, 3)),
+            "the valid bitmap-bounded mask must survive loading"
+        );
+
+        let mut engine = Engine::with_seed(70);
+        engine.set_landscape(vehicle_grid_landscape(30, 30));
+        engine.register_definition(definition)?;
+        let object =
+            engine.spawn_object(SpawnConfig::new("ZMSK").with_position(Vector2::new(10, 10)))?;
+        assert_eq!(vehicle_pixels(&engine), vec![(8, 13), (9, 13)]);
+        assert_eq!(
+            engine.debug_solid_mask_buffer(object.as_u64()),
+            Some(vec![0, 0])
+        );
+
+        let index = engine.find_object_index(object).expect("object exists");
+        assert_eq!(
+            engine.call_object_function(index, "Reput", Vec::new())?,
+            Value::Bool(true),
+            "Reput must see the callback-private zero-offset mask synchronously"
+        );
+        assert_eq!(
+            vehicle_pixels(&engine),
+            vec![(8, 13), (9, 13)],
+            "callback-time SetSolidMask must use the same zero shape offset"
+        );
+        assert_eq!(
+            engine.debug_solid_mask_buffer(object.as_u64()),
+            Some(vec![0, 0])
+        );
+
+        // A non-grid landscape cannot rasterize CreateObject's live mask.
+        // Stuck must therefore consume pending_solid_mask's placement before
+        // the host outcome materializes the new object.
+        let mut pending_engine = Engine::with_seed(71);
+        pending_engine.set_landscape(Landscape::flat_with_material(30, 30, None));
+        pending_engine.register_definition(Definition::from_resource(&resource)?)?;
+        let mut caller = Definition::from_script(
+            "CALL",
+            "Caller",
+            r#"#strict 2
+            public func ProbePendingMask() {
+                CreateObject(ZMSK, 0, 0, -1);
+                return Stuck();
+            }
+            "#,
+        )?;
+        caller.set_shape_vertices(vec![ObjectVertex::new(-2, 3)]);
+        caller.set_contact_density(50);
+        pending_engine.register_definition(caller)?;
+        let caller_id = pending_engine
+            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(10, 8)))?;
+        assert!(
+            !pending_engine
+                .landscape()
+                .expect("landscape remains")
+                .is_solid_at(8, 11),
+            "the pending-mask probe starts in sky"
+        );
+        let caller_index = pending_engine
+            .find_object_index(caller_id)
+            .expect("caller exists");
+        assert_eq!(
+            pending_engine.call_object_function(caller_index, "ProbePendingMask", Vec::new())?,
+            Value::Bool(true),
+            "Stuck must see CreateObject's pending zero-offset mask before materialization"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn set_solid_mask_clamps_negative_origin_and_stores_height_disable_like_cpp() {
         // CheckSolidMaskRect moves a negative source origin to zero, but its
         // width/height limits use the OLD coordinates. Thus (-1,-1,3,3) on

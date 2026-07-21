@@ -50371,7 +50371,7 @@ impl Engine {
             SolidMaskPixels::Rectangle => None,
             SolidMaskPixels::Alpha(pixels) => Some(Arc::clone(&pixels)),
         };
-        let shape = definition.shape_rect()?;
+        let shape = definition.shape_rect().unwrap_or_default();
         Some(SolidMaskSpec {
             mask,
             pixels,
