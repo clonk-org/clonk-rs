@@ -150,8 +150,8 @@ use lc_frontend::input_dialog::{
     InputDialogIcon, InputDialogKeyModifiers, InputDialogPlacement, InputDialogSound,
 };
 use lc_frontend::loader_screen::{
-    LoaderRenderConfig, LoaderResources, LoaderScreen, LoaderSelection, LoaderState, LoaderUpdate,
-    STARTUP_LOADER_SPECIFICATION,
+    LoaderGuiProgress, LoaderRenderConfig, LoaderResources, LoaderScreen, LoaderSelection,
+    LoaderState, LoaderUpdate, STARTUP_LOADER_SPECIFICATION,
 };
 use lc_frontend::rename_edit::{
     RenameEdit, RenameEditAction, RenameEditCursorOperation, RenameEditResolution,
@@ -1051,7 +1051,8 @@ struct ScenarioLoadingState {
     refreshed_resources: Option<LoaderResources>,
     refreshed_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
     refreshed_native_font_source: Option<ClassicNativeFontSource>,
-    refreshed_global_gui_overrides: Option<HashMap<&'static str, String>>,
+    refreshed_global_gui_failures: Option<HashMap<&'static str, String>>,
+    refreshed_gui_sheet_overrides: Option<Vec<ClassicGuiSheetOverride>>,
     refresh_requested: bool,
     receiver: Receiver<ScenarioLoadingEvent>,
     finished: bool,
@@ -1069,14 +1070,16 @@ impl ScenarioLoadingState {
     fn new(
         scenario: FrontendScenario,
         refreshed_resources: LoaderResources,
-        refreshed_global_gui_overrides: HashMap<&'static str, String>,
+        refreshed_global_gui_failures: HashMap<&'static str, String>,
+        refreshed_gui_sheet_overrides: Vec<ClassicGuiSheetOverride>,
         receiver: Receiver<ScenarioLoadingEvent>,
     ) -> Self {
         Self {
             refreshed_resources: Some(refreshed_resources),
             refreshed_tooltip_font: None,
             refreshed_native_font_source: None,
-            refreshed_global_gui_overrides: Some(refreshed_global_gui_overrides),
+            refreshed_global_gui_failures: Some(refreshed_global_gui_failures),
+            refreshed_gui_sheet_overrides: Some(refreshed_gui_sheet_overrides),
             refresh_requested: false,
             scenario,
             receiver,
@@ -1121,7 +1124,8 @@ impl ScenarioLoadingState {
             refreshed_resources: None,
             refreshed_tooltip_font: None,
             refreshed_native_font_source: None,
-            refreshed_global_gui_overrides: None,
+            refreshed_global_gui_failures: None,
+            refreshed_gui_sheet_overrides: None,
             refresh_requested: false,
             receiver,
             finished: false,
@@ -1210,7 +1214,8 @@ struct ClassicLoaderSetup {
     refreshed_resources: LoaderResources,
     refreshed_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
     refreshed_native_font_source: Option<ClassicNativeFontSource>,
-    refreshed_global_gui_overrides: HashMap<&'static str, String>,
+    refreshed_global_gui_failures: HashMap<&'static str, String>,
+    refreshed_gui_sheet_overrides: Vec<ClassicGuiSheetOverride>,
     refreshed_player_icon: Option<ImageData>,
     refreshed_crew_icon: Option<ImageData>,
     scenario_title: Option<String>,
@@ -3121,32 +3126,68 @@ fn loader_graphics_registrations(
     Ok(graphics)
 }
 
-fn classic_global_gui_runtime_overrides(
+/// One decoded active-scenario GUI sheet override selected from the
+/// registered `Graphics.c4g` groups, ready to rebind the process-global
+/// `C4GUI::Resource` sheet (`C4GUI::Resource::Load`, C4Gui.cpp:1085-1112).
+/// `source` is the winning group/file identity standing in for the C++
+/// group id, so a rebind reloads only when the winning group changes
+/// (`C4GraphicsResource::LoadFile`, C4GraphicsResource.cpp:418-470).
+#[derive(Clone)]
+struct ClassicGuiSheetOverride {
+    stem: &'static str,
+    canonical_name: &'static str,
+    source: String,
+    image: ImageData,
+}
+
+/// `C4GUI::Resource::Load` over the refreshed group set: decoded sheet
+/// overrides to apply, plus per-resource failures that must keep failing
+/// typed before any pixels (C++ LoadFile logs and Init returns false).
+#[derive(Default)]
+struct ClassicGuiSheetResolution {
+    overrides: Vec<ClassicGuiSheetOverride>,
+    failures: HashMap<&'static str, String>,
+}
+
+fn resolve_classic_global_gui_sheet_overrides(
     registrations: &[LoaderGroupRegistration],
     graphics: &Group,
-) -> HashMap<&'static str, String> {
+) -> ClassicGuiSheetResolution {
     let graphics_registrations = match loader_graphics_registrations(registrations) {
         Ok(registrations) => registrations,
         Err(error) => {
             let detail = format!("cannot inspect active graphics groups: {error}");
-            return CLASSIC_GLOBAL_GUI_SHEETS
-                .into_iter()
-                .map(|(stem, _)| (stem, detail.clone()))
-                .collect();
+            return ClassicGuiSheetResolution {
+                overrides: Vec::new(),
+                failures: CLASSIC_GLOBAL_GUI_SHEETS
+                    .into_iter()
+                    .map(|(stem, _)| (stem, detail.clone()))
+                    .collect(),
+            };
         }
     };
-    let mut overrides = HashMap::new();
-    for (stem, _) in CLASSIC_GLOBAL_GUI_SHEETS {
+    let mut resolution = ClassicGuiSheetResolution::default();
+    for (stem, canonical_name) in CLASSIC_GLOBAL_GUI_SHEETS {
         match select_named_graphics_image_source(stem, &graphics_registrations, graphics) {
             Ok(selected) if selected.from_registration => {
-                overrides.insert(
-                    stem,
-                    format!(
-                        "{}:{}",
-                        selected.source.group.root().display(),
-                        selected.source.presentation_filename()
-                    ),
+                let source = format!(
+                    "{}:{}",
+                    selected.source.group.root().display(),
+                    selected.source.presentation_filename()
                 );
+                match decode_selected_loader(&selected.source) {
+                    Ok(image) => resolution.overrides.push(ClassicGuiSheetOverride {
+                        stem,
+                        canonical_name,
+                        source,
+                        image,
+                    }),
+                    Err(error) => {
+                        resolution
+                            .failures
+                            .insert(stem, format!("{source}: {error}"));
+                    }
+                }
             }
             Ok(_) => {}
             Err(error) => {
@@ -3155,12 +3196,12 @@ fn classic_global_gui_runtime_overrides(
                 // the refreshed group set and must not fall back silently.
                 let detail = error.to_string();
                 if detail != format!("classic graphics resource `{stem}` is unavailable") {
-                    overrides.insert(stem, detail);
+                    resolution.failures.insert(stem, detail);
                 }
             }
         }
     }
-    overrides
+    resolution
 }
 
 fn open_loader_group_with_prefix(prefix: &Path, specification: &str) -> Result<Group> {
@@ -4691,7 +4732,8 @@ fn build_startup_loader(paths: &AppPaths, assets: &FrontendAssets) -> Result<Cla
         refreshed_resources: resources,
         refreshed_tooltip_font: None,
         refreshed_native_font_source: assets.startup_native_font_source.clone(),
-        refreshed_global_gui_overrides: HashMap::new(),
+        refreshed_global_gui_failures: HashMap::new(),
+        refreshed_gui_sheet_overrides: Vec::new(),
         refreshed_player_icon: None,
         refreshed_crew_icon: None,
         scenario_title: None,
@@ -4757,8 +4799,8 @@ fn build_scenario_loader(
         paths,
         first_definition_order,
     )?);
-    let mut refreshed_global_gui_overrides =
-        classic_global_gui_runtime_overrides(&refreshed_registrations, &graphics);
+    let mut refreshed_gui_resolution =
+        resolve_classic_global_gui_sheet_overrides(&refreshed_registrations, &graphics);
     let refreshed_font_bundle = resolve_classic_font_bundle(
         paths,
         Some(head.font()),
@@ -4773,7 +4815,7 @@ fn build_scenario_loader(
         Err(error) => {
             let detail = error.to_string();
             for name in CLASSIC_GLOBAL_GUI_FONTS {
-                refreshed_global_gui_overrides.insert(name, detail.clone());
+                refreshed_gui_resolution.failures.insert(name, detail.clone());
             }
             None
         }
@@ -4781,12 +4823,21 @@ fn build_scenario_loader(
     // The complete GUI resource reload occurs only after the worker's
     // RefreshResources event. Definition Graphics groups may replace bitmap
     // font images then, but cannot make a definition-only image available to
-    // the pre-definition loader initialization above.
+    // the pre-definition loader initialization above. The loader progress
+    // bar is C4GUI::GetRes()->fctProgressBar (C4LoaderScreen.cpp:147), so
+    // the refresh rebinds it to the winning active GUIProgress sheet.
+    let refreshed_gui_progress = refreshed_gui_resolution
+        .overrides
+        .iter()
+        .find(|sheet| sheet.stem == "GUIProgress")
+        .map(|sheet| LoaderGuiProgress::GuiValid {
+            progress_bar: Some(sheet.image.clone()),
+        })
+        .unwrap_or_else(|| initial_resources.gui_progress().clone());
     let refreshed_resources = match refreshed_font_bundle.as_ref() {
-        Some(bundle) => LoaderResources::from_gui_state(
-            bundle.fonts.clone(),
-            initial_resources.gui_progress().clone(),
-        )?,
+        Some(bundle) => {
+            LoaderResources::from_gui_state(bundle.fonts.clone(), refreshed_gui_progress)?
+        }
         None => initial_resources.clone(),
     };
     let refreshed_native_font_source = refreshed_font_bundle
@@ -4822,7 +4873,8 @@ fn build_scenario_loader(
         refreshed_resources,
         refreshed_tooltip_font,
         refreshed_native_font_source,
-        refreshed_global_gui_overrides,
+        refreshed_global_gui_failures: refreshed_gui_resolution.failures,
+        refreshed_gui_sheet_overrides: refreshed_gui_resolution.overrides,
         refreshed_player_icon,
         refreshed_crew_icon,
         scenario_title: Some(head.scenario_title().to_string()),
@@ -5397,7 +5449,18 @@ struct FrontendAssets {
     game_over_button_highlight: Option<ImageData>,
     /// Graphics.c4g images used by the startup dialog parity renderers,
     /// keyed by file name (the eager bootstrap plus supplemental GUI images).
+    /// While a scenario runs, `C4GUI::Resource::Load` sheet entries may be
+    /// rebound to active-scenario overrides; the pristine startup entries are
+    /// retained in `startup_gui_sheet_images` until teardown restores them.
     startup_dialog_images: HashMap<String, ImageData>,
+    /// Winning override source per rebound GUI sheet stem — the C++ group-id
+    /// reload cache (idSfcCaption/idSourceGroup, C4Gui.cpp:1085-1130): a
+    /// repeated refresh reloads a sheet only when its winning source changes.
+    active_gui_sheet_sources: HashMap<&'static str, String>,
+    /// Pristine startup images for every rebound canonical sheet name.
+    /// Teardown (C++ `Resource::Clear` + `CloseFiles`, restoring the
+    /// global-only group set) swaps these back in.
+    startup_gui_sheet_images: HashMap<String, ImageData>,
     /// Non-lookup failures for eager startup images. A missing map entry with
     /// no recorded failure is a true absence; decode/read failures remain a
     /// typed malformed issue instead of being collapsed into "missing".
@@ -5645,6 +5708,8 @@ impl FrontendAssets {
             button_highlight,
             game_over_button_highlight,
             startup_dialog_images,
+            active_gui_sheet_sources: HashMap::new(),
+            startup_gui_sheet_images: HashMap::new(),
             startup_bootstrap_image_failures,
             global_gui_font_failures,
             global_gui_sheet_failures,
@@ -5854,6 +5919,71 @@ impl FrontendAssets {
 
     fn dialog_image(&self, name: &str) -> Option<ImageData> {
         self.startup_dialog_images.get(name).cloned()
+    }
+
+    /// `C4GUI::Resource::Load` over the active group set
+    /// (C4Gui.cpp:1085-1112): rebinds every sheet whose winning source
+    /// changed, keeps unchanged winners loaded (the group-id cache of
+    /// C4GraphicsResource.cpp:418-470), and restores the pristine startup
+    /// sheet when the global group wins again. Returns whether any sheet
+    /// was rebound.
+    fn apply_active_gui_sheet_overrides(&mut self, overrides: &[ClassicGuiSheetOverride]) -> bool {
+        let by_stem: HashMap<&'static str, &ClassicGuiSheetOverride> = overrides
+            .iter()
+            .map(|sheet| (sheet.stem, sheet))
+            .collect();
+        let mut changed = false;
+        for (stem, canonical_name) in CLASSIC_GLOBAL_GUI_SHEETS {
+            match by_stem.get(stem) {
+                Some(sheet) => {
+                    if self.active_gui_sheet_sources.get(stem) == Some(&sheet.source) {
+                        continue;
+                    }
+                    if !self.startup_gui_sheet_images.contains_key(canonical_name) {
+                        if let Some(pristine) = self.startup_dialog_images.get(canonical_name) {
+                            self.startup_gui_sheet_images
+                                .insert(canonical_name.to_string(), pristine.clone());
+                        }
+                    }
+                    self.startup_dialog_images
+                        .insert(canonical_name.to_string(), sheet.image.clone());
+                    self.active_gui_sheet_sources
+                        .insert(stem, sheet.source.clone());
+                    changed = true;
+                }
+                None => {
+                    if self.active_gui_sheet_sources.remove(stem).is_some() {
+                        match self.startup_gui_sheet_images.remove(canonical_name) {
+                            Some(pristine) => {
+                                self.startup_dialog_images
+                                    .insert(canonical_name.to_string(), pristine);
+                            }
+                            None => {
+                                self.startup_dialog_images.remove(canonical_name);
+                            }
+                        }
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.refresh_derived_gui_sheet_state();
+        }
+        changed
+    }
+
+    /// Derived consumers of the rebindable sheets; C++ recomputes the bars
+    /// and facet cuts inside every `Resource::Load`.
+    fn refresh_derived_gui_sheet_state(&mut self) {
+        self.button_highlight = self
+            .startup_dialog_images
+            .get("GUIButtonHighlight.png")
+            .cloned();
+        self.game_over_button_highlight = self
+            .startup_dialog_images
+            .get("GUIButtonHighlight.png")
+            .map(lc_frontend::classic_gui::blacken_transparent_pixels);
     }
 
     fn loader_resources(&self) -> Result<LoaderResources> {
@@ -6325,9 +6455,9 @@ impl FrontendAssets {
 
     fn require_classic_global_gui_bootstrap_resources(
         &self,
-        runtime_overrides: &HashMap<&'static str, String>,
+        active_failures: &HashMap<&'static str, String>,
     ) -> std::result::Result<(), ClassicParityBoundary> {
-        let issues = self.classic_global_gui_bootstrap_issues(runtime_overrides);
+        let issues = self.classic_global_gui_bootstrap_issues(active_failures);
         if issues.is_empty() {
             Ok(())
         } else {
@@ -6337,7 +6467,7 @@ impl FrontendAssets {
 
     fn classic_global_gui_bootstrap_issues(
         &self,
-        runtime_overrides: &HashMap<&'static str, String>,
+        active_failures: &HashMap<&'static str, String>,
     ) -> Vec<ClassicGuiBootstrapIssue> {
         let fonts = self.clonk_fonts.as_deref();
         let font_states = [
@@ -6349,10 +6479,11 @@ impl FrontendAssets {
         ];
         let mut issues = Vec::new();
         for (name, font, shadowed) in font_states {
-            if let Some(source) = runtime_overrides.get(name) {
-                issues.push(ClassicGuiBootstrapIssue::runtime_override(
+            if let Some(actual) = active_failures.get(name) {
+                issues.push(ClassicGuiBootstrapIssue::malformed(
                     name,
-                    source.clone(),
+                    "the exact active RX font source",
+                    actual.clone(),
                 ));
                 continue;
             }
@@ -6395,10 +6526,11 @@ impl FrontendAssets {
         }
 
         for (stem, canonical_name) in CLASSIC_GLOBAL_GUI_SHEETS {
-            if let Some(source) = runtime_overrides.get(stem) {
-                issues.push(ClassicGuiBootstrapIssue::runtime_override(
+            if let Some(actual) = active_failures.get(stem) {
+                issues.push(ClassicGuiBootstrapIssue::malformed(
                     stem,
-                    source.clone(),
+                    "a readable selected bmp/jpeg/jpg/png RGBA surface",
+                    actual.clone(),
                 ));
                 continue;
             }
@@ -12520,7 +12652,9 @@ struct StagedNetworkHostScenario {
     loader_refreshed_native_font_source: Option<ClassicNativeFontSource>,
     /// Retained until the unported lobby Start handoff reaches the real
     /// GraphicsResource refresh. The visible lobby still uses startup GUI.
-    pending_global_gui_overrides: HashMap<&'static str, String>,
+    pending_global_gui_failures: HashMap<&'static str, String>,
+    /// Decoded scenario GUI sheet overrides applied at the same refresh.
+    pending_gui_sheet_overrides: Vec<ClassicGuiSheetOverride>,
     /// Post-definition `GraphicsResource.Player`, used when a player file has
     /// no valid `BigIcon.png`.
     default_player_icon: ImageData,
@@ -15050,9 +15184,10 @@ struct GameApp {
     /// ends; returning from a game resets this guard.
     frontend_music_attempted_for_entry: bool,
     assets: Arc<FrontendAssets>,
-    /// Winning scenario/folder/definition C4GUI sources that cannot yet be
-    /// rebound. Empty means the accepted initial base/Extra bundle is active.
-    active_global_gui_overrides: HashMap<&'static str, String>,
+    /// Per-resource failures from resolving the active scenario's C4GUI
+    /// sheet/font set. Empty means the active (or startup) bundle resolved
+    /// exactly; any entry keeps the typed bootstrap boundary failing.
+    active_global_gui_failures: HashMap<&'static str, String>,
     /// Scale-native CStdFont atlas used after the presenter's bilinear base
     /// pass for startup screens and in-game messages. C++ rebuilds its
     /// fonts with Application.GetScale()
@@ -16639,9 +16774,6 @@ enum ClassicGuiBootstrapDefect {
         expected: &'static str,
         actual: String,
     },
-    RuntimeOverride {
-        source: String,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16671,15 +16803,6 @@ impl ClassicGuiBootstrapIssue {
             },
         }
     }
-
-    fn runtime_override(resource: &'static str, source: impl Into<String>) -> Self {
-        Self {
-            resource,
-            defect: ClassicGuiBootstrapDefect::RuntimeOverride {
-                source: source.into(),
-            },
-        }
-    }
 }
 
 impl fmt::Display for ClassicGuiBootstrapIssue {
@@ -16689,11 +16812,6 @@ impl fmt::Display for ClassicGuiBootstrapIssue {
             ClassicGuiBootstrapDefect::Malformed { expected, actual } => write!(
                 f,
                 "{}: malformed (expected {expected}, got {actual})",
-                self.resource
-            ),
-            ClassicGuiBootstrapDefect::RuntimeOverride { source } => write!(
-                f,
-                "{}: active runtime override at {source} cannot be rebound exactly",
                 self.resource
             ),
         }
@@ -28045,7 +28163,7 @@ impl GameApp {
             resume_frontend_music_after_fade: false,
             frontend_music_attempted_for_entry: false,
             assets: assets.clone(),
-            active_global_gui_overrides: HashMap::new(),
+            active_global_gui_failures: HashMap::new(),
             native_startup_fonts: None,
             pending_native_presentation: None,
             loader_screen,
@@ -60963,7 +61081,8 @@ impl GameApp {
         // remembered startup dialog again in the same process. Clear every
         // partially installed network-game projection before doing likewise.
         self.restore_startup_fonts();
-        self.active_global_gui_overrides.clear();
+        self.restore_startup_gui_sheets();
+        self.active_global_gui_failures.clear();
         self.clear_lobby_preload();
         self.classic_host_lobby = None;
         self.network_lobby = None;
@@ -67748,8 +67867,10 @@ impl GameApp {
                 loading.refreshed_resources = Some(staged.loader_refreshed_resources);
                 loading.refreshed_tooltip_font = staged.loader_refreshed_tooltip_font;
                 loading.refreshed_native_font_source = staged.loader_refreshed_native_font_source;
-                loading.refreshed_global_gui_overrides =
-                    Some(staged.pending_global_gui_overrides);
+                loading.refreshed_global_gui_failures =
+                    Some(staged.pending_global_gui_failures);
+                loading.refreshed_gui_sheet_overrides =
+                    Some(staged.pending_gui_sheet_overrides);
                 loading.refresh_requested = true;
             }
             self.loading_state = Some(loading);
@@ -68029,7 +68150,7 @@ impl GameApp {
             if let Some(overrides) = self
                 .staged_network_host_scenario
                 .as_ref()
-                .map(|staged| &staged.pending_global_gui_overrides)
+                .map(|staged| &staged.pending_global_gui_failures)
             {
                 self.assets
                     .require_classic_global_gui_bootstrap_resources(overrides)
@@ -69105,7 +69226,7 @@ impl GameApp {
             if let Some(overrides) = self
                 .staged_network_host_scenario
                 .as_ref()
-                .map(|staged| &staged.pending_global_gui_overrides)
+                .map(|staged| &staged.pending_global_gui_failures)
             {
                 self.assets
                     .require_classic_global_gui_bootstrap_resources(overrides)
@@ -73153,7 +73274,8 @@ impl GameApp {
             audio.stop_lobby_elevator();
         }
         self.restore_startup_fonts();
-        self.active_global_gui_overrides.clear();
+        self.restore_startup_gui_sheets();
+        self.active_global_gui_failures.clear();
         self.running_chat = None;
         self.runtime_client_list = None;
         self.running_dialog_stack.clear();
@@ -77305,17 +77427,17 @@ impl GameApp {
     }
 
     fn apply_pending_loading_resource_refresh(&mut self) -> Result<(), EngineError> {
-        let Some(overrides) = self
+        let Some(failures) = self
             .loading_state
             .as_ref()
             .filter(|state| state.refresh_requested)
-            .and_then(|state| state.refreshed_global_gui_overrides.as_ref())
+            .and_then(|state| state.refreshed_global_gui_failures.as_ref())
             .cloned()
         else {
             return Ok(());
         };
         self.assets
-            .require_classic_global_gui_bootstrap_resources(&overrides)
+            .require_classic_global_gui_bootstrap_resources(&failures)
             .map_err(report_classic_parity_boundary)
             .map_err(classic_parity_engine_error)?;
 
@@ -77325,10 +77447,11 @@ impl GameApp {
         let resources = state.refreshed_resources.take();
         let tooltip_font = state.refreshed_tooltip_font.take();
         let native_font_source = state.refreshed_native_font_source.take();
-        let overrides = state
-            .refreshed_global_gui_overrides
+        let failures = state
+            .refreshed_global_gui_failures
             .take()
             .unwrap_or_default();
+        let sheet_overrides = state.refreshed_gui_sheet_overrides.take();
         state.refresh_requested = false;
         if let Some(resources) = resources {
             let fonts = resources.fonts().clone();
@@ -77337,7 +77460,10 @@ impl GameApp {
                 loader.replace_resources(resources);
             }
         }
-        self.active_global_gui_overrides = overrides;
+        if let Some(sheet_overrides) = sheet_overrides {
+            self.install_active_gui_sheet_overrides(&sheet_overrides);
+        }
+        self.active_global_gui_failures = failures;
         Ok(())
     }
 
@@ -77361,7 +77487,8 @@ impl GameApp {
 
         // Explicit command-line/developer-console starts and an already
         // prepared network GO do not enter another startup generation.
-        self.active_global_gui_overrides.clear();
+        self.restore_startup_gui_sheets();
+        self.active_global_gui_failures.clear();
         self.status_text = message;
         self.loading_state = None;
         self.network_start_wait = None;
@@ -82220,7 +82347,7 @@ impl GameApp {
 
     fn reject_classic_global_gui_bootstrap(&self) -> Result<()> {
         self.assets
-            .require_classic_global_gui_bootstrap_resources(self.effective_global_gui_overrides())
+            .require_classic_global_gui_bootstrap_resources(self.effective_global_gui_failures())
             .map_err(report_classic_parity_boundary)
             .map_err(anyhow::Error::new)
     }
@@ -82357,17 +82484,17 @@ impl GameApp {
 
     fn guard_classic_global_gui_bootstrap(&self) -> Result<(), EngineError> {
         self.assets
-            .require_classic_global_gui_bootstrap_resources(self.effective_global_gui_overrides())
+            .require_classic_global_gui_bootstrap_resources(self.effective_global_gui_failures())
             .map_err(report_classic_parity_boundary)
             .map_err(classic_parity_engine_error)
     }
 
-    fn effective_global_gui_overrides(&self) -> &HashMap<&'static str, String> {
+    fn effective_global_gui_failures(&self) -> &HashMap<&'static str, String> {
         self.loading_state
             .as_ref()
             .filter(|state| state.refresh_requested)
-            .and_then(|state| state.refreshed_global_gui_overrides.as_ref())
-            .unwrap_or(&self.active_global_gui_overrides)
+            .and_then(|state| state.refreshed_global_gui_failures.as_ref())
+            .unwrap_or(&self.active_global_gui_failures)
     }
 
     fn guard_gui_overlay_result(
@@ -86486,6 +86613,27 @@ impl GameApp {
         self.mark_menu_dirty();
     }
 
+    /// Rebinds the process-global GUI sheets to the active scenario's
+    /// winners (`C4GraphicsResource::Init` → `C4GUI::Resource::Load` over
+    /// the registered set). Cached menu graphics captured the previous
+    /// sheets and are rebuilt lazily from the rebound ones.
+    fn install_active_gui_sheet_overrides(&mut self, overrides: &[ClassicGuiSheetOverride]) {
+        if overrides.is_empty() && self.assets.active_gui_sheet_sources.is_empty() {
+            return;
+        }
+        if Arc::make_mut(&mut self.assets).apply_active_gui_sheet_overrides(overrides) {
+            self.ingame_menu_gfx = None;
+            self.mark_menu_dirty();
+        }
+    }
+
+    /// `C4GUI::Resource::Clear` + `CloseFiles`: the next load happens
+    /// against the global-only group set, so every rebound sheet returns
+    /// to its pristine startup surface.
+    fn restore_startup_gui_sheets(&mut self) {
+        self.install_active_gui_sheet_overrides(&[]);
+    }
+
     fn restore_startup_fonts(&mut self) {
         let fonts = self.assets.startup_clonk_fonts.clone();
         let tooltip = self.assets.startup_global_tooltip_font.clone();
@@ -86593,7 +86741,8 @@ impl GameApp {
         self.ingame_menu_gfx = None;
         self.runtime_player_big_icons.clear();
         self.runtime_player_big_icon_misses.clear();
-        self.active_global_gui_overrides.clear();
+        self.restore_startup_gui_sheets();
+        self.active_global_gui_failures.clear();
         self.close_context_menu_silently();
         self.network_start_wait = None;
         self.host_lobby_countdown = None;
@@ -87382,7 +87531,8 @@ impl GameApp {
             loader_refreshed_resources: loader_setup.refreshed_resources,
             loader_refreshed_tooltip_font: loader_setup.refreshed_tooltip_font,
             loader_refreshed_native_font_source: loader_setup.refreshed_native_font_source,
-            pending_global_gui_overrides: loader_setup.refreshed_global_gui_overrides,
+            pending_global_gui_failures: loader_setup.refreshed_global_gui_failures,
+            pending_gui_sheet_overrides: loader_setup.refreshed_gui_sheet_overrides,
             default_player_icon,
             default_crew_icon,
             options,
@@ -87648,7 +87798,8 @@ impl GameApp {
         let mut loading_state = ScenarioLoadingState::new(
             scenario,
             loader_setup.refreshed_resources,
-            loader_setup.refreshed_global_gui_overrides,
+            loader_setup.refreshed_global_gui_failures,
+            loader_setup.refreshed_gui_sheet_overrides,
             receiver,
         );
         loading_state.refreshed_tooltip_font = loader_setup.refreshed_tooltip_font;
@@ -88855,7 +89006,8 @@ impl GameApp {
         self.ingame_menu_gfx = None;
         self.runtime_player_big_icons.clear();
         self.runtime_player_big_icon_misses.clear();
-        self.active_global_gui_overrides.clear();
+        self.restore_startup_gui_sheets();
+        self.active_global_gui_failures.clear();
         self.finish_recording();
         self.live_save_seed = None;
         self.recording_template = None;
@@ -88981,11 +89133,11 @@ impl GameApp {
         Ok(())
     }
 
-    fn loaded_game_global_gui_overrides(
+    fn loaded_game_global_gui_resolution(
         &self,
         frontend: &FrontendScenario,
         definition_load: Option<&ScenarioDefinitionLoad>,
-    ) -> Result<HashMap<&'static str, String>> {
+    ) -> Result<ClassicGuiSheetResolution> {
         let paths = self
             .app_paths
             .as_ref()
@@ -89046,13 +89198,13 @@ impl GameApp {
         {
             font_failure = Some(error.to_string());
         }
-        let mut overrides = classic_global_gui_runtime_overrides(&registrations, &graphics);
+        let mut resolution = resolve_classic_global_gui_sheet_overrides(&registrations, &graphics);
         if let Some(detail) = font_failure {
             for name in CLASSIC_GLOBAL_GUI_FONTS {
-                overrides.insert(name, detail.clone());
+                resolution.failures.insert(name, detail.clone());
             }
         }
-        Ok(overrides)
+        Ok(resolution)
     }
 
     fn loaded_game_classic_font_bundle(
@@ -89131,11 +89283,11 @@ impl GameApp {
         let frontend = scenario_info.to_frontend();
         let saved_definition_load = save.definition_load.clone();
 
-        let (loaded_overrides, loaded_fonts, loaded_game_graphics) = if scenario_info.sandbox {
-            (HashMap::new(), None, None)
+        let (loaded_resolution, loaded_fonts, loaded_game_graphics) = if scenario_info.sandbox {
+            (ClassicGuiSheetResolution::default(), None, None)
         } else {
             (
-                self.loaded_game_global_gui_overrides(&frontend, saved_definition_load.as_ref())?,
+                self.loaded_game_global_gui_resolution(&frontend, saved_definition_load.as_ref())?,
                 Some(
                     self.loaded_game_classic_font_bundle(
                         &frontend,
@@ -89149,10 +89301,11 @@ impl GameApp {
             )
         };
         self.assets
-            .require_classic_global_gui_bootstrap_resources(&loaded_overrides)
+            .require_classic_global_gui_bootstrap_resources(&loaded_resolution.failures)
             .map_err(report_classic_parity_boundary)
             .map_err(anyhow::Error::new)?;
-        self.active_global_gui_overrides = loaded_overrides;
+        self.install_active_gui_sheet_overrides(&loaded_resolution.overrides);
+        self.active_global_gui_failures = loaded_resolution.failures;
         if let Some(bundle) = loaded_fonts {
             self.install_active_classic_fonts(
                 bundle.fonts,
@@ -106413,6 +106566,95 @@ mod tests {
         );
     }
 
+    #[test]
+    fn real_hazard_scenario_gui_sheet_overrides_apply_and_reach_running() {
+        let user_data = tempdir().expect("isolated Hazard override user data");
+        let (_paths_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        configure_test_startup_participant(&paths, user_data.path());
+        let audio_options = AudioOptions {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        };
+        let mut app = GameApp::new(
+            320,
+            200,
+            audio_options,
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Hazard GUI parity".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize Hazard override app");
+        wait_for_menu(&mut app);
+        let pristine_scroll = app
+            .assets
+            .startup_dialog_images
+            .get("GUIScroll.png")
+            .expect("pristine startup scroll sheet")
+            .clone();
+        let scenario =
+            resolve_next_mission_scenario(&app.scenario_catalog, "Hazard.c4f/Tutorial.c4s")
+                .expect("Hazard tutorial is present in the real scenario catalog");
+
+        // The user repro: starting any Hazard map used to refuse during
+        // loading with a GlobalGuiBootstrapResources boundary because the
+        // folder's Graphics.c4g overrides GUICaption/GUIScroll/GUIProgress.
+        // C++ instead applies those overrides (C4GraphicsResource::Init →
+        // C4GUI::Resource::Load over the registered set).
+        app.start_scenario(scenario).expect("start Hazard tutorial");
+        wait_for_running_with_attempts(&mut app, 2_400);
+
+        assert!(app.effective_global_gui_failures().is_empty());
+        app.assets
+            .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+            .expect("running Hazard keeps the global GUI bundle boundary-clean");
+        for stem in ["GUICaption", "GUIScroll", "GUIProgress"] {
+            let source = app
+                .assets
+                .active_gui_sheet_sources
+                .get(stem)
+                .unwrap_or_else(|| panic!("{stem} must be rebound while Hazard runs"));
+            assert!(
+                source.contains("Hazard.c4f") && source.contains("Graphics.c4g"),
+                "{stem} must be won by the Hazard folder pack: {source}"
+            );
+        }
+        let running_scroll = app
+            .assets
+            .startup_dialog_images
+            .get("GUIScroll.png")
+            .expect("running scroll sheet")
+            .clone();
+        assert_ne!(
+            running_scroll.pixels(),
+            pristine_scroll.pixels(),
+            "the Hazard scroll sheet must replace the global surface"
+        );
+        assert!(
+            app.assets.message_dialog_resources().is_some(),
+            "running dialogs resolve from the rebound sheets"
+        );
+
+        app.return_to_menu();
+        assert!(app.assets.active_gui_sheet_sources.is_empty());
+        assert_eq!(
+            app.assets
+                .startup_dialog_images
+                .get("GUIScroll.png")
+                .expect("restored scroll sheet")
+                .pixels()
+                .as_ptr(),
+            pristine_scroll.pixels().as_ptr(),
+            "teardown must restore the pristine startup scroll sheet"
+        );
+    }
+
     fn real_tutorial_app(tutorial: u8, player_name: &str) -> RealTutorialApp {
         real_installed_scenario_app(
             &format!("Tutorial.c4f/Tutorial{tutorial:02}.c4s"),
@@ -120035,6 +120277,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             frontend,
             loader_refreshed_resources,
             HashMap::new(),
+            Vec::new(),
             receiver,
         ));
         app.mode = AppMode::Loading;
@@ -120060,7 +120303,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(app.loader_error.is_none());
         assert!(app.active_scenario.is_none());
         assert!(app.active_definition_load.is_none());
-        assert!(app.active_global_gui_overrides.is_empty());
+        assert!(app.active_global_gui_failures.is_empty());
         assert!(app.runtime_client_list.is_none());
         assert_startup_error_log(&app, "controlled local load failure");
         assert_eq!(
@@ -121737,7 +121980,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn staged_host_uses_startup_gui_but_pending_override_beats_start_and_pixels() {
+    fn staged_host_uses_startup_gui_but_pending_failure_beats_start_and_pixels() {
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated staged-host GUI data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -121748,9 +121991,10 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("repository root");
         let mut app = new_menu_app_with_paths(640, 480, &paths);
         let mut staged = prepare_tutorial_host_lobby(&app, repository);
-        let source = "Tutorial01.c4s/Graphics.c4g:GUISpinBoxArrow.bmp".to_string();
+        let source =
+            "Tutorial01.c4s/Graphics.c4g:GUISpinBoxArrow.bmp: not a decodable image".to_string();
         staged
-            .pending_global_gui_overrides
+            .pending_global_gui_failures
             .insert("GUISpinBoxArrow", source.clone());
         app.staged_network_host_scenario = Some(staged);
         install_test_classic_host_lobby(&mut app);
@@ -121767,19 +122011,20 @@ public func Grant(password) { return GainMissionAccess(password); }
                 check_league_rules: true,
                 confirm_unassociated_savegame_players: false,
             }])
-            .expect_err("pending scenario GUI override must beat the Start child");
+            .expect_err("pending scenario GUI failure must beat the Start child");
         assert_engine_parity_boundary(
             error,
             ClassicParityBoundary::GlobalGuiBootstrapResources {
-                issues: vec![ClassicGuiBootstrapIssue::runtime_override(
+                issues: vec![ClassicGuiBootstrapIssue::malformed(
                     "GUISpinBoxArrow",
+                    "a readable selected bmp/jpeg/jpg/png RGBA surface",
                     source,
                 )],
             },
         );
         assert_eq!(app.menu_render_version, version);
         assert!(app.classic_host_lobby.is_some());
-        assert!(app.active_global_gui_overrides.is_empty());
+        assert!(app.active_global_gui_failures.is_empty());
 
         remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
         let cached = vec![0x45; 640 * 480 * 4];
@@ -136761,7 +137006,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.main_menu_state.menu = main_menu;
         app.graphics.set_clonk_fonts(assets.clonk_fonts.clone());
         app.assets = assets;
-        app.active_global_gui_overrides.clear();
+        app.active_global_gui_failures.clear();
         app.menu_frame_cache = None;
         app.menu_backdrop_cache = StartupBackdropCache::default();
         app.mark_menu_dirty();
@@ -142088,34 +142333,35 @@ public func Grant(password) { return GainMissionAccess(password); }
             ImageData::new(0, 360, Vec::new()),
         );
         assets.startup_dialog_images.remove("GUIBigArrows.png");
-        // Insert runtime defects in deliberately reverse/non-oracle order.
-        // C4GUI initialization order, never HashMap insertion order, owns the
-        // aggregate presented to the caller.
-        let mut overrides = HashMap::new();
-        overrides.insert(
+        // Insert active-set failures in deliberately reverse/non-oracle
+        // order. C4GUI initialization order, never HashMap insertion order,
+        // owns the aggregate presented to the caller.
+        let mut failures = HashMap::new();
+        failures.insert(
             "GUISpinBoxArrow",
-            "Scenario.c4s/Graphics.c4g:GUISpinBoxArrow.bmp".to_string(),
+            "Scenario.c4s/Graphics.c4g:GUISpinBoxArrow.bmp: unreadable".to_string(),
         );
-        overrides.insert(
+        failures.insert(
             "FontTitle",
-            "Scenario.c4s/Graphics.c4g:Endeavour.ttf".to_string(),
+            "Scenario.c4s/Graphics.c4g:Endeavour.ttf: unreadable".to_string(),
         );
-        overrides.insert(
+        failures.insert(
             "GUIContext",
-            "Folder.c4f/Graphics.c4g:GUIContext.jpg".to_string(),
+            "Folder.c4f/Graphics.c4g:GUIContext.jpg: unreadable".to_string(),
         );
 
         let error = assets
-            .require_classic_global_gui_bootstrap_resources(&overrides)
+            .require_classic_global_gui_bootstrap_resources(&failures)
             .expect_err("incomplete global GUI bundle must fail as one aggregate");
         assert_eq!(
             error,
             ClassicParityBoundary::GlobalGuiBootstrapResources {
                 issues: vec![
                     ClassicGuiBootstrapIssue::missing("FontRegular"),
-                    ClassicGuiBootstrapIssue::runtime_override(
+                    ClassicGuiBootstrapIssue::malformed(
                         "FontTitle",
-                        "Scenario.c4s/Graphics.c4g:Endeavour.ttf",
+                        "the exact active RX font source",
+                        "Scenario.c4s/Graphics.c4g:Endeavour.ttf: unreadable",
                     ),
                     ClassicGuiBootstrapIssue::missing("FontCaption"),
                     ClassicGuiBootstrapIssue::missing("FontTiny"),
@@ -142126,14 +142372,16 @@ public func Grant(password) { return GainMissionAccess(password); }
                         "a non-empty decoded RGBA surface",
                         "0x360 with 0 bytes",
                     ),
-                    ClassicGuiBootstrapIssue::runtime_override(
+                    ClassicGuiBootstrapIssue::malformed(
                         "GUIContext",
-                        "Folder.c4f/Graphics.c4g:GUIContext.jpg",
+                        "a readable selected bmp/jpeg/jpg/png RGBA surface",
+                        "Folder.c4f/Graphics.c4g:GUIContext.jpg: unreadable",
                     ),
                     ClassicGuiBootstrapIssue::missing("GUIBigArrows"),
-                    ClassicGuiBootstrapIssue::runtime_override(
+                    ClassicGuiBootstrapIssue::malformed(
                         "GUISpinBoxArrow",
-                        "Scenario.c4s/Graphics.c4g:GUISpinBoxArrow.bmp",
+                        "a readable selected bmp/jpeg/jpg/png RGBA surface",
+                        "Scenario.c4s/Graphics.c4g:GUISpinBoxArrow.bmp: unreadable",
                     ),
                 ],
             }
@@ -142228,6 +142476,286 @@ public func Grant(password) { return GainMissionAccess(password); }
                             ClassicGuiBootstrapDefect::Malformed { .. })
             ));
         }
+    }
+
+    fn solid_gui_sheet(pixel: [u8; 4], width: u32, height: u32) -> ImageData {
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..width * height {
+            pixels.extend_from_slice(&pixel);
+        }
+        ImageData::new(width, height, pixels)
+    }
+
+    fn gui_sheet_override(
+        stem: &'static str,
+        canonical_name: &'static str,
+        source: &str,
+        pixel: [u8; 4],
+    ) -> ClassicGuiSheetOverride {
+        ClassicGuiSheetOverride {
+            stem,
+            canonical_name,
+            source: source.to_string(),
+            image: solid_gui_sheet(pixel, 64, 32),
+        }
+    }
+
+    #[test]
+    fn active_scenario_gui_overrides_reach_dialogs_and_script_menus() {
+        let mut app = new_menu_app(320, 200);
+        let pristine_caption = app
+            .assets
+            .startup_dialog_images
+            .get("GUICaption.png")
+            .expect("startup caption sheet")
+            .clone();
+        let pristine_scroll = app
+            .assets
+            .startup_dialog_images
+            .get("GUIScroll.png")
+            .expect("startup scroll sheet")
+            .clone();
+        let overrides = vec![
+            gui_sheet_override(
+                "GUICaption",
+                "GUICaption.png",
+                "Hazard.c4f/Graphics.c4g:GUICaption.png",
+                [0x11, 0x22, 0x33, 0xff],
+            ),
+            gui_sheet_override(
+                "GUIScroll",
+                "GUIScroll.png",
+                "Hazard.c4f/Graphics.c4g:GUIScroll.png",
+                [0x44, 0x55, 0x66, 0xff],
+            ),
+            gui_sheet_override(
+                "GUIProgress",
+                "GUIProgress.png",
+                "Hazard.c4f/Graphics.c4g:GUIProgress.png",
+                [0x77, 0x88, 0x99, 0xff],
+            ),
+        ];
+        app.install_active_gui_sheet_overrides(&overrides);
+
+        // The rebound C4GUI::Resource sheets stay boundary-clean and reach
+        // every reusable running dialog and the script-menu graphics.
+        app.assets
+            .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+            .expect("applied overrides keep the global GUI bundle valid");
+        let message = app
+            .assets
+            .message_dialog_resources()
+            .expect("message dialog resources resolve from the rebound sheets");
+        assert_eq!(message.progress.pixels()[..4], [0x77, 0x88, 0x99, 0xff]);
+        drop(message);
+        app.assets
+            .input_dialog_resources()
+            .expect("input dialog resources resolve from the rebound sheets");
+        assert_eq!(
+            app.assets
+                .startup_dialog_images
+                .get("GUICaption.png")
+                .expect("rebound caption sheet")
+                .pixels()[..4],
+            [0x11, 0x22, 0x33, 0xff],
+            "the caption consumed by every dialog skin must be the override"
+        );
+        let info = app
+            .assets
+            .static_info_dialog_resources()
+            .expect("info dialog resources resolve from the rebound sheets");
+        assert_eq!(info.scroll.pixels()[..4], [0x44, 0x55, 0x66, 0xff]);
+        drop(info);
+        assert_eq!(
+            app.ensure_ingame_menu_gfx()
+                .caption_bar
+                .as_ref()
+                .expect("script menus keep a caption bar")
+                .pixels()[..4],
+            [0x11, 0x22, 0x33, 0xff],
+            "script-menu graphics must read the rebound caption sheet"
+        );
+
+        // Startup teardown (Resource::Clear + CloseFiles) restores the
+        // pristine startup sheets for the next startup generation.
+        app.show_main_menu();
+        assert!(app.assets.active_gui_sheet_sources.is_empty());
+        assert!(app.assets.startup_gui_sheet_images.is_empty());
+        assert_eq!(
+            app.assets
+                .startup_dialog_images
+                .get("GUICaption.png")
+                .expect("restored caption sheet")
+                .pixels()
+                .as_ptr(),
+            pristine_caption.pixels().as_ptr(),
+            "teardown must restore the pristine caption surface"
+        );
+        assert_eq!(
+            app.assets
+                .startup_dialog_images
+                .get("GUIScroll.png")
+                .expect("restored scroll sheet")
+                .pixels()
+                .as_ptr(),
+            pristine_scroll.pixels().as_ptr(),
+            "teardown must restore the pristine scroll surface"
+        );
+        assert!(
+            app.ingame_menu_gfx.is_none(),
+            "cached script-menu graphics must not outlive the rebound sheets"
+        );
+    }
+
+    #[test]
+    fn active_gui_sheet_overrides_rebind_only_when_the_winning_source_changes() {
+        let mut app = new_menu_app(320, 200);
+        let pristine_highlight = app
+            .assets
+            .startup_dialog_images
+            .get("GUIButtonHighlight.png")
+            .expect("startup highlight sheet")
+            .clone();
+
+        let first = vec![gui_sheet_override(
+            "GUIButtonHighlight",
+            "GUIButtonHighlight.png",
+            "Hazard.c4f/Graphics.c4g:GUIButtonHighlight.png",
+            [0x10, 0x20, 0x30, 0xff],
+        )];
+        app.install_active_gui_sheet_overrides(&first);
+        let applied_ptr = app
+            .assets
+            .startup_dialog_images
+            .get("GUIButtonHighlight.png")
+            .expect("applied highlight sheet")
+            .pixels()
+            .as_ptr();
+        assert_eq!(applied_ptr, first[0].image.pixels().as_ptr());
+        assert_eq!(
+            app.assets
+                .button_highlight
+                .as_ref()
+                .expect("derived button highlight")
+                .pixels()[..4],
+            [0x10, 0x20, 0x30, 0xff],
+            "derived highlight state must recompute from the rebound sheet"
+        );
+
+        // A repeated refresh with the same winning source is the C++
+        // group-id cache hit: the surface is not reloaded even though the
+        // refresh decoded a fresh image.
+        let repeat = vec![gui_sheet_override(
+            "GUIButtonHighlight",
+            "GUIButtonHighlight.png",
+            "Hazard.c4f/Graphics.c4g:GUIButtonHighlight.png",
+            [0xa0, 0xb0, 0xc0, 0xff],
+        )];
+        app.install_active_gui_sheet_overrides(&repeat);
+        assert_eq!(
+            app.assets
+                .startup_dialog_images
+                .get("GUIButtonHighlight.png")
+                .expect("cached highlight sheet")
+                .pixels()
+                .as_ptr(),
+            applied_ptr,
+            "an unchanged winning source must not reload the sheet"
+        );
+
+        // A different winning source is a changed group id: reload.
+        let changed = vec![gui_sheet_override(
+            "GUIButtonHighlight",
+            "GUIButtonHighlight.png",
+            "Extra.c4g/Graphics.c4g:GUIButtonHighlight.png",
+            [0xa0, 0xb0, 0xc0, 0xff],
+        )];
+        app.install_active_gui_sheet_overrides(&changed);
+        assert_eq!(
+            app.assets
+                .startup_dialog_images
+                .get("GUIButtonHighlight.png")
+                .expect("reloaded highlight sheet")
+                .pixels()[..4],
+            [0xa0, 0xb0, 0xc0, 0xff],
+            "a changed winning source must rebind the sheet"
+        );
+
+        // A refresh where the global group wins again restores the pristine
+        // surface without waiting for teardown.
+        app.install_active_gui_sheet_overrides(&[]);
+        assert_eq!(
+            app.assets
+                .startup_dialog_images
+                .get("GUIButtonHighlight.png")
+                .expect("restored highlight sheet")
+                .pixels()
+                .as_ptr(),
+            pristine_highlight.pixels().as_ptr(),
+            "losing every override must restore the pristine surface"
+        );
+        assert_eq!(
+            app.assets
+                .button_highlight
+                .as_ref()
+                .expect("restored derived highlight")
+                .pixels()
+                .as_ptr(),
+            pristine_highlight.pixels().as_ptr(),
+            "derived highlight state must follow the restored sheet"
+        );
+        assert!(app.assets.active_gui_sheet_sources.is_empty());
+        assert!(app.assets.startup_gui_sheet_images.is_empty());
+    }
+
+    #[test]
+    fn malformed_active_gui_sheet_override_fails_typed_before_pixels() {
+        let root = tempdir().expect("malformed override fixture");
+        let graphics_child = root.path().join("Scenario.c4s/Graphics.c4g");
+        fs::create_dir_all(&graphics_child).expect("scenario Graphics.c4g");
+        fs::write(graphics_child.join("GUICaption.png"), b"not a png")
+            .expect("write corrupt override");
+        let base_graphics = root.path().join("planet/Graphics.c4g");
+        fs::create_dir_all(&base_graphics).expect("base Graphics.c4g");
+
+        let registrations = vec![LoaderGroupRegistration {
+            priority: 1,
+            registration_order: 0,
+            group: Group::open(root.path().join("Scenario.c4s"))
+                .expect("open scenario registration"),
+        }];
+        let resolution = resolve_classic_global_gui_sheet_overrides(
+            &registrations,
+            &Group::open(&base_graphics).expect("open base graphics"),
+        );
+        assert!(
+            resolution.overrides.is_empty(),
+            "a corrupt override must not be applied"
+        );
+        let failure = resolution
+            .failures
+            .get("GUICaption")
+            .expect("corrupt override is a typed failure");
+        assert!(
+            failure.contains("GUICaption.png"),
+            "the failure must name the winning source: {failure}"
+        );
+
+        let app = new_menu_app(320, 200);
+        let error = app
+            .assets
+            .require_classic_global_gui_bootstrap_resources(&resolution.failures)
+            .expect_err("a corrupt active override must fail before pixels");
+        assert_eq!(
+            error,
+            ClassicParityBoundary::GlobalGuiBootstrapResources {
+                issues: vec![ClassicGuiBootstrapIssue::malformed(
+                    "GUICaption",
+                    "a readable selected bmp/jpeg/jpg/png RGBA surface",
+                    failure.clone(),
+                )],
+            }
+        );
     }
 
     #[test]
@@ -142494,7 +143022,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn loading_refresh_override_latches_before_resources_finished_or_pixels() {
+    fn loading_refresh_failure_latches_before_resources_finished_or_pixels() {
         let mut app = new_classic_menu_app(320, 200);
         app.mode = AppMode::Loading;
         app.loader_error = Some("lower-priority loader failure".to_string());
@@ -142540,15 +143068,16 @@ public func Grant(password) { return GainMissionAccess(password); }
             .clone();
         let resources = app.assets.loader_resources().expect("loader resources");
         let (sender, receiver) = mpsc::channel();
-        let mut overrides = HashMap::new();
-        overrides.insert(
+        let mut failures = HashMap::new();
+        failures.insert(
             "GUISpinBoxArrow",
-            "Scenario.c4s/Graphics.c4g:GUISpinBoxArrow.bmp".to_string(),
+            "Scenario.c4s/Graphics.c4g:GUISpinBoxArrow.bmp: unreadable".to_string(),
         );
         app.loading_state = Some(ScenarioLoadingState::new(
             FrontendScenario::fallback(),
             resources,
-            overrides.clone(),
+            failures.clone(),
+            Vec::new(),
             receiver,
         ));
         sender
@@ -142569,23 +143098,24 @@ public func Grant(password) { return GainMissionAccess(password); }
             frame: cached.clone(),
         });
         let boundary = ClassicParityBoundary::GlobalGuiBootstrapResources {
-            issues: vec![ClassicGuiBootstrapIssue::runtime_override(
+            issues: vec![ClassicGuiBootstrapIssue::malformed(
                 "GUISpinBoxArrow",
-                overrides["GUISpinBoxArrow"].clone(),
+                "a readable selected bmp/jpeg/jpg/png RGBA surface",
+                failures["GUISpinBoxArrow"].clone(),
             )],
         };
         let error = app
             .update()
-            .expect_err("refresh override must fail before resource replacement");
+            .expect_err("refresh failure must fail before resource replacement");
         assert_engine_parity_boundary(error, boundary.clone());
         let state = app.loading_state.as_ref().expect("loading state retained");
         assert!(state.refresh_requested);
         assert!(state.refreshed_resources.is_some());
         assert_eq!(
-            state.refreshed_global_gui_overrides.as_ref(),
-            Some(&overrides)
+            state.refreshed_global_gui_failures.as_ref(),
+            Some(&failures)
         );
-        assert!(app.active_global_gui_overrides.is_empty());
+        assert!(app.active_global_gui_failures.is_empty());
         assert_eq!(app.mode, AppMode::Loading);
         let loader = app
             .loader_screen
@@ -142604,12 +143134,12 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let error = app
             .update()
-            .expect_err("latched override must guard the next update at ingress");
+            .expect_err("latched failure must guard the next update at ingress");
         assert_engine_parity_boundary(error, boundary);
         let mut frame = vec![0x62; 320 * 200 * 4];
         let error = app
             .render(&mut frame)
-            .expect_err("latched override must guard logical loader render");
+            .expect_err("latched failure must guard logical loader render");
         assert!(matches!(
             error.downcast_ref::<ClassicParityBoundary>(),
             Some(ClassicParityBoundary::GlobalGuiBootstrapResources { .. })
@@ -142663,6 +143193,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             frontend,
             refreshed,
             HashMap::new(),
+            Vec::new(),
             receiver,
         ));
         success.mode = AppMode::Loading;
@@ -142686,7 +143217,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .progress(),
             100
         );
-        assert!(success.active_global_gui_overrides.is_empty());
+        assert!(success.active_global_gui_failures.is_empty());
         assert_eq!(
             success
                 .loader_screen
@@ -142713,6 +143244,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             FrontendScenario::fallback(),
             refreshed,
             HashMap::new(),
+            Vec::new(),
             receiver,
         ));
         failure.mode = AppMode::Loading;
@@ -142730,7 +143262,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(failure.loading_state.is_none());
         assert!(failure.loader_screen.is_none());
         assert!(failure.loader_error.is_none());
-        assert!(failure.active_global_gui_overrides.is_empty());
+        assert!(failure.active_global_gui_failures.is_empty());
         assert_startup_error_log(
             &failure,
             "Scenario `Rust Sandbox` is missing a filesystem path",
@@ -146640,6 +147172,7 @@ ScenInfoArea=70,5,25,90
                 FrontendScenario::fallback(),
                 resources,
                 HashMap::new(),
+                Vec::new(),
                 receiver,
             ));
             app.mode = AppMode::Loading;
@@ -146751,6 +147284,7 @@ ScenInfoArea=70,5,25,90
             FrontendScenario::fallback(),
             resources,
             HashMap::new(),
+            Vec::new(),
             receiver,
         ));
         app.mode = AppMode::Loading;
@@ -146835,6 +147369,7 @@ ScenInfoArea=70,5,25,90
             FrontendScenario::fallback(),
             resources,
             HashMap::new(),
+            Vec::new(),
             receiver,
         ));
         app.mode = AppMode::Loading;
@@ -147625,22 +148160,22 @@ ScenInfoArea=70,5,25,90
             .expect("definition-root vector font is ignored");
         for name in CLASSIC_GLOBAL_GUI_FONTS {
             assert!(
-                !setup.refreshed_global_gui_overrides.contains_key(name),
+                !setup.refreshed_global_gui_failures.contains_key(name),
                 "definition-root vector file incorrectly overrode loader {name}"
             );
         }
 
-        let overrides = app
-            .loaded_game_global_gui_overrides(&frontend, Some(&definition_load))
+        let resolution = app
+            .loaded_game_global_gui_resolution(&frontend, Some(&definition_load))
             .expect("resolve saved-game target GUI groups");
         for name in CLASSIC_GLOBAL_GUI_FONTS {
             assert!(
-                !overrides.contains_key(name),
+                !resolution.failures.contains_key(name),
                 "definition-root vector file incorrectly overrode saved target {name}"
             );
         }
         app.assets
-            .require_classic_global_gui_bootstrap_resources(&overrides)
+            .require_classic_global_gui_bootstrap_resources(&resolution.failures)
             .expect("definition-root vector file does not poison global GUI resources");
     }
 
@@ -147925,6 +148460,7 @@ ScenInfoArea=70,5,25,90
             FrontendScenario::fallback(),
             resources,
             HashMap::new(),
+            Vec::new(),
             receiver,
         ));
         let mut reporter = ScenarioLoadingReporter::new(sender);
@@ -178799,7 +179335,8 @@ protected func InputCallback(string answer, int player)
             refreshed_resources: None,
             refreshed_tooltip_font: None,
             refreshed_native_font_source: None,
-            refreshed_global_gui_overrides: None,
+            refreshed_global_gui_failures: None,
+            refreshed_gui_sheet_overrides: None,
             refresh_requested: false,
             receiver,
             finished: false,
@@ -200028,7 +200565,8 @@ func ControlDig() { dig_count = 1; return(1); }
             refreshed_resources: None,
             refreshed_tooltip_font: None,
             refreshed_native_font_source: None,
-            refreshed_global_gui_overrides: None,
+            refreshed_global_gui_failures: None,
+            refreshed_gui_sheet_overrides: None,
             refresh_requested: false,
             receiver,
             finished: false,
@@ -200162,7 +200700,8 @@ func ControlDig() { dig_count = 1; return(1); }
             refreshed_resources: None,
             refreshed_tooltip_font: None,
             refreshed_native_font_source: None,
-            refreshed_global_gui_overrides: None,
+            refreshed_global_gui_failures: None,
+            refreshed_gui_sheet_overrides: None,
             refresh_requested: false,
             receiver,
             finished: false,
@@ -209203,7 +209742,7 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn definition_pack_gui_sheet_enters_the_runtime_override_chain() {
+    fn definition_pack_gui_sheet_wins_the_active_override_selection() {
         let _env_lock = crate::tests::env_lock().lock();
         let root = tempdir().expect("definition GUI fixture");
         let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
@@ -209243,17 +209782,29 @@ func ControlDig() { dig_count = 1; return(1); }
         assert_eq!(registrations[0].priority, 1);
         assert_eq!(registrations[0].group.root(), definition.as_path());
 
-        let overrides = classic_global_gui_runtime_overrides(
+        let resolution = resolve_classic_global_gui_sheet_overrides(
             &registrations,
             &Group::open(&base_graphics).expect("base graphics group"),
         );
+        assert!(
+            resolution.failures.is_empty(),
+            "a decodable definition-pack sheet must not fail: {:?}",
+            resolution.failures
+        );
+        let sheet = resolution
+            .overrides
+            .iter()
+            .find(|sheet| sheet.stem == "GUIBigArrows")
+            .expect("the definition-pack GUI sheet wins over the priority-zero base sheet");
+        assert_eq!(sheet.canonical_name, "GUIBigArrows.png");
         assert_eq!(
-            overrides.get("GUIBigArrows"),
-            Some(&format!(
-                "{}:GUIBigArrows.png",
-                definition_graphics.display()
-            )),
-            "the definition-pack GUI sheet wins over the priority-zero base sheet"
+            sheet.source,
+            format!("{}:GUIBigArrows.png", definition_graphics.display())
+        );
+        assert_eq!(
+            &sheet.image.pixels()[..4],
+            &[0x12, 0x34, 0x56, 0xff],
+            "the applied override carries the winning group's decoded pixels"
         );
     }
 
