@@ -9247,7 +9247,7 @@ fn handle_window_event(
                 && !app.options_keyboard_control_capture_active()
             {
                 app.startup_tooltip.note_non_pointer_input();
-                app.note_classic_host_lobby_non_pointer_input();
+                app.note_classic_lobby_non_pointer_input();
                 if app.mode == AppMode::Menu {
                     app.menu_frame_cache = None;
                 }
@@ -15370,6 +15370,9 @@ struct GameApp {
     /// A paste may close its chat owner on key-down; retain the physical V
     /// until release so the replacement screen cannot receive an orphaned up.
     chat_paste_consumed_keys: HashSet<VirtualKeyCode>,
+    /// C4GUI::Edit retains an equal start/end selection as its hidden drag
+    /// anchor even though the painted selection is empty.
+    lobby_chat_drag_anchor: Option<usize>,
     message_input_history: VecDeque<String>,
     /// `C4Player::ShowStartup` for the local player: device hint + name
     /// until the first control com (src/C4Player.cpp:1376,1735).
@@ -18361,6 +18364,13 @@ impl NetworkLobbyLayout {
 
 #[derive(Clone, Debug)]
 struct NetworkLobbyState {
+    /// The native client constructs one C4GameLobby::MainDlg for the whole
+    /// lobby lifetime. Keep the Rust controller equally persistent so edit
+    /// capture and TextWindow scroll state survive rendering projections.
+    controller: ClassicGameLobby,
+    /// Constructor-only MainDlg inputs are frozen on first projection, just
+    /// as C++ snapshots them when entering DoLobby.
+    controller_initialized: bool,
     participants: BTreeMap<ClientId, LobbyParticipantState>,
     /// Authoritative PlayerInfo projection shared with the host's persistent
     /// controller so peer lobbies converge after the same direct control.
@@ -18392,7 +18402,6 @@ struct NetworkLobbyState {
     selected_title: Option<String>,
     hover_button: Option<LobbyButton>,
     pressed_button: Option<LobbyButton>,
-    sound_events: Vec<LobbySound>,
     /// Raw C++ countdown timer. `None` is the distinguished abort packet;
     /// `Some(0)` is the final start transition.
     countdown: Option<i32>,
@@ -18411,12 +18420,6 @@ enum LobbyAction {
     OpenExternalIrcChat,
     SubmitMessage(String),
     ChatEdited,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum NetworkLobbyContextRequest {
-    Tabs { position: GuiPoint },
-    Roster { row: LobbyRosterId, position: GuiPoint },
 }
 
 const DEFAULT_LOBBY_COUNTDOWN_SECONDS: i32 = 5;
@@ -18651,7 +18654,25 @@ impl NetworkLobbyState {
                 .entry(0)
                 .or_insert_with(|| LobbyParticipantState::new("Host", ParticipantKind::Player));
         }
+        let role = if is_host {
+            LobbyRole::Host
+        } else {
+            LobbyRole::Client
+        };
         Self {
+            controller: ClassicGameLobby::new(
+                role,
+                String::new(),
+                0,
+                1,
+                false,
+                false,
+                false,
+                false,
+                DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+                Vec::new(),
+            ),
+            controller_initialized: false,
             participants,
             roster_rows: Vec::new(),
             client_telemetry: lc_network::RuntimeLobbyClientTelemetry::default(),
@@ -18676,7 +18697,6 @@ impl NetworkLobbyState {
             selected_title: None,
             hover_button: None,
             pressed_button: None,
-            sound_events: Vec::new(),
             countdown: None,
             layout: None,
             pointer: None,
@@ -18690,6 +18710,7 @@ impl NetworkLobbyState {
 
     fn with_preloading(mut self, automatic: bool, labels: LobbyLabels) -> Self {
         self.preload = LobbyPreloadState::new(automatic);
+        self.controller.set_labels(labels.clone());
         self.labels = labels;
         self
     }
@@ -18763,21 +18784,11 @@ impl NetworkLobbyState {
 
     fn handle_panel_pointer_move(&mut self, point: GuiPoint) {
         self.pointer = Some(point);
-        let hovered = self.hit_test_button(point);
-        if self.pressed_button == Some(LobbyButton::Exit)
-            && (self.hover_button == Some(LobbyButton::Exit))
-                != (hovered == Some(LobbyButton::Exit))
-        {
-            self.sound_events.push(LobbySound::ArrowHit);
-        }
-        self.hover_button = hovered;
+        self.hover_button = self.hit_test_button(point);
     }
 
     fn handle_panel_pointer_down(&mut self, point: GuiPoint) {
         self.pressed_button = self.hit_test_button(point);
-        if self.pressed_button == Some(LobbyButton::Exit) {
-            self.sound_events.push(LobbySound::ArrowHit);
-        }
     }
 
     fn handle_panel_pointer_up(&mut self, point: GuiPoint) -> Option<LobbyAction> {
@@ -18785,10 +18796,7 @@ impl NetworkLobbyState {
         let hit = self.hit_test_button(point);
         if pressed.is_some() && hit == pressed {
             match hit {
-                Some(LobbyButton::Exit) => {
-                    self.sound_events.push(LobbySound::Click);
-                    Some(LobbyAction::ExitRequested)
-                }
+                Some(LobbyButton::Exit) => Some(LobbyAction::ExitRequested),
                 Some(LobbyButton::Ready) => Some(LobbyAction::ToggleReady),
                 Some(LobbyButton::Start) => Some(LobbyAction::StartGame),
                 Some(LobbyButton::Preload) => Some(LobbyAction::Preload),
@@ -18808,10 +18816,7 @@ impl NetworkLobbyState {
         self.hover_button = None;
         self.pressed_button = None;
         self.pointer = None;
-    }
-
-    fn take_sound_events(&mut self) -> Vec<LobbySound> {
-        std::mem::take(&mut self.sound_events)
+        self.controller.pointer_left();
     }
 
     fn exit_hotkey(&self) -> Option<char> {
@@ -18900,7 +18905,8 @@ impl NetworkLobbyState {
     }
 
     fn push_log(&mut self, line: LobbyLogLine) {
-        self.logs.push(line);
+        self.logs.push(line.clone());
+        self.controller.push_log(line);
     }
 
     fn note_client_sound(&mut self, client_id: i32, muted: bool) {
@@ -18981,6 +18987,73 @@ impl NetworkLobbyState {
             })
     }
 
+    fn sync_classic_controller(&mut self) {
+        let rows = self.visible_roster_rows();
+        let active_players = rows
+            .iter()
+            .filter(|row| matches!(row, LobbyRosterRow::Player(_)))
+            .count() as i32;
+        if !self.controller_initialized {
+            self.controller = ClassicGameLobby::new(
+                if self.is_host {
+                    LobbyRole::Host
+                } else {
+                    LobbyRole::Client
+                },
+                self.selected_title.clone().unwrap_or_default(),
+                active_players,
+                self.max_players.max(1),
+                self.has_teams,
+                self.has_external_chat,
+                self.resources_loaded,
+                self.local_ready(),
+                DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+                rows.clone(),
+            );
+            self.controller_initialized = true;
+        }
+        self.controller
+            .set_player_count(active_players, self.max_players.max(1));
+        if self.controller.rows() != rows {
+            self.controller.set_rows(rows);
+        }
+        if self.controller.labels() != &self.labels {
+            self.controller.set_labels(self.labels.clone());
+        }
+        self.controller.set_preload_button_state(
+            self.preload.manual_button_present,
+            self.preload.eligible,
+        );
+        self.controller.set_active_sheet(self.active_sheet);
+        if self.controller.scenario_text() != &self.scenario_description.text {
+            self.controller
+                .set_scenario_text(self.scenario_description.text.clone());
+        }
+        self.controller.set_scenario_scroll(self.scenario_scroll);
+        let resource_rows = self.resource_rows.values().cloned().collect::<Vec<_>>();
+        if self.controller.resource_rows() != resource_rows {
+            self.controller.set_resource_rows(resource_rows);
+        }
+        self.controller.set_resource_scroll(self.resource_scroll);
+        if self.controller.resources_loaded() != self.resources_loaded {
+            let _ = self.controller.set_resources_loaded(self.resources_loaded);
+        }
+        self.controller.set_ready(self.local_ready());
+        if self.controller.logs() != self.logs {
+            self.controller.set_logs(self.logs.clone());
+        }
+        if self.controller.chat_edit_view() != &self.chat_edit {
+            self.controller.set_chat_edit_view(self.chat_edit.clone());
+        }
+    }
+
+    fn retain_classic_controller(&mut self, controller: ClassicGameLobby) {
+        self.resource_scroll = controller.resource_scroll();
+        self.scenario_scroll = controller.scenario_scroll();
+        self.chat_edit = controller.chat_edit_view().clone();
+        self.controller = controller;
+    }
+
     fn classic_render_state(
         &mut self,
         surface: &Surface,
@@ -18992,47 +19065,9 @@ impl NetworkLobbyState {
             now.checked_duration_since(*started)
                 .is_none_or(|elapsed| elapsed < Duration::from_secs(1))
         });
-        let role = if self.is_host {
-            LobbyRole::Host
-        } else {
-            LobbyRole::Client
-        };
-        let rows = self.visible_roster_rows();
-        let active_players = rows
-            .iter()
-            .filter(|row| matches!(row, LobbyRosterRow::Player(_)))
-            .count() as i32;
-        let mut controller = ClassicGameLobby::new(
-            role,
-            self.selected_title.clone().unwrap_or_default(),
-            active_players,
-            self.max_players.max(1),
-            self.has_teams,
-            self.has_external_chat,
-            self.resources_loaded,
-            self.local_ready(),
-            DEFAULT_LOBBY_COUNTDOWN_SECONDS,
-            rows,
-        );
-        controller.set_labels(self.labels.clone());
-        controller.set_preload_button_state(
-            self.preload.manual_button_present,
-            self.preload.eligible,
-        );
-        controller.set_active_sheet(self.active_sheet);
-        controller.set_scenario_text(self.scenario_description.text.clone());
-        controller.set_scenario_scroll(self.scenario_scroll);
-        if self.active_sheet == LobbySheet::Resources {
-            controller.set_resource_rows(self.resource_rows.values().cloned().collect());
-            controller.set_resource_scroll(self.resource_scroll);
-        }
-        controller.set_logs(self.logs.clone());
-        controller.set_chat_edit_view(self.chat_edit.clone());
-        if let Some(seconds) = self.countdown {
-            let _ = controller.apply_countdown_packet(
-                lc_frontend::game_lobby::LobbyCountdownPacket::Seconds(seconds),
-            );
-        }
+        self.sync_classic_controller();
+        let role = self.controller.role();
+        let controller = self.controller.clone();
         let fonts = assets
             .clonk_fonts
             .as_deref()
@@ -19052,13 +19087,17 @@ impl NetworkLobbyState {
         Ok((controller, options))
     }
 
-    fn context_request_at(
+    fn with_classic_controller_input<T>(
         &mut self,
-        point: GuiPoint,
         surface: &Surface,
         assets: &FrontendAssets,
         scenario_game_options: &GameOptionButtons,
-    ) -> Result<Option<NetworkLobbyContextRequest>> {
+        input: impl FnOnce(
+            &mut ClassicGameLobby,
+            &LobbyLayout,
+            &LobbyRosterLayout,
+        ) -> T,
+    ) -> Result<T> {
         let fonts = assets
             .clonk_fonts
             .as_deref()
@@ -19066,19 +19105,192 @@ impl NetworkLobbyState {
         let (mut controller, _) =
             self.classic_render_state(surface, assets, scenario_game_options)?;
         let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
+        let _ = controller.chat_scroll_metrics(&layout, &fonts.text);
         let roster = controller.right_list_layout(&layout, fonts);
-        Ok(controller
-            .pointer_secondary_down(point, &layout, &roster)
-            .into_iter()
-            .find_map(|action| match action {
-                ClassicLobbyAction::TabContextRequested { position } => {
-                    Some(NetworkLobbyContextRequest::Tabs { position })
+        let result = input(&mut controller, &layout, &roster);
+        self.retain_classic_controller(controller);
+        Ok(result)
+    }
+
+    fn classic_pointer_move(
+        &mut self,
+        point: GuiPoint,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.pointer = Some(point);
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| controller.pointer_move(point, layout, roster),
+        )
+    }
+
+    fn classic_pointer_down(
+        &mut self,
+        point: GuiPoint,
+        double_click: bool,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| {
+                if double_click {
+                    controller.pointer_double_click(point, layout, roster)
+                } else {
+                    controller.pointer_down(point, layout, roster)
                 }
-                ClassicLobbyAction::RosterContextRequested { row, position } => {
-                    Some(NetworkLobbyContextRequest::Roster { row, position })
+            },
+        )
+    }
+
+    fn classic_pointer_up(
+        &mut self,
+        point: GuiPoint,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| {
+                controller.pointer_up(point, layout, roster, Instant::now())
+            },
+        )
+    }
+
+    fn classic_note_pointer_button(
+        &mut self,
+        point: GuiPoint,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<()> {
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| {
+                controller.note_pointer_button(point, layout, roster);
+            },
+        )
+    }
+
+    fn classic_secondary_down(
+        &mut self,
+        point: GuiPoint,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| {
+                controller.pointer_secondary_down(point, layout, roster)
+            },
+        )
+    }
+
+    fn classic_context_key(
+        &mut self,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| {
+                let actions = controller.chat_context_from_key(layout);
+                if !actions.is_empty() {
+                    return actions;
                 }
-                _ => None,
-            }))
+                let anchor = controller
+                    .selected_roster_id()
+                    .and_then(|selected| {
+                        roster.rows.iter().find(|row_layout| {
+                            controller
+                                .rows()
+                                .get(row_layout.index)
+                                .is_some_and(|row| &row.id() == selected)
+                        })
+                    })
+                    .map(|row| {
+                        GuiPoint::new(
+                            (row.rect.x + row.rect.w / 2) as f32,
+                            (row.rect.y + row.rect.h / 2) as f32,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        GuiPoint::new(
+                            (layout.roster.x + layout.roster.w / 2) as f32,
+                            (layout.roster.y + layout.roster.h / 2) as f32,
+                        )
+                    });
+                controller.request_focused_context(anchor)
+            },
+        )
+    }
+
+    fn classic_hotkey(&mut self, hotkey: char) -> Vec<ClassicLobbyAction> {
+        self.sync_classic_controller();
+        self.controller.hotkey(hotkey, Instant::now())
+    }
+
+    fn classic_middle_down(
+        &mut self,
+        point: GuiPoint,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| {
+                controller.pointer_middle_down(point, layout, roster)
+            },
+        )
+    }
+
+    fn classic_touch(
+        &mut self,
+        phase: TouchPhase,
+        point: GuiPoint,
+        double_click: bool,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<Vec<ClassicLobbyAction>> {
+        self.pointer = (!matches!(phase, TouchPhase::Cancelled)).then_some(point);
+        self.with_classic_controller_input(
+            surface,
+            assets,
+            scenario_game_options,
+            |controller, layout, roster| match phase {
+                TouchPhase::Started if double_click => {
+                    controller.pointer_double_click(point, layout, roster)
+                }
+                TouchPhase::Started => controller.touch_start(point, layout, roster),
+                TouchPhase::Moved => controller.touch_move(point, layout, roster),
+                TouchPhase::Ended => {
+                    controller.touch_end(point, layout, roster, Instant::now())
+                }
+                TouchPhase::Cancelled => controller.touch_cancel(),
+            },
+        )
     }
 
     fn render_classic(
@@ -19113,8 +19325,7 @@ impl NetworkLobbyState {
                 Some(gamma),
             )
         };
-        self.resource_scroll = controller.resource_scroll();
-        self.scenario_scroll = controller.scenario_scroll();
+        self.retain_classic_controller(controller);
         result
     }
 
@@ -19145,15 +19356,9 @@ impl NetworkLobbyState {
         surface: &Surface,
         assets: &FrontendAssets,
         scenario_game_options: &GameOptionButtons,
-    ) -> Result<bool> {
-        if !matches!(
-            self.active_sheet,
-            LobbySheet::Resources | LobbySheet::Scenario
-        ) {
-            return Ok(false);
-        }
+    ) -> Result<(bool, bool)> {
         let Some(point) = self.pointer else {
-            return Ok(false);
+            return Ok((false, false));
         };
         let fonts = assets
             .clonk_fonts
@@ -19162,49 +19367,66 @@ impl NetworkLobbyState {
         let (mut controller, _) =
             self.classic_render_state(surface, assets, scenario_game_options)?;
         let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
+        let _ = controller.chat_scroll_metrics(&layout, &fonts.text);
         let roster = controller.right_list_layout(&layout, fonts);
-        let changed = controller.wheel(point, delta, &layout, &roster);
-        self.resource_scroll = controller.resource_scroll();
-        self.scenario_scroll = controller.scenario_scroll();
-        Ok(changed)
+        let contains = |rect: lc_frontend::classic_gui::IntRect| {
+            point.x >= rect.x as f32
+                && point.y >= rect.y as f32
+                && point.x < (rect.x + rect.w) as f32
+                && point.y < (rect.y + rect.h) as f32
+        };
+        let scroll_window_captured =
+            contains(layout.chat_log_client) || contains(layout.roster_client);
+        controller.note_pointer_wheel();
+        let outside_scroll_window = contains(layout.chat_log)
+            && !contains(layout.chat_log_client)
+            || contains(layout.roster) && !contains(layout.roster_client);
+        let changed = !outside_scroll_window && controller.wheel(point, delta, &layout, &roster);
+        self.retain_classic_controller(controller);
+        Ok((changed, scroll_window_captured))
     }
 
-    fn insert_chat_text(&mut self, text: &str) {
-        lobby_chat_insert_text(&mut self.chat_edit, text);
-    }
-
-    fn browse_chat_history(&mut self, older: bool, history: &VecDeque<String>) {
+    fn browse_chat_history(&mut self, older: bool, history: &VecDeque<String>) -> bool {
         self.chat_history_index += if older { 1 } else { -1 };
+        let horizontal_scroll = self.chat_edit.horizontal_scroll;
         let text = usize::try_from(self.chat_history_index)
             .ok()
             .and_then(|index| history.get(index))
+            .filter(|text| !text.is_empty())
             .cloned();
-        match text {
+        let inserted = match text {
             Some(text) => {
                 self.chat_edit = LobbyChatEditView {
                     caret: text.len(),
                     selection: (!text.is_empty()).then_some((0, text.len())),
                     text,
+                    horizontal_scroll,
                     cursor_visible: true,
-                    ..LobbyChatEditView::default()
                 };
+                true
             }
             None => {
                 self.chat_history_index = -1;
-                self.chat_edit = LobbyChatEditView::default();
+                lobby_chat_clear_preserving_scroll(&mut self.chat_edit);
+                false
             }
-        }
+        };
+        self.controller.set_chat_edit_view(self.chat_edit.clone());
+        inserted
     }
 
     fn take_chat_submission(&mut self) -> String {
-        let text = std::mem::take(&mut self.chat_edit.text);
-        self.chat_edit = LobbyChatEditView::default();
+        let text = self.chat_edit.text.clone();
+        lobby_chat_clear_preserving_scroll(&mut self.chat_edit);
+        self.controller.set_chat_edit_view(self.chat_edit.clone());
         self.chat_history_index = -1;
         text
     }
 
     fn handle_key(&mut self, key: KeyCode, state: ElementState) -> Option<LobbyAction> {
-        if state != ElementState::Pressed {
+        if state != ElementState::Pressed
+            || self.controller.focus() != LobbyControl::ChatInput
+        {
             return None;
         }
         match key {
@@ -19219,7 +19441,7 @@ impl NetworkLobbyState {
                 Some(LobbyAction::ChatEdited)
             }
             KeyCode::Left => {
-                lobby_chat_apply_edit_key(
+                let _ = lobby_chat_apply_edit_key(
                     &mut self.chat_edit,
                     LobbyChatEditKey::Left,
                     LobbyChatKeyModifiers::default(),
@@ -19227,7 +19449,7 @@ impl NetworkLobbyState {
                 Some(LobbyAction::ChatEdited)
             }
             KeyCode::Right => {
-                lobby_chat_apply_edit_key(
+                let _ = lobby_chat_apply_edit_key(
                     &mut self.chat_edit,
                     LobbyChatEditKey::Right,
                     LobbyChatKeyModifiers::default(),
@@ -26154,6 +26376,20 @@ fn lobby_chat_delete_selection(view: &mut LobbyChatEditView) -> bool {
     true
 }
 
+fn lobby_chat_clear_preserving_scroll(view: &mut LobbyChatEditView) {
+    let horizontal_scroll = view.horizontal_scroll;
+    let cursor_visible = if view.text.is_empty() {
+        view.cursor_visible
+    } else {
+        true
+    };
+    *view = LobbyChatEditView {
+        horizontal_scroll,
+        cursor_visible,
+        ..LobbyChatEditView::default()
+    };
+}
+
 fn lobby_chat_context_entries(
     view: &LobbyChatEditView,
     clipboard_available: bool,
@@ -26207,12 +26443,20 @@ fn lobby_chat_context_entries(
     entries
 }
 
-fn lobby_chat_insert_text(view: &mut LobbyChatEditView, text: &str) {
+fn lobby_chat_insert_text_impl(
+    view: &mut LobbyChatEditView,
+    text: &str,
+    preserve_control_characters: bool,
+) -> bool {
     const CPP_EDIT_MAX_BYTES: usize = 254;
     lobby_chat_delete_selection(view);
     let mut remaining = CPP_EDIT_MAX_BYTES.saturating_sub(lc_script::c4_string_byte_len(&view.text));
     let mut sanitized = String::new();
-    for character in text.chars().filter(|character| !character.is_control()) {
+    for character in text
+        .chars()
+        .take_while(|character| *character != '\0')
+        .filter(|character| preserve_control_characters || !character.is_ascii_control())
+    {
         let character = if character == '|' { '¦' } else { character };
         let width = lc_script::c4_string_byte_len(&character.to_string());
         if width > remaining {
@@ -26225,6 +26469,15 @@ fn lobby_chat_insert_text(view: &mut LobbyChatEditView, text: &str) {
     view.caret += sanitized.len();
     view.selection = None;
     view.cursor_visible = true;
+    !sanitized.is_empty()
+}
+
+fn lobby_chat_insert_text(view: &mut LobbyChatEditView, text: &str) -> bool {
+    lobby_chat_insert_text_impl(view, text, false)
+}
+
+fn lobby_chat_insert_pasted_text(view: &mut LobbyChatEditView, text: &str) -> bool {
+    lobby_chat_insert_text_impl(view, text, true)
 }
 
 fn lobby_chat_character_at(
@@ -26244,6 +26497,137 @@ fn lobby_chat_character_at(
     view.text.len()
 }
 
+fn lobby_chat_scroll_caret_in_view(
+    view: &mut LobbyChatEditView,
+    layout: &LobbyLayout,
+    font: &lc_graphics::clonk_font::ClonkFont,
+) {
+    let client_width = (layout.chat_edit.w - 8).max(0);
+    if client_width < 5 {
+        return;
+    }
+    let caret_x = font.measure(&view.text[..view.caret], false).0
+        + font.measure("\u{a6}", false).0 / 2;
+    if caret_x < view.horizontal_scroll && view.horizontal_scroll > 0 {
+        view.horizontal_scroll = caret_x.saturating_sub(2).max(0);
+    }
+    if caret_x > view.horizontal_scroll
+        && caret_x > client_width.saturating_add(view.horizontal_scroll)
+    {
+        view.horizontal_scroll = caret_x.saturating_sub(client_width)
+            + i32::from(view.caret < view.text.len()) * 2;
+    }
+}
+
+fn lobby_chat_pointer_character(
+    view: &LobbyChatEditView,
+    point: GuiPoint,
+    layout: &LobbyLayout,
+    font: &lc_graphics::clonk_font::ClonkFont,
+) -> usize {
+    let control_x = point.x.floor() as i32 - (layout.chat_edit.x + 4)
+        + view.horizontal_scroll;
+    lobby_chat_character_at(view, control_x, font)
+}
+
+fn lobby_chat_apply_pointer_selection(
+    view: &mut LobbyChatEditView,
+    point: GuiPoint,
+    layout: &LobbyLayout,
+    font: &lc_graphics::clonk_font::ClonkFont,
+    begin: bool,
+    retained_anchor: Option<usize>,
+) -> (usize, usize) {
+    let previous_caret = view.caret;
+    let position = lobby_chat_pointer_character(view, point, layout, font);
+    let anchor = if begin {
+        position
+    } else {
+        view.selection
+            .map(|(anchor, _)| anchor)
+            .or(retained_anchor)
+            .unwrap_or(view.caret)
+    };
+    view.caret = position;
+    view.selection = (anchor != position).then_some((anchor, position));
+    view.cursor_visible = true;
+    if previous_caret != position {
+        lobby_chat_scroll_caret_in_view(view, layout, font);
+    }
+    (position, anchor)
+}
+
+fn lobby_chat_apply_double_click(
+    view: &mut LobbyChatEditView,
+    point: GuiPoint,
+    layout: &LobbyLayout,
+    font: &lc_graphics::clonk_font::ClonkFont,
+) {
+    let previous_caret = view.caret;
+    let is_spacer = |character: Option<char>| {
+        character.is_none_or(|character| {
+            character.is_ascii()
+                && !character.is_ascii_alphanumeric()
+                && character != '_'
+        })
+    };
+    let mut position = lobby_chat_pointer_character(view, point, layout, font);
+    let character = view.text[position..].chars().next();
+    if is_spacer(character) {
+        if position == 0 {
+            return;
+        }
+        let previous = lobby_chat_previous_boundary(&view.text, position);
+        if is_spacer(view.text[previous..position].chars().next()) {
+            return;
+        }
+        position = previous;
+    }
+
+    let mut start = position;
+    while start > 0 {
+        let previous = lobby_chat_previous_boundary(&view.text, start);
+        if is_spacer(view.text[previous..start].chars().next()) {
+            break;
+        }
+        start = previous;
+    }
+    let mut end = lobby_chat_next_boundary(&view.text, position);
+    while end < view.text.len() {
+        let next = lobby_chat_next_boundary(&view.text, end);
+        if is_spacer(view.text[end..next].chars().next()) {
+            break;
+        }
+        end = next;
+    }
+    view.caret = end;
+    view.selection = Some((start, end));
+    view.cursor_visible = true;
+    if previous_caret != end {
+        lobby_chat_scroll_caret_in_view(view, layout, font);
+    }
+}
+
+fn lobby_chat_insert_primary_text(view: &mut LobbyChatEditView, text: &str) -> bool {
+    const CPP_EDIT_MAX_BYTES: usize = 254;
+    lobby_chat_delete_selection(view);
+    let mut remaining = CPP_EDIT_MAX_BYTES.saturating_sub(lc_script::c4_string_byte_len(&view.text));
+    let mut inserted = String::new();
+    for character in text.chars().take_while(|character| *character != '\0') {
+        let width = lc_script::c4_string_byte_len(&character.to_string());
+        if width > remaining {
+            break;
+        }
+        inserted.push(character);
+        remaining -= width;
+    }
+    view.text.insert_str(view.caret, &inserted);
+    view.caret += inserted.len();
+    view.selection = None;
+    view.cursor_visible = true;
+    !inserted.is_empty()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LobbyChatPasteMode {
     Lobby,
@@ -26257,24 +26641,35 @@ struct LobbyChatPasteOutcome {
     stopped: bool,
 }
 
+fn lobby_chat_paste_attempts_insertion(clipboard: &str) -> bool {
+    clipboard
+        .split_once('\0')
+        .map_or(clipboard, |(head, _)| head)
+        .chars()
+        .any(|character| !matches!(character, '\r' | '\n'))
+}
+
 fn lobby_chat_paste_text<E>(
     view: &mut LobbyChatEditView,
     clipboard: &str,
     mode: LobbyChatPasteMode,
+    mut scroll_inserted_text: impl FnMut(&mut LobbyChatEditView),
     mut finish_input: impl FnMut(String) -> Result<bool, E>,
 ) -> Result<LobbyChatPasteOutcome, E> {
     let mut outcome = LobbyChatPasteOutcome::default();
-    let mut rest = clipboard;
+    let mut rest = clipboard.split_once('\0').map_or(clipboard, |(head, _)| head);
     while let Some(line_break) = rest.find(['\r', '\n']) {
         if line_break == 0 {
             rest = &rest[1..];
             continue;
         }
-        lobby_chat_insert_text(view, &rest[..line_break]);
+        if lobby_chat_insert_pasted_text(view, &rest[..line_break]) {
+            scroll_inserted_text(view);
+        }
         rest = &rest[line_break + 1..];
         let submission = view.text.clone();
         match mode {
-            LobbyChatPasteMode::Lobby => *view = LobbyChatEditView::default(),
+            LobbyChatPasteMode::Lobby => lobby_chat_clear_preserving_scroll(view),
             LobbyChatPasteMode::Running if !rest.is_empty() => {
                 view.caret = view.text.len();
                 view.selection = (!view.text.is_empty()).then_some((0, view.text.len()));
@@ -26294,7 +26689,9 @@ fn lobby_chat_paste_text<E>(
         }
     }
     if !rest.is_empty() {
-        lobby_chat_insert_text(view, rest);
+        if lobby_chat_insert_pasted_text(view, rest) {
+            scroll_inserted_text(view);
+        }
     }
     Ok(outcome)
 }
@@ -26362,7 +26759,14 @@ fn lobby_chat_apply_edit_key(
     view: &mut LobbyChatEditView,
     key: LobbyChatEditKey,
     modifiers: LobbyChatKeyModifiers,
-) {
+) -> bool {
+    // C4GUI::Edit::KeyCursorOp returns immediately after deleting an active
+    // selection. Every other recognized cursor operation reaches
+    // ScrollCursorInView, even when it does not move the caret.
+    let deleted_selection_without_scroll = matches!(
+        key,
+        LobbyChatEditKey::Backspace | LobbyChatEditKey::Delete
+    ) && lobby_chat_selection(view).is_some();
     let old_caret = view.caret;
     let target = match key {
         LobbyChatEditKey::Left => Some(if modifiers.control {
@@ -26420,6 +26824,7 @@ fn lobby_chat_apply_edit_key(
         }
     }
     view.cursor_visible = true;
+    !deleted_selection_without_scroll
 }
 
 fn legacy_message_whitespace(byte: u8) -> bool {
@@ -27616,6 +28021,7 @@ impl GameApp {
             network_chart_elevated: false,
             running_chat: None,
             chat_paste_consumed_keys: HashSet::new(),
+            lobby_chat_drag_anchor: None,
             message_input_history: VecDeque::new(),
             show_startup_hint: false,
             debug_hud: std::env::var("LC_APP_HUD_DEBUG")
@@ -29736,13 +30142,19 @@ impl GameApp {
             && self.classic_host_lobby.is_some()
     }
 
-    fn note_classic_host_lobby_non_pointer_input(&mut self) {
-        if self.classic_host_lobby_active() {
-            if let Some(lobby) = self.classic_host_lobby.as_mut() {
-                lobby.controller.note_non_pointer_input();
-            }
-            self.scenario_game_options.note_non_pointer_input();
+    fn note_classic_lobby_non_pointer_input(&mut self) {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkLobby {
+            return;
         }
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.note_non_pointer_input();
+        } else if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.sync_classic_controller();
+            lobby.controller.note_non_pointer_input();
+        } else {
+            return;
+        }
+        self.scenario_game_options.note_non_pointer_input();
     }
 
     fn has_or_will_have_network_lobby(&self) -> bool {
@@ -30996,7 +31408,7 @@ impl GameApp {
                 lobby.update_layout(width_f, height_f);
                 lobby.pointer_left();
             }
-            self.cancel_classic_host_lobby_interaction();
+            self.cancel_classic_lobby_interaction();
             if let Some(controller) = self.definition_selector.as_mut() {
                 controller.cancel_interaction();
             }
@@ -31563,7 +31975,7 @@ impl GameApp {
     fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.startup_tooltip.note_non_pointer_input();
-        self.note_classic_host_lobby_non_pointer_input();
+        self.note_classic_lobby_non_pointer_input();
         if let Some(dialog) = self.runtime_client_list.as_mut() {
             dialog.note_non_pointer_input();
         }
@@ -31678,7 +32090,7 @@ impl GameApp {
             // those come from the KEY_Any key binding on physical key-down.
             return Ok(());
         }
-        if self.mode != AppMode::Menu || character.is_control() {
+        if self.mode != AppMode::Menu || character.is_ascii_control() {
             return Ok(());
         }
         if self.startup_dialog_fade_active() {
@@ -31696,12 +32108,16 @@ impl GameApp {
         }
         if self.startup_view == StartupView::NetworkLobby {
             let mut encoded = [0_u8; 4];
-            let text = character.encode_utf8(&mut encoded);
-            if let Some(lobby) = self.network_lobby.as_mut() {
-                lobby.insert_chat_text(text);
-                self.mark_menu_dirty();
-            }
-            return Ok(());
+            let text = character.encode_utf8(&mut encoded).to_string();
+            let actions = self
+                .network_lobby
+                .as_mut()
+                .map(|lobby| {
+                    lobby.sync_classic_controller();
+                    lobby.controller.text_input(text)
+                })
+                .unwrap_or_default();
+            return self.process_joined_lobby_controller_actions(actions);
         }
         if self.startup_view == StartupView::ScenarioBrowser
             && self.menu_state.rename_edit.is_some()
@@ -32840,7 +33256,11 @@ impl GameApp {
                     (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
                 }
             };
-            let changed = match self.network_lobby.as_mut() {
+            if amount == 0 {
+                return Ok(());
+            }
+            self.scenario_game_options.note_pointer_wheel();
+            let (changed, scroll_window_captured) = match self.network_lobby.as_mut() {
                 Some(lobby) => lobby.wheel_right_sheet(
                     amount,
                     self.graphics.surface(),
@@ -32856,9 +33276,14 @@ impl GameApp {
                         ),
                     ))
                 })?,
-                None => false,
+                None => (false, false),
             };
-            if changed {
+            if scroll_window_captured {
+                // C4GUI::ScrollWindow consumes the wheel and clears the
+                // screen's pMouseOver owner until a later pointer event.
+                self.note_classic_lobby_non_pointer_input();
+            }
+            if changed || scroll_window_captured {
                 self.mark_menu_dirty();
             }
             return Ok(());
@@ -38769,7 +39194,7 @@ impl GameApp {
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.startup_tooltip.note_non_pointer_input();
-        self.note_classic_host_lobby_non_pointer_input();
+        self.note_classic_lobby_non_pointer_input();
         if let Some(dialog) = self.runtime_client_list.as_mut() {
             dialog.note_non_pointer_input();
         }
@@ -39383,7 +39808,7 @@ impl GameApp {
             && self.keyboard_modifiers.is_empty()
         {
             if state == ElementState::Pressed {
-                self.handle_network_lobby_secondary_button(ElementState::Pressed)?;
+                self.handle_network_lobby_context_key()?;
             }
             return Ok(());
         }
@@ -39987,9 +40412,7 @@ impl GameApp {
             dialog.controller.cancel_interaction();
         }
         self.scenario_game_options.cancel_interaction();
-        if self.classic_host_lobby_active() {
-            self.cancel_classic_host_lobby_interaction();
-        }
+        self.cancel_classic_lobby_interaction();
         self.message_dialog_consumed_keys.clear();
         self.network_chart_consumed_keys.clear();
         self.runtime_client_list_consumed_keys.clear();
@@ -47873,7 +48296,7 @@ impl GameApp {
         let events = events.into_iter().collect::<Vec<_>>();
         if !events.is_empty() {
             self.startup_tooltip.note_non_pointer_input();
-            self.note_classic_host_lobby_non_pointer_input();
+            self.note_classic_lobby_non_pointer_input();
             if let Some(dialog) = self.runtime_client_list.as_mut() {
                 dialog.note_non_pointer_input();
             }
@@ -48758,7 +49181,7 @@ impl GameApp {
         axis_alias: bool,
     ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
-        self.note_classic_host_lobby_non_pointer_input();
+        self.note_classic_lobby_non_pointer_input();
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.context_menu_pointer_dismissed_lobby_option = None;
         if self.runtime_client_list_keyboard_active()
@@ -48821,8 +49244,11 @@ impl GameApp {
                     pending.controller.cancel_interaction();
                 } else if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
                     pending.controller.pointer_left();
-                } else if self.classic_host_lobby_active() {
-                    self.cancel_classic_host_lobby_interaction();
+                } else if self.mode == AppMode::Menu
+                    && self.startup_view == StartupView::NetworkLobby
+                    && (self.classic_host_lobby.is_some() || self.network_lobby.is_some())
+                {
+                    self.cancel_classic_lobby_interaction();
                 } else if self.mode == AppMode::Menu
                     && self.startup_view == StartupView::ScenarioBrowser
                 {
@@ -50223,10 +50649,7 @@ impl GameApp {
                                     state.menu().handle_pointer_move(point)
                                 }),
                                 LobbyPointerRegion::Panel => {
-                                    lobby.handle_panel_pointer_move(point);
-                                    self.play_network_lobby_sounds();
-                                    self.menu_state.set_pointer_position(None);
-                                    Ok(())
+                                    self.handle_network_lobby_pointer_move(point)
                                 }
                             }
                         } else {
@@ -53311,6 +53734,12 @@ impl GameApp {
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_middle_button(button_state);
         }
+        if self.mode == AppMode::Menu
+            && self.startup_view == StartupView::NetworkLobby
+            && self.network_lobby.is_some()
+        {
+            return self.handle_network_lobby_middle_button(button_state);
+        }
         if self.mode == AppMode::Running {
             if self.scoreboard_contains_running_pointer()? {
                 self.suspend_ingame_pointer_for_gui();
@@ -55199,7 +55628,7 @@ impl GameApp {
             return Ok(());
         }
         if self.classic_host_lobby_active() {
-            return self.handle_classic_lobby_pointer_button(button_state);
+            return self.handle_classic_lobby_pointer_button(button_state, left_double_click);
         }
         match self.mode {
             AppMode::Menu => {
@@ -55530,9 +55959,10 @@ impl GameApp {
                                             lobby.pointer_region(point),
                                             LobbyPointerRegion::Panel
                                         ) {
-                                            lobby.handle_panel_pointer_down(point);
-                                            self.play_network_lobby_sounds();
-                                            return Ok(());
+                                            return self.handle_network_lobby_pointer_button(
+                                                ElementState::Pressed,
+                                                left_double_click,
+                                            );
                                         }
                                     }
                                     if let Some(point) = self.menu_state.pointer_position() {
@@ -55548,12 +55978,10 @@ impl GameApp {
                                             lobby.pointer_region(point),
                                             LobbyPointerRegion::Panel
                                         ) {
-                                            let action = lobby.handle_panel_pointer_up(point);
-                                            self.play_network_lobby_sounds();
-                                            if let Some(action) = action {
-                                                self.process_lobby_action(action)?;
-                                            }
-                                            return Ok(());
+                                            return self.handle_network_lobby_pointer_button(
+                                                ElementState::Released,
+                                                false,
+                                            );
                                         }
                                     }
                                     if let Some(point) = self.menu_state.pointer_position() {
@@ -56316,7 +56744,7 @@ impl GameApp {
         }
         if self.classic_host_lobby_active() {
             self.mark_menu_dirty();
-            return self.handle_classic_lobby_touch(phase, position);
+            return self.handle_classic_lobby_touch(phase, position, left_double_click);
         }
         self.mark_menu_dirty();
         if self.game_over_dialog.is_some() {
@@ -56547,11 +56975,11 @@ impl GameApp {
                                 state.menu().handle_pointer_down(position)
                             }),
                             LobbyPointerRegion::Panel => {
-                                lobby.handle_panel_pointer_move(position);
-                                lobby.handle_panel_pointer_down(position);
-                                self.play_network_lobby_sounds();
-                                self.menu_state.set_pointer_position(None);
-                                Ok(())
+                                self.handle_network_lobby_touch(
+                                    TouchPhase::Started,
+                                    position,
+                                    left_double_click,
+                                )
                             }
                         },
                         TouchPhase::Moved => match lobby.pointer_region(position) {
@@ -56560,10 +56988,11 @@ impl GameApp {
                                 state.menu().handle_pointer_move(position)
                             }),
                             LobbyPointerRegion::Panel => {
-                                lobby.handle_panel_pointer_move(position);
-                                self.play_network_lobby_sounds();
-                                self.menu_state.set_pointer_position(None);
-                                Ok(())
+                                self.handle_network_lobby_touch(
+                                    TouchPhase::Moved,
+                                    position,
+                                    false,
+                                )
                             }
                         },
                         TouchPhase::Ended => match lobby.pointer_region(position) {
@@ -56576,19 +57005,19 @@ impl GameApp {
                                 result
                             }
                             LobbyPointerRegion::Panel => {
-                                lobby.handle_panel_pointer_move(position);
-                                let action = lobby.handle_panel_pointer_up(position);
-                                self.play_network_lobby_sounds();
-                                if let Some(action) = action {
-                                    self.process_lobby_action(action)?;
-                                }
-                                self.pointer_left_unchecked();
-                                Ok(())
+                                self.handle_network_lobby_touch(
+                                    TouchPhase::Ended,
+                                    position,
+                                    false,
+                                )
                             }
                         },
                         TouchPhase::Cancelled => {
-                            self.pointer_left_unchecked();
-                            Ok(())
+                            self.handle_network_lobby_touch(
+                                TouchPhase::Cancelled,
+                                position,
+                                false,
+                            )
                         }
                     }
                 } else {
@@ -56770,11 +57199,8 @@ impl GameApp {
                     self.main_menu_state.pointer_left();
                 }
                 StartupView::NetworkLobby => {
-                    if !self.classic_host_lobby_pointer_left() {
+                    if !self.classic_lobby_pointer_left() {
                         self.menu_state.set_pointer_position(None);
-                        if let Some(lobby) = self.network_lobby.as_mut() {
-                            lobby.pointer_left();
-                        }
                     }
                 }
                 StartupView::Options => {
@@ -56866,7 +57292,7 @@ impl GameApp {
                     self.menu_state.menu().cancel_interaction();
                 }
                 StartupView::NetworkLobby => {
-                    if !self.cancel_classic_host_lobby_interaction() {
+                    if !self.cancel_classic_lobby_interaction() {
                         self.menu_state.menu().cancel_interaction();
                     }
                 }
@@ -60925,7 +61351,7 @@ impl GameApp {
             minimum_width,
         );
         self.startup_tooltip.pointer_left();
-        self.note_classic_host_lobby_non_pointer_input();
+        self.note_classic_lobby_non_pointer_input();
         self.context_menu = Some(menu);
         self.context_menu_lobby_kick_client = None;
         self.context_menu_lobby_player = None;
@@ -63540,7 +63966,7 @@ impl GameApp {
                 }),
                 ContextMenuEvent::Closed => {
                     self.startup_tooltip.pointer_left();
-                    self.note_classic_host_lobby_non_pointer_input();
+                    self.note_classic_lobby_non_pointer_input();
                     self.context_menu = None;
                     self.set_context_menu_lobby_team_player(None);
                     self.set_context_menu_lobby_option(None);
@@ -64141,7 +64567,7 @@ impl GameApp {
         };
         let _ = menu.dismiss(false);
         self.startup_tooltip.pointer_left();
-        self.note_classic_host_lobby_non_pointer_input();
+        self.note_classic_lobby_non_pointer_input();
         self.set_context_menu_lobby_team_player(None);
         self.set_context_menu_lobby_option(None);
         self.context_menu_lobby_kick_client = None;
@@ -66967,33 +67393,54 @@ impl GameApp {
         &mut self,
         packet: lc_network::LobbyCountdownPacket,
     ) {
+        let frontend_packet = if packet.is_abort() {
+            lc_frontend::game_lobby::LobbyCountdownPacket::Abort
+        } else {
+            lc_frontend::game_lobby::LobbyCountdownPacket::Seconds(packet.countdown())
+        };
         if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.apply_lobby_countdown(packet);
         }
-        let actions = self
-            .classic_host_lobby
-            .as_mut()
-            .map(|lobby| {
-                lobby.controller.apply_countdown_packet(if packet.is_abort() {
-                    lc_frontend::game_lobby::LobbyCountdownPacket::Abort
-                } else {
-                    lc_frontend::game_lobby::LobbyCountdownPacket::Seconds(packet.countdown())
-                })
-            })
-            .unwrap_or_default();
+        let actions = if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.apply_countdown_packet(frontend_packet)
+        } else if let Some(lobby) = self.network_lobby.as_mut() {
+            // A joined client owns the same long-lived MainDlg as the host.
+            // Initialize it before applying the packet so the controller,
+            // log, sounds and focus transition all observe the event once.
+            lobby.sync_classic_controller();
+            lobby.controller.apply_countdown_packet(frontend_packet)
+        } else {
+            Vec::new()
+        };
         for action in actions {
             match action {
                 ClassicLobbyAction::CountdownChanged(state) => {
                     self.scenario_game_options.set_countdown(state.is_locked());
                 }
+                ClassicLobbyAction::FocusChanged(control) => {
+                    self.set_active_lobby_chat_focus(control == LobbyControl::ChatInput);
+                    self.scenario_game_options.set_focused_button(match control {
+                        LobbyControl::GameOption(button) => Some(button),
+                        _ => None,
+                    });
+                }
                 ClassicLobbyAction::NotifyUserIfInactive => {
                     self.request_control_message_attention();
                 }
                 ClassicLobbyAction::AppendLog(line) => {
-                    let removed_frontend_copy = self
-                        .classic_host_lobby
-                        .as_mut()
-                        .is_some_and(|lobby| {
+                    let removed_frontend_copy = if let Some(lobby) =
+                        self.classic_host_lobby.as_mut()
+                    {
+                        let mut logs = lobby.controller.logs().to_vec();
+                        if logs.last() != Some(&line) {
+                            false
+                        } else {
+                            logs.pop();
+                            lobby.controller.set_logs(logs);
+                            true
+                        }
+                    } else {
+                        self.network_lobby.as_mut().is_some_and(|lobby| {
                             let mut logs = lobby.controller.logs().to_vec();
                             if logs.last() != Some(&line) {
                                 return false;
@@ -67001,7 +67448,8 @@ impl GameApp {
                             logs.pop();
                             lobby.controller.set_logs(logs);
                             true
-                        });
+                        })
+                    };
                     if removed_frontend_copy {
                         let color = (u32::from(line.color[0]) << 16)
                             | (u32::from(line.color[1]) << 8)
@@ -67213,16 +67661,27 @@ impl GameApp {
     }
 
     fn paste_network_lobby_chat_text(&mut self, text: &str) -> Result<(), EngineError> {
+        if self.network_lobby.is_none() {
+            return Ok(());
+        }
+        let (layout, fonts) = self.active_lobby_chat_scroll_context()?;
         let (mut view, local_client_id) = {
-            let Some(lobby) = self.network_lobby.as_mut() else {
-                return Ok(());
-            };
+            let lobby = self
+                .network_lobby
+                .as_mut()
+                .expect("joined lobby was checked above");
             (std::mem::take(&mut lobby.chat_edit), lobby.local_client_id)
         };
+        if self.lobby_chat_drag_anchor.is_some() && lobby_chat_paste_attempts_insertion(text) {
+            if let Some((anchor, caret)) = view.selection {
+                self.lobby_chat_drag_anchor = Some(anchor.min(caret));
+            }
+        }
         let result = lobby_chat_paste_text(
             &mut view,
             text,
             LobbyChatPasteMode::Lobby,
+            |view| lobby_chat_scroll_caret_in_view(view, &layout, &fonts.text),
             |submission| {
                 self.process_lobby_action(LobbyAction::SubmitMessage(submission))?;
                 Ok(self.startup_view == StartupView::NetworkLobby
@@ -67232,15 +67691,25 @@ impl GameApp {
                         .is_some_and(|lobby| lobby.local_client_id == local_client_id))
             },
         );
-        if let Some(lobby) = self
-            .network_lobby
-            .as_mut()
-            .filter(|lobby| lobby.local_client_id == local_client_id)
-        {
-            lobby.chat_edit = view;
-            if result
+        let completed_lines = result
+            .as_ref()
+            .is_ok_and(|outcome| outcome.completed_lines > 0);
+        if completed_lines && self.lobby_chat_drag_anchor.is_some() {
+            self.lobby_chat_drag_anchor = Some(0);
+        }
+        let still_active = self.startup_view == StartupView::NetworkLobby
+            && self
+                .network_lobby
                 .as_ref()
-                .is_ok_and(|outcome| outcome.completed_lines > 0)
+                .is_some_and(|lobby| lobby.local_client_id == local_client_id);
+        if still_active {
+            self.install_active_lobby_chat_view(view);
+        }
+        if completed_lines {
+            if let Some(lobby) = self
+                .network_lobby
+                .as_mut()
+                .filter(|lobby| lobby.local_client_id == local_client_id)
             {
                 lobby.chat_history_index = -1;
             }
@@ -67267,16 +67736,29 @@ impl GameApp {
         {
             return Ok(false);
         }
-        let hotkey = startup_dialog_hotkey(key);
+        let Some(hotkey) = startup_dialog_hotkey(key) else {
+            return Ok(false);
+        };
         let exit_hotkey = self
             .network_lobby
             .as_ref()
             .and_then(NetworkLobbyState::exit_hotkey);
-        if hotkey.is_none() || hotkey != exit_hotkey {
+        if Some(hotkey) == exit_hotkey {
+            if state == ElementState::Pressed {
+                self.process_lobby_action(LobbyAction::ExitRequested)?;
+            }
+            return Ok(true);
+        }
+        if hotkey != 'T' {
             return Ok(false);
         }
         if state == ElementState::Pressed {
-            self.process_lobby_action(LobbyAction::ExitRequested)?;
+            let actions = self
+                .network_lobby
+                .as_mut()
+                .expect("joined lobby was checked above")
+                .classic_hotkey(hotkey);
+            self.process_joined_lobby_controller_actions(actions)?;
         }
         Ok(true)
     }
@@ -67292,37 +67774,62 @@ impl GameApp {
         {
             return Ok(false);
         }
+        let chat_focused = self.network_lobby.as_mut().is_some_and(|lobby| {
+            lobby.sync_classic_controller();
+            lobby.controller.focus() == LobbyControl::ChatInput
+        });
+        if !chat_focused {
+            return Ok(false);
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         let modifiers = LobbyChatKeyModifiers {
-            shift: self.keyboard_modifiers.shift(),
-            control: self.keyboard_modifiers.ctrl(),
+            shift: c4_modifiers.contains(ModifiersState::SHIFT),
+            control: c4_modifiers.contains(ModifiersState::CTRL),
         };
-        let clipboard = modifiers.control.then(|| match key {
+        let clipboard = (c4_modifiers == ModifiersState::CTRL).then(|| match key {
             VirtualKeyCode::C => Some(LobbyChatClipboardShortcut::Copy),
             VirtualKeyCode::X => Some(LobbyChatClipboardShortcut::Cut),
             VirtualKeyCode::V => Some(LobbyChatClipboardShortcut::Paste),
             VirtualKeyCode::A => Some(LobbyChatClipboardShortcut::SelectAll),
             _ => None,
         });
-        let edit = match key {
-            VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
-            VirtualKeyCode::Right => Some(LobbyChatEditKey::Right),
-            VirtualKeyCode::Home => Some(LobbyChatEditKey::Home),
-            VirtualKeyCode::End => Some(LobbyChatEditKey::End),
-            VirtualKeyCode::Back => Some(LobbyChatEditKey::Backspace),
-            VirtualKeyCode::Delete => Some(LobbyChatEditKey::Delete),
-            _ => None,
-        };
-        let recognized = clipboard.flatten().is_some()
-            || edit.is_some()
-            || matches!(
+        let edit = (!c4_modifiers.contains(ModifiersState::ALT))
+            .then(|| match key {
+                VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
+                VirtualKeyCode::Right => Some(LobbyChatEditKey::Right),
+                VirtualKeyCode::Home => Some(LobbyChatEditKey::Home),
+                VirtualKeyCode::End => Some(LobbyChatEditKey::End),
+                VirtualKeyCode::Back => Some(LobbyChatEditKey::Backspace),
+                VirtualKeyCode::Delete => Some(LobbyChatEditKey::Delete),
+                _ => None,
+            })
+            .flatten();
+        let plain_command = c4_modifiers.is_empty()
+            && matches!(
                 key,
                 VirtualKeyCode::Return
                     | VirtualKeyCode::NumpadEnter
                     | VirtualKeyCode::Up
                     | VirtualKeyCode::Down
             );
+        let recognized = clipboard.flatten().is_some()
+            || edit.is_some()
+            || plain_command;
         if !recognized {
-            return Ok(false);
+            return Ok(matches!(
+                key,
+                VirtualKeyCode::Return
+                    | VirtualKeyCode::NumpadEnter
+                    | VirtualKeyCode::Up
+                    | VirtualKeyCode::Down
+                    | VirtualKeyCode::Left
+                    | VirtualKeyCode::Right
+                    | VirtualKeyCode::Home
+                    | VirtualKeyCode::End
+                    | VirtualKeyCode::Back
+                    | VirtualKeyCode::Delete
+            ));
         }
         if state == ElementState::Released {
             return Ok(true);
@@ -67330,57 +67837,29 @@ impl GameApp {
         if let Some(shortcut) = clipboard.flatten() {
             if shortcut == LobbyChatClipboardShortcut::Paste {
                 self.chat_paste_consumed_keys.insert(key);
-                if let Ok(text) =
-                    arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
-                {
-                    self.paste_network_lobby_chat_text(&text)?;
-                }
-                return Ok(true);
             }
-            let Some(lobby) = self.network_lobby.as_mut() else {
-                return Ok(true);
-            };
-            match shortcut {
-                LobbyChatClipboardShortcut::Copy | LobbyChatClipboardShortcut::Cut => {
-                    if let Some(range) = lobby_chat_selection(&lobby.chat_edit) {
-                        let selected = lobby.chat_edit.text[range].to_string();
-                        let copied = arboard::Clipboard::new()
-                            .and_then(|mut clipboard| clipboard.set_text(selected))
-                            .is_ok();
-                        if copied && shortcut == LobbyChatClipboardShortcut::Cut {
-                            lobby_chat_delete_selection(&mut lobby.chat_edit);
-                        }
-                    }
-                }
-                LobbyChatClipboardShortcut::Paste => unreachable!("paste handled above"),
-                LobbyChatClipboardShortcut::SelectAll => {
-                    lobby.chat_edit.caret = lobby.chat_edit.text.len();
-                    lobby.chat_edit.selection = (!lobby.chat_edit.text.is_empty())
-                        .then_some((0, lobby.chat_edit.caret));
-                }
-            }
+            self.process_classic_lobby_chat_request(LobbyChatRequest::Clipboard { shortcut })?;
             return Ok(true);
         }
         if let Some(edit) = edit {
-            if let Some(lobby) = self.network_lobby.as_mut() {
-                lobby_chat_apply_edit_key(&mut lobby.chat_edit, edit, modifiers);
-            }
+            self.process_classic_lobby_chat_request(LobbyChatRequest::EditKey {
+                key: edit,
+                modifiers,
+            })?;
             return Ok(true);
         }
         match key {
             VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => {
                 let text = self
-                    .network_lobby
-                    .as_mut()
-                    .map(NetworkLobbyState::take_chat_submission)
+                    .active_lobby_chat_view()
+                    .map(|view| view.text)
                     .unwrap_or_default();
-                self.process_lobby_action(LobbyAction::SubmitMessage(text))?;
+                self.process_classic_lobby_chat_request(LobbyChatRequest::Submit(text))?;
             }
             VirtualKeyCode::Up | VirtualKeyCode::Down => {
-                let history = self.message_input_history.clone();
-                if let Some(lobby) = self.network_lobby.as_mut() {
-                    lobby.browse_chat_history(key == VirtualKeyCode::Up, &history);
-                }
+                self.process_classic_lobby_chat_request(LobbyChatRequest::History {
+                    older: key == VirtualKeyCode::Up,
+                })?;
             }
             _ => {}
         }
@@ -67464,7 +67943,10 @@ impl GameApp {
             LobbyAction::SubmitMessage(text) => {
                 if let Some(lobby) = self.network_lobby.as_mut() {
                     lobby.chat_history_index = -1;
-                    lobby.chat_edit = LobbyChatEditView::default();
+                    lobby_chat_clear_preserving_scroll(&mut lobby.chat_edit);
+                    lobby
+                        .controller
+                        .set_chat_edit_view(lobby.chat_edit.clone());
                 }
                 if text.is_empty() {
                     self.play_ui_sound("Error");
@@ -67558,45 +68040,69 @@ impl GameApp {
     }
 
     fn play_network_lobby_sounds(&mut self) {
-        let sounds = self
-            .network_lobby
-            .as_mut()
-            .map(NetworkLobbyState::take_sound_events)
-            .unwrap_or_default();
+        let sounds = self.take_network_lobby_sounds();
         self.play_lobby_sound_events(sounds);
     }
 
-    fn play_classic_lobby_sounds(&mut self) {
-        let sounds = self
-            .classic_host_lobby
+    fn take_network_lobby_sounds(&mut self) -> Vec<LobbySound> {
+        // The retained classic controller is the joined lobby's only live
+        // C4GUI control tree (C4GuiButton.cpp SetDown/SetUp), so it is the
+        // single sound source; the reduced adapter dispatches commands only.
+        self.network_lobby
             .as_mut()
             .map(|state| state.controller.take_sounds())
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    fn play_classic_lobby_sounds(&mut self) {
+        let sounds = if let Some(state) = self.classic_host_lobby.as_mut() {
+            state.controller.take_sounds()
+        } else {
+            self.take_network_lobby_sounds()
+        };
         self.play_lobby_sound_events(sounds);
         let option_sounds = self.scenario_game_options.take_sound_events();
         self.play_game_option_sound_events(option_sounds);
     }
 
-    fn cancel_classic_host_lobby_interaction(&mut self) -> bool {
-        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+    fn cancel_classic_lobby_interaction(&mut self) -> bool {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkLobby {
             return false;
-        };
-        lobby.pointer = None;
-        lobby.last_roster_click = None;
-        lobby.controller.cancel_interaction();
+        }
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.pointer = None;
+            lobby.last_roster_click = None;
+            lobby.controller.cancel_interaction();
+        } else if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.pointer = None;
+            lobby.pressed_button = None;
+            lobby.sync_classic_controller();
+            lobby.controller.cancel_interaction();
+        } else {
+            return false;
+        }
+        self.lobby_chat_drag_anchor = None;
         self.scenario_game_options.cancel_interaction();
         self.play_classic_lobby_sounds();
         self.mark_menu_dirty();
         true
     }
 
-    fn classic_host_lobby_pointer_left(&mut self) -> bool {
-        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+    fn classic_lobby_pointer_left(&mut self) -> bool {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkLobby {
             return false;
-        };
-        lobby.pointer = None;
-        lobby.last_roster_click = None;
-        lobby.controller.pointer_left();
+        }
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.pointer = None;
+            lobby.last_roster_click = None;
+            lobby.controller.pointer_left();
+        } else if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.pointer_left();
+        } else {
+            return false;
+        }
+        self.lobby_chat_drag_anchor = None;
+        self.menu_state.set_pointer_position(None);
         self.scenario_game_options.pointer_left();
         self.play_classic_lobby_sounds();
         self.mark_menu_dirty();
@@ -67768,6 +68274,7 @@ impl GameApp {
             self.mark_menu_dirty();
             match action {
                 ClassicLobbyAction::FocusChanged(control) => {
+                    self.set_active_lobby_chat_focus(control == LobbyControl::ChatInput);
                     let focused = match control {
                         LobbyControl::GameOption(button) => Some(button),
                         _ => None,
@@ -69003,6 +69510,7 @@ impl GameApp {
             lobby.controller.set_logs(Vec::new());
         } else if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.logs.clear();
+            lobby.controller.set_logs(Vec::new());
         }
         self.mark_menu_dirty();
     }
@@ -69400,29 +69908,186 @@ impl GameApp {
         Ok(false)
     }
 
-    fn paste_classic_lobby_chat_text(&mut self, text: &str) -> Result<(), EngineError> {
-        let Some(mut view) = self
-            .classic_host_lobby
+    fn active_lobby_chat_view(&self) -> Option<LobbyChatEditView> {
+        self.classic_host_lobby
             .as_ref()
             .map(|lobby| lobby.controller.chat_edit_view().clone())
-        else {
+            .or_else(|| {
+                (self.startup_view == StartupView::NetworkLobby)
+                    .then(|| {
+                        self.network_lobby
+                            .as_ref()
+                            .map(|lobby| lobby.chat_edit.clone())
+                    })
+                    .flatten()
+            })
+    }
+
+    fn install_active_lobby_chat_view(&mut self, view: LobbyChatEditView) {
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.set_chat_edit_view(view);
+        } else if self.startup_view == StartupView::NetworkLobby {
+            if let Some(lobby) = self.network_lobby.as_mut() {
+                lobby.chat_edit = view.clone();
+                lobby.controller.set_chat_edit_view(view);
+            }
+        }
+    }
+
+    fn set_active_lobby_chat_focus(&mut self, focused: bool) {
+        let Some(mut view) = self.active_lobby_chat_view() else {
+            return;
+        };
+        if self.lobby_chat_drag_anchor.is_some() {
+            self.lobby_chat_drag_anchor = Some(0);
+        }
+        if focused {
+            view.caret = view.text.len();
+            view.selection = (!view.text.is_empty()).then_some((0, view.caret));
+            view.cursor_visible = true;
+        } else {
+            view.selection = None;
+        }
+        self.install_active_lobby_chat_view(view);
+    }
+
+    fn active_lobby_chat_layout(&mut self) -> Result<LobbyLayout, EngineError> {
+        if self.classic_host_lobby_active() {
+            return self.classic_host_lobby_layouts().map(|(layout, _)| layout);
+        }
+        let assets = Arc::clone(&self.assets);
+        let surface = self.graphics.surface();
+        let lobby = self.network_lobby.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model {
+                    detail: "joined lobby state is absent".to_string(),
+                }),
+            ))
+        })?;
+        lobby
+            .with_classic_controller_input(
+                surface,
+                assets.as_ref(),
+                &self.scenario_game_options,
+                |_, layout, _| layout.clone(),
+            )
+            .map_err(|error| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Resources {
+                        detail: error.to_string(),
+                    }),
+                ))
+            })
+    }
+
+    fn scroll_active_lobby_chat_caret_in_view(
+        &mut self,
+        view: &mut LobbyChatEditView,
+    ) -> Result<(), EngineError> {
+        let (layout, fonts) = self.active_lobby_chat_scroll_context()?;
+        lobby_chat_scroll_caret_in_view(view, &layout, &fonts.text);
+        Ok(())
+    }
+
+    fn active_lobby_chat_scroll_context(
+        &mut self,
+    ) -> Result<(LobbyLayout, Arc<lc_frontend::ClonkFontSet>), EngineError> {
+        let layout = self.active_lobby_chat_layout()?;
+        let fonts = self.assets.clonk_fonts.clone().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Resources {
+                    detail: "CStdFont-faithful lobby fonts are unavailable".to_string(),
+                }),
+            ))
+        })?;
+        Ok((layout, fonts))
+    }
+
+    fn apply_active_lobby_chat_pointer_selection(
+        &mut self,
+        point: GuiPoint,
+        begin: bool,
+        release: bool,
+    ) -> Result<(), EngineError> {
+        let retained_anchor = if begin {
+            None
+        } else {
+            self.lobby_chat_drag_anchor
+        };
+        let (layout, fonts) = self.active_lobby_chat_scroll_context()?;
+        let mut view = self.active_lobby_chat_view().unwrap_or_default();
+        let (position, anchor) = lobby_chat_apply_pointer_selection(
+            &mut view,
+            point,
+            &layout,
+            &fonts.text,
+            begin,
+            retained_anchor,
+        );
+        if begin {
+            self.lobby_chat_drag_anchor = Some(position);
+        } else if release {
+            self.lobby_chat_drag_anchor = None;
+        } else {
+            self.lobby_chat_drag_anchor = Some(anchor);
+        }
+        self.install_active_lobby_chat_view(view);
+        Ok(())
+    }
+
+    fn paste_classic_lobby_chat_text(&mut self, text: &str) -> Result<(), EngineError> {
+        let Some(mut view) = self.active_lobby_chat_view() else {
             return Ok(());
         };
+        let (layout, fonts) = self.active_lobby_chat_scroll_context()?;
+        if self.lobby_chat_drag_anchor.is_some() && lobby_chat_paste_attempts_insertion(text) {
+            if let Some((anchor, caret)) = view.selection {
+                self.lobby_chat_drag_anchor = Some(anchor.min(caret));
+            }
+        }
+        let host = self.classic_host_lobby_active();
+        let joined_client = self
+            .network_lobby
+            .as_ref()
+            .map(|lobby| lobby.local_client_id);
         let result = lobby_chat_paste_text(
             &mut view,
             text,
             LobbyChatPasteMode::Lobby,
+            |view| lobby_chat_scroll_caret_in_view(view, &layout, &fonts.text),
             |submission| {
                 self.process_classic_lobby_chat_request(LobbyChatRequest::Submit(submission))?;
-                Ok(self.classic_host_lobby_active())
+                Ok(if host {
+                    self.classic_host_lobby_active()
+                } else {
+                    self.startup_view == StartupView::NetworkLobby
+                        && self
+                            .network_lobby
+                            .as_ref()
+                            .map(|lobby| lobby.local_client_id)
+                            == joined_client
+                })
             },
         );
-        if self.classic_host_lobby_active() {
-            let lobby = self
-                .classic_host_lobby
-                .as_mut()
-                .expect("active classic lobby has state");
-            lobby.controller.set_chat_edit_view(view);
+        if result
+            .as_ref()
+            .is_ok_and(|outcome| outcome.completed_lines > 0)
+            && self.lobby_chat_drag_anchor.is_some()
+        {
+            self.lobby_chat_drag_anchor = Some(0);
+        }
+        let still_active = if host {
+            self.classic_host_lobby_active()
+        } else {
+            self.startup_view == StartupView::NetworkLobby
+                && self
+                    .network_lobby
+                    .as_ref()
+                    .map(|lobby| lobby.local_client_id)
+                    == joined_client
+        };
+        if still_active {
+            self.install_active_lobby_chat_view(view);
         }
         result.map(|_| ())
     }
@@ -69431,41 +70096,60 @@ impl GameApp {
         &mut self,
         request: LobbyChatRequest,
     ) -> Result<(), EngineError> {
-        let current_view = || {
-            self.classic_host_lobby
-                .as_ref()
-                .map(|lobby| lobby.controller.chat_edit_view().clone())
-                .unwrap_or_default()
-        };
-        let install_view = |app: &mut Self, view: LobbyChatEditView| {
-            if let Some(lobby) = app.classic_host_lobby.as_mut() {
-                lobby.controller.set_chat_edit_view(view);
-            }
-        };
         match request {
             LobbyChatRequest::FocusInput => {
-                let mut view = current_view();
+                let mut view = self.active_lobby_chat_view().unwrap_or_default();
+                if self.lobby_chat_drag_anchor.is_some() {
+                    self.lobby_chat_drag_anchor = Some(0);
+                }
                 view.caret = view.text.len();
                 view.selection = (!view.text.is_empty()).then_some((0, view.caret));
                 view.cursor_visible = true;
-                install_view(self, view);
+                self.install_active_lobby_chat_view(view);
             }
             LobbyChatRequest::InsertText(text) => {
-                let mut view = current_view();
-                lobby_chat_insert_text(&mut view, &text);
-                install_view(self, view);
+                let mut view = self.active_lobby_chat_view().unwrap_or_default();
+                if self.lobby_chat_drag_anchor.is_some() {
+                    if let Some((anchor, caret)) = view.selection {
+                        self.lobby_chat_drag_anchor = Some(anchor.min(caret));
+                    }
+                }
+                if lobby_chat_insert_text(&mut view, &text) {
+                    self.scroll_active_lobby_chat_caret_in_view(&mut view)?;
+                }
+                self.install_active_lobby_chat_view(view);
             }
             LobbyChatRequest::RefocusAndInsert(text) => {
-                let mut view = current_view();
+                let mut view = self.active_lobby_chat_view().unwrap_or_default();
+                if self.lobby_chat_drag_anchor.is_some() {
+                    self.lobby_chat_drag_anchor = Some(0);
+                }
                 view.caret = view.text.len();
                 view.selection = (!view.text.is_empty()).then_some((0, view.caret));
-                lobby_chat_insert_text(&mut view, &text);
-                install_view(self, view);
+                if lobby_chat_insert_text(&mut view, &text) {
+                    self.scroll_active_lobby_chat_caret_in_view(&mut view)?;
+                }
+                self.install_active_lobby_chat_view(view);
             }
             LobbyChatRequest::EditKey { key, modifiers } => {
-                let mut view = current_view();
-                lobby_chat_apply_edit_key(&mut view, key, modifiers);
-                install_view(self, view);
+                let mut view = self.active_lobby_chat_view().unwrap_or_default();
+                let old_caret = view.caret;
+                let old_selection = view.selection;
+                if lobby_chat_apply_edit_key(&mut view, key, modifiers) {
+                    self.scroll_active_lobby_chat_caret_in_view(&mut view)?;
+                }
+                if self.lobby_chat_drag_anchor.is_some() {
+                    self.lobby_chat_drag_anchor = match (old_selection, key, modifiers.shift) {
+                        (Some((anchor, caret)), LobbyChatEditKey::Backspace | LobbyChatEditKey::Delete, _) => {
+                            Some(anchor.min(caret))
+                        }
+                        (Some(_), _, false) => Some(0),
+                        (Some((anchor, _)), _, true) => Some(anchor),
+                        (None, _, true) if view.caret != old_caret => Some(old_caret),
+                        _ => self.lobby_chat_drag_anchor,
+                    };
+                }
+                self.install_active_lobby_chat_view(view);
             }
             LobbyChatRequest::Clipboard { shortcut } => {
                 if shortcut == LobbyChatClipboardShortcut::Paste {
@@ -69476,27 +70160,34 @@ impl GameApp {
                     }
                     return Ok(());
                 }
-                let mut view = current_view();
+                let mut view = self.active_lobby_chat_view().unwrap_or_default();
                 match shortcut {
                     LobbyChatClipboardShortcut::Copy | LobbyChatClipboardShortcut::Cut => {
                         if let Some(range) = lobby_chat_selection(&view) {
+                            let selection_start = range.start;
                             let selected = view.text[range].to_string();
                             let copied = arboard::Clipboard::new()
                                 .and_then(|mut clipboard| clipboard.set_text(selected))
                                 .is_ok();
                             if copied && shortcut == LobbyChatClipboardShortcut::Cut {
+                                if self.lobby_chat_drag_anchor.is_some() {
+                                    self.lobby_chat_drag_anchor = Some(selection_start);
+                                }
                                 lobby_chat_delete_selection(&mut view);
                             }
                         }
                     }
                     LobbyChatClipboardShortcut::Paste => unreachable!("paste handled above"),
                     LobbyChatClipboardShortcut::SelectAll => {
+                        if self.lobby_chat_drag_anchor.is_some() {
+                            self.lobby_chat_drag_anchor = Some(0);
+                        }
                         view.caret = view.text.len();
                         view.selection = (!view.text.is_empty()).then_some((0, view.caret));
                     }
                 }
                 view.cursor_visible = true;
-                install_view(self, view);
+                self.install_active_lobby_chat_view(view);
             }
             LobbyChatRequest::ContextCommand(command) => {
                 let shortcut = match command {
@@ -69513,14 +70204,30 @@ impl GameApp {
                         LobbyChatRequest::Clipboard { shortcut },
                     );
                 }
-                let mut view = current_view();
+                let mut view = self.active_lobby_chat_view().unwrap_or_default();
+                if self.lobby_chat_drag_anchor.is_some() {
+                    if let Some(range) = lobby_chat_selection(&view) {
+                        self.lobby_chat_drag_anchor = Some(range.start);
+                    }
+                }
                 lobby_chat_delete_selection(&mut view);
-                install_view(self, view);
+                self.install_active_lobby_chat_view(view);
             }
             LobbyChatRequest::Submit(text) => {
+                if self.lobby_chat_drag_anchor.is_some() {
+                    self.lobby_chat_drag_anchor = Some(0);
+                }
+                if !self.classic_host_lobby_active()
+                    && self.startup_view == StartupView::NetworkLobby
+                    && self.network_lobby.is_some()
+                {
+                    return self.process_lobby_action(LobbyAction::SubmitMessage(text));
+                }
                 if let Some(lobby) = self.classic_host_lobby.as_mut() {
                     lobby.chat_history_index = -1;
-                    lobby.controller.set_chat_draft("");
+                    let mut view = lobby.controller.chat_edit_view().clone();
+                    lobby_chat_clear_preserving_scroll(&mut view);
+                    lobby.controller.set_chat_edit_view(view);
                 }
                 if text.is_empty() {
                     // C4GameLobby::MainDlg::OnChatInput uses GUISound here;
@@ -69562,58 +70269,126 @@ impl GameApp {
                 }
             }
             LobbyChatRequest::History { older } => {
-                let Some(lobby) = self.classic_host_lobby.as_mut() else {
-                    return Ok(());
-                };
-                lobby.chat_history_index += if older { 1 } else { -1 };
-                let text = usize::try_from(lobby.chat_history_index)
-                    .ok()
-                    .and_then(|index| self.message_input_history.get(index))
-                    .cloned();
-                match text {
-                    Some(text) => {
-                        lobby.controller.set_chat_draft(text.clone());
-                        lobby.controller.set_chat_edit_view(LobbyChatEditView {
-                            caret: text.len(),
-                            selection: (!text.is_empty()).then_some((0, text.len())),
-                            text,
-                            cursor_visible: true,
-                            ..LobbyChatEditView::default()
-                        });
-                    }
-                    None => {
-                        lobby.chat_history_index = -1;
-                        lobby.controller.set_chat_draft("");
-                    }
+                if self.lobby_chat_drag_anchor.is_some() {
+                    self.lobby_chat_drag_anchor = Some(0);
                 }
+                if !self.classic_host_lobby_active() {
+                    let history = self.message_input_history.clone();
+                    let view = self.network_lobby.as_mut().map(|lobby| {
+                        let inserted = lobby.browse_chat_history(older, &history);
+                        (lobby.chat_edit.clone(), inserted)
+                    });
+                    if let Some((mut view, inserted)) = view {
+                        if inserted {
+                            self.scroll_active_lobby_chat_caret_in_view(&mut view)?;
+                        }
+                        self.install_active_lobby_chat_view(view);
+                    }
+                    return Ok(());
+                }
+                let (mut view, inserted) = {
+                    let Some(lobby) = self.classic_host_lobby.as_mut() else {
+                        return Ok(());
+                    };
+                    lobby.chat_history_index += if older { 1 } else { -1 };
+                    let horizontal_scroll = lobby.controller.chat_edit_view().horizontal_scroll;
+                    let text = usize::try_from(lobby.chat_history_index)
+                        .ok()
+                        .and_then(|index| self.message_input_history.get(index))
+                        .filter(|text| !text.is_empty())
+                        .cloned();
+                    let (view, inserted) = match text {
+                        Some(text) => {
+                            let view = LobbyChatEditView {
+                                caret: text.len(),
+                                selection: Some((0, text.len())),
+                                text,
+                                horizontal_scroll,
+                                cursor_visible: true,
+                            };
+                            (view, true)
+                        }
+                        None => {
+                            lobby.chat_history_index = -1;
+                            let mut view = lobby.controller.chat_edit_view().clone();
+                            lobby_chat_clear_preserving_scroll(&mut view);
+                            (view, false)
+                        }
+                    };
+                    lobby.controller.set_chat_edit_view(view.clone());
+                    (view, inserted)
+                };
+                if inserted {
+                    self.scroll_active_lobby_chat_caret_in_view(&mut view)?;
+                }
+                self.install_active_lobby_chat_view(view);
             }
             LobbyChatRequest::PointerMiddleDown(point) => {
-                let mut view = current_view();
-                let (layout, _) = self.classic_host_lobby_layouts()?;
-                if let Some(fonts) = self.assets.clonk_fonts.as_deref() {
-                    let control_x = point.x.floor() as i32 - (layout.chat_edit.x + 4)
-                        + view.horizontal_scroll;
-                    view.caret = lobby_chat_character_at(&view, control_x, &fonts.text);
-                    view.selection = None;
-                    view.cursor_visible = true;
-                    install_view(self, view);
+                let layout = self.active_lobby_chat_layout()?;
+                let fonts = self.assets.clonk_fonts.clone().ok_or_else(|| {
+                    classic_parity_engine_error(report_classic_parity_boundary(
+                        ClassicParityBoundary::GameLobby(
+                            ClassicGameLobbyBoundary::Resources {
+                                detail: "CStdFont-faithful lobby fonts are unavailable"
+                                    .to_string(),
+                            },
+                        ),
+                    ))
+                })?;
+                let mut view = self.active_lobby_chat_view().unwrap_or_default();
+                let (position, _) = lobby_chat_apply_pointer_selection(
+                    &mut view,
+                    point,
+                    &layout,
+                    &fonts.text,
+                    true,
+                    None,
+                );
+                if self.lobby_chat_drag_anchor.is_some() {
+                    self.lobby_chat_drag_anchor = Some(position);
                 }
                 if let Some(text) = primary_clipboard_text() {
-                    self.paste_classic_lobby_chat_text(&text)?;
+                    if lobby_chat_insert_primary_text(&mut view, &text) {
+                        lobby_chat_scroll_caret_in_view(&mut view, &layout, &fonts.text);
+                    }
                 }
+                self.install_active_lobby_chat_view(view);
             }
             LobbyChatRequest::OpenContextMenu { anchor } => {
-                let entries =
-                    lobby_chat_context_entries(&current_view(), clipboard_text_available());
+                let entries = lobby_chat_context_entries(
+                    &self.active_lobby_chat_view().unwrap_or_default(),
+                    clipboard_text_available(),
+                );
                 self.open_context_menu_at(entries, anchor)?;
             }
-            LobbyChatRequest::PointerDown(_)
-            | LobbyChatRequest::PointerMove(_)
-            | LobbyChatRequest::PointerUp(_)
-            | LobbyChatRequest::PointerDoubleClick(_)
-            | LobbyChatRequest::TouchCancel => {
-                // The controller already owns focus/capture. Text mutation is
-                // handled by keyboard/clipboard actions above.
+            LobbyChatRequest::PointerDown(point) => {
+                self.apply_active_lobby_chat_pointer_selection(point, true, false)?;
+            }
+            LobbyChatRequest::PointerMove(point) => {
+                self.apply_active_lobby_chat_pointer_selection(point, false, false)?;
+            }
+            LobbyChatRequest::PointerUp(point) => {
+                self.apply_active_lobby_chat_pointer_selection(point, false, true)?;
+            }
+            LobbyChatRequest::PointerDoubleClick(point) => {
+                let layout = self.active_lobby_chat_layout()?;
+                let fonts = self.assets.clonk_fonts.clone().ok_or_else(|| {
+                    classic_parity_engine_error(report_classic_parity_boundary(
+                        ClassicParityBoundary::GameLobby(
+                            ClassicGameLobbyBoundary::Resources {
+                                detail: "CStdFont-faithful lobby fonts are unavailable"
+                                    .to_string(),
+                            },
+                        ),
+                    ))
+                })?;
+                let mut view = self.active_lobby_chat_view().unwrap_or_default();
+                lobby_chat_apply_double_click(&mut view, point, &layout, &fonts.text);
+                self.lobby_chat_drag_anchor = None;
+                self.install_active_lobby_chat_view(view);
+            }
+            LobbyChatRequest::TouchCancel => {
+                self.lobby_chat_drag_anchor = None;
             }
             LobbyChatRequest::OpenExternalDialog => {
                 self.show_external_irc_dialog()?;
@@ -69628,8 +70403,21 @@ impl GameApp {
         state: ElementState,
     ) -> Result<(), EngineError> {
         let (layout, roster) = self.classic_host_lobby_layouts()?;
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         if state == ElementState::Pressed {
-            let chat_actions = if key == VirtualKeyCode::Apps {
+            let chat_focused = self
+                .classic_host_lobby
+                .as_ref()
+                .is_some_and(|lobby| lobby.controller.focus() == LobbyControl::ChatInput);
+            let chat_command_key = matches!(
+                key,
+                VirtualKeyCode::Return
+                    | VirtualKeyCode::NumpadEnter
+                    | VirtualKeyCode::Up
+                    | VirtualKeyCode::Down
+            );
+            let chat_actions = if key == VirtualKeyCode::Apps && c4_modifiers.is_empty() {
                 self.classic_host_lobby
                     .as_ref()
                     .map(|lobby| {
@@ -69664,8 +70452,26 @@ impl GameApp {
                         lobby.controller.request_focused_context(anchor)
                     })
                     .unwrap_or_default()
+            } else if chat_focused && chat_command_key {
+                if c4_modifiers.is_empty() {
+                    map_key_code(key)
+                        .and_then(|key| {
+                            self.classic_host_lobby.as_mut().map(|lobby| {
+                                lobby.controller.key_down(
+                                    key,
+                                    false,
+                                    &layout,
+                                    &roster,
+                                    Instant::now(),
+                                )
+                            })
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
             } else {
-                let shortcut = if self.keyboard_modifiers.ctrl() {
+                let shortcut = if c4_modifiers == ModifiersState::CTRL {
                     match key {
                         VirtualKeyCode::C => Some(LobbyChatClipboardShortcut::Copy),
                         VirtualKeyCode::X => Some(LobbyChatClipboardShortcut::Cut),
@@ -69687,23 +70493,25 @@ impl GameApp {
                     }
                     actions
                 } else {
-                    let edit_key = match key {
-                        VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
-                        VirtualKeyCode::Right => Some(LobbyChatEditKey::Right),
-                        VirtualKeyCode::Home => Some(LobbyChatEditKey::Home),
-                        VirtualKeyCode::End => Some(LobbyChatEditKey::End),
-                        VirtualKeyCode::Back => Some(LobbyChatEditKey::Backspace),
-                        VirtualKeyCode::Delete => Some(LobbyChatEditKey::Delete),
-                        _ => None,
-                    };
+                    let edit_key = (!c4_modifiers.contains(ModifiersState::ALT))
+                        .then(|| match key {
+                            VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
+                            VirtualKeyCode::Right => Some(LobbyChatEditKey::Right),
+                            VirtualKeyCode::Home => Some(LobbyChatEditKey::Home),
+                            VirtualKeyCode::End => Some(LobbyChatEditKey::End),
+                            VirtualKeyCode::Back => Some(LobbyChatEditKey::Backspace),
+                            VirtualKeyCode::Delete => Some(LobbyChatEditKey::Delete),
+                            _ => None,
+                        })
+                        .flatten();
                     edit_key
                         .and_then(|edit_key| {
                             self.classic_host_lobby.as_ref().map(|lobby| {
                                 lobby.controller.chat_edit_key(
                                     edit_key,
                                     LobbyChatKeyModifiers {
-                                        shift: self.keyboard_modifiers.shift(),
-                                        control: self.keyboard_modifiers.ctrl(),
+                                        shift: c4_modifiers.contains(ModifiersState::SHIFT),
+                                        control: c4_modifiers.contains(ModifiersState::CTRL),
                                     },
                                 )
                             })
@@ -69713,6 +70521,9 @@ impl GameApp {
             };
             if !chat_actions.is_empty() {
                 return self.process_classic_lobby_actions(chat_actions);
+            }
+            if chat_focused && chat_command_key {
+                return Ok(());
             }
         }
         let alt_combo_open = state == ElementState::Pressed
@@ -69736,14 +70547,34 @@ impl GameApp {
                     })
                 })
                 .unwrap_or_default()
-        } else if state == ElementState::Pressed && self.keyboard_modifiers.alt() {
-            context_menu_hotkey(key)
+        } else if state == ElementState::Pressed
+            && (c4_modifiers == ModifiersState::ALT
+                || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT))
+        {
+            startup_dialog_hotkey(key)
                 .and_then(|hotkey| {
                     self.classic_host_lobby
                         .as_mut()
                         .map(|lobby| lobby.controller.hotkey(hotkey, Instant::now()))
                 })
                 .unwrap_or_default()
+        } else if state == ElementState::Pressed
+            && c4_modifiers.contains(ModifiersState::ALT)
+            && matches!(
+                key,
+                VirtualKeyCode::Left
+                    | VirtualKeyCode::Right
+                    | VirtualKeyCode::Home
+                    | VirtualKeyCode::End
+                    | VirtualKeyCode::Back
+                    | VirtualKeyCode::Delete
+            )
+            && self
+                .classic_host_lobby
+                .as_ref()
+                .is_some_and(|lobby| lobby.controller.focus() == LobbyControl::ChatInput)
+        {
+            Vec::new()
         } else if let Some(key) = map_key_code(key) {
             match state {
                 ElementState::Pressed => self
@@ -69771,6 +70602,175 @@ impl GameApp {
         self.process_classic_lobby_actions(actions)
     }
 
+    fn process_joined_lobby_controller_actions(
+        &mut self,
+        actions: Vec<ClassicLobbyAction>,
+    ) -> Result<(), EngineError> {
+        for action in actions {
+            self.mark_menu_dirty();
+            match action {
+                ClassicLobbyAction::FocusChanged(control) => {
+                    self.set_active_lobby_chat_focus(control == LobbyControl::ChatInput);
+                }
+                ClassicLobbyAction::Chat(request) => {
+                    self.process_classic_lobby_chat_request(request)?;
+                }
+                ClassicLobbyAction::RosterContextRequested { row, position } => {
+                    self.open_classic_lobby_roster_context(row, position)?;
+                }
+                ClassicLobbyAction::TabContextRequested { position } => {
+                    self.open_lobby_tab_context(position)?;
+                }
+                // The existing joined-lobby adapter still owns non-chat
+                // commands. L168 routes the retained Edit/TextWindow and the
+                // already-landed roster/tab context controls through this
+                // controller without changing other command ownership.
+                _ => {}
+            }
+        }
+        self.play_classic_lobby_sounds();
+        Ok(())
+    }
+
+    fn joined_lobby_input_error(error: anyhow::Error) -> EngineError {
+        classic_parity_engine_error(report_classic_parity_boundary(
+            ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Resources {
+                detail: error.to_string(),
+            }),
+        ))
+    }
+
+    fn handle_network_lobby_pointer_move(
+        &mut self,
+        point: GuiPoint,
+    ) -> Result<(), EngineError> {
+        let assets = Arc::clone(&self.assets);
+        let actions = self
+            .network_lobby
+            .as_mut()
+            .map(|lobby| {
+                lobby.handle_panel_pointer_move(point);
+                lobby.classic_pointer_move(
+                    point,
+                    self.graphics.surface(),
+                    assets.as_ref(),
+                    &self.scenario_game_options,
+                )
+            })
+            .transpose()
+            .map_err(Self::joined_lobby_input_error)?
+            .unwrap_or_default();
+        self.menu_state.set_pointer_position(None);
+        self.process_joined_lobby_controller_actions(actions)
+    }
+
+    fn handle_network_lobby_pointer_button(
+        &mut self,
+        state: ElementState,
+        double_click: bool,
+    ) -> Result<(), EngineError> {
+        let Some(point) = self.network_lobby.as_ref().and_then(|lobby| lobby.pointer) else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        let (actions, reduced_action) = {
+            let lobby = self
+                .network_lobby
+                .as_mut()
+                .expect("joined lobby pointer came from live state");
+            match state {
+                ElementState::Pressed => {
+                    if !double_click {
+                        lobby.handle_panel_pointer_down(point);
+                    }
+                    (
+                        lobby
+                            .classic_pointer_down(
+                                point,
+                                double_click,
+                                self.graphics.surface(),
+                                assets.as_ref(),
+                                &self.scenario_game_options,
+                            )
+                            .map_err(Self::joined_lobby_input_error)?,
+                        None,
+                    )
+                }
+                ElementState::Released => (
+                    lobby
+                        .classic_pointer_up(
+                            point,
+                            self.graphics.surface(),
+                            assets.as_ref(),
+                            &self.scenario_game_options,
+                        )
+                        .map_err(Self::joined_lobby_input_error)?,
+                    lobby.handle_panel_pointer_up(point),
+                ),
+            }
+        };
+        self.process_joined_lobby_controller_actions(actions)?;
+        if let Some(action) = reduced_action {
+            self.process_lobby_action(action)?;
+        }
+        Ok(())
+    }
+
+    fn handle_network_lobby_touch(
+        &mut self,
+        phase: TouchPhase,
+        point: GuiPoint,
+        double_click: bool,
+    ) -> Result<(), EngineError> {
+        let assets = Arc::clone(&self.assets);
+        let (actions, reduced_action) = {
+            let lobby = self
+                .network_lobby
+                .as_mut()
+                .expect("joined lobby touch requires live state");
+            let actions = lobby
+                .classic_touch(
+                    phase,
+                    point,
+                    double_click,
+                    self.graphics.surface(),
+                    assets.as_ref(),
+                    &self.scenario_game_options,
+                )
+                .map_err(Self::joined_lobby_input_error)?;
+            let reduced_action = match phase {
+                TouchPhase::Started if double_click => None,
+                TouchPhase::Started => {
+                    lobby.handle_panel_pointer_move(point);
+                    lobby.handle_panel_pointer_down(point);
+                    None
+                }
+                TouchPhase::Moved => {
+                    lobby.handle_panel_pointer_move(point);
+                    None
+                }
+                TouchPhase::Ended => {
+                    lobby.handle_panel_pointer_move(point);
+                    lobby.handle_panel_pointer_up(point)
+                }
+                TouchPhase::Cancelled => {
+                    lobby.pressed_button = None;
+                    None
+                }
+            };
+            (actions, reduced_action)
+        };
+        self.menu_state.set_pointer_position(None);
+        self.process_joined_lobby_controller_actions(actions)?;
+        if let Some(action) = reduced_action {
+            self.process_lobby_action(action)?;
+        }
+        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.pointer_left_unchecked();
+        }
+        Ok(())
+    }
+
     fn handle_classic_lobby_pointer_move(&mut self, point: GuiPoint) -> Result<(), EngineError> {
         let (layout, roster) = self.classic_host_lobby_layouts()?;
         let actions = self
@@ -69787,6 +70787,7 @@ impl GameApp {
     fn handle_classic_lobby_pointer_button(
         &mut self,
         state: ElementState,
+        double_click: bool,
     ) -> Result<(), EngineError> {
         let Some(point) = self
             .classic_host_lobby
@@ -69800,7 +70801,16 @@ impl GameApp {
             ElementState::Pressed => self
                 .classic_host_lobby
                 .as_mut()
-                .map(|lobby| lobby.controller.pointer_down(point, &layout, &roster))
+                .map(|lobby| {
+                    if double_click {
+                        lobby.last_roster_click = None;
+                        lobby
+                            .controller
+                            .pointer_double_click(point, &layout, &roster)
+                    } else {
+                        lobby.controller.pointer_down(point, &layout, &roster)
+                    }
+                })
                 .unwrap_or_default(),
             ElementState::Released => self
                 .classic_host_lobby
@@ -69874,18 +70884,29 @@ impl GameApp {
         &mut self,
         state: ElementState,
     ) -> Result<(), EngineError> {
-        if state == ElementState::Released {
-            return Ok(());
-        }
         let Some(point) = self.network_lobby.as_ref().and_then(|lobby| lobby.pointer) else {
             return Ok(());
         };
         let assets = Arc::clone(&self.assets);
-        let request = self
+        self.network_lobby
+            .as_mut()
+            .expect("network lobby was checked above")
+            .classic_note_pointer_button(
+                point,
+                self.graphics.surface(),
+                assets.as_ref(),
+                &self.scenario_game_options,
+            )
+            .map_err(Self::joined_lobby_input_error)?;
+        self.scenario_game_options.note_pointer_button();
+        if state == ElementState::Released {
+            return Ok(());
+        }
+        let actions = self
             .network_lobby
             .as_mut()
             .expect("network lobby was checked above")
-            .context_request_at(
+            .classic_secondary_down(
                 point,
                 self.graphics.surface(),
                 assets.as_ref(),
@@ -69898,16 +70919,22 @@ impl GameApp {
                     }),
                 ))
             })?;
-        match request {
-            Some(NetworkLobbyContextRequest::Tabs { position }) => {
-                self.open_lobby_tab_context(position)?;
-            }
-            Some(NetworkLobbyContextRequest::Roster { row, position }) => {
-                self.open_classic_lobby_roster_context(row, position)?;
-            }
-            None => {}
-        }
-        Ok(())
+        self.process_joined_lobby_controller_actions(actions)
+    }
+
+    fn handle_network_lobby_context_key(&mut self) -> Result<(), EngineError> {
+        let assets = Arc::clone(&self.assets);
+        let actions = self
+            .network_lobby
+            .as_mut()
+            .expect("network lobby context key requires live state")
+            .classic_context_key(
+                self.graphics.surface(),
+                assets.as_ref(),
+                &self.scenario_game_options,
+            )
+            .map_err(Self::joined_lobby_input_error)?;
+        self.process_joined_lobby_controller_actions(actions)
     }
 
     fn handle_classic_lobby_middle_button(
@@ -69941,6 +70968,42 @@ impl GameApp {
         self.process_classic_lobby_actions(actions)
     }
 
+    fn handle_network_lobby_middle_button(
+        &mut self,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        let Some(point) = self.network_lobby.as_ref().and_then(|lobby| lobby.pointer) else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        self.network_lobby
+            .as_mut()
+            .expect("network lobby was checked above")
+            .classic_note_pointer_button(
+                point,
+                self.graphics.surface(),
+                assets.as_ref(),
+                &self.scenario_game_options,
+            )
+            .map_err(Self::joined_lobby_input_error)?;
+        self.scenario_game_options.note_pointer_button();
+        if state == ElementState::Released {
+            return Ok(());
+        }
+        let actions = self
+            .network_lobby
+            .as_mut()
+            .expect("network lobby was checked above")
+            .classic_middle_down(
+                point,
+                self.graphics.surface(),
+                assets.as_ref(),
+                &self.scenario_game_options,
+            )
+            .map_err(Self::joined_lobby_input_error)?;
+        self.process_joined_lobby_controller_actions(actions)
+    }
+
     fn handle_classic_lobby_wheel(&mut self, delta: i32) -> Result<(), EngineError> {
         if delta == 0 {
             return Ok(());
@@ -69959,21 +71022,27 @@ impl GameApp {
                 && point.x < (rect.x + rect.w) as f32
                 && point.y < (rect.y + rect.h) as f32
         };
-        let scroll_window_captured = contains(layout.chat_log) || contains(layout.roster);
+        let scroll_window_captured =
+            contains(layout.chat_log_client) || contains(layout.roster_client);
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
             lobby.controller.note_pointer_wheel();
         }
         self.scenario_game_options.note_pointer_wheel();
+        let outside_scroll_window = contains(layout.chat_log)
+            && !contains(layout.chat_log_client)
+            || contains(layout.roster) && !contains(layout.roster_client);
         let scrolled = self
             .classic_host_lobby
             .as_mut()
-            .is_some_and(|lobby| lobby.controller.wheel(point, delta, &layout, &roster));
+            .is_some_and(|lobby| {
+                !outside_scroll_window && lobby.controller.wheel(point, delta, &layout, &roster)
+            });
         if scroll_window_captured {
             // C4GUI::ScrollWindow consumes the wheel and clears the screen's
             // pMouseOver owner. Keep retained positions for integer motion
             // detection, but require a later pointer event before either
             // controller may expose another tooltip.
-            self.note_classic_host_lobby_non_pointer_input();
+            self.note_classic_lobby_non_pointer_input();
         }
         if scrolled || scroll_window_captured {
             self.mark_menu_dirty();
@@ -69985,6 +71054,7 @@ impl GameApp {
         &mut self,
         phase: TouchPhase,
         point: GuiPoint,
+        double_click: bool,
     ) -> Result<(), EngineError> {
         let (layout, roster) = self.classic_host_lobby_layouts()?;
         let actions = self
@@ -69993,6 +71063,9 @@ impl GameApp {
             .map(|lobby| {
                 lobby.pointer = (!matches!(phase, TouchPhase::Cancelled)).then_some(point);
                 match phase {
+                    TouchPhase::Started if double_click => lobby
+                        .controller
+                        .pointer_double_click(point, &layout, &roster),
                     TouchPhase::Started => lobby.controller.touch_start(point, &layout, &roster),
                     TouchPhase::Moved => lobby.controller.touch_move(point, &layout, &roster),
                     TouchPhase::Ended => {
@@ -121948,6 +123021,600 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn joined_lobby_chat_routes_pointer_context_and_log_scroll() {
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        {
+            let lobby = app.network_lobby.as_mut().expect("joined lobby");
+            lobby.chat_edit = LobbyChatEditView {
+                text: "alpha beta".to_string(),
+                caret: 10,
+                cursor_visible: true,
+                ..LobbyChatEditView::default()
+            };
+            for index in 0..80 {
+                lobby.push_log(LobbyLogLine {
+                    text: format!("joined lobby chat line {index}"),
+                    color: [255, 255, 255, 255],
+                });
+            }
+        }
+
+        let assets = Arc::clone(&app.assets);
+        let (layout, max_scroll) = app
+            .network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .with_classic_controller_input(
+                app.graphics.surface(),
+                assets.as_ref(),
+                &app.scenario_game_options,
+                |controller, layout, _| {
+                    let fonts = assets.clonk_fonts.as_deref().expect("classic fonts");
+                    let metrics = controller.chat_scroll_metrics(layout, &fonts.text);
+                    (layout.clone(), metrics.max_scroll)
+                },
+            )
+            .expect("layout retained joined lobby");
+        assert!(max_scroll > 0);
+        let font = &assets.clonk_fonts.as_deref().expect("classic fonts").text;
+        let edit_y = (layout.chat_edit.y + layout.chat_edit.h / 2) as f32;
+        let beta = GuiPoint::new(
+            (layout.chat_edit.x + 4 + font.measure("alpha b", false).0) as f32,
+            edit_y,
+        );
+
+        app.handle_network_lobby_pointer_move(beta)
+            .expect("move into joined edit");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, true)
+            .expect("double click joined edit");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .chat_edit
+                .selection,
+            Some((6, 10)),
+        );
+        let label_point = GuiPoint::new(
+            (layout.chat_label.x + layout.chat_label.w / 2) as f32,
+            (layout.chat_label.y + layout.chat_label.h / 2) as f32,
+        );
+        app.handle_network_lobby_pointer_move(label_point)
+            .expect("move over the already-focused joined chat label");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press the already-focused joined chat label");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("release the already-focused joined chat label");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .chat_edit
+                .selection,
+            Some((6, 10)),
+            "C4GUI::Dialog::SetFocus preserves the edit selection when focus is unchanged",
+        );
+        app.handle_network_lobby_pointer_move(beta)
+            .expect("return to joined edit");
+        app.handle_network_lobby_secondary_button(ElementState::Pressed)
+            .expect("open joined edit context");
+        assert!(app.context_menu.is_some());
+        app.handle_network_lobby_secondary_button(ElementState::Released)
+            .expect("route joined secondary release through CMouse input timing");
+        app.handle_network_lobby_middle_button(ElementState::Released)
+            .expect("route joined middle release through CMouse input timing");
+        app.context_menu = None;
+        app.network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .pointer = None;
+        app.handle_network_lobby_context_key()
+            .expect("Apps opens focused joined edit context without a pointer");
+        assert!(app.context_menu.is_some());
+        app.process_classic_lobby_chat_request(LobbyChatRequest::ContextCommand(
+            LobbyChatContextCommand::Clear,
+        ))
+        .expect("clear joined selection");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .chat_edit
+                .text,
+            "alpha ",
+        );
+        app.context_menu = None;
+
+        let roster_point = GuiPoint::new(
+            (layout.roster_client.x + 2) as f32,
+            (layout.roster_client.y + 2) as f32,
+        );
+        app.handle_network_lobby_pointer_move(roster_point)
+            .expect("move into joined roster");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("focus joined roster");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("release joined roster");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .controller
+                .focus(),
+            LobbyControl::Roster,
+        );
+        app.keyboard_modifiers = ModifiersState::ALT;
+        app.handle_key(VirtualKeyCode::T, ElementState::Pressed)
+            .expect("Alt+T routes through the retained joined lobby label");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .controller
+                .focus(),
+            LobbyControl::ChatInput,
+        );
+        app.keyboard_modifiers = ModifiersState::empty();
+        app.handle_network_lobby_pointer_move(roster_point)
+            .expect("return to the joined roster after mnemonic focus");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press joined roster after mnemonic focus");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("release joined roster after mnemonic focus");
+        app.keyboard_modifiers = ModifiersState::CTRL;
+        assert!(!app
+            .handle_network_lobby_chat_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect("unfocused joined edit rejects Ctrl+A"));
+        app.keyboard_modifiers = ModifiersState::empty();
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .chat_edit
+                .text,
+            "alpha ",
+        );
+        {
+            let lobby = app.network_lobby.as_mut().expect("joined lobby");
+            let caret = lobby.chat_edit.caret;
+            assert_eq!(
+                lobby.handle_key(KeyCode::Enter, ElementState::Pressed),
+                None,
+                "an unfocused joined edit must not submit through the reduced adapter",
+            );
+            assert_eq!(
+                lobby.handle_key(KeyCode::Left, ElementState::Pressed),
+                None,
+                "an unfocused joined edit must not consume cursor keys",
+            );
+            assert_eq!(lobby.chat_edit.caret, caret);
+            assert_eq!(lobby.chat_edit.text, "alpha ");
+        }
+        let unfocused_view = app
+            .network_lobby
+            .as_ref()
+            .expect("joined lobby")
+            .chat_edit
+            .clone();
+        app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+            .expect("full key dispatch leaves the unfocused joined edit alone");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .chat_edit,
+            unfocused_view,
+        );
+        app.handle_network_lobby_pointer_move(beta)
+            .expect("move from the focused roster into joined chat");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, true)
+            .expect("route a global cross-control double click");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .controller
+                .focus(),
+            LobbyControl::Roster,
+            "C4GUI::Edit::LeftDouble does not run the ordinary focus-changing LeftDown path",
+        );
+        app.handle_text_input('z')
+            .expect("ordinary text refocuses joined chat");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .chat_edit
+                .text,
+            "z",
+        );
+        app.handle_text_input('\u{80}')
+            .expect("C++ CharIn accepts a UTF-8 C1 code point");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .chat_edit
+                .text,
+            "z\u{80}",
+        );
+        let exact_modifier_view = app
+            .network_lobby
+            .as_ref()
+            .expect("joined lobby")
+            .chat_edit
+            .clone();
+        for (modifiers, key) in [
+            (ModifiersState::SHIFT, VirtualKeyCode::Return),
+            (ModifiersState::ALT, VirtualKeyCode::Left),
+            (
+                ModifiersState::CTRL | ModifiersState::SHIFT,
+                VirtualKeyCode::A,
+            ),
+            (ModifiersState::CTRL, VirtualKeyCode::Up),
+        ] {
+            app.keyboard_modifiers = modifiers;
+            app.handle_key(key, ElementState::Pressed)
+                .expect("reject an over-modified joined chat binding");
+            assert_eq!(
+                app.network_lobby
+                    .as_ref()
+                    .expect("joined lobby")
+                    .chat_edit,
+                exact_modifier_view,
+            );
+        }
+        app.keyboard_modifiers = ModifiersState::empty();
+
+        let log_point = GuiPoint::new(
+            (layout.chat_log_client.x + 2) as f32,
+            (layout.chat_log_client.y + 2) as f32,
+        );
+        app.handle_network_lobby_pointer_move(log_point)
+            .expect("move over joined chat log");
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
+            .expect("wheel joined chat log");
+        let wheel_scroll = app
+            .network_lobby
+            .as_ref()
+            .expect("joined lobby")
+            .controller
+            .chat_scroll();
+        assert!(wheel_scroll < max_scroll);
+
+        let assets = Arc::clone(&app.assets);
+        app.network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .classic_render_state(
+                app.graphics.surface(),
+                assets.as_ref(),
+                &app.scenario_game_options,
+            )
+            .expect("refresh joined projection");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .controller
+                .chat_scroll(),
+            wheel_scroll,
+            "a frame projection must not repin the retained TextWindow",
+        );
+
+        let scrollbar_start = GuiPoint::new(
+            (layout.chat_log_scrollbar.x + layout.chat_log_scrollbar.w / 2) as f32,
+            (layout.chat_log_scrollbar.y + layout.chat_log_scrollbar.h / 2) as f32,
+        );
+        let scrollbar_end = GuiPoint::new(
+            scrollbar_start.x,
+            (layout.chat_log_scrollbar.y + 17) as f32,
+        );
+        app.handle_network_lobby_touch(TouchPhase::Started, scrollbar_start, false)
+            .expect("start joined scrollbar drag");
+        app.handle_network_lobby_touch(TouchPhase::Moved, scrollbar_end, false)
+            .expect("drag joined scrollbar thumb");
+        app.handle_network_lobby_touch(TouchPhase::Ended, scrollbar_end, false)
+            .expect("release joined scrollbar drag");
+        let scrollbar_scroll = app
+            .network_lobby
+            .as_ref()
+            .expect("joined lobby")
+            .controller
+            .chat_scroll();
+        assert!(scrollbar_scroll < wheel_scroll);
+        let assets = Arc::clone(&app.assets);
+        app.network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .classic_render_state(
+                app.graphics.surface(),
+                assets.as_ref(),
+                &app.scenario_game_options,
+            )
+            .expect("refresh joined projection after scrollbar drag");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .controller
+                .chat_scroll(),
+            scrollbar_scroll,
+        );
+
+        app.handle_network_lobby_touch(TouchPhase::Started, scrollbar_start, false)
+            .expect("start another joined scrollbar capture");
+        app.cancel_underlying_interaction();
+        let cancelled_scroll = app
+            .network_lobby
+            .as_ref()
+            .expect("joined lobby")
+            .controller
+            .chat_scroll();
+        app.handle_network_lobby_touch(TouchPhase::Moved, scrollbar_end, false)
+            .expect("motion after joined capture cancellation");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .controller
+                .chat_scroll(),
+            cancelled_scroll,
+            "an elevated dialog cancellation must not strand the joined TextWindow drag",
+        );
+
+        let drag_start = GuiPoint::new(
+            (layout.chat_edit.x + 4) as f32,
+            edit_y,
+        );
+        let drag_end = GuiPoint::new(
+            (layout.chat_edit.x + layout.chat_edit.w + 40) as f32,
+            edit_y,
+        );
+        app.process_classic_lobby_chat_request(LobbyChatRequest::InsertText(
+            "touch selection".to_string(),
+        ))
+        .expect("seed joined touch selection");
+        app.handle_network_lobby_touch(TouchPhase::Started, drag_start, false)
+            .expect("start joined touch selection");
+        app.handle_network_lobby_touch(TouchPhase::Moved, drag_end, false)
+            .expect("drag joined touch selection outside edit");
+        app.handle_network_lobby_touch(TouchPhase::Cancelled, drag_end, false)
+            .expect("cancel joined touch capture");
+        assert!(
+            lobby_chat_selection(
+                &app.network_lobby
+                    .as_ref()
+                    .expect("joined lobby")
+                    .chat_edit,
+            )
+            .is_some(),
+            "touch cancel releases capture but retains the last selection",
+        );
+
+        app.install_active_lobby_chat_view(LobbyChatEditView::default());
+        app.process_classic_lobby_chat_request(LobbyChatRequest::InsertText("W".repeat(200)))
+            .expect("type a joined draft wider than the C4GUI edit client");
+        assert!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .chat_edit
+                .horizontal_scroll
+                > 0,
+            "user text insertion keeps the C++ caret visible",
+        );
+        app.process_classic_lobby_chat_request(LobbyChatRequest::EditKey {
+            key: LobbyChatEditKey::Home,
+            modifiers: LobbyChatKeyModifiers::default(),
+        })
+        .expect("move the long joined draft caret home");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .chat_edit
+                .horizontal_scroll,
+            (font.measure("\u{a6}", false).0 / 2).saturating_sub(2),
+            "ordinary cursor operations run C4GUI::Edit::ScrollCursorInView",
+        );
+
+        app.install_active_lobby_chat_view(LobbyChatEditView::default());
+        app.paste_classic_lobby_chat_text(&"W".repeat(200))
+            .expect("paste a joined draft wider than the C4GUI edit client");
+        assert!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .chat_edit
+                .horizontal_scroll
+                > 0,
+            "clipboard insertion keeps the C++ caret visible",
+        );
+        let paste_scroll = app
+            .network_lobby
+            .as_ref()
+            .expect("joined lobby")
+            .chat_edit
+            .horizontal_scroll;
+        app.paste_classic_lobby_chat_text("")
+            .expect("route an empty joined paste");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .chat_edit
+                .horizontal_scroll,
+            paste_scroll,
+            "C4GUI::Edit::InsertText returns before scrolling an empty paste",
+        );
+
+        app.install_active_lobby_chat_view(LobbyChatEditView {
+            text: "W".repeat(254),
+            caret: 254,
+            selection: None,
+            horizontal_scroll: 123,
+            cursor_visible: true,
+        });
+        app.process_classic_lobby_chat_request(LobbyChatRequest::InsertText("X".to_string()))
+            .expect("reject joined text beyond the C++ edit capacity");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .chat_edit
+                .horizontal_scroll,
+            123,
+            "a zero-byte C++ insertion preserves retained horizontal scroll",
+        );
+
+        app.message_input_history.clear();
+        app.install_active_lobby_chat_view(LobbyChatEditView {
+            text: "seed".to_string(),
+            caret: 4,
+            selection: None,
+            horizontal_scroll: 37,
+            cursor_visible: true,
+        });
+        app.process_classic_lobby_chat_request(LobbyChatRequest::History { older: true })
+            .expect("browse beyond the joined chat history");
+        let history_view = &app
+            .network_lobby
+            .as_ref()
+            .expect("joined lobby")
+            .chat_edit;
+        assert!(history_view.text.is_empty());
+        assert_eq!(
+            history_view.horizontal_scroll, 37,
+            "C++ history miss clears through DeleteSelection without scrolling",
+        );
+        app.process_classic_lobby_chat_request(LobbyChatRequest::PointerDown(drag_start))
+            .expect("press the unchanged empty-history caret");
+        app.process_classic_lobby_chat_request(LobbyChatRequest::PointerUp(drag_end))
+            .expect("release without an intervening C++ drag update");
+        let unchanged_pointer_view = &app
+            .network_lobby
+            .as_ref()
+            .expect("joined lobby")
+            .chat_edit;
+        assert_eq!(unchanged_pointer_view.caret, 0);
+        assert_eq!(
+            unchanged_pointer_view.horizontal_scroll, 37,
+            "same-caret down/up preserve C++ iXScroll",
+        );
+
+        app.install_active_lobby_chat_view(LobbyChatEditView {
+            text: "alpha".to_string(),
+            caret: 0,
+            cursor_visible: true,
+            ..LobbyChatEditView::default()
+        });
+        app.process_classic_lobby_chat_request(LobbyChatRequest::PointerDown(drag_start))
+            .expect("start a joined selection without moving");
+        app.process_classic_lobby_chat_request(LobbyChatRequest::PointerUp(drag_end))
+            .expect("finish the joined selection at the release coordinate");
+        assert_eq!(
+            lobby_chat_selection(
+                &app.network_lobby
+                    .as_ref()
+                    .expect("joined lobby")
+                    .chat_edit,
+            ),
+            Some(0..5),
+            "C4GUI::Screen::StopDragging applies the final release coordinate",
+        );
+
+        app.install_active_lobby_chat_view(LobbyChatEditView {
+            text: "alpha".to_string(),
+            caret: 0,
+            cursor_visible: true,
+            ..LobbyChatEditView::default()
+        });
+        app.process_classic_lobby_chat_request(LobbyChatRequest::PointerDown(drag_start))
+            .expect("retain an equal C++ drag anchor");
+        app.process_classic_lobby_chat_request(LobbyChatRequest::InsertText("Z".to_string()))
+            .expect("edit while the joined pointer capture remains held");
+        app.process_classic_lobby_chat_request(LobbyChatRequest::PointerMove(drag_end))
+            .expect("continue dragging from the retained C++ anchor");
+        assert_eq!(
+            lobby_chat_selection(
+                &app.network_lobby
+                    .as_ref()
+                    .expect("joined lobby")
+                    .chat_edit,
+            ),
+            Some(0..6),
+        );
+        app.process_classic_lobby_chat_request(LobbyChatRequest::PointerUp(drag_end))
+            .expect("release the retained joined drag anchor");
+
+        app.install_active_lobby_chat_view(LobbyChatEditView {
+            text: "alpha".to_string(),
+            caret: 5,
+            cursor_visible: true,
+            ..LobbyChatEditView::default()
+        });
+        app.process_classic_lobby_chat_request(LobbyChatRequest::PointerDown(drag_end))
+            .expect("start a reverse joined selection");
+        app.process_classic_lobby_chat_request(LobbyChatRequest::PointerMove(drag_start))
+            .expect("drag the joined selection back to the start");
+        app.process_classic_lobby_chat_request(LobbyChatRequest::InsertText("Z".to_string()))
+            .expect("replace the reverse selection while capture remains held");
+        app.process_classic_lobby_chat_request(LobbyChatRequest::PointerMove(drag_end))
+            .expect("continue from DeleteSelection's new native anchor");
+        assert_eq!(
+            lobby_chat_selection(
+                &app.network_lobby
+                    .as_ref()
+                    .expect("joined lobby")
+                    .chat_edit,
+            ),
+            Some(0..1),
+        );
+        app.process_classic_lobby_chat_request(LobbyChatRequest::PointerUp(drag_end))
+            .expect("release the reverse joined selection");
+
+        app.install_active_lobby_chat_view(LobbyChatEditView::default());
+        app.paste_classic_lobby_chat_text(&("W".repeat(200) + "\n"))
+            .expect("paste and submit one long joined line");
+        let completed_line_view = &app
+            .network_lobby
+            .as_ref()
+            .expect("joined lobby")
+            .chat_edit;
+        assert!(completed_line_view.text.is_empty());
+        assert!(
+            completed_line_view.horizontal_scroll > 0,
+            "C++ scrolls each pasted line before clearing it for submission",
+        );
+
+        app.install_active_lobby_chat_view(LobbyChatEditView {
+            text: "submitted".to_string(),
+            caret: 9,
+            selection: None,
+            horizontal_scroll: 61,
+            cursor_visible: false,
+        });
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "submitted".to_string(),
+        ))
+        .expect("submit a joined lobby draft");
+        let submitted_view = &app
+            .network_lobby
+            .as_ref()
+            .expect("joined lobby")
+            .chat_edit;
+        assert!(submitted_view.text.is_empty());
+        assert_eq!(submitted_view.horizontal_scroll, 61);
+        assert!(
+            submitted_view.cursor_visible,
+            "DeleteSelection refreshes the focused caret after nonempty submission",
+        );
+    }
+
+    #[test]
     fn l108_completed_scenario_description_uses_exact_desc_or_title() {
         let app = new_state_only_menu_app(640, 480);
         let directory = tempdir().expect("scenario description fixture");
@@ -124250,23 +125917,23 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         app.handle_classic_lobby_pointer_move(other_point)
             .expect("hover other team header");
-        app.handle_classic_lobby_pointer_button(ElementState::Pressed)
+        app.handle_classic_lobby_pointer_button(ElementState::Pressed, false)
             .expect("press other team header");
         app.handle_classic_lobby_pointer_move(point)
             .expect("drag onto target team header");
-        app.handle_classic_lobby_pointer_button(ElementState::Released)
+        app.handle_classic_lobby_pointer_button(ElementState::Released, false)
             .expect("release canceled cross-row gesture");
-        app.handle_classic_lobby_pointer_button(ElementState::Pressed)
+        app.handle_classic_lobby_pointer_button(ElementState::Pressed, false)
             .expect("press target team header once");
-        app.handle_classic_lobby_pointer_button(ElementState::Released)
+        app.handle_classic_lobby_pointer_button(ElementState::Released, false)
             .expect("release target team header once");
         assert!(
             commands.take_player_info_updates().is_empty(),
             "a drag release must not seed a later single click as a double click"
         );
-        app.handle_classic_lobby_pointer_button(ElementState::Pressed)
+        app.handle_classic_lobby_pointer_button(ElementState::Pressed, false)
             .expect("press target team header twice");
-        app.handle_classic_lobby_pointer_button(ElementState::Released)
+        app.handle_classic_lobby_pointer_button(ElementState::Released, false)
             .expect("release target team header twice");
 
         let mut moved_chooser = chooser.clone();
@@ -125329,8 +126996,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         let mut submissions = Vec::new();
         let outcome = lobby_chat_paste_text(
             &mut view,
-            "x|y",
+            "x|y\t\u{1}",
             LobbyChatPasteMode::Lobby,
+            |_| {},
             |submission| {
                 submissions.push(submission);
                 Ok::<bool, ()>(true)
@@ -125339,9 +127007,14 @@ public func Grant(password) { return GainMissionAccess(password); }
         .expect("infallible paste callback");
         assert_eq!(outcome.completed_lines, 0);
         assert!(submissions.is_empty());
-        assert_eq!(view.text, "abx¦ycd");
-        assert_eq!(view.caret, 6);
+        assert_eq!(view.text, "abx¦y\t\u{1}cd");
+        assert_eq!(view.caret, 8);
         assert_eq!(view.selection, None);
+
+        let mut typed = LobbyChatEditView::default();
+        assert!(!lobby_chat_insert_text(&mut typed, "\t"));
+        assert!(lobby_chat_insert_text(&mut typed, "\u{80}"));
+        assert_eq!(typed.text, "\u{80}");
 
         let mut view = LobbyChatEditView {
             text: "draft".into(),
@@ -125354,6 +127027,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             &mut view,
             "\r\nmore",
             LobbyChatPasteMode::Lobby,
+            |_| {},
             |submission| {
                 submissions.push(submission);
                 Ok::<bool, ()>(true)
@@ -125371,6 +127045,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             &mut view,
             &oversized,
             LobbyChatPasteMode::Lobby,
+            |_| {},
             |submission| {
                 submissions.push(submission);
                 Ok::<bool, ()>(true)
@@ -125389,6 +127064,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             &mut view,
             "one\ntwo\nthree",
             LobbyChatPasteMode::Lobby,
+            |_| {},
             |submission| {
                 submissions.push(submission);
                 Ok::<bool, ()>(true)
@@ -125405,6 +127081,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             &mut view,
             "first\nnever-inserted",
             LobbyChatPasteMode::Lobby,
+            |_| {},
             |submission| {
                 submissions.push(submission);
                 Ok::<bool, ()>(false)
@@ -164829,16 +166506,68 @@ VendorNestedField=discard me\n";
             SocketAddr::from(([127, 0, 0, 1], 11_112)),
             "Client",
         )));
+        app.startup_view = StartupView::NetworkLobby;
+        app.show_log_timestamps = false;
         app.network_lobby = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
 
-        for (countdown, expected) in [(5, Some(5)), (0, Some(0)), (-1, None)] {
+        for (countdown, expected, expected_controller, expected_logs) in [
+            (
+                5,
+                Some(5),
+                lc_frontend::game_lobby::LobbyCountdownState::Final { seconds: 5 },
+                vec!["The game will start in 5 seconds."],
+            ),
+            (
+                0,
+                Some(0),
+                lc_frontend::game_lobby::LobbyCountdownState::Start,
+                vec!["The game will start in 5 seconds."],
+            ),
+            (
+                -1,
+                None,
+                lc_frontend::game_lobby::LobbyCountdownState::None,
+                vec!["The game will start in 5 seconds.", "Game start aborted."],
+            ),
+        ] {
             event_tx
                 .send(NetworkEvent::LobbyCountdown(
                     lc_network::LobbyCountdownPacket::new(countdown),
                 ))
                 .expect("queue lobby countdown");
             app.process_network_events().expect("apply lobby countdown");
-            assert_eq!(app.network_lobby.as_ref().unwrap().countdown, expected);
+            let retained_logs = {
+                let lobby = app.network_lobby.as_ref().expect("joined lobby");
+                assert_eq!(lobby.countdown, expected);
+                assert_eq!(lobby.controller.countdown(), expected_controller);
+                assert_eq!(
+                    lobby.logs.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+                    expected_logs,
+                );
+                assert_eq!(lobby.logs, lobby.controller.logs());
+                lobby.logs.clone()
+            };
+            let assets = Arc::clone(&app.assets);
+            let (projection, _) = app
+                .network_lobby
+                .as_mut()
+                .expect("joined lobby")
+                .classic_render_state(
+                    app.graphics.surface(),
+                    assets.as_ref(),
+                    &app.scenario_game_options,
+                )
+                .expect("project retained joined countdown");
+            assert_eq!(projection.countdown(), expected_controller);
+            assert_eq!(projection.logs(), retained_logs);
+            assert_eq!(
+                app.network_lobby
+                    .as_ref()
+                    .expect("joined lobby")
+                    .controller
+                    .logs(),
+                retained_logs,
+            );
             assert!(matches!(app.mode, AppMode::Menu));
             assert!(app.host_lobby_countdown.is_none());
             assert!(

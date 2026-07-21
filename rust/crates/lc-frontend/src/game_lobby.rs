@@ -3028,11 +3028,14 @@ impl GameLobby {
             }
             HitTarget::ChatLabel => {
                 let changed = self.focus != LobbyControl::ChatInput;
-                self.change_focus(LobbyControl::ChatInput, false);
-                let mut actions = vec![LobbyAction::Chat(LobbyChatRequest::FocusInput)];
-                if changed {
-                    actions.insert(0, LobbyAction::FocusChanged(LobbyControl::ChatInput));
+                if !changed {
+                    return Vec::new();
                 }
+                self.change_focus(LobbyControl::ChatInput, false);
+                let mut actions = vec![
+                    LobbyAction::FocusChanged(LobbyControl::ChatInput),
+                    LobbyAction::Chat(LobbyChatRequest::FocusInput),
+                ];
                 self.append_game_option_focus_clear(previous_focus, &mut actions);
                 return actions;
             }
@@ -3246,17 +3249,9 @@ impl GameLobby {
         self.note_pointer_button(point, layout, roster);
         let hit = self.hovered;
         if hit == HitTarget::ChatInput {
-            let previous = self.focus;
-            let changed = self.focus != LobbyControl::ChatInput;
-            self.change_focus(LobbyControl::ChatInput, false);
-            let mut actions = vec![LobbyAction::Chat(LobbyChatRequest::PointerDoubleClick(
+            vec![LobbyAction::Chat(LobbyChatRequest::PointerDoubleClick(
                 point,
-            ))];
-            if changed {
-                actions.insert(0, LobbyAction::FocusChanged(LobbyControl::ChatInput));
-            }
-            self.append_game_option_focus_clear(previous, &mut actions);
-            actions
+            ))]
         } else if let HitTarget::RosterRow(index) = hit {
             match self.rows.get(index) {
                 Some(LobbyRosterRow::Header(LobbyHeaderRow {
@@ -3606,11 +3601,14 @@ impl GameLobby {
         if hotkey == 'T' {
             let previous = self.focus;
             let changed = self.focus != LobbyControl::ChatInput;
-            self.change_focus(LobbyControl::ChatInput, false);
-            let mut actions = vec![LobbyAction::Chat(LobbyChatRequest::FocusInput)];
-            if changed {
-                actions.insert(0, LobbyAction::FocusChanged(LobbyControl::ChatInput));
+            if !changed {
+                return Vec::new();
             }
+            self.change_focus(LobbyControl::ChatInput, false);
+            let mut actions = vec![
+                LobbyAction::FocusChanged(LobbyControl::ChatInput),
+                LobbyAction::Chat(LobbyChatRequest::FocusInput),
+            ];
             self.append_game_option_focus_clear(previous, &mut actions);
             return actions;
         }
@@ -8135,6 +8133,53 @@ mod tests {
         lobby.focus = LobbyControl::Exit;
         assert!(lobby.text_input(" ").is_empty());
         assert_eq!(lobby.focus(), LobbyControl::Exit);
+    }
+
+    #[test]
+    fn chat_label_and_double_click_preserve_cpp_focus_semantics() {
+        let mut lobby = lobby(LobbyRole::Host, vec![]);
+        let layout = game_lobby_layout(1280, 720, 34, 22, LobbyRole::Host, false, false);
+        let roster = lobby.roster_layout(&layout, 22);
+        let label = GuiPoint::new(
+            (layout.chat_label.x + 1) as f32,
+            (layout.chat_label.y + 1) as f32,
+        );
+        let edit = GuiPoint::new(
+            (layout.chat_edit.x + 1) as f32,
+            (layout.chat_edit.y + 1) as f32,
+        );
+
+        lobby.set_chat_edit_view(LobbyChatEditView {
+            text: "word".into(),
+            caret: 3,
+            selection: Some((0, 3)),
+            horizontal_scroll: 0,
+            cursor_visible: true,
+        });
+        let edit_view = lobby.chat_edit.clone();
+        assert_eq!(lobby.focus(), LobbyControl::ChatInput);
+        assert!(lobby.pointer_down(label, &layout, &roster).is_empty());
+        assert!(lobby.hotkey('T', Instant::now()).is_empty());
+        assert_eq!(lobby.chat_edit, edit_view);
+
+        lobby.focus = LobbyControl::Exit;
+        assert_eq!(
+            lobby.pointer_down(label, &layout, &roster),
+            [
+                LobbyAction::FocusChanged(LobbyControl::ChatInput),
+                LobbyAction::Chat(LobbyChatRequest::FocusInput)
+            ]
+        );
+        assert_eq!(lobby.focus(), LobbyControl::ChatInput);
+
+        lobby.focus = LobbyControl::Roster;
+        assert_eq!(
+            lobby.pointer_double_click(edit, &layout, &roster),
+            [LobbyAction::Chat(LobbyChatRequest::PointerDoubleClick(
+                edit
+            ))]
+        );
+        assert_eq!(lobby.focus(), LobbyControl::Roster);
     }
 
     #[test]
