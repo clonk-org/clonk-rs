@@ -4861,8 +4861,7 @@ impl Landscape {
         let max_slide = materials
             .get_by_id(material)
             .map(|mat| mat.max_slide())
-            .unwrap_or(0)
-            .max(0);
+            .unwrap_or(0);
         loop {
             let mut slide_direction: Option<(i32, i32)> = None;
             let mut left_active = true;
@@ -10416,6 +10415,71 @@ func TransactionThenRaw()
         // counts any nonzero density, liquids included).
         landscape.set_liquid_column(40, vec![LiquidSegment::with_material(5, 8, Some(water))]);
         assert!(!landscape.path_free(5, 5, 60, 10, &materials));
+    }
+
+    #[test]
+    fn negative_max_slide_skips_cslide_zero_find_mat_top_search() {
+        // C4Landscape::FindMatTop (C4Landscape.cpp:1100-1127) starts its
+        // upward search at cslide=0. A negative MaxSlide therefore skips the
+        // loop entirely and extracts the probed pixel, while zero still
+        // climbs through the same-material pixel directly above it.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Negative]
+            Name=Negative
+            Density=25
+            MaxSlide=-1
+
+            [Material Zero]
+            Name=Zero
+            Density=25
+            MaxSlide=0
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let negative = materials
+            .id_of("Negative")
+            .expect("negative material exists");
+        let zero = materials.id_of("Zero").expect("zero material exists");
+        assert_eq!(
+            materials
+                .get_by_id(negative)
+                .map(|material| material.max_slide()),
+            Some(-1),
+            "the signed field must survive material compilation"
+        );
+
+        let mut bytes = vec![0; 5 * 5];
+        for y in [2, 3] {
+            bytes[y * 5 + 1] = 1;
+            bytes[y * 5 + 3] = 2;
+        }
+        let grid = PixelGrid::new(
+            5,
+            5,
+            bytes,
+            vec![0, 25, 25],
+            vec![None, Some("Negative".into()), Some("Zero".into())],
+            vec![None; 3],
+        );
+        let mut landscape = Landscape::new(5, vec![5; 5]).expect("landscape builds");
+        landscape.set_world_height(5);
+        landscape.set_pixel_grid(grid);
+        landscape.resolve_grid_materials(|name| materials.id_of(name));
+
+        assert_eq!(
+            landscape.extract_material_probe(1, 3, &materials),
+            Some((negative, 1, 3)),
+            "negative MaxSlide skips even the cslide=0 upward probe"
+        );
+        assert_eq!(landscape.material_at(1, 2), Some(negative));
+        assert_eq!(
+            landscape.extract_material_probe(3, 3, &materials),
+            Some((zero, 3, 2)),
+            "zero MaxSlide still climbs vertically before extraction"
+        );
+        assert_eq!(landscape.material_at(3, 3), Some(zero));
     }
 
     #[test]

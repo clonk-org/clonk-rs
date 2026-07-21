@@ -780,7 +780,7 @@ impl MaterialProperties {
             .or_else(|| definition.bool_flag("dig2objectonrequestonly"))
             .unwrap_or(false);
         let placement = match definition.int("placement") {
-            Some(value) if value > 0 => value,
+            Some(value) if value != 0 => value,
             _ => Self::default_placement(
                 density,
                 dig_free,
@@ -788,9 +788,9 @@ impl MaterialProperties {
                 dig_to_object_on_request_only,
             ),
         };
-        let splash_rate = definition.int("splashrate").unwrap_or(10).max(0);
+        let splash_rate = definition.int("splashrate").unwrap_or(10);
         let wind_drift = definition.int("winddrift").unwrap_or(0);
-        let max_slide = definition.int("maxslide").unwrap_or(0).max(0);
+        let max_slide = definition.int("maxslide").unwrap_or(0);
         let instable = definition.int("instable").unwrap_or(0) != 0;
         let inflammable = definition.int("inflammable").unwrap_or(0);
         let incindiary = definition.int("incindiary").unwrap_or(0);
@@ -820,7 +820,9 @@ impl MaterialProperties {
                 Some(trimmed.to_ascii_uppercase())
             }
         });
-        let dig_to_object_ratio = definition.int("dig2objectratio").filter(|ratio| *ratio > 0);
+        let dig_to_object_ratio = definition
+            .int("dig2objectratio")
+            .filter(|ratio| *ratio != 0);
         let in_mat_convert = definition.value("inmatconvert").and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {
@@ -837,10 +839,9 @@ impl MaterialProperties {
                 Some(normalize_key(trimmed))
             }
         });
-        let in_mat_convert_depth = match definition.int("inmatconvertdepth") {
-            Some(value) if value > 0 => Some(value),
-            _ => None,
-        };
+        let in_mat_convert_depth = definition
+            .int("inmatconvertdepth")
+            .filter(|value| *value != 0);
         let above_temperature = parse_temperature_conversion(
             definition,
             "abovetempconvert",
@@ -1714,7 +1715,7 @@ fn parse_custom_reaction_kind(
             Some(MaterialReactionKind::Script { func: index })
         }
         "convert" => {
-            let depth = definition.int("depth").filter(|value| *value > 0);
+            let depth = definition.int("depth").filter(|value| *value != 0);
             let target = definition
                 .value("convertmat")
                 .map(|value| value.trim())
@@ -2027,6 +2028,122 @@ mod tests {
                 depth: Some(2),
             }
         );
+    }
+
+    #[test]
+    fn negative_material_fields_preserve_cpp_signed_semantics() {
+        let set = build_material_set(
+            r#"
+            [Material Negative]
+            Name=Negative
+            Density=80
+            Placement=-7
+            SplashRate=-5
+            MaxSlide=-2
+            Dig2Object=GEM_
+            Dig2ObjectRatio=-3
+            InMatConvert=Target
+            InMatConvertTo=Target
+            InMatConvertDepth=-4
+
+            [Reaction]
+            Type=Convert
+            TargetSpec=Target
+            ConvertMat=Target
+            Depth=-6
+
+            [Material Zero]
+            Name=Zero
+            Density=80
+            Placement=0
+            SplashRate=0
+            MaxSlide=0
+            Dig2Object=GEM_
+            Dig2ObjectRatio=0
+            InMatConvert=Target
+            InMatConvertTo=Target
+            InMatConvertDepth=0
+
+            [Reaction]
+            Type=Convert
+            TargetSpec=Target
+            ConvertMat=Target
+            Depth=0
+
+            [Material Positive]
+            Name=Positive
+            Density=80
+            Placement=7
+            SplashRate=5
+            MaxSlide=2
+            Dig2Object=GEM_
+            Dig2ObjectRatio=3
+            InMatConvert=Target
+            InMatConvertTo=Target
+            InMatConvertDepth=4
+
+            [Reaction]
+            Type=Convert
+            TargetSpec=Target
+            ConvertMat=Target
+            Depth=6
+
+            [Material Target]
+            Name=Target
+            Density=25
+            "#,
+        );
+        let negative = set.get("Negative").expect("negative material exists");
+        let zero = set.get("Zero").expect("zero material exists");
+        let positive = set.get("Positive").expect("positive material exists");
+        let target = set.id_of("Target").expect("target material exists");
+
+        assert_eq!(
+            (
+                negative.placement(),
+                negative.splash_rate(),
+                negative.max_slide(),
+                negative.dig_to_object_ratio(),
+                negative.in_mat_convert_depth(),
+            ),
+            (-7, -5, -2, Some(-3), Some(-4)),
+        );
+        assert_eq!(
+            (
+                zero.placement(),
+                zero.splash_rate(),
+                zero.max_slide(),
+                zero.dig_to_object_ratio(),
+                zero.in_mat_convert_depth(),
+            ),
+            (70, 0, 0, None, None),
+            "only zero Placement receives the native density-derived default",
+        );
+        assert_eq!(
+            (
+                positive.placement(),
+                positive.splash_rate(),
+                positive.max_slide(),
+                positive.dig_to_object_ratio(),
+                positive.in_mat_convert_depth(),
+            ),
+            (7, 5, 2, Some(3), Some(4)),
+        );
+
+        for (source, depth) in [
+            ("Negative", Some(-6)),
+            ("Zero", None),
+            ("Positive", Some(6)),
+        ] {
+            let source = set.id_of(source).expect("source material exists");
+            assert_eq!(
+                set.reaction(Some(source), Some(target)).kind,
+                MaterialReactionKind::Convert {
+                    target: Some(target),
+                    depth,
+                },
+            );
+        }
     }
 
     #[test]

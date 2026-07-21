@@ -193471,6 +193471,27 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
+    fn material_render_info_preserves_signed_placement_and_defaults_only_zero() {
+        // C4MaterialCore::Load substitutes the density-derived placement only
+        // when Placement is exactly zero; negative and positive values reach
+        // the landscape shading metadata unchanged (C4Material.cpp:145-158).
+        for (placement, expected) in [(-17, -17), (0, 70), (23, 23)] {
+            let library = lc_resources::MaterialLibrary::parse(&format!(
+                "[Material]\nName=Earth\nDensity=50\nPlacement={placement}\n"
+            ))
+            .expect("material library");
+            let definition = library.get("Earth").expect("Earth material");
+
+            assert_eq!(material_render_placement(definition), expected);
+            assert_eq!(
+                material_render_info(definition),
+                lc_frontend::MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 50)
+                    .with_placement(expected),
+            );
+        }
+    }
+
+    #[test]
     fn material_render_info_defaults_pxs_size_to_facet_width() {
         // PXSGfxSize defaults to PXSGfxRt.Wdt during material compilation
         // (C4Material.cpp:205-207).
