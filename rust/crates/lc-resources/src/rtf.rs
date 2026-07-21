@@ -339,4 +339,12 @@ mod tests {
             "Invalid RTF file: Unexpected end of file"
         );
     }
+
+    #[test]
+    fn direct_rtf_parser_does_not_apply_native_nul_truncation() {
+        assert_eq!(
+            rtf_to_plain_text(b"{\\rtf1 Visible\\par}\0}"),
+            "Invalid RTF file: Too many brackets closed"
+        );
+    }
 }

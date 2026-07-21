@@ -1736,7 +1736,12 @@ fn load_lobby_scenario_description(
         let Some(component) = components.read(candidate).ok().flatten() else {
             continue;
         };
-        let description = lc_resources::rtf::rtf_to_plain_text(&component.bytes);
+        let visible = component
+            .bytes
+            .split(|byte| *byte == 0)
+            .next()
+            .unwrap_or_default();
+        let description = lc_resources::rtf::rtf_to_plain_text(visible);
         return Ok((!description.is_empty()).then_some(description));
     }
     Ok(None)
@@ -115093,6 +115098,41 @@ public func Grant(password) { return GainMissionAccess(password); }
                 "Remote title".to_string(),
             ),
             LobbyScenarioText::Message("scenario file load error".to_string())
+        );
+    }
+
+    #[test]
+    fn l163_lobby_scenario_description_ignores_bytes_after_native_nul() {
+        let app = new_state_only_menu_app(640, 480);
+        let directory = tempdir().expect("scenario description fixture");
+        let scenario = directory.path().join("Remote.c4s");
+        fs::create_dir_all(&scenario).expect("create unpacked scenario group");
+        fs::write(
+            scenario.join("DescUS.rtf"),
+            b"{\\rtf1 Visible lobby description.\\par}\0}",
+        )
+        .expect("write native-NUL scenario description");
+
+        assert_eq!(
+            app.completed_lobby_scenario_description(&scenario, "Remote title".to_string()),
+            LobbyScenarioText::Description("Visible lobby description.\n".to_string())
+        );
+
+        fs::write(scenario.join("DescUS.rtf"), b"\0ignored suffix")
+            .expect("replace description with native-NUL-first data");
+        fs::write(
+            scenario.join("DescDE.rtf"),
+            br"{\rtf1 Later language must not win.\par}",
+        )
+        .expect("write later-language scenario description");
+        assert_eq!(
+            load_lobby_scenario_description(
+                &scenario,
+                &["US".to_string(), "DE".to_string()],
+                &LanguagePacks::default(),
+            )
+            .expect("load native-NUL-first lobby description"),
+            None
         );
     }
 

@@ -1148,7 +1148,12 @@ fn description_from_desc_files(
 ) -> Option<String> {
     for candidate in languages.iter().map(|code| format!("Desc{code}.rtf")) {
         if let Some(component) = components.read(candidate).ok().flatten() {
-            let text = crate::rtf::rtf_to_plain_text(&component.bytes);
+            let visible = component
+                .bytes
+                .split(|byte| *byte == 0)
+                .next()
+                .unwrap_or_default();
+            let text = crate::rtf::rtf_to_plain_text(visible);
             if !text.is_empty() {
                 return Some(text);
             }
@@ -2226,6 +2231,39 @@ mod tests {
         // the next language just like a missing component.
         let fr = discover_with_languages(dir.path(), &langs(&["FR", "DE"])).expect("discover");
         assert_eq!(fr[0].description.as_deref(), Some("Deutsch\n"));
+    }
+
+    #[test]
+    fn scenario_description_ignores_bytes_after_native_nul() {
+        let dir = tempdir().unwrap();
+        let scenario_dir = dir.path().join("NativeNul.c4s");
+        fs::create_dir(&scenario_dir).unwrap();
+        fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Native NUL\n",
+        )
+        .unwrap();
+        fs::write(
+            scenario_dir.join("DescUS.rtf"),
+            b"{\\rtf1 Visible description.\\par}\0}",
+        )
+        .unwrap();
+
+        let entries = discover_with_languages(dir.path(), &langs(&["US"])).expect("discover");
+        assert_eq!(
+            entries[0].description.as_deref(),
+            Some("Visible description.\n")
+        );
+
+        fs::write(scenario_dir.join("DescUS.rtf"), b"\0ignored suffix").unwrap();
+        fs::write(
+            scenario_dir.join("DescDE.rtf"),
+            br"{\rtf1 Later language must not win.\par}",
+        )
+        .unwrap();
+        let entries =
+            discover_with_languages(dir.path(), &langs(&["US", "DE"])).expect("discover");
+        assert_eq!(entries[0].description, None);
     }
 
     // Folders load descriptions the same way (generic Entry::Load).
