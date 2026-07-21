@@ -25250,6 +25250,39 @@ fn project_startup_irc_command(
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SynchronizedPlayerFilePolicy {
+    Skip,
+    BlockedRemote,
+    Persist { local_control: bool },
+}
+
+/// The two-stage eligibility in `C4PlayerList::SynchronizeLocalFiles` and
+/// `C4Player::Save`: eliminated/script players are successful no-ops, while
+/// an ineligible remote player reaches Save and contributes a false result.
+fn synchronized_player_file_policy(
+    status: lc_engine::PlayerStatus,
+    script_player: bool,
+    at_client: i32,
+    local_client_id: i32,
+    league: bool,
+    max_players: Option<i32>,
+) -> SynchronizedPlayerFilePolicy {
+    if script_player
+        || matches!(
+            status,
+            lc_engine::PlayerStatus::Eliminated | lc_engine::PlayerStatus::Surrendered
+        )
+    {
+        return SynchronizedPlayerFilePolicy::Skip;
+    }
+    let local_control = at_client == local_client_id;
+    if !local_control && (league || max_players.is_some_and(|max_players| max_players <= 0)) {
+        return SynchronizedPlayerFilePolicy::BlockedRemote;
+    }
+    SynchronizedPlayerFilePolicy::Persist { local_control }
+}
+
 impl GameApp {
     fn new(
         width: u32,
@@ -26327,22 +26360,23 @@ impl GameApp {
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             .unwrap_or_else(|| self.offline_local_client_id());
+        let league = self.network_is_league;
+        let max_players = self.engine.max_players();
         let candidates = self
             .engine
             .players()
-            .filter(|player| {
-                !player.is_script_player()
-                    && !matches!(
-                        player.status(),
-                        lc_engine::PlayerStatus::Eliminated
-                            | lc_engine::PlayerStatus::Surrendered
-                    )
-            })
             .map(|player| {
                 (
                     player.id(),
                     player.player_info_id(),
-                    player.at_client().get() == local_client_id,
+                    synchronized_player_file_policy(
+                        player.status(),
+                        player.is_script_player(),
+                        player.at_client().get(),
+                        local_client_id,
+                        league,
+                        max_players,
+                    ),
                 )
             })
             .collect::<Vec<_>>();
@@ -26357,16 +26391,23 @@ impl GameApp {
         };
         let mut success = true;
 
-        for (player_number, info_id, local_control) in candidates {
-            if !local_control
-                && (self.network_is_league
-                    || self
-                        .engine
-                        .max_players()
-                        .is_some_and(|max_players| max_players <= 0))
-            {
-                success = false;
-                continue;
+        for (player_number, info_id, policy) in candidates {
+            let local_control = match policy {
+                SynchronizedPlayerFilePolicy::Skip => continue,
+                SynchronizedPlayerFilePolicy::BlockedRemote => {
+                    success = false;
+                    continue;
+                }
+                SynchronizedPlayerFilePolicy::Persist { local_control } => local_control,
+            };
+            if !local_control {
+                // Native permanently strips missing-definition crew before
+                // opening its temporary remote group. Keep that mutation
+                // even when Rust-only provenance lookup fails afterward.
+                lc_engine::strip_unresolved_remote_crew_for_synchronization(
+                    &mut self.engine,
+                    player_number,
+                );
             }
             let Some(info) = self.control_player_infos.get(info_id).cloned() else {
                 tracing::warn!(player_number, info_id, "cannot save player without PlayerInfo");
@@ -26384,12 +26425,18 @@ impl GameApp {
                 continue;
             };
             let saved = (|| -> Result<()> {
-                let original = local_control
-                    .then(|| {
+                // C4Player::Save ignores a failed source copy before opening
+                // its temporary group with create enabled. Consequently a
+                // local profile removed after admission is recreated from
+                // the live core and roster instead of becoming ineligible.
+                let original = if local_control && path.exists() {
+                    Some(
                         open_group_path_for_folder_map(&path)
-                            .with_context(|| format!("open player profile {}", path.display()))
-                    })
-                    .transpose()?;
+                            .with_context(|| format!("open player profile {}", path.display()))?,
+                    )
+                } else {
+                    None
+                };
                 let synchronized = lc_engine::serialize_live_c4_player_for_synchronization(
                     &mut self.engine,
                     player_number,
@@ -26400,17 +26447,16 @@ impl GameApp {
                     options,
                 )
                 .with_context(|| format!("serialize player profile {}", path.display()))?;
-                let group = if local_control {
+                let group = if let Some(original) = original.as_ref() {
                     developer_console_save::overlay_live_player_group_with_cleanup(
-                        original
-                            .as_ref()
-                            .expect("local player synchronization opened its profile"),
+                        original,
                         &synchronized.group,
                         &synchronized.crew_cleanup,
                     )?
                 } else {
-                    // C4Player::Save recreates non-local temporary player
-                    // files from scratch with fStoreTiny=true.
+                    // Remote profiles and missing local profiles both start
+                    // from the freshly serialized group. Remote saves use
+                    // fStoreTiny=true; local saves retain the full payload.
                     synchronized.group
                 };
                 // Native snapshots fOfficial after serializing and before
@@ -26755,13 +26801,6 @@ impl GameApp {
                 let copy = MutableGroup::from_group(&source).with_context(|| {
                     format!("copy source scenario {}", source_path.display())
                 })?;
-                if destination != source_path && destination.exists() {
-                    if destination.is_dir() {
-                        fs::remove_dir_all(&destination)?;
-                    } else {
-                        fs::remove_file(&destination)?;
-                    }
-                }
                 persist_console_save_group(&copy, &destination, source_path.is_dir())
                     .with_context(|| format!("copy scenario to {}", destination.display()))
             })();
@@ -88894,8 +88933,9 @@ fn scenario_filename_from_title(title: &str, kind: ScenarioKind, old_path: &Path
     filename
 }
 
+static NEXT_GROUP_REWRITE: AtomicU64 = AtomicU64::new(0);
+
 fn replace_file_from_same_directory(path: &Path, bytes: &[u8]) -> Result<()> {
-    static NEXT_REWRITE: AtomicU64 = AtomicU64::new(0);
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("rewrite target has no parent: {}", path.display()))?;
@@ -88903,10 +88943,13 @@ fn replace_file_from_same_directory(path: &Path, bytes: &[u8]) -> Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("group");
-    let permissions = fs::metadata(path).ok().map(|metadata| metadata.permissions());
+    let permissions = fs::symlink_metadata(path)
+        .ok()
+        .filter(|metadata| metadata.file_type().is_file())
+        .map(|metadata| metadata.permissions());
     let mut last_error = None;
     for _ in 0..100 {
-        let nonce = NEXT_REWRITE.fetch_add(1, AtomicOrdering::Relaxed);
+        let nonce = NEXT_GROUP_REWRITE.fetch_add(1, AtomicOrdering::Relaxed);
         let temporary = parent.join(format!(
             ".{filename}.lc-rewrite-{}-{nonce}",
             std::process::id()
@@ -88924,17 +88967,21 @@ fn replace_file_from_same_directory(path: &Path, bytes: &[u8]) -> Result<()> {
             Err(error) => return Err(error.into()),
         };
         let result = (|| -> io::Result<()> {
+            file.write_all(bytes)?;
+            file.sync_all()?;
             if let Some(permissions) = permissions.clone() {
                 file.set_permissions(permissions)?;
             }
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            drop(file);
-            fs::rename(&temporary, path)
+            Ok(())
         })();
         if let Err(error) = result {
-            let _ = fs::remove_file(&temporary);
+            let _ = remove_file_or_directory(&temporary);
             return Err(error.into());
+        }
+        drop(file);
+        if let Err(error) = commit_staged_file_rewrite(&temporary, path) {
+            let _ = remove_file_or_directory(&temporary);
+            return Err(error);
         }
         return Ok(());
     }
@@ -88947,6 +88994,265 @@ fn console_save_ignored_directory_entry(name: &[u8]) -> bool {
     (name.first() == Some(&b'.') && name != b".legacyclonk")
         || name.eq_ignore_ascii_case(b"cvs")
         || name.eq_ignore_ascii_case(b"Thumbs.db")
+}
+
+fn remove_file_or_directory(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    fn clear_readonly(path: &Path) -> io::Result<()> {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() {
+            return Ok(());
+        }
+        let mut permissions = metadata.permissions();
+        if permissions.readonly() {
+            permissions.set_readonly(false);
+            fs::set_permissions(path, permissions)?;
+        }
+        if metadata.file_type().is_dir() {
+            for entry in fs::read_dir(path)? {
+                clear_readonly(&entry?.path())?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    clear_readonly(path)?;
+    let file_type = fs::symlink_metadata(path)?.file_type();
+    if file_type.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+fn copy_file_or_directory(source: &Path, destination: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        let target = fs::read_link(source)?;
+        #[cfg(unix)]
+        {
+            return std::os::unix::fs::symlink(target, destination);
+        }
+        #[cfg(windows)]
+        {
+            return if fs::metadata(source)?.is_dir() {
+                std::os::windows::fs::symlink_dir(target, destination)
+            } else {
+                std::os::windows::fs::symlink_file(target, destination)
+            };
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target, destination);
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "copying a symbolic link is unsupported on this platform",
+            ));
+        }
+    }
+    if file_type.is_dir() {
+        fs::create_dir(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            copy_file_or_directory(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if file_type.is_file() {
+        fs::copy(source, destination)?;
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("unsupported directory entry: {}", source.display()),
+    ))
+}
+
+fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
+    for entry in fs::read_dir(source)
+        .with_context(|| format!("read folder group {}", source.display()))?
+    {
+        let entry = entry?;
+        copy_file_or_directory(&entry.path(), &destination.join(entry.file_name()))
+            .with_context(|| format!("copy folder-group entry {}", entry.path().display()))?;
+    }
+    Ok(())
+}
+
+fn restore_directory_permissions(source: &Path, destination: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let metadata = fs::symlink_metadata(&source_path)?;
+        if !metadata.file_type().is_dir() {
+            continue;
+        }
+        let destination_path = destination.join(entry.file_name());
+        let Ok(destination_metadata) = fs::symlink_metadata(&destination_path) else {
+            continue;
+        };
+        if !destination_metadata.file_type().is_dir() {
+            continue;
+        }
+        restore_directory_permissions(&source_path, &destination_path)?;
+        fs::set_permissions(&destination_path, metadata.permissions())?;
+    }
+    Ok(())
+}
+
+fn create_sibling_rewrite_directory(parent: &Path, filename: &str) -> Result<PathBuf> {
+    let mut last_error = None;
+    for _ in 0..100 {
+        let nonce = NEXT_GROUP_REWRITE.fetch_add(1, AtomicOrdering::Relaxed);
+        let temporary = parent.join(format!(
+            ".{filename}.lc-rewrite-{}-{nonce}",
+            std::process::id()
+        ));
+        match fs::create_dir(&temporary) {
+            Ok(()) => return Ok(temporary),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "temporary rewrite path"))
+        .into())
+}
+
+fn unused_sibling_rewrite_path(parent: &Path, filename: &str) -> Result<PathBuf> {
+    for _ in 0..100 {
+        let nonce = NEXT_GROUP_REWRITE.fetch_add(1, AtomicOrdering::Relaxed);
+        let candidate = parent.join(format!(
+            ".{filename}.lc-rewrite-backup-{}-{nonce}",
+            std::process::id()
+        ));
+        match fs::symlink_metadata(&candidate) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, "backup rewrite path").into())
+}
+
+fn commit_staged_path_with_backup(
+    staged: &Path,
+    destination: &Path,
+    after_backup: impl FnOnce() -> io::Result<()>,
+) -> Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("rewrite target has no parent: {}", destination.display()))?;
+    let filename = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("group");
+    let backup = match fs::symlink_metadata(destination) {
+        Ok(_) => {
+            let backup = unused_sibling_rewrite_path(parent, filename)?;
+            fs::rename(destination, &backup).with_context(|| {
+                format!("stage existing group {}", destination.display())
+            })?;
+            Some(backup)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+
+    let committed = after_backup().and_then(|()| fs::rename(staged, destination));
+    if let Err(error) = committed {
+        if let Some(backup) = backup.as_ref() {
+            if let Err(rollback_error) = fs::rename(backup, destination) {
+                return Err(anyhow!(
+                    "commit group {} failed: {error}; restoring the original from {} failed: {rollback_error}",
+                    destination.display(),
+                    backup.display()
+                ));
+            }
+        }
+        return Err(error).with_context(|| format!("commit group {}", destination.display()));
+    }
+
+    if let Some(backup) = backup {
+        remove_file_or_directory(&backup)
+            .with_context(|| format!("remove replaced group {}", backup.display()))?;
+    }
+    Ok(())
+}
+
+fn commit_staged_file_rewrite(staged: &Path, destination: &Path) -> Result<()> {
+    #[cfg(not(windows))]
+    {
+        match fs::symlink_metadata(destination) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                return commit_staged_path_with_backup(staged, destination, || Ok(()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        fs::rename(staged, destination)?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        // std::fs::rename cannot replace an existing path on Windows. Move
+        // the old file aside and restore it if the staged commit fails.
+        commit_staged_path_with_backup(staged, destination, || Ok(()))
+    }
+}
+
+fn replace_directory_from_same_parent(source: &Group, destination: &Path) -> Result<()> {
+    replace_directory_from_same_parent_with_hook(source, destination, || Ok(()))
+}
+
+/// Stage a complete folder group before moving the admitted profile aside.
+/// The hook exists only so tests can force the narrow two-rename failure
+/// window and prove that the old directory is restored intact.
+fn replace_directory_from_same_parent_with_hook(
+    source: &Group,
+    destination: &Path,
+    after_backup: impl FnOnce() -> io::Result<()>,
+) -> Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("rewrite target has no parent: {}", destination.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create save parent {}", parent.display()))?;
+    let filename = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("group");
+    let staged = create_sibling_rewrite_directory(parent, filename)?;
+    let prepared = (|| -> Result<()> {
+        if destination.is_dir() {
+            // C4Player::Save copies the complete admitted local group before
+            // mutating it. Seed the sibling stage likewise so ignored files,
+            // executable bits and other unrelated entries survive.
+            copy_directory_contents(destination, &staged)?;
+        }
+        sync_console_save_group_directory(source, &staged)?;
+        if destination.is_dir() {
+            restore_directory_permissions(destination, &staged)?;
+            if let Ok(metadata) = fs::metadata(destination) {
+                fs::set_permissions(&staged, metadata.permissions())?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = prepared {
+        let _ = remove_file_or_directory(&staged);
+        return Err(error);
+    }
+    let committed = commit_staged_path_with_backup(&staged, destination, after_backup);
+    if committed.is_err() {
+        let _ = remove_file_or_directory(&staged);
+    }
+    committed
 }
 
 /// Reconcile a folder-backed C4Group with an already-mutated in-memory group.
@@ -88975,11 +89281,7 @@ fn sync_console_save_group_directory(source: &Group, destination: &Path) -> Resu
             continue;
         }
         let path = existing.path();
-        if fs::symlink_metadata(&path)?.file_type().is_dir() {
-            fs::remove_dir_all(&path)?;
-        } else {
-            fs::remove_file(&path)?;
-        }
+        remove_file_or_directory(&path)?;
     }
 
     for entry in desired {
@@ -88993,22 +89295,28 @@ fn sync_console_save_group_directory(source: &Group, destination: &Path) -> Resu
                 .then_some(candidate.path())
         });
         if let Some(existing) = existing.as_ref().filter(|existing| **existing != target) {
-            if fs::symlink_metadata(existing)?.file_type().is_dir() {
-                fs::remove_dir_all(existing)?;
-            } else {
-                fs::remove_file(existing)?;
-            }
+            remove_file_or_directory(existing)?;
         }
 
         if entry.is_directory {
-            if target.exists() && !target.is_dir() {
-                fs::remove_file(&target)?;
+            match fs::symlink_metadata(&target) {
+                Ok(metadata) if !metadata.file_type().is_dir() => {
+                    remove_file_or_directory(&target)?;
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
             let child = source.open_child(&entry.relative_path)?;
             sync_console_save_group_directory(&child, &target)?;
         } else {
-            if target.is_dir() {
-                fs::remove_dir_all(&target)?;
+            match fs::symlink_metadata(&target) {
+                Ok(metadata) if metadata.file_type().is_dir() => {
+                    remove_file_or_directory(&target)?;
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
             let payload = source.read_entry_bytes_exact(&entry)?;
             replace_file_from_same_directory(&target, &payload)?;
@@ -89032,18 +89340,18 @@ fn persist_console_save_group(
 ) -> Result<()> {
     let packed = group.pack()?;
     if preserve_folder_group {
-        if destination.exists() && !destination.is_dir() {
-            fs::remove_file(destination)
-                .with_context(|| format!("replace packed save target {}", destination.display()))?;
-        }
         let source = Group::from_memory(destination.to_path_buf(), packed)?;
-        return sync_console_save_group_directory(&source, destination);
+        let physical_destination = match fs::symlink_metadata(destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(destination)
+                .with_context(|| {
+                    format!("resolve folder-group target {}", destination.display())
+                })?,
+            Ok(_) => destination.to_path_buf(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => destination.to_path_buf(),
+            Err(error) => return Err(error.into()),
+        };
+        return replace_directory_from_same_parent(&source, &physical_destination);
     }
-    anyhow::ensure!(
-        !destination.is_dir(),
-        "save target is an existing directory: {}",
-        destination.display()
-    );
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create save parent {}", parent.display()))?;
@@ -143439,6 +143747,400 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn synchronized_player_file_policy_matches_native_suppression_matrix() {
+        use lc_engine::PlayerStatus;
+
+        let policy = |status, script_player, at_client, league, max_players| {
+            synchronized_player_file_policy(
+                status,
+                script_player,
+                at_client,
+                7,
+                league,
+                max_players,
+            )
+        };
+        for status in [
+            PlayerStatus::Inactive,
+            PlayerStatus::Active,
+            PlayerStatus::TeamSelection,
+            PlayerStatus::TeamSelectionPending,
+        ] {
+            assert_eq!(
+                policy(status, false, 7, true, Some(0)),
+                SynchronizedPlayerFilePolicy::Persist {
+                    local_control: true
+                },
+                "local users persist regardless of remote-only gates"
+            );
+        }
+        for status in [PlayerStatus::Eliminated, PlayerStatus::Surrendered] {
+            assert_eq!(
+                policy(status, false, 7, false, Some(4)),
+                SynchronizedPlayerFilePolicy::Skip
+            );
+        }
+        assert_eq!(
+            policy(PlayerStatus::Active, true, 7, false, Some(4)),
+            SynchronizedPlayerFilePolicy::Skip
+        );
+        for (league, max_players) in [
+            (true, Some(4)),
+            (false, Some(0)),
+            (false, Some(-1)),
+        ] {
+            assert_eq!(
+                policy(PlayerStatus::Active, false, 8, league, max_players),
+                SynchronizedPlayerFilePolicy::BlockedRemote
+            );
+        }
+        for max_players in [None, Some(1)] {
+            assert_eq!(
+                policy(PlayerStatus::Active, false, 8, false, max_players),
+                SynchronizedPlayerFilePolicy::Persist {
+                    local_control: false
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn synchronized_player_file_remote_gates_leave_profile_untouched() {
+        let directory = tempdir().expect("player profile directory");
+        let profile_path = directory.path().join("Remote.c4p");
+        let sentinel = b"profile must not be opened";
+        fs::write(&profile_path, sentinel).expect("write remote sentinel");
+
+        let mut app = new_state_only_synthetic_crew_running_sandbox_app();
+        let player_number = app.local_owner;
+        let info_id = 602;
+        let mut state = app.engine.capture_state();
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == player_number)
+            .expect("sandbox player state");
+        player.player_info_id = info_id;
+        player.at_client = lc_engine::PlayerAtClient::new(8);
+        player.status = lc_engine::PlayerStatus::Active;
+        player.script_player = false;
+        app.engine
+            .restore_state(&state)
+            .expect("install remote player state");
+        app.control_player_infos.replace_snapshot(
+            info_id,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 8,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: info_id,
+                    filename: LegacyCString::from_bytes(b"Remote.c4p".to_vec())
+                        .expect("player filename"),
+                    game_number: player_number,
+                    ..lc_engine::ControlPlayerInfoEntry::default()
+                }],
+                by_client: 0,
+                ..lc_engine::PlayerInfoControlData::default()
+            }],
+        );
+        app.local_player_profile_paths
+            .insert(info_id, profile_path.clone());
+        assert_eq!(
+            app.offline_local_client_id(),
+            0,
+            "the fixture must classify client 8 as remote"
+        );
+
+        app.engine.set_max_players(4);
+        app.network_is_league = true;
+        assert!(!app.persist_synchronized_local_player_files());
+        assert_eq!(fs::read(&profile_path).unwrap(), sentinel);
+
+        app.network_is_league = false;
+        app.engine.set_max_players(0);
+        assert!(!app.persist_synchronized_local_player_files());
+        assert_eq!(fs::read(&profile_path).unwrap(), sentinel);
+    }
+
+    #[test]
+    fn save_player_files_synchronize_persists_local_player_core_and_crew() {
+        let directory = tempdir().expect("player profile directory");
+        let profile_path = directory.path().join("Local.c4p");
+        fs::create_dir(&profile_path).expect("create unpacked local profile");
+        fs::write(
+            profile_path.join("Player.txt"),
+            b"[Player]\nName=Stale\nScore=1\n",
+        )
+        .expect("stale player core");
+        fs::write(profile_path.join("C4Player.c4b"), b"obsolete core")
+            .expect("obsolete binary core");
+        fs::write(profile_path.join("KeepRoot.dat"), b"root sentinel")
+            .expect("profile sentinel");
+        fs::write(profile_path.join(".local-metadata"), b"ignored sentinel")
+            .expect("ignored profile metadata");
+        for (filename, name) in [("Hero.c4i", "Hero"), ("Idle.c4i", "Idle")] {
+            let child = profile_path.join(filename);
+            fs::create_dir(&child).expect("create stale crew child");
+            fs::write(
+                child.join("ObjectInfo.txt"),
+                format!("[ObjectInfo]\nid=CLNK\nName={name}\n"),
+            )
+            .expect("stale crew core");
+            fs::write(child.join("KeepCrew.dat"), format!("{name} sentinel"))
+                .expect("crew sentinel");
+            fs::write(child.join(".crew-metadata"), format!("{name} metadata"))
+                .expect("ignored crew metadata");
+        }
+
+        let mut app = new_state_only_synthetic_crew_running_sandbox_app();
+        let player_number = app.local_owner;
+        let info_id = 601;
+        let crew = |name: &str,
+                    filename: &str,
+                    total_playing_time: i32,
+                    in_action: bool| {
+            let mut core = lc_engine::CrewInfoCoreFields::default();
+            core.original_filename = filename.to_string();
+            core.portrait_file = "none".to_string();
+            lc_engine::player_file::CrewInfo {
+                id: "CLNK".to_string(),
+                name: name.to_string(),
+                death_message: format!("{name} fell"),
+                core,
+                rank: 0,
+                rank_name: "Clonk".to_string(),
+                experience: if in_action { 321 } else { 123 },
+                rounds: 4,
+                physical: lc_engine::PhysicalInfo::default(),
+                death_count: if in_action { 2 } else { 1 },
+                total_playing_time,
+                birthday: 1_234,
+                age: 3,
+                participation: 1,
+                in_action,
+                was_in_action: in_action,
+                in_action_time: 10,
+                has_died: false,
+                extra_data: vec![(
+                    "CrewToken".to_string(),
+                    Value::Int(if in_action { 77 } else { 33 }),
+                )],
+                portraits: lc_engine::CrewPortraitState {
+                    permanent: lc_engine::CrewPermanentPortrait::ExplicitNone,
+                    ..lc_engine::CrewPortraitState::default()
+                },
+            }
+        };
+        let mut state = app.engine.capture_state();
+        state.game_time = 25;
+        state.player_crew_rosters_authoritative = true;
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == player_number)
+            .expect("sandbox player state");
+        player.player_info_id = info_id;
+        player.at_client = lc_engine::PlayerAtClient::HOST;
+        player.status = lc_engine::PlayerStatus::Active;
+        player.script_player = false;
+        player.score = 900;
+        player.rounds = 8;
+        player.rounds_won = 5;
+        player.rounds_lost = 3;
+        player.total_playing_time = 40;
+        player.extra_data = vec![("PlayerToken".to_string(), Value::Int(99))];
+        let mut info_core = player.player_info_core.take().unwrap_or_default();
+        info_core.pref_name = "Persistent Player".to_string();
+        player.player_info_core = Some(info_core);
+        state.crew_info_rosters.insert(
+            player_number,
+            vec![
+                crew("Hero", "Hero.c4i", 7, true),
+                crew("Idle", "Idle.c4i", 11, false),
+            ],
+        );
+        state.crew_info_order.insert(player_number, vec![0, 1]);
+        app.engine
+            .restore_state(&state)
+            .expect("install synchronized player state");
+        app.engine
+            .player_mut(player_number)
+            .expect("sandbox player")
+            .set_game_join_time(10);
+        app.engine.set_local_players([player_number]);
+        app.control_player_infos.replace_snapshot(
+            info_id,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: info_id,
+                    name: LegacyCString::from_bytes(b"Persistent Player".to_vec())
+                        .expect("player name"),
+                    filename: LegacyCString::from_bytes(b"Local.c4p".to_vec())
+                        .expect("player filename"),
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    game_number: player_number,
+                    ..lc_engine::ControlPlayerInfoEntry::default()
+                }],
+                by_client: 0,
+            }],
+        );
+        app.local_player_profile_paths
+            .insert(info_id, profile_path.clone());
+
+        let synchronize = || {
+            NetworkControl::Synchronize(lc_engine::SynchronizeControlData {
+                save_player_files: true,
+                sync_clearance: false,
+                by_client: 0,
+            })
+        };
+        app.apply_synchronized_controls(0, vec![synchronize()])
+            .expect("save local player profile");
+
+        let saved = PlayerFile::load_from_path(&profile_path).expect("reload saved profile");
+        assert_eq!(saved.name, "Persistent Player");
+        assert_eq!(
+            (
+                saved.score,
+                saved.rounds,
+                saved.rounds_won,
+                saved.rounds_lost
+            ),
+            (900, 8, 5, 3)
+        );
+        assert_eq!(saved.total_playing_time, 55);
+        assert_eq!(
+            saved.info_core.extra_data,
+            vec![("PlayerToken".to_string(), Value::Int(99))]
+        );
+        let hero = saved
+            .crew
+            .iter()
+            .find(|crew| crew.name == "Hero")
+            .expect("active crew persisted");
+        assert_eq!(
+            (hero.experience, hero.death_count, hero.total_playing_time),
+            (321, 2, 22)
+        );
+        assert_eq!(
+            hero.extra_data,
+            vec![("CrewToken".to_string(), Value::Int(77))]
+        );
+        let idle = saved
+            .crew
+            .iter()
+            .find(|crew| crew.name == "Idle")
+            .expect("idle crew persisted");
+        assert_eq!(
+            idle.total_playing_time, 11,
+            "idle crew has no active-time delta"
+        );
+        let saved_group = Group::open(&profile_path).expect("saved profile remains a C4Group");
+        assert_eq!(
+            saved_group.read_file("KeepRoot.dat").unwrap(),
+            b"root sentinel"
+        );
+        assert_eq!(
+            saved_group
+                .open_child("Hero.c4i")
+                .unwrap()
+                .read_file("KeepCrew.dat")
+                .unwrap(),
+            b"Hero sentinel"
+        );
+        assert_eq!(
+            fs::read(profile_path.join("Hero.c4i/.crew-metadata")).unwrap(),
+            b"Hero metadata"
+        );
+        assert!(!saved_group.exists("C4Player.c4b"));
+        assert_eq!(
+            fs::read(profile_path.join(".local-metadata")).unwrap(),
+            b"ignored sentinel"
+        );
+
+        // A removed local source is not an eligibility failure in C++: its
+        // unchecked copy leaves a fresh temp group that Save fills. Recreate
+        // it at the same game time and also prove the ledgers are not counted
+        // twice at consecutive SavePlrs boundaries.
+        fs::remove_dir_all(&profile_path).expect("remove admitted local profile");
+        app.apply_synchronized_controls(1, vec![synchronize()])
+            .expect("recreate missing local player profile");
+        let recreated =
+            PlayerFile::load_from_path(&profile_path).expect("reload recreated profile");
+        assert_eq!(recreated.total_playing_time, 55);
+        assert_eq!(
+            recreated
+                .crew
+                .iter()
+                .find(|crew| crew.name == "Hero")
+                .expect("recreated active crew")
+                .total_playing_time,
+            22
+        );
+        let recreated_group = Group::open(&profile_path).expect("recreated profile C4Group");
+        assert!(!recreated_group.exists("KeepRoot.dat"));
+        assert!(!recreated_group.exists("C4Player.c4b"));
+        assert!(fs::read_dir(directory.path())
+            .expect("enumerate rewrite directory")
+            .all(|entry| !entry
+                .expect("rewrite directory entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".Local.c4p.lc-rewrite-")));
+
+        // SavePlrs inside control replay is a complete no-op for both the
+        // mutable time checkpoint and the app-owned profile write.
+        let profile_before_replay = fs::read(&profile_path).expect("snapshot recreated profile");
+        let mut replay_state = app.engine.capture_state();
+        replay_state.game_time = 30;
+        replay_state
+            .players
+            .iter_mut()
+            .find(|player| player.id == player_number)
+            .expect("replay player state")
+            .score = 901;
+        app.engine
+            .restore_state(&replay_state)
+            .expect("advance live replay state");
+        app.engine
+            .player_mut(player_number)
+            .expect("replay player")
+            .set_game_join_time(25);
+        app.control_playback = Some(
+            ControlRecordPlayback::from_bytes(&[0, lc_engine::RCT_END])
+                .expect("open replay marker"),
+        );
+        app.engine.set_replay_control(true);
+        app.apply_synchronized_controls(2, vec![synchronize()])
+            .expect("replay SavePlrs is suppressed");
+        assert_eq!(fs::read(&profile_path).unwrap(), profile_before_replay);
+        assert_eq!(
+            (
+                app.engine
+                    .player(player_number)
+                    .expect("replay player remains")
+                    .total_playing_time(),
+                app.engine
+                    .player(player_number)
+                    .expect("replay player remains")
+                    .game_join_time(),
+            ),
+            (55, 25)
+        );
+        let replay_state = app.engine.capture_state();
+        let replay_roster = &replay_state.crew_info_rosters[&player_number];
+        let replay_hero = replay_roster
+            .iter()
+            .find(|crew| crew.name == "Hero")
+            .expect("replay hero remains");
+        assert_eq!(
+            (replay_hero.total_playing_time, replay_hero.in_action_time),
+            (22, 25)
+        );
+    }
+
+    #[test]
     fn developer_console_runtime_record_waits_for_its_queued_synchronize() {
         let directory = tempdir().expect("record directory");
         let output_path = directory.path().join("001-ConsoleRuntime.c4s");
@@ -143728,6 +144430,137 @@ ScenInfoArea=70,5,25,90
             fs::read(destination.join("Scenario.txt")).unwrap(),
             b"[Head]\nTitle=Copy\n"
         );
+    }
+
+    #[test]
+    fn folder_group_rewrite_restores_original_when_commit_fails() {
+        let directory = tempdir().expect("folder-group root");
+        let destination = directory.path().join("Local.c4p");
+        fs::create_dir(&destination).expect("create original folder group");
+        fs::write(destination.join("Player.txt"), b"old player")
+            .expect("write original player");
+        fs::write(destination.join("Keep.dat"), b"old sentinel")
+            .expect("write original sentinel");
+        fs::write(destination.join(".metadata"), b"hidden sentinel")
+            .expect("write ignored metadata");
+
+        let mut replacement = MutableGroup::new("Local.c4p");
+        replacement
+            .add_file("Player.txt", b"new player".to_vec())
+            .expect("add replacement player");
+        let source = Group::from_memory(
+            destination.clone(),
+            replacement.pack().expect("pack replacement"),
+        )
+        .expect("open replacement");
+        let error = replace_directory_from_same_parent_with_hook(&source, &destination, || {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "synthetic commit failure",
+            ))
+        })
+        .expect_err("commit failure must roll the original folder group back");
+        assert!(format!("{error:#}").contains("synthetic commit failure"));
+        assert_eq!(
+            fs::read(destination.join("Player.txt")).unwrap(),
+            b"old player"
+        );
+        assert_eq!(
+            fs::read(destination.join("Keep.dat")).unwrap(),
+            b"old sentinel"
+        );
+        assert_eq!(
+            fs::read(destination.join(".metadata")).unwrap(),
+            b"hidden sentinel"
+        );
+        assert!(fs::read_dir(directory.path())
+            .expect("enumerate folder-group root")
+            .all(|entry| !entry
+                .expect("folder-group root entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".Local.c4p.lc-rewrite-")));
+    }
+
+    #[test]
+    fn packed_group_rewrite_safely_replaces_an_existing_directory() {
+        let directory = tempdir().expect("packed replacement root");
+        let destination = directory.path().join("Copy.c4s");
+        fs::create_dir(&destination).expect("create previous unpacked target");
+        fs::write(destination.join("Old.txt"), b"old").expect("write previous target");
+        let mut replacement = MutableGroup::new("Copy.c4s");
+        replacement
+            .add_file("Scenario.txt", b"new".to_vec())
+            .expect("add replacement entry");
+
+        persist_console_save_group(&replacement, &destination, false)
+            .expect("replace directory with a packed group");
+        assert!(destination.is_file());
+        assert_eq!(
+            Group::open(&destination)
+                .expect("open packed replacement")
+                .read_file("Scenario.txt")
+                .unwrap(),
+            b"new"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_group_rewrite_never_follows_nested_directory_symlinks() {
+        let directory = tempdir().expect("symlink replacement root");
+        let destination = directory.path().join("Local.c4p");
+        let external = directory.path().join("External.c4i");
+        fs::create_dir(&destination).expect("create original profile");
+        fs::create_dir(&external).expect("create external crew directory");
+        fs::write(external.join("Outside.dat"), b"outside").expect("write external sentinel");
+        std::os::unix::fs::symlink(&external, destination.join("Hero.c4i"))
+            .expect("link original crew outside profile");
+
+        let mut replacement = MutableGroup::new("Local.c4p");
+        let mut hero = MutableGroup::new("Hero.c4i");
+        hero.add_file("ObjectInfo.txt", b"new crew".to_vec())
+            .expect("add replacement crew core");
+        replacement
+            .add_child("Hero.c4i", hero)
+            .expect("add replacement crew");
+        persist_console_save_group(&replacement, &destination, true)
+            .expect("replace linked child inside staged profile");
+
+        assert_eq!(fs::read(external.join("Outside.dat")).unwrap(), b"outside");
+        assert!(!external.join("ObjectInfo.txt").exists());
+        let saved_child = destination.join("Hero.c4i");
+        assert!(fs::symlink_metadata(&saved_child)
+            .expect("saved child metadata")
+            .file_type()
+            .is_dir());
+        assert_eq!(
+            fs::read(saved_child.join("ObjectInfo.txt")).unwrap(),
+            b"new crew"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_group_rewrite_preserves_a_root_directory_symlink() {
+        let directory = tempdir().expect("root symlink replacement");
+        let physical = directory.path().join("Physical.c4p");
+        let linked = directory.path().join("Linked.c4p");
+        fs::create_dir(&physical).expect("create physical profile");
+        fs::write(physical.join("Player.txt"), b"old").expect("write physical profile");
+        std::os::unix::fs::symlink(&physical, &linked).expect("link profile");
+        let mut replacement = MutableGroup::new("Linked.c4p");
+        replacement
+            .add_file("Player.txt", b"new".to_vec())
+            .expect("add replacement player");
+
+        persist_console_save_group(&replacement, &linked, true)
+            .expect("rewrite physical folder through its stable symlink");
+        assert!(fs::symlink_metadata(&linked)
+            .expect("linked profile metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(physical.join("Player.txt")).unwrap(), b"new");
     }
 
     #[test]

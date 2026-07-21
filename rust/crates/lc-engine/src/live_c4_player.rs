@@ -6,6 +6,7 @@
 //! engine state without passing through the private Rust JSON save format.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use lc_resources::{Group, MutableGroup, MutableGroupError, PhysicalInfo};
 use thiserror::Error;
@@ -133,7 +134,8 @@ pub fn serialize_live_c4_player_with_options(
 ///
 /// C++ copies and updates the original group only for `LocalControl`. A
 /// remote player is recreated in a fresh group with `fStoreTiny=true`, after
-/// stripping crew whose definitions are not loaded.
+/// stripping crew whose definitions are not loaded. If the attempted local
+/// copy is unavailable, native continues with a fresh, non-tiny group.
 pub fn serialize_live_c4_player_for_synchronization(
     engine: &mut Engine,
     player_number: i32,
@@ -145,19 +147,25 @@ pub fn serialize_live_c4_player_for_synchronization(
 ) -> Result<LiveC4SynchronizedPlayerGroup, LiveC4PlayerError> {
     let mut profile_entry_names = if local_control {
         original_profile
-            .ok_or_else(|| {
-                LiveC4PlayerError::LocalProfile(
-                    "local synchronization requires the copied profile".to_string(),
-                )
-            })?
-            .entries()
-            .map_err(|error| LiveC4PlayerError::LocalProfile(error.to_string()))?
-            .into_iter()
-            .map(|entry| entry.name_bytes)
-            .collect::<Vec<_>>()
+            .map(|profile| {
+                profile
+                    .entries()
+                    .map_err(|error| LiveC4PlayerError::LocalProfile(error.to_string()))
+                    .map(|entries| {
+                        entries
+                            .into_iter()
+                            .map(|entry| entry.name_bytes)
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .transpose()?
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
+    if !local_control && engine.player(player_number).is_some() {
+        strip_unresolved_remote_crew_for_synchronization(engine, player_number);
+    }
     let state = engine.capture_state_for_network_save();
     let player = state
         .players
@@ -243,6 +251,108 @@ pub fn serialize_live_c4_player_for_synchronization(
         }
     }
     Ok(synchronized)
+}
+
+/// `C4ObjectInfoList::Strip`: remote player files are temporary resumable
+/// profiles, so their owning runtime roster permanently drops entries whose
+/// definitions are not loaded before the save snapshot is taken.
+#[doc(hidden)]
+pub fn strip_unresolved_remote_crew_for_synchronization(
+    engine: &mut Engine,
+    player_number: i32,
+) {
+    let Some(roster) = engine.crew_rosters.get(&player_number) else {
+        return;
+    };
+    let retained = roster
+        .iter()
+        .map(|info| engine.definition(&info.id).is_some())
+        .collect::<Vec<_>>();
+    if retained.iter().all(|retained| *retained) {
+        return;
+    }
+
+    let mut old_to_new = vec![None; retained.len()];
+    let mut retained_count = 0;
+    for (old_index, retained) in retained.iter().copied().enumerate() {
+        if retained {
+            old_to_new[old_index] = Some(retained_count);
+            retained_count += 1;
+        }
+    }
+
+    let roster = engine
+        .crew_rosters
+        .get_mut(&player_number)
+        .expect("the inspected crew roster still exists");
+    let mut old_index = 0;
+    roster.retain(|_| {
+        let keep = retained[old_index];
+        old_index += 1;
+        keep
+    });
+
+    let order = engine.crew_info_order.entry(player_number).or_default();
+    let mut seen = HashSet::with_capacity(retained_count);
+    let mut remapped_order = order
+        .iter()
+        .filter_map(|old_index| old_to_new.get(*old_index).copied().flatten())
+        .filter(|new_index| seen.insert(*new_index))
+        .collect::<Vec<_>>();
+    remapped_order.extend((0..retained_count).filter(|new_index| seen.insert(*new_index)));
+    *order = remapped_order;
+
+    // ControlCount belongs to the C4ObjectInfo pointer represented by the
+    // roster link. Compacting the Vec must therefore move retained counters
+    // to the new pointer-equivalent index and discard stripped entries.
+    engine.crew_info_control_counts = std::mem::take(&mut engine.crew_info_control_counts)
+        .into_iter()
+        .filter_map(|(link, count)| {
+            if link.player_id != player_number {
+                return Some((link, count));
+            }
+            old_to_new
+                .get(link.roster_index)
+                .copied()
+                .flatten()
+                .map(|roster_index| {
+                    (
+                        crate::CrewInfoLink {
+                            player_id: player_number,
+                            roster_index,
+                        },
+                        count,
+                    )
+                })
+        })
+        .collect();
+
+    let mut removed_objects = HashSet::new();
+    Rc::make_mut(&mut engine.crew_info_links).retain(|object_id, link| {
+        if link.player_id != player_number {
+            return true;
+        }
+        let Some(new_index) = old_to_new.get(link.roster_index).copied().flatten() else {
+            removed_objects.insert(*object_id);
+            return false;
+        };
+        link.roster_index = new_index;
+        true
+    });
+    if !removed_objects.is_empty() {
+        Rc::make_mut(&mut engine.crew_object_infos)
+            .retain(|object_id, _| !removed_objects.contains(object_id));
+        Rc::make_mut(&mut engine.crew_ranks).retain(|object_id, _| {
+            !removed_objects
+                .iter()
+                .any(|removed| removed.as_u64() == *object_id)
+        });
+        for object in &mut engine.objects {
+            if removed_objects.contains(&object.id) {
+                object.state.info_physical = None;
+            }
+        }
+    }
 }
 
 /// Serialize with the C4StringTable enumeration produced by the enclosing
@@ -1332,6 +1442,27 @@ mod tests {
         }
     }
 
+    fn synchronized_object_info(info: &CrewInfo) -> crate::CrewObjectInfo {
+        crate::CrewObjectInfo {
+            definition_id: crate::DefinitionId::from(info.id.as_str()),
+            name: info.name.clone(),
+            death_message: info.death_message.clone(),
+            core: info.core.clone(),
+            rank: info.rank,
+            rank_name: info.rank_name.clone(),
+            experience: info.experience,
+            participation: info.participation,
+            rounds: info.rounds,
+            death_count: info.death_count,
+            total_playing_time: info.total_playing_time,
+            birthday: info.birthday,
+            age: info.age,
+            in_action_time: info.in_action_time,
+            extra_data: info.extra_data.clone(),
+            portraits: info.portraits.clone(),
+        }
+    }
+
     #[test]
     fn local_profile_crew_rename_respects_existing_target_and_new_name_numbering() {
         let mut renamed = synchronized_crew("GOOD", "Old.c4i");
@@ -1432,7 +1563,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_profile_serialization_is_fresh_tiny_and_strips_missing_defs() {
+    fn local_profile_without_original_is_fresh_full_profile() {
         let mut engine = Engine::new();
         engine
             .register_definition(
@@ -1440,15 +1571,120 @@ mod tests {
             )
             .expect("definition registers");
         engine
+            .register_player(crate::PlayerConfig::new(1, "Local").with_player_info_id(7))
+            .expect("player registers");
+        let mut live_crew = synchronized_crew("GOOD", "Old Crew.c4i");
+        live_crew.name = "Renamed Crew".to_string();
+        engine.crew_rosters.insert(1, vec![live_crew]);
+
+        let synchronized = serialize_live_c4_player_for_synchronization(
+            &mut engine,
+            1,
+            b"Local.c4p",
+            b"Maker",
+            true,
+            None,
+            LiveC4PlayerSaveOptions {
+                savegame: false,
+                ..LiveC4PlayerSaveOptions::default()
+            },
+        )
+        .expect("a missing copied profile falls back to a fresh local group");
+        assert_eq!(
+            synchronized.crew_cleanup,
+            vec![LiveC4CrewProfileCleanup {
+                filename: b"Old Crew.c4i".to_vec(),
+                original_filename: b"Old Crew.c4i".to_vec(),
+                roster_index: 0,
+                remove_default_portrait_png: false,
+                remove_rank_png: true,
+            }],
+            "without a copied source entry, C4Group::Rename cannot adopt the name-derived filename"
+        );
+        let reopened = lc_resources::Group::from_raw_memory(
+            std::path::PathBuf::from("Local.c4p"),
+            synchronized.group.pack_raw().expect("profile packs"),
+        )
+        .expect("profile opens");
+        assert!(!reopened.exists("Renamed Crew.c4i"));
+        let crew = reopened.open_child("Old Crew.c4i").expect("crew opens");
+        assert_eq!(crew.read_file("Portrait.png").unwrap(), vec![1, 2, 3]);
+        assert_eq!(
+            crew.read_file("PortraitOverlay.png").unwrap(),
+            vec![4, 5, 6]
+        );
+        assert_eq!(
+            engine.crew_rosters[&1][0].core.original_filename,
+            "Old Crew.c4i"
+        );
+    }
+
+    #[test]
+    fn remote_profile_serialization_is_fresh_tiny_and_strips_missing_defs() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                crate::Definition::from_script("GOOD", "Crew", "").expect("definition compiles"),
+            )
+            .expect("definition registers");
+        let mut temporary =
+            crate::Definition::from_script("TEMP", "Temporary", "").expect("definition compiles");
+        temporary.temporary_crew = 1;
+        engine
+            .register_definition(temporary)
+            .expect("temporary definition registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("MISS", "Missing", "")
+                    .expect("missing definition compiles"),
+            )
+            .expect("missing definition initially registers");
+        engine
             .register_player(crate::PlayerConfig::new(2, "Remote").with_player_info_id(8))
             .expect("player registers");
-        engine.crew_rosters.insert(
-            2,
-            vec![
-                synchronized_crew("GOOD", "Valid.c4i"),
-                synchronized_crew("MISS", "Missing.c4i"),
-            ],
-        );
+        let roster = vec![
+            synchronized_crew("GOOD", "Valid.c4i"),
+            synchronized_crew("MISS", "Missing.c4i"),
+            synchronized_crew("TEMP", "Temporary.c4i"),
+            synchronized_crew("GOOD", "Second.c4i"),
+        ];
+        engine.crew_rosters.insert(2, roster.clone());
+        engine.crew_info_order.insert(2, vec![3, 1, 2, 0]);
+        let valid = crate::ObjectId::new(101);
+        let missing = engine
+            .spawn_object(crate::SpawnConfig::new("MISS"))
+            .expect("temporarily resolved crew object spawns");
+        let missing_index = engine
+            .find_object_index(missing)
+            .expect("temporarily resolved crew object exists");
+        engine.objects[missing_index].state.info_physical = Some(PhysicalInfo {
+            walk: 99,
+            ..PhysicalInfo::default()
+        });
+        engine
+            .definitions
+            .remove(&crate::DefinitionId::from("MISS"));
+        let temporary = crate::ObjectId::new(103);
+        let second = crate::ObjectId::new(104);
+        for (object_id, roster_index) in [(valid, 0), (missing, 1), (temporary, 2), (second, 3)] {
+            engine.crew_info_control_counts.insert(
+                crate::CrewInfoLink {
+                    player_id: 2,
+                    roster_index,
+                },
+                10 + roster_index as i32,
+            );
+            Rc::make_mut(&mut engine.crew_info_links).insert(
+                object_id,
+                crate::CrewInfoLink {
+                    player_id: 2,
+                    roster_index,
+                },
+            );
+            Rc::make_mut(&mut engine.crew_object_infos)
+                .insert(object_id, synchronized_object_info(&roster[roster_index]));
+            Rc::make_mut(&mut engine.crew_ranks).insert(object_id.as_u64(), roster_index as i32);
+        }
 
         let synchronized = serialize_live_c4_player_for_synchronization(
             &mut engine,
@@ -1463,16 +1699,81 @@ mod tests {
             },
         )
         .expect("remote profile serializes");
+        assert_eq!(
+            engine.crew_rosters[&2]
+                .iter()
+                .map(|info| (info.id.as_str(), info.core.original_filename.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("GOOD", "Valid.c4i"),
+                ("TEMP", "Temporary.c4i"),
+                ("GOOD", "Second.c4i"),
+            ],
+            "remote Strip permanently removes only unresolved definitions"
+        );
+        assert_eq!(engine.crew_info_order[&2], vec![2, 1, 0]);
+        assert_eq!(engine.crew_info_links[&valid].roster_index, 0);
+        assert_eq!(engine.crew_info_links[&temporary].roster_index, 1);
+        assert_eq!(engine.crew_info_links[&second].roster_index, 2);
+        assert!(!engine.crew_info_links.contains_key(&missing));
+        assert_eq!(
+            engine
+                .object_snapshot(missing)
+                .expect("detached object remains live")
+                .info_physical,
+            None,
+            "stripping its deleted C4ObjectInfo also drops trained physicals"
+        );
+        assert_eq!(
+            engine.crew_info_control_counts,
+            [
+                (
+                    crate::CrewInfoLink {
+                        player_id: 2,
+                        roster_index: 0,
+                    },
+                    10,
+                ),
+                (
+                    crate::CrewInfoLink {
+                        player_id: 2,
+                        roster_index: 1,
+                    },
+                    12,
+                ),
+                (
+                    crate::CrewInfoLink {
+                        player_id: 2,
+                        roster_index: 2,
+                    },
+                    13,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            "runtime-only C4ObjectInfo counters follow the compacted pointers"
+        );
+        assert!(!engine.crew_object_infos.contains_key(&missing));
+        assert!(!engine.crew_ranks.contains_key(&missing.as_u64()));
+        for object_id in [valid, temporary, second] {
+            let link = engine.crew_info_links[&object_id];
+            assert_eq!(
+                engine.crew_object_infos[&object_id].name,
+                engine.crew_rosters[&link.player_id][link.roster_index].name
+            );
+        }
         assert!(synchronized.crew_cleanup.is_empty());
         let reopened = lc_resources::Group::from_raw_memory(
             std::path::PathBuf::from("Remote.c4p"),
             synchronized.group.pack_raw().expect("profile packs"),
         )
         .expect("profile opens");
-        assert_eq!(reopened.entries().expect("enumerate profile").len(), 2);
+        assert_eq!(reopened.entries().expect("enumerate profile").len(), 3);
         assert!(reopened.exists("Player.txt"));
         assert!(reopened.exists("Valid.c4i"));
+        assert!(reopened.exists("Second.c4i"));
         assert!(!reopened.exists("Missing.c4i"));
+        assert!(!reopened.exists("Temporary.c4i"));
         let crew = reopened.open_child("Valid.c4i").expect("crew opens");
         assert_eq!(crew.entries().expect("enumerate crew").len(), 1);
         assert!(crew.exists("ObjectInfo.txt"));

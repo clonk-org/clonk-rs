@@ -128,6 +128,7 @@ pub use live_c4_player::{
     serialize_live_c4_player_for_synchronization, serialize_live_c4_player_from_state,
     serialize_live_c4_player_state, serialize_live_c4_player_with_options,
     serialize_live_c4_player_with_options_and_enumeration,
+    strip_unresolved_remote_crew_for_synchronization,
 };
 pub use live_c4_save::{
     LiveC4SaveComponentRef, LiveC4SaveComponents, LiveC4SaveEntry, LiveC4SaveEntryKind,
@@ -62618,6 +62619,49 @@ mod command_contact_regression {
                 portraits: CrewPortraitState::default(),
             }],
         );
+        engine
+            .register_player(
+                PlayerConfig::new(4, "Script")
+                    .with_player_info_id(18)
+                    .with_total_playing_time(70),
+            )
+            .expect("script player registers");
+        engine
+            .player_mut(4)
+            .expect("script player exists")
+            .set_script_player(true);
+        engine
+            .register_player(
+                PlayerConfig::new(5, "Eliminated")
+                    .with_player_info_id(19)
+                    .with_total_playing_time(80)
+                    .with_status(PlayerStatus::Eliminated),
+            )
+            .expect("eliminated player registers");
+        let suppressed_crew = player_file::CrewInfo {
+            id: "CLNK".to_string(),
+            name: "Suppressed Crew".to_string(),
+            death_message: String::new(),
+            core: CrewInfoCoreFields::default(),
+            rank: 0,
+            rank_name: "Clonk".to_string(),
+            experience: 0,
+            rounds: 0,
+            physical: PhysicalInfo::default(),
+            death_count: 0,
+            total_playing_time: 17,
+            birthday: 0,
+            age: 0,
+            participation: 1,
+            in_action: true,
+            was_in_action: true,
+            in_action_time: 10,
+            has_died: false,
+            extra_data: Vec::new(),
+            portraits: CrewPortraitState::default(),
+        };
+        engine.crew_rosters.insert(4, vec![suppressed_crew.clone()]);
+        engine.crew_rosters.insert(5, vec![suppressed_crew]);
         engine.game_time = 25;
 
         engine
@@ -62627,6 +62671,14 @@ mod command_contact_regression {
         assert_eq!(engine.player(3).unwrap().game_join_time(), 25);
         assert_eq!(engine.crew_rosters[&3][0].total_playing_time, 22);
         assert_eq!(engine.crew_rosters[&3][0].in_action_time, 25);
+        assert_eq!(engine.player(4).unwrap().total_playing_time(), 70);
+        assert_eq!(engine.player(4).unwrap().game_join_time(), 10);
+        assert_eq!(engine.player(5).unwrap().total_playing_time(), 80);
+        assert_eq!(engine.player(5).unwrap().game_join_time(), 10);
+        for player_id in [4, 5] {
+            assert_eq!(engine.crew_rosters[&player_id][0].total_playing_time, 17);
+            assert_eq!(engine.crew_rosters[&player_id][0].in_action_time, 10);
+        }
 
         engine.set_replay_control(true);
         engine.game_time = 30;
