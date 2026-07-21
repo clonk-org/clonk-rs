@@ -8516,6 +8516,10 @@ fn fair_crew_physical_with_script(
 
 fn log_runtime_call_frames(definition: &str, frames: &[lc_script::RuntimeCallFrame]) {
     for frame in frames {
+        if let Some(dump) = frame.direct_exec_display() {
+            tracing::info!(" by: {dump}");
+            continue;
+        }
         let mut dump = format!("{}({})", frame.function(), frame.arguments());
         if let Some(object) = frame.object_context() {
             dump.push_str(&format!(" (obj {object})"));
@@ -8634,6 +8638,7 @@ mod failsafe_call_stack_diagnostic_regression {
 public func Outer(first, gap, tail) { return Middle(first, gap, tail); }
 private func Middle(first, gap, tail) { return Inner(first, gap, tail); }
 private func Inner(first, gap, tail) { return MissingFromInner(); }
+public func EvalOuter() { return eval("MissingFromEval()"); }
 public func Healthy() { return 9; }
 public func Lone() { return MissingFromLone(); }
 "#;
@@ -8665,8 +8670,25 @@ public func Lone() { return MissingFromLone(); }
         assert!(frames[0].contains("Inner(7,nil,\"tail\")"));
         assert!(frames[1].contains("Middle(7,nil,\"tail\")"));
         assert!(frames[2].contains("Outer(7,nil,\"tail\")"));
-        assert!(frames.iter().all(|frame| frame.contains("(obj <object ")));
+        assert!(frames
+            .iter()
+            .all(|frame| frame.contains("(obj Stack fixture #")));
         assert!(frames.iter().all(|frame| frame.contains("(STAK:")));
+
+        let (recovered, warnings) = capture_warnings(|| {
+            tolerate_script_error(engine.call_object_function(index, "EvalOuter", Vec::new()))
+        });
+        assert_eq!(recovered.expect("eval error is tolerated"), None);
+        let frames = warnings
+            .iter()
+            .filter(|message| message.starts_with(" by: "))
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 2);
+        assert!(frames[0].starts_with(" by: eval in STAK (obj Stack fixture #"));
+        assert!(!frames[0].contains("()") && !frames[0].contains("(STAK:"));
+        assert!(frames[1].contains("EvalOuter()"));
+        assert!(frames[1].contains("(obj Stack fixture #"));
+        assert!(frames[1].contains("(STAK:"));
 
         let raw_script = Arc::clone(
             &engine
@@ -11937,6 +11959,13 @@ impl ActionCallbackKind {
     }
 }
 
+/// Context labels used by actual C4AulScript::DirectExec call sites. Several
+/// Rust compatibility adapters reuse the expression evaluator for native C++
+/// calls; those must not appear in C4Aul's DirectExec trace/profiler totals.
+fn is_cpp_direct_exec_context(context: &str) -> bool {
+    matches!(context, "console script" | "internal script" | "MenuCommand")
+}
+
 impl Definition {
     pub fn from_script(
         id: impl Into<String>,
@@ -11970,6 +11999,7 @@ impl Definition {
         let mut script = ScriptEngine::new();
         script.set_script_name(id.clone());
         script.set_definition_name(name.clone());
+        script.set_definition_context(true);
         script.add_script(compiled_script.clone());
         compat::register_host_functions(&mut script);
         // Synthetic command-DSL fixtures historically declare these as
@@ -12214,6 +12244,14 @@ impl Definition {
 
     pub fn set_description(&mut self, description: Option<String>) {
         self.description = description.filter(|text| !text.is_empty());
+    }
+
+    fn set_script_name(&mut self, script_name: impl Into<String>) {
+        Arc::make_mut(&mut self.script).set_script_name(script_name);
+    }
+
+    fn set_game_script_name(&mut self, script_name: impl Into<String>) {
+        Arc::make_mut(&mut self.script).set_game_script_name(script_name);
     }
 
     pub fn has_function(&self, name: &str) -> bool {
@@ -15600,7 +15638,15 @@ impl Definition {
             game_over_triggered,
             audio,
             label,
-            |script, cells, this| script.direct_exec_with_cells_and_this(source, cells, this),
+            |script, cells, this| {
+                script.direct_exec_with_cells_and_this_in_context_diagnostics(
+                    source,
+                    cells,
+                    this,
+                    label,
+                    is_cpp_direct_exec_context(label),
+                )
+            },
         )
     }
 
@@ -15636,7 +15682,14 @@ impl Definition {
             audio,
             label,
             |script, cells, this| {
-                script.direct_exec_with_cells_and_this_at_strict(source, cells, this, strict_level)
+                script.direct_exec_with_cells_and_this_at_strict_in_context_diagnostics(
+                    source,
+                    cells,
+                    this,
+                    strict_level,
+                    label,
+                    is_cpp_direct_exec_context(label),
+                )
             },
         )
     }
@@ -16498,6 +16551,7 @@ impl ScenarioScript {
         let name = name.into();
         let mut script = ScriptEngine::new();
         script.set_script_name(name.clone());
+        script.set_game_script_name(name.clone());
         let compiled =
             lc_script::Script::compile_c4_string(source).map_err(|source| EngineError::Script {
                 definition: name.clone(),
@@ -16967,11 +17021,13 @@ impl ScenarioScript {
             game_over_triggered,
             || {
                 script
-                    .direct_exec_with_locals_and_this_at_strict(
+                    .direct_exec_with_locals_and_this_at_strict_in_context_diagnostics(
                         source,
                         &local_vars,
                         Value::Nil,
                         strict_level,
+                        function_label,
+                        is_cpp_direct_exec_context(function_label),
                     )
                     .map(|(value, _locals)| (value, Vec::new()))
             },
@@ -25147,6 +25203,13 @@ impl Engine {
     /// global cell and function and carries the normal native host surface.
     fn script_control_global_host(&self) -> ScriptEngine {
         let mut script = ScriptEngine::new();
+        script.set_script_name("System.c4g");
+        script.set_game_script_name(
+            self.scenario_script
+                .as_ref()
+                .map(|scenario| scenario.script.script_name())
+                .unwrap_or("Script.c"),
+        );
         script.set_global_variables(self.script_globals.clone());
         script.set_global_slots(self.script_global_slots.clone());
         script.set_global_constants(self.script_global_consts.clone());
@@ -25177,7 +25240,15 @@ impl Engine {
         else {
             // Game.Script exists even when the scenario supplied no Script.c;
             // its empty host still resolves through Game.ScriptEngine.
-            return self.direct_exec_script_control_global(source, function_label, strict_level);
+            let mut script = self.script_control_global_host();
+            script.set_script_name("Script.c");
+            return self.direct_exec_script_control_host(
+                "Game.Script",
+                &script,
+                source,
+                function_label,
+                strict_level,
+            );
         };
         self.direct_exec_script_control_host(
             &name,
@@ -26244,6 +26315,14 @@ impl Engine {
 
     pub fn clear_scenario_script(&mut self) {
         self.scenario_script = None;
+        for definition in self.definitions.values_mut() {
+            definition.set_game_script_name("Script.c");
+        }
+        for source in &mut self.script_link_sources {
+            if let ScriptLinkSource::Script { script, .. } = source {
+                Arc::make_mut(script).set_game_script_name("Script.c");
+            }
+        }
         self.script_link_sources
             .retain(|source| !matches!(source, ScriptLinkSource::Scenario));
     }
@@ -26310,6 +26389,15 @@ impl Engine {
         let name = name.into();
         let mut script = ScenarioScript::from_source(name, source)?;
         script.c4_args = c4_args;
+        let game_script_name = script.script.script_name().to_owned();
+        for definition in self.definitions.values_mut() {
+            definition.set_game_script_name(game_script_name.clone());
+        }
+        for source in &mut self.script_link_sources {
+            if let ScriptLinkSource::Script { script, .. } = source {
+                Arc::make_mut(script).set_game_script_name(game_script_name.clone());
+            }
+        }
         // C4Aul's preparser installs Ref (non-Hold) static-constant strings
         // before its later function-body parse registers held operands.
         if let Err(diagnostic) = lc_script::register_global_declarations_with_strings(
@@ -28321,6 +28409,13 @@ impl Engine {
         }
 
         let mut definition = definition;
+        let game_script_name = self
+            .scenario_script
+            .as_ref()
+            .map(|scenario| scenario.script.script_name())
+            .unwrap_or("Script.c")
+            .to_owned();
+        definition.set_game_script_name(game_script_name);
         // C4Game runs the one-shot definition colorization after materials
         // and definitions are loaded. Production Rust loaders establish the
         // final MaterialSet before registering definitions, so applying at
@@ -28477,6 +28572,12 @@ impl Engine {
     }
 
     fn install_global_scripts_at(&mut self, sources: &[(String, String)]) -> usize {
+        let game_script_name = self
+            .scenario_script
+            .as_ref()
+            .map(|scenario| scenario.script.script_name())
+            .unwrap_or("Script.c")
+            .to_owned();
         let mut functions: HashMap<String, lc_script::Function> = self
             .global_script_functions
             .as_deref()
@@ -28511,6 +28612,7 @@ impl Engine {
                     }
                     let mut script = ScriptEngine::new();
                     script.set_script_name(name.clone());
+                    script.set_game_script_name(game_script_name.clone());
                     script.add_script(compiled.clone().without_static_declarations());
                     script.set_global_variables(self.script_globals.clone());
                     script.set_global_slots(self.script_global_slots.clone());

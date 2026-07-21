@@ -36,6 +36,7 @@ pub struct RuntimeError {
 pub struct RuntimeCallFrame {
     function: String,
     arguments: String,
+    direct_exec_display: Option<String>,
     object_context: Option<String>,
     definition_context: Option<String>,
     source_host_identity: Option<ScriptHostIdentity>,
@@ -56,11 +57,25 @@ impl RuntimeCallFrame {
         Self {
             function,
             arguments,
+            direct_exec_display: None,
             object_context,
             definition_context,
             source_host_identity,
             source_name,
             source_line,
+        }
+    }
+
+    pub(crate) fn direct_exec(stack_display: String) -> Self {
+        Self {
+            function: String::new(),
+            arguments: String::new(),
+            direct_exec_display: Some(stack_display),
+            object_context: None,
+            definition_context: None,
+            source_host_identity: None,
+            source_name: None,
+            source_line: 0,
         }
     }
 
@@ -70,6 +85,12 @@ impl RuntimeCallFrame {
 
     pub fn arguments(&self) -> &str {
         &self.arguments
+    }
+
+    /// Exact native stack display for a temporary C4Aul DirectExec context.
+    /// Ordinary function frames return `None`.
+    pub fn direct_exec_display(&self) -> Option<&str> {
+        self.direct_exec_display.as_deref()
     }
 
     pub fn object_context(&self) -> Option<&str> {

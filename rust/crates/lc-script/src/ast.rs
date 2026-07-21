@@ -281,6 +281,21 @@ impl Function {
         }
     }
 
+    /// Rename diagnostics for functions originating in one script host.
+    /// Include/append copies retain their declaring host's ScriptName.
+    pub(crate) fn rebind_source_name_for_host(
+        &mut self,
+        host: crate::vm::ScriptHostIdentity,
+        name: &str,
+    ) {
+        if self.source_host == Some(host) {
+            self.source_name = Some(name.to_owned());
+        }
+        if let Some(overloaded) = self.overloaded.as_mut() {
+            std::sync::Arc::make_mut(overloaded).rebind_source_name_for_host(host, name);
+        }
+    }
+
     /// Original script host (`pOrgScript`) for diagnostic/source lookup.
     pub fn source_host_identity(&self) -> Option<crate::vm::ScriptHostIdentity> {
         self.source_host

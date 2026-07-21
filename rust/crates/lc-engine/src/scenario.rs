@@ -169,6 +169,8 @@ struct ScenarioDefinition {
     description: Option<String>,
     clonk_names: Option<String>,
     script: String,
+    /// Native C4ScriptHost::ScriptName (`<group full name>/Script.c`).
+    script_name: Option<String>,
     actions: Option<DefinitionActions>,
     crew_member: bool,
     can_be_base: bool,
@@ -334,6 +336,9 @@ fn scenario_map_callback_functions(
                     &definition.script,
                 )
                 .or_else(|_| Definition::from_script(&definition.id, name, ""))?;
+                if let Some(script_name) = &definition.script_name {
+                    compiled.set_script_name(script_name.clone());
+                }
                 compiled.set_c4_callback_convention(true);
                 linker.register_definition(compiled)?;
             }
@@ -3551,6 +3556,9 @@ impl Scenario {
                         Definition::from_script(&definition.id, name, "")?
                     }
                 };
+            if let Some(script_name) = &definition.script_name {
+                compiled.set_script_name(script_name.clone());
+            }
             // Real content gets the C++ callback arguments (no parameters;
             // AbortCall gets the last phase — C4Object.cpp:4154-4182).
             compiled.set_c4_callback_convention(true);
@@ -3694,8 +3702,15 @@ impl Scenario {
                         script = %definition,
                         function,
                         error = %source,
-                        "scenario script failed to load; continuing without it like C++"
+                        "scenario script failed to load; retaining empty host like C++"
                     );
+                    // C4GameScriptHost survives a parse failure with its
+                    // native full ScriptName even though no functions link.
+                    engine.load_scenario_script_with_convention(
+                        &script.name,
+                        "",
+                        script.c4_args,
+                    )?;
                 }
                 Err(other) => return Err(other.into()),
             }
@@ -4051,6 +4066,13 @@ impl Scenario {
                     description: None,
                     clonk_names: None,
                     script: script_source,
+                    script_name: Some(
+                        group
+                            .root()
+                            .join(script_path)
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
                     actions: None,
                     crew_member,
                     can_be_base: false,
@@ -4123,7 +4145,11 @@ impl Scenario {
             let script_bytes = read_group_file_bytes(group, script_path)?;
             let script_source = lc_script::c4_string_from_bytes(&script_bytes);
             Some(ScenarioScriptSource {
-                name: path,
+                name: group
+                    .root()
+                    .join(script_path)
+                    .to_string_lossy()
+                    .into_owned(),
                 source: script_source,
                 c4_args: false,
             })
@@ -8231,12 +8257,27 @@ fn load_legacy_scenario_script<S: AsRef<str>>(
         let source = lc_script::c4_string_from_bytes(&bytes);
         let source = localize_script_source_with_components(components, &source, languages)?;
         return Ok(Some(ScenarioScriptSource {
-            name: candidate.to_string(),
+            name: group
+                .root()
+                .join(candidate)
+                .to_string_lossy()
+                .into_owned(),
             source,
             c4_args: true,
         }));
     }
-    Ok(None)
+    // C4GameScriptHost exists and receives its full ScriptName even when the
+    // optional component is absent. Retain that empty host so DirectExec/eval
+    // diagnostics do not fall back to a basename or Game.ScriptEngine.
+    Ok(Some(ScenarioScriptSource {
+        name: group
+            .root()
+            .join("Script.c")
+            .to_string_lossy()
+            .into_owned(),
+        source: String::new(),
+        c4_args: true,
+    }))
 }
 
 /// Byte-preserving C4LangStringTable::ReplaceStrings for Teams.txt. Unlike
@@ -15194,6 +15235,13 @@ fn scenario_definition_from_resource(
     resource: ResourceDefinitionData,
     source_group: Option<Group>,
 ) -> ScenarioDefinition {
+    let script_name = source_group.as_ref().map(|group| {
+        group
+            .root()
+            .join("Script.c")
+            .to_string_lossy()
+            .into_owned()
+    });
     let description = resource.description().map(str::to_owned);
     let ResourceDefinitionData {
         core,
@@ -15223,6 +15271,7 @@ fn scenario_definition_from_resource(
         description,
         clonk_names,
         script: script.combined().to_string(),
+        script_name,
         actions,
         crew_member: core.crew_member != 0,
         can_be_base: core.can_be_base,
@@ -20397,6 +20446,7 @@ global func Step(state, frame, random)
                 description: None,
                 clonk_names: None,
                 script: TEST_SCRIPT.to_string(),
+                script_name: None,
                 actions: None,
                 crew_member: false,
                 can_be_base: false,
@@ -20531,6 +20581,7 @@ global func Step(state, frame, random)
                 description: None,
                 clonk_names: None,
                 script: TEST_SCRIPT.to_string(),
+                script_name: None,
                 actions: None,
                 crew_member: false,
                 can_be_base: false,

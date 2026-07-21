@@ -208,6 +208,9 @@ pub(crate) struct ScriptCallerContext {
     /// engine/global scope. `GetLocalSFunc` keeps the linked destination
     /// host first, then permits the engine table only for this case.
     engine_scope: bool,
+    /// Whether the current C4Aul context carries a non-null `Def`. DirectExec
+    /// without an object clears it even when its receiver is a definition.
+    definition_context: bool,
     /// `cthr->Caller->Func->Owner->Strict`, used by native compatibility
     /// functions. Includes/appends therefore use their destination owner.
     owner_strict_level: Option<u8>,
@@ -250,15 +253,73 @@ thread_local! {
 type ScriptTraceSink = Arc<dyn Fn(&str) + Send + Sync>;
 
 struct ActiveDiagnosticFrame {
-    profile_host_identity: Option<ScriptHostIdentity>,
-    function: String,
-    arguments: Vec<(Value, bool)>,
-    object_context: Option<String>,
-    definition_context: Option<String>,
-    source_host_identity: Option<ScriptHostIdentity>,
-    source_name: Option<String>,
-    source_line: usize,
+    kind: DiagnosticFrameKind,
     profile_started_at: Option<Instant>,
+}
+
+enum DiagnosticFrameKind {
+    Function {
+        host_identity: Option<ScriptHostIdentity>,
+        function: String,
+        arguments: Vec<(Value, bool)>,
+        object_context: Option<String>,
+        definition_context: Option<String>,
+        source_host_identity: Option<ScriptHostIdentity>,
+        source_name: Option<String>,
+        source_line: usize,
+    },
+    DirectExec(DirectExecDiagnosticFrame),
+}
+
+struct DirectExecDiagnosticFrame {
+    script_display: String,
+    object_id: Option<u64>,
+    object_fallback: Option<String>,
+}
+
+impl DirectExecDiagnosticFrame {
+    fn new(script_display: String, object_id: Option<u64>) -> Self {
+        let object_fallback = object_id.map(|id| {
+            diagnostic_object_display(id)
+                .map(|(display, _)| display)
+                .unwrap_or_else(|| id.to_string())
+        });
+        Self {
+            script_display,
+            object_id,
+            object_fallback,
+        }
+    }
+
+    fn display(&self) -> String {
+        let Some(id) = self.object_id else {
+            return self.script_display.clone();
+        };
+        let object = diagnostic_object_display(id)
+            .map(|(display, _)| display)
+            .or_else(|| self.object_fallback.clone())
+            .unwrap_or_else(|| id.to_string());
+        format!("{} (obj {object})", self.script_display)
+    }
+}
+
+impl DiagnosticFrameKind {
+    fn matches_profiler_target(&self, target: Option<ScriptHostIdentity>) -> bool {
+        match self {
+            Self::DirectExec(_) => true,
+            Self::Function { host_identity, .. } => match target {
+                None => true,
+                Some(target) => *host_identity == Some(target),
+            },
+        }
+    }
+
+    fn trace_return_name(&self) -> &str {
+        match self {
+            Self::Function { function, .. } => function,
+            Self::DirectExec(_) => "",
+        }
+    }
 }
 
 struct ScriptTraceRun {
@@ -269,6 +330,8 @@ struct ScriptTraceRun {
 struct ScriptProfilerRun {
     target: Option<ScriptHostIdentity>,
     elapsed: HashMap<(Option<ScriptHostIdentity>, String), Duration>,
+    direct_exec_started_at: Option<Instant>,
+    direct_exec_elapsed: Duration,
 }
 
 #[derive(Default)]
@@ -284,6 +347,69 @@ thread_local! {
     // top-level calls and follow synchronous calls into another script host.
     static EXECUTION_DIAGNOSTICS: RefCell<ExecutionDiagnostics> =
         RefCell::new(ExecutionDiagnostics::default());
+    /// Optional engine-side C4Object::GetDataString bridge. lc-script knows
+    /// object numbers, while the embedding engine owns live names/status.
+    static DIAGNOSTIC_OBJECT_FORMATTER: Cell<
+        Option<fn(u64) -> Option<(String, Option<String>)>>,
+    > =
+        const { Cell::new(None) };
+}
+
+struct DiagnosticObjectFormatterGuard(
+    Option<fn(u64) -> Option<(String, Option<String>)>>,
+);
+
+impl Drop for DiagnosticObjectFormatterGuard {
+    fn drop(&mut self) {
+        DIAGNOSTIC_OBJECT_FORMATTER.with(|cell| cell.set(self.0));
+    }
+}
+
+/// Run one script entry with an embedding-provided C4Object::GetDataString
+/// formatter. The bridge is thread-local and nesting-safe, matching the
+/// thread-local C4Aul execution/host context.
+#[doc(hidden)]
+pub fn with_diagnostic_object_formatter<R>(
+    formatter: fn(u64) -> Option<(String, Option<String>)>,
+    action: impl FnOnce() -> R,
+) -> R {
+    let previous = DIAGNOSTIC_OBJECT_FORMATTER.with(|cell| cell.replace(Some(formatter)));
+    let _guard = DiagnosticObjectFormatterGuard(previous);
+    action()
+}
+
+fn diagnostic_object_display(id: u64) -> Option<(String, Option<String>)> {
+    DIAGNOSTIC_OBJECT_FORMATTER.with(|cell| cell.get().and_then(|formatter| formatter(id)))
+}
+
+fn diagnostic_value_display(value: &Value) -> String {
+    match value {
+        Value::Object(id) => diagnostic_object_display(*id)
+            .map(|(display, _)| display)
+            .unwrap_or_else(|| id.to_string()),
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(diagnostic_value_display)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Proplist(entries) if entries.is_empty() => "{}".to_string(),
+        Value::Proplist(entries) => format!(
+            "{{ {} }}",
+            entries
+                .iter()
+                .map(|(key, value)| format!(
+                    "{} = {}",
+                    diagnostic_value_display(key),
+                    diagnostic_value_display(value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => value.to_string(),
+    }
 }
 
 /// Snapshot the singleton executor stack without changing its lifetime.
@@ -295,33 +421,46 @@ pub(crate) fn snapshot_active_runtime_frames() -> Vec<RuntimeCallFrame> {
             .frames
             .iter()
             .rev()
-            .map(|frame| {
-                let mut arguments = frame.arguments.iter().collect::<Vec<_>>();
-                while arguments
-                    .last()
-                    .is_some_and(|(argument, reference)| !reference && matches!(argument, Value::Nil))
-                {
-                    arguments.pop();
+            .map(|frame| match &frame.kind {
+                DiagnosticFrameKind::DirectExec(frame) => {
+                    RuntimeCallFrame::direct_exec(frame.display())
                 }
-                RuntimeCallFrame::new(
-                    frame.function.clone(),
-                    arguments
-                        .into_iter()
-                        .map(|(value, reference)| {
-                            let mut value = value.to_string();
-                            if *reference {
-                                value.push('*');
-                            }
-                            value
-                        })
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    frame.object_context.clone(),
-                    frame.definition_context.clone(),
-                    frame.source_host_identity,
-                    frame.source_name.clone(),
-                    frame.source_line,
-                )
+                DiagnosticFrameKind::Function {
+                    function,
+                    arguments,
+                    object_context,
+                    definition_context,
+                    source_host_identity,
+                    source_name,
+                    source_line,
+                    ..
+                } => {
+                    let mut arguments = arguments.iter().collect::<Vec<_>>();
+                    while arguments.last().is_some_and(|(argument, reference)| {
+                        !reference && matches!(argument, Value::Nil)
+                    }) {
+                        arguments.pop();
+                    }
+                    RuntimeCallFrame::new(
+                        function.clone(),
+                        arguments
+                            .into_iter()
+                            .map(|(value, reference)| {
+                                let mut value = diagnostic_value_display(value);
+                                if *reference {
+                                    value.push('*');
+                                }
+                                value
+                            })
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        object_context.clone(),
+                        definition_context.clone(),
+                        *source_host_identity,
+                        source_name.clone(),
+                        *source_line,
+                    )
+                }
             })
             .collect()
     })
@@ -330,10 +469,13 @@ pub(crate) fn snapshot_active_runtime_frames() -> Vec<RuntimeCallFrame> {
 /// One completed script function in a [`stop_script_profiler`] report.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScriptProfileEntry {
-    /// `None` identifies a function owned by Game.ScriptEngine.
+    /// `None` identifies a function owned by Game.ScriptEngine. DirectExec
+    /// also uses `None`, but is distinguished by [`Self::direct_exec`].
     pub host_identity: Option<ScriptHostIdentity>,
     pub function: String,
     pub elapsed: Duration,
+    /// The C++ profiler's one host-independent `Direct exec` aggregate.
+    pub direct_exec: bool,
 }
 
 /// Arm C4Aul-style call tracing at the currently active script-stack depth.
@@ -344,9 +486,8 @@ where
 {
     EXECUTION_DIAGNOSTICS.with(|cell| {
         let mut diagnostics = cell.borrow_mut();
-        // A native/direct entry has no script frame whose unwind could clear
-        // the trace. C++ console DirectExec owns a context; Rust does not yet,
-        // so leave that unsupported path inert instead of leaking globally.
+        // A native entry has no script frame whose unwind could clear the
+        // trace. DirectExec does own a temporary diagnostic frame, like C++.
         if !diagnostics.frames.is_empty() && diagnostics.trace.is_none() {
             diagnostics.trace = Some(ScriptTraceRun {
                 start_depth: diagnostics.frames.len(),
@@ -363,14 +504,20 @@ pub fn start_script_profiler(target: Option<ScriptHostIdentity>) {
         let mut diagnostics = cell.borrow_mut();
         let now = Instant::now();
         for frame in &mut diagnostics.frames {
-            frame.profile_started_at = match target {
-                None => Some(now),
-                Some(target) => (frame.profile_host_identity == Some(target)).then_some(now),
+            frame.profile_started_at = match frame.kind {
+                DiagnosticFrameKind::Function { .. } => {
+                    frame.kind.matches_profiler_target(target).then_some(now)
+                }
+                DiagnosticFrameKind::DirectExec(_) => None,
             };
         }
         diagnostics.profiler = Some(ScriptProfilerRun {
             target,
             elapsed: HashMap::new(),
+            // C++ initializes its singleton timestamp in case profiling was
+            // armed from inside an already-active DirectExec frame.
+            direct_exec_started_at: Some(now),
+            direct_exec_elapsed: Duration::ZERO,
         });
     });
 }
@@ -381,18 +528,26 @@ pub fn start_script_profiler(target: Option<ScriptHostIdentity>) {
 pub fn stop_script_profiler() -> Option<Vec<ScriptProfileEntry>> {
     EXECUTION_DIAGNOSTICS.with(|cell| {
         let run = cell.borrow_mut().profiler.take()?;
+        let direct_exec_elapsed = run.direct_exec_elapsed;
         let mut entries = run
             .elapsed
             .into_iter()
             .filter(|(_, elapsed)| elapsed.as_millis() != 0)
-            .map(
-                |((host_identity, function), elapsed)| ScriptProfileEntry {
-                    host_identity,
-                    function,
-                    elapsed,
-                },
-            )
+            .map(|((host_identity, function), elapsed)| ScriptProfileEntry {
+                host_identity,
+                function,
+                elapsed,
+                direct_exec: false,
+            })
             .collect::<Vec<_>>();
+        if direct_exec_elapsed.as_millis() != 0 {
+            entries.push(ScriptProfileEntry {
+                host_identity: None,
+                function: "Direct exec".to_string(),
+                elapsed: direct_exec_elapsed,
+                direct_exec: true,
+            });
+        }
         entries.sort_by(|left, right| {
             right
                 .elapsed
@@ -404,8 +559,38 @@ pub fn stop_script_profiler() -> Option<Vec<ScriptProfileEntry>> {
     })
 }
 
+/// Bottom-to-top display strings for active C4Aul DirectExec contexts.
+///
+/// This is intentionally limited to temporary frames: retaining formatted
+/// argument strings on every ordinary call would tax gameplay while tracing
+/// is inactive.
+#[doc(hidden)]
+pub fn active_direct_exec_diagnostic_frames() -> Vec<String> {
+    EXECUTION_DIAGNOSTICS.with(|cell| {
+        cell.borrow()
+            .frames
+            .iter()
+            .filter_map(|frame| match &frame.kind {
+                DiagnosticFrameKind::DirectExec(frame) => Some(frame.display()),
+                DiagnosticFrameKind::Function { .. } => None,
+            })
+            .collect()
+    })
+}
+
+fn start_direct_exec_profile() {
+    EXECUTION_DIAGNOSTICS.with(|cell| {
+        if let Some(run) = cell.borrow_mut().profiler.as_mut() {
+            // Native C4AulExec owns one timestamp, not a nested timer stack.
+            // A nested DirectExec deliberately overwrites the outer start.
+            run.direct_exec_started_at = Some(Instant::now());
+        }
+    });
+}
+
 struct ScriptDiagnosticGuard {
     active: bool,
+    profile_on_error: bool,
 }
 
 impl ScriptDiagnosticGuard {
@@ -425,13 +610,10 @@ impl ScriptDiagnosticGuard {
                 let indent = ">".repeat(depth.saturating_sub(trace.start_depth));
                 let args = args
                     .iter()
-                    .map(Value::to_string)
+                    .map(diagnostic_value_display)
                     .collect::<Vec<_>>()
                     .join(", ");
-                (
-                    Arc::clone(&trace.sink),
-                    format!("T{indent}{name}({args})"),
-                )
+                (Arc::clone(&trace.sink), format!("T{indent}{name}({args})"))
             });
             let profile_started_at = diagnostics
                 .profiler
@@ -443,30 +625,71 @@ impl ScriptDiagnosticGuard {
                 .map(|_| Instant::now());
             let object_context = match this_value {
                 Value::Object(0) | Value::Nil => None,
-                Value::Object(_) => Some(this_value.to_string()),
+                Value::Object(id) => Some(
+                    diagnostic_object_display(*id)
+                        .map(|(display, _)| display)
+                        .unwrap_or_else(|| this_value.to_string()),
+                ),
                 _ => None,
             };
             diagnostics.frames.push(ActiveDiagnosticFrame {
-                profile_host_identity,
-                function: name.to_string(),
-                arguments: args
-                    .iter()
-                    .cloned()
-                    .zip(arg_references.iter().copied())
-                    .collect(),
-                object_context,
-                definition_context: (function.access != AccessLevel::Global)
-                    .then(|| owner_definition_name.map(str::to_owned))
-                    .flatten(),
-                source_host_identity: function.source_host_identity(),
-                source_name: function.source_name().map(str::to_owned),
-                source_line: function.source_line(),
+                kind: DiagnosticFrameKind::Function {
+                    host_identity: profile_host_identity,
+                    function: name.to_string(),
+                    arguments: args
+                        .iter()
+                        .cloned()
+                        .zip(arg_references.iter().copied())
+                        .collect(),
+                    object_context,
+                    definition_context: (function.access != AccessLevel::Global)
+                        .then(|| owner_definition_name.map(str::to_owned))
+                        .flatten(),
+                    source_host_identity: function.source_host_identity(),
+                    source_name: function.source_name().map(str::to_owned),
+                    source_line: function.source_line(),
+                },
                 profile_started_at,
             });
             emission
         });
 
-        let guard = Self { active: true };
+        let guard = Self {
+            active: true,
+            profile_on_error: true,
+        };
+        if let Some((sink, message)) = emission {
+            sink(&message);
+        }
+        guard
+    }
+
+    fn enter_direct(
+        frame: DirectExecDiagnosticFrame,
+        profile_on_error: bool,
+    ) -> Self {
+        let emission = EXECUTION_DIAGNOSTICS.with(|cell| {
+            let mut diagnostics = cell.borrow_mut();
+            let depth = diagnostics.frames.len() + 1;
+            let stack_display = frame.display();
+            let emission = diagnostics.trace.as_ref().map(|trace| {
+                let indent = ">".repeat(depth.saturating_sub(trace.start_depth));
+                (
+                    Arc::clone(&trace.sink),
+                    format!("T{indent}{stack_display}"),
+                )
+            });
+            diagnostics.frames.push(ActiveDiagnosticFrame {
+                kind: DiagnosticFrameKind::DirectExec(frame),
+                profile_started_at: None,
+            });
+            emission
+        });
+
+        let guard = Self {
+            active: true,
+            profile_on_error,
+        };
         if let Some((sink, message)) = emission {
             sink(&message);
         }
@@ -476,7 +699,7 @@ impl ScriptDiagnosticGuard {
     fn returned(&mut self, value: &Value) {
         if self.active {
             self.active = false;
-            exit_diagnostic_frame(Some(value));
+            exit_diagnostic_frame(Some(value), true);
         }
     }
 }
@@ -485,37 +708,52 @@ impl Drop for ScriptDiagnosticGuard {
     fn drop(&mut self) {
         if self.active {
             self.active = false;
-            exit_diagnostic_frame(None);
+            exit_diagnostic_frame(None, self.profile_on_error);
         }
     }
 }
 
-fn exit_diagnostic_frame(returned: Option<&Value>) {
+fn exit_diagnostic_frame(returned: Option<&Value>, record_profile: bool) {
     let emission = EXECUTION_DIAGNOSTICS.with(|cell| {
         let mut diagnostics = cell.borrow_mut();
         let depth = diagnostics.frames.len();
         let frame = diagnostics.frames.pop()?;
 
-        if let (Some(run), Some(started_at)) =
-            (diagnostics.profiler.as_mut(), frame.profile_started_at)
-        {
-            let matches_target = match run.target {
-                None => true,
-                Some(target) => frame.profile_host_identity == Some(target),
-            };
-            if matches_target {
-                *run.elapsed
-                    .entry((frame.profile_host_identity, frame.function.clone()))
-                    .or_default() += started_at.elapsed();
+        if record_profile {
+            if let Some(run) = diagnostics.profiler.as_mut() {
+                match &frame.kind {
+                    DiagnosticFrameKind::Function {
+                        host_identity,
+                        function,
+                        ..
+                    } => {
+                        if let Some(started_at) = frame.profile_started_at {
+                            if frame.kind.matches_profiler_target(run.target) {
+                                *run.elapsed
+                                    .entry((*host_identity, function.clone()))
+                                    .or_default() += started_at.elapsed();
+                            }
+                        }
+                    }
+                    DiagnosticFrameKind::DirectExec(_) => {
+                        if let Some(started_at) = run.direct_exec_started_at {
+                            run.direct_exec_elapsed += started_at.elapsed();
+                        }
+                    }
+                }
             }
         }
 
         let emission = diagnostics.trace.as_ref().and_then(|trace| {
             returned.map(|value| {
                 let indent = ">".repeat(depth.saturating_sub(trace.start_depth));
+                let value = diagnostic_value_display(value);
                 (
                     Arc::clone(&trace.sink),
-                    format!("T{indent}{} returned {value}", frame.function),
+                    format!(
+                        "T{indent}{} returned {value}",
+                        frame.kind.trace_return_name()
+                    ),
                 )
             })
         });
@@ -2504,6 +2742,15 @@ pub struct Vm<'a> {
     host_identity: ScriptHostIdentity,
     /// Destination definition name for local-function diagnostics.
     owner_definition_name: Option<&'a str>,
+    /// `C4AulScript::ScriptName` of the DirectExec receiver. Temporary
+    /// expression contexts derive their visible name from this host, never
+    /// from an enclosing temporary script.
+    script_name: &'a str,
+    /// Receiver name for `global->eval`, whose native call context has no
+    /// object or definition and therefore selects Game.Script in C++.
+    game_script_name: Option<&'a str>,
+    /// Native `cthr->Def` availability for callerless ordinary frames.
+    definition_context: bool,
     /// Destination script strictness for `Func->Owner->Strict`. None means
     /// this bare VM has no configured base script; Some(None) is an
     /// explicitly NONSTRICT destination.
@@ -2571,6 +2818,9 @@ impl<'a> Vm<'a> {
             functions,
             host_identity: ScriptHostIdentity::fresh(),
             owner_definition_name: None,
+            script_name: "",
+            game_script_name: None,
+            definition_context: false,
             owner_strict_level: None,
             host_functions,
             host_reference_functions: None,
@@ -2619,6 +2869,21 @@ impl<'a> Vm<'a> {
 
     pub(crate) fn with_owner_definition_name(mut self, name: Option<&'a str>) -> Self {
         self.owner_definition_name = name;
+        self
+    }
+
+    pub(crate) fn with_script_name(mut self, script_name: &'a str) -> Self {
+        self.script_name = script_name;
+        self
+    }
+
+    pub(crate) fn with_game_script_name(mut self, script_name: Option<&'a str>) -> Self {
+        self.game_script_name = script_name;
+        self
+    }
+
+    pub(crate) fn with_definition_context(mut self, definition_context: bool) -> Self {
+        self.definition_context = definition_context;
         self
     }
 
@@ -3043,7 +3308,14 @@ impl<'a> Vm<'a> {
         cells: &LocalCells,
     ) -> Result<Value, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::runtime).collect();
-        self.invoke_value(name, args, 0, cells.state.clone(), current_caller_context())
+        let mut caller = current_caller_context();
+        if let Some(caller) = &mut caller {
+            // This entry is used only after AB_CALL has resolved an explicit
+            // object/definition target. C4Id dispatch represents that target
+            // with a nil `this`, so the destination host must restore Def.
+            caller.definition_context |= self.definition_context;
+        }
+        self.invoke_value(name, args, 0, cells.state.clone(), caller)
     }
 
     /// Reference-returning counterpart to [`Vm::call_with_cells`].
@@ -3067,7 +3339,11 @@ impl<'a> Vm<'a> {
         cells: &LocalCells,
     ) -> Result<ValueReference, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::runtime).collect();
-        self.invoke_reference(name, args, 0, cells.state.clone(), current_caller_context())
+        let mut caller = current_caller_context();
+        if let Some(caller) = &mut caller {
+            caller.definition_context |= self.definition_context;
+        }
+        self.invoke_reference(name, args, 0, cells.state.clone(), caller)
             .map(ValueReference)
     }
 
@@ -3091,52 +3367,151 @@ impl<'a> Vm<'a> {
     /// script-language `eval` special form. Parse errors yield C4VNull
     /// (DirectExec's catch, :1693-1699); runtime errors propagate for the
     /// caller's fPassErrors handling. Returns (result, updated_local_vars).
-    pub fn direct_exec_with_locals(
+    #[cfg(test)]
+    fn direct_exec_with_locals(
         &self,
         source: &str,
         local_vars: &HashMap<String, Value>,
         strict_level: Option<u8>,
     ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
+        self.direct_exec_with_locals_in_context(
+            source,
+            local_vars,
+            strict_level,
+            "DirectExec",
+            true,
+        )
+    }
+
+    pub(crate) fn direct_exec_with_locals_in_context(
+        &self,
+        source: &str,
+        local_vars: &HashMap<String, Value>,
+        strict_level: Option<u8>,
+        context: &str,
+        diagnostics: bool,
+    ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
+        if diagnostics {
+            start_direct_exec_profile();
+        }
         let object_state = ObjectState::from_local_vars(local_vars);
-        let Ok(expr) =
-            crate::parser::Parser::with_strict_level_c4_string(source, strict_level)
-                .parse_direct_exec_expression()
+        let Ok(expr) = crate::parser::Parser::with_strict_level_c4_string(source, strict_level)
+            .parse_direct_exec_expression()
         else {
             return Ok((Value::Nil, object_state.to_local_vars(self.var_decls)));
         };
+        let mut diagnostic = diagnostics.then(|| {
+            ScriptDiagnosticGuard::enter_direct(
+                self.direct_exec_diagnostic_frame(context),
+                true,
+            )
+        });
         let mut env = Environment::new_with_params(&[], &[], strict_level, object_state.clone())?;
         env.temporary_script = true;
+        env.definition_context = matches!(&self.this_value, Value::Object(id) if *id != 0);
         for var_decl in self.var_decls {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
         let value = self.evaluate(&expr, &mut env, 0)?;
+        if let Some(diagnostic) = &mut diagnostic {
+            diagnostic.returned(&value);
+        }
         Ok((value, object_state.to_local_vars(self.var_decls)))
     }
 
-    /// [`Vm::direct_exec_with_locals`] against SHARED live cells (see
-    /// [`LocalCells`]): writes land live — deeper sessions on the same
-    /// object observe them mid-call.
-    pub(crate) fn direct_exec_with_cells(
+    /// DirectExec against SHARED live cells (see [`LocalCells`]): writes land
+    /// live, so deeper sessions on the same object observe them mid-call.
+    #[cfg(test)]
+    fn direct_exec_with_cells(
         &self,
         source: &str,
         cells: &LocalCells,
         strict_level: Option<u8>,
     ) -> Result<Value, RuntimeError> {
-        let Ok(expr) =
-            crate::parser::Parser::with_strict_level_c4_string(source, strict_level)
-                .parse_direct_exec_expression()
+        self.direct_exec_with_cells_in_context(
+            source,
+            cells,
+            strict_level,
+            "DirectExec",
+            true,
+        )
+    }
+
+    pub(crate) fn direct_exec_with_cells_in_context(
+        &self,
+        source: &str,
+        cells: &LocalCells,
+        strict_level: Option<u8>,
+        context: &str,
+        diagnostics: bool,
+    ) -> Result<Value, RuntimeError> {
+        if diagnostics {
+            start_direct_exec_profile();
+        }
+        let Ok(expr) = crate::parser::Parser::with_strict_level_c4_string(source, strict_level)
+            .parse_direct_exec_expression()
         else {
             return Ok(Value::Nil);
         };
-        let mut env =
-            Environment::new_with_params(&[], &[], strict_level, cells.state.clone())?;
+        let mut diagnostic = diagnostics.then(|| {
+            ScriptDiagnosticGuard::enter_direct(
+                self.direct_exec_diagnostic_frame(context),
+                true,
+            )
+        });
+        let mut env = Environment::new_with_params(&[], &[], strict_level, cells.state.clone())?;
         env.temporary_script = true;
+        env.definition_context = matches!(&self.this_value, Value::Object(id) if *id != 0);
         for var_decl in self.var_decls {
             let cell = env.object_state.named_local_cell(&var_decl.name);
             env.define_object_local(&var_decl.name, self.identity_for_cell(&cell));
         }
-        self.evaluate(&expr, &mut env, 0)
+        let value = self.evaluate(&expr, &mut env, 0)?;
+        if let Some(diagnostic) = &mut diagnostic {
+            diagnostic.returned(&value);
+        }
+        Ok(value)
+    }
+
+    fn direct_exec_diagnostic_frame(&self, context: &str) -> DirectExecDiagnosticFrame {
+        DirectExecDiagnosticFrame::new(
+            format!("{context} in {}", self.script_name),
+            match &self.this_value {
+                Value::Object(id) if *id != 0 => Some(*id),
+                _ => None,
+            },
+        )
+    }
+
+    fn eval_direct_exec_diagnostic_frame(
+        &self,
+        definition_context: bool,
+    ) -> DirectExecDiagnosticFrame {
+        if let Value::Object(id) = &self.this_value {
+            if *id != 0 {
+                let dynamic_script_name = diagnostic_object_display(*id)
+                    .and_then(|(_, script_name)| script_name);
+                let receiver = dynamic_script_name
+                    .as_deref()
+                    .unwrap_or(self.script_name);
+                return DirectExecDiagnosticFrame::new(
+                    format!("eval in {receiver}"),
+                    Some(*id),
+                );
+            }
+        }
+        if !definition_context {
+            DirectExecDiagnosticFrame::new(
+                format!(
+                    "eval in {}",
+                    self.game_script_name.unwrap_or(self.script_name)
+                ),
+                None,
+            )
+        } else {
+            self.direct_exec_diagnostic_frame("eval")
+        }
     }
 
     fn invoke_value(
@@ -3304,6 +3679,9 @@ impl<'a> Vm<'a> {
             functions: self.functions,
             host_identity: self.host_identity,
             owner_definition_name: None,
+            script_name: self.script_name,
+            game_script_name: self.game_script_name,
+            definition_context: false,
             owner_strict_level: self.owner_strict_level,
             host_functions: self.host_functions,
             host_reference_functions: self.host_reference_functions,
@@ -3507,6 +3885,17 @@ impl<'a> Vm<'a> {
         env.inherited_target = function.overloaded.clone();
         env.function_name = function.name.clone();
         env.engine_scope = function.access == AccessLevel::Global;
+        let explicit_definition_context = match &self.this_value {
+            Value::Object(id) => *id != 0,
+            Value::C4Id(id) => crate::value::c4_id_raw(id) != 0,
+            _ => false,
+        };
+        let inherited_definition_context = caller.as_ref().map_or(
+            function.access != AccessLevel::Global,
+            |caller| caller.definition_context,
+        );
+        env.definition_context = explicit_definition_context
+            || (self.definition_context && inherited_definition_context);
         env.linked_host_lookup = self.exact_global_link_lookup
             && env.engine_scope
             && function.global_link_host == Some(self.host_identity);
@@ -4756,6 +5145,7 @@ impl<'a> Vm<'a> {
                                 // 1693-1699).
                                 _ => return Ok(Value::Nil),
                             };
+                            start_direct_exec_profile();
                             let Ok(expr) = crate::parser::Parser::with_strict_level_c4_string(
                                 &code,
                                 env.strict_level,
@@ -4766,6 +5156,10 @@ impl<'a> Vm<'a> {
                                 // (DirectExec's catch, C4AulExec.cpp:1693).
                                 return Ok(Value::Nil);
                             };
+                            let mut diagnostic = ScriptDiagnosticGuard::enter_direct(
+                                self.eval_direct_exec_diagnostic_frame(env.definition_context),
+                                false,
+                            );
                             let mut exec_env = Environment::new_with_params(
                                 &[],
                                 &[],
@@ -4773,6 +5167,8 @@ impl<'a> Vm<'a> {
                                 env.object_state.clone(),
                             )?;
                             exec_env.temporary_script = true;
+                            exec_env.definition_context =
+                                matches!(&self.this_value, Value::Object(id) if *id != 0);
                             for var_decl in self.var_decls {
                                 let cell = exec_env.object_state.named_local_cell(&var_decl.name);
                                 exec_env.define_object_local(
@@ -4782,7 +5178,9 @@ impl<'a> Vm<'a> {
                             }
                             // Runtime errors propagate (fPassErrors=true,
                             // C4Script.cpp:4514).
-                            return self.evaluate(&expr, &mut exec_env, depth + 1);
+                            let value = self.evaluate(&expr, &mut exec_env, depth + 1)?;
+                            diagnostic.returned(&value);
+                            return Ok(value);
                         }
                         // `Par(n)` reads the executing call's parameter slot n;
                         // outside 0..ParCnt it is nil (C4AulExec.cpp:1127-1140).
@@ -6509,11 +6907,23 @@ impl<'a> Vm<'a> {
                     Some(Value::String(code)) => code,
                     _ => return Ok(value(Value::Nil)),
                 };
-                let Ok(expr) = crate::parser::Parser::with_strict_level(&code, env.strict_level)
-                    .parse_direct_exec_expression()
+                start_direct_exec_profile();
+                let Ok(expr) =
+                    crate::parser::Parser::with_strict_level_c4_string(&code, env.strict_level)
+                        .parse_direct_exec_expression()
                 else {
                     return Ok(value(Value::Nil));
                 };
+                let mut diagnostic = ScriptDiagnosticGuard::enter_direct(
+                    DirectExecDiagnosticFrame::new(
+                        format!(
+                            "eval in {}",
+                            self.game_script_name.unwrap_or(self.script_name)
+                        ),
+                        None,
+                    ),
+                    false,
+                );
                 let mut exec_env = Environment::new_with_params(
                     &[],
                     &[],
@@ -6522,8 +6932,9 @@ impl<'a> Vm<'a> {
                 )?;
                 exec_env.engine_scope = true;
                 exec_env.temporary_script = true;
-                self.evaluate_tracked(&expr, &mut exec_env, depth + 1)
-                    .map(ReturnValue::Value)
+                let tracked = self.evaluate_tracked(&expr, &mut exec_env, depth + 1)?;
+                diagnostic.returned(&tracked.value);
+                Ok(ReturnValue::Value(tracked))
             }
             _ => Err(RuntimeError::new(format!("unknown function '{name}'"))),
         }
@@ -8548,6 +8959,9 @@ struct Environment {
     /// DirectExec/eval expression frames are backed by temporary scripts;
     /// ordinary function invocation leaves this false.
     temporary_script: bool,
+    /// Dynamic `cthr->Def` presence. Unlike the VM's owning-script identity,
+    /// this is cleared by a nil-object DirectExec and `global->`.
+    definition_context: bool,
 }
 
 impl Environment {
@@ -8596,6 +9010,7 @@ impl Environment {
             engine_scope: false,
             linked_host_lookup: false,
             temporary_script: false,
+            definition_context: false,
         })
     }
 
@@ -8605,6 +9020,7 @@ impl Environment {
             function_vars: self.function_vars.clone(),
             owner_host: self.caller_host_identity,
             engine_scope: self.engine_scope,
+            definition_context: self.definition_context,
             owner_strict_level: self.caller_owner_strict_level,
             origin_strict_level: self.strict_level,
             temporary_script: self.temporary_script,

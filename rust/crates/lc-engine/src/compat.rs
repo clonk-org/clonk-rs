@@ -14136,7 +14136,7 @@ fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
         // first, else a GLOBAL script function running in definition
         // scope (C4AulExec.cpp:1259-1261, C4Aul.cpp:130-148) — unlike
         // FnDefinitionCall's owner-scoped lookup.
-        return match call_scoped_script_function_or_global(script, name, &pars) {
+        return match call_scoped_script_function_or_global(script, def_id, name, &pars) {
             Some(result) => result,
             None if failsafe => Ok(Value::Nil),
             None => Err(RuntimeError::new(format!(
@@ -14218,7 +14218,7 @@ fn arrow_method_reference_dispatch(
                 lc_script::c4_id_text(stored_id)
             )));
         };
-        return match call_scoped_script_reference(script, name, &pars) {
+        return match call_scoped_script_reference(script, Some(def_id), name, &pars) {
             Some(result) => result,
             None if failsafe => Err(RuntimeError::new(format!(
                 "function '{name}' does not return a reference"
@@ -14334,10 +14334,20 @@ fn call_scoped_definition_function(
 /// GLOBAL script functions (C4Aul.cpp:130-148) — own functions win.
 fn call_scoped_script_function_or_global(
     script: Arc<ScriptEngine>,
+    definition: DefinitionId,
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, true, false, true, None, None)
+    call_scoped_script_function_impl(
+        script,
+        function,
+        args,
+        true,
+        false,
+        true,
+        Some(Some(definition)),
+        None,
+    )
 }
 
 /// C4Effect::DoCall's definition/global branch includes engine-native
@@ -14406,6 +14416,7 @@ fn call_scoped_global_effect_function(
 
 fn call_scoped_script_reference(
     script: Arc<ScriptEngine>,
+    definition_override: Option<DefinitionId>,
     function: &str,
     args: &[Value],
 ) -> Option<Result<lc_script::ValueReference, RuntimeError>> {
@@ -14413,15 +14424,17 @@ fn call_scoped_script_reference(
     let (previous_script_object, previous_script_definition, previous_definition) =
         HOST_CONTEXT.with(|cell| {
             if let Some(context) = cell.borrow_mut().as_mut() {
-                let definition = if resolution.scope == lc_script::ScriptFunctionScope::Global {
-                    None
-                } else {
-                    context
-                        .world
-                        .script_for_host_identity(resolution.host_identity)
-                        .and_then(|(_, definition, _)| definition)
-                        .or_else(|| context.definition_context.clone())
-                };
+                let definition = definition_override.clone().or_else(|| {
+                    if resolution.scope == lc_script::ScriptFunctionScope::Global {
+                        None
+                    } else {
+                        context
+                            .world
+                            .script_for_host_identity(resolution.host_identity)
+                            .and_then(|(_, definition, _)| definition)
+                            .or_else(|| context.definition_context.clone())
+                    }
+                });
                 let active = context.object.take();
                 context.dormant_scopes.push(active);
                 let previous_definition =
@@ -16035,6 +16048,48 @@ fn value_to_data_string_with_context(
     }
 }
 
+/// C4Value::GetDataString for a live object used by lc-script diagnostic
+/// frames. Deleted/unknown pointers fall back to their raw object number in
+/// lc-script, while inactive objects retain C++'s brace notation.
+pub(crate) fn diagnostic_object_data_string(id: u64) -> Option<(String, Option<String>)> {
+    let target = ObjectId::new(id);
+    HOST_CONTEXT.with(|cell| {
+        // RuntimeError snapshots the active diagnostic stack at the error
+        // site. A native may still hold this context mutably at that point;
+        // diagnostic rendering must fall back instead of re-borrowing/panicking.
+        let borrow = cell.try_borrow().ok()?;
+        let context = borrow.as_ref()?;
+        let scoped_object = context.object_scope(target);
+        let status = scoped_object
+            .map(|scope| {
+                if scope.destroy {
+                    ObjectStatus::Deleted
+                } else {
+                    scope.status()
+                }
+            })
+            .or_else(|| context.get_world_object(target).map(|object| object.status()))?;
+        if status == ObjectStatus::Deleted && scoped_object.is_none() {
+            return None;
+        }
+        let definition = context.object_effective_definition_id(target);
+        let name = context
+            .object_effective_name(target)
+            .or_else(|| definition.clone())?;
+        let script_name = definition
+            .as_deref()
+            .and_then(|definition| context.world.definition_script(definition))
+            .map(|script| script.script_name().to_owned());
+        let display = format!("{name} #{id}");
+        let display = if status == ObjectStatus::Normal {
+            display
+        } else {
+            format!("{{{display}}}")
+        };
+        Some((display, script_name))
+    })
+}
+
 fn value_to_data_string(value: &Value) -> String {
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -16614,26 +16669,30 @@ fn stop_script_profiler(_args: &[Value]) -> Result<Value, RuntimeError> {
         info!(target: "lc-script-profiler", "Profiler statistics:");
         info!(target: "lc-script-profiler", "==============================");
         for entry in entries {
-            let function = match entry.host_identity {
-                None => format!("global {}", entry.function),
-                Some(host_identity) => HOST_CONTEXT
-                    .with(|cell| {
-                        cell.borrow().as_ref().and_then(|context| {
-                            context
-                                .world
-                                .script_for_host_identity(host_identity)
-                                .map(|(host, definition, _)| match definition {
-                                    Some(definition) => {
-                                        format!("{definition}::{}", entry.function)
-                                    }
-                                    None if host == "Game.Script" => {
-                                        format!("game {}", entry.function)
-                                    }
-                                    None => format!("{host}::{}", entry.function),
-                                })
+            let function = if entry.direct_exec {
+                entry.function
+            } else {
+                match entry.host_identity {
+                    None => format!("global {}", entry.function),
+                    Some(host_identity) => HOST_CONTEXT
+                        .with(|cell| {
+                            cell.borrow().as_ref().and_then(|context| {
+                                context
+                                    .world
+                                    .script_for_host_identity(host_identity)
+                                    .map(|(host, definition, _)| match definition {
+                                        Some(definition) => {
+                                            format!("{definition}::{}", entry.function)
+                                        }
+                                        None if host == "Game.Script" => {
+                                            format!("game {}", entry.function)
+                                        }
+                                        None => format!("{host}::{}", entry.function),
+                                    })
+                            })
                         })
-                    })
-                    .unwrap_or(entry.function),
+                        .unwrap_or(entry.function),
+                }
             };
             info!(
                 target: "lc-script-profiler",
@@ -18530,7 +18589,10 @@ where
             game_over_triggered,
         ));
         let guard = EffectHostContextTlsGuard { cell, active: true };
-        let result = func();
+        let result = lc_script::with_diagnostic_object_formatter(
+            diagnostic_object_data_string,
+            func,
+        );
         let context = guard.finish();
         let outcome = context.into_commands();
         AUDIO_CONTEXT.with(|cell| {
@@ -59159,6 +59221,457 @@ public func RejectConstruction(x, y, builder)
                 "T>Outer returned 7",
                 "TArm returned 7",
             ]
+        );
+    }
+
+    #[test]
+    fn direct_exec_arms_trace_and_reports_direct_exec_profile_entry() {
+        let mut script = ScriptEngine::new();
+        script.set_script_name("Test.Script");
+        register_host_functions(&mut script);
+        script.register_host_function("ProfilerDelay", |_| {
+            std::thread::sleep(std::time::Duration::from_millis(3));
+            Ok(Value::Nil)
+        });
+        script
+            .load_script(
+                "#strict 2\n\
+                 func Helper() { return 7; }\n\
+                 func EvalProfileFail() { return eval(\"ProfilerDelay() || Missing()\"); }\n\
+                 func EndProfile() { return StopScriptProfiler(); }",
+            )
+            .expect("DirectExec diagnostic probes compile");
+
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
+        subscriber::with_default(subscriber, || {
+            let (value, _) = script
+                .direct_exec_with_locals_and_this_in_context(
+                    "StartCallTrace() || Helper()",
+                    &HashMap::new(),
+                    Value::Nil,
+                    "console script",
+                )
+                .expect("traced DirectExec succeeds");
+            assert_eq!(value, Value::Int(7));
+            assert_eq!(
+                script.call("Helper", &[]).expect("later call succeeds"),
+                Value::Int(7),
+                "the DirectExec frame unwind ends its trace"
+            );
+
+            lc_script::start_script_profiler(None);
+            for context in ["console script", "MenuCommand"] {
+                let (value, _) = script
+                    .direct_exec_with_locals_and_this_in_context(
+                        "ProfilerDelay() || 1",
+                        &HashMap::new(),
+                        Value::Nil,
+                        context,
+                    )
+                    .expect("profiled DirectExec succeeds");
+                assert_eq!(value, Value::Int(1));
+            }
+            assert!(
+                script
+                    .direct_exec_with_locals_and_this_in_context(
+                        "ProfilerDelay() || Missing()",
+                        &HashMap::new(),
+                        Value::Nil,
+                        "console script",
+                    )
+                    .is_err(),
+                "the host catches this fPassErrors=false failure after DirectExec"
+            );
+            assert_eq!(
+                script.call("EndProfile", &[]).expect("profiler stops"),
+                Value::Nil
+            );
+
+            lc_script::start_script_profiler(None);
+            assert!(
+                script.call("EvalProfileFail", &[]).is_err(),
+                "eval propagates its runtime error"
+            );
+            assert!(
+                lc_script::stop_script_profiler()
+                    .expect("eval error leaves profiler active")
+                    .iter()
+                    .all(|entry| !entry.direct_exec),
+                "fPassErrors=true eval never reaches StopDirectExec"
+            );
+        });
+
+        let records = records.lock().unwrap();
+        let trace = records
+            .iter()
+            .filter(|record| record.target == "lc-script-trace")
+            .map(|record| record.message.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            trace,
+            vec!["T>Helper()", "T>Helper returned 7", "T returned 7"]
+        );
+
+        let profiler_rows = records
+            .iter()
+            .filter(|record| {
+                record.target == "lc-script-profiler"
+                    && record.message.ends_with("\tDirect exec")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(profiler_rows.len(), 1, "DirectExec timings aggregate");
+        assert!(!profiler_rows[0].message.contains("global Direct exec"));
+        let elapsed_ms = profiler_rows[0]
+            .message
+            .split_once("ms\t")
+            .expect("native profiler row format")
+            .0
+            .parse::<u128>()
+            .expect("native profiler duration");
+        assert!(
+            elapsed_ms >= 9,
+            "success and swallowed-error DirectExec calls all contribute"
+        );
+    }
+
+    #[test]
+    fn eval_direct_exec_frames_use_cpp_names_and_balance_on_errors() {
+        let mut script = ScriptEngine::new();
+        script.set_script_name("Scenario");
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Helper() { return 7; }\n\
+                 func Arm() { StartCallTrace(); return eval(\"Helper()\"); }\n\
+                 func Fail() { StartCallTrace(); return eval(\"Missing()\"); }\n\
+                 func NestedFail() { StartCallTrace(); return eval(\"eval(\\\"Missing()\\\")\"); }\n\
+                 func ParseFail() { StartCallTrace(); return eval(\"(\"); }\n\
+                 func GlobalEval() { StartCallTrace(); return global->eval(\"1\"); }",
+            )
+            .expect("eval diagnostic probes compile");
+
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
+        subscriber::with_default(subscriber, || {
+            let take_trace = || {
+                let mut records = records.lock().unwrap();
+                let trace = records
+                    .iter()
+                    .filter(|record| record.target == "lc-script-trace")
+                    .map(|record| record.message.clone())
+                    .collect::<Vec<_>>();
+                records.clear();
+                trace
+            };
+
+            assert_eq!(script.call("Arm", &[]).expect("eval succeeds"), Value::Int(7));
+            assert_eq!(
+                take_trace(),
+                [
+                    "T>eval in Scenario",
+                    "T>>Helper()",
+                    "T>>Helper returned 7",
+                    "T> returned 7",
+                    "TArm returned 7",
+                ]
+            );
+
+            let error = script
+                .call("Fail", &[])
+                .expect_err("runtime errors propagate");
+            assert_eq!(error.call_frames().len(), 2);
+            assert_eq!(
+                error.call_frames()[0].direct_exec_display(),
+                Some("eval in Scenario")
+            );
+            assert_eq!(error.call_frames()[1].function(), "Fail");
+            assert_eq!(error.call_frames()[1].direct_exec_display(), None);
+            assert_eq!(take_trace(), ["T>eval in Scenario"]);
+
+            let error = script
+                .call("NestedFail", &[])
+                .expect_err("nested runtime errors propagate");
+            assert_eq!(error.call_frames().len(), 3);
+            assert_eq!(
+                error.call_frames()[0].direct_exec_display(),
+                Some("eval in Scenario")
+            );
+            assert_eq!(
+                error.call_frames()[1].direct_exec_display(),
+                Some("eval in Scenario")
+            );
+            assert_eq!(error.call_frames()[2].function(), "NestedFail");
+            assert_eq!(
+                take_trace(),
+                ["T>eval in Scenario", "T>>eval in Scenario"]
+            );
+
+            assert_eq!(
+                script
+                    .call("ParseFail", &[])
+                    .expect("parse errors become nil"),
+                Value::Nil
+            );
+            assert_eq!(take_trace(), ["TParseFail returned nil"]);
+
+            assert_eq!(
+                script
+                    .call("GlobalEval", &[])
+                    .expect("global eval succeeds"),
+                Value::Int(1)
+            );
+            assert_eq!(
+                take_trace(),
+                [
+                    "T>eval in Scenario",
+                    "T> returned 1",
+                    "TGlobalEval returned 1",
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn direct_exec_stack_display_and_targeted_profiler_match_cpp() {
+        let mut script = ScriptEngine::new();
+        script.set_script_name("TEST");
+        script.set_game_script_name("Scenario.c4s/Script.c");
+        script.set_definition_context(true);
+        register_host_functions(&mut script);
+        script.register_host_function("CaptureFrames", |_| {
+            Ok(Value::Array(
+                lc_script::active_direct_exec_diagnostic_frames()
+                    .into_iter()
+                    .map(Value::from)
+                .collect(),
+            ))
+        });
+        script.register_host_function("MissingObject", |_| Ok(Value::Object(999)));
+        script.register_host_function("ProfilerDelay", |_| {
+            std::thread::sleep(std::time::Duration::from_millis(3));
+            Ok(Value::Int(1))
+        });
+        script.register_host_function("StopProfilerWithoutDirect", |_| {
+            let entries = lc_script::stop_script_profiler().unwrap_or_default();
+            Ok(Value::Bool(entries.iter().all(|entry| !entry.direct_exec)))
+        });
+        let direct_trace = Arc::new(Mutex::new(Vec::new()));
+        let direct_trace_sink = Arc::clone(&direct_trace);
+        script.register_host_function("CaptureDirectTrace", move |_| {
+            let direct_trace = Arc::clone(&direct_trace_sink);
+            lc_script::start_call_trace(move |message| {
+                direct_trace.lock().unwrap().push(message.to_string());
+            });
+            Ok(Value::Nil)
+        });
+        script
+            .load_script(
+                "#strict 3\n\
+                 global func GlobalFrame() { return eval(\"CaptureFrames()\"); }\n\
+                 global func NestedDefinitionFrame() { return eval(\"CaptureFrames()\"); }\n\
+                 func DefinitionFrame() { return eval(\"CaptureFrames()\"); }\n\
+                 func DefinitionThroughEval() { return eval(\"NestedDefinitionFrame()\"); }\n\
+                 func ProbeGlobal() { return global->GlobalFrame(); }",
+            )
+            .expect("stack-display host compiles");
+
+        let (frames, _) = with_effect_context(
+            Some(object_host_context_with_physical_energy(100, 100).with_definition_id("Clonk")),
+            &[],
+            HostWorldContext::default(),
+            2,
+            || {
+                script.direct_exec_with_locals_and_this_in_context(
+                    "eval(\"CaptureFrames()\")",
+                    &HashMap::new(),
+                    Value::Object(1),
+                    "MenuCommand",
+                )
+            },
+        )
+        .0
+        .expect("nested DirectExec stack capture succeeds");
+        assert_eq!(
+            frames,
+            Value::Array(vec![
+                Value::String("MenuCommand in TEST (obj Clonk #1)".into()),
+                Value::String("eval in TEST (obj Clonk #1)".into()),
+            ])
+        );
+        let renamed_error = with_effect_context(
+            Some(object_host_context_with_physical_energy(100, 100).with_definition_id("Clonk")),
+            &[],
+            HostWorldContext::default(),
+            2,
+            || {
+                script.direct_exec_with_locals_and_this_in_context(
+                    "SetName(\"Renamed\") && Missing()",
+                    &HashMap::new(),
+                    Value::Object(1),
+                    "MenuCommand",
+                )
+            },
+        )
+        .0
+        .expect_err("renamed-object probe raises a runtime error");
+        assert_eq!(
+            renamed_error.call_frames()[0].direct_exec_display(),
+            Some("MenuCommand in TEST (obj Renamed #1)"),
+            "DirectExec stack dumps render the object's live error-time name"
+        );
+        let borrowed_context_error = with_effect_context(
+            Some(object_host_context_with_physical_energy(100, 100).with_definition_id("Clonk")),
+            &[],
+            HostWorldContext::default(),
+            2,
+            || {
+                script.direct_exec_with_locals_and_this_in_context(
+                    "SetTransferZone(0, 0, 1, 1, MissingObject())",
+                    &HashMap::new(),
+                    Value::Object(1),
+                    "MenuCommand",
+                )
+            },
+        )
+        .0
+        .expect_err("missing transfer-zone owner raises a runtime error");
+        assert_eq!(
+            borrowed_context_error.call_frames()[0].direct_exec_display(),
+            Some("MenuCommand in TEST (obj Clonk #1)"),
+            "errors raised under a mutable host-context borrow retain the entry display"
+        );
+        let (returned_object, _) = with_effect_context(
+            Some(object_host_context_with_physical_energy(100, 100).with_definition_id("Clonk")),
+            &[],
+            HostWorldContext::default(),
+            2,
+            || {
+                script.direct_exec_with_locals_and_this_in_context(
+                    "CaptureDirectTrace() || Object(1)",
+                    &HashMap::new(),
+                    Value::Object(1),
+                    "MenuCommand",
+                )
+            },
+        )
+        .0
+        .expect("object-return DirectExec succeeds");
+        assert_eq!(returned_object, Value::Object(1));
+        assert_eq!(
+            *direct_trace.lock().unwrap(),
+            ["T returned Clonk #1"],
+            "anonymous DirectExec returns use C4Value::GetDataString"
+        );
+        assert_eq!(
+            script
+                .call("GlobalFrame", &[])
+                .expect("callerless global frame eval succeeds"),
+            Value::Array(vec![Value::String(
+                "eval in Scenario.c4s/Script.c".into()
+            )]),
+            "a callerless global function is owned by Game.ScriptEngine"
+        );
+        assert_eq!(
+            script
+                .call("DefinitionFrame", &[])
+                .expect("definition frame eval succeeds"),
+            Value::Array(vec![Value::String("eval in TEST".into())]),
+            "a retained Def context selects the definition script"
+        );
+        assert_eq!(
+            script
+                .call("DefinitionThroughEval", &[])
+                .expect("nested definition eval succeeds"),
+            Value::Array(vec![
+                Value::String("eval in TEST".into()),
+                Value::String("eval in Scenario.c4s/Script.c".into()),
+            ]),
+            "nil-object DirectExec clears Def for nested calls"
+        );
+        assert_eq!(
+            script
+                .call("ProbeGlobal", &[])
+                .expect("global frame eval succeeds"),
+            Value::Array(vec![Value::String(
+                "eval in Scenario.c4s/Script.c".into()
+            )]),
+            "a null Obj/Def global frame selects Game.Script"
+        );
+
+        let unrelated_target = ScriptEngine::new().host_identity();
+        lc_script::start_script_profiler(Some(unrelated_target));
+        script
+            .direct_exec_with_locals_and_this_in_context(
+                "ProfilerDelay()",
+                &HashMap::new(),
+                Value::Nil,
+                "console script",
+            )
+            .expect("target-independent DirectExec profiling succeeds");
+        let entries = lc_script::stop_script_profiler().expect("profiler was active");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].direct_exec);
+        assert_eq!(entries[0].function, "Direct exec");
+        assert_eq!(entries[0].host_identity, None);
+        assert!(entries[0].elapsed >= std::time::Duration::from_millis(3));
+
+        script
+            .direct_exec_with_locals_and_this_in_context(
+                "(StartScriptProfiler() && ProfilerDelay()) || 1",
+                &HashMap::new(),
+                Value::Nil,
+                "internal script",
+            )
+            .expect("profiling can start inside DirectExec");
+        let entries = lc_script::stop_script_profiler().expect("inner profiler remains active");
+        let direct = entries
+            .iter()
+            .find(|entry| entry.direct_exec)
+            .expect("active DirectExec starts timing at profiler start");
+        assert!(direct.elapsed >= std::time::Duration::from_millis(3));
+
+        lc_script::start_script_profiler(None);
+        assert_eq!(
+            script
+                .direct_exec_with_locals_and_this_in_context(
+                    "ProfilerDelay() && StopProfilerWithoutDirect()",
+                    &HashMap::new(),
+                    Value::Nil,
+                    "console script",
+                )
+                .expect("profiling can stop inside DirectExec")
+                .0,
+            Value::Bool(true),
+            "stopping inside DirectExec excludes its still-active frame"
+        );
+        assert!(lc_script::stop_script_profiler().is_none());
+
+        lc_script::start_script_profiler(None);
+        script
+            .direct_exec_with_locals_and_this_at_strict_in_context_diagnostics(
+                "ProfilerDelay()",
+                &HashMap::new(),
+                Value::Nil,
+                Some(3),
+                "ObjectMenuValue",
+                false,
+            )
+            .expect("Rust-only expression adapter executes");
+        assert!(
+            lc_script::stop_script_profiler()
+                .expect("adapter profiler was active")
+                .is_empty(),
+            "Rust-only expression adapters do not contaminate DirectExec totals"
+        );
+        assert!(crate::is_cpp_direct_exec_context("MenuCommand"));
+        assert!(!crate::is_cpp_direct_exec_context("ObjectMenuValue"));
+
+        let engine = crate::Engine::new();
+        assert_eq!(
+            engine.script_control_global_host().script_name(),
+            "System.c4g"
         );
     }
 

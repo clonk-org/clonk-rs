@@ -829,10 +829,17 @@ pub struct Engine {
     /// Rust moves and copy-on-write Engine clones so global Function
     /// `LinkedTo` provenance never depends on a HashMap's address.
     host_identity: crate::vm::ScriptHostIdentity,
-    /// Native `C4AulScript::ScriptName` used in call-stack diagnostics.
+    /// Native `C4AulScript::ScriptName`, used by function source diagnostics
+    /// and temporary DirectExec contexts (`<context> in <ScriptName>`).
     script_name: Option<String>,
     /// Destination `C4Def::Name` for objectless local-function frames.
     definition_name: Option<String>,
+    /// `Game.Script::ScriptName`, which is the receiver selected by C++ when
+    /// AB_CALLGLOBAL clears Obj/Def before a native `eval` call.
+    game_script_name: Option<String>,
+    /// Whether a callerless ordinary frame retains a C4Aul `Def` context.
+    /// Definition hosts do; Game.Script and Game.ScriptEngine do not.
+    definition_context: bool,
     /// Strictness of this C4AulScript host itself. Linked include/append
     /// function copies keep their source strictness for expression semantics,
     /// but native calls inspect `Func->Owner->Strict` (the destination host).
@@ -915,6 +922,8 @@ impl Engine {
             host_identity: crate::vm::ScriptHostIdentity::fresh(),
             script_name: None,
             definition_name: None,
+            game_script_name: None,
+            definition_context: false,
             owner_strict_level: None,
             host_functions: HashMap::new(),
             host_reference_functions: HashMap::new(),
@@ -959,15 +968,27 @@ impl Engine {
     pub fn set_script_name(&mut self, name: impl Into<String>) {
         let name = name.into();
         for function in self.functions.values_mut() {
-            function.bind_source_name(&name);
+            function.rebind_source_name_for_host(self.host_identity, &name);
         }
         self.script_name = Some(name);
+    }
+
+    pub fn script_name(&self) -> &str {
+        self.script_name.as_deref().unwrap_or("")
     }
 
     /// Assign the destination definition label used by objectless local
     /// function frames. Scenario and engine-global hosts leave this unset.
     pub fn set_definition_name(&mut self, name: impl Into<String>) {
         self.definition_name = Some(name.into());
+    }
+
+    pub fn set_game_script_name(&mut self, script_name: impl Into<String>) {
+        self.game_script_name = Some(script_name.into());
+    }
+
+    pub fn set_definition_context(&mut self, definition_context: bool) {
+        self.definition_context = definition_context;
     }
 
     /// Installs the engine-global script function table (System.c4g
@@ -1546,6 +1567,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1581,6 +1605,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1622,6 +1649,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1668,6 +1698,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1721,6 +1754,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1760,6 +1796,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1798,6 +1837,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1836,6 +1878,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1872,6 +1917,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1908,6 +1956,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1941,6 +1992,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -1970,11 +2024,27 @@ impl Engine {
         local_vars: &std::collections::HashMap<String, Value>,
         this: Value,
     ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
-        self.direct_exec_with_locals_and_this_at_strict(
+        self.direct_exec_with_locals_and_this_in_context(
+            source,
+            local_vars,
+            this,
+            "DirectExec",
+        )
+    }
+
+    pub fn direct_exec_with_locals_and_this_in_context(
+        &self,
+        source: &str,
+        local_vars: &std::collections::HashMap<String, Value>,
+        this: Value,
+        context: &str,
+    ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
+        self.direct_exec_with_locals_and_this_at_strict_in_context(
             source,
             local_vars,
             this,
             self.script_strict_level(),
+            context,
         )
     }
 
@@ -1988,6 +2058,43 @@ impl Engine {
         this: Value,
         strict_level: Option<u8>,
     ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
+        self.direct_exec_with_locals_and_this_at_strict_in_context(
+            source,
+            local_vars,
+            this,
+            strict_level,
+            "DirectExec",
+        )
+    }
+
+    pub fn direct_exec_with_locals_and_this_at_strict_in_context(
+        &self,
+        source: &str,
+        local_vars: &std::collections::HashMap<String, Value>,
+        this: Value,
+        strict_level: Option<u8>,
+        context: &str,
+    ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
+        self.direct_exec_with_locals_and_this_at_strict_in_context_diagnostics(
+            source,
+            local_vars,
+            this,
+            strict_level,
+            context,
+            true,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn direct_exec_with_locals_and_this_at_strict_in_context_diagnostics(
+        &self,
+        source: &str,
+        local_vars: &std::collections::HashMap<String, Value>,
+        this: Value,
+        strict_level: Option<u8>,
+        context: &str,
+        diagnostics: bool,
+    ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
         let vm = Vm::new(
             &self.functions,
             &self.host_functions,
@@ -1996,6 +2103,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -2010,7 +2120,13 @@ impl Engine {
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_string_registrations(self.string_registrations.as_deref())
         .with_this(this);
-        vm.direct_exec_with_locals(source, local_vars, strict_level)
+        vm.direct_exec_with_locals_in_context(
+            source,
+            local_vars,
+            strict_level,
+            context,
+            diagnostics,
+        )
             .map_err(ScriptError::from)
     }
 
@@ -2026,11 +2142,46 @@ impl Engine {
         cells: &crate::vm::LocalCells,
         this: Value,
     ) -> Result<Value, ScriptError> {
-        self.direct_exec_with_cells_and_this_at_strict(
+        self.direct_exec_with_cells_and_this_in_context(
+            source,
+            cells,
+            this,
+            "DirectExec",
+        )
+    }
+
+    pub fn direct_exec_with_cells_and_this_in_context(
+        &self,
+        source: &str,
+        cells: &crate::vm::LocalCells,
+        this: Value,
+        context: &str,
+    ) -> Result<Value, ScriptError> {
+        self.direct_exec_with_cells_and_this_at_strict_in_context(
             source,
             cells,
             this,
             self.script_strict_level(),
+            context,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn direct_exec_with_cells_and_this_in_context_diagnostics(
+        &self,
+        source: &str,
+        cells: &crate::vm::LocalCells,
+        this: Value,
+        context: &str,
+        diagnostics: bool,
+    ) -> Result<Value, ScriptError> {
+        self.direct_exec_with_cells_and_this_at_strict_in_context_diagnostics(
+            source,
+            cells,
+            this,
+            self.script_strict_level(),
+            context,
+            diagnostics,
         )
     }
 
@@ -2044,6 +2195,43 @@ impl Engine {
         this: Value,
         strict_level: Option<u8>,
     ) -> Result<Value, ScriptError> {
+        self.direct_exec_with_cells_and_this_at_strict_in_context(
+            source,
+            cells,
+            this,
+            strict_level,
+            "DirectExec",
+        )
+    }
+
+    pub fn direct_exec_with_cells_and_this_at_strict_in_context(
+        &self,
+        source: &str,
+        cells: &crate::vm::LocalCells,
+        this: Value,
+        strict_level: Option<u8>,
+        context: &str,
+    ) -> Result<Value, ScriptError> {
+        self.direct_exec_with_cells_and_this_at_strict_in_context_diagnostics(
+            source,
+            cells,
+            this,
+            strict_level,
+            context,
+            true,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn direct_exec_with_cells_and_this_at_strict_in_context_diagnostics(
+        &self,
+        source: &str,
+        cells: &crate::vm::LocalCells,
+        this: Value,
+        strict_level: Option<u8>,
+        context: &str,
+        diagnostics: bool,
+    ) -> Result<Value, ScriptError> {
         let vm = Vm::new(
             &self.functions,
             &self.host_functions,
@@ -2052,6 +2240,9 @@ impl Engine {
         )
         .with_host_identity(self.host_identity)
         .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
         .with_host_reference_functions(&self.host_reference_functions)
         .with_host_function_parameter_types(&self.host_function_parameter_types)
         .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
@@ -2066,7 +2257,7 @@ impl Engine {
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_string_registrations(self.string_registrations.as_deref())
         .with_this(this);
-        vm.direct_exec_with_cells(source, cells, strict_level)
+        vm.direct_exec_with_cells_in_context(source, cells, strict_level, context, diagnostics)
             .map_err(ScriptError::from)
     }
 
@@ -2335,6 +2526,48 @@ mod tests {
                 (Some(destination_identity), Some(false)),
                 (Some(declaring_identity), Some(true)),
             ]
+        );
+    }
+
+    #[test]
+    fn renaming_a_script_host_updates_only_its_function_source_names() {
+        let mut foreign = Engine::new();
+        foreign.set_script_name("Foreign.c4d/Script.c");
+        foreign
+            .load_script("func Boom() { return 1; }")
+            .expect("foreign script compiles");
+        let foreign_boom = foreign
+            .functions()
+            .get("Boom")
+            .expect("foreign function exists")
+            .clone();
+
+        let mut host = Engine::new();
+        host.set_script_name("OLD/Script.c");
+        host.load_script("func Boom() { return Missing(); }")
+            .expect("host script compiles");
+        host.functions
+            .get_mut("Boom")
+            .expect("host function exists")
+            .append_include_overload(foreign_boom);
+
+        host.set_script_name("Scenario.c4s/Objects.c4d/Script.c");
+        let boom = host.functions().get("Boom").expect("host function remains");
+        assert_eq!(
+            boom.source_name(),
+            Some("Scenario.c4s/Objects.c4d/Script.c")
+        );
+        assert_eq!(
+            boom.overloaded
+                .as_deref()
+                .and_then(Function::source_name),
+            Some("Foreign.c4d/Script.c")
+        );
+
+        let error = host.call("Boom", &[]).expect_err("runtime error is captured");
+        assert_eq!(
+            error.call_frames()[0].source_name(),
+            Some("Scenario.c4s/Objects.c4d/Script.c")
         );
     }
 
