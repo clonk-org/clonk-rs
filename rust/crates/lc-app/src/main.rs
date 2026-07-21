@@ -8012,6 +8012,8 @@ fn main() -> Result<()> {
     }
     app.window_active = window.has_focus();
     app.set_display_mode(display_options.mode);
+    app.graphics
+        .set_runtime_sprite_filtering(presenter.scale(), display_options.point_filtering);
     app.configure_native_startup_fonts(presenter.scale(), display_options.point_filtering);
     app.apply_classic_command_line(&classic)?;
     app.auto_start_sandbox = cli.sandbox;
@@ -8450,10 +8452,8 @@ fn apply_options_display_requests(
             OptionsDisplayRequest::SetScale { percent, persist } => {
                 anyhow::ensure!(percent > 0, "application scale must remain positive");
                 presenter.set_scale(percent as f32 / 100.0);
-                app.configure_native_startup_fonts(
-                    presenter.scale(),
-                    display_options.point_filtering,
-                );
+                let point_filtering = app.graphics.point_filtering();
+                app.configure_native_startup_fonts(presenter.scale(), point_filtering);
                 let (logical_width, logical_height) = presenter.logical_size();
                 app.resize(logical_width, logical_height)?;
                 if persist {
@@ -29058,6 +29058,7 @@ impl GameApp {
         graphics.inherit_liquid_animation_cycle(&self.graphics);
         graphics.inherit_pending_observer_scroll(&self.graphics);
         graphics.inherit_debug_draw_state(&self.graphics);
+        graphics.inherit_runtime_sprite_filtering(&self.graphics);
         graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
         graphics.set_game_palette(game_palette);
         graphics.set_liquid_animation(liquid_animation);
@@ -63921,6 +63922,11 @@ impl GameApp {
             audio.options = reloaded_audio;
             audio.set_music_volume_percent(music_volume);
             audio.set_sound_volume_percent(sound_volume);
+        }
+        let point_filtering = DisplayOptions::load(paths).point_filtering;
+        self.graphics.set_point_filtering(point_filtering);
+        if let Some(config) = self.loader_render_config {
+            self.configure_native_startup_fonts(config.application_scale(), point_filtering);
         }
     }
 
@@ -128763,6 +128769,33 @@ public func Grant(password) { return GainMissionAccess(password); }
         )
         .expect("execute allowed replay editor script");
         assert_eq!(app.engine.physics().gravity, 99);
+    }
+
+    #[test]
+    fn runtime_point_filtering_reloads_after_advanced_config_save() {
+        let _lock = env_lock().lock();
+        let fixture = tempdir().expect("point-filtering configuration");
+        let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+        fs::write(paths.config_file(), b"[Graphics]\nPointFiltering=true\n")
+            .expect("enable point filtering");
+
+        let mut app = new_state_only_running_sandbox_app();
+        app.app_paths = Some(paths.clone());
+        app.synchronize_advanced_options_runtime();
+        assert!(app.graphics.point_filtering());
+        assert!(app
+            .loader_render_config
+            .expect("loader render config remains materialized")
+            .point_filtering());
+
+        fs::write(paths.config_file(), b"[Graphics]\nPointFiltering=false\n")
+            .expect("disable point filtering");
+        app.synchronize_advanced_options_runtime();
+        assert!(!app.graphics.point_filtering());
+        assert!(!app
+            .loader_render_config
+            .expect("loader config follows live advanced save")
+            .point_filtering());
     }
 
     #[test]

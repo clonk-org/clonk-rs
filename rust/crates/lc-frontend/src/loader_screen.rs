@@ -14,7 +14,10 @@ use crate::clonk_fonts::{NativeClonkFont, NativeClonkFontSet};
 use crate::{ClonkFontSet, ImageData};
 use anyhow::{ensure, Result};
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
-use lc_graphics::{ClipperProjection, Color, GammaRamp, Rect, Surface, SurfaceDrawTarget};
+use lc_graphics::{
+    stdgl_blit_sampling, BlitSampling, ClipperProjection, Color, GammaRamp, Rect, Surface,
+    SurfaceDrawTarget,
+};
 use std::sync::Arc;
 
 /// `C4CFN_StartupBackgroundMain` (`src/C4Startup.h`).
@@ -36,13 +39,9 @@ const PROGRESS_FRAME_COLOR: u32 = 0x4f00_0000;
 const LOG_BOX_COLOR: u32 = 0x7f00_0000;
 const FALLBACK_PROGRESS_COLOR: u32 = 0x4fff_0000;
 
-/// Texture filtering selected by `CStdGL::PerformBlt` for the non-exact
-/// loader blits (`StdGL.cpp:527-532`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum LoaderSampling {
-    Nearest,
-    Linear,
-}
+/// Texture filtering selected by `CStdGL::PerformBlt` for loader blits
+/// (`StdGL.cpp:527-532`).
+pub type LoaderSampling = BlitSampling;
 
 /// Application-scale and point-filtering inputs to C++'s blit decision.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -85,11 +84,7 @@ impl LoaderRenderConfig {
     /// `exact_blit` is C++'s per-call `fExact`: no transform and identical
     /// source-facet/target dimensions after scaling correction.
     pub const fn sampling(self, exact_blit: bool) -> LoaderSampling {
-        if self.application_scale != 1.0 || (!exact_blit && !self.point_filtering) {
-            LoaderSampling::Linear
-        } else {
-            LoaderSampling::Nearest
-        }
+        stdgl_blit_sampling(self.application_scale, self.point_filtering, exact_blit)
     }
 }
 

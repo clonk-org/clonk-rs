@@ -5,6 +5,7 @@ pub mod color;
 pub mod ffi;
 pub mod font;
 pub mod gamma;
+pub mod sampling;
 pub mod snapshot;
 pub mod surface;
 pub mod transform;
@@ -13,6 +14,7 @@ pub use color::Color;
 pub use clip_projection::ClipperProjection;
 pub use gamma::GammaRamp;
 pub use font::{BitmapFont, FontMetrics, TextFont, TrueTypeFont, TrueTypeFontError};
+pub use sampling::{stdgl_blit_sampling, BlitSampling};
 pub use snapshot::{SnapshotHasher, SurfaceSnapshot};
 pub use surface::{
     BlitMode, PixelFormat, Point, Rect, RgbaSurfaceViewMut, Surface, SurfaceDrawTarget,

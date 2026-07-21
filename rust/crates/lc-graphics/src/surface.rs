@@ -906,11 +906,12 @@ impl Surface {
         }
     }
 
-    /// Stretched blit: sample `src_rect` of `src` into the (possibly
-    /// differently-sized) `dest_rect` with nearest-neighbour sampling — the C++
-    /// facet-scaling path (`StdGL::PerformBlt` texcoord stepping; pixel gfx use
-    /// point sampling). Each sampled pixel is prepared with `modulation`
-    /// according to `mode` and then composited. Clipped to the destination.
+    /// Stretched point blit: sample `src_rect` of `src` into the (possibly
+    /// differently-sized) `dest_rect` with nearest-neighbour sampling. This CPU
+    /// primitive does not select C++'s runtime GPU filtering policy; callers
+    /// that need linear filtering must use a filtering-aware renderer. Each
+    /// sampled pixel is prepared with `modulation` according to `mode` and then
+    /// composited. Clipped to the destination.
     pub fn blit_stretched(
         &mut self,
         src: &Surface,
@@ -1366,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn blit_stretched_2x_nearest_neighbour() {
+    fn blit_stretched_is_explicit_point_sampling() {
         let mut src = Surface::new(2, 2, PixelFormat::Rgba8888);
         src.set_pixel(0, 0, Color::opaque(255, 0, 0)).unwrap();
         src.set_pixel(1, 0, Color::opaque(0, 255, 0)).unwrap();
@@ -1382,7 +1383,7 @@ mod tests {
             BlitMode::Normal,
         )
         .unwrap();
-        // 2x upscale: each src pixel fills a 2x2 block.
+        // This point-only primitive maps each source pixel to a 2x2 block.
         assert_eq!(dest.get_pixel(0, 0), Some(Color::opaque(255, 0, 0)));
         assert_eq!(dest.get_pixel(1, 1), Some(Color::opaque(255, 0, 0)));
         assert_eq!(dest.get_pixel(2, 0), Some(Color::opaque(0, 255, 0)));

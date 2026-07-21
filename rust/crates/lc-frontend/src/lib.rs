@@ -65,9 +65,9 @@ use lc_engine::{
     VIS_ALLIES, VIS_ENEMIES, VIS_GOD, VIS_LAYER_TOGGLE, VIS_LOCAL, VIS_OVERLAY_ONLY, VIS_OWNER,
 };
 use lc_graphics::{
-    Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
-    SurfaceDrawTarget, SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont,
-    Transform as GraphicsTransform,
+    stdgl_blit_sampling, BlitSampling, Color, PixelFormat, Point as SurfacePoint,
+    Rect as SurfaceRect, Surface, SurfaceDrawTarget,
+    SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont, Transform as GraphicsTransform,
 };
 use lc_gui::{Rect as GuiRect, Size as GuiSize};
 use rayon::prelude::*;
@@ -848,15 +848,21 @@ enum ColorByOwnerSample {
 }
 
 #[derive(Clone, Copy)]
+enum FilteredColorByOwnerSample {
+    Scalar(f32),
+    Overlay([f32; 4]),
+}
+
+#[derive(Clone, Copy)]
 enum PreparedSpriteLayer {
     Legacy(Color),
-    Shader { rgb: [f32; 3], alpha: u8 },
+    Shader { rgb: [f32; 3], alpha: f32 },
 }
 
 impl PreparedSpriteLayer {
-    fn alpha(self) -> u8 {
+    fn alpha(self) -> f32 {
         match self {
-            Self::Legacy(color) => color.a,
+            Self::Legacy(color) => f32::from(color.a),
             Self::Shader { alpha, .. } => alpha,
         }
     }
@@ -874,7 +880,7 @@ enum PreparedSpriteFragment {
     /// Exact pre-existing path for an unmodulated main-surface texel.
     Legacy(Color),
     /// StdGL shader output before gamma lookup and framebuffer blending.
-    Shader { rgb: [f32; 3], alpha: u8 },
+    Shader { rgb: [f32; 3], alpha: f32 },
     /// C4Surface owner-color bitmaps are two textures and therefore two
     /// framebuffer passes: unchanged base first, full RGBA overlay second.
     Layers {
@@ -884,9 +890,9 @@ enum PreparedSpriteFragment {
 }
 
 impl PreparedSpriteFragment {
-    fn alpha(self) -> u8 {
+    fn alpha(self) -> f32 {
         match self {
-            Self::Legacy(color) => color.a,
+            Self::Legacy(color) => f32::from(color.a),
             Self::Shader { alpha, .. } => alpha,
             Self::Layers { base, overlay } => base.alpha().max(overlay.alpha()),
         }
@@ -1614,7 +1620,7 @@ fn draw_fogged_cursor_text_line(
                             );
                             let source =
                                 prepare_sprite_fragment(source_color, None, None, pixel_blit);
-                            if source.alpha() == 0 {
+                            if source.alpha() == 0.0 {
                                 continue;
                             }
                             let (Ok(target_x), Ok(target_y)) =
@@ -1698,7 +1704,7 @@ fn draw_fogged_cursor_text_line(
                         target_y,
                     );
                     let source = prepare_sprite_fragment(source_color, None, None, pixel_blit);
-                    if source.alpha() == 0 {
+                    if source.alpha() == 0.0 {
                         continue;
                     }
                     let (Ok(target_x), Ok(target_y)) =
@@ -1798,7 +1804,7 @@ fn draw_fogged_markup_text(
                 target_y,
             );
             let source = prepare_sprite_fragment(source_color, None, None, pixel_blit);
-            if source.alpha() == 0 {
+            if source.alpha() == 0.0 {
                 continue;
             }
             let (Ok(target_x), Ok(target_y)) =
@@ -1977,38 +1983,48 @@ fn modulate_c4_colors(dst: u32, src: u32) -> u32 {
         | mul(dst[2], src[2])
 }
 
-fn shader_modulate_fragment(source: Color, modulation: u32, mod2: bool) -> PreparedSpriteFragment {
+fn shader_modulate_sample(source: [f32; 4], modulation: u32, mod2: bool) -> PreparedSpriteFragment {
     let modulation = split_c4_color(modulation);
     if mod2 {
-        let channel = |source: u8, modulation: u8| {
-            (2.0 * f32::from(source) + 2.0 * f32::from(modulation) - 255.0)
-                .clamp(0.0, 255.0)
+        let channel = |source: f32, modulation: u8| {
+            (2.0 * source + 2.0 * f32::from(modulation) - 255.0).clamp(0.0, 255.0)
         };
         PreparedSpriteFragment::Shader {
             rgb: [
-                channel(source.r, modulation[0]),
-                channel(source.g, modulation[1]),
-                channel(source.b, modulation[2]),
+                channel(source[0], modulation[0]),
+                channel(source[1], modulation[1]),
+                channel(source[2], modulation[2]),
             ],
             // LC_MOD2 intentionally leaves texture alpha untouched
             // (StdGL.cpp:1072-1075).
-            alpha: source.a,
+            alpha: source[3],
         }
     } else {
-        let channel = |source: u8, modulation: u8| {
-            f32::from(source) * f32::from(modulation) / 255.0
-        };
+        let channel = |source: f32, modulation: u8| source * f32::from(modulation) / 255.0;
         PreparedSpriteFragment::Shader {
             rgb: [
-                channel(source.r, modulation[0]),
-                channel(source.g, modulation[1]),
-                channel(source.b, modulation[2]),
+                channel(source[0], modulation[0]),
+                channel(source[1], modulation[1]),
+                channel(source[2], modulation[2]),
             ],
             // Textures carry normal opacity in Rust, while StdGL adds C4's
             // transparency-alpha modulation to texture transparency.
-            alpha: source.a.saturating_sub(modulation[3]),
+            alpha: (source[3] - f32::from(modulation[3])).max(0.0),
         }
     }
+}
+
+fn shader_modulate_fragment(source: Color, modulation: u32, mod2: bool) -> PreparedSpriteFragment {
+    shader_modulate_sample(
+        [
+            f32::from(source.r),
+            f32::from(source.g),
+            f32::from(source.b),
+            f32::from(source.a),
+        ],
+        modulation,
+        mod2,
+    )
 }
 
 fn prepare_color_by_owner_fragment(
@@ -2092,6 +2108,78 @@ fn prepare_sprite_fragment(
     shader_modulate_fragment(source, modulation, mod2)
 }
 
+/// Prepare a GL-filtered texture result without quantizing it back to an
+/// eight-bit texel. Native filtering precedes both owner-color passes and all
+/// shader modulation, so fractional RGBA must survive until framebuffer
+/// composition.
+fn prepare_filtered_sprite_fragment(
+    source: [f32; 4],
+    owner_mask: Option<FilteredColorByOwnerSample>,
+    owner_color: Option<u32>,
+    blit: SpriteBlitState,
+) -> PreparedSpriteFragment {
+    if let (Some(FilteredColorByOwnerSample::Overlay(overlay)), Some(modulation)) =
+        (owner_mask, owner_color)
+    {
+        if overlay[3] > 0.0 {
+            let base = prepare_filtered_sprite_fragment(source, None, None, blit).into_layer();
+            let overlay =
+                prepare_filtered_color_by_owner_fragment(overlay, modulation, blit).into_layer();
+            return PreparedSpriteFragment::Layers { base, overlay };
+        }
+    }
+
+    if let (Some(FilteredColorByOwnerSample::Scalar(mask)), Some(modulation)) =
+        (owner_mask, owner_color)
+    {
+        if mask <= 0.0 {
+            return prepare_filtered_sprite_fragment(source, None, None, blit);
+        }
+        return prepare_filtered_color_by_owner_fragment(
+            [mask, mask, mask, source[3]],
+            modulation,
+            blit,
+        );
+    }
+
+    let mut modulation = blit.modulation.unwrap_or(0x00ff_ffff);
+    let uses_mod2 = blit.mode & C4GFXBLIT_MOD2 != 0;
+    let quad_modulation_is_nonzero = if modulation != 0 {
+        blit.fog_modulation.map_or(true, |fog| {
+            let any_nonzero = !uses_mod2 || fog.combined_quad_is_nonzero(modulation);
+            modulation = fog.combine_with(modulation);
+            any_nonzero
+        })
+    } else {
+        false
+    };
+    let mod2 = uses_mod2 && quad_modulation_is_nonzero;
+    shader_modulate_sample(source, modulation, mod2)
+}
+
+fn prepare_filtered_color_by_owner_fragment(
+    source: [f32; 4],
+    mut modulation: u32,
+    blit: SpriteBlitState,
+) -> PreparedSpriteFragment {
+    if let Some(global) = blit.modulation {
+        if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR == 0 {
+            modulation = modulate_c4_colors(modulation, global);
+        }
+    }
+    let uses_mod2 = blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0;
+    let quad_modulation_is_nonzero = if modulation != 0 {
+        blit.fog_modulation.map_or(true, |fog| {
+            let any_nonzero = !uses_mod2 || fog.combined_quad_is_nonzero(modulation);
+            modulation = fog.combine_with(modulation);
+            any_nonzero
+        })
+    } else {
+        false
+    };
+    shader_modulate_sample(source, modulation, uses_mod2 && quad_modulation_is_nonzero)
+}
+
 /// Prepares the animated landscape shader's float RGB without quantizing the
 /// Liquid.png contribution before global modulation, fog, and gamma.
 fn prepare_liquid_animation_fragment(
@@ -2117,7 +2205,7 @@ fn prepare_liquid_animation_fragment(
             channel(source.g, modulation[1]),
             channel(source.b, modulation[2]),
         ],
-        alpha: source.a.saturating_sub(modulation[3]),
+        alpha: f32::from(source.a.saturating_sub(modulation[3])),
     }
 }
 
@@ -2463,37 +2551,30 @@ impl FloatSourceRect {
             && self.height > 0.0
     }
 
-    /// Nearest/point sample for one normalized source axis. Integer origins
-    /// and extents deliberately reduce to the existing SourceRect mapping.
-    fn sample_axis(origin: f32, extent: f32, normalized: f32, flipped: bool) -> i32 {
-        // Preserve the exact operation order of the established integer
-        // sampler. `floor(origin + normalized * extent)` is not equivalent:
-        // adding an integer origin can round a value just below the next
-        // integer upward (the real ELEV 28x44 construction slice exposes
-        // this at specific rows).
-        if origin.fract() == 0.0 && extent.fract() == 0.0 {
-            let origin = origin as i32;
-            let extent = extent as i32;
-            let relative = (normalized * extent as f32)
-                .floor()
-                .clamp(0.0, (extent - 1) as f32) as i32;
-            let relative = if flipped {
-                (extent - 1).saturating_sub(relative)
-            } else {
-                relative
-            };
-            return origin.saturating_add(relative);
+    /// `CStdDDraw::Blit` insets ordinary source facets by half a texel on
+    /// each side when the application scale is not 100%. This happens before
+    /// exactness, tile intersection, and texture-coordinate calculation.
+    fn with_scaling_correction(mut self, enabled: bool) -> Self {
+        if enabled {
+            if self.width > 1.0 {
+                self.x += 0.5;
+                self.width -= 1.0;
+            }
+            if self.height > 1.0 {
+                self.y += 0.5;
+                self.height -= 1.0;
+            }
         }
-        let first = origin.floor() as i32;
-        let last = (origin + extent).ceil() as i32 - 1;
-        let sample = (origin + normalized * extent)
-            .floor()
-            .clamp(first as f32, last as f32) as i32;
-        if flipped {
-            first.saturating_add(last).saturating_sub(sample)
+        self
+    }
+
+    fn source_edge(self, normalized_x: f32, normalized_y: f32, flip_x: bool) -> (f32, f32) {
+        let x = if flip_x {
+            self.x + self.width * (1.0 - normalized_x)
         } else {
-            sample
-        }
+            self.x + self.width * normalized_x
+        };
+        (x, self.y + self.height * normalized_y)
     }
 }
 
@@ -3328,12 +3409,12 @@ fn draw_ground_textured_row(
                     prepare_liquid_animation_fragment(color, delta, pixel_blit)
                 },
             );
-        if source.alpha() == 0 {
+        if source.alpha() == 0.0 {
             continue;
         }
 
         let destination_offset = screen_x * 4;
-        let destination = if source.alpha() == 255 {
+        let destination = if source.alpha() == 255.0 {
             Color::transparent()
         } else {
             #[cfg(test)]
@@ -3585,11 +3666,11 @@ fn draw_sky_tile_row(
                 context.base_blit
             };
             let source = prepare_sprite_fragment(color, None, None, pixel_blit);
-            if source.alpha() == 0 {
+            if source.alpha() == 0.0 {
                 continue;
             }
             let destination_offset = target_x * 4;
-            let destination = if source.alpha() == 255 {
+            let destination = if source.alpha() == 255.0 {
                 Color::transparent()
             } else {
                 Color::new(
@@ -3880,6 +3961,10 @@ pub struct GraphicsSystem {
     /// `Application.GetScale()` / `Config.Graphics.Scale / 100` supplied by
     /// the frame presenter before composition.
     presentation_scale: f32,
+    /// Live `Config.Graphics.PointFiltering`. At scale one this forces point
+    /// sampling for non-exact runtime blits; non-100% application scale still
+    /// forces linear filtering in StdGL.
+    point_filtering: bool,
     surface_width: u32,
     surface_height: u32,
     fallback_ground_height: i32,
@@ -3984,6 +4069,7 @@ impl GraphicsSystem {
             viewport_zoom: 1.0,
             logical_resolution_width: surface_width,
             presentation_scale: 1.0,
+            point_filtering: false,
             surface_width,
             surface_height,
             fallback_ground_height,
@@ -4033,6 +4119,40 @@ impl GraphicsSystem {
         } else {
             1.0
         };
+    }
+
+    pub fn set_runtime_sprite_filtering(&mut self, scale: f32, point_filtering: bool) {
+        self.set_presentation_scale(scale);
+        self.set_point_filtering(point_filtering);
+    }
+
+    pub fn set_point_filtering(&mut self, point_filtering: bool) {
+        self.point_filtering = point_filtering;
+    }
+
+    pub fn point_filtering(&self) -> bool {
+        self.point_filtering
+    }
+
+    pub fn inherit_runtime_sprite_filtering(&mut self, previous: &Self) {
+        self.presentation_scale = previous.presentation_scale;
+        self.point_filtering = previous.point_filtering;
+    }
+
+    fn runtime_sprite_blit(
+        &self,
+        source: FloatSourceRect,
+        destination_size: (f32, f32),
+        transformed: bool,
+    ) -> (FloatSourceRect, BlitSampling) {
+        let source = source.with_scaling_correction(self.presentation_scale != 1.0);
+        let exact = !transformed
+            && source.width == destination_size.0
+            && source.height == destination_size.1;
+        (
+            source,
+            stdgl_blit_sampling(self.presentation_scale, self.point_filtering, exact),
+        )
     }
 
     pub fn set_rotateable_definitions(&mut self, definitions: HashSet<DefinitionId>) {
@@ -7674,11 +7794,11 @@ impl GraphicsSystem {
             fog_modulation: None,
         };
         let source = prepare_sprite_fragment(ground_color, None, None, blit);
-        if source.alpha() == 0 {
+        if source.alpha() == 0.0 {
             return false;
         }
         let fog = self.fog_box_sampler(true);
-        let opaque_output = (fog.is_none() && source.alpha() == 255)
+        let opaque_output = (fog.is_none() && source.alpha() == 255.0)
             .then(|| composite_sprite_fragment(source, Color::transparent(), blit, gamma));
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let surface_height = self.surface_height as i32;
@@ -7825,7 +7945,7 @@ impl GraphicsSystem {
             fog_modulation: None,
         };
         let source = prepare_sprite_fragment(base_color, None, None, blit);
-        if source.alpha() == 0 {
+        if source.alpha() == 0.0 {
             return;
         }
 
@@ -8902,12 +9022,18 @@ impl GraphicsSystem {
                     width as f32 * zoom,
                     height as f32 * zoom,
                 );
-                draw_image_region(
+                let (source, sampling) = self.runtime_sprite_blit(
+                    FloatSourceRect::scaled(SourceRect::new(0, 0, width, height), 1.0),
+                    (rect.size.width, rect.size.height),
+                    false,
+                );
+                draw_image_region_float_source(
                     &mut self.surface,
                     &rect,
                     &construction,
                     None,
-                    &SourceRect::new(0, 0, width, height),
+                    &source,
+                    sampling,
                     false,
                     None,
                     SpriteBlitState::normal(),
@@ -9507,12 +9633,18 @@ impl GraphicsSystem {
         }
         let source = SourceRect::new(source_x as i32, 0, cell, cell);
         let fog = self.fog_draw_context();
-        draw_image_region(
+        let (source, sampling) = self.runtime_sprite_blit(
+            FloatSourceRect::scaled(source, 1.0),
+            (rect.size.width, rect.size.height),
+            false,
+        );
+        draw_image_region_float_source(
             &mut self.surface,
             &rect,
             &fire,
             None,
             &source,
+            sampling,
             false,
             None,
             blit,
@@ -9786,10 +9918,13 @@ impl GraphicsSystem {
         // facet blit. SetGraphics may select another definition, so scale
         // the source rectangle with the selected bitmap's metadata while
         // leaving the live definition's destination/shape untouched.
-        let mut source = FloatSourceRect::scaled(source, sprite.graphics_scale);
+        let source = FloatSourceRect::scaled(source, sprite.graphics_scale);
         if !source.is_valid() {
             return;
         }
+        let transformed = transform.is_some() || flipped || rotation_degrees.abs() > f32::EPSILON;
+        let (mut source, sampling) =
+            self.runtime_sprite_blit(source, (dest_w * zoom, dest_h * zoom), transformed);
         let image_w = sprite.image.width() as f32;
         let image_h = sprite.image.height() as f32;
         if source.x < 0.0 || source.y < 0.0 {
@@ -9812,7 +9947,7 @@ impl GraphicsSystem {
         let viewport_x = self.viewport_x;
         let viewport_y = self.viewport_y;
         let fog = self.fog_draw_context();
-        if transform.is_none() && !flipped && rotation_degrees.abs() <= f32::EPSILON {
+        if !transformed {
             let rect = GuiRect::from_origin_size(
                 GuiPoint::new((dest_x - viewport_x) * zoom, (dest_y - viewport_y) * zoom),
                 GuiSize::new(dest_w * zoom, dest_h * zoom),
@@ -9823,6 +9958,7 @@ impl GraphicsSystem {
                 &sprite.image,
                 sprite.color_mask.as_ref(),
                 &source,
+                sampling,
                 false,
                 owner_color,
                 blit,
@@ -9862,6 +9998,7 @@ impl GraphicsSystem {
                 &sprite.image,
                 sprite.color_mask.as_ref(),
                 &source,
+                sampling,
                 false,
                 owner_color,
                 blit,
@@ -9934,8 +10071,40 @@ impl GraphicsSystem {
             return false;
         }
         let fog = self.fog_draw_context();
-
-        if let Some(transform) = transform {
+        // C4GraphicsOverlay always passes a local C4DrawTransform pointer,
+        // including for a logically identity overlay. It is therefore always
+        // non-exact in PerformBlt. Retain the established straight rasterizer
+        // for a logical identity; its half-pixel geometry is tracked by L030.
+        let source = FloatSourceRect::scaled(source_rect, 1.0);
+        let (source, sampling) = self.runtime_sprite_blit(
+            source,
+            (facet.width as f32 * zoom, facet.height as f32 * zoom),
+            true,
+        );
+        if transform.is_none() && rotation_degrees.abs() <= f32::EPSILON {
+            let dest_width = facet.width as f32 * zoom;
+            let dest_height = facet.height as f32 * zoom;
+            let dest_rect = GuiRect::from_origin_size(
+                GuiPoint::new(
+                    screen_x - dest_width / 2.0,
+                    screen_y - dest_height / 2.0,
+                ),
+                GuiSize::new(dest_width, dest_height),
+            );
+            draw_image_region_float_source(
+                &mut self.surface,
+                &dest_rect,
+                &sprite.image,
+                sprite.color_mask.as_ref(),
+                &source,
+                sampling,
+                flipped,
+                owner_color,
+                blit,
+                gamma,
+                fog.as_ref(),
+            );
+        } else {
             let center = (screen_x / zoom, screen_y / zoom);
             let dest = (
                 center.0 - facet.width as f32 / 2.0,
@@ -9943,7 +10112,13 @@ impl GraphicsSystem {
                 facet.width as f32,
                 facet.height as f32,
             );
-            let mut matrix = draw_transform_at(transform.matrix(), center.0, center.1);
+            let mut matrix = draw_transform_at(
+                transform
+                    .map(|transform| transform.matrix())
+                    .unwrap_or(GraphicsTransform::identity().mat),
+                center.0,
+                center.1,
+            );
             if rotation_degrees.abs() > f32::EPSILON {
                 matrix = matrix.multiply(&GraphicsTransform::set_rotate(
                     (rotation_degrees * 100.0).round() as i32,
@@ -9954,56 +10129,16 @@ impl GraphicsSystem {
             matrix = matrix.multiply(&GraphicsTransform::set_move_scale(
                 0.0, 0.0, zoom, zoom,
             ));
-            draw_image_region_transformed(
+            draw_image_region_transformed_float_source(
                 &mut self.surface,
                 dest,
                 &matrix,
                 &sprite.image,
                 sprite.color_mask.as_ref(),
-                &source_rect,
+                &source,
+                sampling,
                 flipped,
                 owner_color,
-                blit,
-                gamma,
-                fog.as_ref(),
-            );
-        } else if rotation_degrees.abs() <= f32::EPSILON {
-            let dest_width = facet.width as f32 * zoom;
-            let dest_height = facet.height as f32 * zoom;
-            let dest_rect = GuiRect::from_origin_size(
-                GuiPoint::new(
-                    screen_x - dest_width / 2.0,
-                    screen_y - dest_height / 2.0,
-                ),
-                GuiSize::new(dest_width, dest_height),
-            );
-            draw_image_region(
-                &mut self.surface,
-                &dest_rect,
-                &sprite.image,
-                sprite.color_mask.as_ref(),
-                &source_rect,
-                flipped,
-                owner_color,
-                blit,
-                gamma,
-                fog.as_ref(),
-            );
-        } else {
-            let dest_width = facet.width as f32 * zoom;
-            let dest_height = facet.height as f32 * zoom;
-            draw_image_region_rotated(
-                &mut self.surface,
-                screen_x,
-                screen_y,
-                dest_width,
-                dest_height,
-                &sprite.image,
-                sprite.color_mask.as_ref(),
-                &source_rect,
-                flipped,
-                owner_color,
-                rotation_degrees,
                 blit,
                 gamma,
                 fog.as_ref(),
@@ -10432,8 +10567,31 @@ impl GraphicsSystem {
             return;
         }
         let fog = self.fog_draw_context();
-
-        if let Some(transform) = transform {
+        let source = FloatSourceRect::scaled(source_rect, 1.0);
+        let (source, sampling) =
+            self.runtime_sprite_blit(source, (sprite_width, sprite_height), true);
+        if transform.is_none() && rotation_degrees.abs() <= f32::EPSILON {
+            let rect = GuiRect::from_origin_size(
+                GuiPoint::new(
+                    screen_x - sprite_width / 2.0,
+                    screen_y - sprite_height / 2.0,
+                ),
+                GuiSize::new(sprite_width, sprite_height),
+            );
+            draw_image_region_float_source(
+                &mut self.surface,
+                &rect,
+                &sprite.image,
+                sprite.color_mask.as_ref(),
+                &source,
+                sampling,
+                false,
+                owner_color,
+                blit,
+                gamma,
+                fog.as_ref(),
+            );
+        } else {
             let center = (screen_x / zoom, screen_y / zoom);
             let dest = (
                 center.0 - sprite.image.width() as f32 / 2.0,
@@ -10441,7 +10599,13 @@ impl GraphicsSystem {
                 sprite.image.width() as f32,
                 sprite.image.height() as f32,
             );
-            let mut matrix = draw_transform_at(transform.matrix(), center.0, center.1);
+            let mut matrix = draw_transform_at(
+                transform
+                    .map(|transform| transform.matrix())
+                    .unwrap_or(GraphicsTransform::identity().mat),
+                center.0,
+                center.1,
+            );
             if rotation_degrees.abs() > f32::EPSILON {
                 matrix = matrix.multiply(&GraphicsTransform::set_rotate(
                     (rotation_degrees * 100.0).round() as i32,
@@ -10452,52 +10616,16 @@ impl GraphicsSystem {
             matrix = matrix.multiply(&GraphicsTransform::set_move_scale(
                 0.0, 0.0, zoom, zoom,
             ));
-            draw_image_region_transformed(
+            draw_image_region_transformed_float_source(
                 &mut self.surface,
                 dest,
                 &matrix,
                 &sprite.image,
                 sprite.color_mask.as_ref(),
-                &source_rect,
+                &source,
+                sampling,
                 false,
                 owner_color,
-                blit,
-                gamma,
-                fog.as_ref(),
-            );
-        } else if rotation_degrees.abs() <= f32::EPSILON {
-            let rect = GuiRect::from_origin_size(
-                GuiPoint::new(
-                    screen_x - sprite_width / 2.0,
-                    screen_y - sprite_height / 2.0,
-                ),
-                GuiSize::new(sprite_width, sprite_height),
-            );
-            draw_image_region(
-                &mut self.surface,
-                &rect,
-                &sprite.image,
-                sprite.color_mask.as_ref(),
-                &source_rect,
-                false,
-                owner_color,
-                blit,
-                gamma,
-                fog.as_ref(),
-            );
-        } else {
-            draw_image_region_rotated(
-                &mut self.surface,
-                screen_x,
-                screen_y,
-                sprite_width,
-                sprite_height,
-                &sprite.image,
-                sprite.color_mask.as_ref(),
-                &source_rect,
-                false,
-                owner_color,
-                rotation_degrees,
                 blit,
                 gamma,
                 fog.as_ref(),
@@ -11715,7 +11843,7 @@ fn draw_object_line_pixel(
         return;
     }
     let source = prepare_sprite_fragment(color, None, None, blit);
-    if source.alpha() == 0 {
+    if source.alpha() == 0.0 {
         return;
     }
     let destination = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
@@ -12510,6 +12638,7 @@ fn draw_image_region_transformed_float_source(
     image: &ImageData,
     mask: Option<&ColorByOwnerMask>,
     source: &FloatSourceRect,
+    sampling: BlitSampling,
     flip_x: bool,
     owner_color: Option<u32>,
     blit: SpriteBlitState,
@@ -12567,9 +12696,6 @@ fn draw_image_region_transformed_float_source(
         return;
     }
 
-    let image_width = image.width() as i32;
-    let image_height = image.height() as i32;
-    let pixels = image.pixels();
     for target_y in min_y..max_y {
         for target_x in min_x..max_x {
             let (sample_x, sample_y) =
@@ -12583,34 +12709,8 @@ fn draw_image_region_transformed_float_source(
                 continue;
             }
 
-            let source_x = FloatSourceRect::sample_axis(
-                source.x,
-                source.width,
-                normalized_x,
-                flip_x,
-            );
-            let source_y =
-                FloatSourceRect::sample_axis(source.y, source.height, normalized_y, false);
-            if source_x < 0
-                || source_y < 0
-                || source_x >= image_width
-                || source_y >= image_height
-            {
-                continue;
-            }
-
-            let idx = (source_y as usize * image.width() as usize + source_x as usize) * 4;
-            if idx + 3 >= pixels.len() {
-                continue;
-            }
-            let color = Color::new(
-                pixels[idx],
-                pixels[idx + 1],
-                pixels[idx + 2],
-                pixels[idx + 3],
-            );
-            let owner_mask =
-                mask.map(|mask_map| mask_map.value_at(source_x as u32, source_y as u32));
+            let (source_edge_x, source_edge_y) =
+                source.source_edge(normalized_x, normalized_y, flip_x);
             let pixel_blit = fog_sprite_blit_at(
                 fog_sampler.as_ref(),
                 fog,
@@ -12620,8 +12720,18 @@ fn draw_image_region_transformed_float_source(
                 target_x,
                 target_y,
             );
-            let source = prepare_sprite_fragment(color, owner_mask, owner_color, pixel_blit);
-            if source.alpha() == 0 {
+            let Some(source) = prepare_runtime_sprite_sample(
+                image,
+                mask,
+                source_edge_x,
+                source_edge_y,
+                sampling,
+                owner_color,
+                pixel_blit,
+            ) else {
+                continue;
+            };
+            if source.alpha() == 0.0 {
                 continue;
             }
             let background = surface
@@ -12757,7 +12867,7 @@ fn draw_image_region_transformed(
                 target_y,
             );
             let source = prepare_sprite_fragment(color, owner_mask, owner_color, pixel_blit);
-            if source.alpha() == 0 {
+            if source.alpha() == 0.0 {
                 continue;
             }
             let background = surface
@@ -12779,6 +12889,7 @@ fn draw_image_region_float_source(
     image: &ImageData,
     mask: Option<&ColorByOwnerMask>,
     source: &FloatSourceRect,
+    sampling: BlitSampling,
     flip_x: bool,
     owner_color: Option<u32>,
     blit: SpriteBlitState,
@@ -12814,21 +12925,13 @@ fn draw_image_region_float_source(
     });
 
     let bounds = surface.bounds();
-    let image_width = image.width() as i32;
-    let image_height = image.height() as i32;
-    let pixels = image.pixels();
-
     for dy in 0..dest_height {
         let target_y = dest_y + dy as i32;
         if target_y < bounds.y || target_y >= bounds.y + bounds.height as i32 {
             continue;
         }
 
-        let normalized_y = dy as f32 / dest_height as f32;
-        let src_y = FloatSourceRect::sample_axis(source.y, source.height, normalized_y, false);
-        if src_y < 0 || src_y >= image_height {
-            continue;
-        }
+        let normalized_y = (dy as f32 + 0.5) / dest_height as f32;
 
         for dx in 0..dest_width {
             let target_x = dest_x + dx as i32;
@@ -12836,29 +12939,9 @@ fn draw_image_region_float_source(
                 continue;
             }
 
-            let normalized_x = dx as f32 / dest_width as f32;
-            let src_x = FloatSourceRect::sample_axis(
-                source.x,
-                source.width,
-                normalized_x,
-                flip_x,
-            );
-            if src_x < 0 || src_x >= image_width {
-                continue;
-            }
-
-            let idx = (src_y as usize * image.width() as usize + src_x as usize) * 4;
-            if idx + 3 >= pixels.len() {
-                continue;
-            }
-
-            let color = Color::new(
-                pixels[idx],
-                pixels[idx + 1],
-                pixels[idx + 2],
-                pixels[idx + 3],
-            );
-            let owner_mask = mask.map(|mask_map| mask_map.value_at(src_x as u32, src_y as u32));
+            let normalized_x = (dx as f32 + 0.5) / dest_width as f32;
+            let (source_edge_x, source_edge_y) =
+                source.source_edge(normalized_x, normalized_y, flip_x);
             let pixel_blit = fog_sprite_blit_at(
                 fog_sampler.as_ref(),
                 fog,
@@ -12868,8 +12951,18 @@ fn draw_image_region_float_source(
                 target_x,
                 target_y,
             );
-            let source = prepare_sprite_fragment(color, owner_mask, owner_color, pixel_blit);
-            if source.alpha() == 0 {
+            let Some(source) = prepare_runtime_sprite_sample(
+                image,
+                mask,
+                source_edge_x,
+                source_edge_y,
+                sampling,
+                owner_color,
+                pixel_blit,
+            ) else {
+                continue;
+            };
+            if source.alpha() == 0.0 {
                 continue;
             }
             let background = surface
@@ -12991,7 +13084,7 @@ fn draw_image_region(
                 target_y,
             );
             let source = prepare_sprite_fragment(color, owner_mask, owner_color, pixel_blit);
-            if source.alpha() == 0 {
+            if source.alpha() == 0.0 {
                 continue;
             }
             let background = surface
@@ -13174,7 +13267,7 @@ fn draw_image_region_rotated(
                 y,
             );
             let source = prepare_sprite_fragment(color, owner_mask, owner_color, pixel_blit);
-            if source.alpha() == 0 {
+            if source.alpha() == 0.0 {
                 continue;
             }
             let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
@@ -13368,9 +13461,8 @@ pub fn draw_image_strip(
 /// The GL texture tile size the C++ engine picks for an image: the next
 /// power of two of min(W, H), capped at the 4096 max texture size
 /// (C4Surface::CreateTextures, C4Surface.cpp:166-189). Images larger than
-/// the tile in either dimension are split across multiple textures, which
-/// produces visible filtering seams at tile boundaries — faithfully
-/// reproduced here.
+/// the tile in either dimension are split across multiple textures. Linear
+/// taps clamp at each physical texture edge and never cross into a neighbor.
 fn cpp_tex_size(width: u32, height: u32) -> u32 {
     let need = width.min(height).max(1);
     let mut n = 1u32;
@@ -13378,6 +13470,120 @@ fn cpp_tex_size(width: u32, height: u32) -> u32 {
         n += 1;
     }
     (1u32 << n).min(4096)
+}
+
+fn cpp_last_tex_size(width: u32, height: u32, base: i32) -> i32 {
+    let base = base as u32;
+    if width % base == 0 || height % base == 0 {
+        return base as i32;
+    }
+    let needed = (width % base).max(height % base).max(1);
+    let mut size = 2u32;
+    while size < needed {
+        size = size.saturating_mul(2);
+    }
+    size as i32
+}
+
+fn cpp_tile_dimensions(width: u32, height: u32, base: i32) -> (i32, i32) {
+    (
+        (width as i32 - 1) / base + 1,
+        (height as i32 - 1) / base + 1,
+    )
+}
+
+fn cpp_tile_size_at(
+    width: u32,
+    height: u32,
+    base: i32,
+    tile_x_index: i32,
+    tile_y_index: i32,
+) -> i32 {
+    let (tiles_x, tiles_y) = cpp_tile_dimensions(width, height, base);
+    if tile_x_index == tiles_x - 1 && tile_y_index == tiles_y - 1 {
+        cpp_last_tex_size(width, height, base)
+    } else {
+        base
+    }
+}
+
+/// CStdDDraw retains the base-sized chunk step after selecting a smaller
+/// final bottom-right C4TexRef. When that texture is smaller than the step,
+/// its chunk loop is empty and native draws none of it.
+fn cpp_tile_has_blit_chunks(
+    width: u32,
+    height: u32,
+    base: i32,
+    tile_x_index: i32,
+    tile_y_index: i32,
+) -> bool {
+    cpp_tile_size_at(width, height, base, tile_x_index, tile_y_index) >= base
+}
+
+fn cpp_texture_tile_for_source(
+    width: u32,
+    height: u32,
+    source_edge_x: f32,
+    source_edge_y: f32,
+) -> Option<(i32, i32, i32)> {
+    if width == 0
+        || height == 0
+        || !source_edge_x.is_finite()
+        || !source_edge_y.is_finite()
+        || source_edge_x < 0.0
+        || source_edge_y < 0.0
+        || source_edge_x >= width as f32
+        || source_edge_y >= height as f32
+    {
+        return None;
+    }
+    let base = cpp_tex_size(width, height) as i32;
+    let tile_x_index = (source_edge_x.floor() as i32).div_euclid(base);
+    let tile_y_index = (source_edge_y.floor() as i32).div_euclid(base);
+    if !cpp_tile_has_blit_chunks(width, height, base, tile_x_index, tile_y_index) {
+        return None;
+    }
+    Some((
+        tile_x_index * base,
+        tile_y_index * base,
+        cpp_tile_size_at(width, height, base, tile_x_index, tile_y_index),
+    ))
+}
+
+fn image_tile_texel(
+    image: &ImageData,
+    tile_x: i32,
+    tile_y: i32,
+    tile_size: i32,
+    x_rel: i32,
+    y_rel: i32,
+) -> [f32; 4] {
+    let x = tile_x + x_rel.clamp(0, tile_size - 1);
+    let y = tile_y + y_rel.clamp(0, tile_size - 1);
+    if x < 0 || y < 0 || x >= image.width() as i32 || y >= image.height() as i32 {
+        // C4TexRef initializes untouched physical padding to 0xffffffff,
+        // which is transparent white in C4's inverted-alpha convention.
+        return [255.0, 255.0, 255.0, 0.0];
+    }
+    let idx = ((y as u32 * image.width() + x as u32) * 4) as usize;
+    image
+        .pixels()
+        .get(idx..idx + 4)
+        .map(|pixel| {
+            if pixel[3] == 0 {
+                // C4Surface::SetPixDw normalizes loaded transparent texels to
+                // transparent black; padding above remains distinguishable.
+                [0.0; 4]
+            } else {
+                [
+                    f32::from(pixel[0]),
+                    f32::from(pixel[1]),
+                    f32::from(pixel[2]),
+                    f32::from(pixel[3]),
+                ]
+            }
+        })
+        .unwrap_or([255.0, 255.0, 255.0, 0.0])
 }
 
 /// Bilinearly samples one `tile_size` texture tile of `image` at GL_LINEAR
@@ -13400,14 +13606,41 @@ fn bilinear_sample_tile(
         let x = tile_x + x_rel.clamp(0, tile_size - 1);
         let y = tile_y + y_rel.clamp(0, tile_size - 1);
         if x < 0 || y < 0 || x >= image.width() as i32 || y >= image.height() as i32 {
-            return [0.0; 4]; // tile padding
+            return [0.0; 4];
         }
         let idx = ((y as u32 * image.width() + x as u32) * 4) as usize;
         pixels
             .get(idx..idx + 4)
-            .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32])
+            .map(|pixel| {
+                [
+                    f32::from(pixel[0]),
+                    f32::from(pixel[1]),
+                    f32::from(pixel[2]),
+                    f32::from(pixel[3]),
+                ]
+            })
             .unwrap_or([0.0; 4])
     };
+    let (x0, y0) = (u_rel.floor() as i32, v_rel.floor() as i32);
+    let (fx, fy) = (u_rel - x0 as f32, v_rel - y0 as f32);
+    let (p00, p10) = (texel(x0, y0), texel(x0 + 1, y0));
+    let (p01, p11) = (texel(x0, y0 + 1), texel(x0 + 1, y0 + 1));
+    std::array::from_fn(|channel| {
+        let top = p00[channel] * (1.0 - fx) + p10[channel] * fx;
+        let bottom = p01[channel] * (1.0 - fx) + p11[channel] * fx;
+        top * (1.0 - fy) + bottom * fy
+    })
+}
+
+fn bilinear_sample_runtime_tile(
+    image: &ImageData,
+    tile_x: i32,
+    tile_y: i32,
+    tile_size: i32,
+    u_rel: f32,
+    v_rel: f32,
+) -> [f32; 4] {
+    let texel = |x, y| image_tile_texel(image, tile_x, tile_y, tile_size, x, y);
     let (x0, y0) = (u_rel.floor() as i32, v_rel.floor() as i32);
     let (fx, fy) = (u_rel - x0 as f32, v_rel - y0 as f32);
     let (p00, p10) = (texel(x0, y0), texel(x0 + 1, y0));
@@ -13417,6 +13650,114 @@ fn bilinear_sample_tile(
         let bottom = p01[c] * (1.0 - fx) + p11[c] * fx;
         top * (1.0 - fy) + bottom * fy
     })
+}
+
+fn bilinear_sample_owner_tile(
+    mask: &ColorByOwnerMask,
+    tile_x: i32,
+    tile_y: i32,
+    tile_size: i32,
+    u_rel: f32,
+    v_rel: f32,
+) -> FilteredColorByOwnerSample {
+    let (x0, y0) = (u_rel.floor() as i32, v_rel.floor() as i32);
+    let (fx, fy) = (u_rel - x0 as f32, v_rel - y0 as f32);
+    let interpolate = |p00: f32, p10: f32, p01: f32, p11: f32| {
+        let top = p00 * (1.0 - fx) + p10 * fx;
+        let bottom = p01 * (1.0 - fx) + p11 * fx;
+        top * (1.0 - fy) + bottom * fy
+    };
+    let pixel_count = u64::from(mask.width) * u64::from(mask.height);
+    if pixel_count.checked_mul(4) == Some(mask.pixels.len() as u64) {
+        let texel = |x_rel: i32, y_rel: i32| {
+            let x = tile_x + x_rel.clamp(0, tile_size - 1);
+            let y = tile_y + y_rel.clamp(0, tile_size - 1);
+            if x < 0 || y < 0 || x >= mask.width as i32 || y >= mask.height as i32 {
+                return [255.0, 255.0, 255.0, 0.0];
+            }
+            match mask.value_at(x as u32, y as u32) {
+                ColorByOwnerSample::Overlay(color) if color.a != 0 => [
+                    f32::from(color.r),
+                    f32::from(color.g),
+                    f32::from(color.b),
+                    f32::from(color.a),
+                ],
+                _ => [0.0; 4],
+            }
+        };
+        let (p00, p10) = (texel(x0, y0), texel(x0 + 1, y0));
+        let (p01, p11) = (texel(x0, y0 + 1), texel(x0 + 1, y0 + 1));
+        return FilteredColorByOwnerSample::Overlay(std::array::from_fn(|channel| {
+            interpolate(
+                p00[channel],
+                p10[channel],
+                p01[channel],
+                p11[channel],
+            )
+        }));
+    }
+
+    let texel = |x_rel: i32, y_rel: i32| {
+        let x = tile_x + x_rel.clamp(0, tile_size - 1);
+        let y = tile_y + y_rel.clamp(0, tile_size - 1);
+        if x < 0 || y < 0 || x >= mask.width as i32 || y >= mask.height as i32 {
+            return 0.0;
+        }
+        match mask.value_at(x as u32, y as u32) {
+            ColorByOwnerSample::Scalar(value) => f32::from(value),
+            ColorByOwnerSample::Overlay(_) => 0.0,
+        }
+    };
+    FilteredColorByOwnerSample::Scalar(interpolate(
+        texel(x0, y0),
+        texel(x0 + 1, y0),
+        texel(x0, y0 + 1),
+        texel(x0 + 1, y0 + 1),
+    ))
+}
+
+fn prepare_runtime_sprite_sample(
+    image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
+    source_edge_x: f32,
+    source_edge_y: f32,
+    sampling: BlitSampling,
+    owner_color: Option<u32>,
+    blit: SpriteBlitState,
+) -> Option<PreparedSpriteFragment> {
+    let (tile_x, tile_y, tile_size) =
+        cpp_texture_tile_for_source(image.width(), image.height(), source_edge_x, source_edge_y)?;
+    match sampling {
+        BlitSampling::Nearest => {
+            let source_x = source_edge_x.floor() as u32;
+            let source_y = source_edge_y.floor() as u32;
+            let idx = ((source_y * image.width() + source_x) * 4) as usize;
+            let pixel = image.pixels().get(idx..idx + 4)?;
+            let color = Color::new(pixel[0], pixel[1], pixel[2], pixel[3]);
+            let owner_mask = mask.map(|mask| mask.value_at(source_x, source_y));
+            Some(prepare_sprite_fragment(
+                color,
+                owner_mask,
+                owner_color,
+                blit,
+            ))
+        }
+        BlitSampling::Linear => {
+            let u_rel = source_edge_x - 0.5 - tile_x as f32;
+            let v_rel = source_edge_y - 0.5 - tile_y as f32;
+            let source =
+                bilinear_sample_runtime_tile(image, tile_x, tile_y, tile_size, u_rel, v_rel);
+            let owner_mask = mask.map(|mask| {
+                bilinear_sample_owner_tile(mask, tile_x, tile_y, tile_size, u_rel, v_rel)
+            });
+            Some(prepare_filtered_sprite_fragment(
+                source,
+                owner_mask,
+                owner_color,
+                blit,
+            ))
+        }
+    }
 }
 
 /// How a stretched blit combines with the framebuffer.
@@ -13430,7 +13771,7 @@ enum BilinearBlend {
 
 /// Stretches `image` into `rect` like `CStdDDraw::Blit` (StdDDraw2.cpp:
 /// 637-786): one quad per power-of-two texture tile, GL_LINEAR sampling with
-/// GL_REPEAT wrap per tile, the blit shader's gamma lookup on the fragment
+/// GL_CLAMP_TO_EDGE per tile, the blit shader's gamma lookup on the fragment
 /// color, and float blending rounded once on store.
 fn draw_image_bilinear_impl<T: SurfaceDrawTarget + ?Sized>(
     surface: &mut T,
@@ -13756,10 +14097,10 @@ fn composite_sprite_fragment(
     let PreparedSpriteFragment::Shader { rgb, alpha } = source else {
         unreachable!();
     };
-    if alpha == 0 {
+    if alpha == 0.0 {
         return destination;
     }
-    let alpha_factor = f32::from(alpha) / 255.0;
+    let alpha_factor = (alpha / 255.0).clamp(0.0, 1.0);
     let channel = |gamma_channel, source: f32, destination: u8| {
         let source = sample_channel(gamma, gamma_channel, source);
         if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
@@ -13789,13 +14130,13 @@ fn composite_sprite_fragment(
         if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
             destination.a
         } else {
-            blend_color_over(Color::new(0, 0, 0, alpha), destination).a
+            store_channel(alpha + f32::from(destination.a) * (1.0 - alpha_factor))
         },
     )
 }
 
 /// Stretches `image` into `rect` with GL_LINEAR-equivalent bilinear sampling
-/// (tiled textures, GL_REPEAT) and normal alpha-over blending. `gamma`
+/// (tiled textures, GL_CLAMP_TO_EDGE) and normal alpha-over blending. `gamma`
 /// mirrors the per-fragment gamma lookup of the C++ blit shader.
 pub fn draw_image_bilinear(
     surface: &mut Surface,
@@ -14082,7 +14423,7 @@ mod tests {
         };
         assert_eq!(rgb, [145.0; 3]);
         assert_eq!(
-            alpha, 255,
+            alpha, 255.0,
             "one nonblack quad vertex keeps MOD2 active at its black corner",
         );
     }
@@ -15012,7 +15353,9 @@ mod tests {
         // override bitmap's 2x scale to (4,2,4,4). A 2x2 destination samples
         // these four physical pixels; omitting width/height scaling samples
         // neighboring red pixels instead.
-        for (x, y) in [(4usize, 2usize), (6, 2), (4, 4), (6, 4)] {
+        // Point filtering still samples GL texel centers: the 4x4 source
+        // scaled to 2x2 lands on offsets (1,1) and (3,3).
+        for (x, y) in [(5usize, 3usize), (7, 3), (5, 5), (7, 5)] {
             let offset = (y * 12 + x) * 4;
             override_pixels[offset..offset + 4]
                 .copy_from_slice(&[green.r, green.g, green.b, green.a]);
@@ -15066,6 +15409,7 @@ mod tests {
             empty_cursor_atlas(),
             empty_hud_graphics(),
         );
+        graphics.set_point_filtering(true);
         let background = Color::opaque(0, 0, 0);
         graphics.surface_mut().fill(background);
         graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
@@ -15149,6 +15493,7 @@ mod tests {
             empty_cursor_atlas(),
             empty_hud_graphics(),
         );
+        graphics.set_point_filtering(true);
         graphics.surface_mut().fill(background);
         graphics.paint_object_top_face(&object, SpriteBlitState::for_object(&object), None);
 
@@ -15196,6 +15541,7 @@ mod tests {
                 empty_cursor_atlas(),
                 empty_hud_graphics(),
             );
+            graphics.set_point_filtering(true);
             graphics.surface_mut().fill(background);
             graphics.blit_face(
                 &sprite,
@@ -15217,7 +15563,7 @@ mod tests {
 
         assert_eq!(
             render(SourceRect::new(1, 0, 2, 1), None),
-            vec![Some(red), Some(red), Some(green), Some(blue)]
+            vec![Some(red), Some(green), Some(green), Some(blue)]
         );
         assert_eq!(
             render(
@@ -15671,6 +16017,212 @@ mod tests {
         assert_eq!(surface.get_pixel(1, 0), Some(gray(64)));
         assert_eq!(surface.get_pixel(2, 0), Some(gray(191)));
         assert_eq!(surface.get_pixel(3, 0), Some(gray(255)));
+    }
+
+    #[test]
+    fn runtime_sprite_filtering_matches_stdgl_exact_and_point_modes() {
+        let image = ImageData::new(
+            2,
+            2,
+            vec![
+                0, 0, 0, 255, // top-left
+                255, 0, 0, 255, // top-right
+                0, 255, 0, 255, // bottom-left
+                0, 0, 255, 255, // bottom-right
+            ],
+        );
+        let render = |application_scale: f32,
+                      point_filtering: bool,
+                      destination_extent: u32|
+         -> (BlitSampling, Vec<Color>) {
+            let mut graphics = GraphicsSystem::new(
+                destination_extent,
+                destination_extent,
+                0,
+                "runtime sprite filtering",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.set_runtime_sprite_filtering(application_scale, point_filtering);
+            graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+            let (source, sampling) = graphics.runtime_sprite_blit(
+                FloatSourceRect::scaled(SourceRect::new(0, 0, 2, 2), 1.0),
+                (destination_extent as f32, destination_extent as f32),
+                false,
+            );
+            draw_image_region_float_source(
+                &mut graphics.surface,
+                &GuiRect::new(
+                    0.0,
+                    0.0,
+                    destination_extent as f32,
+                    destination_extent as f32,
+                ),
+                &image,
+                None,
+                &source,
+                sampling,
+                false,
+                None,
+                SpriteBlitState::normal(),
+                None,
+                None,
+            );
+            let pixels = (0..destination_extent)
+                .flat_map(|y| {
+                    (0..destination_extent)
+                        .map(|x| graphics.surface().get_pixel(x, y).unwrap())
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            (sampling, pixels)
+        };
+
+        // Exact scale-one blits stay nearest for both PointFiltering values.
+        for point_filtering in [false, true] {
+            let (sampling, pixels) = render(1.0, point_filtering, 2);
+            assert_eq!(sampling, BlitSampling::Nearest);
+            assert_eq!(
+                pixels,
+                vec![
+                    Color::opaque(0, 0, 0),
+                    Color::opaque(255, 0, 0),
+                    Color::opaque(0, 255, 0),
+                    Color::opaque(0, 0, 255),
+                ]
+            );
+        }
+
+        // At scale one, PointFiltering alone distinguishes a non-exact 2x
+        // stretch. The centre-near sample retains GL's fractional channels.
+        let (sampling, linear) = render(1.0, false, 4);
+        assert_eq!(sampling, BlitSampling::Linear);
+        assert_eq!(linear[5], Color::opaque(48, 48, 16));
+        let (sampling, point) = render(1.0, true, 4);
+        assert_eq!(sampling, BlitSampling::Nearest);
+        assert_eq!(point[5], Color::opaque(0, 0, 0));
+
+        // Non-100% scale forces linear for both config values and first
+        // applies CStdDDraw's 0.5/-1 source correction.
+        for point_filtering in [false, true] {
+            let (sampling, exact_geometry) = render(2.0, point_filtering, 2);
+            assert_eq!(sampling, BlitSampling::Linear);
+            assert_eq!(exact_geometry[0], Color::opaque(48, 48, 16));
+            let (sampling, scaled) = render(2.0, point_filtering, 4);
+            assert_eq!(sampling, BlitSampling::Linear);
+            assert_eq!(scaled[5], Color::opaque(60, 60, 36));
+        }
+
+        // A transform pointer makes identity, rotation, mirror and projective
+        // calls alike non-exact; the shared selector then supplies StdGL's
+        // default-linear / PointFiltering-nearest choice at scale one.
+        let mut graphics = GraphicsSystem::new(
+            2,
+            2,
+            0,
+            "transformed sampler selection",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let source = FloatSourceRect::scaled(SourceRect::new(0, 0, 2, 2), 1.0);
+        for point_filtering in [false, true] {
+            graphics.set_runtime_sprite_filtering(1.0, point_filtering);
+            let (_, transformed_sampling) = graphics.runtime_sprite_blit(source, (2.0, 2.0), true);
+            assert_eq!(
+                transformed_sampling,
+                if point_filtering {
+                    BlitSampling::Nearest
+                } else {
+                    BlitSampling::Linear
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_sprite_linear_filtering_uses_native_tile_edges_and_float_pipeline() {
+        let row = [0, 0, 0, 255, 100, 0, 0, 255, 200, 0, 0, 255, 255, 0, 0, 255];
+        let image = ImageData::new(4, 2, row.repeat(2));
+        let sample = |source_edge_x: f32| {
+            let fragment = prepare_runtime_sprite_sample(
+                &image,
+                None,
+                source_edge_x,
+                0.5,
+                BlitSampling::Linear,
+                None,
+                SpriteBlitState::normal(),
+            )
+            .expect("source coordinate belongs to a native texture tile");
+            composite_sprite_fragment(
+                fragment,
+                Color::opaque(0, 0, 0),
+                SpriteBlitState::normal(),
+                None,
+            )
+        };
+
+        assert_eq!(
+            sample(1.25),
+            Color::opaque(75, 0, 0),
+            "a source-facet boundary may filter an adjacent atlas texel",
+        );
+        assert_eq!(
+            sample(1.75),
+            Color::opaque(100, 0, 0),
+            "the left C4TexRef clamps instead of sampling the right tile",
+        );
+        assert_eq!(
+            sample(2.25),
+            Color::opaque(200, 0, 0),
+            "the right C4TexRef independently clamps its left edge",
+        );
+
+        // Keep sub-byte filtered channels in float until after shader
+        // modulation: 0..3 sampled at 25% is 0.75, then *128/255 rounds to
+        // zero. Quantizing the texture sample first would incorrectly yield 1.
+        let tiny = ImageData::new(2, 1, vec![0, 0, 0, 255, 3, 0, 0, 255]);
+        let blit = SpriteBlitState {
+            mode: 0,
+            modulation: Some(0x0080_0000),
+            fog_modulation: None,
+        };
+        let fragment =
+            prepare_runtime_sprite_sample(&tiny, None, 0.75, 0.5, BlitSampling::Linear, None, blit)
+                .unwrap();
+        assert_eq!(
+            composite_sprite_fragment(fragment, Color::opaque(0, 0, 0), blit, None),
+            Color::opaque(0, 0, 0),
+        );
+
+        // The owner bitmap is a second filtered texture pass. Its filtered
+        // purple midpoint is tinted and composed over the independently
+        // filtered black base, rather than choosing one owner texel.
+        let base = ImageData::new(2, 1, vec![0, 0, 0, 255, 0, 0, 0, 255]);
+        let owner = ColorByOwnerMask::new(2, 1, Arc::from([255, 0, 0, 255, 0, 0, 255, 255]));
+        let fragment = prepare_runtime_sprite_sample(
+            &base,
+            Some(&owner),
+            1.0,
+            0.5,
+            BlitSampling::Linear,
+            Some(0x00ff_ffff),
+            SpriteBlitState::normal(),
+        )
+        .unwrap();
+        assert_eq!(
+            composite_sprite_fragment(
+                fragment,
+                Color::opaque(0, 0, 0),
+                SpriteBlitState::normal(),
+                None,
+            ),
+            Color::opaque(128, 0, 128),
+        );
     }
 
     #[test]
@@ -23884,6 +24436,9 @@ mod tests {
             empty_cursor_atlas(),
             empty_hud_graphics(),
         );
+        // This regression isolates FacetTargetStretch geometry under C++'s
+        // explicit point-filter mode; default non-exact blits are linear.
+        graphics.set_point_filtering(true);
         let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
         graphics.render_frame(&snapshot, &viewports);
 
@@ -23920,6 +24475,60 @@ mod tests {
 
     #[test]
     fn real_tutorial_elevator_facets_construction_and_live_frame_delta_match_cpp() {
+        fn draw_point_region(
+            surface: &mut Surface,
+            rect: &GuiRect,
+            image: &ImageData,
+            source: SourceRect,
+        ) {
+            let dest_width = rect.size.width.round() as i32;
+            let dest_height = rect.size.height.round() as i32;
+            let dest_x = rect.origin.x.round() as i32;
+            let dest_y = rect.origin.y.round() as i32;
+            assert!(dest_width > 0 && dest_height > 0);
+            assert!(source.width > 0 && source.height > 0);
+
+            for dy in 0..dest_height {
+                // Independent GL_NEAREST oracle: the rasterizer evaluates
+                // texture coordinates at destination pixel centres.
+                let source_y = source.y
+                    + ((2_i64 * i64::from(dy) + 1) * i64::from(source.height)
+                        / (2_i64 * i64::from(dest_height))) as i32;
+                for dx in 0..dest_width {
+                    let target_x = dest_x + dx;
+                    let target_y = dest_y + dy;
+                    if target_x < 0
+                        || target_y < 0
+                        || target_x >= surface.width() as i32
+                        || target_y >= surface.height() as i32
+                    {
+                        continue;
+                    }
+                    let source_x = source.x
+                        + ((2_i64 * i64::from(dx) + 1) * i64::from(source.width)
+                            / (2_i64 * i64::from(dest_width))) as i32;
+                    assert!(source_x >= 0 && source_y >= 0);
+                    let idx = ((source_y as u32 * image.width() + source_x as u32) * 4) as usize;
+                    let pixel = &image.pixels()[idx..idx + 4];
+                    let source = Color::new(pixel[0], pixel[1], pixel[2], pixel[3]);
+                    if source.a == 0 {
+                        continue;
+                    }
+                    let destination = surface
+                        .get_pixel(target_x as u32, target_y as u32)
+                        .unwrap_or_default();
+                    let output = if source.a == 255 {
+                        source
+                    } else {
+                        blend_colors(source, destination)
+                    };
+                    surface
+                        .set_pixel(target_x as u32, target_y as u32, output)
+                        .unwrap();
+                }
+            }
+        }
+
         // Real Tutorial05 starts ELEV at Con=80 with no case
         // (Tutorial05/Script.c:30-34). C4Object::DrawFace exposes the bottom
         // Con slice for construction graphics (src/C4Object.cpp:440-475), and
@@ -23984,6 +24593,9 @@ mod tests {
                 ..HudGraphics::default()
             }),
         );
+        // This oracle isolates construction/facet geometry under C++'s
+        // explicit PointFiltering mode; default non-exact blits are linear.
+        partial_graphics.set_point_filtering(true);
         partial_graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         partial_graphics.viewport_x = partial_origin.x as f32;
         partial_graphics.viewport_y = partial_origin.y as f32;
@@ -24002,7 +24614,7 @@ mod tests {
         partial_expected.fill(Color::opaque(0, 0, 0));
         // C++ construction display: source y=56*(100-80)/100=11,
         // source/destination h=56*80/100=44; Jolt makes Shape.y=-22.
-        draw_image_region(
+        draw_point_region(
             &mut partial_expected,
             &GuiRect::new(
                 (partial.position.x - 14 - partial_origin.x) as f32,
@@ -24011,13 +24623,7 @@ mod tests {
                 44.0,
             ),
             &real_elev.image,
-            None,
-            &SourceRect::new(0, 11, 28, 44),
-            false,
-            None,
-            SpriteBlitState::normal(),
-            None,
-            None,
+            SourceRect::new(0, 11, 28, 44),
         );
         assert_surface_pixels_eq(
             partial_graphics.surface(),
@@ -24032,7 +24638,7 @@ mod tests {
         );
         // DrawTopFace bottom-left aligns the 16x16 sign to the Con-scaled
         // Shape (-14,-22,28,44), hence the real ELEV-relative (-14,+6).
-        draw_image_region(
+        draw_point_region(
             &mut partial_expected,
             &GuiRect::new(
                 (partial.position.x - 14 - partial_origin.x) as f32,
@@ -24041,13 +24647,7 @@ mod tests {
                 16.0,
             ),
             &construction_sign,
-            None,
-            &SourceRect::new(0, 0, 16, 16),
-            false,
-            None,
-            SpriteBlitState::normal(),
-            None,
-            None,
+            SourceRect::new(0, 0, 16, 16),
         );
         assert_surface_pixels_eq(
             partial_graphics.surface(),
@@ -24144,6 +24744,7 @@ mod tests {
                 empty_cursor_atlas(),
                 empty_hud_graphics(),
             );
+            graphics.set_point_filtering(true);
             graphics.surface_mut().fill(Color::opaque(0, 0, 0));
             graphics.viewport_x = origin.x as f32;
             graphics.viewport_y = origin.y as f32;
@@ -24164,7 +24765,7 @@ mod tests {
             let case = snapshot.object(case_id).expect("ELEC remains live");
             let mut expected = Surface::new(96, 128, PixelFormat::Rgba8888);
             expected.fill(Color::opaque(0, 0, 0));
-            draw_image_region(
+            draw_point_region(
                 &mut expected,
                 &GuiRect::new(
                     (elevator.position.x - 14 - origin.x) as f32,
@@ -24173,13 +24774,7 @@ mod tests {
                     56.0,
                 ),
                 &elev_sprite.image,
-                None,
-                &SourceRect::new(0, 0, 28, 56),
-                false,
-                None,
-                SpriteBlitState::normal(),
-                None,
-                None,
+                SourceRect::new(0, 0, 28, 56),
             );
             // C4Object::Draw computes the live target every draw:
             // height=(Target.y+Target.Shape.y)-(y+Shape.y+FacetY)
@@ -24187,7 +24782,7 @@ mod tests {
             // 2x4 source (src/C4Facet.cpp:296-303).
             let cable_top = elevator.position.y - 28 + cable_facet.target_y;
             let case_top = case.position.y - 13;
-            draw_image_region(
+            draw_point_region(
                 &mut expected,
                 &GuiRect::new(
                     (elevator.position.x - 14 + cable_facet.target_x - origin.x) as f32,
@@ -24196,18 +24791,12 @@ mod tests {
                     (case_top - cable_top) as f32,
                 ),
                 &elev_sprite.image,
-                None,
-                &SourceRect::new(
+                SourceRect::new(
                     cable_facet.x,
                     cable_facet.y,
                     cable_facet.width,
                     cable_facet.height,
                 ),
-                false,
-                None,
-                SpriteBlitState::normal(),
-                None,
-                None,
             );
             expected
         };
@@ -24223,6 +24812,7 @@ mod tests {
                 empty_cursor_atlas(),
                 empty_hud_graphics(),
             );
+            graphics.set_point_filtering(true);
             graphics.surface_mut().fill(Color::opaque(0, 0, 0));
             graphics.viewport_x = origin.x as f32;
             graphics.viewport_y = origin.y as f32;
@@ -24248,7 +24838,7 @@ mod tests {
             // 2419-2496). The full carriage is this one DrawTopFace blit in
             // the second object-list pass (src/C4ObjectList.cpp:387-396;
             // src/C4Object.cpp:2617-2670).
-            draw_image_region(
+            draw_point_region(
                 &mut expected,
                 &GuiRect::new(
                     (case.position.x - 12 - origin.x) as f32,
@@ -24257,13 +24847,7 @@ mod tests {
                     26.0,
                 ),
                 &case_sprite.image,
-                None,
-                &SourceRect::new(0, 0, 24, 26),
-                false,
-                None,
-                SpriteBlitState::normal(),
-                None,
-                None,
+                SourceRect::new(0, 0, 24, 26),
             );
             expected
         };
@@ -26476,7 +27060,7 @@ mod tests {
         else {
             panic!("liquid animation must retain float shader channels");
         };
-        assert_eq!(alpha, 255);
+        assert_eq!(alpha, 255.0);
         for (actual, expected) in rgb.into_iter().zip([128.0, 76.8, 38.650_98]) {
             assert!((actual - expected).abs() < 0.000_01);
         }
