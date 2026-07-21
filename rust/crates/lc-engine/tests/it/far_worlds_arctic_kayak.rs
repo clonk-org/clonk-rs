@@ -1,5 +1,8 @@
 use crate::support::real_scenario::{join_local_player, load_installed_scenario};
-use lc_engine::{ObjectId, ObjectUpdate, SpawnConfig, COM_RELEASE_OFFSET, COM_THROW};
+use lc_engine::{
+    CommandDirection, Direction, ObjectId, ObjectUpdate, SpawnConfig, COM_LEFT, COM_RELEASE_OFFSET,
+    COM_THROW,
+};
 use lc_script::Value;
 
 fn fill_kayak(engine: &mut lc_engine::Engine, kayak: ObjectId, cargo_count: usize) -> Vec<ObjectId> {
@@ -10,6 +13,64 @@ fn fill_kayak(engine: &mut lc_engine::Engine, kayak: ObjectId, cargo_count: usiz
                 .expect("the shipped Arctic bone cargo spawns in KAJO")
         })
         .collect()
+}
+
+#[test]
+fn arctic_occupied_kayak_rows_with_jump_and_run_direction_updates() {
+    // C4Object::ContainedControl dispatches PSF_ContainedControlUpdate, whose
+    // script name is `~ContainedUpdate` (C4Script.h:74; C4Object.cpp:3253-3263).
+    // Shipped KAJO deliberately defers Jump'n'Run direction handling from
+    // ContainedLeft to ContainedUpdate, which starts/stops its Paddle action
+    // (Occupied.c4d/Script.c:25-52,54-100).
+    let mut engine = load_installed_scenario("FarWorlds.c4f/Arctic.c4s", 0);
+    let owner = join_local_player(&mut engine, "Arctic kayak rowing parity");
+    engine
+        .player_mut(owner)
+        .expect("Arctic player remains joined")
+        .control
+        .control_style = true;
+    let crew = engine
+        .crew_cursor(owner)
+        .expect("Arctic joins with a selected Inuit");
+    let kayak = engine
+        .spawn_object(
+            SpawnConfig::new("KAJO")
+                .with_owner(owner)
+                .with_in_liquid(true),
+        )
+        .expect("the shipped occupied kayak spawns in liquid");
+    engine
+        .apply_object_update(crew, ObjectUpdate::new().with_container(kayak))
+        .expect("the Inuit enters the occupied kayak");
+    engine
+        .apply_object_update(
+            kayak,
+            ObjectUpdate::new()
+                .with_action("Stop")
+                .with_direction(Direction::Left)
+                .with_command_direction(CommandDirection::Stop),
+        )
+        .expect("the occupied kayak starts stopped and facing left");
+    engine.debug_set_in_liquid(kayak, true);
+
+    engine
+        .player_in_com(owner, COM_LEFT, 0)
+        .expect("held-left control reaches the occupied kayak");
+    let rowing = engine
+        .object_snapshot(kayak)
+        .expect("the occupied kayak survives held-left control");
+    assert_eq!(rowing.action.name, "Paddle");
+    assert_eq!(rowing.command_direction, CommandDirection::Left);
+    assert_eq!(rowing.direction, Direction::Left);
+
+    engine
+        .player_in_com(owner, COM_LEFT + COM_RELEASE_OFFSET, 0)
+        .expect("left release reaches the occupied kayak");
+    let stopped = engine
+        .object_snapshot(kayak)
+        .expect("the occupied kayak survives left release");
+    assert_eq!(stopped.action.name, "Stop");
+    assert_eq!(stopped.command_direction, CommandDirection::Stop);
 }
 
 #[test]

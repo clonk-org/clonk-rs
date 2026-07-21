@@ -5483,8 +5483,8 @@ impl Engine {
         Ok(())
     }
 
-    /// The `ContainedControlUpdate` notification for Jump'n'Run control
-    /// (C4Object.cpp:3244-3249).
+    /// The `PSF_ContainedControlUpdate` (`~ContainedUpdate`) notification for
+    /// Jump'n'Run control (C4Script.h:74; C4Object.cpp:3256-3262,3300-3304).
     fn contained_control_update(
         &mut self,
         index: usize,
@@ -5516,7 +5516,7 @@ impl Engine {
             Value::Bool(pressed & (1 << COM_DIG) != 0),
             Value::Bool(pressed & (1 << COM_THROW) != 0),
         ];
-        self.contained_call(container_index, "ContainedControlUpdate", &args)?;
+        self.contained_call(container_index, "ContainedUpdate", &args)?;
         Ok(())
     }
 
@@ -10788,6 +10788,134 @@ protected func Destruction()
                 .is_empty(),
             "the presence of an old late ContainedLeft suppresses Take"
         );
+    }
+
+    #[test]
+    fn contained_control_update_uses_native_name_and_arguments_for_old_and_new_definitions() {
+        // PSF_ContainedControlUpdate is the internal C++ identifier, but its
+        // script callback is `~ContainedUpdate`. Both the early and late
+        // version branches pass (driver, comdir, dig, throw)
+        // (C4Script.h:74; C4Object.cpp:3253-3263,3296-3305).
+        let container_script = r#"
+#strict 2
+local update_count, update_driver, update_dir, update_dig, update_throw, wrong_name;
+protected func ContainedUpdate(object driver, int dir, bool digging, bool throwing)
+{
+    update_count++;
+    update_driver = driver;
+    update_dir = dir + 100;
+    update_dig = digging;
+    update_throw = throwing;
+    return(1);
+}
+protected func ContainedControlUpdate()
+{
+    wrong_name = 1;
+    return(1);
+}
+"#;
+
+        for (label, version) in [
+            ("modern early callback", [4, 9, 1, 3, 0]),
+            ("legacy late callback", [4, 9, 1, 2, 0]),
+        ] {
+            let mut engine = Engine::new();
+            register_clonk(&mut engine, "CLNK", "#strict\n");
+            let mut container =
+                Definition::from_script("CONT", "Container", container_script)
+                    .expect("container script compiles");
+            container.set_version(version);
+            engine
+                .register_definition(container)
+                .expect("container registers");
+            engine
+                .register_player(PlayerConfig::new(1, "Test"))
+                .expect("player registers");
+            let crew = spawn_crew(&mut engine, "CLNK", 1);
+            let container = engine
+                .spawn_object(SpawnConfig::new("CONT"))
+                .expect("container spawns");
+            engine
+                .apply_object_update(crew, crate::ObjectUpdate::new().with_container(container))
+                .expect("crew enters container");
+            let player = engine.player_mut(1).expect("player remains");
+            player.control.control_style = true;
+            player.control.pressed_coms = (1_i32 << COM_DIG) | (1_i32 << COM_THROW);
+
+            engine
+                .player_in_com(1, COM_LEFT, 0)
+                .expect("contained control completes");
+
+            let container = engine
+                .object_snapshot(container)
+                .expect("container survives update");
+            assert_eq!(
+                container.local_vars.get("update_count"),
+                Some(&Value::Int(1)),
+                "{label}"
+            );
+            assert_eq!(
+                container.local_vars.get("update_driver"),
+                Some(&Value::Object(crew.as_u64())),
+                "{label}"
+            );
+            assert_eq!(
+                container.local_vars.get("update_dir"),
+                Some(&Value::Int(
+                    CommandDirection::Left.to_script_value() + 100
+                )),
+                "{label}"
+            );
+            assert_eq!(
+                container.local_vars.get("update_dig"),
+                Some(&Value::Bool(true)),
+                "{label}"
+            );
+            assert_eq!(
+                container.local_vars.get("update_throw"),
+                Some(&Value::Bool(true)),
+                "{label}"
+            );
+            assert_eq!(
+                container.local_vars.get("wrong_name"),
+                Some(&Value::Nil),
+                "{label}"
+            );
+
+            engine
+                .player_in_com(1, COM_LEFT + COM_RELEASE_OFFSET, 0)
+                .expect("contained release update completes");
+            let container = engine
+                .object_snapshot(container.id)
+                .expect("container survives release update");
+            assert_eq!(
+                container.local_vars.get("update_count"),
+                Some(&Value::Int(2)),
+                "{label}"
+            );
+            assert_eq!(
+                container.local_vars.get("update_dir"),
+                Some(&Value::Int(
+                    CommandDirection::Stop.to_script_value() + 100
+                )),
+                "{label}"
+            );
+            assert_eq!(
+                container.local_vars.get("update_dig"),
+                Some(&Value::Bool(true)),
+                "{label}"
+            );
+            assert_eq!(
+                container.local_vars.get("update_throw"),
+                Some(&Value::Bool(true)),
+                "{label}"
+            );
+            assert_eq!(
+                container.local_vars.get("wrong_name"),
+                Some(&Value::Nil),
+                "{label}"
+            );
+        }
     }
 
     #[test]
