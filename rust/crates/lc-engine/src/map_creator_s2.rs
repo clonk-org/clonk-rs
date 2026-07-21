@@ -10,8 +10,9 @@
 //! keeping the post-init synced ledger untouched.
 //!
 //! `evalFn=`/`drawFn=` record pixels during rendering for the post-landscape
-//! scenario-script callback phase. `algo=script` parses and uses C++'s
-//! missing-`ScriptAlgo<Name>` failsafe (an empty mask).
+//! scenario-script callback phase. `algo=script` synchronously calls the
+//! live scenario host's `ScriptAlgo<Name>` function at each native algorithm
+//! evaluation point; a missing function or caught script error is false.
 
 use crate::map_creator::evaluate_map_size;
 use crate::rng::LcgRng;
@@ -26,6 +27,13 @@ const ZOOM_RES: i32 = 100;
 
 type NodeId = usize;
 type CallbackId = usize;
+
+/// Live `C4MCOverlay::AlgoScript` dispatch. The caller owns the script host,
+/// while the map creator owns the active C4Landscape::FixRandom ledger.
+/// Passing that ledger through the seam keeps script-side `Random()` calls in
+/// exact render traversal order without coupling this parser to lc-script.
+pub(crate) type ScriptAlgoCall<'a> =
+    dyn FnMut(&mut LcgRng, &str, [i32; 4]) -> bool + 'a;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Op {
@@ -429,6 +437,11 @@ pub(crate) struct MapCreatorS2State {
     default_map: Overlay,
     #[serde(skip, default)]
     callbacks: PostInitMapCallbacks,
+    /// C4Landscape's fixed RNG position immediately before RenderTo. Initial
+    /// scenario loading parses resources before the live script host exists,
+    /// then replays only RenderTo after script linking from this exact point.
+    #[serde(skip, default)]
+    pre_render_rng: Option<LcgRng>,
 }
 
 // Callback bitmaps are transient PostInitMap work, deliberately omitted from
@@ -450,6 +463,10 @@ impl MapCreatorS2State {
 
     pub(crate) fn set_callback_map_zoom(&mut self, map_zoom: i32) {
         self.callbacks.set_map_zoom(map_zoom);
+    }
+
+    pub(crate) fn pre_render_rng(&self) -> Option<LcgRng> {
+        self.pre_render_rng.clone()
     }
 
     pub(crate) fn callbacks(&self) -> &PostInitMapCallbacks {
@@ -723,7 +740,14 @@ impl Tree {
     }
 
     /// C4MCOverlay::CheckMask (src/C4MapCreatorS2.cpp:448-504).
-    fn check_mask(&self, id: NodeId, ix: i32, iy: i32) -> bool {
+    fn check_mask(
+        &self,
+        id: NodeId,
+        ix: i32,
+        iy: i32,
+        rng: &mut LcgRng,
+        script_algo: &mut ScriptAlgoCall<'_>,
+    ) -> bool {
         use crate::math::{fixed10, fixtoi_prec, itofix, C4Fixed};
         let overlay = self.overlay(id).expect("check_mask on overlay");
         if !overlay.loose_bounds && !overlay.in_bounds(ix, iy) {
@@ -791,7 +815,7 @@ impl Tree {
         {
             return overlay.invert;
         }
-        self.run_algorithm(id, ix, iy) ^ overlay.invert
+        self.run_algorithm(id, ix, iy, rng, script_algo) ^ overlay.invert
     }
 
     /// C4MCOverlay::RenderPix (src/C4MapCreatorS2.cpp:506-553).
@@ -805,9 +829,11 @@ impl Tree {
         last_set: bool,
         draw: bool,
         mut trace: Option<&mut PixelRenderTrace>,
+        rng: &mut LcgRng,
+        script_algo: &mut ScriptAlgoCall<'_>,
     ) -> bool {
         let overlay = self.overlay(id).expect("render_pix on overlay");
-        let set_this = self.check_mask(id, ix, iy);
+        let set_this = self.check_mask(id, ix, iy, rng, script_algo);
         let mut do_set = match last_op {
             Op::And => set_this && last_set,
             Op::Or => set_this || last_set,
@@ -838,6 +864,8 @@ impl Tree {
                         last_set_c,
                         draw,
                         trace.as_deref_mut(),
+                        rng,
+                        script_algo,
                     );
                     if overlay.group && child_overlay.op == Op::None {
                         do_set |= last_set_c;
@@ -857,14 +885,31 @@ impl Tree {
     }
 
     /// C4MCOverlay::PeekPix (src/C4MapCreatorS2.cpp:555-571).
-    fn peek_pix(&self, start: NodeId, ix: i32, iy: i32) -> bool {
+    fn peek_pix(
+        &self,
+        start: NodeId,
+        ix: i32,
+        iy: i32,
+        rng: &mut LcgRng,
+        script_algo: &mut ScriptAlgoCall<'_>,
+    ) -> bool {
         let mut current = start;
         let mut last_set = false;
         let mut last_op = Op::None;
         let mut crap = 0u8;
         loop {
-            last_set =
-                self.render_pix(current, ix, iy, &mut crap, last_op, last_set, false, None);
+            last_set = self.render_pix(
+                current,
+                ix,
+                iy,
+                &mut crap,
+                last_op,
+                last_set,
+                false,
+                None,
+                rng,
+                script_algo,
+            );
             let overlay = self.overlay(current).expect("peek chain overlay");
             last_op = overlay.op;
             if overlay.op == Op::None {
@@ -880,7 +925,14 @@ impl Tree {
     }
 
     /// The algorithm dispatch (src/C4MapCreatorS2.cpp:1351-1564).
-    fn run_algorithm(&self, id: NodeId, ix: i32, iy: i32) -> bool {
+    fn run_algorithm(
+        &self,
+        id: NodeId,
+        ix: i32,
+        iy: i32,
+        rng: &mut LcgRng,
+        script_algo: &mut ScriptAlgoCall<'_>,
+    ) -> bool {
         let overlay = self.overlay(id).expect("algorithm on overlay");
         let s = overlay.seed;
         let z = ZOOM_RES;
@@ -918,7 +970,7 @@ impl Tree {
                 let pxa = overlay.alpha.evaluate(overlay.wdt);
                 modulo((ix + modulo(s, 4738)).abs(), pxb * z + 1) < pxa * z + 1
             }
-            Algo::Border => self.algo_border(id, ix, iy),
+            Algo::Border => self.algo_border(id, ix, iy, rng, script_algo),
             Algo::Mandel => {
                 let mut iter = overlay.alpha.evaluate(SIZE_RES);
                 if iter == 0 {
@@ -960,9 +1012,19 @@ impl Tree {
                 let v = i64::from(ix ^ iy.wrapping_mul(3)) * 2531011;
                 (v.abs() % 214013) % i64::from(z) > i64::from(ix / wdt)
             }
-            // AlgoScript asks for `ScriptAlgo<Name>` at render time. When it
-            // is missing, C++'s documented failsafe contributes no pixels.
-            Algo::Script => false,
+            // GetSFunc is deliberately repeated for every evaluation. Border
+            // peeks and non-drawing operator operands therefore make the same
+            // extra synchronous calls as C++ rather than caching per pixel.
+            Algo::Script => script_algo(
+                rng,
+                &format!("ScriptAlgo{}", self.nodes[id].name),
+                [
+                    ix,
+                    iy,
+                    overlay.alpha.evaluate(SIZE_RES),
+                    overlay.beta.evaluate(SIZE_RES),
+                ],
+            ),
             Algo::RndAll => modulo(s, 100) < overlay.alpha.evaluate(SIZE_RES),
             Algo::Poly => self.algo_polygon(id, ix, iy),
         }
@@ -970,7 +1032,14 @@ impl Tree {
 
     /// AlgoBorder (src/C4MapCreatorS2.cpp:1408-1420) with PreparePeek
     /// (src/C4MapCreatorS2.cpp:1327-1343).
-    fn algo_border(&self, id: NodeId, ix: i32, iy: i32) -> bool {
+    fn algo_border(
+        &self,
+        id: NodeId,
+        ix: i32,
+        iy: i32,
+        rng: &mut LcgRng,
+        script_algo: &mut ScriptAlgoCall<'_>,
+    ) -> bool {
         let overlay = self.overlay(id).expect("border overlay");
         let la = overlay.alpha.evaluate(overlay.wdt);
         let lb = overlay.beta.evaluate(overlay.hgt);
@@ -987,12 +1056,16 @@ impl Tree {
         let chain = self.first_of_chain(owner);
         let top_overlay = self.overlay(top).expect("top overlay");
         for x in (ix - la)..=(ix + la) {
-            if top_overlay.in_bounds(x, iy) && !self.peek_pix(chain, x, iy) {
+            if top_overlay.in_bounds(x, iy)
+                && !self.peek_pix(chain, x, iy, rng, script_algo)
+            {
                 return true;
             }
         }
         for y in (iy - lb)..=(iy + lb) {
-            if top_overlay.in_bounds(ix, y) && !self.peek_pix(chain, ix, y) {
+            if top_overlay.in_bounds(ix, y)
+                && !self.peek_pix(chain, ix, y, rng, script_algo)
+            {
                 return true;
             }
         }
@@ -1776,10 +1849,36 @@ pub(crate) fn create_s2_map_with_state_and_functions(
     rng: &mut LcgRng,
     script_functions: &HashSet<String>,
 ) -> S2MapCreation {
+    let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
+    create_s2_map_with_state_and_functions_with_script_algo(
+        source,
+        classifier,
+        map_width,
+        map_height,
+        map_player_extend,
+        player_count,
+        rng,
+        script_functions,
+        &mut missing_script_algo,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_s2_map_with_state_and_functions_with_script_algo(
+    source: &str,
+    classifier: &mut MapPixelClassifier,
+    map_width: LegacyC4SVal,
+    map_height: LegacyC4SVal,
+    map_player_extend: bool,
+    player_count: i32,
+    rng: &mut LcgRng,
+    script_functions: &HashSet<String>,
+    script_algo: &mut ScriptAlgoCall<'_>,
+) -> S2MapCreation {
     // C4MCMap::Default (src/C4MapCreatorS2.cpp:633-644) runs at creator
     // construction: MapWdt/MapHgt evaluate through the synced rng.
     let (wdt, hgt) = evaluate_map_size(map_width, map_height, map_player_extend, player_count, rng);
-    parse_and_render_s2_map(
+    parse_and_render_s2_map_with_callbacks_and_script_algo(
         Tree::new(),
         source,
         classifier,
@@ -1787,6 +1886,8 @@ pub(crate) fn create_s2_map_with_state_and_functions(
         rng,
         false,
         script_functions,
+        None,
+        script_algo,
     )
 }
 
@@ -1806,8 +1907,36 @@ pub(crate) fn create_s2_map_for_section_with_state_and_functions(
     rng: &mut LcgRng,
     script_functions: &HashSet<String>,
 ) -> S2MapCreation {
+    let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
+    create_s2_map_for_section_with_state_and_functions_with_script_algo(
+        retained,
+        source,
+        classifier,
+        map_width,
+        map_height,
+        map_player_extend,
+        player_count,
+        rng,
+        script_functions,
+        &mut missing_script_algo,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_s2_map_for_section_with_state_and_functions_with_script_algo(
+    retained: Option<MapCreatorS2State>,
+    source: &str,
+    classifier: &mut MapPixelClassifier,
+    map_width: LegacyC4SVal,
+    map_height: LegacyC4SVal,
+    map_player_extend: bool,
+    player_count: i32,
+    rng: &mut LcgRng,
+    script_functions: &HashSet<String>,
+    script_algo: &mut ScriptAlgoCall<'_>,
+) -> S2MapCreation {
     let Some(retained) = retained else {
-        return create_s2_map_with_state_and_functions(
+        return create_s2_map_with_state_and_functions_with_script_algo(
             source,
             classifier,
             map_width,
@@ -1816,14 +1945,16 @@ pub(crate) fn create_s2_map_for_section_with_state_and_functions(
             player_count,
             rng,
             script_functions,
+            script_algo,
         );
     };
     let MapCreatorS2State {
         tree,
         default_map,
         callbacks,
+        pre_render_rng: _,
     } = retained;
-    parse_and_render_s2_map_with_callbacks(
+    parse_and_render_s2_map_with_callbacks_and_script_algo(
         tree,
         source,
         classifier,
@@ -1832,6 +1963,7 @@ pub(crate) fn create_s2_map_for_section_with_state_and_functions(
         false,
         script_functions,
         Some(callbacks),
+        script_algo,
     )
 }
 
@@ -1899,6 +2031,30 @@ pub(crate) fn render_runtime_s2_map(
     rng: &mut LcgRng,
     script_functions: &HashSet<String>,
 ) -> Option<lc_resources::bitmap::IndexedBitmap> {
+    let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
+    render_runtime_s2_map_with_script_algo(
+        retained,
+        source,
+        classifier,
+        map_width,
+        map_height,
+        rng,
+        script_functions,
+        &mut missing_script_algo,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_runtime_s2_map_with_script_algo(
+    retained: Option<&mut MapCreatorS2State>,
+    source: &str,
+    classifier: &mut MapPixelClassifier,
+    map_width: i32,
+    map_height: i32,
+    rng: &mut LcgRng,
+    script_functions: &HashSet<String>,
+    script_algo: &mut ScriptAlgoCall<'_>,
+) -> Option<lc_resources::bitmap::IndexedBitmap> {
     let original_callback_count = retained
         .as_ref()
         .map(|creator| creator.tree.callbacks.len())
@@ -1912,7 +2068,7 @@ pub(crate) fn render_runtime_s2_map(
     // returns the exact value (C4Scenario.cpp:38-46).
     let _ = rng.random(1);
     let _ = rng.random(1);
-    let creation = parse_and_render_s2_map(
+    let creation = parse_and_render_s2_map_with_callbacks_and_script_algo(
         tree,
         source,
         classifier,
@@ -1920,6 +2076,8 @@ pub(crate) fn render_runtime_s2_map(
         rng,
         true,
         script_functions,
+        None,
+        script_algo,
     );
     if let Some(retained) = retained {
         retained
@@ -1950,7 +2108,8 @@ fn parse_and_render_s2_map(
     runtime_source: bool,
     script_functions: &HashSet<String>,
 ) -> S2MapCreation {
-    parse_and_render_s2_map_with_callbacks(
+    let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
+    parse_and_render_s2_map_with_callbacks_and_script_algo(
         tree,
         source,
         classifier,
@@ -1959,6 +2118,7 @@ fn parse_and_render_s2_map(
         runtime_source,
         script_functions,
         None,
+        &mut missing_script_algo,
     )
 }
 
@@ -1972,6 +2132,32 @@ fn parse_and_render_s2_map_with_callbacks(
     runtime_source: bool,
     script_functions: &HashSet<String>,
     retained_callbacks: Option<PostInitMapCallbacks>,
+) -> S2MapCreation {
+    let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
+    parse_and_render_s2_map_with_callbacks_and_script_algo(
+        tree,
+        source,
+        classifier,
+        default_map,
+        rng,
+        runtime_source,
+        script_functions,
+        retained_callbacks,
+        &mut missing_script_algo,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_and_render_s2_map_with_callbacks_and_script_algo(
+    tree: Tree,
+    source: &str,
+    classifier: &mut MapPixelClassifier,
+    default_map: Overlay,
+    rng: &mut LcgRng,
+    runtime_source: bool,
+    script_functions: &HashSet<String>,
+    retained_callbacks: Option<PostInitMapCallbacks>,
+    script_algo: &mut ScriptAlgoCall<'_>,
 ) -> S2MapCreation {
     let retained_callback_count = tree.callbacks.len();
     let mut parser = Parser {
@@ -1993,7 +2179,8 @@ fn parse_and_render_s2_map_with_callbacks(
     }
     let tree = parser.tree;
 
-    let (bitmap, rendered_callbacks) = render_last_map(&tree);
+    let pre_render_rng = Some(rng.clone());
+    let (bitmap, rendered_callbacks) = render_last_map(&tree, rng, script_algo);
     let mut callbacks = retained_callbacks.unwrap_or_default();
     if callbacks.arrays.is_empty() && retained_callback_count == 0 {
         callbacks = rendered_callbacks;
@@ -2006,6 +2193,7 @@ fn parse_and_render_s2_map_with_callbacks(
             tree,
             default_map,
             callbacks: callbacks.clone(),
+            pre_render_rng,
         },
         callbacks,
     }
@@ -2023,6 +2211,8 @@ fn last_map(tree: &Tree) -> Option<NodeId> {
 
 fn render_last_map(
     tree: &Tree,
+    rng: &mut LcgRng,
+    script_algo: &mut ScriptAlgoCall<'_>,
 ) -> (
     Option<lc_resources::bitmap::IndexedBitmap>,
     PostInitMapCallbacks,
@@ -2030,13 +2220,18 @@ fn render_last_map(
     let Some(map) = last_map(tree) else {
         return (None, PostInitMapCallbacks::default());
     };
-    render_map_with_callbacks(tree, map).map_or_else(
+    render_map_with_callbacks(tree, map, rng, script_algo).map_or_else(
         || (None, PostInitMapCallbacks::default()),
         |(bitmap, callbacks)| (Some(bitmap), callbacks),
     )
 }
 
-fn render_map(tree: &Tree, map: NodeId) -> Option<lc_resources::bitmap::IndexedBitmap> {
+fn render_map(
+    tree: &Tree,
+    map: NodeId,
+    rng: &mut LcgRng,
+    script_algo: &mut ScriptAlgoCall<'_>,
+) -> Option<lc_resources::bitmap::IndexedBitmap> {
     let map_overlay = tree.overlay(map)?;
     let (wdt, hgt) = (map_overlay.wdt, map_overlay.hgt);
     if wdt <= 0 || hgt <= 0 {
@@ -2048,7 +2243,18 @@ fn render_map(tree: &Tree, map: NodeId) -> Option<lc_resources::bitmap::IndexedB
         for ix in 0..wdt {
             let pix = &mut bytes[(iy * wdt + ix) as usize];
             *pix = 0;
-            tree.render_pix(map, ix, iy, pix, Op::None, false, true, None);
+            tree.render_pix(
+                map,
+                ix,
+                iy,
+                pix,
+                Op::None,
+                false,
+                true,
+                None,
+                rng,
+                script_algo,
+            );
         }
     }
     Some(lc_resources::bitmap::IndexedBitmap {
@@ -2061,19 +2267,22 @@ fn render_map(tree: &Tree, map: NodeId) -> Option<lc_resources::bitmap::IndexedB
 fn render_map_with_callbacks(
     tree: &Tree,
     map: NodeId,
+    rng: &mut LcgRng,
+    script_algo: &mut ScriptAlgoCall<'_>,
 ) -> Option<(
     lc_resources::bitmap::IndexedBitmap,
     PostInitMapCallbacks,
 )> {
     if tree.callbacks.is_empty() {
-        return render_map(tree, map)
+        return render_map(tree, map, rng, script_algo)
             .map(|bitmap| (bitmap, PostInitMapCallbacks::default()));
     }
     let mut callbacks = PostInitMapCallbacks {
         arrays: tree.callbacks.iter().map(CallbackArray::new).collect(),
         map_zoom: 0,
     };
-    let bitmap = render_map_recording_callbacks(tree, map, &mut callbacks)?;
+    let bitmap =
+        render_map_recording_callbacks(tree, map, &mut callbacks, rng, script_algo)?;
     Some((bitmap, callbacks))
 }
 
@@ -2081,6 +2290,8 @@ fn render_map_recording_callbacks(
     tree: &Tree,
     map: NodeId,
     callbacks: &mut PostInitMapCallbacks,
+    rng: &mut LcgRng,
+    script_algo: &mut ScriptAlgoCall<'_>,
 ) -> Option<lc_resources::bitmap::IndexedBitmap> {
     let map_overlay = tree.overlay(map)?;
     let (wdt, hgt) = (map_overlay.wdt, map_overlay.hgt);
@@ -2106,6 +2317,8 @@ fn render_map_recording_callbacks(
                 false,
                 true,
                 Some(&mut trace),
+                rng,
+                script_algo,
             );
             for &callback in &trace.eval_callbacks {
                 if let Some(array) = callbacks.arrays.get_mut(callback) {
@@ -2143,6 +2356,28 @@ pub(crate) fn render_named_s2_map(
     map_height: i32,
     rng: &mut LcgRng,
 ) -> Option<lc_resources::bitmap::IndexedBitmap> {
+    let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
+    render_named_s2_map_with_script_algo(
+        creator,
+        name,
+        classifier,
+        map_width,
+        map_height,
+        rng,
+        &mut missing_script_algo,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_named_s2_map_with_script_algo(
+    creator: &mut MapCreatorS2State,
+    name: &str,
+    classifier: &mut MapPixelClassifier,
+    map_width: i32,
+    map_height: i32,
+    rng: &mut LcgRng,
+    script_algo: &mut ScriptAlgoCall<'_>,
+) -> Option<lc_resources::bitmap::IndexedBitmap> {
     let map = if name.is_empty() {
         last_map(&creator.tree)
     } else {
@@ -2158,7 +2393,27 @@ pub(crate) fn render_named_s2_map(
     map_overlay.wdt = map_width;
     map_overlay.hgt = map_height;
     creator.tree.re_evaluate(0, classifier, rng);
-    render_map_recording_callbacks(&creator.tree, map, &mut creator.callbacks)
+    creator.pre_render_rng = Some(rng.clone());
+    render_map_recording_callbacks(
+        &creator.tree,
+        map,
+        &mut creator.callbacks,
+        rng,
+        script_algo,
+    )
+}
+
+/// Re-run only C4MCMap::RenderTo after the actual scenario host has linked.
+/// Parsing, material lookup and overlay seed evaluation already occurred at
+/// resource-load time; `pre_render_rng` restores the exact fixed ledger seam.
+pub(crate) fn rerender_last_s2_map_with_script_algo(
+    creator: &mut MapCreatorS2State,
+    rng: &mut LcgRng,
+    script_algo: &mut ScriptAlgoCall<'_>,
+) -> Option<lc_resources::bitmap::IndexedBitmap> {
+    let (bitmap, callbacks) = render_last_map(&creator.tree, rng, script_algo);
+    creator.callbacks = callbacks;
+    bitmap
 }
 
 #[cfg(test)]
@@ -2273,7 +2528,9 @@ mod tests {
     ) -> bool {
         let (tree, node) =
             algorithm_tree(algorithm, alpha, seed, wdt, hgt, zoom_x, zoom_y);
-        tree.run_algorithm(node, ix, iy)
+        let mut rng = LcgRng::seed_from_u64(0);
+        let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
+        tree.run_algorithm(node, ix, iy, &mut rng, &mut missing_script_algo)
     }
 
     fn cpp_mandel_formula(
@@ -3075,6 +3332,50 @@ mod tests {
             map.indices,
             vec![0, 2],
             "missing ScriptAlgoMissing paints nothing and parsing continues"
+        );
+    }
+
+    #[test]
+    fn script_algorithm_calls_existing_named_function_per_pixel_with_cpp_arguments() {
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let mut calls = Vec::new();
+        let mut script_algo =
+            |_: &mut LcgRng, function: &str, args: [i32; 4]| -> bool {
+                calls.push((function.to_string(), args));
+                true
+            };
+        let creation = create_s2_map_with_state_and_functions_with_script_algo(
+            "map Test { seed=1; wdt=3px; hgt=2px; \
+               overlay Probe { seed=2; algo=script; a=17; b=29; \
+                               mat=Earth; tex=Rough; sub=0; }; \
+             };",
+            &mut classifier,
+            LegacyC4SVal::new(3, 0, 3, 3),
+            LegacyC4SVal::new(2, 0, 2, 2),
+            false,
+            1,
+            &mut rng,
+            &HashSet::new(),
+            &mut script_algo,
+        );
+
+        assert_eq!(
+            calls,
+            [
+                ("ScriptAlgoProbe".to_string(), [0, 0, 17, 29]),
+                ("ScriptAlgoProbe".to_string(), [100, 0, 17, 29]),
+                ("ScriptAlgoProbe".to_string(), [200, 0, 17, 29]),
+                ("ScriptAlgoProbe".to_string(), [0, 100, 17, 29]),
+                ("ScriptAlgoProbe".to_string(), [100, 100, 17, 29]),
+                ("ScriptAlgoProbe".to_string(), [200, 100, 17, 29]),
+            ],
+            "RenderTo is row-major and passes transformed coordinates plus a/b"
+        );
+        assert_eq!(
+            creation.bitmap.expect("map renders").indices,
+            vec![2; 6],
+            "truthy ScriptAlgo results paint every reached pixel"
         );
     }
 

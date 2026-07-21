@@ -21042,6 +21042,20 @@ impl Engine {
         self.last_scenario_section_flags = None;
     }
 
+    pub(crate) fn refresh_initial_s2_section(
+        &mut self,
+        landscape: &Landscape,
+        creator: &map_creator_s2::MapCreatorS2State,
+        callbacks: &map_creator_s2::PostInitMapCallbacks,
+    ) {
+        let key = self.current_scenario_section.to_ascii_lowercase();
+        if let Some(section) = self.scenario_sections.get_mut(&key) {
+            section.landscape = Some(landscape.clone());
+            section.map_creator = Some(creator.clone());
+            section.post_init_map_callbacks = callbacks.clone();
+        }
+    }
+
     #[doc(hidden)]
     pub fn debug_current_scenario_section(&self) -> &str {
         &self.current_scenario_section
@@ -25898,6 +25912,55 @@ impl Engine {
             return Ok(None);
         }
         Ok(value)
+    }
+
+    /// `C4MCOverlay::AlgoScript`: resolve a scenario-local function afresh,
+    /// call it with no object context, and keep the complete synchronous call
+    /// inside C4Landscape's temporary FixRandom ledger. Script failures are
+    /// the native false fallback, but mutations completed before the failure
+    /// remain live.
+    pub(crate) fn call_map_script_algorithm(
+        &mut self,
+        rng: &mut LcgRng,
+        function: &str,
+        args: [i32; 4],
+    ) -> bool {
+        let Some((name, script)) = self.scenario_script.as_ref().and_then(|scenario| {
+            scenario
+                .script
+                .has_local_function(function)
+                .then(|| (scenario.name.clone(), scenario.script_arc()))
+        }) else {
+            return false;
+        };
+        let args = args.map(Value::Int);
+        let world = self.host_world_context();
+        let (value, _final_args, batch, audio_state, map_rng, script_error) =
+            ScenarioScript::call_value_for_script(
+                &name,
+                script.as_ref(),
+                None,
+                function,
+                &args,
+                world,
+                rng.clone(),
+                self.frame,
+                &self.global_effects.clone(),
+                self.physics,
+                self.environment,
+                self.audio_registry.clone(),
+                self.game_over_triggered,
+            );
+
+        // Batch application can synchronously construct objects and invoke
+        // further callbacks. Those draws belong to the same fixed map epoch,
+        // never to the saved gameplay ledger restored after Landscape::Init.
+        let saved_game_rng = std::mem::replace(&mut self.rng, map_rng);
+        self.audio_registry = audio_state;
+        let batch_ok = self.apply_scenario_batch(batch).is_ok();
+        *rng = std::mem::replace(&mut self.rng, saved_game_rng);
+
+        batch_ok && script_error.is_none() && value.is_some_and(|value| value.as_bool())
     }
 
     fn direct_exec_script_control_host(
@@ -38238,8 +38301,12 @@ impl Engine {
                     .as_ref()
                     .and_then(|(_, _, _, _, _, creator)| creator.clone());
                 let mut classifier = scenario::MapPixelClassifier::from_runtime_state(live_texmap);
-                let creation =
-                    map_creator_s2::create_s2_map_for_section_with_state_and_functions(
+                let creation = {
+                    let mut script_algo =
+                        |rng: &mut LcgRng, function: &str, args: [i32; 4]| {
+                            self.call_map_script_algorithm(rng, function, args)
+                        };
+                    map_creator_s2::create_s2_map_for_section_with_state_and_functions_with_script_algo(
                         live_creator,
                         &spec.source,
                         &mut classifier,
@@ -38249,7 +38316,13 @@ impl Engine {
                         spec.player_count,
                         &mut state.rng,
                         &spec.script_functions,
-                    );
+                        &mut script_algo,
+                    )
+                };
+                // restore_state below installs the pending target section.
+                // Keep the live Game.Script mutations made while its map was
+                // rendered instead of restoring the pre-render snapshot.
+                state.script_globals = self.capture_script_globals();
                 let runtime_texmap = classifier.into_runtime_state();
                 if let Some(bitmap) = creation.bitmap.as_ref() {
                     let map_zoom = spec.map_zoom.evaluate(&mut state.rng) as u32 as i32;

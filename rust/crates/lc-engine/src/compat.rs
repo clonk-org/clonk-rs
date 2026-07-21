@@ -30612,6 +30612,35 @@ fn draw_material_quad(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn runtime_map_random_context(function: &str) -> Result<Rc<RandomContext>, RuntimeError> {
+    RANDOM_CONTEXT
+        .with(|cell| cell.borrow().as_ref().cloned())
+        .ok_or_else(|| RuntimeError::new(format!("{function}: random context unavailable")))
+}
+
+/// Run one AlgoScript callback without retaining either thread-local borrow.
+/// The map renderer owns a detached copy of the live RANDOM_CONTEXT ledger;
+/// publish it immediately before entering the nested scenario VM, then pull
+/// back every Random() draw before continuing the native pixel traversal.
+fn call_runtime_map_script_algo(
+    random_context: &Rc<RandomContext>,
+    scenario_script: Option<&Arc<ScriptEngine>>,
+    rng: &mut LcgRng,
+    function: &str,
+    args: [i32; 4],
+) -> bool {
+    *random_context.rng.borrow_mut() = rng.clone();
+    let args = args.map(Value::Int);
+    let result = scenario_script
+        .and_then(|script| {
+            call_scoped_scenario_function(Arc::clone(script), function, &args)
+        })
+        .and_then(Result::ok)
+        .is_some_and(|value| value.as_bool());
+    *rng = random_context.rng.borrow().clone();
+    result
+}
+
 /// FnDrawMap/C4Landscape::DrawMap (C4Script.cpp:4851-4855;
 /// C4Landscape.cpp:2636-2668): clip the GLOBAL destination first, then make
 /// an exact-size temporary S2 map through the callback's live synced RNG.
@@ -30626,12 +30655,10 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(0));
     };
 
-    HOST_CONTEXT.with(|cell| {
+    let preflight = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
-        let Some((landscape_width, landscape_height, map_zoom, mut retained_creator)) =
+        let context = borrow.as_mut()?;
+        let Some((landscape_width, landscape_height, map_zoom, retained_creator)) =
             context.world.landscape_ref().and_then(|landscape| {
                 let (landscape_width, landscape_height) = landscape.grid_dimensions()?;
                 let raster = landscape.raster_state()?;
@@ -30643,10 +30670,10 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
                 ))
             })
         else {
-            return Ok(Value::Int(0));
+            return None;
         };
         if map_zoom <= 0 {
-            return Ok(Value::Int(0));
+            return None;
         }
 
         // C4Landscape::ClipRect (C4Landscape.cpp:2698-2707) is the half-open
@@ -30657,7 +30684,7 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
         let right = (i64::from(x) + i64::from(width)).min(i64::from(landscape_width));
         let bottom = (i64::from(y) + i64::from(height)).min(i64::from(landscape_height));
         if right <= left || bottom <= top {
-            return Ok(Value::Int(0));
+            return None;
         }
         let clipped_x = left as i32;
         let clipped_y = top as i32;
@@ -30666,45 +30693,81 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
         let map_width = (clipped_width - 1) / map_zoom + 1;
         let map_height = (clipped_height - 1) / map_zoom + 1;
 
-        let Some(texmap) = context.take_runtime_texmap() else {
+        let texmap = context.runtime_texmap()?.clone();
+        let scenario_script = context.world.scenario_script().cloned();
+        Some((
+            clipped_x,
+            clipped_y,
+            map_width,
+            map_height,
+            retained_creator,
+            texmap,
+            scenario_script,
+        ))
+    });
+    let Some((
+        clipped_x,
+        clipped_y,
+        map_width,
+        map_height,
+        mut retained_creator,
+        texmap,
+        scenario_script,
+    )) = preflight
+    else {
+        return Ok(Value::Int(0));
+    };
+
+    let texmap_before = texmap.clone();
+    let mut classifier = crate::scenario::MapPixelClassifier::from_runtime_state(texmap);
+    let script_functions = scenario_script
+        .as_ref()
+        .map(|script| {
+            script
+                .functions()
+                .keys()
+                .filter(|name| script.has_local_function(name))
+                .cloned()
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let random_context = runtime_map_random_context("DrawMap")?;
+    let mut rng = random_context.rng.borrow().clone();
+    let rendered = {
+        let mut script_algo = |rng: &mut LcgRng, function: &str, args: [i32; 4]| {
+            call_runtime_map_script_algo(
+                &random_context,
+                scenario_script.as_ref(),
+                rng,
+                function,
+                args,
+            )
+        };
+        crate::map_creator_s2::render_runtime_s2_map_with_script_algo(
+            retained_creator.as_mut(),
+            &source,
+            &mut classifier,
+            map_width,
+            map_height,
+            &mut rng,
+            &script_functions,
+            &mut script_algo,
+        )
+    };
+    // Parsing/evaluation draws also precede the caller's next script opcode,
+    // even when no ScriptAlgo function exists or Render finds no map.
+    *random_context.rng.borrow_mut() = rng;
+
+    let texmap = classifier.into_runtime_state();
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
             return Ok(Value::Int(0));
         };
-        let texmap_before = texmap.clone();
-        let mut classifier = crate::scenario::MapPixelClassifier::from_runtime_state(texmap);
-        let script_functions = context
-            .world
-            .scenario_script()
-            .map(|script| {
-                script
-                    .functions()
-                    .keys()
-                    .filter(|name| script.has_local_function(name))
-                    .cloned()
-                    .collect::<HashSet<_>>()
-            })
-            .unwrap_or_default();
-        let rendered = RANDOM_CONTEXT.with(|random_cell| {
-            let random_context = random_cell
-                .borrow()
-                .as_ref()
-                .cloned()
-                .ok_or_else(|| RuntimeError::new("DrawMap: random context unavailable"))?;
-            let mut rng = random_context.rng.borrow_mut();
-            Ok(crate::map_creator_s2::render_runtime_s2_map(
-                retained_creator.as_mut(),
-                &source,
-                &mut classifier,
-                map_width,
-                map_height,
-                &mut rng,
-                &script_functions,
-            ))
-        });
-        let texmap = classifier.into_runtime_state();
         // Parser-side texture allocations are live to later calls in this
         // VM session even if Render found no map.
         context.set_runtime_texmap(texmap.clone());
-        let Some(bitmap) = rendered? else {
+        let Some(bitmap) = rendered else {
             if texmap != texmap_before {
                 let operation = LandscapeOperation::SyncRuntimeTexMap { texmap };
                 context.world.preview_runtime_landscape_operation(&operation);
@@ -30740,12 +30803,10 @@ fn draw_def_map(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(0));
     };
 
-    HOST_CONTEXT.with(|cell| {
+    let preflight = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
-        let Some((landscape_width, landscape_height, map_zoom, mut map_creator)) =
+        let context = borrow.as_mut()?;
+        let Some((landscape_width, landscape_height, map_zoom, map_creator)) =
             context.world.landscape_ref().and_then(|landscape| {
                 let (landscape_width, landscape_height) = landscape.grid_dimensions()?;
                 let raster = landscape.raster_state()?;
@@ -30757,10 +30818,10 @@ fn draw_def_map(args: &[Value]) -> Result<Value, RuntimeError> {
                 ))
             })
         else {
-            return Ok(Value::Int(0));
+            return None;
         };
         if map_zoom <= 0 {
-            return Ok(Value::Int(0));
+            return None;
         }
 
         // C4Landscape::ClipRect runs before GetMap/SetSize. In particular,
@@ -30770,7 +30831,7 @@ fn draw_def_map(args: &[Value]) -> Result<Value, RuntimeError> {
         let right = (i64::from(x) + i64::from(width)).min(i64::from(landscape_width));
         let bottom = (i64::from(y) + i64::from(height)).min(i64::from(landscape_height));
         if right <= left || bottom <= top {
-            return Ok(Value::Int(0));
+            return None;
         }
         let clipped_x = left as i32;
         let clipped_y = top as i32;
@@ -30779,29 +30840,64 @@ fn draw_def_map(args: &[Value]) -> Result<Value, RuntimeError> {
         let map_width = (clipped_width - 1) / map_zoom + 1;
         let map_height = (clipped_height - 1) / map_zoom + 1;
 
-        let Some(texmap) = context.take_runtime_texmap() else {
+        let texmap = context.runtime_texmap()?.clone();
+        let scenario_script = context.world.scenario_script().cloned();
+        Some((
+            clipped_x,
+            clipped_y,
+            map_width,
+            map_height,
+            map_creator,
+            texmap,
+            scenario_script,
+        ))
+    });
+    let Some((
+        clipped_x,
+        clipped_y,
+        map_width,
+        map_height,
+        mut map_creator,
+        texmap,
+        scenario_script,
+    )) = preflight
+    else {
+        return Ok(Value::Int(0));
+    };
+
+    let mut classifier = crate::scenario::MapPixelClassifier::from_runtime_state(texmap);
+    let random_context = runtime_map_random_context("DrawDefMap")?;
+    let mut rng = random_context.rng.borrow().clone();
+    let rendered = {
+        let mut script_algo = |rng: &mut LcgRng, function: &str, args: [i32; 4]| {
+            call_runtime_map_script_algo(
+                &random_context,
+                scenario_script.as_ref(),
+                rng,
+                function,
+                args,
+            )
+        };
+        crate::map_creator_s2::render_named_s2_map_with_script_algo(
+            &mut map_creator,
+            &map_name,
+            &mut classifier,
+            map_width,
+            map_height,
+            &mut rng,
+            &mut script_algo,
+        )
+    };
+    *random_context.rng.borrow_mut() = rng;
+
+    let texmap = classifier.into_runtime_state();
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
             return Ok(Value::Int(0));
         };
-        let mut classifier = crate::scenario::MapPixelClassifier::from_runtime_state(texmap);
-        let rendered = RANDOM_CONTEXT.with(|random_cell| {
-            let random_context = random_cell
-                .borrow()
-                .as_ref()
-                .cloned()
-                .ok_or_else(|| RuntimeError::new("DrawDefMap: random context unavailable"))?;
-            let mut rng = random_context.rng.borrow_mut();
-            Ok(crate::map_creator_s2::render_named_s2_map(
-                &mut map_creator,
-                &map_name,
-                &mut classifier,
-                map_width,
-                map_height,
-                &mut rng,
-            ))
-        });
-        let texmap = classifier.into_runtime_state();
         context.set_runtime_texmap(texmap.clone());
-        let Some(bitmap) = rendered? else {
+        let Some(bitmap) = rendered else {
             return Ok(Value::Int(0));
         };
 
@@ -62436,6 +62532,56 @@ public func RejectConstruction(x, y, builder)
         );
         assert_eq!(final_rng, expected_rng);
         assert_eq!(outcome.landscape.len(), 1, "render queues exact bytes once");
+    }
+
+    #[test]
+    fn draw_map_script_algorithm_reenters_scenario_and_threads_live_rng() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"
+                func ScriptAlgoRuntime(x, y, a, b) {
+                    Random(1000);
+                    return x == 0 && y == 0 && a == 7 && b == 13;
+                }
+                func Probe() {
+                    DrawMap(0, 0, 3, 3,
+                        "map RuntimeMap { seed=9; wdt=1px; hgt=1px; overlay Runtime { algo=script; seed=11; a=7; b=13; mat=Earth; tex=Rough; sub=0; }; };");
+                    return Random(1000);
+                }
+                "#,
+            )
+            .expect("runtime ScriptAlgo probe compiles");
+        let script = Arc::new(script);
+        let world = draw_map_world(8, 7, 3, true)
+            .with_scenario_script(Some(Arc::clone(&script)));
+
+        let seed = 53;
+        let mut expected_rng = LcgRng::new(seed);
+        let _ = expected_rng.random(1);
+        let _ = expected_rng.random(1);
+        let _ = expected_rng.random(1_000);
+        let expected_after = expected_rng.random(1_000);
+
+        let guard = enter_random_context(LcgRng::new(seed));
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            script.call("Probe", &[])
+        });
+        let final_rng = guard.finish();
+
+        assert_eq!(
+            result.expect("DrawMap reenters the scenario script"),
+            Value::Int(expected_after)
+        );
+        assert_eq!(
+            final_rng, expected_rng,
+            "the callback Random draw stays between map setup and Probe's later draw"
+        );
+        let [LandscapeOperation::DrawMap { bitmap, .. }] = outcome.landscape.as_slice() else {
+            panic!("unexpected runtime map operations: {:?}", outcome.landscape);
+        };
+        assert_eq!(bitmap.indices, vec![1]);
     }
 
     #[test]

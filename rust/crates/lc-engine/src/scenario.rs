@@ -3361,6 +3361,91 @@ impl Scenario {
         }
     }
 
+    /// Initial C4Landscape::CreateMapS2 runs after script linking in C++.
+    /// Resource loading has already parsed/evaluated the creator so texture
+    /// slots and diagnostics stay deterministic; replay only RenderTo here,
+    /// on the real scenario host, then evaluate MapZoom from the resulting
+    /// fixed map RNG and replace the eager preview landscape.
+    fn rerender_initial_s2_map(
+        &self,
+        engine: &mut Engine,
+        callbacks: &mut crate::map_creator_s2::PostInitMapCallbacks,
+    ) -> Result<(), ScenarioError> {
+        let Some(spec) = self
+            .scenario_sections
+            .first()
+            .and_then(|section| section.s2_overload.as_ref())
+        else {
+            return Ok(());
+        };
+        let Some((mut creator, mut map_rng, map_seed, modulation, texmap)) = engine
+            .landscape
+            .as_ref()
+            .and_then(|landscape| {
+                let raster = landscape.raster_state()?;
+                let creator = raster.map_creator()?.clone();
+                Some((
+                    creator.clone(),
+                    creator.pre_render_rng()?,
+                    landscape.map_seed(),
+                    landscape.modulation(),
+                    raster.texmap().clone(),
+                ))
+            })
+        else {
+            return Ok(());
+        };
+
+        let bitmap = {
+            let mut call = |rng: &mut crate::rng::LcgRng,
+                            function: &str,
+                            args: [i32; 4]| {
+                engine.call_map_script_algorithm(rng, function, args)
+            };
+            crate::map_creator_s2::rerender_last_s2_map_with_script_algo(
+                &mut creator,
+                &mut map_rng,
+                &mut call,
+            )
+        };
+        let Some(bitmap) = bitmap else {
+            return Ok(());
+        };
+
+        let map_zoom = spec.map_zoom.evaluate(&mut map_rng) as u32 as i32;
+        creator.set_callback_map_zoom(map_zoom);
+        *callbacks = creator.callback_state();
+        let classifier = MapPixelClassifier::from_runtime_state(texmap);
+        let mut landscape = classified_landscape(&bitmap, &classifier, map_zoom, map_seed)?;
+        landscape
+            .save_initial()
+            .map_err(|error| ScenarioError::InvalidLandscape(error.to_string()))?;
+        if let Some(diff) = spec.diff.as_ref() {
+            // Initial ApplyDiff failure is non-fatal in native Landscape::Init.
+            let _ = landscape.apply_diff(diff);
+        }
+        landscape.set_shade_materials(spec.shade_materials);
+        landscape.set_no_scan(spec.no_scan);
+        landscape.set_border_open(
+            spec.left_open,
+            spec.right_open,
+            spec.top_open,
+            spec.bottom_open,
+        );
+        if spec.auto_scan_side_open {
+            landscape.scan_side_open();
+        }
+        landscape.set_modulation(modulation);
+        landscape.set_runtime_mode(LANDSCAPE_MODE_DYNAMIC);
+        landscape
+            .raster_state_mut()
+            .expect("classified S2 landscapes carry raster state")
+            .set_map_creator(Some(creator.clone()));
+        engine.refresh_initial_s2_section(&landscape, &creator, callbacks);
+        engine.set_landscape(landscape);
+        Ok(())
+    }
+
     fn apply_before_players_with_final_synchronize(
         &self,
         engine: &mut Engine,
@@ -3370,6 +3455,7 @@ impl Scenario {
         initial_network_game: Option<&InitialNetworkGameData>,
         execute_post_init_map_callbacks: bool,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
+        let mut live_post_init_map_callbacks = self.post_init_map_callbacks.clone();
         let mut initial_network_runtime = initial_network_game
             .map(InitialNetworkRuntimeState::parse)
             .transpose()?;
@@ -3753,6 +3839,7 @@ impl Scenario {
         // CLNK, and C++ resolves it).
         engine.resolve_appends();
         engine.resolve_includes()?;
+        self.rerender_initial_s2_map(engine, &mut live_post_init_map_callbacks)?;
         // register_definition already inserted each definition's global funcs
         // in load order. Re-collecting here would put them above the scenario
         // System.c4g that C++ deliberately loaded last.
@@ -3961,7 +4048,7 @@ impl Scenario {
             // pixel order, on the live post-FixRandom synced ledger
             // (C4Game.cpp:2493-2521; C4MapCreatorS2.cpp:49-114).
             if execute_post_init_map_callbacks {
-                engine.run_post_init_map_callbacks(&self.post_init_map_callbacks)?;
+                engine.run_post_init_map_callbacks(&live_post_init_map_callbacks)?;
             }
             if !self.keep_map_creator {
                 engine.clear_runtime_map_creator();
@@ -11615,6 +11702,36 @@ fn load_legacy_scenario_sections(
         mat_modulation: landscape.modulation(),
         ..LandscapeGameData::default()
     });
+    let main_s2_source = try_read_group_file_case_insensitive(group, "Landscape.txt")?
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    let main_s2_diff = try_read_group_file_case_insensitive(group, "DiffLandscape.bmp")
+        .ok()
+        .flatten()
+        .and_then(|bytes| lc_resources::bitmap::IndexedBitmap::decode(&bytes).ok());
+    let main_has_s2_creator = main_landscape
+        .as_ref()
+        .and_then(Landscape::raster_state)
+        .and_then(LandscapeRasterState::map_creator)
+        .is_some();
+    let main_s2_overload = main_s2_source
+        .filter(|_| main_has_s2_creator)
+        .map(|source| ScenarioSectionS2Spec {
+            source,
+            map_width: main_manifest.core.landscape.map_width,
+            map_height: main_manifest.core.landscape.map_height,
+            map_player_extend: main_manifest.core.landscape.map_player_extend,
+            player_count: startup_player_count,
+            map_zoom: main_manifest.core.landscape.map_zoom,
+            diff: main_s2_diff,
+            left_open: main_manifest.core.landscape.left_open,
+            right_open: main_manifest.core.landscape.right_open,
+            top_open: main_manifest.core.landscape.top_open,
+            bottom_open: main_manifest.core.landscape.bottom_open,
+            auto_scan_side_open: main_manifest.core.landscape.auto_scan_side_open,
+            no_scan: main_manifest.core.landscape.no_scan,
+            shade_materials: main_manifest.core.landscape.shade_materials,
+            script_functions: map_callback_functions.clone(),
+        });
     let mut sections = vec![ScenarioSectionSpec {
         // An exact save stores the live current section in the root and
         // identifies it through Game.CurrentScenarioSection. `SectMain.c4g`
@@ -11632,7 +11749,7 @@ fn load_legacy_scenario_sections(
             .and_then(Landscape::raster_state)
             .and_then(LandscapeRasterState::map_creator)
             .cloned(),
-        s2_overload: None,
+        s2_overload: main_s2_overload,
         gravity: main_manifest.core.landscape.gravity,
         post_init_map_callbacks: main_post_init_map_callbacks.clone(),
         keep_map_creator: main_manifest.core.landscape.keep_map_creator,
@@ -31001,6 +31118,169 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn script_algorithm_calls_existing_named_function_per_pixel_with_cpp_arguments() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "#strict\nstatic algo_call;\n\
+             func ScriptAlgoProbe(x, y, a, b) {\n\
+                 if (!algo_call) algo_call = 0;\n\
+                 var call = algo_call;\n\
+                 algo_call++;\n\
+                 Random(17);\n\
+                 return x == (call % 3) * 100 && y == (call / 3) * 100\n\
+                     && a == 17 && b == 29;\n\
+             }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Live ScriptAlgo\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=3,0,3,3\nMapHeight=2,0,2,2\n\
+             MapZoom=10,2,5,15\nKeepMapCreator=1\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.txt"),
+            "map Test { seed=1; wdt=3px; hgt=2px;\n\
+               overlay Probe { seed=2; algo=script; a=17; b=29;\n\
+                               mat=Earth; tex=Rough; sub=0; };\n\
+             };\n",
+        )
+        .expect("write landscape script");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write material");
+        write_test_texture(&materials, "Rough");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(Landscape::raster_state)
+                .and_then(LandscapeRasterState::map)
+                .map(|map| map.indices),
+            Some(vec![1, 1, 1, 1, 1, 1]),
+            "all six row-major calls receive their exact transformed arguments"
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("algo_call")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(6)),
+            "ScriptAlgo executes on the live linked host before initialization"
+        );
+
+        let mut map_rng = legacy_map_creation_rng(0);
+        LegacyC4SVal::new(3, 0, 3, 3).evaluate(&mut map_rng);
+        LegacyC4SVal::new(2, 0, 2, 2).evaluate(&mut map_rng);
+        for _ in 0..6 {
+            map_rng.random(17);
+        }
+        let expected_zoom = LegacyC4SVal::new(10, 2, 5, 15).evaluate(&mut map_rng) as u32 as i32;
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(Landscape::raster_state)
+                .map(LandscapeRasterState::map_zoom),
+            Some(expected_zoom),
+            "ScriptAlgo Random calls precede MapZoom in the fixed map ledger"
+        );
+        let mut expected_game_rng = crate::rng::LcgRng::seed_from_u64(0);
+        assert_eq!(
+            engine.debug_rng_clone().random(1_000_000),
+            expected_game_rng.random(1_000_000),
+            "the fixed map epoch never leaks ScriptAlgo draws into gameplay RNG"
+        );
+    }
+
+    #[test]
+    fn script_algorithm_uses_cpp_truthiness_and_catches_per_pixel_errors() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "#strict\nstatic fault_calls;\n\
+             func ScriptAlgoTruth(x, y, a, b) {\n\
+                 if (!fault_calls) fault_calls = 0;\n\
+                 if (x == 0) return nil;\n\
+                 if (x == 100) return 0;\n\
+                 if (x == 200) return false;\n\
+                 if (x == 300) return -7;\n\
+                 if (x == 400) return \"\";\n\
+                 if (x == 500) return [];\n\
+                 if (x == 600) { fault_calls++; FatalError(\"pixel\"); }\n\
+                 return true;\n\
+             }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=ScriptAlgo truth\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=8,0,8,8\nMapHeight=1,0,1,1\nMapZoom=5\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.txt"),
+            "map Test { seed=1; wdt=8px; hgt=1px;\n\
+               overlay Truth { seed=2; algo=script; mat=Earth; tex=Rough; sub=0; };\n\
+             };\n",
+        )
+        .expect("write landscape script");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write material");
+        write_test_texture(&materials, "Rough");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(Landscape::raster_state)
+                .and_then(LandscapeRasterState::map)
+                .map(|map| map.indices),
+            Some(vec![0, 0, 0, 1, 1, 1, 0, 1]),
+            "nil/zero/false are false; negative and allocated empty values are true; errors are false"
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("fault_calls")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(1)),
+            "the mutation before the caught error persists and later pixels still execute"
+        );
+    }
+
+    #[test]
     fn s2_map_callbacks_run_after_render_in_cpp_array_and_pixel_order() {
         let dir = tempdir().expect("tempdir");
         let scenario_dir = write_resilience_fixture(
@@ -32140,6 +32420,92 @@ public func ActualizePhase(pClonk)
         assert_eq!(
             engine.rng, expected,
             "the second FixRandom hides map creation and gravity consumes one draw"
+        );
+    }
+
+    #[test]
+    fn scenario_section_script_algorithm_uses_live_host_and_preserves_globals() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "#strict\nstatic section_calls;\n\
+             func ScriptAlgoLive(x, y, a, b) {\n\
+                 if (!section_calls) section_calls = 0;\n\
+                 section_calls++;\n\
+                 Random(7);\n\
+                 return y == 0 && a == 5 && b == 9\n\
+                     && x == (section_calls - 1) * 100;\n\
+             }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Section ScriptAlgo\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=2,0,2,2\nMapHeight=1,0,1,1\n\
+             MapZoom=5,0,5,5\nKeepMapCreator=1\n",
+        )
+        .expect("write main core");
+        std::fs::write(
+            scenario_dir.join("Landscape.txt"),
+            "map Main { seed=1; wdt=2px; hgt=1px; };\n",
+        )
+        .expect("write main landscape");
+
+        let section = scenario_dir.join("SectNext.c4g");
+        std::fs::create_dir_all(&section).expect("section dir");
+        std::fs::write(
+            section.join("Scenario.txt"),
+            "[Head]\nTitle=Next\n\n[Landscape]\nMapZoom=5,0,5,5\nKeepMapCreator=1\n",
+        )
+        .expect("write section core");
+        std::fs::write(
+            section.join("Landscape.txt"),
+            "map Next { seed=2; wdt=2px; hgt=1px;\n\
+               overlay Live { seed=3; algo=script; a=5; b=9;\n\
+                              mat=Earth; tex=Rough; sub=0; };\n\
+             };\n",
+        )
+        .expect("write section landscape");
+
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write material");
+        write_test_texture(&materials, "Rough");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert!(engine
+            .load_scenario_section("Next", 0, Vec::new())
+            .expect("section load succeeds"));
+
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(Landscape::raster_state)
+                .and_then(LandscapeRasterState::map)
+                .map(|map| map.indices),
+            Some(vec![1, 1]),
+            "the section map executes ScriptAlgoLive in row-major order"
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("section_calls")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(2)),
+            "section restore keeps globals mutated by live ScriptAlgo calls"
         );
     }
 
