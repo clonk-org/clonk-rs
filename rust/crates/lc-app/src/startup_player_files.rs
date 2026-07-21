@@ -839,7 +839,7 @@ pub fn discover_player_files_in(
                 continue;
             }
         };
-        let metadata = PlayerRenderMetadata::load(&group);
+        let exact_core = player_file.exact_info_core();
         let activated = participants
             .iter()
             .any(|participant| participant.eq_ignore_ascii_case(&file_name));
@@ -858,12 +858,14 @@ pub fn discover_player_files_in(
             big_icon: load_group_png(&group, "BigIcon.png"),
             portrait: load_group_png(&group, "Portrait.png"),
             color_dw: normalized_player_color(&player_file),
-            score: metadata.score,
-            rounds: metadata.rounds,
-            rounds_won: metadata.rounds_won,
-            rounds_lost: metadata.rounds_lost,
-            total_playing_time: metadata.total_playing_time,
-            comment: metadata.comment,
+            score: exact_core.score,
+            rounds: exact_core.rounds,
+            rounds_won: exact_core.rounds_won,
+            rounds_lost: exact_core.rounds_lost,
+            total_playing_time: exact_core.total_playing_time,
+            comment: lc_resources::decode_legacy_script_text(&lc_script::c4_string_bytes(
+                &exact_core.comment,
+            )),
         };
         players.push(StartupPlayerFile {
             path,
@@ -1255,11 +1257,11 @@ fn rewrite_player_core(original: Option<&[u8]>, player: &PlayerFile, comment: &s
                 &mut player_written,
                 &mut preferences_written,
             );
-            let name = trimmed[1..trimmed.len() - 1].trim();
-            section = if name.eq_ignore_ascii_case("Player") {
+            let name = &trimmed[1..trimmed.len() - 1];
+            section = if name == "Player" {
                 player_seen = true;
                 CoreSection::Player
-            } else if name.eq_ignore_ascii_case("Preferences") {
+            } else if name == "Preferences" {
                 preferences_seen = true;
                 CoreSection::Preferences
             } else {
@@ -1275,9 +1277,10 @@ fn rewrite_player_core(original: Option<&[u8]>, player: &PlayerFile, comment: &s
             CoreSection::Other => None,
         };
         if let (Some((key, _)), Some((values, written))) = (line.split_once('='), values) {
+            let key = key.trim_start_matches([' ', '\t']);
             if let Some(index) = values
                 .iter()
-                .position(|(known, _)| known.eq_ignore_ascii_case(key.trim()))
+                .position(|(known, _)| *known == key)
             {
                 if !written[index] {
                     output.push(format!("{}={}", values[index].0, values[index].1));
@@ -1386,80 +1389,6 @@ fn has_player_extension(name: &str) -> bool {
 
 fn normalized_player_color(player: &PlayerFile) -> u32 {
     player.normalized_preferred_color()
-}
-
-#[derive(Default)]
-struct PlayerRenderMetadata {
-    comment: String,
-    score: i32,
-    rounds: i32,
-    rounds_won: i32,
-    rounds_lost: i32,
-    total_playing_time: i32,
-}
-
-impl PlayerRenderMetadata {
-    fn load(group: &Group) -> Self {
-        let Ok(bytes) = group.read_file("Player.txt") else {
-            return Self::default();
-        };
-        let text = lc_resources::decode_legacy_script_text(&bytes);
-        let mut metadata = Self::default();
-        let mut in_player_section = false;
-        for raw_line in text.lines() {
-            let line = raw_line.trim_start_matches('\u{feff}').trim();
-            if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
-                continue;
-            }
-            if line.starts_with('[') && line.ends_with(']') {
-                in_player_section = line[1..line.len() - 1]
-                    .trim()
-                    .eq_ignore_ascii_case("Player");
-                continue;
-            }
-            if !in_player_section {
-                continue;
-            }
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let key = key.trim();
-            let value = unquote(value.trim());
-            if key.eq_ignore_ascii_case("Comment") {
-                metadata.comment = value.to_string();
-            } else if key.eq_ignore_ascii_case("Score") {
-                metadata.score = parse_leading_i32(value).unwrap_or_default();
-            } else if key.eq_ignore_ascii_case("Rounds") {
-                metadata.rounds = parse_leading_i32(value).unwrap_or_default();
-            } else if key.eq_ignore_ascii_case("RoundsWon") {
-                metadata.rounds_won = parse_leading_i32(value).unwrap_or_default();
-            } else if key.eq_ignore_ascii_case("RoundsLost") {
-                metadata.rounds_lost = parse_leading_i32(value).unwrap_or_default();
-            } else if key.eq_ignore_ascii_case("TotalPlayingTime") {
-                metadata.total_playing_time = parse_leading_i32(value).unwrap_or_default();
-            }
-        }
-        metadata
-    }
-}
-
-fn unquote(value: &str) -> &str {
-    value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap_or(value)
-}
-
-fn parse_leading_i32(value: &str) -> Option<i32> {
-    let value = value.trim_start();
-    let digits = value
-        .char_indices()
-        .take_while(|(index, character)| {
-            character.is_ascii_digit() || (*index == 0 && matches!(character, '+' | '-'))
-        })
-        .last()
-        .map(|(index, character)| index + character.len_utf8())?;
-    value[..digits].parse().ok()
 }
 
 fn load_group_png(group: &Group, name: &str) -> Option<ImageData> {
@@ -1715,6 +1644,52 @@ mod tests {
         assert_eq!(players[0].render_model.comment, "Alpha comment");
         assert!(players[0].render_model.big_icon.is_none());
         assert!(players[0].render_model.portrait.is_none());
+    }
+
+    #[test]
+    fn discovery_render_uses_exact_player_core_names() {
+        // C4StartupPlrSelDlg renders the same exact-name C4PlayerInfoCore
+        // loaded for gameplay; it does not parse a second, permissive view of
+        // Player.txt (C4StartupPlrSelDlg.cpp:216-243,293-301).
+        let install = tempdir().expect("install root");
+        let player = install.path().join("Case.c4p");
+        fs::create_dir_all(&player).expect("create player group");
+        fs::write(
+            player.join("Player.txt"),
+            "[player]\n\
+             Comment=Wrong section\n\
+             Score=101\n\
+             Rounds=102\n\
+             RoundsWon=103\n\
+             RoundsLost=104\n\
+             TotalPlayingTime=105\n\
+             [Player]\n\
+             Name=Case\n\
+             comment=Wrong key\n\
+             score=201\n\
+             rounds=202\n\
+             roundswon=203\n\
+             roundslost=204\n\
+             totalplayingtime=205\n",
+        )
+        .expect("write player core");
+
+        let players = discover_player_files_in(install.path(), &Config::new())
+            .expect("discover player");
+
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].render_model.name, "Case");
+        assert_eq!(
+            (
+                players[0].render_model.score,
+                players[0].render_model.rounds,
+                players[0].render_model.rounds_won,
+                players[0].render_model.rounds_lost,
+                players[0].render_model.total_playing_time,
+            ),
+            (0, 0, 0, 0, 0)
+        );
+        assert!(players[0].render_model.comment.is_empty());
     }
 
     #[test]
@@ -2037,6 +2012,84 @@ mod tests {
                 .windows(expected.len())
                 .any(|window| window == expected));
         }
+    }
+
+    #[test]
+    fn player_core_rewrite_preserves_wrong_case_names_as_unmodeled() {
+        // C4PlayerInfoCore only recognizes exact names. The preserving Rust
+        // editor may retain malformed lines, but must write edited values to
+        // canonical sections and keys instead of treating those lines as the
+        // canonical save targets.
+        let player = PlayerFile {
+            name: "Edited".to_string(),
+            score: 17,
+            rounds: 8,
+            rounds_won: 5,
+            rounds_lost: 3,
+            total_playing_time: 3_661,
+            pref_color: 4,
+            pref_color_dw: 0x12_34_56,
+            pref_position: 2,
+            pref_control: 3,
+            pref_mouse: false,
+            pref_control_style: true,
+            pref_auto_context_menu: true,
+            ..PlayerFile::default()
+        };
+        let original = b"[player]\n\
+Name=Wrong section\n\
+Score=91\n\
+[Player]\n\
+name=Wrong key\n\
+score=92\n\
+[preferences]\n\
+Color=9\n\
+Control=8\n\
+[Preferences]\n\
+color=7\n\
+control=6\n";
+
+        let rewritten = rewrite_player_core(Some(original), &player, "Edited comment");
+        let rewritten_text = lc_script::c4_string_from_bytes(&rewritten);
+        for malformed in [
+            "[player]\nName=Wrong section\nScore=91",
+            "[Player]\nname=Wrong key\nscore=92",
+            "[preferences]\nColor=9\nControl=8",
+            "[Preferences]\ncolor=7\ncontrol=6",
+        ] {
+            assert!(rewritten_text.contains(malformed), "missing `{malformed}`");
+        }
+
+        let root = tempdir().expect("player root");
+        let path = root.path().join("Edited.c4p");
+        fs::create_dir_all(&path).expect("create player group");
+        fs::write(path.join("Player.txt"), rewritten).expect("write rewritten core");
+        let loaded = PlayerFile::load_from_path(&path).expect("load rewritten player");
+
+        assert_eq!(loaded.name, "Edited");
+        assert_eq!(loaded.info_core.comment, "Edited comment");
+        assert_eq!(
+            (
+                loaded.score,
+                loaded.rounds,
+                loaded.rounds_won,
+                loaded.rounds_lost,
+                loaded.total_playing_time,
+            ),
+            (17, 8, 5, 3, 3_661)
+        );
+        assert_eq!(
+            (
+                loaded.pref_color,
+                loaded.pref_color_dw,
+                loaded.pref_position,
+                loaded.pref_control,
+            ),
+            (4, 0x12_34_56, 2, 3)
+        );
+        assert!(!loaded.pref_mouse);
+        assert!(loaded.pref_control_style);
+        assert!(loaded.pref_auto_context_menu);
     }
 
     #[test]

@@ -2146,24 +2146,118 @@ mod tests {
     }
 
     #[test]
-    fn control_and_mouse_names_are_exact_case_like_cpp() {
-        // StdCompilerINIRead compares section and value names exactly. The
-        // lowercase variants are unexpected entries, so CompileFunc applies
-        // its loaded-file defaults (pristine 9ffa0a5d
-        // src/StdCompiler.cpp:498-525; src/C4InfoCore.cpp:164-174).
+    fn player_file_core_names_are_exact_case() {
+        // StdCompilerINIRead compares every section and value name exactly.
+        // Wrong-case PlayerInfoCore names are unexpected entries, so
+        // CompileFunc applies its loaded-file defaults (pristine 9ffa0a5d
+        // src/StdCompiler.cpp:498-525; src/C4InfoCore.cpp:148-176,565-582).
         let dir = tempdir().expect("tempdir");
         let root = dir.path().join("Case.c4p");
         std::fs::create_dir_all(&root).expect("player dir");
         std::fs::write(
             root.join("Player.txt"),
-            "[preferences]\nControl=3\nMouse=0\n\n[Preferences]\ncontrol=2\nmouse=0\n",
+            "[player]\n\
+             Name=Wrong section\n\
+             Comment=Wrong section\n\
+             Rank=1\n\
+             RankName=Wrong section\n\
+             Score=2\n\
+             Rounds=3\n\
+             RoundsWon=4\n\
+             RoundsLost=5\n\
+             TotalPlayingTime=6\n\
+             ExtraData=1;Wrong=b1\n\
+             [preferences]\n\
+             Color=1\n\
+             ColorDw=1193046\n\
+             AlternateColorDw=11259375\n\
+             Control=3\n\
+             AutoStopControl=1\n\
+             AutoContextMenu=1\n\
+             Position=2\n\
+             Mouse=0\n\
+             [lastround]\n\
+             Title=Wrong section\n\
+             Date=1\n\
+             Duration=2\n\
+             Won=1\n\
+             Score=3\n\
+             FinalScore=4\n\
+             TotalScore=5\n\
+             Bonus=6\n\
+             Level=7\n\
+             [Player]\n\
+             name=Wrong key\n\
+             comment=Wrong key\n\
+             rank=8\n\
+             rankname=Wrong key\n\
+             score=9\n\
+             rounds=10\n\
+             roundswon=11\n\
+             roundslost=12\n\
+             totalplayingtime=13\n\
+             extradata=1;Wrong=b1\n\
+             [Preferences]\n\
+             color=2\n\
+             colordw=6636321\n\
+             alternatecolordw=1267611\n\
+             control=4\n\
+             autostopcontrol=1\n\
+             autocontextmenu=1\n\
+             position=3\n\
+             mouse=0\n\
+             [LastRound]\n\
+             title=Wrong key\n\
+             date=8\n\
+             duration=9\n\
+             won=1\n\
+             score=10\n\
+             finalscore=11\n\
+             totalscore=12\n\
+             bonus=13\n\
+             level=14\n",
         )
         .expect("write core");
 
         let player = PlayerFile::load_from_path(&root).expect("player file loads");
 
-        assert_eq!(player.pref_control, 1);
-        assert!(player.pref_mouse);
+        assert_eq!(
+            player.info_core,
+            PlayerInfoCoreState {
+                pref_name: "Neuling".to_string(),
+                comment: String::new(),
+                rank: 0,
+                rank_name: "Rank".to_string(),
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                extra_data: Vec::new(),
+                pref_color: 0,
+                pref_color_dw: 0xff,
+                pref_color2_dw: 0,
+                pref_control: 1,
+                pref_control_style: false,
+                pref_control_style_value: 0,
+                pref_auto_context_menu: false,
+                pref_auto_context_menu_value: 0,
+                pref_position: 0,
+                pref_mouse: true,
+                pref_mouse_value: 1,
+                last_round: PlayerLastRoundState {
+                    title: String::new(),
+                    date: 0,
+                    duration: 0,
+                    won: 0,
+                    score: 0,
+                    final_score: 0,
+                    total_score: 0,
+                    bonus: 0,
+                    level: 0,
+                },
+            }
+        );
     }
 
     #[test]
