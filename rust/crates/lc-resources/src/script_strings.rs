@@ -10,10 +10,15 @@ const C4_MAX_NAME: usize = 30;
 pub fn decode_legacy_script_text(data: &[u8]) -> String {
     std::str::from_utf8(data)
         .map(str::to_owned)
-        .unwrap_or_else(|_| {
-            let (text, _, _) = encoding_rs::WINDOWS_1252.decode(data);
-            text.into_owned()
-        })
+        .unwrap_or_else(|_| decode_legacy_system_text(data))
+}
+
+/// Decodes native legacy bytes for presentation without first interpreting a
+/// coincidentally valid byte sequence as UTF-8. This is the reversible UI
+/// boundary for byte-oriented configuration and wire protocols.
+pub fn decode_legacy_system_text(data: &[u8]) -> String {
+    let (text, _, _) = encoding_rs::WINDOWS_1252.decode(data);
+    text.into_owned()
 }
 
 /// Encodes presentation/configuration text into the Windows-1252 system
@@ -351,6 +356,24 @@ mod tests {
         assert_eq!(
             decode_legacy_script_text(&[b'G', b'r', 0xfc, 0xdf, b'e']),
             "Grüße"
+        );
+    }
+
+    #[test]
+    fn legacy_system_decoder_never_reinterprets_utf8_shaped_bytes() {
+        let native = [0xc3, 0xa9];
+        let presented = decode_legacy_system_text(&native);
+
+        assert_eq!(presented, "\u{00c3}\u{00a9}");
+        assert_eq!(encode_legacy_script_text(&presented), Some(native.to_vec()));
+        assert_ne!(presented, "\u{00e9}");
+
+        let every_native_byte = (u8::MIN..=u8::MAX).collect::<Vec<_>>();
+        let presented = decode_legacy_system_text(&every_native_byte);
+        assert_eq!(
+            encode_legacy_script_text(&presented),
+            Some(every_native_byte),
+            "the presentation boundary must remain reversible for every native byte"
         );
     }
 

@@ -38,15 +38,14 @@ pub enum IrcMessageType {
 pub struct IrcMessage {
     pub timestamp: SystemTime,
     pub message_type: IrcMessageType,
-    pub source: String,
-    pub target: String,
-    pub data: String,
+    pub source: Vec<u8>,
+    pub target: Vec<u8>,
+    pub data: Vec<u8>,
 }
 
 impl IrcMessage {
     pub fn is_channel(&self) -> bool {
         self.target
-            .as_bytes()
             .first()
             .is_some_and(|byte| matches!(byte, b'#' | b'+'))
     }
@@ -54,58 +53,72 @@ impl IrcMessage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrcUser {
-    pub prefix: String,
-    pub name: String,
+    pub prefix: Vec<u8>,
+    pub name: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrcChannel {
-    pub name: String,
-    pub topic: String,
+    pub name: Vec<u8>,
+    pub topic: Vec<u8>,
     pub users: Vec<IrcUser>,
     pub receiving_users: bool,
 }
 
 impl IrcChannel {
-    fn new(name: impl Into<String>) -> Self {
+    fn new(name: impl Into<Vec<u8>>) -> Self {
         Self {
             name: name.into(),
-            topic: String::new(),
+            topic: Vec::new(),
             users: Vec::new(),
             receiving_users: false,
         }
     }
 
-    pub fn user(&self, name: &str) -> Option<&IrcUser> {
-        self.users.iter().find(|user| user.name == name)
+    pub fn user(&self, name: impl AsRef<[u8]>) -> Option<&IrcUser> {
+        let name = c_string_bytes(name.as_ref());
+        self.users
+            .iter()
+            .find(|user| c_string_bytes(&user.name) == name)
     }
 
-    fn add_user(&mut self, name: &str) -> &mut IrcUser {
-        if let Some(index) = self.users.iter().position(|user| user.name == name) {
+    fn add_user(&mut self, name: &[u8]) -> &mut IrcUser {
+        let name = c_string_bytes(name);
+        if let Some(index) = self
+            .users
+            .iter()
+            .position(|user| c_string_bytes(&user.name) == name)
+        {
             return &mut self.users[index];
         }
         self.users.insert(
             0,
             IrcUser {
-                prefix: String::new(),
-                name: name.to_owned(),
+                prefix: Vec::new(),
+                name: name.to_vec(),
             },
         );
         &mut self.users[0]
     }
 
-    fn remove_user(&mut self, name: &str) -> bool {
-        let Some(index) = self.users.iter().position(|user| user.name == name) else {
+    fn remove_user(&mut self, name: &[u8]) -> bool {
+        let name = c_string_bytes(name);
+        let Some(index) = self
+            .users
+            .iter()
+            .position(|user| c_string_bytes(&user.name) == name)
+        else {
             return false;
         };
         self.users.remove(index);
         true
     }
 
-    fn receive_users(&mut self, names: &str, prefix_map: &str) {
+    fn receive_users(&mut self, names: &[u8], prefix_map: &[u8]) {
         let prefix_chars = prefix_map
-            .find(')')
-            .map_or("", |closing| &prefix_map[closing + 1..]);
+            .iter()
+            .position(|byte| *byte == b')')
+            .map_or(&[][..], |closing| &prefix_map[closing + 1..]);
         if !self.receiving_users {
             self.users.clear();
         }
@@ -114,8 +127,8 @@ impl IrcChannel {
         while parameters.is_some_and(|remaining| !remaining.is_empty()) {
             let prefixed_name = extract_parameter(&mut parameters);
             let name_start = prefixed_name
-                .char_indices()
-                .find_map(|(index, character)| (!prefix_chars.contains(character)).then_some(index))
+                .iter()
+                .position(|byte| !prefix_chars.contains(byte))
                 .unwrap_or(prefixed_name.len());
             let (prefix, name) = prefixed_name.split_at(name_start);
             // The C++ code walks beyond the terminator for a prefix-only token.
@@ -123,7 +136,7 @@ impl IrcChannel {
             if name.is_empty() {
                 continue;
             }
-            self.add_user(name).prefix = prefix.to_owned();
+            self.add_user(name).prefix = prefix.to_vec();
         }
         self.receiving_users = true;
     }
@@ -140,27 +153,24 @@ pub enum IrcConnectionState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrcConnectConfig {
     pub server: String,
-    pub nick: String,
-    pub real_name: String,
-    pub password: Option<String>,
-    pub auto_join: Option<String>,
+    pub nick: Vec<u8>,
+    pub real_name: Vec<u8>,
+    pub password: Option<Vec<u8>>,
+    pub auto_join: Option<Vec<u8>>,
     /// Payload following the CTCP `VERSION` tag, without CTCP delimiters.
-    pub ctcp_version: String,
+    pub ctcp_version: Vec<u8>,
 }
 
 impl IrcConnectConfig {
-    pub fn new(
-        server: impl Into<String>,
-        nick: impl Into<String>,
-        real_name: impl Into<String>,
-    ) -> Self {
+    pub fn new(server: impl Into<String>, nick: Vec<u8>, real_name: Vec<u8>) -> Self {
         Self {
             server: server.into(),
-            nick: nick.into(),
-            real_name: real_name.into(),
+            nick,
+            real_name,
             password: None,
             auto_join: None,
-            ctcp_version: format!("LegacyClonk:{}:{}", IRC_CTCP_ENGINE_VERSION, c4_os_tag()),
+            ctcp_version: format!("LegacyClonk:{}:{}", IRC_CTCP_ENGINE_VERSION, c4_os_tag())
+                .into_bytes(),
         }
     }
 }
@@ -195,40 +205,40 @@ const fn c4_os_tag() -> &'static str {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IrcCommand {
     /// Send one complete IRC payload without the trailing CRLF.
-    Raw(String),
+    Raw(Vec<u8>),
     Send {
-        command: String,
-        parameters: Option<String>,
+        command: Vec<u8>,
+        parameters: Option<Vec<u8>>,
     },
     Quit {
-        reason: String,
+        reason: Vec<u8>,
     },
     Join {
-        channel: String,
+        channel: Vec<u8>,
     },
     Part {
-        channel: String,
+        channel: Vec<u8>,
     },
     Message {
-        target: String,
-        text: String,
+        target: Vec<u8>,
+        text: Vec<u8>,
     },
     Notice {
-        target: String,
-        text: String,
+        target: Vec<u8>,
+        text: Vec<u8>,
     },
     Action {
-        target: String,
-        text: String,
+        target: Vec<u8>,
+        text: Vec<u8>,
     },
     ChangeNick {
-        nick: String,
+        nick: Vec<u8>,
     },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct IrcReduceResult {
-    pub outbound: Vec<String>,
+    pub outbound: Vec<Vec<u8>>,
     /// One notification per appended message, plus the NAMES-end notification.
     pub notifications: usize,
 }
@@ -236,8 +246,8 @@ pub struct IrcReduceResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrcClientSnapshot {
     pub connection_state: IrcConnectionState,
-    pub nick: String,
-    pub prefixes: String,
+    pub nick: Vec<u8>,
+    pub prefixes: Vec<u8>,
     pub channels: Vec<IrcChannel>,
     pub messages: Vec<IrcMessage>,
     pub unread_index: usize,
@@ -247,12 +257,12 @@ pub struct IrcClientSnapshot {
 #[derive(Clone, Debug)]
 pub struct IrcClientState {
     connection_state: IrcConnectionState,
-    nick: String,
-    real_name: String,
-    password: Option<String>,
-    auto_join: Option<String>,
-    ctcp_version: String,
-    prefixes: String,
+    nick: Vec<u8>,
+    real_name: Vec<u8>,
+    password: Option<Vec<u8>>,
+    auto_join: Option<Vec<u8>>,
+    ctcp_version: Vec<u8>,
+    prefixes: Vec<u8>,
     channels: Vec<IrcChannel>,
     messages: VecDeque<IrcMessage>,
     unread_index: usize,
@@ -275,12 +285,12 @@ impl IrcClientState {
     fn with_log_limits(max_log_length: usize, max_read_log_length: usize) -> Self {
         Self {
             connection_state: IrcConnectionState::Disconnected,
-            nick: String::new(),
-            real_name: String::new(),
+            nick: Vec::new(),
+            real_name: Vec::new(),
             password: None,
             auto_join: None,
-            ctcp_version: String::new(),
-            prefixes: "(ov)@+".to_owned(),
+            ctcp_version: Vec::new(),
+            prefixes: b"(ov)@+".to_vec(),
             channels: Vec::new(),
             messages: VecDeque::new(),
             unread_index: 0,
@@ -302,11 +312,11 @@ impl IrcClientState {
         self.connection_state == IrcConnectionState::Connected
     }
 
-    pub fn user_name(&self) -> &str {
+    pub fn user_name(&self) -> &[u8] {
         &self.nick
     }
 
-    pub fn prefixes(&self) -> &str {
+    pub fn prefixes(&self) -> &[u8] {
         &self.prefixes
     }
 
@@ -314,7 +324,8 @@ impl IrcClientState {
         &self.channels
     }
 
-    pub fn channel(&self, name: &str) -> Option<&IrcChannel> {
+    pub fn channel(&self, name: impl AsRef<[u8]>) -> Option<&IrcChannel> {
+        let name = name.as_ref();
         self.channels
             .iter()
             .find(|channel| irc_eq(&channel.name, name))
@@ -354,14 +365,23 @@ impl IrcClientState {
         if self.is_active() {
             self.close();
         }
-        truncate_string_bytes(&mut config.password, 31);
+        truncate_at_nul(&mut config.nick);
+        truncate_at_nul(&mut config.real_name);
+        if let Some(password) = &mut config.password {
+            truncate_at_nul(password);
+            password.truncate(31);
+        }
+        if let Some(auto_join) = &mut config.auto_join {
+            truncate_at_nul(auto_join);
+        }
+        truncate_at_nul(&mut config.ctcp_version);
         self.connection_state = IrcConnectionState::Connecting;
         self.nick = config.nick;
         self.real_name = config.real_name;
         self.password = config.password;
         self.auto_join = config.auto_join;
         self.ctcp_version = config.ctcp_version;
-        self.prefixes = "(ov)@+".to_owned();
+        self.prefixes = b"(ov)@+".to_vec();
         self.last_error = None;
     }
 
@@ -374,12 +394,12 @@ impl IrcClientState {
         self.connection_state = IrcConnectionState::Connected;
         let mut outbound = Vec::with_capacity(3);
         if let Some(password) = &self.password {
-            outbound.push(format_command("PASS", Some(password)));
+            outbound.push(format_command(b"PASS", Some(password)));
         }
-        outbound.push(format_command("NICK", Some(&self.nick)));
+        outbound.push(format_command(b"NICK", Some(&self.nick)));
         outbound.push(format_command(
-            "USER",
-            Some(&format!("clonk x x :{}", self.real_name)),
+            b"USER",
+            Some(&join_bytes(&[b"clonk x x :", &self.real_name])),
         ));
         Ok(IrcReduceResult {
             outbound,
@@ -394,9 +414,9 @@ impl IrcClientState {
         let target = self.nick.clone();
         let notifications = self.push_message(
             IrcMessageType::Status,
-            "",
+            b"",
             &target,
-            &format!("Disconnected from server ({reason})."),
+            &join_bytes(&[b"Disconnected from server (", reason.as_bytes(), b")."]),
         );
         IrcReduceResult {
             outbound: Vec::new(),
@@ -423,30 +443,32 @@ impl IrcClientState {
         }
     }
 
-    pub fn outgoing_line(&self, command: &IrcCommand) -> Result<String, IrcClientError> {
+    pub fn outgoing_line(&self, command: &IrcCommand) -> Result<Vec<u8>, IrcClientError> {
         if !self.is_connected() {
             return Err(IrcClientError::NotConnected);
         }
         Ok(match command {
-            IrcCommand::Raw(line) => line.clone(),
+            IrcCommand::Raw(line) => c_string_bytes(line).to_vec(),
             IrcCommand::Send {
                 command,
                 parameters,
             } => format_command(command, parameters.as_deref()),
-            IrcCommand::Quit { reason } => format_command("QUIT", Some(&format!(":{reason}"))),
-            IrcCommand::Join { channel } => format_command("JOIN", Some(channel)),
-            IrcCommand::Part { channel } => format_command("PART", Some(channel)),
+            IrcCommand::Quit { reason } => {
+                format_command(b"QUIT", Some(&join_bytes(&[b":", reason])))
+            }
+            IrcCommand::Join { channel } => format_command(b"JOIN", Some(channel)),
+            IrcCommand::Part { channel } => format_command(b"PART", Some(channel)),
             IrcCommand::Message { target, text } => {
-                format_command("PRIVMSG", Some(&format!("{target} :{text}")))
+                format_command(b"PRIVMSG", Some(&join_bytes(&[target, b" :", text])))
             }
             IrcCommand::Notice { target, text } => {
-                format_command("NOTICE", Some(&format!("{target} :{text}")))
+                format_command(b"NOTICE", Some(&join_bytes(&[target, b" :", text])))
             }
             IrcCommand::Action { target, text } => format_command(
-                "PRIVMSG",
-                Some(&format!("{target} :\u{1}ACTION {text}\u{1}")),
+                b"PRIVMSG",
+                Some(&join_bytes(&[target, b" :\x01ACTION ", text, b"\x01"])),
             ),
-            IrcCommand::ChangeNick { nick } => format_command("NICK", Some(nick)),
+            IrcCommand::ChangeNick { nick } => format_command(b"NICK", Some(nick)),
         })
     }
 
@@ -477,20 +499,15 @@ impl IrcClientState {
     }
 
     /// Apply a server line after its LF and optional CR have been removed.
-    pub fn receive_line(&mut self, line: &str) -> IrcReduceResult {
-        let Some(parsed) = ParsedLine::parse(line) else {
+    pub fn receive_line(&mut self, line: impl AsRef<[u8]>) -> IrcReduceResult {
+        let Some(parsed) = ParsedLine::parse(line.as_ref()) else {
             return IrcReduceResult::default();
         };
-        if parsed.command.len() == 3
-            && parsed
-                .command
-                .as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_digit)
-        {
+        if parsed.command.len() == 3 && parsed.command.first().is_some_and(u8::is_ascii_digit) {
             let numeric = parsed
                 .command
-                .bytes()
+                .iter()
+                .copied()
                 .take_while(u8::is_ascii_digit)
                 .fold(0_i32, |value, digit| value * 10 + i32::from(digit - b'0'));
             return self.receive_numeric(&parsed.prefix, numeric, &parsed.parameters);
@@ -500,44 +517,48 @@ impl IrcClientState {
 
     fn receive_command(
         &mut self,
-        sender: &str,
-        command: &str,
-        raw_parameters: &str,
+        sender: &[u8],
+        command: &[u8],
+        raw_parameters: &[u8],
     ) -> IrcReduceResult {
         let mut result = IrcReduceResult::default();
-        let sender_nick = sender.split('!').next().unwrap_or_default().to_owned();
+        let sender_nick = sender
+            .split(|byte| *byte == b'!')
+            .next()
+            .unwrap_or_default()
+            .to_vec();
 
-        if irc_eq(command, "PING") {
+        if irc_eq(command, b"PING") {
             result
                 .outbound
-                .push(format_command("PONG", Some(raw_parameters)));
+                .push(format_command(b"PONG", Some(raw_parameters)));
         }
 
-        if irc_eq(command, "NOTICE") || irc_eq(command, "PRIVMSG") {
+        if irc_eq(command, b"NOTICE") || irc_eq(command, b"PRIVMSG") {
             let mut parameters = Some(raw_parameters);
             let target = extract_parameter(&mut parameters);
             let text = extract_parameter(&mut parameters);
             let message_result =
-                self.receive_message(irc_eq(command, "NOTICE"), sender, &target, &text);
+                self.receive_message(irc_eq(command, b"NOTICE"), sender, &target, &text);
             result.outbound.extend(message_result.outbound);
             result.notifications += message_result.notifications;
         }
 
-        if irc_eq(command, "JOIN") {
+        if irc_eq(command, b"JOIN") {
             let mut parameters = Some(raw_parameters);
             let channel = extract_parameter(&mut parameters);
             let channel_index = self.add_channel(&channel);
             self.channels[channel_index].add_user(&sender_nick);
             let text = if sender_nick == self.nick {
-                format!("You have joined channel {channel}.")
+                join_bytes(&[b"You have joined channel ", &channel, b"."])
             } else {
-                format!("{sender_nick} has joined the channel.")
+                join_bytes(&[&sender_nick, b" has joined the channel."])
             };
             result.notifications +=
                 self.push_message(IrcMessageType::Status, sender, &channel, &text);
         }
 
-        if irc_eq(command, "PART") {
+        if irc_eq(command, b"PART") {
             let mut parameters = Some(raw_parameters);
             let channel = extract_parameter(&mut parameters);
             let comment = extract_parameter(&mut parameters);
@@ -550,19 +571,19 @@ impl IrcClientState {
                     IrcMessageType::Status,
                     sender,
                     &nick,
-                    &format!("You have left channel {channel} ({comment})."),
+                    &join_bytes(&[b"You have left channel ", &channel, b" (", &comment, b")."]),
                 );
             } else {
                 result.notifications += self.push_message(
                     IrcMessageType::Status,
                     sender,
                     &channel,
-                    &format!("{sender_nick} has left the channel ({comment})"),
+                    &join_bytes(&[&sender_nick, b" has left the channel (", &comment, b")"]),
                 );
             }
         }
 
-        if irc_eq(command, "KICK") {
+        if irc_eq(command, b"KICK") {
             let mut parameters = Some(raw_parameters);
             let channel = extract_parameter(&mut parameters);
             let kicked = extract_parameter(&mut parameters);
@@ -576,22 +597,28 @@ impl IrcClientState {
                     IrcMessageType::Status,
                     sender,
                     &nick,
-                    &format!("You were kicked from channel {channel} ({comment})."),
+                    &join_bytes(&[
+                        b"You were kicked from channel ",
+                        &channel,
+                        b" (",
+                        &comment,
+                        b").",
+                    ]),
                 );
             } else {
                 result.notifications += self.push_message(
                     IrcMessageType::Status,
                     sender,
                     &channel,
-                    &format!("{kicked} was kicked from the channel ({comment})."),
+                    &join_bytes(&[&kicked, b" was kicked from the channel (", &comment, b")."]),
                 );
             }
         }
 
-        if irc_eq(command, "QUIT") {
+        if irc_eq(command, b"QUIT") {
             let mut parameters = Some(raw_parameters);
             let comment = extract_parameter(&mut parameters);
-            let text = format!("{sender_nick} has disconnected ({comment}).");
+            let text = join_bytes(&[&sender_nick, b" has disconnected (", &comment, b")."]);
             let affected = self
                 .channels
                 .iter()
@@ -608,7 +635,7 @@ impl IrcClientState {
             }
         }
 
-        if irc_eq(command, "TOPIC") {
+        if irc_eq(command, b"TOPIC") {
             let mut parameters = Some(raw_parameters);
             let channel = extract_parameter(&mut parameters);
             let topic = extract_parameter(&mut parameters);
@@ -618,11 +645,11 @@ impl IrcClientState {
                 IrcMessageType::Status,
                 sender,
                 &channel,
-                &format!("{sender_nick} changes the topic to: {topic}"),
+                &join_bytes(&[&sender_nick, b" changes the topic to: ", &topic]),
             );
         }
 
-        if irc_eq(command, "MODE") {
+        if irc_eq(command, b"MODE") {
             let mut parameters = Some(raw_parameters);
             let channel = extract_parameter(&mut parameters);
             let flags = extract_parameter(&mut parameters);
@@ -630,17 +657,17 @@ impl IrcClientState {
             if self.channel(&channel).is_some() {
                 result
                     .outbound
-                    .push(format_command("NAMES", Some(&channel)));
+                    .push(format_command(b"NAMES", Some(&channel)));
             }
             result.notifications += self.push_message(
                 IrcMessageType::Status,
                 sender,
                 &channel,
-                &format!("{sender_nick} sets mode {flags} {what}"),
+                &join_bytes(&[&sender_nick, b" sets mode ", &flags, b" ", &what]),
             );
         }
 
-        if irc_eq(command, "ERROR") {
+        if irc_eq(command, b"ERROR") {
             let mut parameters = Some(raw_parameters);
             let message = extract_parameter(&mut parameters);
             let nick = self.nick.clone();
@@ -648,10 +675,10 @@ impl IrcClientState {
                 self.push_message(IrcMessageType::Server, sender, &nick, &message);
         }
 
-        if irc_eq(command, "NICK") {
+        if irc_eq(command, b"NICK") {
             let mut parameters = Some(raw_parameters);
             let new_nick = extract_parameter(&mut parameters);
-            let text = format!("{sender_nick} is now known as {new_nick}");
+            let text = join_bytes(&[&sender_nick, b" is now known as ", &new_nick]);
             let affected = self
                 .channels
                 .iter()
@@ -677,9 +704,9 @@ impl IrcClientState {
 
     fn receive_numeric(
         &mut self,
-        sender: &str,
+        sender: &[u8],
         command: i32,
-        raw_parameters: &str,
+        raw_parameters: &[u8],
     ) -> IrcReduceResult {
         let mut result = IrcReduceResult::default();
         let mut parameters = Some(raw_parameters);
@@ -689,17 +716,17 @@ impl IrcClientState {
         match command {
             433 => {
                 let mut desired_nick = extract_parameter(&mut parameters);
-                desired_nick.push('_');
+                desired_nick.push(b'_');
                 result
                     .outbound
-                    .push(format_command("NICK", Some(&desired_nick)));
+                    .push(format_command(b"NICK", Some(&desired_nick)));
             }
             376 | 422 => {
                 if let Some(auto_join) = &self.auto_join {
                     if !auto_join.is_empty() {
                         result
                             .outbound
-                            .push(format_command("JOIN", Some(auto_join)));
+                            .push(format_command(b"JOIN", Some(auto_join)));
                     }
                 }
             }
@@ -708,7 +735,7 @@ impl IrcClientState {
                 let topic = if command == 332 {
                     extract_parameter(&mut parameters)
                 } else {
-                    String::new()
+                    Vec::new()
                 };
                 let channel_index = self.add_channel(&channel);
                 self.channels[channel_index].topic.clone_from(&topic);
@@ -717,7 +744,7 @@ impl IrcClientState {
                         IrcMessageType::Status,
                         sender,
                         &channel,
-                        &format!("Topic in {channel}: {topic}"),
+                        &join_bytes(&[b"Topic in ", &channel, b": ", &topic]),
                     );
                 }
             }
@@ -740,13 +767,10 @@ impl IrcClientState {
             5 => {
                 while parameters.is_some_and(|remaining| !remaining.is_empty()) {
                     let token = extract_parameter(&mut parameters);
-                    let (parameter, value) = token
-                        .split_once('=')
-                        .map_or((token.as_str(), ""), |(parameter, value)| {
-                            (parameter, value)
-                        });
-                    if irc_eq(parameter, "PREFIX") {
-                        self.prefixes = value.to_owned();
+                    let (parameter, value) = split_once_byte(&token, b'=')
+                        .map_or((token.as_slice(), &[][..]), |parts| parts);
+                    if irc_eq(parameter, b"PREFIX") {
+                        self.prefixes = value.to_vec();
                     }
                 }
                 show_message = false;
@@ -757,7 +781,7 @@ impl IrcClientState {
         if show_message {
             let mut target_channel = None;
             if parameters
-                .is_some_and(|remaining| !remaining.is_empty() && !remaining.starts_with(':'))
+                .is_some_and(|remaining| !remaining.is_empty() && !remaining.starts_with(b":"))
             {
                 let possible_channel = extract_parameter(&mut parameters);
                 target_channel = self
@@ -767,12 +791,16 @@ impl IrcClientState {
 
             let mut message = parameters;
             while message
-                .is_some_and(|remaining| !remaining.is_empty() && !remaining.starts_with(':'))
+                .is_some_and(|remaining| !remaining.is_empty() && !remaining.starts_with(b":"))
             {
-                message = message
-                    .and_then(|remaining| remaining.find(' ').map(|space| &remaining[space + 1..]));
+                message = message.and_then(|remaining| {
+                    remaining
+                        .iter()
+                        .position(|byte| *byte == b' ')
+                        .map(|space| &remaining[space + 1..])
+                });
             }
-            if let Some(message) = message.and_then(|message| message.strip_prefix(':')) {
+            if let Some(message) = message.and_then(|message| message.strip_prefix(b":")) {
                 if let Some(channel) = target_channel {
                     result.notifications +=
                         self.push_message(IrcMessageType::Status, sender, &channel, message);
@@ -790,37 +818,44 @@ impl IrcClientState {
     fn receive_message(
         &mut self,
         notice: bool,
-        sender: &str,
-        target: &str,
-        text: &str,
+        sender: &[u8],
+        target: &[u8],
+        text: &[u8],
     ) -> IrcReduceResult {
         let mut result = IrcReduceResult::default();
-        if let Some(mut remaining) = text.strip_prefix('\u{1}') {
+        if let Some(mut remaining) = text.strip_prefix(b"\x01") {
             while !remaining.is_empty() {
-                let (ctcp, next) = remaining.find('\u{1}').map_or((remaining, ""), |end| {
-                    (&remaining[..end], &remaining[end + 1..])
-                });
-                let (tag, data) = ctcp
-                    .split_once(' ')
-                    .map_or((ctcp, ""), |(tag, data)| (tag, data));
-                let sender_nick = sender.split('!').next().unwrap_or_default();
-                if irc_eq(tag, "ACTION") {
+                let (ctcp, next) = remaining
+                    .iter()
+                    .position(|byte| *byte == 1)
+                    .map_or((remaining, &[][..]), |end| {
+                        (&remaining[..end], &remaining[end + 1..])
+                    });
+                let (tag, data) =
+                    split_once_byte(ctcp, b' ').map_or((ctcp, &[][..]), |parts| parts);
+                let sender_nick = sender
+                    .split(|byte| *byte == b'!')
+                    .next()
+                    .unwrap_or_default();
+                if irc_eq(tag, b"ACTION") {
                     result.notifications +=
                         self.push_message(IrcMessageType::Action, sender, target, data);
                 }
-                if !notice && irc_eq(tag, "VERSION") {
+                if !notice && irc_eq(tag, b"VERSION") {
                     result.outbound.push(format_command(
-                        "NOTICE",
-                        Some(&format!(
-                            "{sender_nick} :\u{1}VERSION {}\u{1}",
-                            self.ctcp_version
-                        )),
+                        b"NOTICE",
+                        Some(&join_bytes(&[
+                            sender_nick,
+                            b" :\x01VERSION ",
+                            &self.ctcp_version,
+                            b"\x01",
+                        ])),
                     ));
                 }
-                if !notice && irc_eq(tag, "PING") {
+                if !notice && irc_eq(tag, b"PING") {
                     result.outbound.push(format_command(
-                        "NOTICE",
-                        Some(&format!("{sender_nick} :\u{1}PING {data}\u{1}")),
+                        b"NOTICE",
+                        Some(&join_bytes(&[sender_nick, b" :\x01PING ", data, b"\x01"])),
                     ));
                 }
                 remaining = next;
@@ -840,7 +875,7 @@ impl IrcClientState {
         result
     }
 
-    fn add_channel(&mut self, name: &str) -> usize {
+    fn add_channel(&mut self, name: &[u8]) -> usize {
         if let Some(index) = self
             .channels
             .iter()
@@ -848,11 +883,11 @@ impl IrcClientState {
         {
             return index;
         }
-        self.channels.insert(0, IrcChannel::new(name));
+        self.channels.insert(0, IrcChannel::new(name.to_vec()));
         0
     }
 
-    fn remove_channel(&mut self, name: &str) -> bool {
+    fn remove_channel(&mut self, name: &[u8]) -> bool {
         let Some(index) = self
             .channels
             .iter()
@@ -874,16 +909,16 @@ impl IrcClientState {
     fn push_message(
         &mut self,
         message_type: IrcMessageType,
-        source: &str,
-        target: &str,
-        data: &str,
+        source: &[u8],
+        target: &[u8],
+        data: &[u8],
     ) -> usize {
         self.messages.push_back(IrcMessage {
             timestamp: SystemTime::now(),
             message_type,
-            source: source.to_owned(),
-            target: target.to_owned(),
-            data: data.to_owned(),
+            source: source.to_vec(),
+            target: target.to_vec(),
+            data: data.to_vec(),
         });
         while self.messages.len() > self.max_log_length {
             self.pop_message();
@@ -910,30 +945,33 @@ pub enum IrcClientError {
 
 #[derive(Debug)]
 struct ParsedLine {
-    prefix: String,
-    command: String,
-    parameters: String,
+    prefix: Vec<u8>,
+    command: Vec<u8>,
+    parameters: Vec<u8>,
 }
 
 impl ParsedLine {
-    fn parse(line: &str) -> Option<Self> {
-        let line = line.split('\0').next().unwrap_or_default();
-        let (prefix, message) = if let Some(prefixed) = line.strip_prefix(':') {
-            let separator = prefixed.find(' ')?;
-            (prefixed[..separator].to_owned(), &prefixed[separator + 1..])
+    fn parse(line: &[u8]) -> Option<Self> {
+        let line = line.split(|byte| *byte == 0).next().unwrap_or_default();
+        let (prefix, message) = if let Some(prefixed) = line.strip_prefix(b":") {
+            let separator = prefixed.iter().position(|byte| *byte == b' ')?;
+            (prefixed[..separator].to_vec(), &prefixed[separator + 1..])
         } else {
-            (String::new(), line)
+            (Vec::new(), line)
         };
-        let message = message.trim_start_matches(' ');
+        let message = &message[message
+            .iter()
+            .position(|byte| *byte != b' ')
+            .unwrap_or(message.len())..];
         if message.is_empty() {
             return None;
         }
-        let (command, parameters) = match message.find(' ') {
+        let (command, parameters) = match message.iter().position(|byte| *byte == b' ') {
             Some(separator) => (
-                message[..separator].to_owned(),
-                message[separator + 1..].to_owned(),
+                message[..separator].to_vec(),
+                message[separator + 1..].to_vec(),
             ),
-            None => (message.to_owned(), String::new()),
+            None => (message.to_vec(), Vec::new()),
         };
         Some(Self {
             prefix,
@@ -943,50 +981,77 @@ impl ParsedLine {
     }
 }
 
-fn extract_parameter<'a>(parameters: &mut Option<&'a str>) -> String {
+fn extract_parameter<'a>(parameters: &mut Option<&'a [u8]>) -> Vec<u8> {
     let Some(remaining) = *parameters else {
-        return String::new();
+        return Vec::new();
     };
     if remaining.is_empty() {
-        return String::new();
+        return Vec::new();
     }
-    if let Some(trailing) = remaining.strip_prefix(':') {
+    if let Some(trailing) = remaining.strip_prefix(b":") {
         *parameters = None;
-        return trailing.to_owned();
+        return trailing.to_vec();
     }
-    if let Some(separator) = remaining.find(' ') {
-        let result = remaining[..separator].to_owned();
+    if let Some(separator) = remaining.iter().position(|byte| *byte == b' ') {
+        let result = remaining[..separator].to_vec();
         *parameters = Some(&remaining[separator + 1..]);
         result
     } else {
         *parameters = None;
-        remaining.to_owned()
+        remaining.to_vec()
     }
 }
 
-fn format_command(command: &str, parameters: Option<&str>) -> String {
+fn format_command(command: &[u8], parameters: Option<&[u8]>) -> Vec<u8> {
+    let command = c_string_bytes(command);
     parameters.map_or_else(
-        || command.to_owned(),
-        |parameters| format!("{command} {parameters}"),
+        || command.to_vec(),
+        |parameters| join_bytes(&[command, b" ", c_string_bytes(parameters)]),
     )
 }
 
-fn irc_eq(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
+fn irc_eq(left: &[u8], right: &[u8]) -> bool {
+    let left = c_string_bytes(left);
+    let right = c_string_bytes(right);
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(&left, &right)| irc_capital(left) == irc_capital(right))
 }
 
-fn truncate_string_bytes(value: &mut Option<String>, maximum: usize) {
-    let Some(value) = value else {
-        return;
-    };
-    if value.len() <= maximum {
-        return;
+fn irc_capital(byte: u8) -> u8 {
+    match byte {
+        b'a'..=b'z' => byte - (b'a' - b'A'),
+        0xe4 => 0xc4,
+        0xf6 => 0xd6,
+        0xfc => 0xdc,
+        _ => byte,
     }
-    let mut boundary = maximum;
-    while !value.is_char_boundary(boundary) {
-        boundary -= 1;
+}
+
+fn c_string_bytes(bytes: &[u8]) -> &[u8] {
+    bytes.split(|byte| *byte == 0).next().unwrap_or_default()
+}
+
+fn truncate_at_nul(bytes: &mut Vec<u8>) {
+    if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+        bytes.truncate(nul);
     }
-    value.truncate(boundary);
+}
+
+fn join_bytes(parts: &[&[u8]]) -> Vec<u8> {
+    let length = parts.iter().map(|part| part.len()).sum();
+    let mut joined = Vec::with_capacity(length);
+    for part in parts {
+        joined.extend_from_slice(part);
+    }
+    joined
+}
+
+fn split_once_byte(bytes: &[u8], delimiter: u8) -> Option<(&[u8], &[u8])> {
+    let separator = bytes.iter().position(|byte| *byte == delimiter)?;
+    Some((&bytes[..separator], &bytes[separator + 1..]))
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -995,7 +1060,7 @@ pub struct IrcLineDecoder {
 }
 
 impl IrcLineDecoder {
-    pub fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
         self.buffered.extend_from_slice(bytes);
         let mut lines = Vec::new();
         while let Some(newline) = self.buffered.iter().position(|byte| *byte == b'\n') {
@@ -1004,7 +1069,7 @@ impl IrcLineDecoder {
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
-            lines.push(String::from_utf8_lossy(&line).into_owned());
+            lines.push(line);
         }
         lines
     }
@@ -1483,8 +1548,8 @@ fn process_worker_request(
     }
 }
 
-fn write_irc_line(stream: &mut TcpStream, line: &str) -> io::Result<()> {
-    stream.write_all(line.as_bytes())?;
+fn write_irc_line(stream: &mut TcpStream, line: &[u8]) -> io::Result<()> {
+    stream.write_all(line)?;
     stream.write_all(b"\r\n")
 }
 
@@ -1523,11 +1588,11 @@ mod tests {
     fn test_config() -> IrcConnectConfig {
         IrcConnectConfig {
             server: "127.0.0.1".to_owned(),
-            nick: "Me".to_owned(),
-            real_name: "Clonk Player".to_owned(),
+            nick: b"Me".to_vec(),
+            real_name: b"Clonk Player".to_vec(),
             password: None,
-            auto_join: Some("#clonken,#legacyclonk".to_owned()),
-            ctcp_version: "LegacyClonk:test:unit".to_owned(),
+            auto_join: Some(b"#clonken,#legacyclonk".to_vec()),
+            ctcp_version: b"LegacyClonk:test:unit".to_vec(),
         }
     }
 
@@ -1538,7 +1603,7 @@ mod tests {
         state
     }
 
-    fn message_tuples(state: &IrcClientState) -> Vec<(IrcMessageType, String, String, String)> {
+    fn message_tuples(state: &IrcClientState) -> Vec<(IrcMessageType, Vec<u8>, Vec<u8>, Vec<u8>)> {
         state
             .messages()
             .map(|message| {
@@ -1552,10 +1617,10 @@ mod tests {
             .collect()
     }
 
-    fn read_wire_line(reader: &mut BufReader<TcpStream>) -> String {
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("read IRC line");
-        assert!(line.ends_with("\r\n"), "wire line lacked CRLF: {line:?}");
+    fn read_wire_line(reader: &mut BufReader<TcpStream>) -> Vec<u8> {
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).expect("read IRC line");
+        assert!(line.ends_with(b"\r\n"), "wire line lacked CRLF: {line:?}");
         line.truncate(line.len() - 2);
         line
     }
@@ -1578,21 +1643,22 @@ mod tests {
         assert_eq!(decoder.buffered_len(), 10);
         assert_eq!(
             decoder.push(b"NG :one\r\nNOTICE Me :two\npartial"),
-            [":server PING :one", "NOTICE Me :two"]
+            [b":server PING :one".to_vec(), b"NOTICE Me :two".to_vec()]
         );
         assert_eq!(decoder.buffered_len(), 7);
-        assert_eq!(decoder.push(b"\r\n"), ["partial"]);
+        assert_eq!(decoder.push(b"\r\n"), [b"partial".to_vec()]);
         assert_eq!(decoder.buffered_len(), 0);
     }
 
     #[test]
     fn registration_order_password_truncation_and_parameter_parsing_match_cpp() {
         assert_eq!(
-            IrcConnectConfig::new("server", "Clonker", "Real Name").ctcp_version,
-            format!("LegacyClonk:{IRC_CTCP_ENGINE_VERSION}:{}", c4_os_tag())
+            IrcConnectConfig::new("server", b"Clonker".to_vec(), b"Real Name".to_vec())
+                .ctcp_version,
+            format!("LegacyClonk:{IRC_CTCP_ENGINE_VERSION}:{}", c4_os_tag()).into_bytes()
         );
         let mut config = test_config();
-        config.password = Some("1234567890123456789012345678901234567890".to_owned());
+        config.password = Some(b"1234567890123456789012345678901234567890".to_vec());
         let mut state = IrcClientState::new();
         state.begin_connect(config);
         assert_eq!(state.connection_state(), IrcConnectionState::Connecting);
@@ -1600,9 +1666,9 @@ mod tests {
         assert_eq!(
             connected.outbound,
             [
-                "PASS 1234567890123456789012345678901",
-                "NICK Me",
-                "USER clonk x x :Clonk Player",
+                b"PASS 1234567890123456789012345678901".to_vec(),
+                b"NICK Me".to_vec(),
+                b"USER clonk x x :Clonk Player".to_vec(),
             ]
         );
 
@@ -1612,17 +1678,37 @@ mod tests {
             message_tuples(&state).last(),
             Some(&(
                 IrcMessageType::Message,
-                "Nick!ident".to_owned(),
-                "Me".to_owned(),
-                "hello there".to_owned(),
+                b"Nick!ident".to_vec(),
+                b"Me".to_vec(),
+                b"hello there".to_vec(),
             ))
         );
 
         // Only one delimiter space is skipped by ircExtractPar.
         state.receive_line(":Nick!ident PRIVMSG  Me :spaced");
         let last = state.messages().last().expect("spaced message");
-        assert_eq!(last.target, "");
-        assert_eq!(last.data, "Me");
+        assert_eq!(last.target, b"");
+        assert_eq!(last.data, b"Me");
+
+        let mut nul_config = test_config();
+        nul_config.nick = b"Me\0ignored".to_vec();
+        nul_config.real_name = b"Real\0ignored".to_vec();
+        nul_config.password = Some(b"secret\0ignored".to_vec());
+        let mut nul_state = IrcClientState::new();
+        nul_state.begin_connect(nul_config);
+        assert_eq!(nul_state.user_name(), b"Me");
+        assert_eq!(
+            nul_state
+                .on_tcp_connected()
+                .expect("connect NUL-terminated native strings")
+                .outbound,
+            [
+                b"PASS secret".to_vec(),
+                b"NICK Me".to_vec(),
+                b"USER clonk x x :Real".to_vec(),
+            ]
+        );
+        assert!(irc_eq(b"#r\xe4um", b"#R\xc4UM"));
     }
 
     #[test]
@@ -1630,22 +1716,22 @@ mod tests {
         let mut state = connected_state();
         assert_eq!(
             state.receive_line(":server 376 Me :End of MOTD").outbound,
-            ["JOIN #clonken,#legacyclonk"]
+            [b"JOIN #clonken,#legacyclonk".to_vec()]
         );
         assert_eq!(
             state.receive_line(":server 422 Me :MOTD missing").outbound,
-            ["JOIN #clonken,#legacyclonk"]
+            [b"JOIN #clonken,#legacyclonk".to_vec()]
         );
         assert_eq!(
             state
                 .receive_line(":server 433 Me Desired :Nickname in use")
                 .outbound,
-            ["NICK Desired_"]
+            [b"NICK Desired_".to_vec()]
         );
-        assert_eq!(state.user_name(), "Me");
+        assert_eq!(state.user_name(), b"Me");
         assert_eq!(
             state.receive_line("PING :token value").outbound,
-            ["PONG :token value"]
+            [b"PONG :token value".to_vec()]
         );
     }
 
@@ -1655,7 +1741,7 @@ mod tests {
         let support =
             state.receive_line(":server 005 Me PREFIX=(qaohv)~&@%+ CHANTYPES=#+ :are supported");
         assert_eq!(support, IrcReduceResult::default());
-        assert_eq!(state.prefixes(), "(qaohv)~&@%+");
+        assert_eq!(state.prefixes(), b"(qaohv)~&@%+");
 
         let first = state.receive_line(":server 353 Me = #Room :@Alice +Bob");
         assert_eq!(first, IrcReduceResult::default());
@@ -1665,20 +1751,20 @@ mod tests {
             room.users,
             [
                 IrcUser {
-                    prefix: "+".to_owned(),
-                    name: "Bob".to_owned(),
+                    prefix: b"+".to_vec(),
+                    name: b"Bob".to_vec(),
                 },
                 IrcUser {
-                    prefix: "@".to_owned(),
-                    name: "Alice".to_owned(),
+                    prefix: b"@".to_vec(),
+                    name: b"Alice".to_vec(),
                 },
             ]
         );
 
         state.receive_line(":server 353 Me = #room :~&Carol @+Dave");
         let room = state.channel("#ROOM").expect("same case-folded room");
-        assert_eq!(room.user("Carol").expect("Carol").prefix, "~&");
-        assert_eq!(room.user("Dave").expect("Dave").prefix, "@+");
+        assert_eq!(room.user("Carol").expect("Carol").prefix, b"~&");
+        assert_eq!(room.user("Dave").expect("Dave").prefix, b"@+");
 
         let end = state.receive_line(":server 366 Me #Room :End of NAMES");
         assert_eq!(end.notifications, 1);
@@ -1691,9 +1777,9 @@ mod tests {
                 .expect("room")
                 .users
                 .iter()
-                .map(|user| user.name.as_str())
+                .map(|user| user.name.as_slice())
                 .collect::<Vec<_>>(),
-            ["Erin"]
+            [b"Erin".as_slice()]
         );
         // This triggered undefined memory walking in C++; the Rust port ignores it.
         state.receive_line(":server 353 Me = #Room :@@");
@@ -1713,7 +1799,7 @@ mod tests {
         for channel in ["#one", "#two"] {
             let channel = state.channel(channel).expect("renamed channel");
             assert!(channel.user("Peer").is_none());
-            assert_eq!(channel.user("Renamed").expect("renamed user").prefix, "");
+            assert_eq!(channel.user("Renamed").expect("renamed user").prefix, b"");
         }
         state.receive_line(":Renamed!ident QUIT :gone");
         for channel in ["#one", "#two"] {
@@ -1725,7 +1811,7 @@ mod tests {
         }
 
         state.receive_line(":Me!self NICK :Myself");
-        assert_eq!(state.user_name(), "Myself");
+        assert_eq!(state.user_name(), b"Myself");
         state.receive_line(":Myself!self PART #One :bye");
         assert!(state.channel("#one").is_none());
         assert!(state.channel("#two").is_some());
@@ -1740,10 +1826,10 @@ mod tests {
         state.receive_line(":Me!self JOIN :#room");
         let topic = state.receive_line(":Alice!ident TOPIC #ROOM :A new topic");
         assert_eq!(topic.notifications, 1);
-        assert_eq!(state.channel("#room").expect("room").topic, "A new topic");
+        assert_eq!(state.channel("#room").expect("room").topic, b"A new topic");
 
         let mode = state.receive_line(":Oper!ident MODE #room +ov Alice");
-        assert_eq!(mode.outbound, ["NAMES #room"]);
+        assert_eq!(mode.outbound, [b"NAMES #room".to_vec()]);
         assert_eq!(mode.notifications, 1);
         let unknown = state.receive_line(":Oper!ident MODE #absent +o Alice");
         assert!(unknown.outbound.is_empty());
@@ -1762,14 +1848,14 @@ mod tests {
         );
         let server_message = state.messages().last().expect("server numeric");
         assert_eq!(server_message.message_type, IrcMessageType::Server);
-        assert_eq!(server_message.target, "Me");
-        assert_eq!(server_message.data, "No such nick");
+        assert_eq!(server_message.target, b"Me");
+        assert_eq!(server_message.data, b"No such nick");
 
         state.receive_line(":server 404 Me #ROOM :Cannot send");
         let channel_message = state.messages().last().expect("channel numeric");
         assert_eq!(channel_message.message_type, IrcMessageType::Status);
-        assert_eq!(channel_message.target, "#room");
-        assert_eq!(channel_message.data, "Cannot send");
+        assert_eq!(channel_message.target, b"#room");
+        assert_eq!(channel_message.data, b"Cannot send");
 
         let before = state.messages().count();
         state.receive_line(":server 004 Me server version modes");
@@ -1777,7 +1863,7 @@ mod tests {
         assert_eq!(state.messages().count(), before);
 
         state.receive_line(":server 331 Me #room :No topic is set");
-        assert_eq!(state.channel("#room").expect("room").topic, "");
+        assert_eq!(state.channel("#room").expect("room").topic, b"");
         assert_eq!(
             state
                 .messages()
@@ -1789,7 +1875,7 @@ mod tests {
         state.receive_line(":server 332 Me #room :Topic from numeric");
         assert_eq!(
             state.channel("#room").expect("room").topic,
-            "Topic from numeric"
+            b"Topic from numeric"
         );
     }
 
@@ -1806,13 +1892,13 @@ mod tests {
             state
                 .receive_line(":Alice!ident PRIVMSG Me :\u{1}VERSION\u{1}")
                 .outbound,
-            ["NOTICE Alice :\u{1}VERSION LegacyClonk:test:unit\u{1}"]
+            [b"NOTICE Alice :\x01VERSION LegacyClonk:test:unit\x01".to_vec()]
         );
         assert_eq!(
             state
                 .receive_line(":Alice!ident PRIVMSG Me :\u{1}PING 123 456\u{1}")
                 .outbound,
-            ["NOTICE Alice :\u{1}PING 123 456\u{1}"]
+            [b"NOTICE Alice :\x01PING 123 456\x01".to_vec()]
         );
         assert!(state
             .receive_line(":Alice!ident NOTICE Me :\u{1}VERSION reply\u{1}")
@@ -1840,32 +1926,32 @@ mod tests {
     fn outbound_payloads_echo_only_after_success_and_wait_for_server_state_echoes() {
         let mut state = connected_state();
         let message = IrcCommand::Message {
-            target: "#room".to_owned(),
-            text: "hello".to_owned(),
+            target: b"#room".to_vec(),
+            text: b"hello".to_vec(),
         };
         assert_eq!(
             state.outgoing_line(&message).expect("message line"),
-            "PRIVMSG #room :hello"
+            b"PRIVMSG #room :hello"
         );
         assert!(state.messages().next().is_none());
         assert_eq!(state.mark_outgoing_sent(&message).notifications, 1);
 
         let action = IrcCommand::Action {
-            target: "Alice".to_owned(),
-            text: "waves".to_owned(),
+            target: b"Alice".to_vec(),
+            text: b"waves".to_vec(),
         };
         assert_eq!(
             state.outgoing_line(&action).expect("action line"),
-            "PRIVMSG Alice :\u{1}ACTION waves\u{1}"
+            b"PRIVMSG Alice :\x01ACTION waves\x01"
         );
         state.mark_outgoing_sent(&action);
 
         let join = IrcCommand::Join {
-            channel: "#later".to_owned(),
+            channel: b"#later".to_vec(),
         };
         assert_eq!(
             state.outgoing_line(&join).expect("join line"),
-            "JOIN #later"
+            b"JOIN #later"
         );
         state.mark_outgoing_sent(&join);
         assert!(state.channel("#later").is_none());
@@ -1881,7 +1967,12 @@ mod tests {
     fn message_log_caps_unread_boundary_and_channel_classification() {
         let mut state = IrcClientState::with_log_limits(3, 2);
         for index in 0..3 {
-            state.push_message(IrcMessageType::Message, "A", "#room", &index.to_string());
+            state.push_message(
+                IrcMessageType::Message,
+                b"A",
+                b"#room",
+                index.to_string().as_bytes(),
+            );
         }
         assert_eq!(state.messages().count(), 3);
         assert_eq!(state.unread_messages().count(), 3);
@@ -1889,15 +1980,15 @@ mod tests {
         assert_eq!(
             state
                 .messages()
-                .map(|message| message.data.as_str())
+                .map(|message| message.data.as_slice())
                 .collect::<Vec<_>>(),
-            ["1", "2"]
+            [b"1".as_slice(), b"2".as_slice()]
         );
         assert_eq!(state.unread_messages().count(), 0);
 
-        state.push_message(IrcMessageType::Notice, "A", "+local", "3");
+        state.push_message(IrcMessageType::Notice, b"A", b"+local", b"3");
         assert_eq!(state.unread_messages().count(), 1);
-        state.push_message(IrcMessageType::Message, "A", "&not-classic", "4");
+        state.push_message(IrcMessageType::Message, b"A", b"&not-classic", b"4");
         assert_eq!(state.messages().count(), 3);
         assert_eq!(state.unread_messages().count(), 2);
         let messages = state.messages().collect::<Vec<_>>();
@@ -1912,7 +2003,12 @@ mod tests {
     fn snapshot_and_mark_read_returns_every_message_before_advancing_the_boundary() {
         let mut state = IrcClientState::with_log_limits(3, 2);
         for index in 0..3 {
-            state.push_message(IrcMessageType::Message, "A", "#room", &index.to_string());
+            state.push_message(
+                IrcMessageType::Message,
+                b"A",
+                b"#room",
+                index.to_string().as_bytes(),
+            );
         }
 
         let snapshot = state.snapshot_and_mark_message_log_read();
@@ -1921,23 +2017,23 @@ mod tests {
             snapshot
                 .messages
                 .iter()
-                .map(|message| message.data.as_str())
+                .map(|message| message.data.as_slice())
                 .collect::<Vec<_>>(),
-            ["0", "1", "2"]
+            [b"0".as_slice(), b"1".as_slice(), b"2".as_slice()]
         );
         assert_eq!(state.unread_messages().count(), 0);
         assert_eq!(
             state
                 .messages()
-                .map(|message| message.data.as_str())
+                .map(|message| message.data.as_slice())
                 .collect::<Vec<_>>(),
-            ["1", "2"]
+            [b"1".as_slice(), b"2".as_slice()]
         );
 
-        state.push_message(IrcMessageType::Message, "A", "#room", "3");
+        state.push_message(IrcMessageType::Message, b"A", b"#room", b"3");
         let snapshot = state.snapshot_and_mark_message_log_read();
         assert_eq!(snapshot.unread_index, 2);
-        assert_eq!(snapshot.messages[2].data, "3");
+        assert_eq!(snapshot.messages[2].data, b"3");
         assert_eq!(state.unread_messages().count(), 0);
     }
 
@@ -2027,18 +2123,18 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("server read timeout");
             let mut reader = BufReader::new(stream.try_clone().expect("clone server stream"));
-            assert_eq!(read_wire_line(&mut reader), "NICK Me");
-            assert_eq!(read_wire_line(&mut reader), "USER clonk x x :Clonk Player");
+            assert_eq!(read_wire_line(&mut reader), b"NICK Me");
+            assert_eq!(read_wire_line(&mut reader), b"USER clonk x x :Clonk Player");
 
             stream
                 .write_all(b":server 376 Me :End of MOTD\r\nPING :probe\r\n")
                 .expect("send welcome and ping");
-            assert_eq!(read_wire_line(&mut reader), "JOIN #loopback");
-            assert_eq!(read_wire_line(&mut reader), "PONG :probe");
+            assert_eq!(read_wire_line(&mut reader), b"JOIN #loopback");
+            assert_eq!(read_wire_line(&mut reader), b"PONG :probe");
             registered_tx.send(()).expect("registration signal");
             assert_eq!(
                 read_wire_line(&mut reader),
-                "PRIVMSG #loopback :from client"
+                b"PRIVMSG #loopback :from client"
             );
             stream
                 .write_all(b":Alice!ident PRIVMSG #loopback :from server\r\n")
@@ -2049,7 +2145,7 @@ mod tests {
 
         let mut config = test_config();
         config.server = address.to_string();
-        config.auto_join = Some("#loopback".to_owned());
+        config.auto_join = Some(b"#loopback".to_vec());
         let mut handle = IrcClientHandle::connect_with_timeout(config, Duration::from_secs(2))
             .expect("start IRC handle");
         assert_eq!(
@@ -2061,8 +2157,8 @@ mod tests {
             .expect("server observed registration");
         handle
             .send_command(IrcCommand::Message {
-                target: "#loopback".to_owned(),
-                text: "from client".to_owned(),
+                target: b"#loopback".to_vec(),
+                text: b"from client".to_vec(),
             })
             .expect("send local message");
         finished_rx
@@ -2073,21 +2169,134 @@ mod tests {
                 .snapshot()
                 .messages
                 .iter()
-                .any(|message| message.data == "from server")
+                .any(|message| message.data == b"from server")
         });
         let snapshot = handle.snapshot();
         assert!(snapshot.messages.iter().any(|message| {
             message.message_type == IrcMessageType::Message
-                && message.source == "Me"
-                && message.data == "from client"
+                && message.source == b"Me"
+                && message.data == b"from client"
         }));
         assert!(snapshot.messages.iter().any(|message| {
             message.message_type == IrcMessageType::Message
-                && message.source == "Alice!ident"
-                && message.data == "from server"
+                && message.source == b"Alice!ident"
+                && message.data == b"from server"
         }));
         server.join().expect("loopback server");
         handle.close().expect("close IRC handle");
+    }
+
+    #[test]
+    fn irc_transport_preserves_legacy_bytes_and_password_cap() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind byte-exact IRC");
+        let address = listener.local_addr().expect("byte-exact IRC address");
+        let (outbound_seen_tx, outbound_seen_rx) = mpsc::channel();
+        let (release_server_tx, release_server_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept byte-exact IRC client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("byte-exact server read timeout");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone byte-exact stream"));
+
+            let mut expected_password = b"PASS ".to_vec();
+            expected_password.extend_from_slice(&[b'p'; 30]);
+            // The 31-byte C++ cap intentionally leaves the leading byte of the
+            // final UTF-8 sequence rather than backing up to a character boundary.
+            expected_password.push(0xc3);
+            assert_eq!(expected_password.len(), b"PASS ".len() + 31);
+            assert!(std::str::from_utf8(&expected_password[b"PASS ".len()..]).is_err());
+            assert_eq!(read_wire_line(&mut reader), expected_password);
+            assert_eq!(read_wire_line(&mut reader), b"NICK M\xe4");
+            assert_eq!(read_wire_line(&mut reader), b"USER clonk x x :R\xe9al");
+
+            // Split a prefixed command across writes and then send channel,
+            // query, topic, source, target, and payload bytes outside UTF-8.
+            stream
+                .write_all(b":M\xe4!self JOIN :#r\xe4um\r\n:Al\xed")
+                .expect("send first legacy byte fragment");
+            stream
+                .write_all(&join_bytes(&[
+                    b"ce!ident TOPIC #r\xc4um :t\xf6pic\r\n",
+                    b":Al\xedce!ident PRIVMSG #r\xe4um :inbound \x80\r\n",
+                    b":Al\xedce!ident PRIVMSG M\xe4 :query \x81\r\n",
+                    b":Al\xedce!ident PRIVMSG M\xe4 :\x01VERSION\x01\r\n",
+                ]))
+                .expect("send remaining legacy byte frames");
+
+            assert_eq!(
+                read_wire_line(&mut reader),
+                b"NOTICE Al\xedce :\x01VERSION LegacyClonk:legacy:\x80\x01"
+            );
+            assert_eq!(
+                read_wire_line(&mut reader),
+                b"PRIVMSG #r\xe4um :outbound \x96"
+            );
+            outbound_seen_tx
+                .send(())
+                .expect("signal byte-exact outbound frame");
+            release_server_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("release byte-exact IRC server");
+        });
+
+        let mut password = vec![b'p'; 30];
+        password.extend_from_slice(&[0xc3, 0xa9]);
+        let mut config =
+            IrcConnectConfig::new(address.to_string(), b"M\xe4".to_vec(), b"R\xe9al".to_vec());
+        config.password = Some(password);
+        config.ctcp_version = b"LegacyClonk:legacy:\x80".to_vec();
+        let mut handle = IrcClientHandle::connect_with_timeout(config, Duration::from_secs(2))
+            .expect("start byte-exact IRC handle");
+        assert_eq!(
+            handle.recv_event_timeout(Duration::from_secs(2)),
+            Ok(IrcClientEvent::Connected)
+        );
+
+        wait_until(Duration::from_secs(2), || {
+            let snapshot = handle.snapshot();
+            snapshot
+                .channels
+                .iter()
+                .any(|channel| channel.name == b"#r\xe4um" && channel.topic == b"t\xf6pic")
+                && snapshot.messages.iter().any(|message| {
+                    message.message_type == IrcMessageType::Message
+                        && message.source == b"Al\xedce!ident"
+                        && message.target == b"#r\xe4um"
+                        && message.data == b"inbound \x80"
+                })
+                && snapshot.messages.iter().any(|message| {
+                    message.message_type == IrcMessageType::Message
+                        && message.source == b"Al\xedce!ident"
+                        && message.target == b"M\xe4"
+                        && message.data == b"query \x81"
+                })
+        });
+
+        handle
+            .send_command(IrcCommand::Message {
+                target: b"#r\xe4um".to_vec(),
+                text: b"outbound \x96".to_vec(),
+            })
+            .expect("send byte-exact local message");
+        outbound_seen_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server observed byte-exact local message");
+
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.nick, b"M\xe4");
+        assert!(snapshot.messages.iter().any(|message| {
+            message.message_type == IrcMessageType::Message
+                && message.source == b"M\xe4"
+                && message.target == b"#r\xe4um"
+                && message.data == b"outbound \x96"
+        }));
+
+        release_server_tx
+            .send(())
+            .expect("release byte-exact IRC server");
+        server.join().expect("byte-exact IRC server");
+        handle.close().expect("close byte-exact IRC handle");
     }
 
     #[test]
@@ -2113,7 +2322,7 @@ mod tests {
         assert_eq!(snapshot.messages[0].message_type, IrcMessageType::Status);
         assert!(snapshot.messages[0]
             .data
-            .starts_with("Disconnected from server ("));
+            .starts_with(b"Disconnected from server ("));
         handle.close().expect("close failed handle");
     }
 

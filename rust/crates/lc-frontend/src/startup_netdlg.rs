@@ -3200,15 +3200,25 @@ impl NetDlgController {
     }
 
     fn valid_irc_password(password: &str) -> bool {
-        password.is_empty()
-            || ((2..=31).contains(&password.len()) && !password.as_bytes().contains(&b' '))
+        if password.is_empty() {
+            return true;
+        }
+        let Some(bytes) = lc_resources::encode_legacy_script_text(password) else {
+            return false;
+        };
+        (2..=31).contains(&bytes.len()) && !bytes.contains(&b' ')
     }
 
     fn valid_irc_channel(channel: &str) -> bool {
-        channel.is_empty()
-            || ((2..=32).contains(&channel.len())
-                && matches!(channel.as_bytes().first(), Some(b'#' | b'+'))
-                && !channel.as_bytes().contains(&b' '))
+        if channel.is_empty() {
+            return true;
+        }
+        let Some(bytes) = lc_resources::encode_legacy_script_text(channel) else {
+            return false;
+        };
+        (2..=32).contains(&bytes.len())
+            && matches!(bytes.first(), Some(b'#' | b'+'))
+            && !bytes.contains(&b' ')
     }
 
     fn format_chat_message(message: &NetDlgChatMessage, source: &str, own_nick: &str) -> String {
@@ -8116,6 +8126,40 @@ mod tests {
             )]
         );
         assert_eq!(controller.chat_login_field(), NetDlgChatLoginField::Nick);
+    }
+
+    #[test]
+    fn irc_login_validation_counts_legacy_bytes_and_rejects_unrepresentable_text() {
+        let password_at_limit = format!("{}é", "a".repeat(30));
+        assert_eq!(
+            lc_resources::encode_legacy_script_text(&password_at_limit)
+                .expect("Windows-1252 password")
+                .len(),
+            31
+        );
+        assert!(NetDlgController::valid_irc_password(&password_at_limit));
+        assert!(!NetDlgController::valid_irc_password(&format!(
+            "{}é",
+            "a".repeat(31)
+        )));
+        assert!(!NetDlgController::valid_irc_password("ok🙂"));
+        assert!(!NetDlgController::valid_irc_password("has space"));
+
+        let channel_at_limit = format!("#{}é", "a".repeat(30));
+        assert_eq!(
+            lc_resources::encode_legacy_script_text(&channel_at_limit)
+                .expect("Windows-1252 channel")
+                .len(),
+            32
+        );
+        assert!(NetDlgController::valid_irc_channel(&channel_at_limit));
+        assert!(!NetDlgController::valid_irc_channel(&format!(
+            "#{}é",
+            "a".repeat(31)
+        )));
+        assert!(!NetDlgController::valid_irc_channel("#clonk🙂"));
+        assert!(!NetDlgController::valid_irc_channel("clonken"));
+        assert!(!NetDlgController::valid_irc_channel("#clonk en"));
     }
 
     #[test]

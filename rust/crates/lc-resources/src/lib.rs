@@ -44,6 +44,7 @@ pub use scenario::{
     ScenarioDiscoveryError, ScenarioDiscoveryProgress, ScenarioEntry, ScenarioEntryKind,
 };
 pub use script_strings::{
-    decode_legacy_script_text, encode_legacy_script_text, localize_script_source,
+    decode_legacy_script_text, decode_legacy_system_text, encode_legacy_script_text,
+    localize_script_source,
     localize_script_source_with_components,
 };

@@ -23140,7 +23140,7 @@ impl IrcSettings {
     fn from_config(config: &[u8]) -> Self {
         let text = |section, key| {
             native_config_text(config, section, key).map(|value| {
-                lc_resources::decode_legacy_script_text(&lc_script::c4_string_bytes(&value))
+                lc_resources::decode_legacy_system_text(&lc_script::c4_string_bytes(&value))
             })
         };
         let mut settings = Self::default();
@@ -26368,14 +26368,14 @@ fn project_startup_irc_snapshot(
         .channels
         .into_iter()
         .map(|channel| NetDlgChatChannel {
-            name: channel.name,
-            topic: channel.topic,
+            name: lc_resources::decode_legacy_system_text(&channel.name),
+            topic: lc_resources::decode_legacy_system_text(&channel.topic),
             users: channel
                 .users
                 .into_iter()
                 .map(|user| NetDlgChatUser {
-                    prefix: user.prefix,
-                    name: user.name,
+                    prefix: lc_resources::decode_legacy_system_text(&user.prefix),
+                    name: lc_resources::decode_legacy_system_text(&user.name),
                 })
                 .collect(),
         })
@@ -26394,9 +26394,9 @@ fn project_startup_irc_snapshot(
             };
             NetDlgChatMessage {
                 kind,
-                source: message.source,
-                target: message.target,
-                text: message.data,
+                source: lc_resources::decode_legacy_system_text(&message.source),
+                target: lc_resources::decode_legacy_system_text(&message.target),
+                text: lc_resources::decode_legacy_system_text(&message.data),
                 is_channel,
             }
         })
@@ -26404,12 +26404,16 @@ fn project_startup_irc_snapshot(
     NetDlgChatSnapshot {
         connection_state,
         server: server.to_string(),
-        nick: snapshot.nick,
+        nick: lc_resources::decode_legacy_system_text(&snapshot.nick),
         channels,
         messages,
         unread_index,
         last_error: snapshot.last_error,
     }
+}
+
+fn encode_startup_irc_text(text: &str) -> Option<Vec<u8>> {
+    lc_resources::encode_legacy_script_text(text)
 }
 
 fn project_startup_irc_command(
@@ -26418,20 +26422,39 @@ fn project_startup_irc_command(
     use lc_frontend::startup_netdlg::NetDlgChatCommand;
 
     Some(match command {
-        NetDlgChatCommand::Quit { reason } => lc_network::IrcCommand::Quit { reason },
-        NetDlgChatCommand::Join { channel } => lc_network::IrcCommand::Join { channel },
-        NetDlgChatCommand::Part { channel } => lc_network::IrcCommand::Part { channel },
+        NetDlgChatCommand::Quit { reason } => lc_network::IrcCommand::Quit {
+            reason: encode_startup_irc_text(&reason)?,
+        },
+        NetDlgChatCommand::Join { channel } => lc_network::IrcCommand::Join {
+            channel: encode_startup_irc_text(&channel)?,
+        },
+        NetDlgChatCommand::Part { channel } => lc_network::IrcCommand::Part {
+            channel: encode_startup_irc_text(&channel)?,
+        },
         NetDlgChatCommand::Message { target, text } => {
-            lc_network::IrcCommand::Message { target, text }
+            lc_network::IrcCommand::Message {
+                target: encode_startup_irc_text(&target)?,
+                text: encode_startup_irc_text(&text)?,
+            }
         }
         NetDlgChatCommand::Notice { target, text } => {
-            lc_network::IrcCommand::Notice { target, text }
+            lc_network::IrcCommand::Notice {
+                target: encode_startup_irc_text(&target)?,
+                text: encode_startup_irc_text(&text)?,
+            }
         }
         NetDlgChatCommand::Action { target, text } => {
-            lc_network::IrcCommand::Action { target, text }
+            lc_network::IrcCommand::Action {
+                target: encode_startup_irc_text(&target)?,
+                text: encode_startup_irc_text(&text)?,
+            }
         }
-        NetDlgChatCommand::Raw(line) => lc_network::IrcCommand::Raw(line),
-        NetDlgChatCommand::ChangeNick { nick } => lc_network::IrcCommand::ChangeNick { nick },
+        NetDlgChatCommand::Raw(line) => {
+            lc_network::IrcCommand::Raw(encode_startup_irc_text(&line)?)
+        }
+        NetDlgChatCommand::ChangeNick { nick } => lc_network::IrcCommand::ChangeNick {
+            nick: encode_startup_irc_text(&nick)?,
+        },
         // Opening a query tab is presentation-only; the first message is sent
         // separately if the user enters one.
         NetDlgChatCommand::OpenQuery { .. } => return None,
@@ -57705,13 +57728,27 @@ impl GameApp {
             nick: login.nick.clone(),
             ..Default::default()
         });
+        let encode = |text: &str| {
+            encode_startup_irc_text(text).ok_or_else(|| EngineError::ClassicMenuParityBoundary {
+                detail: "validated IRC text is not representable in the native byte charset"
+                    .to_string(),
+            })
+        };
         let mut config = lc_network::IrcConnectConfig::new(
             login.server.clone(),
-            login.nick.clone(),
-            login.real_name,
+            encode(&login.nick)?,
+            encode(&login.real_name)?,
         );
-        config.password = (!login.password.is_empty()).then_some(login.password);
-        config.auto_join = (!login.channel.is_empty()).then_some(login.channel);
+        config.password = if login.password.is_empty() {
+            None
+        } else {
+            Some(encode(&login.password)?)
+        };
+        config.auto_join = if login.channel.is_empty() {
+            None
+        } else {
+            Some(encode(&login.channel)?)
+        };
         match lc_network::IrcClientHandle::connect(config) {
             Ok(client) => {
                 self.startup_irc_initial_connect_pending = true;
@@ -130825,6 +130862,70 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let invalid = IrcSettings::from_config(b"[Startup]\nHideMsgIRCDangerous=yes\n");
         assert!(!invalid.hide_dangerous_warning);
+
+        let utf8_shaped = IrcSettings::from_config(
+            b"[IRC]\nNick=\xc3\xa9\nRealName=Name \xc3\xa9\nChannel=#\xc3\xa9\n",
+        );
+        let presented = "\u{00c3}\u{00a9}";
+        assert_eq!(utf8_shaped.nick, presented);
+        assert_eq!(utf8_shaped.real_name, format!("Name {presented}"));
+        assert_eq!(utf8_shaped.channel, format!("#{presented}"));
+        assert_eq!(
+            encode_startup_irc_text(&utf8_shaped.nick),
+            Some(vec![0xc3, 0xa9]),
+            "valid UTF-8-shaped config bytes remain two native bytes"
+        );
+    }
+
+    #[test]
+    fn startup_irc_snapshot_projects_legacy_bytes_without_utf8_reinterpretation() {
+        let raw = vec![0xc3, 0xa9];
+        let mut channel_name = b"#".to_vec();
+        channel_name.extend_from_slice(&raw);
+        let snapshot = lc_network::IrcClientSnapshot {
+            connection_state: lc_network::IrcConnectionState::Connected,
+            nick: raw.clone(),
+            prefixes: b"(ov)@+".to_vec(),
+            channels: vec![lc_network::IrcChannel {
+                name: channel_name.clone(),
+                topic: raw.clone(),
+                users: vec![lc_network::IrcUser {
+                    prefix: b"@".to_vec(),
+                    name: raw.clone(),
+                }],
+                receiving_users: false,
+            }],
+            messages: vec![lc_network::IrcMessage {
+                timestamp: std::time::SystemTime::UNIX_EPOCH,
+                message_type: lc_network::IrcMessageType::Message,
+                source: raw.clone(),
+                target: channel_name,
+                data: raw.clone(),
+            }],
+            unread_index: 0,
+            last_error: None,
+        };
+
+        let projected = project_startup_irc_snapshot("irc.example.test", snapshot);
+        let presented = "\u{00c3}\u{00a9}";
+        assert_eq!(projected.nick, presented);
+        assert_eq!(projected.channels[0].name, format!("#{presented}"));
+        assert_eq!(projected.channels[0].topic, presented);
+        assert_eq!(projected.channels[0].users[0].prefix, "@");
+        assert_eq!(projected.channels[0].users[0].name, presented);
+        assert_eq!(projected.messages[0].source, presented);
+        assert_eq!(projected.messages[0].target, format!("#{presented}"));
+        assert_eq!(projected.messages[0].text, presented);
+        assert!(projected.messages[0].is_channel);
+        for text in [
+            &projected.nick,
+            &projected.channels[0].topic,
+            &projected.channels[0].users[0].name,
+            &projected.messages[0].source,
+            &projected.messages[0].text,
+        ] {
+            assert_eq!(encode_startup_irc_text(text), Some(raw.clone()));
+        }
     }
 
     #[test]
@@ -131078,7 +131179,11 @@ public func Grant(password) { return GainMissionAccess(password); }
             while stream.read(&mut buffer).is_ok_and(|read| read != 0) {}
         });
         let handle = lc_network::IrcClientHandle::connect_with_timeout(
-            lc_network::IrcConnectConfig::new(address.to_string(), "Clonker", "Clonker"),
+            lc_network::IrcConnectConfig::new(
+                address.to_string(),
+                b"Clonker".to_vec(),
+                b"Clonker".to_vec(),
+            ),
             Duration::from_secs(2),
         )
         .expect("start loopback IRC client");
@@ -131161,7 +131266,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                     reason: "bye".into(),
                 },
                 Backend::Quit {
-                    reason: "bye".into(),
+                    reason: b"bye".to_vec(),
                 },
             ),
             (
@@ -131169,7 +131274,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                     channel: "#clonk".into(),
                 },
                 Backend::Join {
-                    channel: "#clonk".into(),
+                    channel: b"#clonk".to_vec(),
                 },
             ),
             (
@@ -131177,17 +131282,17 @@ public func Grant(password) { return GainMissionAccess(password); }
                     channel: "#clonk".into(),
                 },
                 Backend::Part {
-                    channel: "#clonk".into(),
+                    channel: b"#clonk".to_vec(),
                 },
             ),
             (
                 Frontend::Message {
                     target: "#clonk".into(),
-                    text: "hello".into(),
+                    text: "\u{00c3}\u{00a9}".into(),
                 },
                 Backend::Message {
-                    target: "#clonk".into(),
-                    text: "hello".into(),
+                    target: b"#clonk".to_vec(),
+                    text: vec![0xc3, 0xa9],
                 },
             ),
             (
@@ -131196,8 +131301,8 @@ public func Grant(password) { return GainMissionAccess(password); }
                     text: "notice".into(),
                 },
                 Backend::Notice {
-                    target: "Clonker".into(),
-                    text: "notice".into(),
+                    target: b"Clonker".to_vec(),
+                    text: b"notice".to_vec(),
                 },
             ),
             (
@@ -131206,20 +131311,20 @@ public func Grant(password) { return GainMissionAccess(password); }
                     text: "waves".into(),
                 },
                 Backend::Action {
-                    target: "#clonk".into(),
-                    text: "waves".into(),
+                    target: b"#clonk".to_vec(),
+                    text: b"waves".to_vec(),
                 },
             ),
             (
                 Frontend::Raw("WHOIS Clonker".into()),
-                Backend::Raw("WHOIS Clonker".into()),
+                Backend::Raw(b"WHOIS Clonker".to_vec()),
             ),
             (
                 Frontend::ChangeNick {
                     nick: "Clonker_".into(),
                 },
                 Backend::ChangeNick {
-                    nick: "Clonker_".into(),
+                    nick: b"Clonker_".to_vec(),
                 },
             ),
         ];
@@ -131232,6 +131337,11 @@ public func Grant(password) { return GainMissionAccess(password); }
             }),
             None,
             "query tabs are a frontend-only operation"
+        );
+        assert_eq!(
+            project_startup_irc_command(Frontend::Raw("snowman \u{2603}".into())),
+            None,
+            "unrepresentable presentation text must not reach the byte transport"
         );
     }
 
@@ -131359,7 +131469,11 @@ public func Grant(password) { return GainMissionAccess(password); }
     fn active_irc_runtime_hud_chat_button_opens_ui_without_disconnecting_transport() {
         let (address, server) = spawn_loopback_irc_server();
         let handle = lc_network::IrcClientHandle::connect_with_timeout(
-            lc_network::IrcConnectConfig::new(address.clone(), "Clonker", "Clonker"),
+            lc_network::IrcConnectConfig::new(
+                address.clone(),
+                b"Clonker".to_vec(),
+                b"Clonker".to_vec(),
+            ),
             Duration::from_secs(2),
         )
         .expect("start loopback IRC client");
