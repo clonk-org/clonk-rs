@@ -23,8 +23,7 @@ pub struct TextureMap {
 /// ("Index +128 for underground materials", TexMap.txt header).
 pub const IFT_BIT: u8 = 0x80;
 
-fn parse_decimal_prefix(text: &str) -> Option<i32> {
-    let bytes = text.as_bytes();
+fn parse_decimal_prefix(bytes: &[u8]) -> Option<i32> {
     let mut cursor = 0;
     while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
         cursor += 1;
@@ -65,31 +64,43 @@ impl TextureMap {
     /// `C4TextureMap::LoadMap`. Unknown or malformed lines are skipped; only
     /// a `#` in column zero suppresses entry parsing.
     pub fn parse(source: &str) -> Self {
+        Self::parse_bytes(&lc_script::c4_string_bytes(source))
+    }
+
+    /// Parse the raw `LoadEntry` buffer without replacing native bytes.
+    pub fn parse_bytes(source: &[u8]) -> Self {
         let mut map = Self {
             entries: vec![None; 128],
             overload_materials: false,
             overload_textures: false,
         };
-        for raw_line in source.split('\n') {
+        let source = source.split(|byte| *byte == 0).next().unwrap_or_default();
+        for raw_line in source.split(|byte| *byte == b'\n') {
+            // SCopySegment writes at most 100 bytes into szLine.
+            let raw_line = &raw_line[..raw_line.len().min(100)];
             // LoadMap decides between entries and flags before removing CR:
             // entries require exactly one '=' and a non-comment first byte.
-            if raw_line.starts_with('#')
-                || raw_line.bytes().filter(|byte| *byte == b'=').count() != 1
+            if raw_line.first() == Some(&b'#')
+                || raw_line.iter().filter(|byte| **byte == b'=').count() != 1
             {
-                if raw_line.starts_with("OverloadMaterials") {
+                if raw_line.starts_with(b"OverloadMaterials") {
                     map.overload_materials = true;
                 }
-                if raw_line.starts_with("OverloadTextures") {
+                if raw_line.starts_with(b"OverloadTextures") {
                     map.overload_textures = true;
                 }
                 continue;
             }
             // SReplaceChar(line, '\r', '\0') makes the first CR terminate all
             // subsequent C-string operations.
-            let line = raw_line.split('\r').next().unwrap_or_default();
-            let Some((index_text, pair)) = line.split_once('=') else {
+            let line = raw_line
+                .split(|byte| *byte == b'\r')
+                .next()
+                .unwrap_or_default();
+            let Some(equals) = line.iter().position(|byte| *byte == b'=') else {
                 continue;
             };
+            let (index_text, pair) = (&line[..equals], &line[equals + 1..]);
             let Some(index) = parse_decimal_prefix(index_text) else {
                 continue;
             };
@@ -98,12 +109,12 @@ impl TextureMap {
             if !(1..127).contains(&index) {
                 continue;
             }
-            let Some((material, texture)) = pair.split_once('-') else {
+            let Some(hyphen) = pair.iter().position(|byte| *byte == b'-') else {
                 continue;
             };
             map.entries[index as usize] = Some(TexMapEntry {
-                material: material.to_string(),
-                texture: texture.to_string(),
+                material: lc_script::c4_string_from_bytes(&pair[..hyphen]),
+                texture: lc_script::c4_string_from_bytes(&pair[hyphen + 1..]),
             });
         }
         map
@@ -113,17 +124,26 @@ impl TextureMap {
     /// `C4TextureMap::LoadFlags`. Unlike [`Self::parse`], this is a raw
     /// prefix scan and deliberately accepts suffixes such as `=1`.
     pub fn parse_flags(source: &str) -> Self {
+        Self::parse_flags_bytes(&lc_script::c4_string_bytes(source))
+    }
+
+    /// Read continuation flags from native `LoadEntryString` bytes.
+    pub fn parse_flags_bytes(source: &[u8]) -> Self {
         let mut map = Self {
             entries: vec![None; 128],
             overload_materials: false,
             overload_textures: false,
         };
-        for raw_line in source.split('\n') {
-            let line = raw_line.trim_start_matches('\r');
-            if line.starts_with("OverloadMaterials") {
+        let source = source.split(|byte| *byte == 0).next().unwrap_or_default();
+        for raw_line in source.split(|byte| *byte == b'\n') {
+            let line = raw_line
+                .iter()
+                .position(|byte| *byte != b'\r' && *byte != b'\n')
+                .map_or(&[][..], |start| &raw_line[start..]);
+            if line.starts_with(b"OverloadMaterials") {
                 map.overload_materials = true;
             }
-            if line.starts_with("OverloadTextures") {
+            if line.starts_with(b"OverloadTextures") {
                 map.overload_textures = true;
             }
         }

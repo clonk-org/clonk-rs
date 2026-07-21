@@ -2589,8 +2589,7 @@ fn load_scenario_into_runtime(
             .map(|root| {
                 std::fs::read(root.join("Material.c4g").join("TexMap.txt"))
                     .map(|bytes| {
-                        lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&bytes))
-                            .overload_materials
+                        lc_resources::texmap::TextureMap::parse_bytes(&bytes).overload_materials
                     })
                     .unwrap_or(true)
             })

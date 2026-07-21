@@ -8,6 +8,58 @@ use crate::{
 use std::collections::HashMap;
 use thiserror::Error;
 
+/// Native byte capacity of `C4Material::Name` and `C4Texture::Name`.
+pub const C4M_MAX_NAME_BYTES: usize = 15;
+
+fn c4_name_byte_key(byte: u8) -> u8 {
+    match byte {
+        b'A'..=b'Z' => byte + (b'a' - b'A'),
+        0xc4 | 0xe4 => 0xe4,
+        0xd6 | 0xf6 => 0xf6,
+        0xdc | 0xfc => 0xfc,
+        _ => byte,
+    }
+}
+
+/// Canonical key for C++ `SEqualNoCase` material/texture-name comparisons.
+///
+/// The private-use projection used by `lc-script` lets the surrounding Rust
+/// APIs remain strings without replacing arbitrary native bytes.
+#[doc(hidden)]
+pub fn c4_name_key(name: &str) -> String {
+    let bytes = lc_script::c4_string_bytes(name);
+    let visible = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+    let folded = visible
+        .iter()
+        .copied()
+        .map(c4_name_byte_key)
+        .collect::<Vec<_>>();
+    lc_script::c4_string_from_bytes(&folded)
+}
+
+/// C++ `SEqualNoCase` over the native bytes represented by two Rust strings.
+#[doc(hidden)]
+pub fn c4_names_equal(left: &str, right: &str) -> bool {
+    c4_name_key(left) == c4_name_key(right)
+}
+
+/// Copy one native C string into the reversible Rust projection.
+#[doc(hidden)]
+pub fn c4_c_string(value: &str) -> String {
+    let bytes = lc_script::c4_string_bytes(value);
+    let visible = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+    lc_script::c4_string_from_bytes(visible)
+}
+
+/// Store one fixed `C4M_MaxName + 1` identity, stopping at a native NUL and
+/// truncating by native bytes rather than UTF-8 scalar boundaries.
+#[doc(hidden)]
+pub fn truncate_c4m_name(name: &str) -> String {
+    let visible = c4_c_string(name);
+    let bytes = lc_script::c4_string_bytes(&visible);
+    lc_script::c4_string_from_bytes(&bytes[..bytes.len().min(C4M_MAX_NAME_BYTES)])
+}
+
 #[derive(Debug, Error)]
 pub enum MaterialError {
     #[error("material resource error: {0}")]
@@ -98,7 +150,8 @@ impl MaterialEnumeration {
         let mut bytes = Self::HEADER.to_vec();
         bytes.extend_from_slice(b"\r\n");
         for name in &self.names {
-            bytes.extend_from_slice(name.as_bytes());
+            let name = c4_c_string(name);
+            bytes.extend_from_slice(&lc_script::c4_string_bytes(&name));
             bytes.extend_from_slice(b"\r\n");
         }
         bytes.push(b' ');
@@ -126,7 +179,14 @@ pub struct MaterialLibrary {
 
 impl MaterialLibrary {
     pub fn parse(source: &str) -> Result<Self, MaterialError> {
-        let parser = MaterialParser::new(source);
+        Self::parse_bytes(&lc_script::c4_string_bytes(source))
+    }
+
+    /// Parse the native `C4MaterialCore` source without a UTF-8 round trip.
+    pub fn parse_bytes(source: &[u8]) -> Result<Self, MaterialError> {
+        let visible = source.split(|byte| *byte == 0).next().unwrap_or_default();
+        let source = lc_script::c4_string_from_bytes(visible);
+        let parser = MaterialParser::new(&source);
         let parsed = parser.parse()?;
         Self::from_definitions(parsed)
     }
@@ -138,10 +198,8 @@ impl MaterialLibrary {
                 continue;
             }
             let bytes = group.read_entry_bytes_exact(&entry)?;
-            let text = match String::from_utf8(bytes) {
-                Ok(text) => text,
-                Err(error) => String::from_utf8_lossy(&error.into_bytes()).into_owned(),
-            };
+            let visible = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+            let text = lc_script::c4_string_from_bytes(visible);
             collected.push(MaterialParser::new(&text).parse_first()?);
         }
         if collected.is_empty() {
@@ -162,9 +220,7 @@ impl MaterialLibrary {
                 .iter()
                 .filter(|definition| {
                     !merged.iter().any(|existing| {
-                        existing
-                            .name()
-                            .eq_ignore_ascii_case(definition.name())
+                        c4_names_equal(existing.name(), definition.name())
                     })
                 })
                 .cloned()
@@ -180,7 +236,7 @@ impl MaterialLibrary {
 
     pub fn get(&self, name: &str) -> Option<&MaterialDefinition> {
         self.by_name
-            .get(&normalize_key(name))
+            .get(&c4_name_key(name))
             .and_then(|&index| self.materials.get(index))
     }
 
@@ -224,7 +280,7 @@ impl MaterialLibrary {
     fn from_definitions(definitions: Vec<MaterialDefinition>) -> Result<Self, MaterialError> {
         let mut by_name = HashMap::with_capacity(definitions.len());
         for (index, material) in definitions.iter().enumerate() {
-            let key = normalize_key(&material.name);
+            let key = c4_name_key(&material.name);
             if by_name.insert(key.clone(), index).is_some() {
                 return Err(MaterialError::DuplicateName(material.name.clone()));
             }
@@ -247,7 +303,7 @@ impl MaterialLibrary {
 fn first_name_indices(definitions: &[MaterialDefinition]) -> HashMap<String, usize> {
     let mut by_name = HashMap::with_capacity(definitions.len());
     for (index, material) in definitions.iter().enumerate() {
-        by_name.entry(normalize_key(material.name())).or_insert(index);
+        by_name.entry(c4_name_key(material.name())).or_insert(index);
     }
     by_name
 }
@@ -475,7 +531,7 @@ fn parse_native_material(source: &str) -> MaterialDefinition {
     let name = properties
         .get("name")
         .and_then(|values| values.first())
-        .map(|value| value.trim_start_matches([' ', '\t']).to_string())
+        .cloned()
         .unwrap_or_default();
 
     let mut reactions = Vec::new();
@@ -672,7 +728,7 @@ fn native_fixed_array(
 
 fn native_compiled_string(name: &str, value: &str) -> String {
     match name {
-        "Name" => value.trim_start_matches([' ', '\t']).to_string(),
+        "Name" => truncate_c4m_name(value.trim_start_matches([' ', '\t'])),
         "TextureOverlay"
         | "PXSGfx"
         | "BlastShiftTo"
@@ -859,7 +915,7 @@ fn material_definition_from_record(
 ) -> Result<MaterialDefinition, MaterialError> {
     let MaterialRecord {
         name_hint,
-        properties,
+        mut properties,
         reactions,
     } = record;
     let mut name = name_hint;
@@ -871,6 +927,13 @@ fn material_definition_from_record(
     let Some(name) = name else {
         return Err(MaterialError::MissingName { index });
     };
+    let name = truncate_c4m_name(&name);
+    if let Some(first) = properties
+        .get_mut("name")
+        .and_then(|values| values.first_mut())
+    {
+        *first = name.clone();
+    }
     Ok(MaterialDefinition {
         name,
         properties,

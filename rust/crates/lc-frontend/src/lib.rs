@@ -201,6 +201,51 @@ impl Default for GamePalette {
     }
 }
 
+/// One native material texture surface. PNG entries carry `Surface32`, while
+/// legacy indexed BMP entries carry `Surface8`; C++ uses both for landscape
+/// patterns but permits only `Surface32` as graphical PXS artwork.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MaterialTextureSurface {
+    Surface32(ImageData),
+    Surface8 {
+        width: u32,
+        height: u32,
+        indices: Arc<[u8]>,
+    },
+}
+
+impl MaterialTextureSurface {
+    pub fn surface32(image: ImageData) -> Self {
+        Self::Surface32(image)
+    }
+
+    pub fn surface8(width: u32, height: u32, indices: Vec<u8>) -> Self {
+        Self::Surface8 {
+            width,
+            height,
+            indices: Arc::from(indices.into_boxed_slice()),
+        }
+    }
+
+    pub fn surface32_image(&self) -> Option<&ImageData> {
+        match self {
+            Self::Surface32(image) => Some(image),
+            Self::Surface8 { .. } => None,
+        }
+    }
+
+    pub fn indexed_pixels(&self) -> Option<(u32, u32, &[u8])> {
+        match self {
+            Self::Surface32(_) => None,
+            Self::Surface8 {
+                width,
+                height,
+                indices,
+            } => Some((*width, *height, indices)),
+        }
+    }
+}
+
 /// Presentation fields from one C4MaterialCore. Colors and alpha retain the
 /// C++ arrays verbatim: three RGB triplets and two sets of three transparency
 /// values (`0` opaque, `255` transparent).
@@ -325,6 +370,94 @@ fn apply_material_pattern(
         .saturating_add(pattern_transparency);
 }
 
+#[derive(Clone, Copy)]
+enum MaterialPatternRef<'a> {
+    Surface32(&'a ImageData),
+    Surface8 {
+        width: u32,
+        height: u32,
+        indices: &'a [u8],
+    },
+}
+
+impl<'a> From<&'a MaterialTextureSurface> for MaterialPatternRef<'a> {
+    fn from(surface: &'a MaterialTextureSurface) -> Self {
+        match surface {
+            MaterialTextureSurface::Surface32(image) => Self::Surface32(image),
+            MaterialTextureSurface::Surface8 {
+                width,
+                height,
+                indices,
+            } => Self::Surface8 {
+                width: *width,
+                height: *height,
+                indices,
+            },
+        }
+    }
+}
+
+fn apply_indexed_material_pattern(
+    pixel: &mut MaterialPixel,
+    material: &MaterialRenderInfo,
+    landscape_pixel: u8,
+    width: u32,
+    height: u32,
+    indices: &[u8],
+    x: i32,
+    y: i32,
+    zoom: i32,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let sample_x = if zoom == 0 { x } else { x / zoom };
+    let sample_y = if zoom == 0 { y } else { y / zoom };
+    let source = (sample_y as u32 % height) as usize * width as usize
+        + (sample_x as u32 % width) as usize;
+    let Some(&shift) = indices.get(source) else {
+        return;
+    };
+    let shift = usize::from(shift % 3);
+    let color = shift * 3;
+    pixel.red = material.color[color];
+    pixel.green = material.color[color + 1];
+    pixel.blue = material.color[color + 2];
+    pixel.transparency = material.alpha[shift + if landscape_pixel & 0xf0 == 0 { 0 } else { 3 }];
+}
+
+fn apply_material_surface(
+    pixel: &mut MaterialPixel,
+    material: &MaterialRenderInfo,
+    landscape_pixel: u8,
+    pattern: MaterialPatternRef<'_>,
+    x: i32,
+    y: i32,
+    zoom: i32,
+    monochrome: bool,
+) {
+    match pattern {
+        MaterialPatternRef::Surface32(pattern) => {
+            apply_material_pattern(pixel, pattern, x, y, zoom, monochrome)
+        }
+        MaterialPatternRef::Surface8 {
+            width,
+            height,
+            indices,
+        } => apply_indexed_material_pattern(
+            pixel,
+            material,
+            landscape_pixel,
+            width,
+            height,
+            indices,
+            x,
+            y,
+            zoom,
+        ),
+    }
+}
+
 #[cfg(test)]
 std::thread_local! {
     static MATERIAL_COMPOSITION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -362,6 +495,24 @@ fn compose_material_pixel(
     texture: &ImageData,
     overlay: Option<&ImageData>,
 ) -> Color {
+    compose_material_surface_pixel(
+        material,
+        landscape_pixel,
+        x,
+        y,
+        MaterialPatternRef::Surface32(texture),
+        overlay.map(MaterialPatternRef::Surface32),
+    )
+}
+
+fn compose_material_surface_pixel(
+    material: &MaterialRenderInfo,
+    landscape_pixel: u8,
+    x: i32,
+    y: i32,
+    texture: MaterialPatternRef<'_>,
+    overlay: Option<MaterialPatternRef<'_>>,
+) -> Color {
     #[cfg(test)]
     MATERIAL_COMPOSITION_CALLS.with(|calls| calls.set(calls.get() + 1));
 
@@ -379,8 +530,10 @@ fn compose_material_pixel(
         0
     };
     let monochrome = material.overlay_type & MATERIAL_OVERLAY_MONOCHROME != 0;
-    apply_material_pattern(
+    apply_material_surface(
         &mut pixel,
+        material,
+        landscape_pixel,
         texture,
         x,
         y,
@@ -393,8 +546,10 @@ fn compose_material_pixel(
         } else {
             2
         };
-        apply_material_pattern(
+        apply_material_surface(
             &mut pixel,
+            material,
+            landscape_pixel,
             overlay,
             x,
             y,
@@ -3680,10 +3835,10 @@ pub struct GraphicsSystem {
     /// frontend; retain the exact C++ default and clamp at use meanwhile.
     scroll_smooth: i32,
     sky: Option<SkyRenderState>,
-    /// Material texture pngs by lowercase texture name — the landscape
-    /// plane samples them per pixel (C++ builds Surface32 from the same
-    /// Material.c4g textures during MapToSurface).
-    material_textures: Arc<HashMap<String, ImageData>>,
+    /// Native material texture surfaces by byte-folded texture name. Both
+    /// Surface32 PNGs and indexed Surface8 BMPs participate in landscape
+    /// patterns; only Surface32 is eligible for graphical PXS.
+    material_textures: Arc<HashMap<String, MaterialTextureSurface>>,
     /// C4MaterialCore presentation fields by lowercase material name.
     material_render_info: Arc<HashMap<String, MaterialRenderInfo>>,
     /// Persistent C++-style Surface32 counterpart. The retained PixelGrid
@@ -3839,6 +3994,24 @@ impl GraphicsSystem {
     }
 
     pub fn set_material_textures(&mut self, textures: Arc<HashMap<String, ImageData>>) {
+        self.material_textures = Arc::new(
+            textures
+                .iter()
+                .map(|(name, image)| {
+                    (
+                        name.clone(),
+                        MaterialTextureSurface::surface32(image.clone()),
+                    )
+                })
+                .collect(),
+        );
+        self.landscape_cache = None;
+    }
+
+    pub fn set_material_texture_surfaces(
+        &mut self,
+        textures: Arc<HashMap<String, MaterialTextureSurface>>,
+    ) {
         self.material_textures = textures;
         self.landscape_cache = None;
     }
@@ -6551,7 +6724,7 @@ impl GraphicsSystem {
             let Some(material_name) = particle
                 .definition_id
                 .strip_prefix("material/pxs/")
-                .map(str::to_ascii_lowercase)
+                .map(lc_resources::material::c4_name_key)
             else {
                 continue;
             };
@@ -6570,7 +6743,7 @@ impl GraphicsSystem {
             let Some(material_name) = particle
                 .definition_id
                 .strip_prefix("material/pxs/")
-                .map(str::to_ascii_lowercase)
+                .map(lc_resources::material::c4_name_key)
             else {
                 continue;
             };
@@ -6620,7 +6793,15 @@ impl GraphicsSystem {
         material
             .pxs_gfx
             .as_deref()
-            .and_then(|name| self.material_textures.get(&name.to_ascii_lowercase()))
+            .and_then(|name| {
+                self.material_textures
+                    .get(&lc_resources::material::c4_name_key(name))
+                    .and_then(MaterialTextureSurface::surface32_image)
+                    // A failed native ReadPNG leaves a non-null 0x0 surface;
+                    // PXS phase arithmetic then divides by zero. Contain that
+                    // undefined case as the old-style fallback.
+                    .filter(|image| image.width() != 0 && image.height() != 0)
+            })
             .map(|texture| (texture, rect))
     }
 
@@ -6881,7 +7062,9 @@ impl GraphicsSystem {
                     materials
                         .get(index)
                         .and_then(|name| name.as_deref())
-                        .and_then(|name| material_render_info.get(&name.to_ascii_lowercase()))
+                        .and_then(|name| {
+                            material_render_info.get(&lc_resources::material::c4_name_key(name))
+                        })
                         .map_or(0, |material| material.placement)
                 })
                 .collect();
@@ -6894,8 +7077,8 @@ impl GraphicsSystem {
                 Empty,
                 Patterns {
                     material: &'a MaterialRenderInfo,
-                    texture: &'a ImageData,
-                    overlay: Option<&'a ImageData>,
+                    texture: &'a MaterialTextureSurface,
+                    overlay: Option<&'a MaterialTextureSurface>,
                 },
             }
             let slots: Vec<Slot> = (0..128usize)
@@ -6903,17 +7086,19 @@ impl GraphicsSystem {
                     let Some(material) = materials
                         .get(index)
                         .and_then(|name| name.as_deref())
-                        .and_then(|name| material_render_info.get(&name.to_ascii_lowercase()))
+                        .and_then(|name| {
+                            material_render_info.get(&lc_resources::material::c4_name_key(name))
+                        })
                     else {
                         return Slot::Empty;
                     };
                     let resolve_texture = |name: &str| {
                         let name = if (25..50).contains(&material.density)
-                            && name.eq_ignore_ascii_case("Smooth")
+                            && lc_resources::material::c4_names_equal(name, "Smooth")
                         {
-                            "liquid".to_string()
+                            lc_resources::material::c4_name_key("Liquid")
                         } else {
-                            name.to_ascii_lowercase()
+                            lc_resources::material::c4_name_key(name)
                         };
                         material_textures.get(&name)
                     };
@@ -6927,7 +7112,10 @@ impl GraphicsSystem {
                     let overlay_name = material
                         .texture_overlay
                         .as_deref()
-                        .filter(|name| material_textures.contains_key(&name.to_ascii_lowercase()))
+                        .filter(|name| {
+                            material_textures
+                                .contains_key(&lc_resources::material::c4_name_key(name))
+                        })
                         .unwrap_or("Smooth");
                     Slot::Patterns {
                         material,
@@ -6998,8 +7186,13 @@ impl GraphicsSystem {
                                 texture,
                                 overlay,
                             } => {
-                                let mut color = compose_material_pixel(
-                                    material, byte, x, y, texture, *overlay,
+                                let mut color = compose_material_surface_pixel(
+                                    material,
+                                    byte,
+                                    x,
+                                    y,
+                                    (*texture).into(),
+                                    (*overlay).map(Into::into),
                                 );
                                 if shade_materials {
                                     let mut own_density = placements[index];
@@ -7224,7 +7417,10 @@ impl GraphicsSystem {
                 self.game_palette.color(index as u8)
             };
             *color = material
-                .and_then(|name| self.material_render_info.get(&name.to_ascii_lowercase()))
+                .and_then(|name| {
+                    self.material_render_info
+                        .get(&lc_resources::material::c4_name_key(name))
+                })
                 .map_or(source_color, |material| {
                     Color::new(
                         material.color[0],
@@ -18649,9 +18845,7 @@ mod tests {
         let texmap_source = local_material_group
             .read_file("Texmap.txt")
             .expect("Tutorial07 Texmap.txt reads");
-        let texmap = lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(
-            &texmap_source,
-        ));
+        let texmap = lc_resources::texmap::TextureMap::parse_bytes(&texmap_source);
         let acid_slot = texmap.entry(22).expect("Tutorial07 Acid texmap slot");
         assert_eq!(
             (acid_slot.material.as_str(), acid_slot.texture.as_str()),
@@ -19386,10 +19580,20 @@ mod tests {
                 snow_pixels[index + 3] = 128;
             }
         }
-        graphics.set_material_textures(Arc::new(HashMap::from([(
-            "snow".to_string(),
-            ImageData::new(12, 6, snow_pixels),
-        )])));
+        graphics.set_material_texture_surfaces(Arc::new(HashMap::from([
+            (
+                "snow".to_string(),
+                MaterialTextureSurface::surface32(ImageData::new(12, 6, snow_pixels)),
+            ),
+            (
+                "indexed".to_string(),
+                MaterialTextureSurface::surface8(1, 1, vec![2]),
+            ),
+            (
+                "empty".to_string(),
+                MaterialTextureSurface::surface32(ImageData::new(0, 0, Vec::new())),
+            ),
+        ])));
         graphics.set_material_render_info(Arc::new(HashMap::from([
             (
                 "snow".to_string(),
@@ -19401,17 +19605,43 @@ mod tests {
                 MaterialRenderInfo::new([90, 80, 70, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25)
                     .with_pxs_graphics(Some("Missing".to_string()), [0, 0, 2, 2, 0, 0], 3),
             ),
+            (
+                "mud".to_string(),
+                MaterialRenderInfo::new([11, 22, 33, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25)
+                    .with_pxs_graphics(Some("Indexed".to_string()), [0, 0, 1, 1, 0, 0], 1),
+            ),
+            (
+                "dust".to_string(),
+                MaterialRenderInfo::new([44, 55, 66, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25)
+                    .with_pxs_graphics(Some("Empty".to_string()), [0, 0, 1, 1, 0, 0], 1),
+            ),
         ])));
         let graphical = pxs_particle("snow", [4 << 16, 4 << 16, 0, 0], 507);
         let fallback = pxs_particle("ash", [10 << 16, 10 << 16, 0, 0], 1);
+        let indexed_fallback = pxs_particle("mud", [13 << 16, 13 << 16, 0, 0], 2);
+        let empty_surface32 = pxs_particle("dust", [14 << 16, 14 << 16, 0, 0], 3);
 
-        graphics.draw_pxs(&[graphical, fallback], 1.0, None);
+        graphics.draw_pxs(
+            &[graphical, fallback, indexed_fallback, empty_surface32],
+            1.0,
+            None,
+        );
 
         // 507 % 500 = 7: phase x=1; z=1; tx=6 shifts x by one. Texture
         // transparency 127 plus modulation 16 gives 143, i.e. source opacity
         // 112 over black (PerformBlt alpha addition).
         assert_eq!(graphics.surface().get_pixel(5, 4), Some(Color::opaque(112, 0, 0)));
         assert_eq!(graphics.surface().get_pixel(10, 10), Some(Color::opaque(90, 80, 70)));
+        assert_eq!(
+            graphics.surface().get_pixel(13, 13),
+            Some(Color::opaque(11, 22, 33)),
+            "Surface8 textures are landscape patterns, not graphical PXS sheets"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(14, 14),
+            Some(Color::opaque(44, 55, 66)),
+            "a 0x0 Surface32 identity contains native divide-by-zero as old-style PXS"
+        );
     }
 
     #[test]
@@ -25772,6 +26002,34 @@ mod tests {
         apply_material_pattern(&mut pixel, &texture, 0, 0, 0, true);
 
         assert_eq!([pixel.red, pixel.green, pixel.blue], [100, 150, 200]);
+    }
+
+    #[test]
+    fn indexed_material_patterns_select_the_native_color_triplet() {
+        let material = MaterialRenderInfo::new(
+            [10, 20, 30, 40, 50, 60, 70, 80, 90],
+            [1, 2, 3, 4, 5, 6],
+            None,
+            MATERIAL_OVERLAY_MONOCHROME,
+            50,
+        );
+        let surface = MaterialTextureSurface::surface8(2, 1, vec![2, 1]);
+
+        assert_eq!(
+            compose_material_surface_pixel(&material, 1, 0, 0, (&surface).into(), None),
+            Color::new(70, 80, 90, 252),
+            "Surface8 shift 2 selects the third RGB/alpha triplet"
+        );
+        assert_eq!(
+            compose_material_surface_pixel(&material, 0x81, 1, 0, (&surface).into(), None),
+            Color::new(40, 50, 60, 250),
+            "IFT pixels select the second alpha triplet; monochrome is ignored for Surface8"
+        );
+        assert_eq!(
+            compose_material_surface_pixel(&material, 0x10, 0, 0, (&surface).into(), None),
+            Color::new(70, 80, 90, 249),
+            "native alpha selection tests the whole high nibble, not only IFT"
+        );
     }
 
     #[test]

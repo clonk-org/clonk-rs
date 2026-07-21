@@ -160,8 +160,9 @@ use lc_frontend::{
     ColorByOwnerMask, CrewNameOverlay, CrewOverlay, CursorAtlas, DefinitionDebugGeometry,
     DefinitionSprite, GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics,
     ImageData, InputDispatcher, InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction,
-    MainMenuItem, MaterialRenderInfo, MessageBoardMode, MessageBoardOverlay, MouseCursorPhase,
-    PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu,
+    MainMenuItem, MaterialRenderInfo, MaterialTextureSurface, MessageBoardMode,
+    MessageBoardOverlay, MouseCursorPhase, PlayerOverlay, ScenarioEntry, ScenarioKind,
+    SkyRenderState, StartupMainMenu, StartupMenu,
     StartupMenuAction, StartupTooltip, ViewportEdgeScroll, ViewportInput, ViewportPointer,
 };
 use lc_graphics::clonk_font::{
@@ -1178,7 +1179,7 @@ struct LobbyPreloadArtifact {
     scenario_path: PathBuf,
     definition_paths: Vec<String>,
     game_graphics: GameGraphicsResources,
-    material_texture_images: Arc<HashMap<String, ImageData>>,
+    material_texture_images: Arc<HashMap<String, MaterialTextureSurface>>,
     material_render_info: Arc<HashMap<String, MaterialRenderInfo>>,
     catalog_host: Option<CatalogHostLobbyPreloadArtifact>,
     client: Option<ClientLobbyPreloadArtifact>,
@@ -13587,9 +13588,9 @@ struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
     sky: Option<SkyRenderState>,
-    /// Landscape texture pngs + material render metadata (re-applied on
+    /// Landscape texture surfaces + material render metadata (re-applied on
     /// every GraphicsSystem rebuild, like the sky).
-    material_texture_images: Arc<HashMap<String, ImageData>>,
+    material_texture_images: Arc<HashMap<String, MaterialTextureSurface>>,
     material_render_info: Arc<HashMap<String, MaterialRenderInfo>>,
     /// System.c4g global script sources, loaded once at boot for every
     /// fresh game engine (the C++ `Game.ScriptEngine` scripts).
@@ -21120,34 +21121,45 @@ fn read_group_file_case_insensitive(group: &Group, name: &str) -> Option<Vec<u8>
     })
 }
 
-fn material_texture_stems(group: &Group) -> Vec<String> {
-    let Ok(resource) = lc_resources::graphics::GraphicsResource::from_group(group.clone()) else {
-        return Vec::new();
-    };
-    group
-        .entries()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|entry| !entry.is_directory)
-        .filter_map(|entry| {
-            let extension = entry
-                .relative_path
-                .extension()
-                .and_then(|extension| extension.to_str())?;
-            if !extension.eq_ignore_ascii_case("png") && !extension.eq_ignore_ascii_case("bmp") {
-                return None;
+fn admit_material_texture_names(group: &Group, inventory: &mut Vec<String>) -> usize {
+    let entries = group.entries().unwrap_or_default();
+    let mut admitted = 0;
+    for extension in [b".png".as_slice(), b".bmp".as_slice()] {
+        for entry in &entries {
+            if entry.is_directory
+                || entry.name_bytes.len() < extension.len()
+                || !entry.name_bytes[entry.name_bytes.len() - extension.len()..]
+                    .eq_ignore_ascii_case(extension)
+            {
+                continue;
             }
-            let name = entry.relative_path.to_string_lossy();
-            if resource.load_image(&name).is_err() {
-                return None;
+            let stem_end = entry
+                .name_bytes
+                .iter()
+                .position(|byte| *byte == b'.')
+                .unwrap_or(entry.name_bytes.len());
+            let full_stem = lc_script::c4_string_from_bytes(&entry.name_bytes[..stem_end]);
+            if inventory.iter().any(|stored| {
+                lc_resources::material::c4_names_equal(stored, &full_stem)
+            }) {
+                continue;
             }
-            entry
-                .relative_path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_ascii_lowercase)
-        })
-        .collect()
+            if extension.eq_ignore_ascii_case(b".bmp")
+                && group
+                    .read_entry_bytes_exact(entry)
+                    .ok()
+                    .and_then(|bytes| {
+                        lc_resources::bitmap::IndexedBitmap::decode(&bytes).ok()
+                    })
+                    .is_none()
+            {
+                continue;
+            }
+            inventory.push(lc_resources::material::truncate_c4m_name(&full_stem));
+            admitted += 1;
+        }
+    }
+    admitted
 }
 
 fn admitted_material_groups_with_paths(
@@ -21162,7 +21174,7 @@ fn admitted_material_groups_with_paths(
     );
     let mut admitted = Vec::new();
     let mut seen_materials = HashSet::new();
-    let mut seen_textures = HashSet::new();
+    let mut seen_textures = Vec::new();
     let mut load_materials = true;
     let mut load_textures = true;
     for (index, group) in groups.into_iter().enumerate() {
@@ -21172,14 +21184,14 @@ fn admitted_material_groups_with_paths(
         let flags = if index == 0 {
             read_group_file_case_insensitive(&group, "TexMap.txt")
                 .map(|source| {
-                    lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&source))
+                    lc_resources::texmap::TextureMap::parse_bytes(&source)
                 })
                 .unwrap_or_default()
         } else {
             let Some(source) = read_group_file_case_insensitive(&group, "TexMap.txt") else {
                 break;
             };
-            lc_resources::texmap::TextureMap::parse_flags(&String::from_utf8_lossy(&source))
+            lc_resources::texmap::TextureMap::parse_flags_bytes(&source)
         };
         let current_materials = load_materials;
         let current_textures = load_textures;
@@ -21192,7 +21204,8 @@ fn admitted_material_groups_with_paths(
                     library
                         .iter()
                         .filter(|material| {
-                            seen_materials.insert(material.name().to_ascii_lowercase())
+                            seen_materials
+                                .insert(lc_resources::material::c4_name_key(material.name()))
                         })
                         .count()
                 })
@@ -21202,10 +21215,7 @@ fn admitted_material_groups_with_paths(
             }
         }
         if current_textures {
-            let fresh = material_texture_stems(&group)
-                .into_iter()
-                .filter(|name| seen_textures.insert(name.clone()))
-                .count();
+            let fresh = admit_material_texture_names(&group, &mut seen_textures);
             if fresh == 0 {
                 next_textures = true;
             }
@@ -21252,7 +21262,7 @@ fn load_material_render_info_with_paths(
             continue;
         };
         for material in library.iter() {
-            let name = material.name().to_ascii_lowercase();
+            let name = lc_resources::material::c4_name_key(material.name());
             render_info
                 .entry(name)
                 .or_insert_with(|| material_render_info(material));
@@ -21261,48 +21271,88 @@ fn load_material_render_info_with_paths(
     render_info
 }
 
-fn absorb_material_texture_group(group: &Group, textures: &mut HashMap<String, ImageData>) {
+fn absorb_material_texture_group(
+    group: &Group,
+    textures: &mut HashMap<String, MaterialTextureSurface>,
+    inventory: &mut Vec<String>,
+) {
     let Ok(entries) = group.entries() else {
         return;
     };
-    let Ok(resource) = lc_resources::graphics::GraphicsResource::from_group(group.clone()) else {
-        return;
-    };
-    for entry in entries {
-        if entry.is_directory {
-            continue;
-        }
-        let name = entry.relative_path.to_string_lossy().to_string();
-        let Some(extension) = entry
-            .relative_path
-            .extension()
-            .and_then(|extension| extension.to_str())
-        else {
-            continue;
-        };
-        // C4Texture stores PNG in Surface32, which PXSFace consumes; BMP is
-        // Surface8-only and still counts for OverloadTextures above but must
-        // not enable graphical PXS (C4Texture.cpp:149-155;
-        // C4Material.cpp:379-385).
-        if !extension.eq_ignore_ascii_case("png") {
-            continue;
-        }
-        let Some(stem) = entry
-            .relative_path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(str::to_ascii_lowercase)
-        else {
-            continue;
-        };
-        if textures.contains_key(&stem) {
-            continue;
-        }
-        if let Ok(image) = resource.load_image(&name) {
-            textures.insert(
-                stem,
-                ImageData::new(image.width(), image.height(), image.pixels().to_vec()),
+    for extension in [b".png".as_slice(), b".bmp".as_slice()] {
+        for entry in &entries {
+            if entry.is_directory
+                || entry.name_bytes.len() < extension.len()
+                || !entry.name_bytes[entry.name_bytes.len() - extension.len()..]
+                    .eq_ignore_ascii_case(extension)
+            {
+                continue;
+            }
+            let stem_end = entry
+                .name_bytes
+                .iter()
+                .position(|byte| *byte == b'.')
+                .unwrap_or(entry.name_bytes.len());
+            let full_stem = lc_script::c4_string_from_bytes(&entry.name_bytes[..stem_end]);
+            if inventory.iter().any(|stored| {
+                lc_resources::material::c4_names_equal(stored, &full_stem)
+            }) {
+                continue;
+            }
+            let bytes = group.read_entry_bytes_exact(entry).ok();
+            let is_bmp = extension.eq_ignore_ascii_case(b".bmp");
+            let indexed = if is_bmp {
+                let Some(mut bitmap) = bytes.as_deref().and_then(|bytes| {
+                    lc_resources::bitmap::IndexedBitmap::decode(bytes).ok()
+                }) else {
+                    continue;
+                };
+                // CSurface8::AllowColor(0, 2, true) retains zero and folds
+                // every other out-of-range palette index into the triplet.
+                for index in &mut bitmap.indices {
+                    if *index > 2 {
+                        *index %= 3;
+                    }
+                }
+                Some(bitmap)
+            } else {
+                None
+            };
+            let decoded = if is_bmp {
+                None
+            } else {
+                bytes.as_deref().and_then(|bytes| {
+                    image::load_from_memory_with_format(bytes, image::ImageFormat::Png).ok()
+                })
+            };
+            let fixed_name = lc_resources::material::truncate_c4m_name(&full_stem);
+            inventory.push(fixed_name.clone());
+            let fixed_key = lc_resources::material::c4_name_key(&fixed_name);
+            textures.remove(&fixed_key);
+            if let Some(bitmap) = indexed {
+                textures.insert(
+                    fixed_key,
+                    MaterialTextureSurface::surface8(
+                        bitmap.width,
+                        bitmap.height,
+                        bitmap.indices,
+                    ),
+                );
+                continue;
+            }
+            // GroupReadSurfacePNG admits a non-null Surface32 even if ReadPNG
+            // failed. Retain an empty surface so lookup, overlay fallback and
+            // graphical-PXS eligibility still see that native identity.
+            let image = decoded.map_or_else(
+                || ImageData::new(0, 0, Vec::new()),
+                |decoded| {
+                    let rgba = decoded.into_rgba8();
+                    let (width, height) = rgba.dimensions();
+                    let image = lc_resources::GraphicsImage::new(width, height, rgba.into_raw());
+                    ImageData::new(image.width(), image.height(), image.pixels().to_vec())
+                },
             );
+            textures.insert(fixed_key, MaterialTextureSurface::surface32(image));
         }
     }
 }
@@ -21310,7 +21360,7 @@ fn absorb_material_texture_group(group: &Group, textures: &mut HashMap<String, I
 fn load_scenario_material_textures(
     scenario_path: &Path,
     authoritative_external_groups: Option<&[Group]>,
-) -> HashMap<String, ImageData> {
+) -> HashMap<String, MaterialTextureSurface> {
     let app_paths = cached_app_paths().ok();
     load_scenario_material_textures_with_paths(
         scenario_path,
@@ -21323,20 +21373,9 @@ fn load_scenario_material_textures_with_paths(
     scenario_path: &Path,
     authoritative_external_groups: Option<&[Group]>,
     app_paths: Option<&AppPaths>,
-) -> HashMap<String, ImageData> {
+) -> HashMap<String, MaterialTextureSurface> {
     let mut textures = HashMap::new();
-    let use_shared_cache = authoritative_external_groups.is_none();
-    // Offline shared groups stay in the process cache; synchronized groups
-    // decode from the exact validated Group handles. Source order is overload
-    // order, so the first source's texture name wins.
-    let shared: HashSet<String> = app_paths
-        .map(|paths| {
-            candidate_material_paths(paths)
-                .into_iter()
-                .map(|path| scenario_root_key(&path))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut inventory = Vec::new();
     for source in admitted_material_groups_with_paths(
         scenario_path,
         authoritative_external_groups,
@@ -21345,47 +21384,9 @@ fn load_scenario_material_textures_with_paths(
         if !source.textures {
             continue;
         }
-        let source_key = scenario_root_key(source.group.root());
-        if use_shared_cache && shared.contains(&source_key) {
-            if let Some(paths) = app_paths {
-                let cached = shared_material_texture_images(paths);
-                if let Some(group_textures) = cached.get(&source_key) {
-                    for (name, image) in group_textures {
-                        textures
-                            .entry(name.clone())
-                            .or_insert_with(|| image.clone());
-                    }
-                }
-            }
-        } else {
-            absorb_material_texture_group(&source.group, &mut textures);
-        }
+        absorb_material_texture_group(&source.group, &mut textures, &mut inventory);
     }
     textures
-}
-
-/// The shared (non-scenario) material textures are scenario-independent —
-/// decode them once per process; scenario activation only re-reads the
-/// scenario-local Material.c4g.
-fn shared_material_texture_images(
-    paths: &AppPaths,
-) -> &'static HashMap<String, HashMap<String, ImageData>> {
-    static SHARED: std::sync::OnceLock<HashMap<String, HashMap<String, ImageData>>> =
-        std::sync::OnceLock::new();
-    SHARED.get_or_init(|| load_material_texture_images(paths))
-}
-
-fn load_material_texture_images(paths: &AppPaths) -> HashMap<String, HashMap<String, ImageData>> {
-    let mut by_group = HashMap::new();
-    for candidate in candidate_material_paths(paths) {
-        let Ok(group) = Group::open(&candidate) else {
-            continue;
-        };
-        let mut textures = HashMap::new();
-        absorb_material_texture_group(&group, &mut textures);
-        by_group.insert(scenario_root_key(group.root()), textures);
-    }
-    by_group
 }
 
 fn try_materials_from_path(path: &Path) -> Result<MaterialSet, lc_resources::MaterialError> {
@@ -28993,7 +28994,7 @@ impl GameApp {
         self.sync_scenario_game_option_bounds();
         self.graphics.set_sky(self.sky.clone());
         self.graphics
-            .set_material_textures(Arc::clone(&self.material_texture_images));
+            .set_material_texture_surfaces(Arc::clone(&self.material_texture_images));
         self.graphics
             .set_material_render_info(Arc::clone(&self.material_render_info));
 
@@ -81243,7 +81244,7 @@ impl GameApp {
         self.graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics.set_sky(self.sky.clone());
         self.graphics
-            .set_material_textures(Arc::clone(&self.material_texture_images));
+            .set_material_texture_surfaces(Arc::clone(&self.material_texture_images));
         self.graphics
             .set_material_render_info(Arc::clone(&self.material_render_info));
 
@@ -82789,7 +82790,7 @@ impl GameApp {
                 ));
             }
             self.graphics
-                .set_material_textures(Arc::clone(&self.material_texture_images));
+                .set_material_texture_surfaces(Arc::clone(&self.material_texture_images));
             self.graphics
                 .set_material_render_info(Arc::clone(&self.material_render_info));
         }
@@ -84206,7 +84207,7 @@ impl GameApp {
         self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
         self.graphics.set_sky(self.sky.clone());
         self.graphics
-            .set_material_textures(Arc::clone(&self.material_texture_images));
+            .set_material_texture_surfaces(Arc::clone(&self.material_texture_images));
         self.graphics
             .set_material_render_info(Arc::clone(&self.material_render_info));
         self.frame_text.clear();
@@ -193003,6 +193004,8 @@ func ControlDig() { dig_count = 1; return(1); }
             load_scenario_material_textures(&scenario_path, None)
                 .get("rough")
                 .expect("inner parent material texture")
+                .surface32_image()
+                .expect("rough texture is PNG-backed")
                 .pixels(),
             &[1, 2, 3, 255]
         );
@@ -193647,6 +193650,95 @@ func ControlDig() { dig_count = 1; return(1); }
         );
 
         reset_cached_app_paths();
+    }
+
+    #[test]
+    fn presentation_texture_long_name_collisions_keep_the_latest_surface() {
+        let root = tempdir().expect("temp texture images");
+        let first_path = root.path().join("first.png");
+        let second_path = root.path().join("second.png");
+        write_preview_png(&first_path, [10, 20, 30, 255]);
+        write_preview_png(&second_path, [40, 50, 60, 255]);
+
+        let prefix = "ColliderPrefixX";
+        assert_eq!(lc_script::c4_string_bytes(prefix).len(), 15);
+        let mut source = lc_resources::MutableGroup::new("Material.c4g");
+        source
+            .add_file("Broken.png", b"not a PNG".to_vec())
+            .unwrap();
+        source
+            .add_file(
+                "ColliderPrefixXA.png",
+                fs::read(&first_path).expect("first PNG bytes"),
+            )
+            .unwrap();
+        source
+            .add_file(
+                "ColliderPrefixXB.png",
+                fs::read(&second_path).expect("second PNG bytes"),
+            )
+            .unwrap();
+        source
+            .add_file(
+                "Mislabeled.bmp",
+                fs::read(&first_path).expect("mislabeled PNG bytes"),
+            )
+            .unwrap();
+        source
+            .add_file(
+                "IndexedOnly.bmp",
+                lc_resources::bitmap::IndexedBitmap {
+                    width: 1,
+                    height: 1,
+                    indices: vec![5],
+                }
+                .encode()
+                .expect("indexed BMP bytes"),
+            )
+            .unwrap();
+        let group = Group::from_raw_memory(
+            PathBuf::from("Material.c4g"),
+            source.pack_raw().expect("packed material group"),
+        )
+        .expect("open material group");
+
+        let mut textures = HashMap::new();
+        let mut inventory = Vec::new();
+        absorb_material_texture_group(&group, &mut textures, &mut inventory);
+        assert_eq!(
+            inventory,
+            vec![
+                "Broken".to_string(),
+                prefix.to_string(),
+                prefix.to_string(),
+                "IndexedOnly".to_string(),
+            ],
+            "full long names both admit before their fixed identities collide"
+        );
+        let broken = textures
+            .get("broken")
+            .and_then(MaterialTextureSurface::surface32_image)
+            .expect("invalid PNG retains an empty Surface32 identity");
+        assert_eq!((broken.width(), broken.height(), broken.pixels()), (0, 0, &[][..]));
+        assert_eq!(
+            textures
+                .get(&lc_resources::material::c4_name_key(prefix))
+                .expect("colliding PNG surface")
+                .surface32_image()
+                .expect("latest collider is a Surface32 PNG")
+                .pixels(),
+            &[40, 50, 60, 255],
+            "the later fixed-name collision shadows the earlier surface"
+        );
+        assert_eq!(
+            textures
+                .get("indexedonly")
+                .expect("indexed BMP surface")
+                .indexed_pixels(),
+            Some((1, 1, [2].as_slice())),
+            "Surface8 admission applies AllowColor(0, 2, true)"
+        );
+        assert!(!inventory.iter().any(|name| name == "Mislabeled"));
     }
 
     #[test]

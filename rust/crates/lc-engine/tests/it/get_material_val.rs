@@ -39,8 +39,8 @@ fn get_material_val_reflects_compiled_material_core() {
         ConvertMat="Water"
         CorrosionRate=17
 
-        [Material NegativePlacement]
-        Name=NegativePlacement
+        [Material NegativePlace]
+        Name=NegativePlace
         Density=80
         Placement=-7
         "#,
@@ -58,7 +58,7 @@ fn get_material_val_reflects_compiled_material_core() {
 public func Probe()
 {
     var core = Material("CoreProbe");
-    var negative = Material("NegativePlacement");
+    var negative = Material("NegativePlace");
     return [
         // Section, entry, material, and entry-number matching is exact.
         [GetMaterialVal("Density", "Material", core),

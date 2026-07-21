@@ -10173,13 +10173,13 @@ pub(crate) fn build_map_pixel_classifier(
         }
         return Ok(None);
     };
-    let texmap = first_group.read_file("TexMap.txt").ok().map(|source| {
-        lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&source))
-    });
+    let texmap = first_group
+        .read_file("TexMap.txt")
+        .ok()
+        .map(|source| lc_resources::texmap::TextureMap::parse_bytes(&source));
 
     let mut material_libraries: Vec<lc_resources::MaterialLibrary> = Vec::new();
-    let mut texture_inventory = Vec::new();
-    let mut seen_textures = HashSet::new();
+    let mut texture_inventory: Vec<String> = Vec::new();
     let mut load_materials = true;
     let mut load_textures = true;
     for (index, material_group) in material_groups.iter().enumerate() {
@@ -10197,9 +10197,7 @@ pub(crate) fn build_map_pixel_classifier(
             let Ok(source) = material_group.read_file("TexMap.txt") else {
                 break;
             };
-            Some(lc_resources::texmap::TextureMap::parse_flags(
-                &String::from_utf8_lossy(&source),
-            ))
+            Some(lc_resources::texmap::TextureMap::parse_flags_bytes(&source))
         };
         let flags = later_texmap.as_ref().or(texmap.as_ref());
         let mut next_materials = flags.is_some_and(|flags| flags.overload_materials);
@@ -10233,26 +10231,51 @@ pub(crate) fn build_map_pixel_classifier(
             // image basenames; a zero-count load keeps the texture chain open
             // (C4Texture.cpp:266-310; C4Game.cpp:956-962).
             let mut loaded_count = 0;
-            let graphics =
-                lc_resources::graphics::GraphicsResource::from_group(material_group.clone()).ok();
-            for entry in material_group.entries().unwrap_or_default() {
-                let name = entry.relative_path.to_string_lossy();
-                let lower = name.to_ascii_lowercase();
-                if let Some(stem) = lower
-                    .strip_suffix(".png")
-                    .or_else(|| lower.strip_suffix(".bmp"))
-                {
-                    if graphics
-                        .as_ref()
-                        .is_none_or(|resource| resource.load_image(&name).is_err())
+            let entries = material_group.entries().unwrap_or_default();
+            // LoadTextures scans the whole group twice: PNG first, then BMP.
+            for extension in [b".png".as_slice(), b".bmp".as_slice()] {
+                for entry in &entries {
+                    if entry.is_directory
+                        || entry.name_bytes.len() < extension.len()
+                        || !entry.name_bytes[entry.name_bytes.len() - extension.len()..]
+                            .eq_ignore_ascii_case(extension)
                     {
                         continue;
                     }
-                    let stem = stem.to_string();
-                    if seen_textures.insert(stem.clone()) {
-                        texture_inventory.push(stem);
-                        loaded_count += 1;
+                    // SReplaceChar(texname, '.', 0) exposes the bytes before
+                    // the first dot, rather than Path::file_stem's suffix.
+                    let stem_end = entry
+                        .name_bytes
+                        .iter()
+                        .position(|byte| *byte == b'.')
+                        .unwrap_or(entry.name_bytes.len());
+                    let full_stem =
+                        lc_script::c4_string_from_bytes(&entry.name_bytes[..stem_end]);
+                    // Duplicate detection precedes the fixed-name copy. A
+                    // long candidate therefore never equals a stored 15-byte
+                    // prefix and every long prefix collision is admitted.
+                    if texture_inventory.iter().any(|stored| {
+                        lc_resources::material::c4_names_equal(stored, &full_stem)
+                    }) {
+                        continue;
                     }
+                    // GroupReadSurfacePNG returns an allocated surface even
+                    // if its decoder reports failure. Bitmap admission does
+                    // require a successfully decoded Surface8.
+                    if extension.eq_ignore_ascii_case(b".bmp")
+                        && material_group
+                            .read_entry_bytes_exact(entry)
+                            .ok()
+                            .and_then(|bytes| {
+                                lc_resources::bitmap::IndexedBitmap::decode(&bytes).ok()
+                            })
+                            .is_none()
+                    {
+                        continue;
+                    }
+                    texture_inventory
+                        .push(lc_resources::material::truncate_c4m_name(&full_stem));
+                    loaded_count += 1;
                 }
             }
             if loaded_count == 0 {
@@ -10288,7 +10311,7 @@ pub(crate) fn build_map_pixel_classifier(
     // empty C4TextureMap and still runs Init + CrossMapMaterials. Parsing an
     // empty source gives the normal 128-slot table with both overload flags
     // false, without changing the independent resource-chain decisions above.
-    let texmap = texmap.unwrap_or_else(|| lc_resources::texmap::TextureMap::parse(""));
+    let texmap = texmap.unwrap_or_else(|| lc_resources::texmap::TextureMap::parse_bytes(b""));
     let overload_materials = texmap.overload_materials;
     let overload_textures = texmap.overload_textures;
 
@@ -10323,7 +10346,9 @@ pub(crate) fn build_map_pixel_classifier(
         if (25..50).contains(&*slot)
             && grid_textures[index]
                 .as_deref()
-                .is_some_and(|texture| texture.eq_ignore_ascii_case("Smooth"))
+                .is_some_and(|texture| {
+                    lc_resources::material::c4_names_equal(texture, "Smooth")
+                })
         {
             grid_textures[index] = Some("Liquid".to_string());
         }
@@ -10340,7 +10365,7 @@ pub(crate) fn build_map_pixel_classifier(
         .flat_map(|library| library.iter())
         .map(|material| {
             (
-                material.value("Name").unwrap_or_default().to_string(),
+                material.name().to_string(),
                 material.value("TextureOverlay").map(str::to_string),
                 ["BlastShiftTo", "BelowTempConvertTo", "AboveTempConvertTo"]
                     .iter()
@@ -10482,7 +10507,9 @@ fn convert_exact_landscape_indices(
         let vehicle = texmap
             .materials
             .iter()
-            .position(|material| material.name.eq_ignore_ascii_case("Vehicle"))
+            .position(|material| {
+                lc_resources::material::c4_names_equal(&material.name, "Vehicle")
+            })
             .map_or(-1, |index| index as i32);
         let material_count = material_count as i32;
         for byte in &mut indices {
@@ -32297,6 +32324,148 @@ public func ActualizePhase(pClonk)
         assert_eq!(
             classifier.state.match_texture_names[usize::from(duplicate_defaults[1])].as_deref(),
             Some("Smooth")
+        );
+    }
+
+    #[test]
+    fn material_and_texture_names_use_c4m_max_name_bytes() {
+        let material_prefix = b"MaterialPrefix\x80";
+        let texture_prefix = b"TexturePrefixX\x81";
+        assert_eq!(material_prefix.len(), 15);
+        assert_eq!(texture_prefix.len(), 15);
+
+        let mut material_long_a = material_prefix.to_vec();
+        material_long_a.extend_from_slice(b"First");
+        let mut material_long_b = material_prefix.to_vec();
+        material_long_b.extend_from_slice(b"Second");
+        let mut texture_long_a = texture_prefix.to_vec();
+        texture_long_a.extend_from_slice(b"One");
+        let mut texture_long_b = texture_prefix.to_vec();
+        texture_long_b.extend_from_slice(b"Two");
+
+        let material_source = |name: &[u8], density: i32| {
+            let mut source = b"[Material]\nName=".to_vec();
+            source.extend_from_slice(name);
+            source.extend_from_slice(format!("\nDensity={density}\nTextureOverlay=").as_bytes());
+            source.extend_from_slice(texture_prefix);
+            source.push(b'\n');
+            source
+        };
+        let mut texmap_source = b"20=".to_vec();
+        texmap_source.extend_from_slice(material_prefix);
+        texmap_source.push(b'-');
+        texmap_source.extend_from_slice(texture_prefix);
+        texmap_source.extend_from_slice(b"\n21=");
+        texmap_source.extend_from_slice(&material_long_a);
+        texmap_source.push(b'-');
+        texmap_source.extend_from_slice(&texture_long_a);
+        texmap_source.push(b'\n');
+
+        let parsed_texmap = lc_resources::texmap::TextureMap::parse_bytes(&texmap_source);
+        assert_eq!(
+            lc_script::c4_string_bytes(&parsed_texmap.entry(21).unwrap().material),
+            material_long_a,
+            "TexMap names remain raw and unbounded"
+        );
+        assert_eq!(
+            lc_script::c4_string_bytes(&parsed_texmap.entry(21).unwrap().texture),
+            texture_long_a,
+            "non-UTF-8 TexMap bytes survive without replacement"
+        );
+
+        let mut materials = lc_resources::MutableGroup::new("Material.c4g");
+        materials
+            .add_file("A.c4m", material_source(&material_long_a, 61))
+            .unwrap();
+        materials
+            .add_file("B.c4m", material_source(&material_long_b, 72))
+            .unwrap();
+        materials
+            .add_file("TexMap.txt", texmap_source)
+            .unwrap();
+        let texture_bitmap = encode_indexed_bmp(&[&[0u8]]);
+        for stem in [&texture_long_a, &texture_long_b] {
+            let mut filename = stem.to_vec();
+            filename.extend_from_slice(b".bmp");
+            materials
+                .add_file_bytes_with_metadata(filename, texture_bitmap.clone(), 1, false)
+                .unwrap();
+        }
+        materials
+            .add_file(
+                "Mislabeled.bmp",
+                include_bytes!("../../../../content/Material.c4g/Snow.png").to_vec(),
+            )
+            .unwrap();
+
+        let mut scenario = lc_resources::MutableGroup::new("ByteNames.c4s");
+        scenario
+            .add_packed_child_with_metadata(
+                "Material.c4g",
+                materials.pack_raw().unwrap(),
+                0,
+                1,
+                false,
+            )
+            .unwrap();
+        let group = Group::from_raw_memory(
+            PathBuf::from("ByteNames.c4s"),
+            scenario.pack_raw().unwrap(),
+        )
+        .unwrap();
+        let classifier = build_map_pixel_classifier(
+            &group,
+            &FileSystemResolver { roots: Vec::new() },
+        )
+        .unwrap()
+        .unwrap();
+        let library = classifier.material_library().unwrap();
+        let names = library
+            .iter()
+            .map(|material| lc_script::c4_string_bytes(material.name()))
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![material_prefix.to_vec(), material_prefix.to_vec()]);
+        for material in library.iter() {
+            assert_eq!(
+                material
+                    .value("Name")
+                    .map(lc_script::c4_string_bytes),
+                Some(material_prefix.to_vec()),
+                "compiled Name reflection matches the fixed live core"
+            );
+        }
+        assert_eq!(
+            library
+                .get(&lc_script::c4_string_from_bytes(material_prefix))
+                .and_then(|material| material.int("Density")),
+            Some(61),
+            "the first same-load fixed-name collision owns name lookup"
+        );
+        assert!(
+            library
+                .get(&lc_script::c4_string_from_bytes(&material_long_a))
+                .is_none(),
+            "whole-name lookup does not prefix-match a fixed identity"
+        );
+
+        assert_eq!(
+            classifier
+                .state
+                .texture_inventory
+                .iter()
+                .map(|name| lc_script::c4_string_bytes(name))
+                .collect::<Vec<_>>(),
+            vec![texture_prefix.to_vec(), texture_prefix.to_vec()],
+            "long candidates admit before truncation, but a PNG payload named BMP is rejected"
+        );
+        assert_eq!(
+            classifier.state.densities[20], 61,
+            "the fixed TexMap identity resolves the first material collision"
+        );
+        assert!(classifier.state.material_names[20].is_some());
+        assert!(
+            classifier.state.material_names[21].is_none(),
+            "an unbounded TexMap pair does not prefix-match fixed identities"
         );
     }
 

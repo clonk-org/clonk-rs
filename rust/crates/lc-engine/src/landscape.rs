@@ -436,7 +436,9 @@ impl PixelGrid {
             .iter()
             .position(|name| {
                 name.as_deref()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("Vehicle"))
+                    .is_some_and(|name| {
+                        lc_resources::material::c4_names_equal(name, "Vehicle")
+                    })
             })
             .map(|index| index as u8)
     }
@@ -758,7 +760,9 @@ impl PixelGrid {
                 name.as_deref().and_then(|name| {
                     old_materials
                         .iter()
-                        .find(|(old_name, _)| old_name.eq_ignore_ascii_case(name))
+                        .find(|(old_name, _)| {
+                            lc_resources::material::c4_names_equal(old_name, name)
+                        })
                         .map(|(_, material)| *material)
                 })
             })
@@ -1286,7 +1290,9 @@ impl PixelGrid {
             .iter()
             .position(|name| {
                 name.as_deref()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("Tunnel"))
+                    .is_some_and(|name| {
+                        lc_resources::material::c4_names_equal(name, "Tunnel")
+                    })
             })
             .map(|index| index as u8)
             .unwrap_or(0)
@@ -1477,13 +1483,13 @@ impl RuntimeTexMapState {
     pub(crate) fn texture_exists(&self, name: &str) -> bool {
         self.texture_inventory
             .iter()
-            .any(|texture| texture.eq_ignore_ascii_case(name))
+            .any(|texture| lc_resources::material::c4_names_equal(texture, name))
     }
 
     pub(crate) fn material(&self, name: &str) -> Option<&RuntimeTexMapMaterial> {
         self.materials
             .iter()
-            .find(|material| material.name.eq_ignore_ascii_case(name))
+            .find(|material| lc_resources::material::c4_names_equal(&material.name, name))
     }
 
     /// Return the numeric slot captured by `CrossMapMaterials`, if this is a
@@ -1497,7 +1503,7 @@ impl RuntimeTexMapState {
     ) -> Option<u8> {
         let runtime_material = self.materials.get(source.index())?;
         let material = materials.get_by_id(source)?;
-        if !runtime_material.name.eq_ignore_ascii_case(material.name()) {
+        if !lc_resources::material::c4_names_equal(&runtime_material.name, material.name()) {
             return None;
         }
         let ordinal = materials.crossmap_entry_ordinal(source, target_spec)?;
@@ -1509,6 +1515,7 @@ impl RuntimeTexMapState {
     /// `BlastShiftTo` pair before simulation starts, so runtime mutation must
     /// recover that exact slot rather than the first slot with the material.
     pub(crate) fn resolved_index_mat_tex(&self, material_texture: &str) -> u8 {
+        let material_texture = lc_resources::material::c4_c_string(material_texture);
         if let Some((material, texture)) = material_texture.split_once('-') {
             return self
                 .material_names
@@ -1520,14 +1527,18 @@ impl RuntimeTexMapState {
                 .find(|(_, (slot_material, slot_texture))| {
                     slot_material
                         .as_deref()
-                        .is_some_and(|name| name.eq_ignore_ascii_case(material))
+                        .is_some_and(|name| {
+                            lc_resources::material::c4_names_equal(name, material)
+                        })
                         && slot_texture
                             .as_deref()
-                            .is_some_and(|name| name.eq_ignore_ascii_case(texture))
+                            .is_some_and(|name| {
+                                lc_resources::material::c4_names_equal(name, texture)
+                            })
                 })
                 .map_or(0, |(slot, _)| slot as u8);
         }
-        self.default_material_entry(material_texture).unwrap_or(0)
+        self.default_material_entry(&material_texture).unwrap_or(0)
     }
 
     /// C4TextureMap::GetIndex (C4Texture.cpp:319-345), relocated from the
@@ -1540,14 +1551,19 @@ impl RuntimeTexMapState {
         texture_name: Option<&str>,
         add_if_missing: bool,
     ) -> u8 {
+        let material_name = lc_resources::material::c4_c_string(material_name);
+        let texture_name = texture_name.map(lc_resources::material::c4_c_string);
         for slot in 1..C4M_MAX_TEX_INDEX {
             if let Some(existing) = &self.material_names[slot] {
-                if existing.eq_ignore_ascii_case(material_name)
+                if lc_resources::material::c4_names_equal(existing, &material_name)
                     && texture_name
+                        .as_deref()
                         .map(|texture| {
                             self.match_texture_names[slot]
                                 .as_deref()
-                                .is_some_and(|existing| existing.eq_ignore_ascii_case(texture))
+                                .is_some_and(|existing| {
+                                    lc_resources::material::c4_names_equal(existing, texture)
+                                })
                         })
                         .unwrap_or(true)
                 {
@@ -1565,14 +1581,14 @@ impl RuntimeTexMapState {
             return 0;
         }
         let Some((density, shape)) = self
-            .material(material_name)
+            .material(&material_name)
             .map(|material| (material.density, material.shape))
         else {
             return 0;
         };
-        if let Some(texture) = texture_name {
+        if let Some(texture) = texture_name.as_deref() {
             let validation_texture = if (C4M_LIQUID..C4M_SOLID).contains(&density)
-                && texture.eq_ignore_ascii_case("Smooth")
+                && lc_resources::material::c4_names_equal(texture, "Smooth")
             {
                 "Liquid"
             } else {
@@ -1586,9 +1602,9 @@ impl RuntimeTexMapState {
             .find(|&slot| self.material_names[slot].is_none()) else {
             return 0;
         };
-        self.material_names[slot] = Some(material_name.to_string());
-        self.match_texture_names[slot] = texture_name.map(str::to_string);
-        self.texture_names[slot] = texture_name.map(str::to_string);
+        self.material_names[slot] = Some(material_name);
+        self.match_texture_names[slot] = texture_name.clone();
+        self.texture_names[slot] = texture_name;
         self.shapes[slot] = Some(shape);
         self.densities[slot] = density;
         self.entries_added = true;
@@ -1611,6 +1627,7 @@ impl RuntimeTexMapState {
         new_index: u8,
         insert: bool,
     ) -> (bool, Option<(u8, u8)>) {
+        let material_texture = lc_resources::material::c4_c_string(material_texture);
         if insert {
             // At 127, the empty-input native path returns true before its
             // out-of-bounds MoveIndex arms. Preserve that defined no-op.
@@ -1634,7 +1651,7 @@ impl RuntimeTexMapState {
 
         let (material, texture) = match material_texture.split_once('-') {
             Some((material, texture)) => (material, Some(texture)),
-            None => (material_texture, None),
+            None => (material_texture.as_str(), None),
         };
         let old_slot = usize::from(self.get_index(material, texture, false));
         if old_slot == 0 {
@@ -1703,9 +1720,11 @@ impl RuntimeTexMapState {
         material_texture: &str,
         default_texture: Option<&str>,
     ) -> u8 {
+        let material_texture = lc_resources::material::c4_c_string(material_texture);
+        let default_texture = default_texture.map(lc_resources::material::c4_c_string);
         let (material, texture) = match material_texture.split_once('-') {
             Some((material, texture)) => (material, Some(texture)),
-            None => (material_texture, None),
+            None => (material_texture.as_str(), None),
         };
         if let Some(texture) = texture {
             let index = self.get_index(material, Some(texture), true);
@@ -1713,13 +1732,13 @@ impl RuntimeTexMapState {
                 return index;
             }
         }
-        if let Some(default_texture) = default_texture {
+        if let Some(default_texture) = default_texture.as_deref() {
             let index = self.get_index(material, Some(default_texture), true);
             if index != 0 {
                 return index;
             }
         }
-        self.default_material_entry(material_texture).unwrap_or(0)
+        self.default_material_entry(&material_texture).unwrap_or(0)
     }
 
     pub(crate) fn entries_added(&self) -> bool {
@@ -1727,29 +1746,35 @@ impl RuntimeTexMapState {
     }
 
     fn serialize_added_entries(&self) -> Vec<u8> {
-        let mut output = String::from(
-            "# Automatically generated texture map\r\n\
-# Contains material-texture-combinations added at runtime\r\n",
-        );
+        let mut output = b"# Automatically generated texture map\r\n\
+# Contains material-texture-combinations added at runtime\r\n"
+            .to_vec();
         if self.overload_materials {
-            output.push_str(
-                "# Import materials from global file as well\r\nOverloadMaterials\r\n",
+            output.extend_from_slice(
+                b"# Import materials from global file as well\r\nOverloadMaterials\r\n",
             );
         }
         if self.overload_textures {
-            output.push_str(
-                "# Import textures from global file as well\r\nOverloadTextures\r\n",
+            output.extend_from_slice(
+                b"# Import textures from global file as well\r\nOverloadTextures\r\n",
             );
         }
-        output.push_str("\r\n");
+        output.extend_from_slice(b"\r\n");
         for slot in 0..C4M_MAX_TEX_INDEX {
             let Some(material) = self.material_names[slot].as_deref() else {
                 continue;
             };
             let texture = self.match_texture_names[slot].as_deref().unwrap_or("");
-            output.push_str(&format!("{slot}={material}-{texture}\r\n"));
+            output.extend_from_slice(slot.to_string().as_bytes());
+            output.push(b'=');
+            let material = lc_resources::material::c4_c_string(material);
+            output.extend_from_slice(&lc_script::c4_string_bytes(&material));
+            output.push(b'-');
+            let texture = lc_resources::material::c4_c_string(texture);
+            output.extend_from_slice(&lc_script::c4_string_bytes(&texture));
+            output.extend_from_slice(b"\r\n");
         }
-        output.into_bytes()
+        output
     }
 
     /// Append one C4Material::DefaultMatTex row. Same-load duplicate names
@@ -1757,13 +1782,13 @@ impl RuntimeTexMapState {
     /// the first/lower material index.
     pub(crate) fn set_default_material_entry(&mut self, name: &str, slot: u8) {
         self.default_material_entries
-            .push((name.to_string(), slot));
+            .push((lc_resources::material::c4_c_string(name), slot));
     }
 
     pub(crate) fn default_material_entry(&self, name: &str) -> Option<u8> {
         self.default_material_entries
             .iter()
-            .find(|(material, _)| material.eq_ignore_ascii_case(name))
+            .find(|(material, _)| lc_resources::material::c4_names_equal(material, name))
             .map(|(_, slot)| *slot)
     }
 
@@ -8318,6 +8343,38 @@ mod tests {
         let mut non_liquid = make_texmap();
         non_liquid.texture_inventory = vec!["Smooth".to_string()];
         assert_eq!(non_liquid.get_index("Earth", Some("Smooth"), true), 4);
+    }
+
+    #[test]
+    fn runtime_texmap_copies_native_names_through_the_first_nul() {
+        let landscape = raster_grid_landscape(1, 1, vec![0]);
+        let mut texmap = landscape
+            .raster_state()
+            .expect("raster state")
+            .texmap()
+            .clone();
+        texmap.texture_inventory = vec!["Ridge".to_string()];
+        let material = lc_script::c4_string_from_bytes(b"Earth\0ignored\x80");
+        let texture = lc_script::c4_string_from_bytes(b"Ridge\0ignored\x81");
+
+        let slot = texmap.get_index(&material, Some(&texture), true);
+        assert_eq!(slot, 4);
+        assert_eq!(texmap.material_names[4].as_deref(), Some("Earth"));
+        assert_eq!(texmap.match_texture_names[4].as_deref(), Some("Ridge"));
+        assert_eq!(texmap.texture_names[4].as_deref(), Some("Ridge"));
+
+        let serialized = texmap.serialize_added_entries();
+        assert!(serialized.windows(b"4=Earth-Ridge\r\n".len()).any(|line| {
+            line == b"4=Earth-Ridge\r\n"
+        }));
+        assert!(!serialized.windows(b"ignored".len()).any(|part| part == b"ignored"));
+
+        let material_texture = lc_script::c4_string_from_bytes(b"Earth\0-Missing");
+        assert_eq!(
+            texmap.get_index_mat_tex(&material_texture, Some(&texture)),
+            slot,
+            "pair splitting and the default texture see only the native C string"
+        );
     }
 
     fn raster_grid_landscape(width: u32, height: u32, bytes: Vec<u8>) -> Landscape {

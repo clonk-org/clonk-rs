@@ -45,7 +45,7 @@ impl TemperatureTarget {
     fn resolve_with(&mut self, lookup: &HashMap<String, MaterialId>) {
         if let TemperatureTarget::MaterialName(name) = self {
             let material_name = name.split_once('-').map(|(name, _)| name).unwrap_or(name);
-            if let Some(id) = lookup.get(material_name) {
+            if let Some(id) = lookup.get(&material_name_key(material_name)) {
                 *self = TemperatureTarget::Material(*id);
             }
         }
@@ -57,7 +57,7 @@ impl TemperatureTarget {
             TemperatureTarget::MaterialName(name) => {
                 let material_name = name.split_once('-').map(|(name, _)| name).unwrap_or(name);
                 lookup
-                    .get(material_name)
+                    .get(&material_name_key(material_name))
                     .copied()
                     .map(TemperatureTarget::Material)
                     .unwrap_or_else(|| TemperatureTarget::MaterialName(name.clone()))
@@ -73,7 +73,7 @@ impl TemperatureTarget {
     }
 
     pub fn is_sky(&self) -> bool {
-        matches!(self, TemperatureTarget::MaterialName(name) if name.split_once('-').map(|(name, _)| name).unwrap_or(name).eq_ignore_ascii_case(SKY_KEY))
+        matches!(self, TemperatureTarget::MaterialName(name) if lc_resources::material::c4_names_equal(name.split_once('-').map(|(name, _)| name).unwrap_or(name), SKY_KEY))
     }
 }
 
@@ -219,6 +219,10 @@ fn normalize_key(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
 
+fn material_name_key(name: &str) -> String {
+    lc_resources::material::c4_name_key(name)
+}
+
 fn parse_temperature_conversion(
     definition: &ResourceMaterialDefinition,
     threshold_key: &str,
@@ -253,8 +257,7 @@ fn parse_blast_shift_to(value: Option<&str>) -> (Option<String>, bool) {
         return (None, false);
     }
 
-    let normalized_full = normalize_key(trimmed);
-    if normalized_full == SKY_KEY {
+    if lc_resources::material::c4_names_equal(trimmed, SKY_KEY) {
         return (None, true);
     }
 
@@ -268,7 +271,7 @@ fn parse_blast_shift_to(value: Option<&str>) -> (Option<String>, bool) {
     }
 
     let normalized = normalize_key(material_part);
-    if normalized == SKY_KEY {
+    if lc_resources::material::c4_names_equal(material_part, SKY_KEY) {
         (None, true)
     } else {
         (Some(normalized), false)
@@ -828,7 +831,7 @@ impl MaterialProperties {
             if trimmed.is_empty() {
                 None
             } else {
-                Some(normalize_key(trimmed))
+                Some(material_name_key(trimmed))
             }
         });
         let in_mat_convert_to = definition.value("inmatconvertto").and_then(|value| {
@@ -836,7 +839,7 @@ impl MaterialProperties {
             if trimmed.is_empty() {
                 None
             } else {
-                Some(normalize_key(trimmed))
+                Some(material_name_key(trimmed))
             }
         });
         let in_mat_convert_depth = definition
@@ -930,7 +933,7 @@ impl Material {
         let alpha = definition
             .int_list("alpha")
             .unwrap_or_else(|| vec![0; 6]);
-        let normalized_name = normalize_key(definition.name());
+        let normalized_name = material_name_key(definition.name());
         Self {
             id,
             definition,
@@ -1131,18 +1134,18 @@ impl Material {
         };
         match landscape {
             Some(material) => trigger == material.normalized_name(),
-            None => trigger == SKY_KEY,
+            None => lc_resources::material::c4_names_equal(trigger, SKY_KEY),
         }
     }
 
     fn resolve_relations(&mut self, lookup: &HashMap<String, MaterialId>) {
         if let Some(name) = &self.properties.blast_shift_to {
-            if let Some(id) = lookup.get(name) {
+            if let Some(id) = lookup.get(&material_name_key(name)) {
                 self.properties.blast_shift_to_target = Some(*id);
             }
         }
         if let Some(name) = &self.properties.in_mat_convert_to {
-            if let Some(id) = lookup.get(name) {
+            if let Some(id) = lookup.get(&material_name_key(name)) {
                 self.properties.in_mat_convert_target = Some(*id);
             }
         }
@@ -1180,7 +1183,7 @@ impl MaterialSet {
                 None => break,
             };
             let material = Material::new(id, definition.clone());
-            let key = normalize_key(material.name());
+            let key = material_name_key(material.name());
             by_name.entry(key).or_insert(id);
             materials.push(material);
         }
@@ -1218,7 +1221,7 @@ impl MaterialSet {
                     continue;
                 };
                 if material.id == source
-                    && spec.trim().eq_ignore_ascii_case(target_spec.trim())
+                    && lc_resources::material::c4_names_equal(spec.trim(), target_spec.trim())
                 {
                     return Some(ordinal);
                 }
@@ -1251,7 +1254,7 @@ impl MaterialSet {
     }
 
     pub fn push(&mut self, mut material: Material) {
-        let key = normalize_key(material.name());
+        let key = material_name_key(material.name());
         if self.by_name.contains_key(&key) {
             return;
         }
@@ -1284,7 +1287,7 @@ impl MaterialSet {
 
     pub fn get(&self, name: &str) -> Option<&Material> {
         self.by_name
-            .get(&normalize_key(name))
+            .get(&material_name_key(name))
             .and_then(|id| self.materials.get(id.index()))
     }
 
@@ -1293,7 +1296,7 @@ impl MaterialSet {
     }
 
     pub fn id_of(&self, name: &str) -> Option<MaterialId> {
-        self.by_name.get(&normalize_key(name)).copied()
+        self.by_name.get(&material_name_key(name)).copied()
     }
 
     pub fn default_ground_material(&self) -> Option<MaterialId> {
@@ -1722,10 +1725,10 @@ fn parse_custom_reaction_kind(
                 .filter(|value| !value.is_empty())
                 .map(normalize_key)
                 .and_then(|name| {
-                    if name == SKY_KEY {
+                    if lc_resources::material::c4_names_equal(&name, SKY_KEY) {
                         Some(None)
                     } else {
-                        by_name.get(&name).copied().map(Some)
+                        by_name.get(&material_name_key(&name)).copied().map(Some)
                     }
                 })
                 .unwrap_or(None);
@@ -1760,7 +1763,7 @@ fn resolve_reaction_targets(
     // only interprets TargetSpec as a category keyword when Get() fails
     // (C4Material.cpp:392-411). Thus a real material named "Solid", "Sky",
     // etc. shadows the corresponding keyword.
-    if let Some(&id) = by_name.get(&normalized) {
+    if let Some(&id) = by_name.get(&material_name_key(target_spec)) {
         if inverse {
             let mut targets = Vec::with_capacity(materials.len() + 1);
             targets.push(None);
